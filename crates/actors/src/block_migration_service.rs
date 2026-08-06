@@ -17,15 +17,16 @@ use irys_types::{
     PartitionChunkOffset, PartitionChunkRange, SealedBlock, SendTraced as _, SystemLedger, Traced,
     U256, app_state::DatabaseProvider,
 };
+use lru::LruCache;
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, PoisonError, RwLock},
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 /// Optional reorg payload so `persist_metadata` can append a durable `reorged` stream frame
-/// inside the same consensus RW txn as confirmation metadata (Phase 4).
+/// inside the same consensus RW txn as confirmation metadata.
 #[derive(Debug)]
 pub struct StreamReorgAppend {
     pub fork_parent: Arc<IrysBlockHeader>,
@@ -45,10 +46,32 @@ pub enum StreamEmission<'a> {
     Reorged(&'a StreamReorgAppend),
 }
 
+/// Restart de-duplication for durable stream appends, seeded from the log tail
+/// at construction. The producer's in-memory caches cannot guard these appends
+/// — they happen upstream, inside consensus txns — so the writer holds its own:
+/// a block re-confirmed after a restart (confirmed-but-unmigrated blocks are
+/// absent from the restored tree and re-enter via gossip) must not append a
+/// second `observed` frame, and a re-migration must not append a second
+/// `finalized` unless a reorg rolled the block back in between.
+struct StreamDedup {
+    emitted: LruCache<H256, ()>,
+    finalized: LruCache<H256, ()>,
+}
+
+impl std::fmt::Debug for StreamDedup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamDedup")
+            .field("emitted", &self.emitted.len())
+            .field("finalized", &self.finalized.len())
+            .finish()
+    }
+}
+
 /// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
 #[derive(Debug)]
 pub struct BlockMigrationService {
     db: DatabaseProvider,
+    stream_dedup: Mutex<StreamDedup>,
     block_index_guard: BlockIndexReadGuard,
     supply_state: Option<Arc<SupplyState>>,
     chunk_size: u64,
@@ -169,8 +192,22 @@ impl BlockMigrationService {
         chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
         packing_sender: PackingSender,
     ) -> Self {
+        // Best-effort seed: an unreadable log tail degrades to an empty de-dup
+        // (worst case a duplicate frame, exactly the pre-seed behaviour) rather
+        // than failing construction.
+        let stream_dedup = match crate::block_stream_service::rebuild_state(&db) {
+            Ok((emitted, finalized)) => StreamDedup { emitted, finalized },
+            Err(e) => {
+                warn!(error = ?e, "failed to seed stream de-dup from the log tail; starting empty");
+                StreamDedup {
+                    emitted: LruCache::new(crate::block_stream_service::DEDUP_CAPACITY),
+                    finalized: LruCache::new(crate::block_stream_service::DEDUP_CAPACITY),
+                }
+            }
+        };
         Self {
             db,
+            stream_dedup: Mutex::new(stream_dedup),
             block_index_guard,
             supply_state,
             chunk_size,
@@ -298,7 +335,7 @@ impl BlockMigrationService {
     /// (re)written when they migrate, not here — so this function never
     /// recreates a `{None, Some}` state.
     /// Durable block-stream frames for `stream` are appended in the same consensus RW txn as
-    /// the metadata writes and returned for live fan-out (Phase 4).
+    /// the metadata writes and returned for live fan-out.
     pub fn persist_metadata(
         &self,
         blocks_to_clear: &[Arc<SealedBlock>],
@@ -362,8 +399,17 @@ impl BlockMigrationService {
         let prepared_stream: Vec<(StreamEvent, Vec<u8>)> = match stream {
             StreamEmission::Disabled => Vec::new(),
             StreamEmission::Observed => {
+                // Skip blocks already `observed` per the seeded restart de-dup:
+                // a block re-confirmed after a restart must not append twice.
+                let dedup = self
+                    .stream_dedup
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 let mut out = Vec::with_capacity(blocks_to_confirm.len());
                 for block in blocks_to_confirm {
+                    if dedup.emitted.contains(&block.header().block_hash) {
+                        continue;
+                    }
                     let event =
                         StreamEvent::Observed(BlockEvent::from_sealed(block, self.chunk_size));
                     let payload = serde_json::to_vec(&event)?;
@@ -467,6 +513,7 @@ impl BlockMigrationService {
             }
             Ok(frames)
         })?;
+        self.note_stream_frames(&stream_frames);
 
         info!(
             cleared_blocks = blocks_to_clear.len(),
@@ -476,6 +523,40 @@ impl BlockMigrationService {
         );
 
         Ok(stream_frames)
+    }
+
+    /// Records appended frames in the restart de-dup. Called only after the
+    /// appending txn commits, so a failed commit cannot mark a frame emitted.
+    fn note_stream_frames(&self, frames: &[StreamFrame]) {
+        if frames.is_empty() {
+            return;
+        }
+        let mut dedup = self
+            .stream_dedup
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for frame in frames {
+            match &frame.event {
+                StreamEvent::Observed(block) => {
+                    dedup.emitted.put(block.header.block_hash, ());
+                }
+                StreamEvent::Finalized(block) => {
+                    dedup.finalized.put(block.header.block_hash, ());
+                }
+                StreamEvent::Reorged {
+                    orphaned, new_fork, ..
+                } => {
+                    for block in new_fork {
+                        dedup.emitted.put(block.header.block_hash, ());
+                    }
+                    // A rolled-back block must be free to emit `finalized`
+                    // again if its fork is re-adopted and it re-migrates.
+                    for block in orphaned {
+                        dedup.finalized.pop(&block.header.block_hash);
+                    }
+                }
+            }
+        }
     }
 
     /// Rolls back blocks migrated on a minority fork during network partition recovery.
@@ -923,7 +1004,19 @@ impl BlockMigrationService {
         let chunk_size = self.chunk_size;
         // Serialize finalized stream payload before the consensus RW txn so a
         // serde fault cannot abort index / header writes in that transaction.
-        let prepared_finalized: Option<(StreamEvent, Vec<u8>)> = if emit_stream {
+        // The seeded restart de-dup suppresses a second `finalized` for a block
+        // whose frame is already in the log (crash after commit, before the
+        // producer restart).
+        let already_finalized = emit_stream
+            && self
+                .stream_dedup
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .finalized
+                .contains(&header.block_hash);
+        let prepared_finalized: Option<(StreamEvent, Vec<u8>)> = if emit_stream
+            && !already_finalized
+        {
             let event = StreamEvent::Finalized(BlockEvent::from_sealed(sealed_block, chunk_size));
             let payload = serde_json::to_vec(&event)?;
             Some((event, payload))
@@ -931,7 +1024,7 @@ impl BlockMigrationService {
             None
         };
 
-        self.db.update_eyre_at("persist_block", |tx| {
+        let frame = self.db.update_eyre_at("persist_block", |tx| {
             for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
             }
@@ -972,7 +1065,11 @@ impl BlockMigrationService {
             } else {
                 Ok(None)
             }
-        })
+        })?;
+        if let Some(frame) = &frame {
+            self.note_stream_frames(std::slice::from_ref(frame));
+        }
+        Ok(frame)
     }
 
     /// Notify ChunkMigrationService about the migrated block (fire-and-forget).
@@ -2163,7 +2260,7 @@ mod tests {
         })
     }
 
-    /// Phase 4: `StreamEmission::Observed` appends one `observed` frame per confirm.
+    /// `StreamEmission::Observed` appends one `observed` frame per confirm.
     #[tokio::test]
     async fn stream_emission_observed_appends_one_frame_per_confirm() -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
@@ -2189,7 +2286,7 @@ mod tests {
         Ok(())
     }
 
-    /// Phase 4: reorg emission is a single `reorged` frame (no per-block observed).
+    /// Reorg emission is a single `reorged` frame (no per-block observed).
     #[tokio::test]
     async fn stream_emission_reorged_appends_one_reorged_frame() -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
@@ -2233,7 +2330,7 @@ mod tests {
         Ok(())
     }
 
-    /// Phase 4: `persist_block(..., true)` returns a durable finalized frame.
+    /// `persist_block(..., true)` returns a durable finalized frame.
     #[tokio::test]
     async fn stream_emission_persist_block_appends_finalized() -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
@@ -2257,7 +2354,7 @@ mod tests {
         Ok(())
     }
 
-    /// Phase 4: disabled stream leaves the durable log empty.
+    /// A disabled stream leaves the durable log empty.
     #[tokio::test]
     async fn stream_emission_disabled_leaves_log_empty() -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
@@ -2272,6 +2369,98 @@ mod tests {
             svc.persist_metadata(&[], std::slice::from_ref(&sealed), StreamEmission::Disabled)?;
         assert!(frames.is_empty());
         assert!(read_stream_frames(&db)?.is_empty());
+        Ok(())
+    }
+
+    /// Restart de-dup (M2): a block whose `observed` frame is already durable must not append a
+    /// second one when it is re-confirmed by a fresh service (seeded from the log tail), while a
+    /// genuinely new block still appends.
+    #[tokio::test]
+    async fn observed_append_is_idempotent_across_restart() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        let tip = make_block_header(1, H256::zero(), 0, vec![tx_id]);
+        let sealed = make_sealed_with_submit_txs(tip, &[(tx_id, data_root)]);
+
+        {
+            let (svc, _svc_tmp) = make_service(db.clone());
+            let frames =
+                svc.persist_metadata(&[], std::slice::from_ref(&sealed), StreamEmission::Observed)?;
+            assert_eq!(frames.len(), 1);
+        }
+
+        // Restart: confirmed-but-unmigrated blocks are absent from the restored tree and
+        // re-enter via gossip, so the same block is re-confirmed by a fresh service.
+        let (svc, _svc_tmp) = make_service(db.clone());
+        let frames =
+            svc.persist_metadata(&[], std::slice::from_ref(&sealed), StreamEmission::Observed)?;
+        assert!(
+            frames.is_empty(),
+            "re-confirmation after restart must not re-append observed"
+        );
+        assert_eq!(read_stream_frames(&db)?.len(), 1);
+
+        let tx2 = H256::random();
+        let root2 = H256::random();
+        let tip2 = make_block_header(2, sealed.header().block_hash, 0, vec![tx2]);
+        let sealed2 = make_sealed_with_submit_txs(tip2, &[(tx2, root2)]);
+        let frames = svc.persist_metadata(
+            &[],
+            std::slice::from_ref(&sealed2),
+            StreamEmission::Observed,
+        )?;
+        assert_eq!(frames.len(), 1, "a new block still appends");
+        Ok(())
+    }
+
+    /// Restart de-dup (M2), finalized side: a re-migration of an already-finalised block appends
+    /// nothing across a restart, but a reorg that orphans it reopens the emission — also across a
+    /// restart between the reorg and the re-migration.
+    #[tokio::test]
+    async fn finalized_dedup_survives_restart_and_reorg_reopens_it() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+
+        let genesis = make_commitment_header(0, H256::zero(), vec![H256::random()]);
+        let genesis_hash = genesis.block_hash;
+        let genesis_sealed = make_sealed_commitment(genesis);
+        let block_1 = make_commitment_header(1, genesis_hash, vec![H256::random()]);
+        let block_1_sealed = make_sealed_commitment(block_1);
+
+        {
+            let (svc, _svc_tmp) = make_service_with_epoch(db.clone(), 10);
+            svc.persist_block(genesis_sealed.as_ref(), false)?;
+            assert!(svc.persist_block(block_1_sealed.as_ref(), true)?.is_some());
+        }
+
+        // Restart: re-migrating the same block must be suppressed by the seeded de-dup.
+        {
+            let (svc, _svc_tmp) = make_service_with_epoch(db.clone(), 10);
+            assert!(
+                svc.persist_block(block_1_sealed.as_ref(), true)?.is_none(),
+                "re-migration after restart must not re-append finalized"
+            );
+
+            // A reorg orphaning the block reopens its finalized emission.
+            let reorg = StreamReorgAppend {
+                fork_parent: Arc::new(IrysBlockHeader::new_mock_header()),
+                old_fork: Arc::new(vec![Arc::clone(&block_1_sealed)]),
+                new_fork: Arc::new(vec![]),
+            };
+            svc.persist_metadata(
+                std::slice::from_ref(&block_1_sealed),
+                &[],
+                StreamEmission::Reorged(&reorg),
+            )?;
+        }
+
+        // Restart between the reorg and the re-migration: the seeded de-dup mirrors the
+        // eviction, so the re-adopted block emits finalized again.
+        let (svc, _svc_tmp) = make_service_with_epoch(db, 10);
+        assert!(
+            svc.persist_block(block_1_sealed.as_ref(), true)?.is_some(),
+            "re-migrated orphan must re-emit finalized"
+        );
         Ok(())
     }
 

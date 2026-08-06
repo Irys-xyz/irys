@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::borrow::Cow;
 
 /// One stream frame: a monotonic `seq` flattened beside a `kind`-tagged event.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct StreamFrame {
     pub seq: u64,
     #[serde(flatten)]

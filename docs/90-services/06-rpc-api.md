@@ -142,14 +142,17 @@ size requests within `MAX_CHUNK_SPAN`, or a conforming node would answer with a 
   also means "no canonical block at that height" — a transport prober must key on the stream/events
   routes, never on the by-height read.
 
-## Limitation: the crash window
+## Durability: frames commit with their transitions
 
-A signal is in-memory between its authoritative site and the producer's durable append, so the log
-is lossless only while the node runs: a crash inside that window loses the frame. For `finalized`
-the durable truth survives in the block index, and the producer reconciles the index tail against
-the log at startup, appending any missing `finalized` frames in height order. A lost `observed` or
-`reorged` frame is not replayed; a follower recovers the resulting state through the canonical
-reads, exactly as it does after a `truncated` poll.
+Production frames are appended inside the same consensus database transaction as the state
+transition they report: confirmation writes `observed`/`reorged` frames with its metadata, and
+migration writes `finalized` with its block-index push. A crash therefore cannot lose a frame for a
+transition that persisted — the two are atomic — and a frame cannot exist for a transition that did
+not. The producer's remaining append path is startup reconciliation, which repairs `finalized`
+frames that a pre-atomic-append build lost between a migration commit and its separate producer
+append, walking the block index tail and appending the gap in height order. Live SSE delivery is
+best-effort on top of this durable log: a frame whose fan-out is missed (say, a halted producer) is
+recovered through replay on reconnect, exactly as after a `truncated` poll.
 
 ## Limitation: log recreation (reset)
 

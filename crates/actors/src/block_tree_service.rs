@@ -169,30 +169,6 @@ pub struct ReorgEvent {
     pub db: Option<DatabaseProvider>,
 }
 
-/// Signals fed to the block-stream producer over a dedicated unbounded channel.
-///
-/// Production (Phase 4): confirmation/migration/reorg write the durable log inside the same
-/// consensus MDBX transaction as metadata/index work, then emit [`Self::Durable`] so the producer
-/// only fans out to live SSE subscribers (no second RW txn).
-///
-/// [`Self::Confirmed`] / [`Self::Finalized`] / [`Self::Reorged`] still append+fanout for unit tests
-/// and any residual callers; startup reconciliation also appends via the producer.
-#[derive(Debug, Clone)]
-pub enum BlockStreamSignal {
-    /// Frame already committed to the durable log; producer fans out only.
-    Durable(Arc<irys_types::block_stream::StreamFrame>),
-    /// A block reached canonical confirmation ⇒ append `observed` then fan out.
-    Confirmed(Arc<SealedBlock>),
-    /// A block migrated to the index ⇒ append `finalized` then fan out.
-    Finalized(Arc<SealedBlock>),
-    /// A reorg occurred ⇒ append one batched `reorged` frame then fan out.
-    Reorged {
-        fork_parent: Arc<IrysBlockHeader>,
-        old_fork: Arc<Vec<Arc<SealedBlock>>>,
-        new_fork: Arc<Vec<Arc<SealedBlock>>>,
-    },
-}
-
 /// Event broadcast when a block's state changes in the block tree.
 #[derive(Debug, Clone)]
 pub struct BlockStateUpdated {
@@ -586,9 +562,7 @@ impl BlockTreeServiceInner {
             emit_stream,
             |_sealed, stream_frame| {
                 if let Some(frame) = stream_frame
-                    && block_stream
-                        .send(BlockStreamSignal::Durable(Arc::new(frame)))
-                        .is_err()
+                    && block_stream.send(Arc::new(frame)).is_err()
                 {
                     tracing::debug!(
                         "block-stream producer gone; dropping durable finalized fanout"
@@ -605,10 +579,7 @@ impl BlockTreeServiceInner {
         }
         let block_stream = &self.service_senders.block_stream;
         for frame in frames {
-            if block_stream
-                .send(BlockStreamSignal::Durable(Arc::new(frame)))
-                .is_err()
-            {
+            if block_stream.send(Arc::new(frame)).is_err() {
                 debug!("block-stream producer gone; dropping durable stream fanout");
                 break;
             }
@@ -1257,8 +1228,8 @@ impl BlockTreeServiceInner {
             self.send_epoch_events(&epoch_block)?;
         }
 
-        // Persist metadata atomically (same code path for both normal blocks and reorgs).
-        // Phase 4: durable observed/reorged stream frames land in this same RW txn.
+        // Persist metadata atomically (same code path for both normal blocks and reorgs);
+        // durable observed/reorged stream frames land in this same RW txn.
         let stream_frames = {
             use crate::block_migration_service::{StreamEmission, StreamReorgAppend};
             let old_fork: &[Arc<SealedBlock>] = reorg_event
@@ -1279,7 +1250,6 @@ impl BlockTreeServiceInner {
             self.block_migration_service
                 .persist_metadata(old_fork, &blocks_to_confirm, stream)?
         };
-        self.fanout_durable_stream_frames(stream_frames);
 
         // Broadcast reorg event if applicable
         let reorg_occurred = reorg_event.is_some();
@@ -1324,10 +1294,15 @@ impl BlockTreeServiceInner {
             // Emit consensus events
             self.emit_fcu(markers).await?;
 
+            // Live stream fan-out only after FCU succeeds, so a follower reacting to `observed`
+            // never races the execution-layer head update (the pre-change ordering). The frames
+            // are already durable; on an FCU error the follower recovers them via replay.
+            self.fanout_durable_stream_frames(stream_frames);
+
             // Mempool confirmations. The mempool may already be shutting down (its receiver
             // dropped); log and continue — block confirmation itself is still valid.
-            // Stream `observed`/`reorged` frames were already durable-appended + fanout-queued
-            // inside `persist_metadata` (Phase 4); migration appends `finalized` the same way.
+            // Stream `observed`/`reorged` frames were durable-appended inside `persist_metadata`;
+            // migration appends `finalized` the same way.
             for sealed_block in &blocks_to_confirm {
                 if let Err(e) =
                     self.service_senders

@@ -180,9 +180,9 @@ async fn finalized_emitted_on_migration() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Phase 2 ordering pin: for a given block, `observed` (Confirmed) is assigned a lower durable
-/// `seq` than `finalized` (migration), even though migrate runs before Confirmed is sent on the
-/// tip-advance path (Confirmed is for the tip; Finalized is for the older migration-depth block).
+/// Durable-seq ordering pin: for a given block, the confirmation txn assigns `observed` a lower
+/// `seq` than the later migration txn assigns `finalized` — confirmation always precedes that
+/// block's migration by at least `block_migration_depth` blocks.
 #[test_log::test(tokio::test)]
 async fn observed_seq_precedes_finalized_for_same_block() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();

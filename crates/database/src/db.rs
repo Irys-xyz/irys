@@ -13,26 +13,40 @@ use std::time::Instant;
 use tracing::{info, info_span};
 
 use irys_utils::{
-    DB_CONSENSUS_WRITER_GATE_WAIT_SECONDS, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM,
-    DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN,
+    DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+    DB_WRITER_GATE_WAIT_SECONDS, MDBX_RW_TX_SPAN,
 };
 
-/// Process-wide gate for the irys-consensus MDBX environment's single writer.
+/// Per-environment writer gates for `DatabaseEnv` MDBX environments.
 ///
 /// MDBX allows one RW transaction per env; concurrent `begin_rw_txn` callers hit
-/// `Error::Busy` and sleep 250 ms in reth-irys libmdbx. Waiting here (OS mutex)
-/// parks waiters until the previous writer commits, so residual Busy sleeps are
-/// rare when every production writer takes this gate before `tx_mut`.
+/// `Error::Busy` and sleep 250 ms in reth-irys libmdbx. Waiting on the gate (an
+/// OS mutex) parks waiters until the previous writer commits, so residual Busy
+/// sleeps are rare when every production writer takes the gate before `tx_mut`.
 ///
-/// Process-global (not per-env): all consensus `DatabaseEnv` instances in the
-/// process share one queue. That is correct for a node (one consensus DB) and
-/// only serializes writers across independent test DBs, which is safe.
-static CONSENSUS_WRITER_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+/// Gates are keyed by environment address so independent environments have
+/// independent queues: the consensus DB and each storage-submodule DB serialise
+/// their own writers without contending with one another. Gate values are
+/// leaked (`&'static`) so guards borrow no registry lock; the registry is
+/// append-only, bounded by the number of environments opened over the process
+/// lifetime. An address reused by a later environment shares the earlier gate,
+/// which merely merges two queues and stays correct.
+static WRITER_GATES: LazyLock<Mutex<std::collections::HashMap<usize, &'static Mutex<()>>>> =
+    LazyLock::new(Default::default);
 
-/// RAII guard for [`lock_consensus_writer_gate`]. Drop to release the gate.
-pub type ConsensusWriterGuard = MutexGuard<'static, ()>;
+fn writer_gate_for(env: &DatabaseEnv) -> &'static Mutex<()> {
+    let key = std::ptr::from_ref(env) as usize;
+    WRITER_GATES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(key)
+        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+}
 
-/// Acquire the consensus writer gate. Prefer [`IrysDatabaseExt::update_eyre`] /
+/// RAII guard for [`lock_writer_gate`]. Drop to release the gate.
+pub type WriterGateGuard = MutexGuard<'static, ()>;
+
+/// Acquire `env`'s writer gate. Prefer [`IrysDatabaseExt::update_eyre`] /
 /// [`IrysDatabaseExt::update_scoped`] for normal writes. Use this only when a
 /// raw `tx_mut` must join the same serialization (long multi-statement writers,
 /// tests that hold the lock across other work).
@@ -40,16 +54,15 @@ pub type ConsensusWriterGuard = MutexGuard<'static, ()>;
 /// # Poisoning
 ///
 /// Recovers from a poisoned mutex so one panicked writer does not permanently
-/// wedge consensus writes.
-pub fn lock_consensus_writer_gate(call_site: &'static str) -> ConsensusWriterGuard {
+/// wedge writes to this environment.
+pub fn lock_writer_gate(env: &DatabaseEnv, call_site: &'static str) -> WriterGateGuard {
     let start = Instant::now();
-    let guard = CONSENSUS_WRITER_GATE
+    let guard = writer_gate_for(env)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     metrics::histogram!(
-        DB_CONSENSUS_WRITER_GATE_WAIT_SECONDS,
+        DB_WRITER_GATE_WAIT_SECONDS,
         "call_site" => call_site,
-        "scope" => DB_SCOPE_IRYS_CONSENSUS,
     )
     .record(start.elapsed().as_secs_f64());
     guard
@@ -274,9 +287,9 @@ impl IrysDatabaseExt for DatabaseEnv {
         // stall warning fired during begin_rw_txn lands under
         // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
         let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
-        // Take the app gate before begin_rw_txn so concurrent consensus writers
-        // park here instead of Busy-sleeping 250 ms in libmdbx.
-        let _gate = lock_consensus_writer_gate(call_site);
+        // Take this env's gate before begin_rw_txn so concurrent writers park
+        // here instead of Busy-sleeping 250 ms in libmdbx.
+        let _gate = lock_writer_gate(self, call_site);
 
         // Time tx_mut() acquisition (should be near-zero when all writers use the gate).
         let start = Instant::now();
@@ -307,7 +320,7 @@ impl IrysDatabaseExt for DatabaseEnv {
         F: FnOnce(&Self::TXMut) -> T,
     {
         let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
-        let _gate = lock_consensus_writer_gate("update_scoped");
+        let _gate = lock_writer_gate(self, "update_scoped");
         let start = Instant::now();
         let tx_result = self.tx_mut();
         IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
@@ -403,15 +416,20 @@ mod tests {
     use crate::tables::IrysTables;
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use reth_db::mdbx::DatabaseArguments;
-    use std::sync::{Arc, Barrier};
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    /// Two concurrent `update_eyre` writers must serialize on the app gate so
-    /// neither pays the 250 ms libmdbx Busy sleep. Wall-clock for both holds
-    /// (~10 ms each) plus queue wait should stay well under one Busy quantum.
+    /// Two overlapping `update_eyre` writers must be mutually exclusive on the
+    /// per-env gate, and neither may pay the 250 ms libmdbx Busy sleep.
+    ///
+    /// Overlap is guaranteed: the first writer signals from *inside* its write
+    /// closure and the second writer starts only after that signal, so the gate
+    /// is provably contended. Exclusion is asserted structurally via an
+    /// occupancy counter rather than wall-clock arithmetic.
     #[test]
-    fn consensus_writer_gate_avoids_250ms_busy_floor() {
+    fn writer_gate_serializes_overlapping_writers_without_busy_floor() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             tmp.path(),
@@ -420,22 +438,45 @@ mod tests {
         )
         .unwrap();
         let db = Arc::new(db);
-        let barrier = Arc::new(Barrier::new(2));
+        let first_writer_in_tx = Arc::new(Barrier::new(2));
+        let occupancy = Arc::new(AtomicUsize::new(0));
+        let max_occupancy = Arc::new(AtomicUsize::new(0));
         let hold = Duration::from_millis(10);
+
+        let enter = |occupancy: &AtomicUsize, max_occupancy: &AtomicUsize| {
+            let now = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
+            max_occupancy.fetch_max(now, Ordering::SeqCst);
+        };
 
         let mut joins = Vec::new();
         for i in 0..2 {
             let db = Arc::clone(&db);
-            let barrier = Arc::clone(&barrier);
+            let first_writer_in_tx = Arc::clone(&first_writer_in_tx);
+            let occupancy = Arc::clone(&occupancy);
+            let max_occupancy = Arc::clone(&max_occupancy);
             joins.push(thread::spawn(move || {
-                barrier.wait();
-                let started = Instant::now();
-                db.update_eyre_at("test.concurrent_writer", |_tx| {
-                    thread::sleep(hold);
-                    Ok(())
-                })
-                .unwrap();
-                (i, started.elapsed())
+                if i == 0 {
+                    let started = Instant::now();
+                    db.update_eyre_at("test.concurrent_writer", |_tx| {
+                        enter(&occupancy, &max_occupancy);
+                        first_writer_in_tx.wait();
+                        thread::sleep(hold);
+                        occupancy.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .unwrap();
+                    started.elapsed()
+                } else {
+                    first_writer_in_tx.wait();
+                    let started = Instant::now();
+                    db.update_eyre_at("test.concurrent_writer", |_tx| {
+                        enter(&occupancy, &max_occupancy);
+                        occupancy.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .unwrap();
+                    started.elapsed()
+                }
             }));
         }
 
@@ -444,21 +485,17 @@ mod tests {
             durations.push(j.join().expect("writer thread panicked"));
         }
 
-        // Serialization: the slower writer waited at least one hold period.
-        // Busy avoidance: neither writer paid the 250 ms libmdbx Busy quantum.
-        let max = durations.iter().map(|(_, d)| *d).max().unwrap();
-        let min = durations.iter().map(|(_, d)| *d).min().unwrap();
-        assert!(
-            max >= hold,
-            "slower writer must wait at least one hold (proves gate serialization); max={max:?} hold={hold:?} times={durations:?}"
+        assert_eq!(
+            max_occupancy.load(Ordering::SeqCst),
+            1,
+            "two writers were inside their write closures at once; gate failed to serialize"
         );
+        // The second writer started while the first held the gate, so its wait
+        // proves it parked on the app mutex, not the 250 ms libmdbx Busy poll.
+        let max = durations.iter().max().unwrap();
         assert!(
-            max < Duration::from_millis(250),
+            *max < Duration::from_millis(250),
             "no writer may reach the 250ms Busy floor; max={max:?} times={durations:?}"
-        );
-        assert!(
-            min >= hold,
-            "each writer holds for at least `hold`; min={min:?} hold={hold:?} times={durations:?}"
         );
     }
 }

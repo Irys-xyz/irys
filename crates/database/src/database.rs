@@ -1314,12 +1314,11 @@ pub fn block_ledger_tx_headers<T: DbTx>(
 /// Appends a block-stream event to the durable log, assigning and returning the next monotonic
 /// `seq`.
 ///
-/// Callers must be the only concurrent writer of this table for the process (serialized by the
-/// consensus writer gate / single RW txn): confirmation and migration append inside their
-/// canonical txns; the producer still appends on startup reconciliation and unit-test signals.
-/// Reading the last key and incrementing within the same write transaction is race-free. `seq`
-/// keys sort numerically because reth encodes integer DB keys big-endian (the same property the
-/// block-index range scans rely on).
+/// Appends are serialized by the consensus environment's writer gate / single RW txn:
+/// confirmation and migration append inside their canonical txns; the producer appends only
+/// during startup reconciliation. Reading the last key and incrementing within the same write
+/// transaction is race-free. `seq` keys sort numerically because reth encodes integer DB keys
+/// big-endian (the same property the block-index range scans rely on).
 pub fn append_block_stream_event<T: DbTx + DbTxMut>(tx: &T, value: Vec<u8>) -> eyre::Result<u64> {
     let next_seq = {
         let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
