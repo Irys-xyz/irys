@@ -53,6 +53,10 @@ pub enum StreamEmission<'a> {
 /// absent from the restored tree and re-enter via gossip) must not append a
 /// second `observed` frame, and a re-migration must not append a second
 /// `finalized` unless a reorg rolled the block back in between.
+///
+/// Callers that check then append must hold this mutex across check, the
+/// appending RW txn, and post-commit recording so concurrent writers cannot
+/// both miss and both append.
 struct StreamDedup {
     emitted: LruCache<H256, ()>,
     finalized: LruCache<H256, ()>,
@@ -396,15 +400,24 @@ impl BlockMigrationService {
 
         // Serialize stream payloads before the consensus RW txn so a serde fault
         // cannot abort metadata / index writes already staged in that transaction.
+        // Observed de-dup must hold `stream_dedup` through check, append, and
+        // post-commit note so concurrent writers cannot both miss and both append.
+        let mut observed_dedup = match &stream {
+            StreamEmission::Observed => Some(
+                self.stream_dedup
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            ),
+            _ => None,
+        };
         let prepared_stream: Vec<(StreamEvent, Vec<u8>)> = match stream {
             StreamEmission::Disabled => Vec::new(),
             StreamEmission::Observed => {
                 // Skip blocks already `observed` per the seeded restart de-dup:
                 // a block re-confirmed after a restart must not append twice.
-                let dedup = self
-                    .stream_dedup
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let dedup = observed_dedup
+                    .as_ref()
+                    .expect("Observed holds stream_dedup for the append critical section");
                 let mut out = Vec::with_capacity(blocks_to_confirm.len());
                 for block in blocks_to_confirm {
                     if dedup.emitted.contains(&block.header().block_hash) {
@@ -513,7 +526,13 @@ impl BlockMigrationService {
             }
             Ok(frames)
         })?;
-        self.note_stream_frames(&stream_frames);
+        // Note only after commit succeeds (update_eyre_at returned Ok). Observed
+        // reuses the lock held across check+append; other modes lock here.
+        if let Some(ref mut dedup) = observed_dedup {
+            Self::note_stream_frames_locked(dedup, &stream_frames);
+        } else {
+            self.note_stream_frames(&stream_frames);
+        }
 
         info!(
             cleared_blocks = blocks_to_clear.len(),
@@ -535,6 +554,10 @@ impl BlockMigrationService {
             .stream_dedup
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        Self::note_stream_frames_locked(&mut dedup, frames);
+    }
+
+    fn note_stream_frames_locked(dedup: &mut StreamDedup, frames: &[StreamFrame]) {
         for frame in frames {
             match &frame.event {
                 StreamEvent::Observed(block) => {
@@ -1012,14 +1035,21 @@ impl BlockMigrationService {
         // serde fault cannot abort index / header writes in that transaction.
         // The seeded restart de-dup suppresses a second `finalized` for a block
         // whose frame is already in the log (crash after commit, before the
-        // producer restart).
-        let already_finalized = emit_stream
-            && self
-                .stream_dedup
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .finalized
-                .contains(&header.block_hash);
+        // producer restart). Hold `stream_dedup` across check, append, and
+        // post-commit note so concurrent migrators cannot both miss and both
+        // append.
+        let mut finalized_dedup = if emit_stream {
+            Some(
+                self.stream_dedup
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            )
+        } else {
+            None
+        };
+        let already_finalized = finalized_dedup
+            .as_ref()
+            .is_some_and(|d| d.finalized.contains(&header.block_hash));
         let prepared_finalized: Option<(StreamEvent, Vec<u8>)> = if emit_stream
             && !already_finalized
         {
@@ -1073,7 +1103,10 @@ impl BlockMigrationService {
             }
         })?;
         if let Some(frame) = &frame {
-            self.note_stream_frames(std::slice::from_ref(frame));
+            // Commit succeeded; record under the same lock held for the check.
+            if let Some(ref mut dedup) = finalized_dedup {
+                Self::note_stream_frames_locked(dedup, std::slice::from_ref(frame));
+            }
         }
         Ok(frame)
     }
