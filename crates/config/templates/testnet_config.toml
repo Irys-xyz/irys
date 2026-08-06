@@ -84,7 +84,10 @@ max_valid_commitment_addresses = 300  # Conservative: ~100 miners * 3
 max_commitments_per_address = 20  # Limit per-address resource consumption
 
 [vdf]
-parallel_verification_thread_limit = 4
+# Threads for parallel VDF verification. Defaults to available cores - 2 (one
+# reserved for the VDF thread, one for the rest of the node). Uncomment to pin
+# it; going above consensus num_checkpoints_in_vdf_step buys nothing.
+# parallel_verification_thread_limit = 4
 
 
 [consensus.Custom]

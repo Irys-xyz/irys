@@ -934,7 +934,21 @@ fn default_metrics_config() -> MetricsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VdfNodeConfig {
-    /// Maximum number of threads to use for parallel VDF verification
+    /// Maximum number of threads to use for parallel VDF verification.
+    ///
+    /// Defaults to `available_parallelism() - 2`, leaving one core for the VDF
+    /// thread (which `core_pinning` may pin) and one for the rest of the node —
+    /// tokio, reth and the API server. A fixed default silently wastes a large
+    /// machine: this is the widest stage of block prevalidation
+    /// (`last_step_checkpoints_is_valid` re-hashes a whole VDF step per block),
+    /// so a host that grows more cores gets no faster unless the limit grows
+    /// with it.
+    ///
+    /// Set it explicitly to override. Raising it past
+    /// `consensus.num_checkpoints_in_vdf_step` buys nothing — that is the
+    /// widest the checkpoint pass can go — and it also raises the floor
+    /// `validation_batch_size` is clamped to (see `clamped_validation_batch_size`).
+    #[serde(default = "default_parallel_verification_thread_limit")]
     pub parallel_verification_thread_limit: usize,
 
     /// Controls whether and how the VDF thread is pinned to a CPU core.
@@ -987,6 +1001,31 @@ fn default_vdf_progress_timeout_secs() -> u64 {
     15
 }
 
+/// Cores this node reserves for work other than parallel VDF verification: one
+/// for the VDF thread itself, one for tokio/reth/the API server.
+const VDF_VERIFICATION_RESERVED_CORES: usize = 2;
+
+/// `available` minus [`VDF_VERIFICATION_RESERVED_CORES`], floored at 1 so a 1-
+/// or 2-core host still verifies (single-threaded) rather than building a
+/// zero-thread rayon pool.
+///
+/// Separate from the `available_parallelism()` call that feeds it, so the
+/// reservation arithmetic is testable without depending on the core count of
+/// the machine running the test.
+const fn verification_threads_for(available: usize) -> usize {
+    let reserved = available.saturating_sub(VDF_VERIFICATION_RESERVED_CORES);
+    if reserved == 0 { 1 } else { reserved }
+}
+
+/// Falls back to 1 when the core count is unavailable: under-committing costs
+/// throughput, while a guessed-high default oversubscribes a host we could not
+/// measure.
+fn default_parallel_verification_thread_limit() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| verification_threads_for(count.get()))
+        .unwrap_or(1)
+}
+
 fn default_vdf_validation_batch_size() -> usize {
     32
 }
@@ -994,8 +1033,7 @@ fn default_vdf_validation_batch_size() -> usize {
 impl Default for VdfNodeConfig {
     fn default() -> Self {
         Self {
-            // TODO: default to something like numcpus - 4
-            parallel_verification_thread_limit: 4,
+            parallel_verification_thread_limit: default_parallel_verification_thread_limit(),
             core_pinning: CorePinning::default(),
             free_run: VdfFreeRun::default(),
             throttle: false,
@@ -1484,7 +1522,7 @@ impl NodeConfig {
             metrics: MetricsConfig::default(),
 
             vdf: VdfNodeConfig {
-                parallel_verification_thread_limit: 4,
+                parallel_verification_thread_limit: default_parallel_verification_thread_limit(),
                 core_pinning: CorePinning::Auto,
                 free_run: VdfFreeRun::Auto,
                 throttle: false,
@@ -1639,6 +1677,63 @@ mod run_mode_tests {
         node_config.vdf.core_pinning = pinning;
         let vdf = node_config.vdf();
         assert_eq!(vdf.core_pinning, pinning);
+    }
+
+    /// The reservation keeps two cores back on any host wide enough to spare
+    /// them, and never yields a zero-thread pool on a narrow one.
+    #[rstest]
+    #[case::single_core(1, 1)]
+    #[case::two_cores(2, 1)]
+    #[case::three_cores(3, 1)]
+    #[case::eight_cores(8, 6)]
+    #[case::twenty_two_cores(22, 20)]
+    #[case::ninety_six_cores(96, 94)]
+    fn verification_threads_reserve_two_cores_with_a_floor_of_one(
+        #[case] available: usize,
+        #[case] expected: usize,
+    ) {
+        assert_eq!(verification_threads_for(available), expected);
+    }
+
+    /// A zero core count cannot come from `available_parallelism()`, but the
+    /// floor must hold for it regardless — a zero-thread rayon pool panics at
+    /// build time, which would turn a bad measurement into a dead node.
+    #[test]
+    fn verification_threads_never_returns_zero() {
+        assert_eq!(verification_threads_for(0), 1);
+        for available in 0..=64 {
+            assert!(verification_threads_for(available) >= 1);
+        }
+    }
+
+    /// `[vdf]` without the key must parse and take the derived default — the
+    /// commented-out line in the shipped templates depends on this.
+    #[test]
+    fn vdf_thread_limit_is_derived_when_the_key_is_absent() {
+        #[derive(Deserialize)]
+        struct VdfDoc {
+            vdf: VdfNodeConfig,
+        }
+
+        let cfg: VdfDoc = toml::from_str("[vdf]\n").expect("[vdf] without the key must parse");
+        assert_eq!(
+            cfg.vdf.parallel_verification_thread_limit,
+            default_parallel_verification_thread_limit()
+        );
+    }
+
+    /// An explicit value still wins: this is a performance knob an operator who
+    /// knows their host must be able to pin.
+    #[test]
+    fn vdf_thread_limit_honours_an_explicit_value() {
+        #[derive(Deserialize)]
+        struct VdfDoc {
+            vdf: VdfNodeConfig,
+        }
+
+        let cfg: VdfDoc = toml::from_str("[vdf]\nparallel_verification_thread_limit = 3\n")
+            .expect("explicit value must parse");
+        assert_eq!(cfg.vdf.parallel_verification_thread_limit, 3);
     }
 
     #[test]

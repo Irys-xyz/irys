@@ -120,7 +120,10 @@ max_valid_commitment_addresses = 300
 max_commitments_per_address = 20
 
 [vdf]
-parallel_verification_thread_limit = 4
+# Threads for parallel VDF verification. Defaults to available cores - 2 (one
+# reserved for the VDF thread, one for the rest of the node). Uncomment to pin
+# it; going above consensus num_checkpoints_in_vdf_step buys nothing.
+# parallel_verification_thread_limit = 4
 
 # Reth Prometheus endpoint (port 9001). The default 127.0.0.1 restricts the
 # listener to the host loopback; deployments expose it externally only via
