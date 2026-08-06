@@ -1157,8 +1157,7 @@ impl BlockMigrationService {
         if prev.saturating_add(frames_appended) < PRUNE_INTERVAL {
             return Ok(());
         }
-        self.stream_appends_since_prune
-            .store(0, Ordering::Relaxed);
+        self.stream_appends_since_prune.store(0, Ordering::Relaxed);
         let Some(keep_from) = latest_seq
             .checked_add(1)
             .and_then(|len| len.checked_sub(RETENTION_EVENTS))
