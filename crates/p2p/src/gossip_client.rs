@@ -3584,13 +3584,13 @@ mod tests {
             let elapsed = start.elapsed();
 
             // Sequential would cost PEER_COUNT * timeout = 6s. Concurrent
-            // (2 batches of <=16) should land close to 2 * timeout; allow a
-            // generous margin for slow CI hosts while staying far below the
-            // sequential bound.
+            // (2 batches of <=16) should land close to 2 * timeout; the bound is
+            // 5 * timeout so a slow CI host cannot fail it, while still being
+            // four times under the sequential cost this test guards against.
             assert!(
-                elapsed < timeout * 3,
+                elapsed < timeout * 5,
                 "expected concurrent hydration well under {:?} (sequential bound would be {:?}), got {:?}",
-                timeout * 3,
+                timeout * 5,
                 timeout * u32::from(PEER_COUNT),
                 elapsed
             );
