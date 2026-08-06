@@ -39,6 +39,29 @@ fn send_message_and_log_error(sender: &PeerNetworkSender, message: PeerNetworkSe
         );
     }
 }
+
+/// Report the outcome of an announcement attempt for `api_address`.
+///
+/// `handle_announcement_finished` owns both the retry decision and the release
+/// of the `currently_running_announcements` latch, so every terminal path of an
+/// announcement must come through here.
+fn report_announcement_finished(
+    sender: &PeerNetworkSender,
+    api_address: SocketAddr,
+    gossip_address: SocketAddr,
+    success: bool,
+    retry: bool,
+) {
+    send_message_and_log_error(
+        sender,
+        PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+            peer_api_address: api_address,
+            peer_gossip_address: gossip_address,
+            success,
+            retry,
+        }),
+    );
+}
 type RethPeerSender = Arc<dyn Fn(RethPeerInfo) -> BoxFuture<'static, ()> + Send + Sync>;
 struct PeerNetworkService {
     shutdown: Shutdown,
@@ -992,15 +1015,7 @@ impl PeerNetworkService {
                 );
                 // Transport failure — the peer may simply be down or restarting,
                 // so this is retryable and the backoff/blocklist ladder applies.
-                send_message_and_log_error(
-                    &sender,
-                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                        peer_api_address: api_address,
-                        peer_gossip_address: gossip_address,
-                        success: false,
-                        retry: true,
-                    }),
-                );
+                report_announcement_finished(&sender, api_address, gossip_address, false, true);
                 return Err(PeerListServiceError::PostVersionError(e.to_string()));
             }
         };
@@ -1022,15 +1037,7 @@ impl PeerNetworkService {
             // Not retryable: the peer's supported set is a property of its build,
             // not a transient condition. Report anyway so the in-flight latch is
             // released and a later forced handshake can proceed.
-            send_message_and_log_error(
-                &sender,
-                PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                    peer_api_address: api_address,
-                    peer_gossip_address: gossip_address,
-                    success: false,
-                    retry: false,
-                }),
-            );
+            report_announcement_finished(&sender, api_address, gossip_address, false, false);
             return Err(PeerListServiceError::PostVersionError(format!(
                 "Peer {} has no compatible protocol versions",
                 gossip_address
@@ -1056,15 +1063,7 @@ impl PeerNetworkService {
             Err(e) => {
                 // A version we advertised but cannot map is a local inconsistency,
                 // not a peer fault; retrying cannot change the outcome.
-                send_message_and_log_error(
-                    &sender,
-                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                        peer_api_address: api_address,
-                        peer_gossip_address: gossip_address,
-                        success: false,
-                        retry: false,
-                    }),
-                );
+                report_announcement_finished(&sender, api_address, gossip_address, false, false);
                 return Err(PeerListServiceError::PostVersionError(format!(
                     "negotiated unknown protocol version with {}: {}",
                     gossip_address, e
@@ -1107,15 +1106,7 @@ impl PeerNetworkService {
                     "Retrying to announce yourself to address {}: {:?}",
                     api_address, error
                 );
-                send_message_and_log_error(
-                    &sender,
-                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                        peer_api_address: api_address,
-                        peer_gossip_address: gossip_address,
-                        success: false,
-                        retry: true,
-                    }),
-                );
+                report_announcement_finished(&sender, api_address, gossip_address, false, true);
                 return Err(error);
             }
         };
@@ -1123,15 +1114,7 @@ impl PeerNetworkService {
         match peer_response {
             PeerResponse::Accepted(mut accepted_peers) => {
                 // An accepted handshake is the only real success.
-                send_message_and_log_error(
-                    &sender,
-                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                        peer_api_address: api_address,
-                        peer_gossip_address: gossip_address,
-                        success: true,
-                        retry: false,
-                    }),
-                );
+                report_announcement_finished(&sender, api_address, gossip_address, true, false);
 
                 // Only log mismatch if the version is not V1 - V1 peers have zero hash
                 if protocol_version != ProtocolVersion::V1 {
@@ -1177,15 +1160,7 @@ impl PeerNetworkService {
                 // it is not cached in `successful_announcements` (which would
                 // suppress future announce attempts as if it had succeeded).
                 // retry=false because re-announcing won't change the peer's mind.
-                send_message_and_log_error(
-                    &sender,
-                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                        peer_api_address: api_address,
-                        peer_gossip_address: gossip_address,
-                        success: false,
-                        retry: false,
-                    }),
-                );
+                report_announcement_finished(&sender, api_address, gossip_address, false, false);
 
                 // A chain_id mismatch (mapped to NetworkMismatch) means the peer
                 // is on a different network. The gossip data plane trusts cache
@@ -1661,6 +1636,119 @@ mod tests {
         let mut expected = vec![peer1.address.api, peer2.address.api];
         expected.sort();
         assert_eq!(api_addrs, expected);
+    }
+
+    /// Announce to `gossip_address` with the api address latched as in flight,
+    /// and return the reported outcome plus whether the latch was released.
+    async fn announce_and_release_latch(
+        harness: &TestHarness,
+        api_address: SocketAddr,
+        gossip_address: SocketAddr,
+    ) -> (AnnouncementFinishedMessage, bool) {
+        let (sender, mut receiver) = PeerNetworkSender::new_with_receiver();
+        let (gossip_client, peers_limit, peer_filter_mode) = {
+            let mut state = harness.inner.state.lock().await;
+            state.currently_running_announcements.insert(api_address);
+            (
+                state.gossip_client.clone(),
+                state.peers_limit,
+                state.config.node_config.peer_filter_mode,
+            )
+        };
+
+        let result = PeerNetworkService::announce_yourself_to_address(
+            gossip_client,
+            api_address,
+            gossip_address,
+            Arc::clone(&harness.inner),
+            sender,
+            false,
+            peer_filter_mode,
+            harness.peer_list(),
+            peers_limit,
+        )
+        .await;
+        assert!(result.is_err(), "the announcement must fail");
+
+        let reported = match receiver.try_recv() {
+            Ok(PeerNetworkServiceMessage::AnnouncementFinished(msg)) => msg,
+            other => panic!("expected an AnnouncementFinished report, got {:?}", other),
+        };
+
+        harness.service.handle_announcement_finished(reported).await;
+        let released = !harness
+            .inner
+            .state
+            .lock()
+            .await
+            .currently_running_announcements
+            .contains(&api_address);
+        (reported, released)
+    }
+
+    /// A peer that is merely down must stay announceable: the transport failure
+    /// is reported as retryable, which releases the in-flight latch and counts
+    /// an attempt on the backoff ladder. Without the report the address stays
+    /// latched for the rest of the process and the peer is never retried.
+    #[test]
+    async fn unreachable_peer_announcement_releases_latch_and_counts_a_retry() {
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let harness = TestHarness::new(temp_dir.path(), config);
+
+        // Nothing is listening on this port, so fetching protocol versions
+        // fails at the transport.
+        let unreachable: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let (reported, released) =
+            announce_and_release_latch(&harness, unreachable, unreachable).await;
+
+        assert!(!reported.success);
+        assert!(reported.retry, "a peer that is down is retryable");
+        assert!(released, "the in-flight latch must be released");
+        assert_eq!(
+            harness
+                .inner
+                .state
+                .lock()
+                .await
+                .handshake_failures
+                .get(&unreachable)
+                .copied(),
+            Some(1),
+            "the failure must count towards the backoff ladder"
+        );
+    }
+
+    /// A peer with no protocol version in common is a permanent mismatch, not a
+    /// transient one: the report must release the latch (so a later forced
+    /// handshake can run) while asking for no retry.
+    #[test]
+    async fn incompatible_peer_announcement_releases_latch_without_retry() {
+        let temp_dir = TempDirBuilder::new().with_tracing().build();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let harness = TestHarness::new(temp_dir.path(), config);
+
+        let server = crate::tests::util::FakeGossipServer::new();
+        server.set_protocol_versions(vec![u32::MAX]);
+        let gossip_address = server.spawn();
+        let api_address: SocketAddr = "127.0.0.1:2".parse().unwrap();
+
+        let (reported, released) =
+            announce_and_release_latch(&harness, api_address, gossip_address).await;
+
+        assert!(!reported.success);
+        assert!(!reported.retry, "a version mismatch cannot be retried away");
+        assert!(released, "the in-flight latch must be released");
+        assert!(
+            harness
+                .inner
+                .state
+                .lock()
+                .await
+                .failed_announcements
+                .contains_key(&api_address),
+            "the outcome must be recorded as failed, not successful"
+        );
     }
 
     #[test]
