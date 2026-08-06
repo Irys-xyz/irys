@@ -1,6 +1,15 @@
 // Deeply-nested `tracing::instrument` async blocks (e.g. the sync task in
 // `chain_sync`) exceed the default type-layout query depth of 128.
 #![recursion_limit = "256"]
+// This crate decides what to do with peer-supplied protocol enums, so a
+// wildcard arm here hands every future variant an answer chosen for its
+// neighbours — how a peer rejecting us for a chain-id mismatch came to be
+// reported as reachable. Name the variants instead; add `#[expect]` at the
+// site when the enum is foreign and cannot be matched exhaustively.
+// Production paths only: a test that stops covering a new variant fails on its
+// own terms, and pinning every fixture match adds noise without protecting the
+// protocol.
+#![cfg_attr(not(test), deny(clippy::wildcard_enum_match_arm))]
 
 mod block_pool;
 mod block_status_provider;

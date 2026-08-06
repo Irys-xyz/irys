@@ -4347,7 +4347,9 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                             ledger_id: ledger.get_id(),
                         }
                     }
-                    other => PreValidationError::BlockBoundsLookupError(other.to_string()),
+                    other @ (BlockBoundsError::IndexEmpty | BlockBoundsError::Internal(_)) => {
+                        PreValidationError::BlockBoundsLookupError(other.to_string())
+                    }
                 })?;
             let owning_hash = bounds.block_hash;
             return Ok((bounds, owning_hash));

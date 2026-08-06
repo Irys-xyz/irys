@@ -697,7 +697,9 @@ impl Ledgers {
     pub fn get_slots(&self, ledger: DataLedger) -> &Vec<LedgerSlot> {
         match ledger {
             DataLedger::Publish => self.perm.get_slots(),
-            ledger => self.get_term_ledger(ledger).get_slots(),
+            ledger @ (DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay) => {
+                self.get_term_ledger(ledger).get_slots()
+            }
         }
     }
 
@@ -705,7 +707,9 @@ impl Ledgers {
     fn slots_mut(&mut self, ledger: DataLedger) -> &mut Vec<LedgerSlot> {
         match ledger {
             DataLedger::Publish => &mut self.perm.slots,
-            ledger => &mut self.get_term_ledger_mut(ledger).slots,
+            ledger @ (DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay) => {
+                &mut self.get_term_ledger_mut(ledger).slots
+            }
         }
     }
 
@@ -713,7 +717,9 @@ impl Ledgers {
     pub fn get_slot_needs(&self, ledger: DataLedger) -> Vec<(usize, usize)> {
         match ledger {
             DataLedger::Publish => self.perm.get_slot_needs(),
-            ledger => self.get_term_ledger(ledger).get_slot_needs(),
+            ledger @ (DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay) => {
+                self.get_term_ledger(ledger).get_slot_needs()
+            }
         }
     }
 
@@ -862,7 +868,7 @@ impl Index<DataLedger> for Ledgers {
     fn index(&self, ledger: DataLedger) -> &Self::Output {
         match ledger {
             DataLedger::Publish => &self.perm,
-            ledger => self
+            ledger @ (DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay) => self
                 .term
                 .iter()
                 .find(|l| l.ledger_id == ledger as u32)
@@ -876,7 +882,7 @@ impl IndexMut<DataLedger> for Ledgers {
     fn index_mut(&mut self, ledger: DataLedger) -> &mut Self::Output {
         match ledger {
             DataLedger::Publish => &mut self.perm as &mut dyn LedgerCore,
-            ledger => {
+            ledger @ (DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay) => {
                 let ledger_id = ledger as u32;
                 self.term
                     .iter_mut()
