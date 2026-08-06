@@ -943,10 +943,11 @@ pub struct VdfNodeConfig {
     /// prevalidation gates block forwarding and must not queue behind a
     /// validation batch, and rayon offers no way to prioritise within a pool.
     ///
-    /// Defaults to `available_parallelism() - 2` (never below 1), leaving one
-    /// core for the VDF thread (which `core_pinning` may pin) and one for the
-    /// rest of the node — tokio, reth and the API server. A fixed default
-    /// silently wastes a large
+    /// Defaults to `available_parallelism() - 2` (never below 1): one core held
+    /// back for the VDF thread (which `core_pinning` may pin) and one for the
+    /// rest of the node — tokio, reth and the API server. That reservation is
+    /// sized for one pool at a time, so it only holds while a single pool is
+    /// verifying. A fixed default silently wastes a large
     /// machine: this is the widest stage of block prevalidation
     /// (`last_step_checkpoints_is_valid` re-hashes a whole VDF step per block),
     /// so a host that grows more cores gets no faster unless the limit grows

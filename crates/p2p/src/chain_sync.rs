@@ -226,6 +226,21 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
+/// Releases the claim on [`ChainSyncServiceInner::is_sync_task_spawned`].
+///
+/// The sync task can panic (hydration, payload repair or `sync_chain`) or be
+/// dropped at runtime shutdown. Releasing the slot by hand at the end of the
+/// task would miss both, and a claimed slot that is never released turns every
+/// later sync request — periodic or explicit — into a no-op for the rest of
+/// the process, which is exactly the "node quietly stops catching up" failure.
+struct SyncTaskSlotGuard(Arc<AtomicBool>);
+
+impl Drop for SyncTaskSlotGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Main sync service that runs in its own tokio task
 #[derive(Debug)]
 pub struct ChainSyncService<B: BlockDiscoveryFacade, M: MempoolFacade> {
@@ -388,7 +403,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         let peer_list = self.peer_list.clone();
         let sync_state = self.sync_state.clone();
         let gossip_data_handler = self.gossip_data_handler.clone();
-        let is_sync_task_spawned = self.is_sync_task_spawned.clone();
+        let sync_task_slot = SyncTaskSlotGuard(Arc::clone(&self.is_sync_task_spawned));
         let block_pool = self.block_pool.clone();
         let reth_service = self.reth_service.clone();
         let vdf_controller = self.vdf_controller.clone();
@@ -397,6 +412,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
         self.runtime_handle.spawn(
             async move {
+                let sync_task_slot = sync_task_slot;
                 debug!("Starting sync from height: {}", start_sync_from_height);
 
                 gossip_data_handler
@@ -433,9 +449,11 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 // Restore the pre-sync mining state (compare-and-swap guarded).
                 vdf_sync_pause.restore();
 
-                // Release, to pair with the Acquire on the claiming CAS: the
-                // next claimer must see this task's work, not just the flag.
-                is_sync_task_spawned.store(false, Ordering::Release);
+                // Release the slot before answering the caller, so a client that
+                // awaits this response can immediately request another sync.
+                // Dropping the guard early keeps that ordering while still
+                // covering every earlier panic or cancellation.
+                drop(sync_task_slot);
 
                 match &res {
                     Ok(()) => info!("Sync task completed successfully"),
@@ -2165,6 +2183,26 @@ mod tests {
         assert!(
             !flag.load(Ordering::Acquire),
             "dropping the task before its first poll must still clear the flag"
+        );
+    }
+
+    /// A sync task that panics must hand the slot back. Releasing it by hand at
+    /// the end of the task would skip this path, and a slot that is never
+    /// released makes every later sync request a silent no-op.
+    #[tokio::test]
+    async fn sync_task_slot_is_released_when_the_task_panics() {
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let guard = SyncTaskSlotGuard(Arc::clone(&flag));
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("sync task blew up");
+        });
+        assert!(handle.await.unwrap_err().is_panic());
+
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "a panicking sync task must still release the slot"
         );
     }
 
