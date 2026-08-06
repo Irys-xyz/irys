@@ -546,11 +546,17 @@ impl BlockMigrationService {
                 StreamEvent::Reorged {
                     orphaned, new_fork, ..
                 } => {
+                    // New-fork hashes are marked emitted so a later confirm does
+                    // not also append `observed` for them (reorg frame already
+                    // carries the switch). Orphaned hashes stay in `emitted`:
+                    // re-adoption is delivered via a later reorged `new_fork`
+                    // list, which re-marks them — popping would invite a
+                    // duplicate Observed if confirmation ran first.
                     for block in new_fork {
                         dedup.emitted.put(block.header.block_hash, ());
                     }
-                    // A rolled-back block must be free to emit `finalized`
-                    // again if its fork is re-adopted and it re-migrates.
+                    // Pop finalized for orphans so re-migration after re-adoption
+                    // can append a fresh `finalized` frame.
                     for block in orphaned {
                         dedup.finalized.pop(&block.header.block_hash);
                     }

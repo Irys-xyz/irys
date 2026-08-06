@@ -55,6 +55,13 @@ pub type WriterGateGuard = MutexGuard<'static, ()>;
 ///
 /// Recovers from a poisoned mutex so one panicked writer does not permanently
 /// wedge writes to this environment.
+///
+/// # Reentrancy
+///
+/// The gate is not reentrant. While a thread holds this guard, it must not call
+/// [`IrysDatabaseExt::update_eyre`], [`IrysDatabaseExt::update_eyre_at`], or
+/// [`IrysDatabaseExt::update_scoped`] on the same environment; those methods take
+/// the same gate and the thread would deadlock.
 pub fn lock_writer_gate(env: &DatabaseEnv, call_site: &'static str) -> WriterGateGuard {
     let start = Instant::now();
     let guard = writer_gate_for(env)

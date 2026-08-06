@@ -880,6 +880,32 @@ mod tests {
         );
     }
 
+    /// Covers `fanout_locked`'s `seq < replay_end` skip: a late subscribe must not
+    /// receive live copies of frames already inside its durable replay window.
+    #[test]
+    fn fanout_skips_frames_covered_by_subscriber_replay() {
+        let (handle, _tmp) = handle_with_events(2); // durable seqs 0,1 → logical_len = 2
+        let (_start, end, mut live) = handle.subscribe(0).unwrap();
+        assert_eq!(end, 2);
+
+        let covered = Arc::new(StreamFrame {
+            seq: 1,
+            event: sample_stream_event(),
+        });
+        handle.fanout_only(&covered).unwrap();
+        assert!(
+            live.try_recv().is_err(),
+            "replay-covered frame must not be delivered live"
+        );
+
+        let fresh = Arc::new(StreamFrame {
+            seq: 2,
+            event: sample_stream_event(),
+        });
+        handle.fanout_only(&fresh).unwrap();
+        assert_eq!(live.try_recv().expect("live frame").seq, 2);
+    }
+
     /// A producer these tests drive directly, so the returned shutdown/sender halves are unused
     /// and may drop.
     fn producer_over(handle: &Arc<BlockStreamHandle>) -> Producer {

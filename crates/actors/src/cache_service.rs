@@ -294,11 +294,6 @@ impl InnerCacheTask {
         Ok(())
     }
 
-    /// Prunes cached chunks for data roots that have no ingress proofs.
-    /// Since `prune_ingress_proofs()` runs immediately before this and removes
-    /// expired/invalid proofs, any remaining proof entry is treated as active.
-    /// Data roots currently undergoing proof generation are skipped to avoid races.
-    #[tracing::instrument(level = "trace", skip_all)]
     /// True when this node's own ingress proof for `data_root` is present.
     /// Shared by the scan and write phases of both prune passes so the
     /// local-proof exemption cannot diverge between collect-time and
@@ -364,6 +359,11 @@ impl InnerCacheTask {
         })
     }
 
+    /// Prunes cached chunks for data roots that have no ingress proofs.
+    /// Since `prune_ingress_proofs()` runs immediately before this and removes
+    /// expired/invalid proofs, any remaining proof entry is treated as active.
+    /// Data roots currently undergoing proof generation are skipped to avoid races.
+    #[tracing::instrument(level = "trace", skip_all)]
     fn prune_chunks_without_active_ingress_proofs(&self) -> eyre::Result<()> {
         let local_address = self.config.irys_signer().address();
         let min_chunk_age_in_blocks = self
