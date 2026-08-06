@@ -1260,8 +1260,7 @@ impl BlockTreeServiceInner {
         // Persist metadata atomically (same code path for both normal blocks and reorgs).
         // Phase 4: durable observed/reorged stream frames land in this same RW txn.
         let stream_frames = {
-            use crate::block_migration_service::StreamReorgAppend;
-            let emit_stream = self.block_stream_enabled();
+            use crate::block_migration_service::{StreamEmission, StreamReorgAppend};
             let old_fork: &[Arc<SealedBlock>] = reorg_event
                 .as_ref()
                 .map_or(&[] as &[_], |e| e.old_fork.as_ref());
@@ -1270,12 +1269,15 @@ impl BlockTreeServiceInner {
                 old_fork: Arc::clone(&e.old_fork),
                 new_fork: Arc::clone(&e.new_fork),
             });
-            self.block_migration_service.persist_metadata(
-                old_fork,
-                &blocks_to_confirm,
-                emit_stream,
-                stream_reorg.as_ref(),
-            )?
+            let stream = if !self.block_stream_enabled() {
+                StreamEmission::Disabled
+            } else if let Some(reorg) = stream_reorg.as_ref() {
+                StreamEmission::Reorged(reorg)
+            } else {
+                StreamEmission::Observed
+            };
+            self.block_migration_service
+                .persist_metadata(old_fork, &blocks_to_confirm, stream)?
         };
         self.fanout_durable_stream_frames(stream_frames);
 

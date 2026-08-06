@@ -11,6 +11,14 @@ from the **same** seq-keyed log, so a follower may use either and reach identica
 > the producer is not started and no stream log is written. When enabled they ride the same HTTP
 > listener as the public API. A deployment that enables them **must** restrict `/internal/*` at the
 > network layer (firewall / reverse proxy / bind address) to the trusted gateway.
+>
+> **Flag toggle gap.** If the flag was on (log written), then off across restarts (no appends, no
+> prune), then on again, `seq` stays contiguous but the event history has a hole for every block that
+> migrated while the producer was disabled. Startup reconciliation only backfills missing `finalized`
+> frames within `RECONCILE_SCAN_CAP` of the index tail; after a long disabled window it may abort and
+> log a warning. Followers that resume from an old cursor will not receive a `truncated` signal for
+> that semantic hole — they must re-bootstrap from canonical block reads. A stronger guarantee would
+> require recording the disable period (e.g. a reset-marker frame).
 
 ## The event log and its cursor
 

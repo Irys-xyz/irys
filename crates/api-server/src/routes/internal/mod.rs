@@ -73,13 +73,9 @@ async fn blocks_stream(
             return;
         }
         // Live tail [end, ..). `recv` yields `None` when the producer halts and drops the sender,
-        // ending the SSE cleanly after replay. Skip `seq < end`: Phase 4 fans out frames that were
-        // already durable when `subscribe` snapped `end`, so a late registration can see them both
-        // in replay and on the live channel — drop the live duplicates.
+        // ending the SSE cleanly after replay. The handle skips live delivery of frames with
+        // `seq < end` (already covered by the durable replay snapshot).
         while let Some(frame) = live.recv().await {
-            if frame.seq < end {
-                continue;
-            }
             yield sse_bytes(&frame)?;
         }
     };

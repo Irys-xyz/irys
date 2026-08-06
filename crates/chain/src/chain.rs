@@ -1855,6 +1855,9 @@ impl IrysNode {
             (Some(service_handle), handle)
         } else {
             drop(receivers.block_stream);
+            // While disabled, no frames append and no stream prune runs; an existing log tail is
+            // left as-is. Re-enabling later can leave a semantic history gap for blocks migrated
+            // offline — see docs/90-services/06-rpc-api.md ("Flag toggle gap").
             info!(
                 "block-stream producer disabled (http.expose_internal_api=false); no durable stream log will be written"
             );

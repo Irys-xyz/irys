@@ -33,6 +33,18 @@ pub struct StreamReorgAppend {
     pub new_fork: Arc<Vec<Arc<SealedBlock>>>,
 }
 
+/// Stream-emission mode for [`BlockMigrationService::persist_metadata`].
+/// Single parameter so invalid pairings (e.g. disabled + reorg payload) are unrepresentable.
+#[derive(Debug, Clone, Copy)]
+pub enum StreamEmission<'a> {
+    /// Do not append durable stream frames.
+    Disabled,
+    /// Append one `observed` frame per confirmed block.
+    Observed,
+    /// Append one `reorged` frame; observed for the new fork is omitted.
+    Reorged(&'a StreamReorgAppend),
+}
+
 /// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
 #[derive(Debug)]
 pub struct BlockMigrationService {
@@ -285,16 +297,13 @@ impl BlockMigrationService {
     /// no-op for them. Re-canonical blocks on the new fork get their metadata
     /// (re)written when they migrate, not here — so this function never
     /// recreates a `{None, Some}` state.
-    /// When `emit_stream` is true, durable block-stream frames are appended in the same
-    /// consensus RW txn as the metadata writes and returned for live fan-out (Phase 4).
-    /// `stream_reorg` supplies the reorged frame when the clear/confirm batch is a reorg;
-    /// if set, observed frames for the new fork are omitted (covered by the reorged event).
+    /// Durable block-stream frames for `stream` are appended in the same consensus RW txn as
+    /// the metadata writes and returned for live fan-out (Phase 4).
     pub fn persist_metadata(
         &self,
         blocks_to_clear: &[Arc<SealedBlock>],
         blocks_to_confirm: &[Arc<SealedBlock>],
-        emit_stream: bool,
-        stream_reorg: Option<&StreamReorgAppend>,
+        stream: StreamEmission<'_>,
     ) -> eyre::Result<Vec<StreamFrame>> {
         // Phase 1 scrub and Phase 3 append both iterate
         // `block.transactions().get_ledger_txs(Submit)`.  The in-memory
@@ -347,6 +356,42 @@ impl BlockMigrationService {
                 }
             }
         }
+
+        // Serialize stream payloads before the consensus RW txn so a serde fault
+        // cannot abort metadata / index writes already staged in that transaction.
+        let prepared_stream: Vec<(StreamEvent, Vec<u8>)> = match stream {
+            StreamEmission::Disabled => Vec::new(),
+            StreamEmission::Observed => {
+                let mut out = Vec::with_capacity(blocks_to_confirm.len());
+                for block in blocks_to_confirm {
+                    let event =
+                        StreamEvent::Observed(BlockEvent::from_sealed(block, self.chunk_size));
+                    let payload = serde_json::to_vec(&event)?;
+                    out.push((event, payload));
+                }
+                out
+            }
+            StreamEmission::Reorged(reorg) => {
+                let event = StreamEvent::Reorged {
+                    fork_parent: BlockRef {
+                        height: reorg.fork_parent.height,
+                        block_hash: reorg.fork_parent.block_hash,
+                    },
+                    orphaned: reorg
+                        .old_fork
+                        .iter()
+                        .map(|b| BlockEvent::from_sealed(b, self.chunk_size))
+                        .collect(),
+                    new_fork: reorg
+                        .new_fork
+                        .iter()
+                        .map(|b| BlockEvent::from_sealed(b, self.chunk_size))
+                        .collect(),
+                };
+                let payload = serde_json::to_vec(&event)?;
+                vec![(event, payload)]
+            }
+        };
 
         let stream_frames = self.db.update_eyre_at("persist_metadata", |tx| {
             // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
@@ -414,38 +459,11 @@ impl BlockMigrationService {
                 }
             }
 
-            // Phase 4: durable block-stream frames in this same RW txn.
-            let mut frames = Vec::new();
-            if emit_stream {
-                if let Some(reorg) = stream_reorg {
-                    let event = StreamEvent::Reorged {
-                        fork_parent: BlockRef {
-                            height: reorg.fork_parent.height,
-                            block_hash: reorg.fork_parent.block_hash,
-                        },
-                        orphaned: reorg
-                            .old_fork
-                            .iter()
-                            .map(|b| BlockEvent::from_sealed(b, self.chunk_size))
-                            .collect(),
-                        new_fork: reorg
-                            .new_fork
-                            .iter()
-                            .map(|b| BlockEvent::from_sealed(b, self.chunk_size))
-                            .collect(),
-                    };
-                    let payload = serde_json::to_vec(&event)?;
-                    let seq = append_block_stream_event(tx, payload)?;
-                    frames.push(StreamFrame { seq, event });
-                } else {
-                    for block in blocks_to_confirm {
-                        let event =
-                            StreamEvent::Observed(BlockEvent::from_sealed(block, self.chunk_size));
-                        let payload = serde_json::to_vec(&event)?;
-                        let seq = append_block_stream_event(tx, payload)?;
-                        frames.push(StreamFrame { seq, event });
-                    }
-                }
+            // Phase 4: append pre-serialized durable stream frames in this same RW txn.
+            let mut frames = Vec::with_capacity(prepared_stream.len());
+            for (event, payload) in prepared_stream {
+                let seq = append_block_stream_event(tx, payload)?;
+                frames.push(StreamFrame { seq, event });
             }
             Ok(frames)
         })?;
@@ -903,6 +921,16 @@ impl BlockMigrationService {
         let migrated_block = (**header).clone();
 
         let chunk_size = self.chunk_size;
+        // Serialize finalized stream payload before the consensus RW txn so a
+        // serde fault cannot abort index / header writes in that transaction.
+        let prepared_finalized: Option<(StreamEvent, Vec<u8>)> = if emit_stream {
+            let event = StreamEvent::Finalized(BlockEvent::from_sealed(sealed_block, chunk_size));
+            let payload = serde_json::to_vec(&event)?;
+            Some((event, payload))
+        } else {
+            None
+        };
+
         self.db.update_eyre_at("persist_block", |tx| {
             for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
@@ -938,10 +966,7 @@ impl BlockMigrationService {
 
             BlockIndex::push_block(tx, sealed_block, chunk_size)?;
 
-            if emit_stream {
-                let event =
-                    StreamEvent::Finalized(BlockEvent::from_sealed(sealed_block, chunk_size));
-                let payload = serde_json::to_vec(&event)?;
+            if let Some((event, payload)) = prepared_finalized {
                 let seq = append_block_stream_event(tx, payload)?;
                 Ok(Some(StreamFrame { seq, event }))
             } else {
@@ -988,7 +1013,7 @@ mod tests {
     //! satisfied with cheap placeholders.
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
+        IrysDatabaseArgs as _, cache_data_root, open_or_create_db, read_block_stream_from,
         tables::{CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockTree, StorageModuleInfo};
@@ -1184,7 +1209,11 @@ mod tests {
         let tip_hash = tip.block_hash;
         let tip_sealed = make_sealed_with_submit_txs(tip, &[(tx_id, data_root)]);
 
-        svc.persist_metadata(&[], std::slice::from_ref(&tip_sealed), false, None)?;
+        svc.persist_metadata(
+            &[],
+            std::slice::from_ref(&tip_sealed),
+            StreamEmission::Disabled,
+        )?;
 
         let cdr = read_cdr(&db, data_root).expect("CDR present");
         assert_eq!(
@@ -1214,7 +1243,11 @@ mod tests {
         let tip = make_block_header(1, H256::random(), 50, vec![tx_id]);
         let tip_sealed = make_sealed_with_submit_txs(tip, &[(tx_id, data_root)]);
 
-        svc.persist_metadata(&[], std::slice::from_ref(&tip_sealed), false, None)?;
+        svc.persist_metadata(
+            &[],
+            std::slice::from_ref(&tip_sealed),
+            StreamEmission::Disabled,
+        )?;
 
         assert!(
             read_cdr(&db, data_root).is_none(),
@@ -1249,7 +1282,11 @@ mod tests {
 
         let orphan_sealed = make_sealed_with_submit_txs(orphan_tip, &[(tx_id, data_root)]);
 
-        svc.persist_metadata(std::slice::from_ref(&orphan_sealed), &[], false, None)?;
+        svc.persist_metadata(
+            std::slice::from_ref(&orphan_sealed),
+            &[],
+            StreamEmission::Disabled,
+        )?;
 
         let cdr = read_cdr(&db, data_root).expect("CDR present");
         assert_eq!(
@@ -1450,7 +1487,11 @@ mod tests {
         );
         let epoch_sealed = make_sealed_commitment(epoch_block);
 
-        svc.persist_metadata(&[], std::slice::from_ref(&epoch_sealed), false, None)?;
+        svc.persist_metadata(
+            &[],
+            std::slice::from_ref(&epoch_sealed),
+            StreamEmission::Disabled,
+        )?;
 
         assert_eq!(
             read_commitment_tx_metadata(&db, &included_commitment)
@@ -1484,7 +1525,11 @@ mod tests {
         let epoch_sealed = make_sealed_commitment(epoch_block);
 
         // Orphan the epoch block.
-        svc.persist_metadata(std::slice::from_ref(&epoch_sealed), &[], false, None)?;
+        svc.persist_metadata(
+            std::slice::from_ref(&epoch_sealed),
+            &[],
+            StreamEmission::Disabled,
+        )?;
 
         assert_eq!(
             read_commitment_tx_metadata(&db, &included_commitment)
@@ -1511,7 +1556,7 @@ mod tests {
         let block = make_commitment_header(height, H256::random(), vec![commitment]);
         let sealed = make_sealed_commitment(block);
 
-        svc.persist_metadata(std::slice::from_ref(&sealed), &[], false, None)?;
+        svc.persist_metadata(std::slice::from_ref(&sealed), &[], StreamEmission::Disabled)?;
 
         assert!(
             read_commitment_tx_metadata(&db, &commitment).is_none(),
@@ -1537,7 +1582,11 @@ mod tests {
         // Migrated state: genesis wrote its commitment dedup row at migration.
         seed_commitment_included_height(&db, commitment, 0);
 
-        svc.persist_metadata(std::slice::from_ref(&genesis_sealed), &[], false, None)?;
+        svc.persist_metadata(
+            std::slice::from_ref(&genesis_sealed),
+            &[],
+            StreamEmission::Disabled,
+        )?;
         assert!(
             read_commitment_tx_metadata(&db, &commitment).is_none(),
             "genesis orphan clears the commitment dedup row (height 0 not epoch-skipped)",
@@ -1708,7 +1757,7 @@ mod tests {
         let commitment_sealed =
             make_sealed_commitment(make_commitment_header(2, H256::random(), vec![commitment]));
 
-        svc.persist_metadata(&[], &[sealed, commitment_sealed], false, None)?;
+        svc.persist_metadata(&[], &[sealed, commitment_sealed], StreamEmission::Disabled)?;
 
         // No canonical metadata written at confirmation.
         assert!(
@@ -1769,7 +1818,11 @@ mod tests {
         assert_eq!(meta.promoted_height, Some(publish_height));
 
         // Orphan the Publish block only
-        svc.persist_metadata(std::slice::from_ref(&publish_sealed), &[], false, None)?;
+        svc.persist_metadata(
+            std::slice::from_ref(&publish_sealed),
+            &[],
+            StreamEmission::Disabled,
+        )?;
 
         let meta = read_data_tx_metadata(&db, &tx_id)
             .expect("row must still exist: included_height is preserved");
@@ -1808,7 +1861,7 @@ mod tests {
         assert!(read_data_tx_metadata(&db, &tx_id).is_some());
 
         // Orphan it
-        svc.persist_metadata(std::slice::from_ref(&sealed), &[], false, None)?;
+        svc.persist_metadata(std::slice::from_ref(&sealed), &[], StreamEmission::Disabled)?;
 
         assert!(
             read_data_tx_metadata(&db, &tx_id).is_none(),
@@ -1842,7 +1895,7 @@ mod tests {
 
         assert!(read_data_tx_metadata(&db, &tx_id).is_some());
 
-        svc.persist_metadata(std::slice::from_ref(&sealed), &[], false, None)?;
+        svc.persist_metadata(std::slice::from_ref(&sealed), &[], StreamEmission::Disabled)?;
 
         assert!(
             read_data_tx_metadata(&db, &tx_id).is_none(),
@@ -1887,8 +1940,7 @@ mod tests {
         svc.persist_metadata(
             std::slice::from_ref(&orphan_sealed),
             std::slice::from_ref(&new_canonical_sealed),
-            false,
-            None,
+            StreamEmission::Disabled,
         )?;
 
         let cdr = read_cdr(&db, data_root).expect("CDR present");
@@ -1952,8 +2004,7 @@ mod tests {
         svc.persist_metadata(
             &[orphan1_sealed, orphan2_sealed],
             &[new1_sealed, new2_sealed],
-            false,
-            None,
+            StreamEmission::Disabled,
         )?;
 
         // Phase 1 cleared the orphaned rows. Confirmation no longer re-writes
@@ -2052,8 +2103,7 @@ mod tests {
         svc.persist_metadata(
             &[orphan1_sealed, orphan2_sealed],
             &[new1_sealed],
-            false,
-            None,
+            StreamEmission::Disabled,
         )?;
 
         // tx_a: cleared by Phase 1. Confirmation no longer re-writes metadata,
@@ -2101,6 +2151,130 @@ mod tests {
         Ok(())
     }
 
+    fn read_stream_frames(db: &DatabaseProvider) -> eyre::Result<Vec<StreamFrame>> {
+        db.view_eyre(|tx| {
+            let raw = read_block_stream_from(tx, 0)?;
+            raw.into_iter()
+                .map(|(seq, bytes)| {
+                    let event: StreamEvent = serde_json::from_slice(&bytes)?;
+                    Ok(StreamFrame { seq, event })
+                })
+                .collect()
+        })
+    }
+
+    /// Phase 4: `StreamEmission::Observed` appends one `observed` frame per confirm.
+    #[tokio::test]
+    async fn stream_emission_observed_appends_one_frame_per_confirm() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        let tip = make_block_header(1, H256::zero(), 0, vec![tx_id]);
+        let tip_hash = tip.block_hash;
+        let sealed = make_sealed_with_submit_txs(tip, &[(tx_id, data_root)]);
+
+        let frames =
+            svc.persist_metadata(&[], std::slice::from_ref(&sealed), StreamEmission::Observed)?;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].seq, 0);
+        assert_eq!(frames[0].kind(), "observed");
+        assert_eq!(frames[0].block_hash(), Some(tip_hash));
+
+        let durable = read_stream_frames(&db)?;
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].seq, 0);
+        assert_eq!(durable[0].kind(), "observed");
+        Ok(())
+    }
+
+    /// Phase 4: reorg emission is a single `reorged` frame (no per-block observed).
+    #[tokio::test]
+    async fn stream_emission_reorged_appends_one_reorged_frame() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let orphan_tx = H256::random();
+        let orphan_root = H256::random();
+        let new_tx = H256::random();
+        let new_root = H256::random();
+        let orphan = make_block_header(1, H256::zero(), 0, vec![orphan_tx]);
+        let new_tip = make_block_header(1, H256::zero(), 0, vec![new_tx]);
+        let fork_parent = Arc::new(IrysBlockHeader::new_mock_header());
+        let orphan_sealed = make_sealed_with_submit_txs(orphan, &[(orphan_tx, orphan_root)]);
+        let new_sealed = make_sealed_with_submit_txs(new_tip, &[(new_tx, new_root)]);
+        let reorg = StreamReorgAppend {
+            fork_parent,
+            old_fork: Arc::new(vec![Arc::clone(&orphan_sealed)]),
+            new_fork: Arc::new(vec![Arc::clone(&new_sealed)]),
+        };
+
+        let frames = svc.persist_metadata(
+            std::slice::from_ref(&orphan_sealed),
+            std::slice::from_ref(&new_sealed),
+            StreamEmission::Reorged(&reorg),
+        )?;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].kind(), "reorged");
+
+        let durable = read_stream_frames(&db)?;
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].kind(), "reorged");
+        match &durable[0].event {
+            StreamEvent::Reorged {
+                orphaned, new_fork, ..
+            } => {
+                assert_eq!(orphaned.len(), 1);
+                assert_eq!(new_fork.len(), 1);
+            }
+            other => panic!("expected reorged, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// Phase 4: `persist_block(..., true)` returns a durable finalized frame.
+    #[tokio::test]
+    async fn stream_emission_persist_block_appends_finalized() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service_with_epoch(db.clone(), 1);
+
+        let commitment = H256::random();
+        let genesis = make_commitment_header(0, H256::zero(), vec![commitment]);
+        let genesis_hash = genesis.block_hash;
+        let genesis_sealed = make_sealed_commitment(genesis);
+
+        let frame = svc
+            .persist_block(genesis_sealed.as_ref(), true)?
+            .expect("finalized frame");
+        assert_eq!(frame.kind(), "finalized");
+        assert_eq!(frame.block_hash(), Some(genesis_hash));
+        assert_eq!(frame.seq, 0);
+
+        let durable = read_stream_frames(&db)?;
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].kind(), "finalized");
+        Ok(())
+    }
+
+    /// Phase 4: disabled stream leaves the durable log empty.
+    #[tokio::test]
+    async fn stream_emission_disabled_leaves_log_empty() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        let tip = make_block_header(1, H256::zero(), 0, vec![tx_id]);
+        let sealed = make_sealed_with_submit_txs(tip, &[(tx_id, data_root)]);
+
+        let frames =
+            svc.persist_metadata(&[], std::slice::from_ref(&sealed), StreamEmission::Disabled)?;
+        assert!(frames.is_empty());
+        assert!(read_stream_frames(&db)?.is_empty());
+        Ok(())
+    }
+
     /// Regression for the broadened `ensure_header_body_consistent` check:
     /// every data ledger (Submit / Publish / OneYear / ThirtyDay) must
     /// trigger the guard when its header advertises a tx_id its body lacks.
@@ -2133,7 +2307,11 @@ mod tests {
         ));
 
         let err = svc
-            .persist_metadata(&[], std::slice::from_ref(&stripped), false, None)
+            .persist_metadata(
+                &[],
+                std::slice::from_ref(&stripped),
+                StreamEmission::Disabled,
+            )
             .expect_err("stripped body must be rejected");
         let msg = err.to_string();
         assert!(

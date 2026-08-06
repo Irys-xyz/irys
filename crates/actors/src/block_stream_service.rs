@@ -67,13 +67,23 @@ pub struct BlockStreamHandle {
     db: DatabaseProvider,
 }
 
+/// One live subscriber: bounded sender plus the durable-log `end` snapped at registration.
+/// Fan-out skips frames with `seq < replay_end` so Phase 4 durable-append-then-fanout cannot
+/// duplicate a frame already covered by that subscriber's replay range.
+#[derive(Debug)]
+struct LiveSubscriber {
+    sender: Sender<Arc<StreamFrame>>,
+    /// Exclusive upper bound of the durable replay snapshot (`[start, end)`).
+    replay_end: u64,
+}
+
 /// The live fan-out registry: subscriber senders plus a `closed` flag the producer sets when it
 /// stops appending for good. Once closed, [`BlockStreamHandle::subscribe`] registers no new sender,
 /// so a reconnecting follower's SSE ends cleanly after its replay instead of hanging on a live tail
 /// nothing will ever feed.
 #[derive(Debug)]
 struct LiveSubscribers {
-    senders: Vec<Sender<Arc<StreamFrame>>>,
+    senders: Vec<LiveSubscriber>,
     closed: bool,
 }
 
@@ -126,7 +136,10 @@ impl BlockStreamHandle {
         // closes `rx`, so the reconnecting follower's SSE ends cleanly after its replay rather than
         // hanging on a live tail nothing will ever feed.
         if !live.closed {
-            live.senders.push(tx);
+            live.senders.push(LiveSubscriber {
+                sender: tx,
+                replay_end: end,
+            });
         }
         Ok((start, end, rx))
     }
@@ -215,8 +228,7 @@ impl BlockStreamHandle {
     }
 
     /// Fan out a frame that is already durable (Phase 4 production path). Does not open a RW txn.
-    /// Live SSE clients skip `seq < end` from their subscribe snapshot so a race with late
-    /// registration cannot duplicate frames on the wire.
+    /// Subscribers whose `replay_end` already covers `frame.seq` are skipped (no live/replay dup).
     fn fanout_only(&self, frame: &Arc<StreamFrame>) -> eyre::Result<()> {
         let mut live = self
             .live
@@ -229,8 +241,13 @@ impl BlockStreamHandle {
     fn fanout_locked(live: &mut LiveSubscribers, frame: &Arc<StreamFrame>) {
         // Drop subscribers whose receiver is closed or lagging past `SUBSCRIBER_BUFFER`; a dropped
         // follower reconnects and replays from the durable log via `subscribe(from_seq)`.
-        live.senders.retain(|sender| {
-            sender
+        // Skip delivery when `frame.seq < replay_end` — that seq is already in the subscriber's
+        // durable replay window (Phase 4 can fan out after a late subscribe snapped past it).
+        live.senders.retain(|sub| {
+            if frame.seq < sub.replay_end {
+                return true; // keep subscriber; do not deliver a replay-covered frame
+            }
+            sub.sender
                 .try_send(Arc::clone(frame)) // clone: live subscribers share one immutable frame allocation
                 .is_ok()
         });
@@ -479,8 +496,8 @@ impl Producer {
                     return Ok(());
                 }
                 let event = StreamEvent::Observed(BlockEvent::from_sealed(&block, self.chunk_size));
-                self.append(event)?;
-                self.emitted.put(hash, ());
+                self.append(event.clone())?; // clone: note_event_for_dedup after successful append
+                self.note_event_for_dedup(&event);
             }
             BlockStreamSignal::Finalized(block) => {
                 let hash = block.header().block_hash;
@@ -489,8 +506,8 @@ impl Producer {
                 }
                 let event =
                     StreamEvent::Finalized(BlockEvent::from_sealed(&block, self.chunk_size));
-                self.append(event)?;
-                self.finalized.put(hash, ());
+                self.append(event.clone())?; // clone: note_event_for_dedup after successful append
+                self.note_event_for_dedup(&event);
             }
             BlockStreamSignal::Reorged {
                 fork_parent,
@@ -511,20 +528,8 @@ impl Producer {
                         .map(|b| BlockEvent::from_sealed(b, self.chunk_size))
                         .collect(),
                 };
-                self.append(event)?;
-                // Mark the new-fork hashes seen so the `Confirmed` signals that follow this tick do
-                // not also emit `observed` for them: `propagate_block` sends the `Reorged` signal
-                // before the per-block `Confirmed` signals, and the signal channel is FIFO.
-                for block in new_fork.iter() {
-                    self.emitted.put(block.header().block_hash, ());
-                }
-                // An orphaned block may have been migrated (and emitted `finalized`) before this
-                // reorg rolled it back. Evict it from the finalized de-dup so that if its fork is
-                // later re-adopted and it re-migrates, the fresh `finalized` is emitted rather than
-                // suppressed — a follower that demoted it on this frame is waiting for exactly that.
-                for block in old_fork.iter() {
-                    self.finalized.pop(&block.header().block_hash);
-                }
+                self.append(event.clone())?; // clone: note_event_for_dedup after successful append
+                self.note_event_for_dedup(&event);
             }
         }
         Ok(())

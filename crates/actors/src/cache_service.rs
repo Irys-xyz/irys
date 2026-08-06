@@ -309,58 +309,58 @@ impl InnerCacheTask {
         let delete_chunks_older_than =
             UnixTimestamp::from_secs(now.saturating_sub(min_chunk_age_secs));
 
-        let tx = self.db.tx()?;
+        // Scan candidates under a short-lived read txn, then drop it before any
+        // gated write (same shape as `prune_ingress_proofs`): holding a RO txn
+        // across consensus-writer-gate waits pins MVCC free-page reclamation.
+        let mut candidates: Vec<DataRoot> = Vec::new();
+        {
+            let tx = self.db.tx()?;
+            let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
+            let mut cdr_walk = cdr_cursor.walk(None)?;
 
-        // Collect candidate data roots from CachedDataRoots
-        let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
-        let mut cdr_walk = cdr_cursor.walk(None)?;
+            // Cap candidates so the write phase cannot exceed MAX_EVICTIONS_PER_RUN.
+            // TODO: try to deprioritise data_roots that almost have all their chunks.
+            while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
+                if candidates.len() >= MAX_EVICTIONS_PER_RUN {
+                    warn!(
+                        chunk.candidates = candidates.len(),
+                        "Hit max eviction limit collecting prune candidates, will continue next cycle"
+                    );
+                    break;
+                }
 
-        // Limit total evictions to avoid long pauses
+                if self.ingress_proof_generation_state.is_generating(data_root) {
+                    debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
+                    continue;
+                }
+
+                let mut proofs_cursor = tx.cursor_read::<IngressProofs>()?;
+                let mut has_any_local_proof = false;
+                let mut walker = proofs_cursor.walk(Some(data_root))?;
+                while let Some((key, compact)) = walker.next().transpose()? {
+                    if key != data_root {
+                        break;
+                    }
+                    if compact.0.address == local_address {
+                        has_any_local_proof = true;
+                        break;
+                    }
+                }
+
+                if !has_any_local_proof {
+                    candidates.push(data_root);
+                }
+            }
+            drop(cdr_walk);
+            drop(cdr_cursor);
+            drop(tx);
+        }
+
         let mut evictions_performed: usize = 0;
-
-        // We'll do deletions in a write tx per batch to keep lock times short
-        let mut pending_roots: Vec<DataRoot> = Vec::new();
-
-        // TODO: try to deprioritise data_roots that almost have all their chunks, as we want as many full data_roots as possible so we can provide proofs
-        while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
-            if evictions_performed >= MAX_EVICTIONS_PER_RUN {
-                warn!(
-                    chunk.evictions_performed = evictions_performed,
-                    "Hit max eviction limit in prune_chunks_without_active_ingress_proofs, will continue next cycle"
-                );
-                break;
-            }
-
-            // Skip if an ingress proof is actively being generated for this root
-            if self.ingress_proof_generation_state.is_generating(data_root) {
-                debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
-                continue;
-            }
-
-            // Presence of at least one proof indicates the data root is active
-            let mut proofs_cursor = tx.cursor_read::<IngressProofs>()?;
-            let mut has_any_local_proof = false;
-            let mut walker = proofs_cursor.walk(Some(data_root))?;
-            while let Some((key, compact)) = walker.next().transpose()? {
-                // Walked all records for this data root
-                if key != data_root {
-                    break;
-                }
-                // Found at least one proof, mark as active
-                if compact.0.address == local_address {
-                    has_any_local_proof = true;
-                    break;
-                }
-            }
-
-            if !has_any_local_proof {
-                pending_roots.push(data_root);
-            }
-
-            // Commit a small batch to avoid large transactions
-            if pending_roots.len() >= 256 {
-                self.db.update_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
-                    for root in pending_roots.drain(..) {
+        for batch in candidates.chunks(256) {
+            self.db
+                .update_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
+                    for &root in batch {
                         trace!(
                             chunk.data_root = ?root,
                             "Pruning chunks for data root without active proofs"
@@ -372,30 +372,11 @@ impl InnerCacheTask {
                         )?;
                         if pruned > 0 {
                             evictions_performed = evictions_performed.saturating_add(1);
-                            debug!(chunk.data_root = ?root, chunk.pruined_chunks = pruned, "Pruned chunks for data root without active proofs");
+                            debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned chunks for data root without active proofs");
                         }
                     }
                     Ok(())
                 })?;
-            }
-        }
-
-        // Flush any remaining pending deletions
-        if !pending_roots.is_empty() {
-            self.db.update_eyre_at("cache_service.prune_chunks_flush", |write_tx| {
-                for root in pending_roots.drain(..) {
-                    let pruned = delete_cached_chunks_by_data_root_older_than(
-                        write_tx,
-                        root,
-                        delete_chunks_older_than,
-                    )?;
-                    if pruned > 0 {
-                        evictions_performed = evictions_performed.saturating_add(1);
-                        debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned chunks for data root without active proofs");
-                    }
-                }
-                Ok(())
-            })?;
         }
 
         info!(
@@ -411,6 +392,7 @@ impl InnerCacheTask {
         // emitted only after `commit()` succeeds — otherwise a failed commit
         // (or a mid-loop delete error that drops the tx) would report
         // evictions/chunks that never persisted.
+        #[derive(Clone)]
         struct EvictionRecord {
             data_root: H256,
             block_set: Vec<H256>,
@@ -422,187 +404,127 @@ impl InnerCacheTask {
 
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
-        let mut chunks_pruned: u64 = 0;
-        let mut eviction_count: usize = 0;
-        let mut evictions: Vec<EvictionRecord> = Vec::new();
-        self.db
-            .update_eyre_at("cache_service.prune_data_root_cache", |write_tx| {
-                let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
-                // Seed the cursor with a random data_root so MDBX seeks to the
-                // nearest key; without this, a stable backlog of CDRs protected by
-                // the pending-tx / local-proof exemptions re-scans from the front
-                // every cycle and starves later entries.  Mirrors the TODO at
-                // `prune_ingress_proofs` (~L696).  When the first walk runs out of
-                // entries without hitting `MAX_EVICTIONS_PER_RUN`, fall through to
-                // a second walk from the beginning so total coverage stays
-                // wrap-around-complete (otherwise tests + small tables with all
-                // keys above the random seek would silently scan zero entries).
-                let seek_key: DataRoot = H256::random();
-                let mut walker = cursor.walk(Some(seek_key))?;
-                let mut wrapped = false;
-                loop {
-                    while let Some((data_root, cached)) = walker.next().transpose()? {
-                        if eviction_count >= MAX_EVICTIONS_PER_RUN {
-                            warn!(
-                                evictions_performed = eviction_count,
-                                "Hit max eviction limit in prune_data_root_cache, will continue next cycle"
-                            );
-                            break;
-                        }
-                        // Pruning horizon priority: canonical tx inclusion > expiry height > evict-anomalous.
-                        //
-                        // CDR lifetime is bounded by either (a) `expiry_height` set at tx
-                        // ingress (`cache_data_root_with_expiry`), or (b) the tx's
-                        // `included_height`, written at migration by
-                        // `BlockMigrationService::persist_block` (`write_data_ledger_metadata`).
-                        // `expiry_height` is cleared earlier, at confirmation, by
-                        // `persist_metadata` Phase 3 (`update_data_root_block_set`).  The
-                        // local-proof exemption below extends (b) indefinitely while a
-                        // local ingress proof is present.
-                        //
-                        // The `(None, None)` arm is reachable only when a CDR has lost
-                        // both bounds: a reorg cleared `included_height` for every tx in
-                        // `txid_set` after the confirmation already cleared
-                        // `expiry_height`, and the mempool re-anchor path did not restore
-                        // expiry (e.g. orphan resubmission failed).  Under the lifetime
-                        // model such an entry should not exist, so treat it as a
-                        // candidate for eviction — but keep the local-proof exemption so
-                        // an entry that still carries a useful commitment survives.
-                        let mut inclusion_max_height: Option<u64> = None;
-                        let mut all_txs_confirmed = true;
-                        for tx_id in cached.txid_set.iter() {
-                            match irys_database::get_data_tx_metadata(write_tx, tx_id)?
-                                .and_then(|m| m.included_height)
-                            {
-                                Some(h) => {
-                                    inclusion_max_height =
-                                        Some(inclusion_max_height.map_or(h, |x| x.max(h)));
-                                }
-                                // No metadata row, or row exists with `included_height = None`:
-                                // this tx (sharing `data_root` with the rest of `txid_set`) is
-                                // still pending.  `inclusion_max_height` alone would prematurely
-                                // prune chunks the pending tx still needs — e.g. a Publish-
-                                // promotion sibling of an already-confirmed term-ledger tx that
-                                // shares the same `data_root`.
-                                //
-                                // Once any tx is pending, the horizon below ignores
-                                // `inclusion_max_height` and defers to `expiry_height`, so
-                                // further metadata reads are wasted DB work inside the open
-                                // write tx.  Bail early.
-                                None => {
-                                    all_txs_confirmed = false;
-                                    break;
-                                }
-                            }
-                        }
 
-                        // Horizon policy:
-                        //  - All txs confirmed: use the latest `included_height` as the
-                        //    boundary (falling back to `expiry_height`, then `(None, None)`
-                        //    anomalous-eviction).
-                        //  - Any tx still pending: defer to `expiry_height`.  An already-
-                        //    confirmed sibling's `included_height` does NOT bind the
-                        //    pending tx's chunk lifetime; using it as the horizon would
-                        //    prematurely prune chunks the pending tx still needs.  If
-                        //    expiry was already cleared by the sibling confirmation,
-                        //    `horizon` is `None` and the eviction-candidate arm protects
-                        //    the entry until the pending tx either confirms or is dropped
-                        //    by mempool TTL.
-                        let horizon = if all_txs_confirmed {
-                            match (inclusion_max_height, cached.expiry_height) {
-                                (Some(h), _) => Some(h),
-                                (None, Some(e)) => Some(e),
-                                (None, None) => None,
-                            }
-                        } else {
-                            cached.expiry_height
-                        };
-
-                        // Decide whether this entry is a candidate for eviction.
-                        //  * horizon present: the historical "past the bound" check.
-                        //  * horizon absent + all txs confirmed: truly anomalous state
-                        //    (empty `txid_set`, or all txs confirmed-and-orphaned with
-                        //    expiry already cleared) — evict unless the local-proof
-                        //    exemption below applies.
-                        //  * horizon absent + pending tx remains: protect (see horizon
-                        //    policy above).
-                        let is_eviction_candidate = match (horizon, all_txs_confirmed) {
-                            (Some(max_height), _) => max_height < prune_height,
-                            (None, true) => true,
-                            (None, false) => false,
-                        };
-
-                        trace!(
-                            data_root.data_root = ?data_root,
-                            horizon = ?horizon,
-                            prune_height,
-                            is_eviction_candidate,
-                            "Processing data root for prune evaluation"
+        // Collect eviction candidates under a short RO txn (random seek + wraparound),
+        // then apply deletes in gated write batches so the consensus writer gate is
+        // released between batches rather than held for the whole table scan.
+        let mut candidates: Vec<EvictionRecord> = Vec::new();
+        {
+            let tx = self.db.tx()?;
+            let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+            let seek_key: DataRoot = H256::random();
+            let mut walker = cursor.walk(Some(seek_key))?;
+            let mut wrapped = false;
+            loop {
+                while let Some((data_root, cached)) = walker.next().transpose()? {
+                    if candidates.len() >= MAX_EVICTIONS_PER_RUN {
+                        warn!(
+                            candidates = candidates.len(),
+                            "Hit max eviction limit collecting prune_data_root_cache candidates, will continue next cycle"
                         );
-
-                        if is_eviction_candidate {
-                            // Check for locally generated ingress proof
-                            let mut proofs_cursor = write_tx.cursor_read::<IngressProofs>()?;
-                            let mut has_local_proof = false;
-                            let mut proof_walker = proofs_cursor.walk(Some(data_root))?;
-                            while let Some((key, compact)) = proof_walker.next().transpose()? {
-                                if key != data_root {
-                                    break;
-                                }
-                                if compact.0.address == local_addr {
-                                    has_local_proof = true;
-                                    break;
-                                }
-                            }
-
-                            if has_local_proof {
-                                trace!(
-                                    data_root.data_root = ?data_root,
-                                    horizon = ?horizon,
-                                    "Skipping prune for data root with locally generated ingress proof"
-                                );
-                                continue;
-                            }
-
-                            // Capture txid_set_size before `cached` is partially moved below.
-                            let txid_set_size = cached.txid_set.len();
-                            let expiry_height = cached.expiry_height;
-
-                            write_tx.delete::<IngressProofs>(data_root, None)?;
-                            chunks_pruned = chunks_pruned.saturating_add(
-                                delete_cached_chunks_by_data_root(write_tx, data_root)?,
-                            );
-                            write_tx.delete::<CachedDataRoots>(data_root, None)?;
-                            eviction_count += 1;
-
-                            evictions.push(EvictionRecord {
-                                data_root,
-                                block_set: cached.block_set,
-                                txid_set_size,
-                                inclusion_max_height,
-                                expiry_height,
-                                horizon,
-                            });
-                        }
-                    }
-                    if wrapped || eviction_count >= MAX_EVICTIONS_PER_RUN {
                         break;
                     }
-                    // First walk ran from `Some(seek_key)` to end without hitting the
-                    // eviction cap.  Wrap around and scan the prefix `[start,
-                    // seek_key)` so coverage is complete.  Without this fall-through
-                    // a small table whose keys all sort above `seek_key` would
-                    // silently scan zero entries this cycle.
-                    wrapped = true;
-                    walker = cursor.walk(None)?;
-                }
-                Ok(())
-            })?;
 
-        // Post-commit: only now is it safe to report what actually persisted.
-        // `has_local_proof` is hardcoded false because the eviction branch
-        // `continue`s on `has_local_proof == true` before reaching this buffer.
-        for entry in &evictions {
+                    let mut inclusion_max_height: Option<u64> = None;
+                    let mut all_txs_confirmed = true;
+                    for tx_id in cached.txid_set.iter() {
+                        match irys_database::get_data_tx_metadata(&tx, tx_id)?
+                            .and_then(|m| m.included_height)
+                        {
+                            Some(h) => {
+                                inclusion_max_height =
+                                    Some(inclusion_max_height.map_or(h, |x| x.max(h)));
+                            }
+                            None => {
+                                all_txs_confirmed = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    let horizon = if all_txs_confirmed {
+                        match (inclusion_max_height, cached.expiry_height) {
+                            (Some(h), _) => Some(h),
+                            (None, Some(e)) => Some(e),
+                            (None, None) => None,
+                        }
+                    } else {
+                        cached.expiry_height
+                    };
+
+                    let is_eviction_candidate = match (horizon, all_txs_confirmed) {
+                        (Some(max_height), _) => max_height < prune_height,
+                        (None, true) => true,
+                        (None, false) => false,
+                    };
+
+                    if !is_eviction_candidate {
+                        continue;
+                    }
+
+                    let mut proofs_cursor = tx.cursor_read::<IngressProofs>()?;
+                    let mut has_local_proof = false;
+                    let mut proof_walker = proofs_cursor.walk(Some(data_root))?;
+                    while let Some((key, compact)) = proof_walker.next().transpose()? {
+                        if key != data_root {
+                            break;
+                        }
+                        if compact.0.address == local_addr {
+                            has_local_proof = true;
+                            break;
+                        }
+                    }
+                    if has_local_proof {
+                        continue;
+                    }
+
+                    candidates.push(EvictionRecord {
+                        data_root,
+                        block_set: cached.block_set,
+                        txid_set_size: cached.txid_set.len(),
+                        inclusion_max_height,
+                        expiry_height: cached.expiry_height,
+                        horizon,
+                    });
+                }
+                if wrapped || candidates.len() >= MAX_EVICTIONS_PER_RUN {
+                    break;
+                }
+                wrapped = true;
+                walker = cursor.walk(None)?;
+            }
+            drop(walker);
+            drop(cursor);
+            drop(tx);
+        }
+
+        let mut chunks_pruned: u64 = 0;
+        let mut applied: Vec<EvictionRecord> = Vec::new();
+        for batch in candidates.chunks(256) {
+            let mut batch_applied: Vec<EvictionRecord> = Vec::new();
+            let mut batch_chunks: u64 = 0;
+            self.db
+                .update_eyre_at("cache_service.prune_data_root_cache", |write_tx| {
+                    for rec in batch {
+                        // Re-check presence: root may have been re-cached since the scan.
+                        if write_tx.get::<CachedDataRoots>(rec.data_root)?.is_none() {
+                            continue;
+                        }
+                        write_tx.delete::<IngressProofs>(rec.data_root, None)?;
+                        batch_chunks = batch_chunks.saturating_add(
+                            delete_cached_chunks_by_data_root(write_tx, rec.data_root)?,
+                        );
+                        write_tx.delete::<CachedDataRoots>(rec.data_root, None)?;
+                        batch_applied.push(rec.clone()); // clone: log after commit outside txn
+                    }
+                    Ok(())
+                })?;
+            chunks_pruned = chunks_pruned.saturating_add(batch_chunks);
+            applied.extend(batch_applied);
+        }
+
+        // Post-commit: only report what actually persisted in a committed write batch.
+        for entry in &applied {
             info!(
                 data_root = %entry.data_root,
                 block_set_size = entry.block_set.len(),

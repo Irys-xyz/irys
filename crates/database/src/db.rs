@@ -444,13 +444,21 @@ mod tests {
             durations.push(j.join().expect("writer thread panicked"));
         }
 
-        // Both writers finish well under the Busy sleep floor (250 ms).
-        // With gate: ~10 ms hold + ~10 ms wait ≈ 20–50 ms wall each in practice.
-        // Without gate: loser would pay ≥250 ms on Busy.
+        // Serialization: the slower writer waited at least one hold period.
+        // Busy avoidance: neither writer paid the 250 ms libmdbx Busy quantum.
         let max = durations.iter().map(|(_, d)| *d).max().unwrap();
+        let min = durations.iter().map(|(_, d)| *d).min().unwrap();
         assert!(
-            max < Duration::from_millis(150),
-            "gated concurrent writers must finish without 250ms Busy floor; max={max:?} times={durations:?}"
+            max >= hold,
+            "slower writer must wait at least one hold (proves gate serialization); max={max:?} hold={hold:?} times={durations:?}"
+        );
+        assert!(
+            max < Duration::from_millis(250),
+            "no writer may reach the 250ms Busy floor; max={max:?} times={durations:?}"
+        );
+        assert!(
+            min >= hold,
+            "each writer holds for at least `hold`; min={min:?} hold={hold:?} times={durations:?}"
         );
     }
 }
