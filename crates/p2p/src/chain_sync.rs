@@ -204,7 +204,26 @@ pub struct ChainSyncServiceInner<B: BlockDiscoveryFacade, M: MempoolFacade> {
     /// `VdfState`.
     vdf_controller: VdfController,
     is_update_whitelist_task_running: Arc<AtomicBool>,
+    /// Set while a periodic sync check is in flight, so ticks arriving faster
+    /// than the check completes are dropped rather than queued. The check is
+    /// dominated by network probes of the same peers, so a concurrent second
+    /// pass would only re-measure what the first is already measuring.
+    is_periodic_check_running: Arc<AtomicBool>,
     runtime_handle: tokio::runtime::Handle,
+}
+
+/// Clears [`ChainSyncServiceInner::is_periodic_check_running`] on drop.
+///
+/// A plain store at the end of the task would leak the flag if the task is
+/// aborted (runtime shutdown) or panics, and a permanently-set flag silently
+/// disables every later periodic check — the one failure that leaves a node
+/// stuck behind with nothing in the log to say why.
+struct PeriodicCheckGuard(Arc<AtomicBool>);
+
+impl Drop for PeriodicCheckGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Main sync service that runs in its own tokio task
@@ -264,7 +283,68 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             reth_service,
             vdf_controller,
             is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
+            is_periodic_check_running: Arc::new(AtomicBool::new(false)),
             runtime_handle,
+        }
+    }
+
+    /// Run the periodic sync check on its own task.
+    ///
+    /// The check probes every known peer over the network before it can decide
+    /// whether we are behind, so it must never be awaited on the service's
+    /// select loop: that loop also dispatches the catch-up chain
+    /// (`BlockProcessedByThePool` -> `process_orphaned_ancestors` -> next
+    /// block), so a node whose peers are unreachable would stop processing
+    /// blocks for as long as the slowest probe takes to fail.
+    fn spawn_periodic_sync_check(&self) {
+        if self
+            .is_periodic_check_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            debug!("Sync service: previous periodic sync check still running, skipping this tick");
+            return;
+        }
+
+        let inner = self.clone();
+        self.runtime_handle.spawn(
+            async move {
+                let _guard = PeriodicCheckGuard(Arc::clone(&inner.is_periodic_check_running));
+                inner.handle_periodic_sync_check().await;
+            }
+            .in_current_span(),
+        );
+    }
+
+    #[instrument(level = "trace", skip_all)]
+    async fn handle_periodic_sync_check(&self) {
+        self.gossip_data_handler
+            .gossip_client
+            .hydrate_peers_online_status(&self.peer_list)
+            .await;
+        debug!("Starting a periodic sync check routine");
+        // Check if we're behind the network
+        match is_local_index_is_behind_trusted_peers(
+            &self.config,
+            &self.peer_list,
+            &self.gossip_data_handler.gossip_client,
+            &self.block_index,
+        )
+        .await
+        {
+            Ok(true) => {
+                info!("Periodic sync check: We're behind the network, starting sync");
+                self.spawn_chain_sync_task(None, false);
+            }
+            Ok(false) => {
+                debug!("Periodic sync check: We're up to date with the network");
+            }
+            Err(e) => {
+                error!(
+                    "Periodic sync check: Failed to check if behind network: {:?}, trusted peers are likely offline",
+                    e
+                );
+            }
         }
     }
 
@@ -610,9 +690,11 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     break;
                 }
 
-                // Handle periodic sync checks
+                // Handle periodic sync checks. Spawned, never awaited here: the
+                // check is network-bound and this loop also dispatches the
+                // catch-up chain.
                 _ = periodic_timer.tick() => {
-                    self.handle_periodic_sync_check().await;
+                    self.inner.spawn_periodic_sync_check();
                 }
 
                 // Handle commands
@@ -643,7 +725,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     .spawn_chain_sync_task(Some(response_sender), true);
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
-                self.handle_periodic_sync_check().await;
+                self.inner.spawn_periodic_sync_check();
             }
             SyncChainServiceMessage::BlockProcessedByThePool {
                 block_hash,
@@ -745,39 +827,6 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
             }
         }
         Ok(())
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    async fn handle_periodic_sync_check(&self) {
-        self.inner
-            .gossip_data_handler
-            .gossip_client
-            .hydrate_peers_online_status(&self.inner.peer_list)
-            .await;
-        debug!("Starting a periodic sync check routine");
-        // Check if we're behind the network
-        match is_local_index_is_behind_trusted_peers(
-            &self.inner.config,
-            &self.inner.peer_list,
-            &self.inner.gossip_data_handler.gossip_client,
-            &self.inner.block_index,
-        )
-        .await
-        {
-            Ok(true) => {
-                info!("Periodic sync check: We're behind the network, starting sync");
-                self.inner.spawn_chain_sync_task(None, false);
-            }
-            Ok(false) => {
-                debug!("Periodic sync check: We're up to date with the network");
-            }
-            Err(e) => {
-                error!(
-                    "Periodic sync check: Failed to check if behind network: {:?}, trusted peers are likely offline",
-                    e
-                );
-            }
-        }
     }
 }
 
@@ -2041,6 +2090,52 @@ mod tests {
         assert!(
             controller.is_enabled(),
             "concurrent enable during a disabled sync window survives the CAS-guarded restore"
+        );
+    }
+
+    /// Baseline: dropping the guard at the end of a normal scope clears the flag.
+    #[test]
+    fn periodic_check_guard_clears_flag_on_drop() {
+        let flag = Arc::new(AtomicBool::new(true));
+        {
+            let _guard = PeriodicCheckGuard(Arc::clone(&flag));
+            assert!(flag.load(Ordering::Acquire), "flag set while guard is held");
+        }
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "guard drop must clear the flag"
+        );
+    }
+
+    /// The invariant that matters: a task holding the guard can be aborted
+    /// mid-await (e.g. runtime shutdown, or any future cancellation) and the
+    /// flag must still be cleared. A plain store at the end of
+    /// `handle_periodic_sync_check` would miss this path entirely and leave
+    /// every later periodic check silently disabled.
+    #[tokio::test]
+    async fn periodic_check_guard_clears_flag_when_task_is_aborted() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let started = Arc::new(AtomicBool::new(false));
+
+        let flag_clone = Arc::clone(&flag);
+        let started_clone = Arc::clone(&started);
+        let handle = tokio::spawn(async move {
+            let _guard = PeriodicCheckGuard(flag_clone);
+            started_clone.store(true, Ordering::Release);
+            std::future::pending::<()>().await;
+        });
+
+        // Make sure the guard has actually been constructed before aborting.
+        while !started.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        handle.abort();
+        let result = handle.await;
+        assert!(result.unwrap_err().is_cancelled());
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "aborting the task must still clear the flag via Drop"
         );
     }
 
