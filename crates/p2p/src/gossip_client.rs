@@ -2299,9 +2299,11 @@ impl GossipClient {
         let total = peers.len();
 
         // Resume where the previous pass stopped. The budget covers only part of
-        // a long peer list, and score order is stable across passes, so always
-        // starting at the head would leave the tail unprobed forever — holding a
-        // stale online flag that peer selection then acts on.
+        // a long peer list, and nothing about the order guarantees a peer ever
+        // reaches the front: with scoring disabled every peer holds the same
+        // score, so the order is whatever the caches enumerate. Always starting
+        // at the head can therefore leave the same tail unprobed indefinitely,
+        // holding a stale online flag that peer selection then acts on.
         let start = if total == 0 {
             0
         } else {
@@ -2333,14 +2335,25 @@ impl GossipClient {
                 Ok(is_healthy) => {
                     debug!("Peer {} is healthy: {}", peer_id, is_healthy);
                     peer_list.set_is_online_by_peer_id(&peer_id, is_healthy);
-                    // A peer this slow spends the pass budget that the peers
-                    // behind it need, so record it the same way a slow data
-                    // response is recorded.
-                    if response_time > NORMAL_RESPONSE_THRESHOLD {
-                        peer_list.decrease_peer_score_by_peer_id(
-                            &peer_id,
-                            ScoreDecreaseReason::SlowResponse,
-                        );
+                    // Credit a healthy answer, so the pass can move a peer's
+                    // score in both directions. Penalties alone would ratchet
+                    // any peer we never pull data from down towards the active
+                    // threshold, one lost probe at a time.
+                    if is_healthy {
+                        if response_time > NORMAL_RESPONSE_THRESHOLD {
+                            // This peer spends the pass budget that the peers
+                            // behind it need, the same way a slow data response
+                            // costs the caller.
+                            peer_list.decrease_peer_score_by_peer_id(
+                                &peer_id,
+                                ScoreDecreaseReason::SlowResponse,
+                            );
+                        } else {
+                            peer_list.increase_peer_score_by_peer_id(
+                                &peer_id,
+                                ScoreIncreaseReason::Online,
+                            );
+                        }
                     }
                 }
                 Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
@@ -3722,12 +3735,13 @@ mod tests {
             );
         }
 
-        /// A probe that fails must cost the peer score, so the score ordering the
-        /// next pass reads reflects which peers actually answer. The penalty is
-        /// NetworkError (-1), not Offline (-3): one failed probe must not push an
-        /// unstaked-but-honest peer toward eviction.
+        /// A pass must move scores in both directions: a healthy answer earns
+        /// `Online` (+1) and a failed probe costs `NetworkError` (-1). The exact
+        /// amounts are asserted, because the reason chosen matters — `Offline`
+        /// (-3) would also sink the peer, but it is the one reason that can evict
+        /// an unstaked peer from purgatory over a single bad pass.
         #[tokio::test]
-        async fn hydrate_sinks_the_score_of_peers_that_fail_their_probe() {
+        async fn hydrate_scores_probe_outcomes_in_both_directions() {
             let fixture = TestFixture::with_timeout(Duration::from_millis(200));
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
 
@@ -3770,13 +3784,17 @@ mod tests {
                 .reputation_score
                 .get();
 
-            assert!(
-                failing_score < healthy_score,
-                "a failed probe must sink the peer below one that answered ({failing_score} vs {healthy_score})"
+            // Exact values, so a swap to a different reason (Offline is -3, bogus
+            // data -5) fails here rather than passing on "sank a bit".
+            assert_eq!(
+                failing_score,
+                PeerScore::INITIAL - 1,
+                "a failed probe must cost exactly the NetworkError penalty"
             );
-            assert!(
-                failing_score >= PeerScore::ACTIVE_THRESHOLD,
-                "a single failed probe must not drive the peer under the active threshold, got {failing_score}"
+            assert_eq!(
+                healthy_score,
+                PeerScore::INITIAL + 1,
+                "a healthy answer must earn exactly the Online credit"
             );
         }
 
@@ -3788,7 +3806,7 @@ mod tests {
         #[tokio::test]
         async fn hydrate_passes_advance_past_peers_the_budget_cut_off() {
             const TEST_BUDGET: Duration = Duration::from_millis(300);
-            const STALLED_PEERS: u8 = HYDRATE_HEALTH_CHECK_CONCURRENCY as u8;
+            const STALLED_PEERS: usize = HYDRATE_HEALTH_CHECK_CONCURRENCY;
 
             // One client for both passes: the cursor lives on it. The request
             // timeout is far above the budget so the stalled head is still in
@@ -3797,12 +3815,36 @@ mod tests {
 
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
 
-            // A full concurrency window of stalled peers, scored above the rest so
-            // they are deterministically at the head of the pass.
+            // A full concurrency window of peers that accept a connection and
+            // never answer, so every one of them is still in flight when the
+            // budget fires. Bound listeners that are never accepted from: the
+            // kernel completes the handshake into the backlog, so the probe
+            // blocks on the response rather than on connect. Deliberately not
+            // unroutable addresses — whether those hang or fail fast depends on
+            // the host's routing, and one fast failure would pull an extra peer
+            // into the window and shift the cursor.
+            let mut stalled_listeners = Vec::with_capacity(STALLED_PEERS);
             for i in 0..STALLED_PEERS {
-                let (_, mut peer) = unreachable_peer(i + 1, 9_200 + u16::from(i), true);
-                peer.reputation_score = PeerScore::new(PeerScore::INITIAL + 10);
-                peer_list.add_or_update_peer(peer, true);
+                let listener =
+                    std::net::TcpListener::bind("127.0.0.1:0").expect("to bind a stalled listener");
+                let address = listener.local_addr().expect("listener address");
+                let addr = IrysAddress::from([(i + 1) as u8; 20]);
+                peer_list.add_or_update_peer(
+                    PeerListItem {
+                        peer_id: IrysPeerId::from(addr),
+                        mining_address: addr,
+                        address: create_peer_address("127.0.0.1", address.port()),
+                        // Above the tail's score, so the stalled peers are
+                        // deterministically at the head of the pass.
+                        reputation_score: PeerScore::new(PeerScore::INITIAL + 10),
+                        response_time: 0,
+                        last_seen: 0,
+                        is_online: true,
+                        protocol_version: ProtocolVersion::V1,
+                    },
+                    true,
+                );
+                stalled_listeners.push(listener);
             }
 
             // One healthy peer behind the stalled head, offline so that a

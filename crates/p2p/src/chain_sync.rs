@@ -241,6 +241,41 @@ impl Drop for SyncTaskSlotGuard {
     }
 }
 
+/// Finishes the sync if `sync_chain` never returned.
+///
+/// `sync_chain` sets the syncing flag partway through and clears it on both of
+/// its own exits, so only an unwind out of the middle leaves it set. That flag
+/// gates later sync requests *and* disables gossip broadcast, so a stuck one
+/// is worse than a stuck spawn slot: the node neither catches up nor
+/// broadcasts. `disarm` is called once `sync_chain` returns, leaving the
+/// success and error paths to clear the flag exactly as before.
+struct SyncInProgressGuard {
+    sync_state: ChainSyncState,
+    armed: bool,
+}
+
+impl SyncInProgressGuard {
+    fn new(sync_state: ChainSyncState) -> Self {
+        Self {
+            sync_state,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SyncInProgressGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            warn!("Sync task ended without finishing the sync; clearing the syncing flag");
+            self.sync_state.finish_sync();
+        }
+    }
+}
+
 /// Main sync service that runs in its own tokio task
 #[derive(Debug)]
 pub struct ChainSyncService<B: BlockDiscoveryFacade, M: MempoolFacade> {
@@ -412,7 +447,6 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
         self.runtime_handle.spawn(
             async move {
-                let sync_task_slot = sync_task_slot;
                 debug!("Starting sync from height: {}", start_sync_from_height);
 
                 gossip_data_handler
@@ -434,6 +468,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     );
                 }
 
+                let mut sync_in_progress = SyncInProgressGuard::new(sync_state.clone());
                 let res = sync_chain(
                     sync_state.clone(),
                     &peer_list,
@@ -445,6 +480,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     &runtime_handle,
                 )
                 .await;
+                sync_in_progress.disarm();
 
                 // Restore the pre-sync mining state (compare-and-swap guarded).
                 vdf_sync_pause.restore();
@@ -2203,6 +2239,51 @@ mod tests {
         assert!(
             !flag.load(Ordering::Acquire),
             "a panicking sync task must still release the slot"
+        );
+    }
+
+    /// A panic mid-sync must also clear the syncing flag. It gates later sync
+    /// requests and disables gossip broadcast, so leaving it set stops the node
+    /// from both catching up and broadcasting — releasing only the spawn slot
+    /// would not be enough.
+    #[tokio::test]
+    async fn sync_state_is_finished_when_the_task_panics() {
+        let sync_state = ChainSyncState::new(false, false);
+        sync_state.set_is_syncing(true);
+        assert!(!sync_state.is_gossip_broadcast_enabled());
+
+        let guarded_state = sync_state.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = SyncInProgressGuard::new(guarded_state);
+            panic!("sync blew up mid-flight");
+        });
+        assert!(handle.await.unwrap_err().is_panic());
+
+        assert!(
+            !sync_state.is_syncing(),
+            "a panicking sync task must clear the syncing flag"
+        );
+        assert!(
+            sync_state.is_gossip_broadcast_enabled(),
+            "clearing the flag must re-enable gossip broadcast"
+        );
+    }
+
+    /// Once `sync_chain` returns, the flag belongs to its own success and error
+    /// paths again — the guard must not clear a state a later sync just claimed.
+    #[tokio::test]
+    async fn disarmed_sync_guard_leaves_the_syncing_flag_alone() {
+        let sync_state = ChainSyncState::new(false, false);
+        sync_state.set_is_syncing(true);
+
+        {
+            let mut guard = SyncInProgressGuard::new(sync_state.clone());
+            guard.disarm();
+        }
+
+        assert!(
+            sync_state.is_syncing(),
+            "a disarmed guard must leave the flag as it found it"
         );
     }
 
