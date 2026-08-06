@@ -3,7 +3,7 @@ use crate::packing_service::{PackingRequest, PackingSender};
 use eyre::{OptionExt as _, ensure};
 use irys_database::{
     append_block_stream_event, block_header_by_hash, db::IrysDatabaseExt as _,
-    insert_commitment_tx, insert_tx_header, tx_header_by_txid,
+    insert_commitment_tx, insert_tx_header, prune_block_stream_below, tx_header_by_txid,
 };
 use irys_domain::{
     BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
@@ -20,7 +20,10 @@ use irys_types::{
 use lru::LruCache;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, PoisonError, RwLock},
+    sync::{
+        Arc, Mutex, PoisonError, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
@@ -76,6 +79,10 @@ impl std::fmt::Debug for StreamDedup {
 pub struct BlockMigrationService {
     db: DatabaseProvider,
     stream_dedup: Mutex<StreamDedup>,
+    /// Counts durable stream frames appended by this service since the last
+    /// in-txn prune. Writers prune so a halted producer cannot leave the log
+    /// growing without bound (`RETENTION_EVENTS` still enforced).
+    stream_appends_since_prune: AtomicU64,
     block_index_guard: BlockIndexReadGuard,
     supply_state: Option<Arc<SupplyState>>,
     chunk_size: u64,
@@ -195,23 +202,35 @@ impl BlockMigrationService {
         cache: Arc<RwLock<BlockTree>>,
         chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
         packing_sender: PackingSender,
+        // When false (`http.expose_internal_api` off), skip the 10k-entry log
+        // scan: no frames will be appended and de-dup is unused.
+        seed_stream_dedup: bool,
     ) -> Self {
         // Best-effort seed: an unreadable log tail degrades to an empty de-dup
         // (worst case a duplicate frame, exactly the pre-seed behaviour) rather
         // than failing construction.
-        let stream_dedup = match crate::block_stream_service::rebuild_state(&db) {
-            Ok((emitted, finalized)) => StreamDedup { emitted, finalized },
-            Err(e) => {
-                warn!(error = ?e, "failed to seed stream de-dup from the log tail; starting empty");
-                StreamDedup {
-                    emitted: LruCache::new(crate::block_stream_service::DEDUP_CAPACITY),
-                    finalized: LruCache::new(crate::block_stream_service::DEDUP_CAPACITY),
+        let empty_dedup = || StreamDedup {
+            emitted: LruCache::new(crate::block_stream_service::DEDUP_CAPACITY),
+            finalized: LruCache::new(crate::block_stream_service::DEDUP_CAPACITY),
+        };
+        let stream_dedup = if seed_stream_dedup {
+            match crate::block_stream_service::rebuild_state(&db) {
+                Ok((emitted, finalized)) => StreamDedup { emitted, finalized },
+                Err(e) => {
+                    warn!(
+                        error = ?e,
+                        "failed to seed stream de-dup from the log tail; starting empty"
+                    );
+                    empty_dedup()
                 }
             }
+        } else {
+            empty_dedup()
         };
         Self {
             db,
             stream_dedup: Mutex::new(stream_dedup),
+            stream_appends_since_prune: AtomicU64::new(0),
             block_index_guard,
             supply_state,
             chunk_size,
@@ -523,6 +542,11 @@ impl BlockMigrationService {
             for (event, payload) in prepared_stream {
                 let seq = append_block_stream_event(tx, payload)?;
                 frames.push(StreamFrame { seq, event });
+            }
+            // Writer-side retention: prune even if the producer has halted.
+            if let Some(last) = frames.last() {
+                let n = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+                self.maybe_prune_stream_in_tx(tx, last.seq, n)?;
             }
             Ok(frames)
         })?;
@@ -1097,6 +1121,8 @@ impl BlockMigrationService {
 
             if let Some((event, payload)) = prepared_finalized {
                 let seq = append_block_stream_event(tx, payload)?;
+                // Writer-side retention: prune even if the producer has halted.
+                self.maybe_prune_stream_in_tx(tx, seq, 1)?;
                 Ok(Some(StreamFrame { seq, event }))
             } else {
                 Ok(None)
@@ -1109,6 +1135,40 @@ impl BlockMigrationService {
             }
         }
         Ok(frame)
+    }
+
+    /// Count-based stream log retention, driven from the append path so a
+    /// halted producer cannot leave the log growing without bound. Batched
+    /// every [`crate::block_stream_service::PRUNE_INTERVAL`] frames; deletes
+    /// below `latest_seq + 1 - RETENTION_EVENTS` inside the same RW txn.
+    fn maybe_prune_stream_in_tx<T: reth_db::transaction::DbTxMut>(
+        &self,
+        tx: &T,
+        latest_seq: u64,
+        frames_appended: u64,
+    ) -> eyre::Result<()> {
+        if frames_appended == 0 {
+            return Ok(());
+        }
+        use crate::block_stream_service::{PRUNE_INTERVAL, RETENTION_EVENTS};
+        let prev = self
+            .stream_appends_since_prune
+            .fetch_add(frames_appended, Ordering::Relaxed);
+        if prev.saturating_add(frames_appended) < PRUNE_INTERVAL {
+            return Ok(());
+        }
+        self.stream_appends_since_prune
+            .store(0, Ordering::Relaxed);
+        let Some(keep_from) = latest_seq
+            .checked_add(1)
+            .and_then(|len| len.checked_sub(RETENTION_EVENTS))
+        else {
+            return Ok(());
+        };
+        if keep_from == 0 {
+            return Ok(());
+        }
+        prune_block_stream_below(tx, keep_from)
     }
 
     /// Notify ChunkMigrationService about the migrated block (fire-and-forget).
@@ -1221,6 +1281,7 @@ mod tests {
             cache,
             chunk_migration_sender,
             packing_sender,
+            true, // unit tests that exercise stream emission need a seeded de-dup
         );
         (svc, tmp)
     }

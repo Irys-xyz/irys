@@ -19,6 +19,10 @@
 //! [`BlockStreamHandle::subscribe`], which snapshots the durable replay suffix and registers a
 //! live receiver under one lock; frames whose `seq` predates a subscriber's snapshot are skipped
 //! at fan-out, so the replay→live handover has no gap or duplicate.
+//!
+//! Live channel order is not a durability contract: steady-state enqueue is seq-monotonic, but
+//! startup reconciliation can fan out ahead of still-queued writer frames. Consumers should treat
+//! `seq <= last_seen` as a no-op (or reconnect for durable replay).
 
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
@@ -33,10 +37,10 @@ use tracing::{Instrument as _, error, info, warn};
 
 /// Count-based retention: keep at most this many events; older ones are pruned. Sized to comfortably
 /// exceed the maximum expected follower downtime (the follower only ever resumes from a recent
-/// `seq`).
-const RETENTION_EVENTS: u64 = 100_000;
+/// `seq`). Shared with confirmation/migration writers so pruning continues if the producer halts.
+pub(crate) const RETENTION_EVENTS: u64 = 100_000;
 /// Prune at most once per this many appends, to batch the delete writes.
-const PRUNE_INTERVAL: u64 = 1_000;
+pub(crate) const PRUNE_INTERVAL: u64 = 1_000;
 /// De-dup window for emitted `observed` block hashes. Must comfortably exceed the reorg depth so a
 /// re-adopted block is still remembered.
 pub(crate) const DEDUP_CAPACITY: NonZeroUsize = match NonZeroUsize::new(10_000) {

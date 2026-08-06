@@ -23,8 +23,14 @@ from the **same** seq-keyed log, so a follower may use either and reach identica
 ## The event log and its cursor
 
 The node appends `observed` / `finalized` / `reorged` events to a durable, append-only log keyed by a
-monotonic `seq` (the 0-based append index). `seq` never rewinds or repeats within one log lifetime, so it
-is the follower's resume cursor — never height, which repeats across forks.
+monotonic `seq` (the 0-based append index). Within one log lifetime the **durable log** never rewinds
+or repeats a `seq` — that is the follower's resume cursor (never height, which repeats across forks).
+
+The **live SSE channel** is best-effort delivery of already-durable frames. In steady state the single
+block-tree task enqueues in commit order so live order matches `seq`. At startup, reconciliation can
+append frames that fan out before earlier writer frames still queued on the channel, so a connected
+subscriber may briefly see `N+1` before `N`. Consumers should ignore a live frame with
+`seq <= last_seen` (or re-sync via poll/replay). Poll pages always read the log in ascending `seq`.
 
 The log is pruned: once it exceeds `RETENTION_EVENTS` (100,000) the oldest events are deleted (batched, so
 the retained count is ~100k with up to `PRUNE_INTERVAL` overshoot). Two quantities therefore matter:
@@ -153,6 +159,14 @@ frames that a pre-atomic-append build lost between a migration commit and its se
 append, walking the block index tail and appending the gap in height order. Live SSE delivery is
 best-effort on top of this durable log: a frame whose fan-out is missed (say, a halted producer) is
 recovered through replay on reconnect, exactly as after a `truncated` poll.
+
+**FCU timing.** An `observed` (or `reorged`) frame becomes durable when confirmation's consensus
+txn commits, which is **before** the execution-layer fork-choice update (FCU) for that tip.
+Live SSE defers fan-out until after a successful FCU ack; the poll transport reads the log with no
+FCU gate, so a poll can return `observed` for a block whose EL head has not advanced yet (window:
+one FCU round-trip). Presence in the log does not imply the EL head has moved. Gateways that
+cross-read `eth_*` at `latest` on `observed` must tolerate that lag or wait for EL confirmation
+separately.
 
 ## Limitation: log recreation (reset)
 

@@ -2259,6 +2259,7 @@ mod tests {
                 cache.clone(),
                 chunk_migration_sender,
                 service_senders.packing_sender(),
+                false, // tests do not seed stream de-dup
             );
 
             // Real (not mocked) VDF state pinned at `live_step`; the gate only

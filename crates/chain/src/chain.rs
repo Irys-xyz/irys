@@ -1801,6 +1801,9 @@ impl IrysNode {
             Arc::clone(&block_tree_cache),
             service_senders.chunk_migration.clone(),
             service_senders.packing_sender(),
+            // Same gate as `/internal/*` and the durable producer: skip the
+            // 10k-entry de-dup seed when the stream is not written.
+            config.node_config.http.expose_internal_api,
         );
 
         // Create the VDF state before the block tree service: its re-anchor

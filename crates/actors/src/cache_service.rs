@@ -390,7 +390,11 @@ impl InnerCacheTask {
             let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
             let mut cdr_walk = cdr_cursor.walk(None)?;
 
-            // Cap candidates so the write phase cannot exceed MAX_EVICTIONS_PER_RUN.
+            // Cap is on candidates collected (read-phase), not on roots that
+            // actually prune chunks in the write phase. A stable set of
+            // non-yielding candidates early in hash order can consume the
+            // budget and starve later prunable roots (hash-order scan, no
+            // wraparound). Count is work attempted, not work applied.
             // TODO: try to deprioritise data_roots that almost have all their chunks.
             while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
                 if candidates.len() >= MAX_EVICTIONS_PER_RUN {
