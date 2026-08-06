@@ -165,6 +165,20 @@ const NORMAL_RESPONSE_THRESHOLD: Duration = Duration::from_secs(2);
 /// Timeout to wait for handshake completion before retrying
 const HANDSHAKE_WAIT_TIMEOUT: Duration = Duration::from_millis(1000);
 
+/// Concurrent health probes per `hydrate_peers_online_status` pass.
+///
+/// Bounded rather than unbounded: the pass covers the whole peer list, and one
+/// socket per known peer is a burst this node has no reason to create.
+const HYDRATE_HEALTH_CHECK_CONCURRENCY: usize = 16;
+
+/// Wall-clock budget for one `hydrate_peers_online_status` pass.
+///
+/// Sized above the 5s per-request timeout its callers construct the client with,
+/// so a full round of concurrent probes can time out normally and still be
+/// recorded; the budget is the backstop for a pass that would otherwise outlast
+/// the caller's own cadence, not the per-peer timeout.
+const HYDRATE_PASS_BUDGET: Duration = Duration::from_secs(10);
+
 /// Control flow outcome for `handle_peer_pull_response`.
 #[derive(Debug)]
 enum PeerPullOutcome<T> {
@@ -2256,17 +2270,43 @@ impl GossipClient {
         ))
     }
 
+    /// Refresh every known peer's online flag.
+    ///
+    /// Probes run concurrently, capped at [`HYDRATE_HEALTH_CHECK_CONCURRENCY`],
+    /// under a single [`HYDRATE_PASS_BUDGET`] deadline. Sequential probing made
+    /// the pass cost the *sum* of every unreachable peer's request timeout,
+    /// which is paid by the caller — the sync service's periodic check.
+    ///
+    /// Peers still unresolved when the budget expires keep their previous flag.
+    /// Marking them offline would attribute our own impatience to the peer, and
+    /// the flag feeds peer selection for block and chunk pulls.
     pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
+        self.hydrate_peers_online_status_within(peer_list, HYDRATE_PASS_BUDGET)
+            .await;
+    }
+
+    /// [`Self::hydrate_peers_online_status`] with an explicit pass budget, so a
+    /// test can exercise the expiry path without waiting out the shipped one.
+    async fn hydrate_peers_online_status_within(&self, peer_list: &PeerList, budget: Duration) {
         debug!("Hydrating peers online status");
         let peers = peer_list.all_peers_sorted_by_score();
-        for peer in peers {
-            match self
+        let total = peers.len();
+
+        let probes = futures::stream::iter(peers.into_iter().map(|peer| async move {
+            let outcome = self
                 .check_health(&peer.0, peer.1.address, peer.1.protocol_version, peer_list)
-                .await
-            {
+                .await;
+            (peer.0, outcome)
+        }))
+        .buffer_unordered(HYDRATE_HEALTH_CHECK_CONCURRENCY);
+
+        let mut resolved = 0_usize;
+        let pass = probes.for_each(|(peer_id, outcome)| {
+            resolved += 1;
+            match outcome {
                 Ok(is_healthy) => {
-                    debug!("Peer {} is healthy: {}", peer.0, is_healthy);
-                    peer_list.set_is_online_by_peer_id(&peer.0, is_healthy);
+                    debug!("Peer {} is healthy: {}", peer_id, is_healthy);
+                    peer_list.set_is_online_by_peer_id(&peer_id, is_healthy);
                 }
                 Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
                     debug!(
@@ -2278,11 +2318,21 @@ impl GossipClient {
                 Err(err) => {
                     warn!(
                         "Failed to check the health of peer {}: {}, setting offline status",
-                        peer.0, err
+                        peer_id, err
                     );
-                    peer_list.set_is_online_by_peer_id(&peer.0, false);
+                    peer_list.set_is_online_by_peer_id(&peer_id, false);
                 }
             }
+            std::future::ready(())
+        });
+
+        if tokio::time::timeout(budget, pass).await.is_err() {
+            warn!(
+                peers.total = total,
+                peers.resolved = resolved,
+                ?budget,
+                "Peer online-status hydration hit its budget; unresolved peers keep their previous status"
+            );
         }
     }
 
@@ -3475,6 +3525,146 @@ mod tests {
             assert!(
                 fixture.client.circuit_breaker.is_available(&peer_id),
                 "after CB recovery, peer must be eligible for re-onlining"
+            );
+        }
+    }
+
+    mod hydrate_concurrency_tests {
+        use super::*;
+        use irys_types::{
+            IrysAddress, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, RethPeerInfo,
+        };
+        use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+        use std::time::Instant;
+
+        /// Builds a peer pointed at an unroutable address (TEST-NET-1, RFC 5737),
+        /// which genuinely blocks the connect attempt until the client's request
+        /// timeout fires rather than failing fast — the same address class the
+        /// existing `test_request_timeout` test relies on.
+        fn unreachable_peer(id_byte: u8, port: u16, is_online: bool) -> (IrysPeerId, PeerListItem) {
+            let addr = IrysAddress::from([id_byte; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            let peer = PeerListItem {
+                peer_id,
+                mining_address: addr,
+                address: PeerAddress {
+                    gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), port)),
+                    api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), port)),
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online,
+                protocol_version: ProtocolVersion::default(),
+            };
+            (peer_id, peer)
+        }
+
+        /// A pass over many unreachable peers must cost roughly ONE request
+        /// timeout, not the sum of every peer's timeout. Before the fix,
+        /// `hydrate_peers_online_status` probed peers sequentially, so 20 peers
+        /// at a 300ms timeout would take ~6s; concurrent probing (capped at
+        /// `HYDRATE_HEALTH_CHECK_CONCURRENCY` = 16) finishes in about two
+        /// batches, well under 1.5s.
+        #[tokio::test]
+        async fn hydrate_probes_unreachable_peers_concurrently() {
+            let timeout = Duration::from_millis(300);
+            let fixture = TestFixture::with_timeout(timeout);
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            const PEER_COUNT: u16 = 20;
+            for i in 0..PEER_COUNT {
+                let (_, peer) = unreachable_peer((i + 1) as u8, 8000 + i, true);
+                peer_list.add_or_update_peer(peer, true);
+            }
+
+            let start = Instant::now();
+            fixture.client.hydrate_peers_online_status(&peer_list).await;
+            let elapsed = start.elapsed();
+
+            // Sequential would cost PEER_COUNT * timeout = 6s. Concurrent
+            // (2 batches of <=16) should land close to 2 * timeout; allow a
+            // generous margin for slow CI hosts while staying far below the
+            // sequential bound.
+            assert!(
+                elapsed < timeout * 3,
+                "expected concurrent hydration well under {:?} (sequential bound would be {:?}), got {:?}",
+                timeout * 3,
+                timeout * u32::from(PEER_COUNT),
+                elapsed
+            );
+        }
+
+        /// When the pass budget expires before every peer resolves, peers that
+        /// already resolved must keep their fresh status, and peers still
+        /// in-flight must keep their PREVIOUS status rather than being forced
+        /// offline — and the call must not panic.
+        ///
+        /// Drives `hydrate_peers_online_status_within` with a short budget rather
+        /// than waiting out the shipped `HYDRATE_PASS_BUDGET`: the behaviour under
+        /// test is "the budget cut the pass short", which does not depend on the
+        /// budget's magnitude. The per-request timeout is set well above the test
+        /// budget so the unreachable peer is guaranteed still in-flight when the
+        /// budget fires.
+        #[tokio::test]
+        async fn hydrate_budget_expiry_keeps_resolved_peers_and_previous_status_for_the_rest() {
+            const TEST_BUDGET: Duration = Duration::from_millis(300);
+            let fixture = TestFixture::with_timeout(Duration::from_secs(11));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            // Fast peer: a real local server answering immediately, regardless
+            // of the 11s client timeout.
+            let fast_body = serde_json::to_string(&GossipResponse::Accepted(true)).unwrap();
+            let fast_server =
+                MockHttpServer::new_with_response(200, &fast_body, "application/json");
+            let fast_addr = IrysAddress::from([200_u8; 20]);
+            let fast_peer_id = IrysPeerId::from(fast_addr);
+            let fast_peer = PeerListItem {
+                peer_id: fast_peer_id,
+                mining_address: fast_addr,
+                address: create_peer_address("127.0.0.1", fast_server.port()),
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: false,
+                protocol_version: ProtocolVersion::default(),
+            };
+            peer_list.add_or_update_peer(fast_peer, true);
+
+            // Slow peer: unroutable, so still in-flight when the budget fires
+            // (its own timeout is 11s). Pre-set online so we can tell whether the
+            // budget-expiry path left it alone.
+            let (slow_peer_id, slow_peer) = unreachable_peer(201, 9_000, true);
+            peer_list.add_or_update_peer(slow_peer, true);
+
+            let start = Instant::now();
+            fixture
+                .client
+                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET)
+                .await;
+            let elapsed = start.elapsed();
+
+            // Lower bound: the budget, not an early return. Upper bound: well
+            // under the 11s per-request timeout, so it was the budget that cut
+            // the pass short and not the probe completing.
+            assert!(
+                elapsed >= TEST_BUDGET && elapsed < Duration::from_secs(5),
+                "expected the pass to be cut short by the {TEST_BUDGET:?} budget, got {elapsed:?}"
+            );
+            assert!(
+                peer_list
+                    .get_peer(&fast_peer_id)
+                    .expect("fast peer exists")
+                    .is_online,
+                "resolved peer must keep its fresh status"
+            );
+            assert!(
+                peer_list
+                    .get_peer(&slow_peer_id)
+                    .expect("slow peer exists")
+                    .is_online,
+                "unresolved peer must keep its previous status rather than being forced offline"
             );
         }
     }
