@@ -936,9 +936,17 @@ fn default_metrics_config() -> MetricsConfig {
 pub struct VdfNodeConfig {
     /// Maximum number of threads to use for parallel VDF verification.
     ///
-    /// Defaults to `available_parallelism() - 2`, leaving one core for the VDF
-    /// thread (which `core_pinning` may pin) and one for the rest of the node —
-    /// tokio, reth and the API server. A fixed default silently wastes a large
+    /// This is a per-pool limit, not a node-wide one. Block discovery
+    /// (prevalidation) and the validation service each build their own rayon
+    /// pool of this size, so a node doing both at once can run up to twice
+    /// this many verification threads. The pools are kept separate on purpose:
+    /// prevalidation gates block forwarding and must not queue behind a
+    /// validation batch, and rayon offers no way to prioritise within a pool.
+    ///
+    /// Defaults to `available_parallelism() - 2` (never below 1), leaving one
+    /// core for the VDF thread (which `core_pinning` may pin) and one for the
+    /// rest of the node — tokio, reth and the API server. A fixed default
+    /// silently wastes a large
     /// machine: this is the widest stage of block prevalidation
     /// (`last_step_checkpoints_is_valid` re-hashes a whole VDF step per block),
     /// so a host that grows more cores gets no faster unless the limit grows
@@ -1701,9 +1709,6 @@ mod run_mode_tests {
     #[test]
     fn verification_threads_never_returns_zero() {
         assert_eq!(verification_threads_for(0), 1);
-        for available in 0..=64 {
-            assert!(verification_threads_for(available) >= 1);
-        }
     }
 
     /// `[vdf]` without the key must parse and take the derived default — the

@@ -259,7 +259,10 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) block_tree_guard: BlockTreeReadGuard,
     /// Read only view of the mempool state
     pub(crate) mempool_guard: MempoolReadGuard,
-    /// Rayon thread pool that executes vdf steps
+    /// Rayon thread pool that executes vdf steps. Deliberately not shared with
+    /// the block-discovery pool: a task here is a whole VDF step (~1s of
+    /// hashing), and rayon has no priority lanes, so prevalidation jobs
+    /// injected into a shared pool would wait behind an in-flight batch.
     pub(crate) pool: rayon::ThreadPool,
     /// Execution payload provider for shadow transaction validation
     pub(crate) execution_payload_provider: ExecutionPayloadCache,
