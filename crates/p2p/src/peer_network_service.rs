@@ -968,19 +968,42 @@ impl PeerNetworkService {
         peer_list: PeerList,
         peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
-        let peer_protocol_versions = gossip_client
+        // Every terminal path below must report through `AnnouncementFinished`.
+        // `handle_announcement_finished` owns both the retry/backoff decision and
+        // the `currently_running_announcements` release, so a path that returns
+        // without reporting leaves the address latched as "announcement in
+        // flight" for the rest of the process: `needs_announce` then stays false
+        // and this peer is never announced to again. A peer that is merely
+        // unreachable at startup would become permanently unreachable — and a
+        // node whose public address changes between restarts depends on this
+        // announcement to be reachable at all.
+        let peer_protocol_versions = match gossip_client
             .get_protocol_versions(PeerAddress {
                 gossip: gossip_address,
                 ..Default::default()
             })
             .await
-            .map_err(|e| {
+        {
+            Ok(versions) => versions,
+            Err(e) => {
                 warn!(
                     "Failed to get protocol versions from gossip address {}: {}",
                     gossip_address, e
                 );
-                PeerListServiceError::PostVersionError(e.to_string())
-            })?;
+                // Transport failure — the peer may simply be down or restarting,
+                // so this is retryable and the backoff/blocklist ladder applies.
+                send_message_and_log_error(
+                    &sender,
+                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+                        peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
+                        success: false,
+                        retry: true,
+                    }),
+                );
+                return Err(PeerListServiceError::PostVersionError(e.to_string()));
+            }
+        };
 
         let our_supported_versions = irys_types::ProtocolVersion::supported_versions_u32();
 
@@ -995,6 +1018,18 @@ impl PeerNetworkService {
             warn!(
                 "Peer at {} has no compatible protocol versions. Peer supports: {:?}, We support: {:?}",
                 gossip_address, peer_protocol_versions, our_supported_versions
+            );
+            // Not retryable: the peer's supported set is a property of its build,
+            // not a transient condition. Report anyway so the in-flight latch is
+            // released and a later forced handshake can proceed.
+            send_message_and_log_error(
+                &sender,
+                PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+                    peer_api_address: api_address,
+                    peer_gossip_address: gossip_address,
+                    success: false,
+                    retry: false,
+                }),
             );
             return Err(PeerListServiceError::PostVersionError(format!(
                 "Peer {} has no compatible protocol versions",
@@ -1014,13 +1049,28 @@ impl PeerNetworkService {
             our_supported_versions
         );
 
-        let protocol_version: irys_types::ProtocolVersion =
-            negotiated_protocol_version.try_into().map_err(|e| {
-                PeerListServiceError::PostVersionError(format!(
+        let protocol_version: irys_types::ProtocolVersion = match negotiated_protocol_version
+            .try_into()
+        {
+            Ok(version) => version,
+            Err(e) => {
+                // A version we advertised but cannot map is a local inconsistency,
+                // not a peer fault; retrying cannot change the outcome.
+                send_message_and_log_error(
+                    &sender,
+                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+                        peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
+                        success: false,
+                        retry: false,
+                    }),
+                );
+                return Err(PeerListServiceError::PostVersionError(format!(
                     "negotiated unknown protocol version with {}: {}",
                     gossip_address, e
-                ))
-            })?;
+                )));
+            }
+        };
 
         // Create the appropriate handshake based on a negotiated version
         let peer_response_result = match protocol_version {
