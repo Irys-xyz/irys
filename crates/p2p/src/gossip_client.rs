@@ -1016,13 +1016,17 @@ impl GossipClient {
             }
             GossipResponse::Rejected(reason) => {
                 warn!("Health check rejected with reason: {:?}", reason);
-                self.circuit_breaker.record_failure(peer_id);
                 // Exhaustive on purpose: a new rejection reason must not inherit
                 // a neighbour's answer. Anything that is not "re-handshake me"
                 // means this peer will not serve us, so it is not healthy.
                 match reason {
                     RejectionReason::HandshakeRequired(requirement) => {
                         warn!("Health check requires handshake: {:?}", requirement);
+                        // No breaker failure: this peer answered, and the
+                        // handshake below is what repairs it. Tripping the
+                        // breaker would strand it — an open breaker short-
+                        // circuits this method before the handshake is asked
+                        // for, so the condition could never clear.
                         peer_list.initiate_handshake(peer.api, peer.gossip, true);
                         Ok(PeerHealth::HandshakePending)
                     }
@@ -1034,7 +1038,10 @@ impl GossipClient {
                     | RejectionReason::ProtocolMismatch
                     | RejectionReason::UnsupportedProtocolVersion(_)
                     | RejectionReason::UnsupportedFeature
-                    | RejectionReason::ChainIdMismatch => Ok(PeerHealth::Unhealthy),
+                    | RejectionReason::ChainIdMismatch => {
+                        self.circuit_breaker.record_failure(peer_id);
+                        Ok(PeerHealth::Unhealthy)
+                    }
                 }
             }
         }
@@ -3669,6 +3676,104 @@ mod tests {
     mod circuit_breaker_tests {
         use super::*;
         use irys_types::IrysAddress;
+
+        /// Probe `probed_peer` `count` times, each against a fresh server that
+        /// answers with `reason`, asserting the health verdict every time.
+        async fn probe_repeatedly_with_rejection(
+            client: &GossipClient,
+            peer_list: &PeerList,
+            probed_peer: &IrysPeerId,
+            reason: RejectionReason,
+            count: u32,
+            expected: PeerHealth,
+        ) {
+            let body = serde_json::to_string(&GossipResponse::<()>::Rejected(reason))
+                .expect("to serialize a rejection");
+            for _ in 0..count {
+                let server = MockHttpServer::new_with_response(200, &body, "application/json");
+                let port = server.port();
+                let health = client
+                    .check_health(
+                        probed_peer,
+                        create_peer_address("127.0.0.1", port),
+                        ProtocolVersion::V1,
+                        peer_list,
+                    )
+                    .await;
+                match health {
+                    Ok(health) => assert_eq!(health, expected),
+                    Err(err) => {
+                        // The probe never reached this server — an open breaker
+                        // short-circuits `check_health`. Connect so the mock's
+                        // accept thread can finish, or its `Drop` joins forever
+                        // and the failure surfaces as a hang instead.
+                        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+                        panic!("probe did not reach the peer: {err:?}");
+                    }
+                }
+            }
+        }
+
+        fn client_with_production_breaker() -> GossipClient {
+            GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(1),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([1_u8; 20]),
+                CircuitBreakerConfig::p2p_defaults(),
+                tokio::runtime::Handle::current(),
+            )
+        }
+
+        /// A peer asking for a handshake is answering us, and the handshake the
+        /// probe requests is what repairs it. Tripping the breaker on that reply
+        /// would strand the peer: an open breaker short-circuits `check_health`
+        /// before it can ask for the handshake, so the condition never clears.
+        #[tokio::test]
+        async fn repeated_handshake_required_does_not_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([9_u8; 20]));
+
+            // Well past the production failure threshold of 5.
+            probe_repeatedly_with_rejection(
+                &client,
+                &peer_list,
+                &probed_peer,
+                RejectionReason::HandshakeRequired(None),
+                8,
+                PeerHealth::HandshakePending,
+            )
+            .await;
+
+            assert!(
+                client.circuit_breaker.is_available(&probed_peer),
+                "a peer awaiting a handshake must stay probeable"
+            );
+        }
+
+        /// The control: a rejection that means "I will not serve you" must still
+        /// trip the breaker, or moving the failure record buys nothing.
+        #[tokio::test]
+        async fn repeated_unhealthy_rejections_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([10_u8; 20]));
+
+            probe_repeatedly_with_rejection(
+                &client,
+                &peer_list,
+                &probed_peer,
+                RejectionReason::ChainIdMismatch,
+                5,
+                PeerHealth::Unhealthy,
+            )
+            .await;
+
+            assert!(
+                !client.circuit_breaker.is_available(&probed_peer),
+                "a peer that will not serve us must trip the breaker"
+            );
+        }
 
         #[tokio::test]
         async fn test_health_check_respects_circuit_breaker() {

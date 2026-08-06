@@ -295,8 +295,11 @@ impl BlockDiscoveryService {
                                     "invalid"
                                 }
                             }
+                            // Database, channel and index-consistency faults say
+                            // nothing about the block; `metric_label` already
+                            // counts them as "internal" on the error counter.
+                            BlockDiscoveryError::InternalError(_) => "internal_error",
                             BlockDiscoveryError::PreviousBlockNotFound { .. }
-                            | BlockDiscoveryError::InternalError(_)
                             | BlockDiscoveryError::DuplicateTransaction(_)
                             | BlockDiscoveryError::MissingTransactions(_)
                             | BlockDiscoveryError::InvalidEpochBlock(_)
