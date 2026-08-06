@@ -200,6 +200,11 @@ pub enum GossipClientError {
     GetJsonResponsePayload(String, String),
     #[error("Circuit breaker open for peer {0}")]
     CircuitBreakerOpen(IrysPeerId),
+    /// The peer applied backpressure. Distinct from a transport failure: the
+    /// peer is up and talking to us, it is just asking us to come back later,
+    /// so the caller should back off rather than treat it as a fault.
+    #[error("Peer {0} rate limited the request")]
+    RateLimited(String),
 }
 
 #[derive(Debug, Clone)]
@@ -702,10 +707,15 @@ impl GossipClient {
                         retry_after: None,
                     },
                 )),
+                // Backpressure, not a fault: the peer is up and asking us to
+                // come back later, so the caller backs off and retries rather
+                // than recording an unexplained request failure.
+                RejectionReason::RateLimited => {
+                    Err(GossipClientError::RateLimited(peer.to_string()))
+                }
                 RejectionReason::HandshakeRequired(_)
                 | RejectionReason::GossipDisabled
                 | RejectionReason::InvalidData
-                | RejectionReason::RateLimited
                 | RejectionReason::UnableToVerifyOrigin
                 | RejectionReason::UnsupportedProtocolVersion(_)
                 | RejectionReason::UnsupportedFeature => Err(GossipClientError::GetRequest(
@@ -783,10 +793,15 @@ impl GossipClient {
                         retry_after: None,
                     },
                 )),
+                // Backpressure, not a fault: the peer is up and asking us to
+                // come back later, so the caller backs off and retries rather
+                // than recording an unexplained request failure.
+                RejectionReason::RateLimited => {
+                    Err(GossipClientError::RateLimited(peer.to_string()))
+                }
                 RejectionReason::HandshakeRequired(_)
                 | RejectionReason::GossipDisabled
                 | RejectionReason::InvalidData
-                | RejectionReason::RateLimited
                 | RejectionReason::UnableToVerifyOrigin
                 | RejectionReason::UnsupportedProtocolVersion(_)
                 | RejectionReason::UnsupportedFeature => Err(GossipClientError::GetRequest(
@@ -2956,6 +2971,85 @@ mod tests {
         #[tokio::test]
         async fn test_500_internal_server_error() {
             test_health_check_error_status(500, StatusCode::INTERNAL_SERVER_ERROR).await;
+        }
+    }
+
+    mod handshake_rejection_tests {
+        use super::*;
+        use irys_types::{HandshakeRequest, HandshakeRequestV2};
+
+        fn rejection_body(reason: RejectionReason) -> String {
+            serde_json::to_string(&GossipResponse::<()>::Rejected(reason))
+                .expect("to serialize a rejection")
+        }
+
+        /// A rate limit is the peer applying backpressure, not a fault. It has
+        /// to be distinguishable from an unexpected rejection so the caller can
+        /// back off instead of recording an unexplained request failure.
+        #[tokio::test]
+        async fn v1_handshake_reports_a_rate_limit_as_a_rate_limit() {
+            let body = rejection_body(RejectionReason::RateLimited);
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+
+            let result = fixture
+                .client
+                .post_handshake_v1(
+                    format!("127.0.0.1:{}", server.port()).parse().unwrap(),
+                    HandshakeRequest::default(),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(GossipClientError::RateLimited(_))),
+                "expected a rate-limit error, got {:?}",
+                result
+            );
+        }
+
+        #[tokio::test]
+        async fn v2_handshake_reports_a_rate_limit_as_a_rate_limit() {
+            let body = rejection_body(RejectionReason::RateLimited);
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+
+            let result = fixture
+                .client
+                .post_handshake_v2(
+                    format!("127.0.0.1:{}", server.port()).parse().unwrap(),
+                    HandshakeRequestV2::default(),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(GossipClientError::RateLimited(_))),
+                "expected a rate-limit error, got {:?}",
+                result
+            );
+        }
+
+        /// The reasons we genuinely do not expect from a handshake must stay
+        /// distinct from backpressure, or splitting the rate limit out buys
+        /// nothing.
+        #[tokio::test]
+        async fn v1_handshake_still_reports_an_unexpected_reason_as_a_request_error() {
+            let body = rejection_body(RejectionReason::GossipDisabled);
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+
+            let result = fixture
+                .client
+                .post_handshake_v1(
+                    format!("127.0.0.1:{}", server.port()).parse().unwrap(),
+                    HandshakeRequest::default(),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(GossipClientError::GetRequest(_, _))),
+                "expected an unexpected-rejection request error, got {:?}",
+                result
+            );
         }
     }
 
