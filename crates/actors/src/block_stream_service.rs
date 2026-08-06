@@ -88,6 +88,19 @@ impl BlockStreamHandle {
         }
     }
 
+    /// Handle for nodes that do not run the durable block-stream producer
+    /// (`http.expose_internal_api = false`). Live subscribe registers no sender;
+    /// `/internal/*` routes that use this handle are unmounted when the flag is off.
+    pub fn disabled(db: DatabaseProvider) -> Self {
+        Self {
+            live: Mutex::new(LiveSubscribers {
+                senders: Vec::new(),
+                closed: true,
+            }),
+            db,
+        }
+    }
+
     /// Atomic replay→live handover: under one lock, snapshot the durable replay bounds `[start, end)` and
     /// register a live sender, so no append interleaves between the snapshot and the registration. The
     /// caller replays `[start, end)` via [`Self::replay_page`] (after the fan-out lock is released), then
@@ -182,7 +195,8 @@ impl BlockStreamHandle {
     }
 
     /// Producer-only. Append `event` to the durable log (assigning `seq`) and fan it out, holding
-    /// the same lock as [`Self::subscribe`].
+    /// the same lock as [`Self::subscribe`]. Used by unit tests and startup reconciliation; the
+    /// production hot path appends inside confirmation/migration txns and calls [`Self::fanout_only`].
     fn append_and_fanout(&self, event: StreamEvent) -> eyre::Result<u64> {
         let payload = serde_json::to_vec(&event)?;
         // The lock must cover the durable append, not just the fan-out: `subscribe` snapshots its
@@ -196,14 +210,30 @@ impl BlockStreamHandle {
             .db
             .update_eyre(|tx| irys_database::append_block_stream_event(tx, payload))?;
         let frame = Arc::new(StreamFrame { seq, event });
+        Self::fanout_locked(&mut live, &frame);
+        Ok(seq)
+    }
+
+    /// Fan out a frame that is already durable (Phase 4 production path). Does not open a RW txn.
+    /// Live SSE clients skip `seq < end` from their subscribe snapshot so a race with late
+    /// registration cannot duplicate frames on the wire.
+    fn fanout_only(&self, frame: &Arc<StreamFrame>) -> eyre::Result<()> {
+        let mut live = self
+            .live
+            .lock()
+            .map_err(|_| eyre::eyre!("block-stream fan-out lock poisoned"))?;
+        Self::fanout_locked(&mut live, frame);
+        Ok(())
+    }
+
+    fn fanout_locked(live: &mut LiveSubscribers, frame: &Arc<StreamFrame>) {
         // Drop subscribers whose receiver is closed or lagging past `SUBSCRIBER_BUFFER`; a dropped
         // follower reconnects and replays from the durable log via `subscribe(from_seq)`.
         live.senders.retain(|sender| {
             sender
-                .try_send(Arc::clone(&frame)) // clone: live subscribers share one immutable frame allocation
+                .try_send(Arc::clone(frame)) // clone: live subscribers share one immutable frame allocation
                 .is_ok()
         });
-        Ok(seq)
     }
 
     fn prune(&self, keep_from_seq: u64) -> eyre::Result<()> {
@@ -438,6 +468,11 @@ impl Producer {
 
     fn handle_signal(&mut self, signal: BlockStreamSignal) -> eyre::Result<()> {
         match signal {
+            BlockStreamSignal::Durable(frame) => {
+                self.note_event_for_dedup(&frame.event);
+                self.handle.fanout_only(&frame)?;
+                self.maybe_prune(frame.seq)?;
+            }
             BlockStreamSignal::Confirmed(block) => {
                 let hash = block.header().block_hash;
                 if self.emitted.contains(&hash) {
@@ -495,8 +530,33 @@ impl Producer {
         Ok(())
     }
 
+    fn note_event_for_dedup(&mut self, event: &StreamEvent) {
+        match event {
+            StreamEvent::Observed(block) => {
+                self.emitted.put(block.header.block_hash, ());
+            }
+            StreamEvent::Finalized(block) => {
+                self.finalized.put(block.header.block_hash, ());
+            }
+            StreamEvent::Reorged {
+                orphaned, new_fork, ..
+            } => {
+                for block in new_fork {
+                    self.emitted.put(block.header.block_hash, ());
+                }
+                for block in orphaned {
+                    self.finalized.pop(&block.header.block_hash);
+                }
+            }
+        }
+    }
+
     fn append(&mut self, event: StreamEvent) -> eyre::Result<()> {
         let seq = self.handle.append_and_fanout(event)?;
+        self.maybe_prune(seq)
+    }
+
+    fn maybe_prune(&mut self, seq: u64) -> eyre::Result<()> {
         self.appends_since_prune += 1;
         if self.appends_since_prune >= PRUNE_INTERVAL {
             self.appends_since_prune = 0;

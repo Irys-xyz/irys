@@ -5,10 +5,12 @@ exposes the node's durable block-event log two ways — a push stream and an equ
 canonical block reads and an unpacked chunk-range read. Both transports carry the **same** `StreamFrame`s
 from the **same** seq-keyed log, so a follower may use either and reach identical state.
 
-> **Security.** These routes carry no application-layer authentication. They are mounted only when the
-> node sets `http.expose_internal_api` (off by default); when enabled they ride the same HTTP listener as
-> the public API. A deployment that enables them **must** restrict `/internal/*` at the network layer
-> (firewall / reverse proxy / bind address) to the trusted gateway.
+> **Security / runtime.** These routes carry no application-layer authentication. They are mounted only
+> when the node sets `http.expose_internal_api` (off by default). That same flag starts the durable
+> block-stream producer that appends `observed` / `finalized` / `reorged` frames; when the flag is off
+> the producer is not started and no stream log is written. When enabled they ride the same HTTP
+> listener as the public API. A deployment that enables them **must** restrict `/internal/*` at the
+> network layer (firewall / reverse proxy / bind address) to the trusted gateway.
 
 ## The event log and its cursor
 
@@ -124,12 +126,13 @@ size requests within `MAX_CHUNK_SPAN`, or a conforming node would answer with a 
   request that is malformed (bad `ledger`, unparsable or inverted `offset`) or wider than `MAX_CHUNK_SPAN`.
 - `5xx` only on a genuine log-read fault.
 - **`404` means the endpoint is not available.** The `/internal` routes are mounted only when the node
-  sets `http.expose_internal_api` (off by default); a node with it disabled, or an older build that lacks
-  the route entirely, serves a normal not-found. The gateway's transport selector treats `404` /
-  connection-refused as "this transport is unsupported" and falls back accordingly. When the routes are
-  mounted they never return `404` for an empty, short, or out-of-range log. The one exception is
-  `GET /internal/blocks/{height}`, whose `404` also means "no canonical block at that height" — a
-  transport prober must key on the stream/events routes, never on the by-height read.
+  sets `http.expose_internal_api` (off by default); with the flag off the durable producer is also not
+  started. A node with it disabled, or an older build that lacks the route entirely, serves a normal
+  not-found. The gateway's transport selector treats `404` / connection-refused as "this transport is
+  unsupported" and falls back accordingly. When the routes are mounted they never return `404` for an
+  empty, short, or out-of-range log. The one exception is `GET /internal/blocks/{height}`, whose `404`
+  also means "no canonical block at that height" — a transport prober must key on the stream/events
+  routes, never on the by-height read.
 
 ## Limitation: the crash window
 

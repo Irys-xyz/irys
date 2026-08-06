@@ -18,6 +18,12 @@ pub const MDBX_RW_TX_LOCK_STALLS_TOTAL: &str = "libmdbx.rw_tx_lock_stalls_total"
 /// not via the [`metrics::describe_histogram!`] macro.
 pub const DB_TX_MUT_ACQUIRE_DURATION_SECONDS: &str = "db.tx_mut_acquire_duration_seconds";
 
+/// Histogram name for time spent waiting on the process-wide consensus writer
+/// gate (seconds), labelled by `call_site` and `scope`. Recorded before
+/// `begin_rw_txn` so residual MDBX Busy sleeps (250 ms) are not conflated with
+/// app-level queueing.
+pub const DB_CONSENSUS_WRITER_GATE_WAIT_SECONDS: &str = "db.consensus_writer_gate_wait_seconds";
+
 /// Span field name read by [`MdbxLockMetricsLayer`] to attribute a stall to a
 /// particular database. Callers should set this field on a parent span using
 /// one of the `DB_SCOPE_*` constants below.
@@ -70,6 +76,11 @@ pub(crate) fn describe_mdbx_metrics() {
         DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
         metrics::Unit::Seconds,
         "Time spent acquiring a libmdbx writer transaction via begin_rw_txn, attributed by scope. Both successful and failed acquires are recorded so genuinely-slow-then-failed waits are visible."
+    );
+    metrics::describe_histogram!(
+        DB_CONSENSUS_WRITER_GATE_WAIT_SECONDS,
+        metrics::Unit::Seconds,
+        "Time spent waiting on the process-wide irys-consensus writer gate before begin_rw_txn, attributed by call_site and scope."
     );
 }
 

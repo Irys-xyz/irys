@@ -169,19 +169,23 @@ pub struct ReorgEvent {
     pub db: Option<DatabaseProvider>,
 }
 
-/// A per-block signal fed to the block-stream producer over a dedicated unbounded channel.
+/// Signals fed to the block-stream producer over a dedicated unbounded channel.
 ///
-/// Emitted from the node's authoritative sites — the `blocks_to_confirm` loop (`observed`), the
-/// reorg construction (`reorged`), and the per-block migration loop (`finalized`) — each carrying
-/// the `Arc<SealedBlock>` already in hand. Unbounded so it cannot drop under backpressure; the
-/// producer turns these into durable, fanned-out `StreamFrame`s.
+/// Production (Phase 4): confirmation/migration/reorg write the durable log inside the same
+/// consensus MDBX transaction as metadata/index work, then emit [`Self::Durable`] so the producer
+/// only fans out to live SSE subscribers (no second RW txn).
+///
+/// [`Self::Confirmed`] / [`Self::Finalized`] / [`Self::Reorged`] still append+fanout for unit tests
+/// and any residual callers; startup reconciliation also appends via the producer.
 #[derive(Debug, Clone)]
 pub enum BlockStreamSignal {
-    /// A block reached canonical confirmation ⇒ `observed`.
+    /// Frame already committed to the durable log; producer fans out only.
+    Durable(Arc<irys_types::block_stream::StreamFrame>),
+    /// A block reached canonical confirmation ⇒ append `observed` then fan out.
     Confirmed(Arc<SealedBlock>),
-    /// A block migrated to the index ⇒ `finalized`.
+    /// A block migrated to the index ⇒ append `finalized` then fan out.
     Finalized(Arc<SealedBlock>),
-    /// A reorg occurred ⇒ one batched `reorged` frame.
+    /// A reorg occurred ⇒ append one batched `reorged` frame then fan out.
     Reorged {
         fork_parent: Arc<IrysBlockHeader>,
         old_fork: Arc<Vec<Arc<SealedBlock>>>,
@@ -568,19 +572,47 @@ impl BlockTreeServiceInner {
             .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
     }
 
+    /// Whether the durable block-stream producer is running (same gate as `/internal/*` routes).
+    fn block_stream_enabled(&self) -> bool {
+        self.config.node_config.http.expose_internal_api
+    }
+
     /// Migrates finalized blocks into the block index and DB via `BlockMigrationService`.
     fn migrate_block(&mut self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
+        let emit_stream = self.block_stream_enabled();
         let block_stream = self.service_senders.block_stream.clone();
-        self.block_migration_service
-            .migrate_blocks(block, |sealed| {
-                if block_stream
-                    .send(BlockStreamSignal::Finalized(Arc::clone(sealed)))
-                    .is_err()
+        self.block_migration_service.migrate_blocks(
+            block,
+            emit_stream,
+            |_sealed, stream_frame| {
+                if let Some(frame) = stream_frame
+                    && block_stream
+                        .send(BlockStreamSignal::Durable(Arc::new(frame)))
+                        .is_err()
                 {
-                    tracing::debug!("block-stream producer gone; dropping finalized signal");
+                    tracing::debug!(
+                        "block-stream producer gone; dropping durable finalized fanout"
+                    );
                 }
-            })?;
+            },
+        )?;
         Ok(())
+    }
+
+    fn fanout_durable_stream_frames(&self, frames: Vec<irys_types::block_stream::StreamFrame>) {
+        if frames.is_empty() {
+            return;
+        }
+        let block_stream = &self.service_senders.block_stream;
+        for frame in frames {
+            if block_stream
+                .send(BlockStreamSignal::Durable(Arc::new(frame)))
+                .is_err()
+            {
+                debug!("block-stream producer gone; dropping durable stream fanout");
+                break;
+            }
+        }
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -1225,14 +1257,27 @@ impl BlockTreeServiceInner {
             self.send_epoch_events(&epoch_block)?;
         }
 
-        // Persist metadata atomically (same code path for both normal blocks and reorgs)
-        {
+        // Persist metadata atomically (same code path for both normal blocks and reorgs).
+        // Phase 4: durable observed/reorged stream frames land in this same RW txn.
+        let stream_frames = {
+            use crate::block_migration_service::StreamReorgAppend;
+            let emit_stream = self.block_stream_enabled();
             let old_fork: &[Arc<SealedBlock>] = reorg_event
                 .as_ref()
                 .map_or(&[] as &[_], |e| e.old_fork.as_ref());
-            self.block_migration_service
-                .persist_metadata(old_fork, &blocks_to_confirm)?;
-        }
+            let stream_reorg = reorg_event.as_ref().map(|e| StreamReorgAppend {
+                fork_parent: Arc::clone(&e.fork_parent),
+                old_fork: Arc::clone(&e.old_fork),
+                new_fork: Arc::clone(&e.new_fork),
+            });
+            self.block_migration_service.persist_metadata(
+                old_fork,
+                &blocks_to_confirm,
+                emit_stream,
+                stream_reorg.as_ref(),
+            )?
+        };
+        self.fanout_durable_stream_frames(stream_frames);
 
         // Broadcast reorg event if applicable
         let reorg_occurred = reorg_event.is_some();
@@ -1240,20 +1285,6 @@ impl BlockTreeServiceInner {
             // Deep reorg may poison VDF seeds; re-anchor before reorg fans out.
             self.maybe_reanchor_vdf_after_reorg(&arc_block, &reorg_event);
 
-            // Feed the block-stream producer one batched `reorged` signal (cheap Arc clones of the
-            // forks already in hand) before the broadcast send consumes the event.
-            if self
-                .service_senders
-                .block_stream
-                .send(BlockStreamSignal::Reorged {
-                    fork_parent: Arc::clone(&reorg_event.fork_parent),
-                    old_fork: Arc::clone(&reorg_event.old_fork),
-                    new_fork: Arc::clone(&reorg_event.new_fork),
-                })
-                .is_err()
-            {
-                debug!("block-stream producer gone; dropping reorged signal");
-            }
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 error!(
                     "Failed to broadcast reorg event - mempool state may be stale: {:?}",
@@ -1291,21 +1322,11 @@ impl BlockTreeServiceInner {
             // Emit consensus events
             self.emit_fcu(markers).await?;
 
-            // Emit block confirmations for all relevant blocks. The mempool may
-            // already be shutting down (its receiver dropped); log and continue
-            // — block confirmation itself is still valid, the mempool just
-            // won't be informed of this particular block.
+            // Mempool confirmations. The mempool may already be shutting down (its receiver
+            // dropped); log and continue — block confirmation itself is still valid.
+            // Stream `observed`/`reorged` frames were already durable-appended + fanout-queued
+            // inside `persist_metadata` (Phase 4); migration appends `finalized` the same way.
             for sealed_block in &blocks_to_confirm {
-                // Feed the block-stream producer one `observed` signal per confirmed block — the
-                // authoritative per-block confirmation set (includes ancestors on a fork switch).
-                if self
-                    .service_senders
-                    .block_stream
-                    .send(BlockStreamSignal::Confirmed(Arc::clone(sealed_block)))
-                    .is_err()
-                {
-                    debug!("block-stream producer gone; dropping confirmed signal");
-                }
                 if let Err(e) =
                     self.service_senders
                         .mempool
@@ -1321,7 +1342,6 @@ impl BlockTreeServiceInner {
                 }
             }
 
-            // Delegate migration to BlockMigrationService (validates continuity internally)
             if tip_changed {
                 self.migrate_block(&markers.migration_block)?;
             }

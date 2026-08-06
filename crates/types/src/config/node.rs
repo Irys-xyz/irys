@@ -731,10 +731,13 @@ pub struct HttpConfig {
     /// Actix worker count. Defaults to half the available system threads.
     #[serde(default = "default_actix_workers")]
     pub actix_workers: usize,
-    /// Whether to mount the node-internal `/internal/*` endpoints (block-stream SSE, canonical
-    /// block reads, unpacked chunk-range reads) on this HTTP listener. Off by default: these routes
-    /// carry no application-layer authentication, so enable them only on a node whose HTTP bind is
-    /// restricted to a trusted gateway at the network layer (firewall / reverse proxy / bind address).
+    /// Whether to expose the node-internal block-follower stack: mount `/internal/*` HTTP routes
+    /// (block-stream SSE, canonical block reads, unpacked chunk-range reads) **and** run the durable
+    /// block-stream producer that appends `observed` / `finalized` / `reorged` frames to the
+    /// consensus MDBX log. Off by default: routes carry no application-layer authentication, and
+    /// the producer is unnecessary write load when nothing can subscribe. Enable only on a node
+    /// whose HTTP bind is restricted to a trusted gateway at the network layer (firewall / reverse
+    /// proxy / bind address).
     #[serde(default)]
     pub expose_internal_api: bool,
 }
