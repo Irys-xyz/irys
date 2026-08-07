@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785881008262,
+  "lastUpdate": 1786126947752,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14191,6 +14191,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000116,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "976e4b6fabbe8a1d5d1a4ec5a6c1ba768d4d2574",
+          "message": "fix(consensus): eliminate block-stream MDBX writer contention (#1549)\n\n* fix(consensus): eliminate block-stream MDBX writer contention\n\n* fix: address review findings\n\n* fix(consensus): scope writer gates per MDBX env and close stream races\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix: address review findings\n\n* chore: fmt\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix: address review findings",
+          "timestamp": "2026-08-07T18:58:05+01:00",
+          "tree_id": "f0046445f4b41fbdf2a214acdef70aed449aa925",
+          "url": "https://github.com/Irys-xyz/irys/commit/976e4b6fabbe8a1d5d1a4ec5a6c1ba768d4d2574"
+        },
+        "date": 1786126945299,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015539,
+            "range": "± 0.001141",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153873,
+            "range": "± 0.008498",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.564067,
+            "range": "± 0.109506",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.50164,
+            "range": "± 0.454729",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082581,
+            "range": "± 0.004011",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 835.42569,
+            "range": "± 9.932832",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1077.923773,
+            "range": "± 34.870005",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.132921,
+            "range": "± 0.009112",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1239.32087,
+            "range": "± 95.820132",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1593.684319,
+            "range": "± 18.54805",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034561,
+            "range": "± 0.001772",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.510032,
+            "range": "± 1.801944",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.685788,
+            "range": "± 1.473906",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
