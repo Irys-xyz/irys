@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785881008262,
+  "lastUpdate": 1786102886435,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14190,6 +14190,110 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000116,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "8f45754fcc30cb26e36b620809194cf0c36bd903",
+          "message": "feat(epoch): water-fill scarce capacity across miner addresses",
+          "timestamp": "2026-08-04T21:41:05Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1546/commits/8f45754fcc30cb26e36b620809194cf0c36bd903"
+        },
+        "date": 1786102884958,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012304,
+            "range": "± 0.000314",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119838,
+            "range": "± 0.001909",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.218917,
+            "range": "± 0.039233",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.948068,
+            "range": "± 0.236506",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07487,
+            "range": "± 0.000564",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 753.128567,
+            "range": "± 16.072962",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.423581,
+            "range": "± 46.518102",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119842,
+            "range": "± 0.000207",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1207.628031,
+            "range": "± 11.206773",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1583.903811,
+            "range": "± 17.650231",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034924,
+            "range": "± 0.001963",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.727092,
+            "range": "± 1.692887",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.512789,
+            "range": "± 3.089058",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
