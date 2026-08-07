@@ -501,6 +501,10 @@ impl InnerCacheTask {
             let mut wrapped = false;
             loop {
                 while let Some((data_root, cached)) = walker.next().transpose()? {
+                    // The wrap stops at the seek key so no root is visited twice.
+                    if wrapped && data_root >= seek_key {
+                        break;
+                    }
                     if candidates.len() >= MAX_EVICTIONS_PER_RUN {
                         warn!(
                             candidates = candidates.len(),

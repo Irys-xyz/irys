@@ -160,8 +160,10 @@ transition that persisted — the two are atomic — and a frame cannot exist fo
 not. The producer's remaining append path is startup reconciliation, which repairs `finalized`
 frames that a pre-atomic-append build lost between a migration commit and its separate producer
 append, walking the block index tail and appending the gap in height order. Live SSE delivery is
-best-effort on top of this durable log: a frame whose fan-out is missed (say, a halted producer) is
-recovered through replay on reconnect, exactly as after a `truncated` poll.
+best-effort on top of this durable log: a committed frame whose fan-out is missed (say, a halted
+producer) is recovered through replay on reconnect for as long as it remains retained. Only a cursor
+that has fallen below `lowest_retained_seq` is unrecoverable by replay — that is the `truncated`
+case, which returns no frames and requires a re-bootstrap from canonical block reads.
 
 **FCU timing.** An `observed` (or `reorged`) frame becomes durable when confirmation's consensus
 txn commits, which is **before** the execution-layer fork-choice update (FCU) for that tip.

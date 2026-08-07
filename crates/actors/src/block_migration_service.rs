@@ -473,90 +473,100 @@ impl BlockMigrationService {
             }
         };
 
-        let stream_frames = self.db.update_eyre_at("persist_metadata", |tx| {
-            // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
-            // block_hash from any CachedDataRoot.block_set that retained it.
-            //
-            // Per-ledger semantics:
-            //   - Term-ledger (Submit, OneYear, ThirtyDay): delete the row.
-            //     The reorg invariant guarantees the matching Publish block is
-            //     also in `blocks_to_clear` (if the tx was promoted at all),
-            //     so either iteration order ends with the row deleted.
-            //   - Publish ledger: clear `promoted_height` only.  A Submit-confirmed
-            //     `included_height` on the same tx must not be disturbed
-            //     (Publish-only orphan: Submit stays canonical, row kept as
-            //     `{Some, None}`).
-            for block in blocks_to_clear {
-                let header = block.header();
-                let orphan_block_hash = header.block_hash;
+        let (stream_frames, prune_interval_reached) =
+            self.db.update_eyre_at("persist_metadata", |tx| {
+                // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
+                // block_hash from any CachedDataRoot.block_set that retained it.
+                //
+                // Per-ledger semantics:
+                //   - Term-ledger (Submit, OneYear, ThirtyDay): delete the row.
+                //     The reorg invariant guarantees the matching Publish block is
+                //     also in `blocks_to_clear` (if the tx was promoted at all),
+                //     so either iteration order ends with the row deleted.
+                //   - Publish ledger: clear `promoted_height` only.  A Submit-confirmed
+                //     `included_height` on the same tx must not be disturbed
+                //     (Publish-only orphan: Submit stays canonical, row kept as
+                //     `{Some, None}`).
+                for block in blocks_to_clear {
+                    let header = block.header();
+                    let orphan_block_hash = header.block_hash;
 
-                for dl in &header.data_ledgers {
-                    let tx_ids = &dl.tx_ids.0;
-                    if tx_ids.is_empty() {
-                        continue;
+                    for dl in &header.data_ledgers {
+                        let tx_ids = &dl.tx_ids.0;
+                        if tx_ids.is_empty() {
+                            continue;
+                        }
+                        if dl.ledger_id == DataLedger::Publish as u32 {
+                            irys_database::batch_clear_data_tx_promoted_height(tx, tx_ids)?;
+                        } else {
+                            // Term ledger (Submit / OneYear / ThirtyDay)
+                            irys_database::batch_clear_data_tx_included_height(tx, tx_ids)?;
+                        }
                     }
-                    if dl.ledger_id == DataLedger::Publish as u32 {
-                        irys_database::batch_clear_data_tx_promoted_height(tx, tx_ids)?;
-                    } else {
-                        // Term ledger (Submit / OneYear / ThirtyDay)
-                        irys_database::batch_clear_data_tx_included_height(tx, tx_ids)?;
+                    self.clear_commitment_inclusions(tx, header)?;
+
+                    for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
+                        irys_database::remove_data_root_block_set_entry(
+                            tx,
+                            submit_tx.data_root,
+                            orphan_block_hash,
+                        )?;
                     }
                 }
-                self.clear_commitment_inclusions(tx, header)?;
-
-                for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                    irys_database::remove_data_root_block_set_entry(
-                        tx,
-                        submit_tx.data_root,
-                        orphan_block_hash,
-                    )?;
+                // Phase 3: Maintain the CachedDataRoot.block_set hint for the
+                //          canonical Submit-ledger txs we just confirmed (update-only,
+                //          does not create cache entries for data_roots the node
+                //          never tracked chunks for).
+                //
+                // Canonical tx metadata (`IrysDataTxMetadata` / `IrysCommitmentTxMetadata`)
+                // is deliberately NOT written here. It is written only at migration
+                // (`persist_block`), atomically with `MigratedBlockHashes` and the
+                // block header — so a metadata row can never exist without its MBH
+                // entry naming the same canonical block. Writing it here (at
+                // confirmation, depth 0) previously let an orphaned tip strand a
+                // metadata row that a later block migrating at the same height would
+                // read as canonical. Unmigrated blocks are served branch-correctly
+                // from the in-memory block tree (see `tx_inclusion` / the validator's
+                // by-hash walk), so the DB metadata is only ever consulted for
+                // migrated heights, where `MigratedBlockHashes` is branch-stable.
+                // `block_set` is only a non-consensus hint (never read by
+                // `find_canonical_ledger_range` / `canonical_*_height`), and the
+                // ingress-proof pipeline needs it populated at confirmation, so it
+                // stays here.
+                for block in blocks_to_confirm {
+                    let block_hash = block.header().block_hash;
+                    for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
+                        irys_database::update_data_root_block_set(
+                            tx,
+                            submit_tx.data_root,
+                            block_hash,
+                        )?;
+                    }
                 }
-            }
-            // Phase 3: Maintain the CachedDataRoot.block_set hint for the
-            //          canonical Submit-ledger txs we just confirmed (update-only,
-            //          does not create cache entries for data_roots the node
-            //          never tracked chunks for).
-            //
-            // Canonical tx metadata (`IrysDataTxMetadata` / `IrysCommitmentTxMetadata`)
-            // is deliberately NOT written here. It is written only at migration
-            // (`persist_block`), atomically with `MigratedBlockHashes` and the
-            // block header — so a metadata row can never exist without its MBH
-            // entry naming the same canonical block. Writing it here (at
-            // confirmation, depth 0) previously let an orphaned tip strand a
-            // metadata row that a later block migrating at the same height would
-            // read as canonical. Unmigrated blocks are served branch-correctly
-            // from the in-memory block tree (see `tx_inclusion` / the validator's
-            // by-hash walk), so the DB metadata is only ever consulted for
-            // migrated heights, where `MigratedBlockHashes` is branch-stable.
-            // `block_set` is only a non-consensus hint (never read by
-            // `find_canonical_ledger_range` / `canonical_*_height`), and the
-            // ingress-proof pipeline needs it populated at confirmation, so it
-            // stays here.
-            for block in blocks_to_confirm {
-                let block_hash = block.header().block_hash;
-                for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                    irys_database::update_data_root_block_set(tx, submit_tx.data_root, block_hash)?;
-                }
-            }
 
-            // Phase 4: append pre-serialized durable stream frames in this same RW txn.
-            let mut frames = Vec::with_capacity(prepared_stream.len());
-            for (event, payload) in prepared_stream {
-                let seq = append_block_stream_event(tx, payload)?;
-                frames.push(StreamFrame { seq, event });
-            }
-            // Writer-side retention: prune even if the producer has halted.
-            if let Some(last) = frames.last() {
-                let n = u64::try_from(frames.len()).unwrap_or(u64::MAX);
-                self.maybe_prune_stream_in_tx(tx, last.seq, n)?;
-            }
-            Ok(frames)
-        })?;
+                // Phase 4: append pre-serialized durable stream frames in this same RW txn.
+                let mut frames = Vec::with_capacity(prepared_stream.len());
+                for (event, payload) in prepared_stream {
+                    let seq = append_block_stream_event(tx, payload)?;
+                    frames.push(StreamFrame { seq, event });
+                }
+                // Writer-side retention: prune even if the producer has halted.
+                let mut prune_interval_reached = false;
+                if let Some(last) = frames.last() {
+                    let n = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+                    prune_interval_reached = self.maybe_prune_stream_in_tx(tx, last.seq, n)?;
+                }
+                Ok((frames, prune_interval_reached))
+            })?;
         // Note only after commit succeeds (update_eyre_at returned Ok), reusing the
         // guard held across check+append. `Disabled` produced no frames to note.
         if let Some(ref mut dedup) = stream_dedup {
             Self::note_stream_frames_locked(dedup, &stream_frames);
         }
+        self.note_stream_appends(
+            u64::try_from(stream_frames.len()).unwrap_or(u64::MAX),
+            prune_interval_reached,
+        );
 
         info!(
             cleared_blocks = blocks_to_clear.len(),
@@ -1111,12 +1121,16 @@ impl BlockMigrationService {
             if let Some((event, payload)) = prepared_finalized {
                 let seq = append_block_stream_event(tx, payload)?;
                 // Writer-side retention: prune even if the producer has halted.
-                self.maybe_prune_stream_in_tx(tx, seq, 1)?;
-                Ok(Some(StreamFrame { seq, event }))
+                let prune_interval_reached = self.maybe_prune_stream_in_tx(tx, seq, 1)?;
+                Ok(Some((StreamFrame { seq, event }, prune_interval_reached)))
             } else {
                 Ok(None)
             }
         })?;
+        let frame = frame.map(|(frame, prune_interval_reached)| {
+            self.note_stream_appends(1, prune_interval_reached);
+            frame
+        });
         if let Some(frame) = &frame {
             // Commit succeeded; record under the same lock held for the check.
             if let Some(ref mut dedup) = finalized_dedup {
@@ -1130,33 +1144,58 @@ impl BlockMigrationService {
     /// halted producer cannot leave the log growing without bound. Batched
     /// every [`crate::block_stream_service::PRUNE_INTERVAL`] frames; deletes
     /// below `latest_seq + 1 - RETENTION_EVENTS` inside the same RW txn.
+    ///
+    /// Returns whether the batching interval was reached. The counter itself is
+    /// left untouched here and advanced by [`Self::note_stream_appends`] only
+    /// after the enclosing txn commits: a rolled-back txn must neither count
+    /// frames that never became durable nor reset the interval, since repeated
+    /// failures at the threshold would defer pruning while the log keeps
+    /// growing.
     fn maybe_prune_stream_in_tx<T: reth_db::transaction::DbTxMut>(
         &self,
         tx: &T,
         latest_seq: u64,
         frames_appended: u64,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<bool> {
         if frames_appended == 0 {
-            return Ok(());
+            return Ok(false);
         }
         use crate::block_stream_service::{PRUNE_INTERVAL, RETENTION_EVENTS};
-        let prev = self
+        let pending = self
             .stream_appends_since_prune
-            .fetch_add(frames_appended, Ordering::Relaxed);
-        if prev.saturating_add(frames_appended) < PRUNE_INTERVAL {
-            return Ok(());
+            .load(Ordering::Relaxed)
+            .saturating_add(frames_appended);
+        if pending < PRUNE_INTERVAL {
+            return Ok(false);
         }
-        self.stream_appends_since_prune.store(0, Ordering::Relaxed);
+        // Interval reached: the counter resets on commit even when there is
+        // nothing below the retention floor yet, so the check runs once per
+        // interval rather than on every append.
         let Some(keep_from) = latest_seq
             .checked_add(1)
             .and_then(|len| len.checked_sub(RETENTION_EVENTS))
         else {
-            return Ok(());
+            return Ok(true);
         };
         if keep_from == 0 {
-            return Ok(());
+            return Ok(true);
         }
-        prune_block_stream_below(tx, keep_from)
+        prune_block_stream_below(tx, keep_from)?;
+        Ok(true)
+    }
+
+    /// Advances the retention counter after the appending txn commits.
+    /// See [`Self::maybe_prune_stream_in_tx`] for why this cannot run inside it.
+    fn note_stream_appends(&self, frames_appended: u64, prune_interval_reached: bool) {
+        if frames_appended == 0 {
+            return;
+        }
+        if prune_interval_reached {
+            self.stream_appends_since_prune.store(0, Ordering::Relaxed);
+        } else {
+            self.stream_appends_since_prune
+                .fetch_add(frames_appended, Ordering::Relaxed);
+        }
     }
 
     /// Notify ChunkMigrationService about the migrated block (fire-and-forget).
