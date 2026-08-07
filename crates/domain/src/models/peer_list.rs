@@ -480,17 +480,9 @@ impl PeerList {
         peers
     }
 
-    /// Peers that are not usable right now — unreachable, disreputable, or
-    /// both. This is the set worth re-probing: a peer leaves it only by
-    /// answering a health check, and reachability is the half a probe can
-    /// actually repair.
-    ///
-    /// Deliberately keyed on [`PeerListItem::is_active`] rather than
-    /// reputation alone. Reputation alone misses every peer that is offline
-    /// but still well-scored, which is exactly the peer a probe should be
-    /// asking about — and with scoring disabled every score is pinned to
-    /// `PeerScore::MAX`, so a reputation-only test returns nothing at all and
-    /// silently retires the health check.
+    /// Peers worth re-probing. Keyed on `is_active`, not reputation alone:
+    /// that misses well-scored peers that are merely offline, and returns
+    /// nothing at all when scoring is disabled.
     pub fn inactive_peers(&self) -> Vec<(IrysPeerId, PeerListItem)> {
         let guard = self.read();
         let mut inactive = Vec::new();
@@ -1448,12 +1440,8 @@ mod tests {
         PeerList(Arc::new(RwLock::new(peer_list_data)))
     }
 
-    /// A peer that is offline but still well-scored has to be re-probeable.
-    ///
-    /// Keying the set on reputation alone stranded exactly this peer: every
-    /// selection path already excludes it for being offline, so nothing used
-    /// it, and nothing probed it either — the health check could not see it,
-    /// and only a full hydration sweep would ever bring it back.
+    /// Reputation alone stranded this peer: excluded from selection for being
+    /// offline, and invisible to the check that would find it again.
     #[test]
     fn inactive_peers_includes_a_reputable_peer_that_is_offline() {
         let peer_list =
@@ -1485,9 +1473,8 @@ mod tests {
         );
     }
 
-    /// With scoring disabled every score is pinned to `PeerScore::MAX`, so a
-    /// reputation-only test answers "active" for every peer and retires the
-    /// health check entirely. Reachability has to keep carrying the signal.
+    /// Scoring disabled pins every score to MAX, which retires a
+    /// reputation-only health check entirely.
     #[test]
     fn inactive_peers_still_finds_offline_peers_when_scoring_is_disabled() {
         let mut node_config = NodeConfig::testing();

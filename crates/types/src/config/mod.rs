@@ -618,17 +618,10 @@ impl From<&NodeConfig> for VdfConfig {
             validation_batch_size,
         } = &value.vdf;
 
-        // Clamp to the checkpoint count. A verification pass hands one
-        // checkpoint to each thread, so threads beyond that number have
-        // nothing to take; the surplus is pure oversubscription. Clamping
-        // here, where the consensus and node halves meet, is the only place
-        // that sees both — `VdfNodeConfig`'s own default cannot, and every
-        // consumer reads the merged config, so nothing can route around it.
-        //
-        // This is also what keeps the derived default (`available cores - 2`)
-        // honest on a wide host: two verification pools are built from this
-        // one limit, and it doubles as the floor `validation_batch_size` is
-        // clamped up to.
+        // A pass hands one checkpoint per thread, so the surplus is pure
+        // oversubscription — doubly so, since two pools are built from this
+        // limit and it also floors `validation_batch_size`. Clamped here
+        // because this merge is the only place that sees both halves.
         let parallel_verification_thread_limit =
             (*parallel_verification_thread_limit).min(num_checkpoints_in_vdf_step);
 
@@ -1033,11 +1026,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use toml;
 
-    /// Threads past the checkpoint count have no checkpoint to take, so the
-    /// merge clamps them away. Left unclamped, the derived default (available
-    /// cores - 2) exceeds this on any host wide enough, and it is spent twice
-    /// over: two verification pools are built from this one limit, and it is
-    /// also the floor `validation_batch_size` is raised to.
+    /// The derived default (cores - 2) exceeds this on any wide host.
     #[test]
     fn vdf_thread_limit_is_clamped_to_the_checkpoint_count() {
         let mut node_config = NodeConfig::testing();
@@ -1054,9 +1043,7 @@ mod tests {
         );
     }
 
-    /// The clamp is a ceiling, not an assignment: a host narrower than the
-    /// checkpoint count must keep its own smaller limit rather than be raised
-    /// to a thread count it has no cores for.
+    /// A ceiling, not an assignment — a narrow host keeps its smaller limit.
     #[test]
     fn vdf_thread_limit_below_the_checkpoint_count_is_left_alone() {
         let mut node_config = NodeConfig::testing();

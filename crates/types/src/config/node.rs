@@ -953,16 +953,10 @@ pub struct VdfNodeConfig {
     /// so a host that grows more cores gets no faster unless the limit grows
     /// with it.
     ///
-    /// Set it explicitly to override.
-    ///
-    /// Whatever it ends up as, derived or explicit, it is clamped to
-    /// `consensus.num_checkpoints_in_vdf_step` when the node and consensus
-    /// halves are merged into `VdfConfig` — the checkpoint pass hands one
-    /// checkpoint to each thread, so threads past that count have nothing to
-    /// take. The clamp matters on two counts here: this limit builds *two*
-    /// pools, and it is also the floor `validation_batch_size` is raised to
-    /// (see `clamped_validation_batch_size`), so an unclamped wide host would
-    /// quietly stretch validation batches as well as oversubscribe cores.
+    /// Set it explicitly to override. Derived or explicit, it is clamped to
+    /// `consensus.num_checkpoints_in_vdf_step` when `VdfConfig` is merged —
+    /// a pass hands one checkpoint per thread. That also caps the floor
+    /// `validation_batch_size` is raised to (`clamped_validation_batch_size`).
     #[serde(default = "default_parallel_verification_thread_limit")]
     pub parallel_verification_thread_limit: usize,
 
