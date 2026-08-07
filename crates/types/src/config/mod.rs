@@ -617,9 +617,24 @@ impl From<&NodeConfig> for VdfConfig {
             progress_timeout_secs,
             validation_batch_size,
         } = &value.vdf;
+
+        // Clamp to the checkpoint count. A verification pass hands one
+        // checkpoint to each thread, so threads beyond that number have
+        // nothing to take; the surplus is pure oversubscription. Clamping
+        // here, where the consensus and node halves meet, is the only place
+        // that sees both — `VdfNodeConfig`'s own default cannot, and every
+        // consumer reads the merged config, so nothing can route around it.
+        //
+        // This is also what keeps the derived default (`available cores - 2`)
+        // honest on a wide host: two verification pools are built from this
+        // one limit, and it doubles as the floor `validation_batch_size` is
+        // clamped up to.
+        let parallel_verification_thread_limit =
+            (*parallel_verification_thread_limit).min(num_checkpoints_in_vdf_step);
+
         Self {
             reset_frequency,
-            parallel_verification_thread_limit: *parallel_verification_thread_limit,
+            parallel_verification_thread_limit,
             num_checkpoints_in_vdf_step,
             max_allowed_vdf_fork_steps,
             sha_1s_difficulty,
@@ -1017,6 +1032,50 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use toml;
+
+    /// Threads past the checkpoint count have no checkpoint to take, so the
+    /// merge clamps them away. Left unclamped, the derived default (available
+    /// cores - 2) exceeds this on any host wide enough, and it is spent twice
+    /// over: two verification pools are built from this one limit, and it is
+    /// also the floor `validation_batch_size` is raised to.
+    #[test]
+    fn vdf_thread_limit_is_clamped_to_the_checkpoint_count() {
+        let mut node_config = NodeConfig::testing();
+        let checkpoints = node_config
+            .consensus_config()
+            .vdf
+            .num_checkpoints_in_vdf_step;
+        node_config.vdf.parallel_verification_thread_limit = checkpoints * 4;
+
+        assert_eq!(
+            node_config.vdf().parallel_verification_thread_limit,
+            checkpoints,
+            "a limit above the checkpoint count must be clamped to it"
+        );
+    }
+
+    /// The clamp is a ceiling, not an assignment: a host narrower than the
+    /// checkpoint count must keep its own smaller limit rather than be raised
+    /// to a thread count it has no cores for.
+    #[test]
+    fn vdf_thread_limit_below_the_checkpoint_count_is_left_alone() {
+        let mut node_config = NodeConfig::testing();
+        let checkpoints = node_config
+            .consensus_config()
+            .vdf
+            .num_checkpoints_in_vdf_step;
+        assert!(
+            checkpoints > 1,
+            "test needs headroom below the checkpoint count"
+        );
+        node_config.vdf.parallel_verification_thread_limit = 1;
+
+        assert_eq!(
+            node_config.vdf().parallel_verification_thread_limit,
+            1,
+            "a limit under the checkpoint count must survive the merge"
+        );
+    }
 
     #[test]
     fn test_deserialize_consensus_config_from_toml() {
