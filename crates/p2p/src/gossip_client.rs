@@ -2381,6 +2381,16 @@ impl GossipClient {
     /// Peers still unresolved when the budget expires keep their previous flag.
     /// Marking them offline would attribute our own impatience to the peer, and
     /// the flag feeds peer selection for block and chunk pulls.
+    ///
+    /// Sets the online flag and nothing else — reputation is not touched here.
+    /// A probe timeout cannot tell a peer that is down from a node that has
+    /// lost its own uplink, so a sweep of the whole peer list is the wrong
+    /// place to move scores: one local network fault would charge every peer at
+    /// once. The online flag carries the same information for peer selection
+    /// and is self-correcting, since the next successful probe restores it,
+    /// whereas a score recovers one increment at a time. Probe-driven
+    /// reputation belongs to the peer-network service's inactive-peer health
+    /// check, which acts on a bounded set.
     pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
         self.hydrate_peers_online_status_within(peer_list, HYDRATE_PASS_BUDGET)
             .await;
@@ -2414,57 +2424,32 @@ impl GossipClient {
             let attempted = &attempted;
             async move {
                 attempted.fetch_add(1, Ordering::Relaxed);
-                let started = std::time::Instant::now();
                 let outcome = self
                     .check_health(&peer.0, peer.1.address, peer.1.protocol_version, peer_list)
                     .await;
-                (peer.0, outcome, started.elapsed())
+                (peer.0, outcome)
             }
         }))
         .buffer_unordered(HYDRATE_HEALTH_CHECK_CONCURRENCY);
 
         let mut resolved = 0_usize;
-        let pass = probes.for_each(|(peer_id, outcome, response_time)| {
+        let pass = probes.for_each(|(peer_id, outcome)| {
             resolved += 1;
             match outcome {
                 Ok(health) => {
                     debug!("Peer {} health: {:?}", peer_id, health);
                     // A peer awaiting a handshake answered, so it stays online
                     // and enumerable — `check_health` has already asked for the
-                    // handshake that repairs it — but it earns no credit while
-                    // it is refusing us.
+                    // handshake that repairs it.
                     let is_online =
                         matches!(health, PeerHealth::Healthy | PeerHealth::HandshakePending);
                     peer_list.set_is_online_by_peer_id(&peer_id, is_online);
-
-                    // Credit a healthy answer, so the pass can move a peer's
-                    // score in both directions. Penalties alone would ratchet
-                    // any peer we never pull data from down towards the active
-                    // threshold, one lost probe at a time.
-                    if health == PeerHealth::Healthy {
-                        if response_time > NORMAL_RESPONSE_THRESHOLD {
-                            // This peer spends the pass budget that the peers
-                            // behind it need, the same way a slow data response
-                            // costs the caller.
-                            peer_list.decrease_peer_score_by_peer_id(
-                                &peer_id,
-                                ScoreDecreaseReason::SlowResponse,
-                            );
-                        } else {
-                            peer_list.increase_peer_score_by_peer_id(
-                                &peer_id,
-                                ScoreIncreaseReason::Online,
-                            );
-                        }
-                    }
                 }
                 Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
                     debug!(
                         ?peer_id,
                         "Circuit breaker open — marking peer offline pending recovery"
                     );
-                    // No score change: the breaker already holds this peer back,
-                    // and the probe never reached the network.
                     peer_list.set_is_online_by_peer_id(&peer_id, false);
                 }
                 Err(err) => {
@@ -2473,15 +2458,6 @@ impl GossipClient {
                         peer_id, err
                     );
                     peer_list.set_is_online_by_peer_id(&peer_id, false);
-                    // NetworkError, not Offline: one failed probe must not evict
-                    // an unstaked peer that is merely overloaded.
-                    peer_list.decrease_peer_score_by_peer_id(
-                        &peer_id,
-                        ScoreDecreaseReason::NetworkError(format!(
-                            "health check for peer {} failed: {}",
-                            peer_id, err
-                        )),
-                    );
                 }
             }
             std::future::ready(())
@@ -4018,13 +3994,18 @@ mod tests {
             );
         }
 
-        /// A pass must move scores in both directions: a healthy answer earns
-        /// `Online` (+1) and a failed probe costs `NetworkError` (-1). The exact
-        /// amounts are asserted, because the reason chosen matters — `Offline`
-        /// (-3) would also sink the peer, but it is the one reason that can evict
-        /// an unstaked peer from purgatory over a single bad pass.
+        /// A pass sets online flags and leaves reputation alone, in both
+        /// directions.
+        ///
+        /// The penalty is the one that matters: this pass sweeps the whole peer
+        /// list, so charging a failed probe would charge every peer at once the
+        /// moment this node lost its own uplink, walking the entire set below
+        /// `ACTIVE_THRESHOLD` and out of `known_peers_cache`. A probe timeout
+        /// cannot distinguish that from the peers being down. The credit is
+        /// asserted too, so probe-driven scoring cannot creep back in on the
+        /// other side.
         #[tokio::test]
-        async fn hydrate_scores_probe_outcomes_in_both_directions() {
+        async fn hydrate_sets_online_flags_without_touching_reputation() {
             let fixture = TestFixture::with_timeout(Duration::from_millis(200));
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
 
@@ -4067,17 +4048,31 @@ mod tests {
                 .reputation_score
                 .get();
 
-            // Exact values, so a swap to a different reason (Offline is -3, bogus
-            // data -5) fails here rather than passing on "sank a bit".
             assert_eq!(
                 failing_score,
-                PeerScore::INITIAL - 1,
-                "a failed probe must cost exactly the NetworkError penalty"
+                PeerScore::INITIAL,
+                "a failed probe must not charge the peer for a fault it may not own"
             );
             assert_eq!(
                 healthy_score,
-                PeerScore::INITIAL + 1,
-                "a healthy answer must earn exactly the Online credit"
+                PeerScore::INITIAL,
+                "a healthy probe must not credit the peer either"
+            );
+
+            // The flags still move — the pass does its actual job.
+            assert!(
+                peer_list
+                    .get_peer(&healthy_id)
+                    .expect("healthy peer still listed")
+                    .is_online,
+                "a peer that answered must be marked online"
+            );
+            assert!(
+                !peer_list
+                    .get_peer(&failing_id)
+                    .expect("failing peer still listed")
+                    .is_online,
+                "a peer that did not answer must be marked offline"
             );
         }
 
