@@ -1112,28 +1112,30 @@ impl EpochSnapshot {
 
     /// Selects which pending pledges receive the `available` unowned capacity partitions.
     ///
-    /// Water-filling: signers holding the fewest capacity partitions are served first, so a
-    /// scarce pool spreads across as many distinct miner addresses as possible. Capacity pool
-    /// diversity is what bounds data replication — `process_slot_needs` admits at most one
-    /// replica per miner, so a slot can only reach as many replicas as there are distinct
-    /// capacity holders.
+    /// Water-filling: signers holding the fewest capacity partitions win first, so a scarce pool
+    /// reaches as many distinct miner addresses as possible. Capacity pool diversity bounds data
+    /// replication: `process_slot_needs` admits at most one replica per miner, so a slot cannot
+    /// have more replicas than there are distinct capacity holders.
     ///
-    /// Selection and hash pairing are deliberately separate concerns. Only selection bears on
-    /// diversity; which hash a winner receives does not. Winners are therefore returned in
-    /// pledge-id order, the order the protocol has always used, so when `available` covers every
-    /// pending pledge the result is exactly that order and assignment is unchanged.
+    /// Selection is separate from hash pairing — only selection affects diversity. Winners are
+    /// returned in pledge-id order, so when `available` covers every pending pledge the result is
+    /// plain id order and assignment is unchanged.
     ///
-    /// `held` counts capacity partitions only. A partition promoted into a data slot no longer
-    /// occupies the pool, so it no longer weighs against its holder.
+    /// `held` counts capacity partitions only: a partition promoted into a data slot no longer
+    /// occupies the pool.
+    ///
+    /// The unstable sorts are safe because every key is unique (`id` is a transaction hash, so
+    /// `(level, id)` is unique too), which makes the sorted sequence independent of the sort
+    /// algorithm. Consensus state depends on this order, so any key that stops being unique needs
+    /// a tiebreaker.
     fn water_fill_select(
         pending: Vec<PledgeEntry>,
         held: &BTreeMap<IrysAddress, usize>,
         available: usize,
     ) -> Vec<PledgeEntry> {
-        // Within a signer, pending pledges claim consecutive holdings levels in id order: the
-        // k-th pending pledge of a signer holding n is the one that would take it from n+k-1 to
-        // n+k. Stamping levels up front makes a single sort equivalent to repeatedly re-picking
-        // the lowest current holder.
+        // A signer's pending pledges claim consecutive holdings levels in id order: its k-th
+        // pending pledge would take it from n+k-1 to n+k. Stamping levels up front makes one sort
+        // equivalent to repeatedly re-picking the lowest current holder.
         let mut pending = pending;
         pending.sort_unstable_by_key(|pledge| pledge.id);
         let mut next_level: BTreeMap<IrysAddress, usize> = BTreeMap::new();
@@ -1166,9 +1168,8 @@ impl EpochSnapshot {
     /// 4. Removes assigned partitions from the unassigned_partitions list
     ///
     /// The assignment is deterministic: both the partition hashes and the selected pledges are
-    /// sorted. When the pool can serve every pending pledge, selection is total and the pledge
-    /// order is the plain id order, so the outcome matches assignment before water-filling
-    /// existed. See `water_fill_select`.
+    /// sorted. When the pool can serve every pending pledge, the pledge order is plain id order,
+    /// so the outcome matches assignment before water-filling. See `water_fill_select`.
     pub fn assign_partition_hashes_to_pledges(&mut self) {
         // Exit early if no partitions available
         if self.unassigned_partitions.is_empty() {
@@ -1198,10 +1199,9 @@ impl EpochSnapshot {
             return;
         }
 
-        // Water-fill selection decides WHO is served when the pool cannot cover every pending
-        // pledge, spreading scarce capacity across as many distinct miner addresses as possible.
-        // It returns the winners in pledge-id order, so which hash each winner receives is
-        // unchanged, and an epoch whose supply meets demand assigns exactly as it always has.
+        // Water-fill decides WHO is served when the pool cannot cover every pending pledge. It
+        // returns winners in pledge-id order, so hash pairing is unchanged and an epoch whose
+        // supply meets demand assigns as it always has.
         let capacity_held = self
             .partition_assignments
             .capacity_partitions
@@ -2052,10 +2052,9 @@ mod tests {
             pledges.iter().map(|pledge| pledge.id).collect()
         }
 
-        /// Supply meeting demand must reproduce the legacy ordering exactly: sorted by pledge
-        /// id, nothing dropped. The assignment loop is unchanged and consumes this list in
-        /// order against an unchanged hash queue, so this identity is what makes an
-        /// uncontended epoch produce byte-identical state to the pre-change behavior.
+        /// Supply meeting demand must give plain pledge-id order with nothing dropped. The
+        /// unchanged assignment loop consumes this list against an unchanged hash queue, so this
+        /// identity is what keeps an uncontended epoch byte-identical to the pre-change behavior.
         #[test]
         fn uncontended_reproduces_legacy_id_order() {
             let pending = vec![pledge(1, 9), pledge(2, 3), pledge(1, 5)];
@@ -2068,8 +2067,8 @@ mod tests {
             assert_eq!(ids(&winners), ids(&expected));
         }
 
-        /// Exactly enough supply is still uncontended, and is the boundary most likely to
-        /// regress into reordering or dropping.
+        /// Supply exactly equal to demand is still uncontended, and is the boundary most likely
+        /// to regress into reordering or dropping.
         #[test]
         fn uncontended_at_exact_boundary() {
             let pending = vec![pledge(1, 9), pledge(1, 8), pledge(2, 7)];
@@ -2083,9 +2082,9 @@ mod tests {
             assert_eq!(ids(&winners), ids(&expected));
         }
 
-        /// Contended: a deep holder is skipped entirely in favour of shallow holders.
-        /// A holds 42 with 2 pending, B holds 0 with 3 pending, C holds 1 with 1 pending,
-        /// four hashes available. B and C take all four, in id order among themselves.
+        /// Contended: a deep holder is skipped for shallow holders. A holds 42 with 2 pending,
+        /// B holds 0 with 3 pending, C holds 1 with 1 pending, four hashes available. B and C
+        /// take all four, in id order.
         #[test]
         fn contended_selects_shallow_holders_first() {
             let pending = vec![
@@ -2184,8 +2183,8 @@ mod tests {
                 .map(|assignment| assignment.miner_address)
         }
 
-        /// End to end through the snapshot: two unowned hashes, a deep holder and two newcomers
-        /// all with pending pledges. The newcomers must be served, the deep holder skipped.
+        /// End to end: two unowned hashes, pending pledges from a deep holder and two newcomers.
+        /// The newcomers must be served and the deep holder skipped.
         #[test]
         fn assignment_spreads_scarce_capacity_across_signers() {
             let mut snapshot = EpochSnapshot::default();
@@ -2224,8 +2223,8 @@ mod tests {
             assert!(snapshot.unassigned_partitions.is_empty());
         }
 
-        /// Uncontended through the snapshot: with supply for every pledge the deep holder is
-        /// served too, and the pairing is the legacy one — lowest pledge id takes the lowest hash.
+        /// Uncontended end to end: with supply for every pledge the deep holder is served too,
+        /// and the pairing is the legacy one — lowest pledge id takes the lowest hash.
         #[test]
         fn assignment_serves_everyone_when_supply_suffices() {
             let mut snapshot = EpochSnapshot::default();
@@ -2256,9 +2255,8 @@ mod tests {
             assert!(snapshot.unassigned_partitions.is_empty());
         }
 
-        /// Holdings count capacity partitions only. A signer whose partitions were promoted into
-        /// data slots is treated as a zero holder, because promoted partitions no longer occupy
-        /// the capacity pool.
+        /// Holdings count capacity partitions only: a signer whose partitions were promoted into
+        /// data slots counts as a zero holder.
         #[test]
         fn data_partitions_do_not_count_toward_holdings() {
             let mut snapshot = EpochSnapshot::default();
@@ -2324,8 +2322,8 @@ mod tests {
             winners
         }
 
-        /// Duplicate pledge ids are rejected upstream by `commitment_dedup`, and the reference
-        /// implementation's `min_by_key` would tie on them, so generated inputs are deduped.
+        /// `commitment_dedup` rejects duplicate pledge ids upstream, and the reference
+        /// `min_by_key` would tie on them, so generated inputs are deduped.
         fn distinct_pledges(specs: Vec<(u8, u8)>) -> Vec<PledgeEntry> {
             let mut seen = HashSet::new();
             specs
