@@ -448,17 +448,21 @@ mod tests {
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::Barrier;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
 
-    /// Two overlapping `update_eyre` writers must be mutually exclusive on the
-    /// per-env gate, and neither may pay the 250 ms libmdbx Busy sleep.
+    /// Two overlapping `update_eyre` writers must be mutually exclusive.
     ///
     /// Overlap is guaranteed: the first writer signals from *inside* its write
     /// closure and the second writer starts only after that signal, so the gate
     /// is provably contended. Exclusion is asserted structurally via an
     /// occupancy counter rather than wall-clock arithmetic.
+    ///
+    /// Exclusion alone does not attribute the serialization to the gate —
+    /// libmdbx enforces it too, after the loser pays the 250 ms Busy sleep.
+    /// `writer_gate_blocks_txn_start_so_libmdbx_never_sees_a_busy_writer`
+    /// covers that half.
     #[test]
     fn writer_gate_serializes_overlapping_writers_without_busy_floor() {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -517,6 +521,59 @@ mod tests {
             max_occupancy.load(Ordering::SeqCst),
             1,
             "two writers were inside their write closures at once; gate failed to serialize"
+        );
+    }
+
+    /// A writer must park on the gate *before* `begin_rw_txn`, so libmdbx never
+    /// sees two concurrent writers and the 250 ms Busy retry is unreachable.
+    ///
+    /// Asserted as a negative under a held gate rather than as a duration
+    /// bound: the contended writer must not have entered its closure while the
+    /// gate is held. A slow or loaded machine only delays that thread further,
+    /// so load cannot turn a passing run into a failing one — only an actual
+    /// regression (a writer reaching libmdbx while another writer is open) can.
+    #[test]
+    fn writer_gate_blocks_txn_start_so_libmdbx_never_sees_a_busy_writer() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let db = Arc::new(db);
+        let writer_spawned = Arc::new(Barrier::new(2));
+        let entered_closure = Arc::new(AtomicBool::new(false));
+
+        let gate = lock_writer_gate(&db, "test.hold_gate");
+
+        let writer = thread::spawn({
+            let db = Arc::clone(&db);
+            let writer_spawned = Arc::clone(&writer_spawned);
+            let entered_closure = Arc::clone(&entered_closure);
+            move || {
+                writer_spawned.wait();
+                db.update_eyre_at("test.gated_writer", |_tx| {
+                    entered_closure.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+
+        // The writer is running and can only be inside `lock_writer_gate`.
+        writer_spawned.wait();
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !entered_closure.load(Ordering::SeqCst),
+            "writer opened a txn while the gate was held; it would reach libmdbx contended and pay the Busy sleep"
+        );
+
+        drop(gate);
+        writer.join().expect("writer thread panicked");
+        assert!(
+            entered_closure.load(Ordering::SeqCst),
+            "writer never ran after the gate was released"
         );
     }
 }

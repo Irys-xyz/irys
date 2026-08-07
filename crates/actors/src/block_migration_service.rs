@@ -419,22 +419,24 @@ impl BlockMigrationService {
 
         // Serialize stream payloads before the consensus RW txn so a serde fault
         // cannot abort metadata / index writes already staged in that transaction.
-        // Observed de-dup must hold `stream_dedup` through check, append, and
+        // Every emitting mode must hold `stream_dedup` through check, append, and
         // post-commit note so concurrent writers cannot both miss and both append.
-        let mut observed_dedup = match &stream {
-            StreamEmission::Observed => Some(
+        // `Reorged` records its `new_fork` hashes as emitted, the same key space
+        // `Observed` checks, so it holds the guard for the same span.
+        let mut stream_dedup = match &stream {
+            StreamEmission::Disabled => None,
+            StreamEmission::Observed | StreamEmission::Reorged(_) => Some(
                 self.stream_dedup
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner),
             ),
-            _ => None,
         };
         let prepared_stream: Vec<(StreamEvent, Vec<u8>)> = match stream {
             StreamEmission::Disabled => Vec::new(),
             StreamEmission::Observed => {
                 // Skip blocks already `observed` per the seeded restart de-dup:
                 // a block re-confirmed after a restart must not append twice.
-                let dedup = observed_dedup
+                let dedup = stream_dedup
                     .as_ref()
                     .expect("Observed holds stream_dedup for the append critical section");
                 let mut out = Vec::with_capacity(blocks_to_confirm.len());
@@ -550,12 +552,10 @@ impl BlockMigrationService {
             }
             Ok(frames)
         })?;
-        // Note only after commit succeeds (update_eyre_at returned Ok). Observed
-        // reuses the lock held across check+append; other modes lock here.
-        if let Some(ref mut dedup) = observed_dedup {
+        // Note only after commit succeeds (update_eyre_at returned Ok), reusing the
+        // guard held across check+append. `Disabled` produced no frames to note.
+        if let Some(ref mut dedup) = stream_dedup {
             Self::note_stream_frames_locked(dedup, &stream_frames);
-        } else {
-            self.note_stream_frames(&stream_frames);
         }
 
         info!(
@@ -570,17 +570,6 @@ impl BlockMigrationService {
 
     /// Records appended frames in the restart de-dup. Called only after the
     /// appending txn commits, so a failed commit cannot mark a frame emitted.
-    fn note_stream_frames(&self, frames: &[StreamFrame]) {
-        if frames.is_empty() {
-            return;
-        }
-        let mut dedup = self
-            .stream_dedup
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        Self::note_stream_frames_locked(&mut dedup, frames);
-    }
-
     fn note_stream_frames_locked(dedup: &mut StreamDedup, frames: &[StreamFrame]) {
         for frame in frames {
             match &frame.event {

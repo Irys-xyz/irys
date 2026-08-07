@@ -388,31 +388,45 @@ impl InnerCacheTask {
         {
             let tx = self.db.tx()?;
             let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
-            let mut cdr_walk = cdr_cursor.walk(None)?;
+            let seek_key: DataRoot = H256::random();
+            let mut cdr_walk = cdr_cursor.walk(Some(seek_key))?;
+            let mut wrapped = false;
 
             // Cap is on candidates collected (read-phase), not on roots that
-            // actually prune chunks in the write phase. A stable set of
-            // non-yielding candidates early in hash order can consume the
-            // budget and starve later prunable roots (hash-order scan, no
-            // wraparound). Count is work attempted, not work applied.
+            // actually prune chunks in the write phase: count is work
+            // attempted, not work applied. The scan therefore starts at a
+            // random key and wraps (same shape as `prune_data_root_cache`), so
+            // a stable set of non-yielding candidates early in hash order
+            // cannot consume the budget every run and starve later prunable
+            // roots. The wrap stops at `seek_key` so no root is visited twice.
             // TODO: try to deprioritise data_roots that almost have all their chunks.
-            while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
-                if candidates.len() >= MAX_EVICTIONS_PER_RUN {
-                    warn!(
-                        chunk.candidates = candidates.len(),
-                        "Hit max eviction limit collecting prune candidates, will continue next cycle"
-                    );
+            loop {
+                while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
+                    if wrapped && data_root >= seek_key {
+                        break;
+                    }
+                    if candidates.len() >= MAX_EVICTIONS_PER_RUN {
+                        warn!(
+                            chunk.candidates = candidates.len(),
+                            "Hit max eviction limit collecting prune candidates, will continue next cycle"
+                        );
+                        break;
+                    }
+
+                    if self.ingress_proof_generation_state.is_generating(data_root) {
+                        debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
+                        continue;
+                    }
+
+                    if !Self::has_local_ingress_proof(&tx, data_root, local_address)? {
+                        candidates.push(data_root);
+                    }
+                }
+                if wrapped || candidates.len() >= MAX_EVICTIONS_PER_RUN {
                     break;
                 }
-
-                if self.ingress_proof_generation_state.is_generating(data_root) {
-                    debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
-                    continue;
-                }
-
-                if !Self::has_local_ingress_proof(&tx, data_root, local_address)? {
-                    candidates.push(data_root);
-                }
+                wrapped = true;
+                cdr_walk = cdr_cursor.walk(None)?;
             }
             drop(cdr_walk);
             drop(cdr_cursor);

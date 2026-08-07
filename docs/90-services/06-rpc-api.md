@@ -29,8 +29,11 @@ or repeats a `seq` — that is the follower's resume cursor (never height, which
 The **live SSE channel** is best-effort delivery of already-durable frames. In steady state the single
 block-tree task enqueues in commit order so live order matches `seq`. At startup, reconciliation can
 append frames that fan out before earlier writer frames still queued on the channel, so a connected
-subscriber may briefly see `N+1` before `N`. Consumers should ignore a live frame with
-`seq <= last_seen` (or re-sync via poll/replay). Poll pages always read the log in ascending `seq`.
+subscriber may briefly see `N+1` before `N`. Consumers should therefore track the highest *contiguous*
+`seq` they have processed, not the highest `seq` they have seen, and ignore only frames at or below that
+watermark. A frame that arrives above the watermark leaves a gap: buffer it until the missing frames
+arrive, or re-sync from the first missing `seq` via poll/replay. Discarding on `seq <= highest seen`
+instead loses `N` whenever `N+1` overtakes it. Poll pages always read the log in ascending `seq`.
 
 The log is pruned: once it exceeds `RETENTION_EVENTS` (100,000) the oldest events are deleted (batched, so
 the retained count is ~100k with up to `PRUNE_INTERVAL` overshoot). Two quantities therefore matter:
