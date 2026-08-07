@@ -32,17 +32,12 @@ use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-/// Concurrent probes per inactive-peer health check pass. Bounded rather than
-/// one task per peer: the set is every peer we cannot currently use, which
-/// after a restart or a local network fault is the entire peer list.
+/// Bounded rather than one task per peer: after a restart the inactive set is
+/// the entire peer list.
 const INACTIVE_PEERS_HEALTH_CHECK_CONCURRENCY: usize = 16;
-/// Wall-clock budget for one pass, deliberately under
-/// [`INACTIVE_PEERS_HEALTH_CHECK_INTERVAL`] so passes cannot overlap.
-///
-/// A pass therefore covers a bounded prefix of the inactive set rather than all
-/// of it. Full coverage is the sync service's hydration pass, which sweeps every
-/// peer under its own cursor; this check exists to recover a handful of peers
-/// quickly, not to be exhaustive.
+/// Under [`INACTIVE_PEERS_HEALTH_CHECK_INTERVAL`] so passes cannot overlap. A
+/// pass therefore covers a prefix; the sync service's hydration sweep is what
+/// eventually reaches every peer.
 const INACTIVE_PEERS_HEALTH_CHECK_BUDGET: Duration = Duration::from_secs(8);
 const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -449,9 +444,8 @@ impl PeerNetworkService {
         let peer_list = self.inner.peer_list();
         let runtime_handle = sender_inner.runtime_handle.clone();
 
-        // Spawned, not awaited here: the caller is the service select loop,
-        // which also dispatches peer messages and the DB flush. A pass is
-        // network-bound and would stall all of that for its full budget.
+        // Spawned, not awaited: the caller is the service select loop, which
+        // also dispatches peer messages and the DB flush.
         runtime_handle.spawn(async move {
             let probes =
                 futures::stream::iter(inactive_peers.into_iter().map(|(peer_id, peer)| {
@@ -469,11 +463,10 @@ impl PeerNetworkService {
                                 inner_clone
                                     .increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
                             }
-                            Ok(PeerHealth::HandshakePending) => {
-                                // Alive, so it keeps its online flag, but no credit
-                                // while it declines to serve us. `check_health` has
-                                // already requested the handshake.
-                                debug!("Peer {:?} answered but wants a handshake", peer_id);
+                            Ok(PeerHealth::AnsweredNotServing) => {
+                                // Alive, so still online; no credit while it
+                                // declines to serve us.
+                                debug!("Peer {:?} answered but is not serving us", peer_id);
                                 peer_list.set_is_online_by_peer_id(&peer_id, true);
                             }
                             Ok(PeerHealth::Unhealthy) => {
@@ -507,10 +500,8 @@ impl PeerNetworkService {
                 }))
                 .buffer_unordered(INACTIVE_PEERS_HEALTH_CHECK_CONCURRENCY);
 
-            // The budget is below the tick interval, so a pass cannot overlap
-            // its successor: expiry drops the stream and cancels whatever is
-            // still in flight. That is what keeps this bounded without an
-            // in-flight latch to leak.
+            // Expiry drops the stream, cancelling anything still in flight —
+            // bounded without an in-flight latch to leak.
             if tokio::time::timeout(
                 INACTIVE_PEERS_HEALTH_CHECK_BUDGET,
                 probes.for_each(|()| std::future::ready(())),

@@ -225,10 +225,9 @@ pub struct GossipClient {
 pub enum PeerHealth {
     /// Answered and serving gossip.
     Healthy,
-    /// Answered, but will not serve us until a handshake completes. Alive, so it
-    /// keeps its online flag and we re-handshake it; it earns no reputation
-    /// credit while it is turning our probes away.
-    HandshakePending,
+    /// Answered; not serving us yet for a reason that clears on its own.
+    /// Never trips the breaker, which would suppress the probe that sees it clear.
+    AnsweredNotServing,
     /// Answered and will not serve us, or reported itself not healthy.
     Unhealthy,
 }
@@ -1017,8 +1016,7 @@ impl GossipClient {
             GossipResponse::Rejected(reason) => {
                 warn!("Health check rejected with reason: {:?}", reason);
                 // Exhaustive on purpose: a new rejection reason must not inherit
-                // a neighbour's answer. Anything that is not "re-handshake me"
-                // means this peer will not serve us, so it is not healthy.
+                // a neighbour's answer. Split on whether the reason clears itself.
                 match reason {
                     RejectionReason::HandshakeRequired(requirement) => {
                         warn!("Health check requires handshake: {:?}", requirement);
@@ -1028,11 +1026,13 @@ impl GossipClient {
                         // circuits this method before the handshake is asked
                         // for, so the condition could never clear.
                         peer_list.initiate_handshake(peer.api, peer.gossip, true);
-                        Ok(PeerHealth::HandshakePending)
+                        Ok(PeerHealth::AnsweredNotServing)
                     }
+                    // Backpressure, not a fault. Expires on its own, so unlike
+                    // the arm above there is nothing to initiate.
+                    RejectionReason::RateLimited => Ok(PeerHealth::AnsweredNotServing),
                     RejectionReason::GossipDisabled
                     | RejectionReason::InvalidData
-                    | RejectionReason::RateLimited
                     | RejectionReason::UnableToVerifyOrigin
                     | RejectionReason::InvalidCredentials
                     | RejectionReason::ProtocolMismatch
@@ -2382,15 +2382,10 @@ impl GossipClient {
     /// Marking them offline would attribute our own impatience to the peer, and
     /// the flag feeds peer selection for block and chunk pulls.
     ///
-    /// Sets the online flag and nothing else — reputation is not touched here.
-    /// A probe timeout cannot tell a peer that is down from a node that has
-    /// lost its own uplink, so a sweep of the whole peer list is the wrong
-    /// place to move scores: one local network fault would charge every peer at
-    /// once. The online flag carries the same information for peer selection
-    /// and is self-correcting, since the next successful probe restores it,
-    /// whereas a score recovers one increment at a time. Probe-driven
-    /// reputation belongs to the peer-network service's inactive-peer health
-    /// check, which acts on a bounded set.
+    /// Sets the online flag only. A timeout cannot tell a peer that is down
+    /// from a lost local uplink, and this sweep covers every peer, so scoring
+    /// here would charge the whole list for one local fault. Probe-driven
+    /// reputation belongs to the peer-network service's health check.
     pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
         self.hydrate_peers_online_status_within(peer_list, HYDRATE_PASS_BUDGET)
             .await;
@@ -2442,7 +2437,7 @@ impl GossipClient {
                     // and enumerable — `check_health` has already asked for the
                     // handshake that repairs it.
                     let is_online =
-                        matches!(health, PeerHealth::Healthy | PeerHealth::HandshakePending);
+                        matches!(health, PeerHealth::Healthy | PeerHealth::AnsweredNotServing);
                     peer_list.set_is_online_by_peer_id(&peer_id, is_online);
                 }
                 Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
@@ -3717,13 +3712,37 @@ mod tests {
                 &probed_peer,
                 RejectionReason::HandshakeRequired(None),
                 8,
-                PeerHealth::HandshakePending,
+                PeerHealth::AnsweredNotServing,
             )
             .await;
 
             assert!(
                 client.circuit_breaker.is_available(&probed_peer),
                 "a peer awaiting a handshake must stay probeable"
+            );
+        }
+
+        /// An open breaker would outlast the rate limit that caused it.
+        #[tokio::test]
+        async fn repeated_rate_limits_do_not_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([11_u8; 20]));
+
+            // Well past the production failure threshold of 5.
+            probe_repeatedly_with_rejection(
+                &client,
+                &peer_list,
+                &probed_peer,
+                RejectionReason::RateLimited,
+                8,
+                PeerHealth::AnsweredNotServing,
+            )
+            .await;
+
+            assert!(
+                client.circuit_breaker.is_available(&probed_peer),
+                "a peer asking us to back off must stay probeable"
             );
         }
 
@@ -3994,16 +4013,10 @@ mod tests {
             );
         }
 
-        /// A pass sets online flags and leaves reputation alone, in both
-        /// directions.
-        ///
-        /// The penalty is the one that matters: this pass sweeps the whole peer
-        /// list, so charging a failed probe would charge every peer at once the
-        /// moment this node lost its own uplink, walking the entire set below
-        /// `ACTIVE_THRESHOLD` and out of `known_peers_cache`. A probe timeout
-        /// cannot distinguish that from the peers being down. The credit is
-        /// asserted too, so probe-driven scoring cannot creep back in on the
-        /// other side.
+        /// Charging a failed probe would charge every peer at once when this
+        /// node loses its own uplink, sinking the whole list below
+        /// `ACTIVE_THRESHOLD`. The credit is pinned too, so scoring cannot
+        /// creep back in on the other side.
         #[tokio::test]
         async fn hydrate_sets_online_flags_without_touching_reputation() {
             let fixture = TestFixture::with_timeout(Duration::from_millis(200));
