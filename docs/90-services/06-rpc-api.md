@@ -161,9 +161,12 @@ not. The producer's remaining append path is startup reconciliation, which repai
 frames that a pre-atomic-append build lost between a migration commit and its separate producer
 append, walking the block index tail and appending the gap in height order. Live SSE delivery is
 best-effort on top of this durable log: a committed frame whose fan-out is missed (say, a halted
-producer) is recovered through replay on reconnect for as long as it remains retained. Only a cursor
-that has fallen below `lowest_retained_seq` is unrecoverable by replay — that is the `truncated`
-case, which returns no frames and requires a re-bootstrap from canonical block reads.
+producer) is recovered through replay on reconnect for as long as it remains retained. Within one log
+lifetime the only cursor replay cannot recover is one that has fallen below `lowest_retained_seq` —
+the `truncated` case, which returns no frames and requires a re-bootstrap from canonical block reads.
+Log recreation is a separate failure, not a deeper truncation: `seq` restarts at `0`, so a cursor
+above the new floor replays *different* frames rather than none. See "Limitation: log recreation
+(reset)" below — it needs an operator-coordinated re-bootstrap, which replay cannot signal.
 
 **FCU timing.** An `observed` (or `reorged`) frame becomes durable when confirmation's consensus
 txn commits, which is **before** the execution-layer fork-choice update (FCU) for that tip.
