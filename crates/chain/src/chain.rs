@@ -33,7 +33,7 @@ use irys_actors::{
 use irys_api_server::{API_VERSION, ApiState, create_listener, run_server};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::database;
-use irys_database::db::RethDbWrapper;
+use irys_database::db::{IrysDatabaseExt as _, RethDbWrapper};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
@@ -73,7 +73,7 @@ use reth::{
     chainspec::ChainSpec,
     tasks::{RuntimeBuilder, RuntimeConfig, TaskExecutor, TokioConfig},
 };
-use reth_db::{Database as _, transaction::DbTx as _};
+use reth_db::Database as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use std::{
@@ -89,7 +89,7 @@ use tokio::{
     },
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
+use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -108,8 +108,8 @@ pub struct IrysNodeCtx {
     pub mempool_guard: MempoolReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
-    /// Shared handle to the block-stream producer; cloned into [`ApiState`] so the `/internal`
-    /// SSE handlers can call `subscribe(from_seq)`.
+    /// Shared block-stream handle; live producer when `http.expose_internal_api`, else
+    /// [`BlockStreamHandle::disabled`]. Cloned into [`ApiState`] for `/internal` SSE handlers.
     pub block_stream_handle: Arc<irys_actors::block_stream_service::BlockStreamHandle>,
     pub partition_controllers: Vec<PartitionMiningController>,
     pub packing_waiter: irys_actors::packing_service::PackingIdleWaiter,
@@ -782,38 +782,25 @@ impl IrysNode {
             // Continue even if saving to disk fails - not critical
         }
 
-        // Open a database transaction. Span attributes any libmdbx writer-lock
-        // stall warning fired during begin_rw_txn to
-        // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}
-        // (see crates/utils/utils/src/mdbx_metrics.rs).
-        let _span = info_span!(
-            irys_utils::MDBX_RW_TX_SPAN,
-            db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
-        )
-        .entered();
-        let write_tx = irys_db.tx_mut()?;
+        // Single gated RW txn (consensus writer gate + irys-consensus scope).
+        irys_db.update_eyre_at("chain.persist_genesis", |write_tx| {
+            database::insert_block_header(write_tx, genesis_block)?;
 
-        // Insert the genesis block header
-        database::insert_block_header(&write_tx, genesis_block)?;
+            for commitment_tx in genesis_commitments {
+                debug!("Persisting genesis commitment: {}", commitment_tx.id());
+                database::insert_commitment_tx(write_tx, commitment_tx)?;
+            }
 
-        // Insert all commitment transactions
-        for commitment_tx in genesis_commitments {
-            debug!("Persisting genesis commitment: {}", commitment_tx.id());
-            database::insert_commitment_tx(&write_tx, commitment_tx)?;
-        }
-
-        // Insert the genesis block index entry.
-        // Use full sealing here so we verify genesis commitments match the header.
-        let genesis_body = BlockBody {
-            block_hash: genesis_block.block_hash,
-            data_transactions: vec![],
-            commitment_transactions: genesis_commitments.to_vec(),
-        };
-        let genesis_sealed = SealedBlock::new(genesis_block.clone(), genesis_body)?;
-        BlockIndex::push_block(&write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
-
-        // Commit the database transaction
-        write_tx.commit()?;
+            // Full sealing verifies genesis commitments match the header.
+            let genesis_body = BlockBody {
+                block_hash: genesis_block.block_hash,
+                data_transactions: vec![],
+                commitment_transactions: genesis_commitments.to_vec(),
+            };
+            let genesis_sealed = SealedBlock::new(genesis_block.clone(), genesis_body)?;
+            BlockIndex::push_block(write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
+            Ok(())
+        })?;
 
         info!("Genesis block and commitments successfully persisted");
         Ok(())
@@ -1814,6 +1801,9 @@ impl IrysNode {
             Arc::clone(&block_tree_cache),
             service_senders.chunk_migration.clone(),
             service_senders.packing_sender(),
+            // Same gate as `/internal/*` and the durable producer: skip the
+            // 10k-entry de-dup seed when the stream is not written.
+            config.node_config.http.expose_internal_api,
         );
 
         // Create the VDF state before the block tree service: its re-anchor
@@ -1850,15 +1840,37 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        // Start the block-stream producer: consumes the `block_stream` signal feed and exposes the
-        // shared handle the `/internal` SSE handlers call `subscribe(from_seq)` on.
-        let (block_stream_service_handle, block_stream_handle) =
-            irys_actors::block_stream_service::BlockStreamService::spawn_service(
-                receivers.block_stream,
-                irys_db.clone(),
-                config.consensus.chunk_size,
-                runtime_handle.clone(),
+        // Block-stream producer + durable log only when `/internal/*` is exposed. Default-off
+        // nodes (Observers, miners without a trusted gateway) must not pay consensus-MDBX
+        // writer tax for a stream nobody can read.
+        let (block_stream_service_handle, block_stream_handle) = if config
+            .node_config
+            .http
+            .expose_internal_api
+        {
+            let (service_handle, handle) =
+                irys_actors::block_stream_service::BlockStreamService::spawn_service(
+                    receivers.block_stream,
+                    irys_db.clone(),
+                    config.consensus.chunk_size,
+                    runtime_handle.clone(),
+                );
+            (Some(service_handle), handle)
+        } else {
+            drop(receivers.block_stream);
+            // While disabled, no frames append and no stream prune runs; an existing log tail is
+            // left as-is. Re-enabling later can leave a semantic history gap for blocks migrated
+            // offline — see docs/90-services/06-rpc-api.md ("Flag toggle gap").
+            info!(
+                "block-stream producer disabled (http.expose_internal_api=false); no durable stream log will be written"
             );
+            (
+                None,
+                Arc::new(
+                    irys_actors::block_stream_service::BlockStreamHandle::disabled(irys_db.clone()),
+                ),
+            )
+        };
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
@@ -2277,7 +2289,9 @@ impl IrysNode {
 
             // 6. Chain management
             services.push(block_tree_handle);
-            services.push(block_stream_service_handle);
+            if let Some(block_stream_service_handle) = block_stream_service_handle {
+                services.push(block_stream_service_handle);
+            }
 
             // 7. State management
             services.push(mempool_handle);

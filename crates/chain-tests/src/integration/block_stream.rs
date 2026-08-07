@@ -180,6 +180,43 @@ async fn finalized_emitted_on_migration() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Durable-seq ordering pin: for a given block, the confirmation txn assigns `observed` a lower
+/// `seq` than the later migration txn assigns `finalized` — confirmation always precedes that
+/// block's migration by at least `block_migration_depth` blocks.
+#[test_log::test(tokio::test)]
+async fn observed_seq_precedes_finalized_for_same_block() -> eyre::Result<()> {
+    let mut node = IrysNodeTest::default_async();
+    node.cfg.consensus.get_mut().block_migration_depth = 2;
+    let node = node.start().await;
+    let handle = node.node_ctx.block_stream_handle.clone();
+    let (_, _, mut live) = handle.subscribe(0)?;
+
+    let blk = node.mine_block().await?;
+    node.wait_until_height(blk.height, 10).await?;
+
+    let observed = next_frame_for(&mut live, |f| {
+        f.kind() == "observed" && f.block_hash() == Some(blk.block_hash)
+    })
+    .await?;
+
+    node.mine_blocks(3).await?;
+    node.wait_until_block_index_height(blk.height, 30).await?;
+
+    let finalized = next_frame_for(&mut live, |f| {
+        f.kind() == "finalized" && f.block_hash() == Some(blk.block_hash)
+    })
+    .await?;
+
+    assert!(
+        observed.seq < finalized.seq,
+        "Confirmed/observed must precede Finalized for the same block: observed.seq={}, finalized.seq={}",
+        observed.seq,
+        finalized.seq
+    );
+
+    Ok(())
+}
+
 #[test_log::test(tokio::test)]
 async fn internal_reads_by_height_and_range() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();

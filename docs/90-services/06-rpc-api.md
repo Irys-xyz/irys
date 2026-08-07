@@ -5,16 +5,35 @@ exposes the node's durable block-event log two ways — a push stream and an equ
 canonical block reads and an unpacked chunk-range read. Both transports carry the **same** `StreamFrame`s
 from the **same** seq-keyed log, so a follower may use either and reach identical state.
 
-> **Security.** These routes carry no application-layer authentication. They are mounted only when the
-> node sets `http.expose_internal_api` (off by default); when enabled they ride the same HTTP listener as
-> the public API. A deployment that enables them **must** restrict `/internal/*` at the network layer
-> (firewall / reverse proxy / bind address) to the trusted gateway.
+> **Security / runtime.** These routes carry no application-layer authentication. They are mounted only
+> when the node sets `http.expose_internal_api` (off by default). That same flag starts the durable
+> block-stream producer that appends `observed` / `finalized` / `reorged` frames; when the flag is off
+> the producer is not started and no stream log is written. When enabled they ride the same HTTP
+> listener as the public API. A deployment that enables them **must** restrict `/internal/*` at the
+> network layer (firewall / reverse proxy / bind address) to the trusted gateway.
+>
+> **Flag toggle gap.** If the flag was on (log written), then off across restarts (no appends, no
+> prune), then on again, `seq` stays contiguous but the event history has a hole for every block that
+> migrated while the producer was disabled. Startup reconciliation only backfills missing `finalized`
+> frames within `RECONCILE_SCAN_CAP` of the index tail; after a long disabled window it may abort and
+> log a warning. Followers that resume from an old cursor will not receive a `truncated` signal for
+> that semantic hole — they must re-bootstrap from canonical block reads. A stronger guarantee would
+> require recording the disable period (e.g. a reset-marker frame).
 
 ## The event log and its cursor
 
 The node appends `observed` / `finalized` / `reorged` events to a durable, append-only log keyed by a
-monotonic `seq` (the 0-based append index). `seq` never rewinds or repeats within one log lifetime, so it
-is the follower's resume cursor — never height, which repeats across forks.
+monotonic `seq` (the 0-based append index). Within one log lifetime the **durable log** never rewinds
+or repeats a `seq` — that is the follower's resume cursor (never height, which repeats across forks).
+
+The **live SSE channel** is best-effort delivery of already-durable frames. In steady state the single
+block-tree task enqueues in commit order so live order matches `seq`. At startup, reconciliation can
+append frames that fan out before earlier writer frames still queued on the channel, so a connected
+subscriber may briefly see `N+1` before `N`. Consumers should therefore track the highest *contiguous*
+`seq` they have processed, not the highest `seq` they have seen, and ignore only frames at or below that
+watermark. A frame that arrives above the watermark leaves a gap: buffer it until the missing frames
+arrive, or re-sync from the first missing `seq` via poll/replay. Discarding on `seq <= highest seen`
+instead loses `N` whenever `N+1` overtakes it. Poll pages always read the log in ascending `seq`.
 
 The log is pruned: once it exceeds `RETENTION_EVENTS` (100,000) the oldest events are deleted (batched, so
 the retained count is ~100k with up to `PRUNE_INTERVAL` overshoot). Two quantities therefore matter:
@@ -124,21 +143,38 @@ size requests within `MAX_CHUNK_SPAN`, or a conforming node would answer with a 
   request that is malformed (bad `ledger`, unparsable or inverted `offset`) or wider than `MAX_CHUNK_SPAN`.
 - `5xx` only on a genuine log-read fault.
 - **`404` means the endpoint is not available.** The `/internal` routes are mounted only when the node
-  sets `http.expose_internal_api` (off by default); a node with it disabled, or an older build that lacks
-  the route entirely, serves a normal not-found. The gateway's transport selector treats `404` /
-  connection-refused as "this transport is unsupported" and falls back accordingly. When the routes are
-  mounted they never return `404` for an empty, short, or out-of-range log. The one exception is
-  `GET /internal/blocks/{height}`, whose `404` also means "no canonical block at that height" — a
-  transport prober must key on the stream/events routes, never on the by-height read.
+  sets `http.expose_internal_api` (off by default); with the flag off the durable producer is also not
+  started. A node with it disabled, or an older build that lacks the route entirely, serves a normal
+  not-found. The gateway's transport selector treats `404` / connection-refused as "this transport is
+  unsupported" and falls back accordingly. When the routes are mounted they never return `404` for an
+  empty, short, or out-of-range log. The one exception is `GET /internal/blocks/{height}`, whose `404`
+  also means "no canonical block at that height" — a transport prober must key on the stream/events
+  routes, never on the by-height read.
 
-## Limitation: the crash window
+## Durability: frames commit with their transitions
 
-A signal is in-memory between its authoritative site and the producer's durable append, so the log
-is lossless only while the node runs: a crash inside that window loses the frame. For `finalized`
-the durable truth survives in the block index, and the producer reconciles the index tail against
-the log at startup, appending any missing `finalized` frames in height order. A lost `observed` or
-`reorged` frame is not replayed; a follower recovers the resulting state through the canonical
-reads, exactly as it does after a `truncated` poll.
+Production frames are appended inside the same consensus database transaction as the state
+transition they report: confirmation writes `observed`/`reorged` frames with its metadata, and
+migration writes `finalized` with its block-index push. A crash therefore cannot lose a frame for a
+transition that persisted — the two are atomic — and a frame cannot exist for a transition that did
+not. The producer's remaining append path is startup reconciliation, which repairs `finalized`
+frames that a pre-atomic-append build lost between a migration commit and its separate producer
+append, walking the block index tail and appending the gap in height order. Live SSE delivery is
+best-effort on top of this durable log: a committed frame whose fan-out is missed (say, a halted
+producer) is recovered through replay on reconnect for as long as it remains retained. Within one log
+lifetime the only cursor replay cannot recover is one that has fallen below `lowest_retained_seq` —
+the `truncated` case, which returns no frames and requires a re-bootstrap from canonical block reads.
+Log recreation is a separate failure, not a deeper truncation: `seq` restarts at `0`, so a cursor
+above the new floor replays *different* frames rather than none. See "Limitation: log recreation
+(reset)" below — it needs an operator-coordinated re-bootstrap, which replay cannot signal.
+
+**FCU timing.** An `observed` (or `reorged`) frame becomes durable when confirmation's consensus
+txn commits, which is **before** the execution-layer fork-choice update (FCU) for that tip.
+Live SSE defers fan-out until after a successful FCU ack; the poll transport reads the log with no
+FCU gate, so a poll can return `observed` for a block whose EL head has not advanced yet (window:
+one FCU round-trip). Presence in the log does not imply the EL head has moved. Gateways that
+cross-read `eth_*` at `latest` on `observed` must tolerate that lag or wait for EL confirmation
+separately.
 
 ## Limitation: log recreation (reset)
 

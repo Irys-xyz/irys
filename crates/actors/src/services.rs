@@ -4,9 +4,7 @@ use crate::{
     DataSyncServiceMessage, StorageModuleServiceMessage,
     block_discovery::BlockDiscoveryMessage,
     block_producer::BlockProducerCommand,
-    block_tree_service::{
-        BlockStateUpdated, BlockStreamSignal, BlockTreeServiceMessage, ReorgEvent,
-    },
+    block_tree_service::{BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent},
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
@@ -110,7 +108,7 @@ pub struct ServiceReceivers {
     pub peer_events: broadcast::Receiver<PeerEvent>,
     pub peer_network: UnboundedReceiver<PeerNetworkServiceMessage>,
     pub block_discovery: UnboundedReceiver<Traced<BlockDiscoveryMessage>>,
-    pub block_stream: UnboundedReceiver<BlockStreamSignal>,
+    pub block_stream: UnboundedReceiver<Arc<irys_types::block_stream::StreamFrame>>,
     pub packing: tokio::sync::mpsc::Receiver<PackingRequest>,
 }
 
@@ -140,7 +138,7 @@ pub struct ServiceSendersInner {
     pub peer_events: broadcast::Sender<PeerEvent>,
     pub peer_network: PeerNetworkSender,
     pub block_discovery: UnboundedSender<Traced<BlockDiscoveryMessage>>,
-    pub block_stream: UnboundedSender<BlockStreamSignal>,
+    pub block_stream: UnboundedSender<Arc<irys_types::block_stream::StreamFrame>>,
     pub mining_bus: MiningBus,
     pub packing_sender: PackingSender,
 }
@@ -177,7 +175,8 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<Traced<BlockDiscoveryMessage>>();
-        let (block_stream_sender, block_stream_receiver) = unbounded_channel::<BlockStreamSignal>();
+        let (block_stream_sender, block_stream_receiver) =
+            unbounded_channel::<Arc<irys_types::block_stream::StreamFrame>>();
         let (packing_sender, packing_receiver) = PackingService::channel(5_000);
 
         let mining_bus = MiningBus::new();

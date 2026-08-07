@@ -6,10 +6,11 @@
 //! matched as a literal segment rather than captured as a height.
 //!
 //! SECURITY: these endpoints carry no application-layer authentication. They are mounted only when
-//! `http.expose_internal_api` is set (off by default); when enabled they ride the same HTTP listener
-//! as the public API. They expose internal block data and a long-lived SSE stream, so a deployment
-//! that enables them MUST restrict `/internal/*` at the network layer (firewall / reverse proxy /
-//! bind address) to the trusted gateway.
+//! `http.expose_internal_api` is set (off by default); that same flag also starts the durable
+//! block-stream producer that writes the seq log these routes read. When enabled they ride the
+//! same HTTP listener as the public API. They expose internal block data and a long-lived SSE
+//! stream, so a deployment that enables them MUST restrict `/internal/*` at the network layer
+//! (firewall / reverse proxy / bind address) to the trusted gateway.
 
 use crate::ApiState;
 use crate::error::ApiError;
@@ -71,8 +72,9 @@ async fn blocks_stream(
             // through to the live tail (that would push a seq gap onto the wire).
             return;
         }
-        // Live tail [end, ..). `recv` yields `None` when the producer halts and drops the sender, ending
-        // the SSE cleanly after replay.
+        // Live tail [end, ..). `recv` yields `None` when the producer halts and drops the sender,
+        // ending the SSE cleanly after replay. The handle skips live delivery of frames with
+        // `seq < end` (already covered by the durable replay snapshot).
         while let Some(frame) = live.recv().await {
             yield sse_bytes(&frame)?;
         }
