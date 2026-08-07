@@ -32,6 +32,18 @@ use tracing::{Instrument as _, debug, error, info, instrument, warn};
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+/// Concurrent probes per inactive-peer health check pass. Bounded rather than
+/// one task per peer: the set is every peer we cannot currently use, which
+/// after a restart or a local network fault is the entire peer list.
+const INACTIVE_PEERS_HEALTH_CHECK_CONCURRENCY: usize = 16;
+/// Wall-clock budget for one pass, deliberately under
+/// [`INACTIVE_PEERS_HEALTH_CHECK_INTERVAL`] so passes cannot overlap.
+///
+/// A pass therefore covers a bounded prefix of the inactive set rather than all
+/// of it. Full coverage is the sync service's hydration pass, which sweeps every
+/// peer under its own cursor; this check exists to recover a handful of peers
+/// quickly, not to be exhaustive.
+const INACTIVE_PEERS_HEALTH_CHECK_BUDGET: Duration = Duration::from_secs(8);
 const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);
 
 fn send_message_and_log_error(sender: &PeerNetworkSender, message: PeerNetworkServiceMessage) {
@@ -434,59 +446,83 @@ impl PeerNetworkService {
             state.gossip_client.clone()
         };
         let sender_inner = self.inner.clone();
+        let peer_list = self.inner.peer_list();
+        let runtime_handle = sender_inner.runtime_handle.clone();
 
-        for (peer_id, peer) in inactive_peers {
-            let client = gossip_client.clone();
-            let peer_list = self.inner.peer_list();
-            let inner_clone = sender_inner.clone();
-            sender_inner.runtime_handle.spawn(
-                async move {
-                    match client
-                        .check_health(&peer_id, peer.address, peer.protocol_version, &peer_list)
-                        .await
-                    {
-                        Ok(PeerHealth::Healthy) => {
-                            debug!("Peer {:?} is online", peer_id);
-                            peer_list.set_is_online_by_peer_id(&peer_id, true);
-                            inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
-                        }
-                        Ok(PeerHealth::HandshakePending) => {
-                            // Alive, so it keeps its online flag, but no credit
-                            // while it declines to serve us. `check_health` has
-                            // already requested the handshake.
-                            debug!("Peer {:?} answered but wants a handshake", peer_id);
-                            peer_list.set_is_online_by_peer_id(&peer_id, true);
-                        }
-                        Ok(PeerHealth::Unhealthy) => {
-                            debug!("Peer {:?} is offline", peer_id);
-                            peer_list.set_is_online_by_peer_id(&peer_id, false);
-                            inner_clone.decrease_peer_score(
-                                &peer_id,
-                                ScoreDecreaseReason::Offline(
-                                    "Health check reported the peer as unhealthy".to_string(),
-                                ),
-                            );
-                        }
-                        Err(GossipClientError::HealthCheck(url, status)) => {
-                            let message = format!(
-                                "Peer {:?} ({}) health check failed with status {}",
-                                peer_id, url, status
-                            );
-                            debug!("{message}");
-                            peer_list.set_is_online_by_peer_id(&peer_id, false);
-                            inner_clone.decrease_peer_score(
-                                &peer_id,
-                                ScoreDecreaseReason::NetworkError(message),
-                            );
-                        }
-                        Err(err) => {
-                            error!("Failed to check health of peer {:?}: {:?}", peer_id, err);
+        // Spawned, not awaited here: the caller is the service select loop,
+        // which also dispatches peer messages and the DB flush. A pass is
+        // network-bound and would stall all of that for its full budget.
+        runtime_handle.spawn(async move {
+            let probes =
+                futures::stream::iter(inactive_peers.into_iter().map(|(peer_id, peer)| {
+                    let client = gossip_client.clone();
+                    let peer_list = peer_list.clone();
+                    let inner_clone = sender_inner.clone();
+                    async move {
+                        match client
+                            .check_health(&peer_id, peer.address, peer.protocol_version, &peer_list)
+                            .await
+                        {
+                            Ok(PeerHealth::Healthy) => {
+                                debug!("Peer {:?} is online", peer_id);
+                                peer_list.set_is_online_by_peer_id(&peer_id, true);
+                                inner_clone
+                                    .increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
+                            }
+                            Ok(PeerHealth::HandshakePending) => {
+                                // Alive, so it keeps its online flag, but no credit
+                                // while it declines to serve us. `check_health` has
+                                // already requested the handshake.
+                                debug!("Peer {:?} answered but wants a handshake", peer_id);
+                                peer_list.set_is_online_by_peer_id(&peer_id, true);
+                            }
+                            Ok(PeerHealth::Unhealthy) => {
+                                debug!("Peer {:?} is offline", peer_id);
+                                peer_list.set_is_online_by_peer_id(&peer_id, false);
+                                inner_clone.decrease_peer_score(
+                                    &peer_id,
+                                    ScoreDecreaseReason::Offline(
+                                        "Health check reported the peer as unhealthy".to_string(),
+                                    ),
+                                );
+                            }
+                            Err(GossipClientError::HealthCheck(url, status)) => {
+                                let message = format!(
+                                    "Peer {:?} ({}) health check failed with status {}",
+                                    peer_id, url, status
+                                );
+                                debug!("{message}");
+                                peer_list.set_is_online_by_peer_id(&peer_id, false);
+                                inner_clone.decrease_peer_score(
+                                    &peer_id,
+                                    ScoreDecreaseReason::NetworkError(message),
+                                );
+                            }
+                            Err(err) => {
+                                error!("Failed to check health of peer {:?}: {:?}", peer_id, err);
+                            }
                         }
                     }
-                }
-                .instrument(tracing::info_span!("peer_health_check", %peer_id)),
-            );
-        }
+                    .instrument(tracing::info_span!("peer_health_check", %peer_id))
+                }))
+                .buffer_unordered(INACTIVE_PEERS_HEALTH_CHECK_CONCURRENCY);
+
+            // The budget is below the tick interval, so a pass cannot overlap
+            // its successor: expiry drops the stream and cancels whatever is
+            // still in flight. That is what keeps this bounded without an
+            // in-flight latch to leak.
+            if tokio::time::timeout(
+                INACTIVE_PEERS_HEALTH_CHECK_BUDGET,
+                probes.for_each(|()| std::future::ready(())),
+            )
+            .await
+            .is_err()
+            {
+                debug!(
+                    "Inactive-peer health check hit its budget; the rest keep their current status"
+                );
+            }
+        });
     }
 
     async fn handle_announce_peer(&self, peer: PeerListItem) {

@@ -78,7 +78,11 @@ impl PeerScore {
         self.0 = Self::MAX;
     }
 
-    pub fn is_active(&self) -> bool {
+    /// Whether the peer's reputation clears the exclusion threshold.
+    ///
+    /// Reputation alone: a peer can be reputable and unreachable. Use
+    /// [`PeerListItem::is_active`] to ask whether a peer is usable right now.
+    pub fn is_reputable(&self) -> bool {
         self.0 >= Self::ACTIVE_THRESHOLD
     }
 
@@ -144,6 +148,19 @@ pub struct PeerListItem {
 }
 
 impl PeerListItem {
+    /// Whether this peer is usable right now: reputable *and* reachable.
+    ///
+    /// Both halves are required, and asking for one without the other has
+    /// caused bugs in both directions. A peer that is reputable but offline is
+    /// not a candidate for gossip or pulls; a peer that answers but has lost
+    /// its reputation is not one either. Scoring can also be disabled, which
+    /// pins every score to `PeerScore::MAX` — then reachability is the only
+    /// half carrying information, and a reputation-only test silently answers
+    /// "yes" for every peer.
+    pub fn is_active(&self) -> bool {
+        self.reputation_score.is_reputable() && self.is_online
+    }
+
     /// Create a PeerListItem from PeerListItemInner loaded from a database.
     /// Uses the mining_address_key (DB key) as fallback for missing fields.
     pub fn from_inner(inner: PeerListItemInner, peer_id: IrysPeerId) -> Self {
@@ -806,7 +823,7 @@ mod tests {
         ) {
             let mut score = PeerScore::new(initial);
             score.decrease_by(decrease);
-            assert_eq!(score.is_active(), should_be_active);
+            assert_eq!(score.is_reputable(), should_be_active);
         }
 
         #[rstest]
