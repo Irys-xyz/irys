@@ -209,7 +209,23 @@ pub struct ChainSyncServiceInner<B: BlockDiscoveryFacade, M: MempoolFacade> {
     /// dominated by network probes of the same peers, so a concurrent second
     /// pass would only re-measure what the first is already measuring.
     is_periodic_check_running: Arc<AtomicBool>,
+    /// Set when the service loop exits. The periodic check runs detached, so
+    /// without this it can outlive the loop and start a whole sync — VDF pause,
+    /// peer hydration, `sync_chain` — on a service that is already gone.
+    is_shutting_down: Arc<AtomicBool>,
     runtime_handle: tokio::runtime::Handle,
+}
+
+/// Sets [`ChainSyncServiceInner::is_shutting_down`] on drop.
+///
+/// A guard, not a store after the loop: the loop also exits by `?`, and every
+/// exit has to be visible to the detached periodic check.
+struct ShutdownFlagGuard(Arc<AtomicBool>);
+
+impl Drop for ShutdownFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// Clears [`ChainSyncServiceInner::is_periodic_check_running`] on drop.
@@ -334,6 +350,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             vdf_controller,
             is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
             is_periodic_check_running: Arc::new(AtomicBool::new(false)),
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
             runtime_handle,
         }
     }
@@ -386,6 +403,12 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         .await
         {
             Ok(true) => {
+                // This check is detached, so it can still be running after the
+                // service loop exited; starting a sync then would outlive it.
+                if self.is_shutting_down.load(Ordering::Acquire) {
+                    debug!("Periodic sync check: service is shutting down, not starting a sync");
+                    return;
+                }
                 info!("Periodic sync check: We're behind the network, starting sync");
                 self.spawn_chain_sync_task(None, false);
             }
@@ -734,6 +757,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
     #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> ChainSyncResult<()> {
         info!("Starting the sync service");
+        let _shutdown_flag = ShutdownFlagGuard(Arc::clone(&self.inner.is_shutting_down));
         let period_secs = self
             .inner
             .config
@@ -2229,6 +2253,24 @@ mod tests {
         assert!(
             !flag.load(Ordering::Acquire),
             "dropping the task before its first poll must still clear the flag"
+        );
+    }
+
+    /// The loop also exits by `?`, not just by `break`, so the flag is set from
+    /// a guard rather than after the loop.
+    #[test]
+    fn shutdown_flag_is_set_on_every_exit_from_the_service_loop() {
+        let flag = Arc::new(AtomicBool::new(false));
+
+        let exit_by_error = || -> ChainSyncResult<()> {
+            let _guard = ShutdownFlagGuard(Arc::clone(&flag));
+            Err(ChainSyncError::Internal("loop bailed".into()))
+        };
+        assert!(exit_by_error().is_err());
+
+        assert!(
+            flag.load(Ordering::Acquire),
+            "an early return must still mark the service as shutting down"
         );
     }
 
