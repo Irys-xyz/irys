@@ -182,6 +182,12 @@ const HYDRATE_HEALTH_CHECK_CONCURRENCY: usize = 16;
 /// the caller's own cadence, not the per-peer timeout.
 const HYDRATE_PASS_BUDGET: Duration = Duration::from_secs(10);
 
+/// Skip a pass if the last one finished less than this ago. Set to the pass
+/// budget: below it, a fresh sweep would finish no more current than the flags
+/// already held. The periodic sync check hydrates and then, if it finds us
+/// behind, starts a sync task that would otherwise hydrate straight afterwards.
+const HYDRATE_MIN_INTERVAL: Duration = HYDRATE_PASS_BUDGET;
+
 /// Control flow outcome for `handle_peer_pull_response`.
 #[derive(Debug)]
 enum PeerPullOutcome<T> {
@@ -218,6 +224,9 @@ pub struct GossipClient {
     /// list. Shared by every clone of this client, since the passes it paces
     /// are the same passes.
     hydrate_cursor: Arc<AtomicUsize>,
+    /// Held for the duration of a hydration pass; carries when the last one
+    /// finished. Serialises passes and backs the freshness skip.
+    hydrate_pass: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 /// What a `/gossip/health` probe learned about a peer.
@@ -288,6 +297,7 @@ impl GossipClient {
             circuit_breaker,
             runtime_handle,
             hydrate_cursor: Arc::new(AtomicUsize::new(0)),
+            hydrate_pass: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -2387,13 +2397,36 @@ impl GossipClient {
     /// here would charge the whole list for one local fault. Probe-driven
     /// reputation belongs to the peer-network service's health check.
     pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
-        self.hydrate_peers_online_status_within(peer_list, HYDRATE_PASS_BUDGET)
-            .await;
+        self.hydrate_peers_online_status_within(
+            peer_list,
+            HYDRATE_PASS_BUDGET,
+            HYDRATE_MIN_INTERVAL,
+        )
+        .await;
     }
 
-    /// [`Self::hydrate_peers_online_status`] with an explicit pass budget, so a
-    /// test can exercise the expiry path without waiting out the shipped one.
-    async fn hydrate_peers_online_status_within(&self, peer_list: &PeerList, budget: Duration) {
+    /// [`Self::hydrate_peers_online_status`] with explicit bounds, so a test can
+    /// exercise the expiry path without waiting out the shipped ones. A
+    /// `min_interval` of zero disables the freshness skip.
+    async fn hydrate_peers_online_status_within(
+        &self,
+        peer_list: &PeerList,
+        budget: Duration,
+        min_interval: Duration,
+    ) {
+        // Skip rather than queue. Two passes would sweep the same peers, fight
+        // over the cursor, and double the probe burst.
+        let Ok(mut last_finished) = self.hydrate_pass.try_lock() else {
+            debug!("Peer hydration already in flight, skipping this pass");
+            return;
+        };
+        if let Some(finished) = *last_finished
+            && finished.elapsed() < min_interval
+        {
+            debug!("Peer hydration ran recently, skipping this pass");
+            return;
+        }
+
         debug!("Hydrating peers online status");
         let mut peers = peer_list.all_peers_sorted_by_score();
         let total = peers.len();
@@ -2474,6 +2507,7 @@ impl GossipClient {
             start.saturating_add(attempted.load(Ordering::Relaxed)),
             Ordering::Relaxed,
         );
+        *last_finished = Some(std::time::Instant::now());
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -3986,7 +4020,7 @@ mod tests {
             let start = Instant::now();
             fixture
                 .client
-                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET)
+                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET, Duration::ZERO)
                 .await;
             let elapsed = start.elapsed();
 
@@ -4047,7 +4081,11 @@ mod tests {
 
             fixture
                 .client
-                .hydrate_peers_online_status_within(&peer_list, Duration::from_secs(5))
+                .hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    Duration::ZERO,
+                )
                 .await;
 
             let failing_score = peer_list
@@ -4131,7 +4169,11 @@ mod tests {
 
             fixture
                 .client
-                .hydrate_peers_online_status_within(&peer_list, Duration::from_secs(5))
+                .hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    Duration::ZERO,
+                )
                 .await;
 
             let peer = peer_list.get_peer(&peer_id).expect("peer still listed");
@@ -4160,7 +4202,11 @@ mod tests {
 
             fixture
                 .client
-                .hydrate_peers_online_status_within(&peer_list, Duration::from_secs(5))
+                .hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    Duration::ZERO,
+                )
                 .await;
 
             assert!(
@@ -4169,6 +4215,106 @@ mod tests {
                     .expect("peer still listed")
                     .is_online,
                 "a peer on another chain must not be left online"
+            );
+        }
+
+        /// The periodic sync check hydrates, then starts a sync task that would
+        /// hydrate again immediately — two sweeps of the same peers seconds
+        /// apart.
+        #[tokio::test]
+        async fn hydrate_skips_a_pass_that_follows_a_recent_one() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(200));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            // Answers every pass, unlike MockHttpServer which serves once and
+            // would make the skip below indistinguishable from a dead server.
+            let server = crate::tests::util::FakeGossipServer::new();
+            let address = server.spawn();
+            let addr = IrysAddress::from([240_u8; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            peer_list.add_or_update_peer(
+                PeerListItem {
+                    peer_id,
+                    mining_address: addr,
+                    address: create_peer_address(&address.ip().to_string(), address.port()),
+                    reputation_score: PeerScore::new(PeerScore::INITIAL),
+                    response_time: 0,
+                    last_seen: 0,
+                    is_online: false,
+                    // V1 hits /gossip/health, the route the fake server serves.
+                    protocol_version: ProtocolVersion::V1,
+                },
+                true,
+            );
+
+            let sweep = |min_interval| {
+                fixture.client.hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    min_interval,
+                )
+            };
+
+            sweep(Duration::ZERO).await;
+            assert!(
+                peer_list.get_peer(&peer_id).expect("listed").is_online,
+                "pre-condition: the first pass resolves the peer"
+            );
+
+            // Force the peer offline; a pass that runs would flip it back.
+            peer_list.set_is_online_by_peer_id(&peer_id, false);
+
+            sweep(Duration::from_secs(30)).await;
+            assert!(
+                !peer_list.get_peer(&peer_id).expect("listed").is_online,
+                "a pass inside the freshness window must not run"
+            );
+
+            // The control: the same sweep without the window does flip it back,
+            // so the assertion above pinned the skip and not a dead server.
+            sweep(Duration::ZERO).await;
+            assert!(
+                peer_list.get_peer(&peer_id).expect("listed").is_online,
+                "the peer was still answering; only the freshness window held the pass back"
+            );
+        }
+
+        /// Concurrent passes would sweep the same peers and fight over the
+        /// cursor, so the second skips instead of queueing behind the first.
+        #[tokio::test]
+        async fn hydrate_skips_a_pass_while_another_is_in_flight() {
+            // Long per-request timeout so the first pass is still in flight.
+            let fixture = TestFixture::with_timeout(Duration::from_secs(11));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let (_, stalled_peer) = unreachable_peer(241, 9_200, true);
+            peer_list.add_or_update_peer(stalled_peer, true);
+
+            let first = fixture.client.hydrate_peers_online_status_within(
+                &peer_list,
+                Duration::from_millis(600),
+                Duration::ZERO,
+            );
+            let second = async {
+                // Let the first pass take the lock before this one tries.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let start = Instant::now();
+                fixture
+                    .client
+                    .hydrate_peers_online_status_within(
+                        &peer_list,
+                        Duration::from_millis(600),
+                        Duration::ZERO,
+                    )
+                    .await;
+                start.elapsed()
+            };
+
+            let (_, second_elapsed) = tokio::join!(first, second);
+
+            assert!(
+                second_elapsed < Duration::from_millis(100),
+                "the second pass must return at once rather than run or queue, took {second_elapsed:?}"
             );
         }
 
@@ -4252,7 +4398,7 @@ mod tests {
             // budget fires before any of it resolves, so the tail is never probed.
             fixture
                 .client
-                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET)
+                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET, Duration::ZERO)
                 .await;
             assert!(
                 !peer_list
@@ -4265,7 +4411,7 @@ mod tests {
             // Second pass: starts where the first stopped, so the tail resolves.
             fixture
                 .client
-                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET)
+                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET, Duration::ZERO)
                 .await;
             assert!(
                 peer_list
