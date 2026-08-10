@@ -122,8 +122,9 @@ max_commitments_per_address = 20
 [vdf]
 # Threads for parallel VDF verification, per pool. Defaults to available cores
 # - 2 (one reserved for the VDF thread, one for the rest of the node), never
-# below 1. Prevalidation and block validation each get a pool of this size.
-# Uncomment to pin it; the value is clamped to consensus
+# below 1. Prevalidation and block validation each get a pool of this size, so
+# a node doing both at once can use up to twice this many threads.
+# Uncomment to pin it; the default and any pinned value are clamped to consensus
 # num_checkpoints_in_vdf_step, which is the widest the checkpoint pass can go.
 # parallel_verification_thread_limit = 4
 
