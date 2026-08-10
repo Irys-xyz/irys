@@ -2447,6 +2447,8 @@ impl GossipClient {
         // Counted as each probe starts, not as it finishes: a pass whose probes
         // all hang resolves nothing, and the cursor still has to move past the
         // peers it tried or the next pass would retry the same stalled head.
+        // The cost is that peers still in flight when the budget fires are
+        // stepped over, keeping their previous flag until the cursor wraps.
         let attempted = AtomicUsize::new(0);
         let probes = futures::stream::iter(peers.into_iter().map(|peer| {
             let attempted = &attempted;
