@@ -197,6 +197,14 @@ impl Config {
             self.consensus.vdf.num_checkpoints_in_vdf_step > 0,
             "vdf.num_checkpoints_in_vdf_step must be > 0"
         );
+        // Checked after the checkpoint count, which this value is clamped to, so
+        // a zero there reports itself rather than surfacing here. Rayon reads
+        // `num_threads(0)` as "size the pool yourself", so a pinned zero would
+        // widen the pool to every core instead of narrowing it.
+        ensure!(
+            self.vdf.parallel_verification_thread_limit > 0,
+            "vdf.parallel_verification_thread_limit must be > 0; remove the setting to derive it from the core count"
+        );
         // Else iterations-per-checkpoint floor to 0 and VDF steps do no sequential work.
         ensure!(
             self.consensus.vdf.sha_1s_difficulty
@@ -1061,6 +1069,23 @@ mod tests {
             node_config.vdf().parallel_verification_thread_limit,
             1,
             "a limit under the checkpoint count must survive the merge"
+        );
+    }
+
+    /// The merge only puts a ceiling on the limit, so a pinned zero survives it
+    /// and must be refused before it reaches the pool builder.
+    #[test]
+    fn vdf_thread_limit_of_zero_is_refused() {
+        let mut node_config = NodeConfig::testing();
+        node_config.vdf.parallel_verification_thread_limit = 0;
+
+        let err = Config::new(node_config, IrysPeerId::random())
+            .validate()
+            .expect_err("a zero thread limit must fail validation");
+        assert!(
+            err.to_string()
+                .contains("vdf.parallel_verification_thread_limit must be > 0"),
+            "unexpected error: {err}"
         );
     }
 
