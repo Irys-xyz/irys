@@ -1905,7 +1905,7 @@ pub trait BlockProdStrategy {
                     DataLedger::Submit => &mempool_txs.submit_tx,
                     DataLedger::OneYear => &mempool_txs.one_year_tx,
                     DataLedger::ThirtyDay => &mempool_txs.thirty_day_tx,
-                    _ => &[],
+                    DataLedger::Publish => &[],
                 };
                 prev_block_header
                     .ledger_total_chunks(ledger)

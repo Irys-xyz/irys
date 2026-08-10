@@ -195,9 +195,9 @@ impl PeerList {
         let mut became_active: Option<irys_types::PeerListItem> = None;
         let mut became_inactive: Option<irys_types::PeerListItem> = None;
         if let Some(peer) = inner.persistent_peers_cache.get_mut(&peer_id) {
-            let was_active = peer.reputation_score.is_active() && peer.is_online;
+            let was_active = peer.is_active();
             peer.is_online = is_online;
-            let now_active = peer.reputation_score.is_active() && peer.is_online;
+            let now_active = peer.is_active();
             if !was_active && now_active {
                 became_active = Some(peer.clone());
             }
@@ -205,9 +205,9 @@ impl PeerList {
                 became_inactive = Some(peer.clone());
             }
         } else if let Some(peer) = inner.unstaked_peer_purgatory.get_mut(&peer_id) {
-            let was_active = peer.reputation_score.is_active() && peer.is_online;
+            let was_active = peer.is_active();
             peer.is_online = is_online;
-            let now_active = peer.reputation_score.is_active() && peer.is_online;
+            let now_active = peer.is_active();
             if !was_active && now_active {
                 became_active = Some(peer.clone());
             }
@@ -236,9 +236,9 @@ impl PeerList {
         let mut became_active: Option<irys_types::PeerListItem> = None;
         let mut became_inactive: Option<irys_types::PeerListItem> = None;
         if let Some(peer) = inner.persistent_peers_cache.get_mut(peer_id) {
-            let was_active = peer.reputation_score.is_active() && peer.is_online;
+            let was_active = peer.is_active();
             peer.is_online = is_online;
-            let now_active = peer.reputation_score.is_active() && peer.is_online;
+            let now_active = peer.is_active();
             if !was_active && now_active {
                 became_active = Some(peer.clone());
             }
@@ -246,9 +246,9 @@ impl PeerList {
                 became_inactive = Some(peer.clone());
             }
         } else if let Some(peer) = inner.unstaked_peer_purgatory.get_mut(peer_id) {
-            let was_active = peer.reputation_score.is_active() && peer.is_online;
+            let was_active = peer.is_active();
             peer.is_online = is_online;
-            let now_active = peer.reputation_score.is_active() && peer.is_online;
+            let now_active = peer.is_active();
             if !was_active && now_active {
                 became_active = Some(peer.clone());
             }
@@ -330,13 +330,13 @@ impl PeerList {
             let persistent = bindings
                 .persistent_peers_cache
                 .values()
-                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .filter(|peer| peer.is_active())
                 .count();
             let purgatory = bindings
                 .unstaked_peer_purgatory
                 .iter()
                 .map(|(_, v)| v)
-                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .filter(|peer| peer.is_active())
                 .count();
             persistent + purgatory
         };
@@ -432,7 +432,7 @@ impl PeerList {
         let purgatory_peers = guard
             .unstaked_peer_purgatory
             .iter()
-            .filter(|(_, peer)| peer.reputation_score.is_active())
+            .filter(|(_, peer)| peer.reputation_score.is_reputable())
             .map(|(key, value)| (*key, value.clone()));
 
         // Chain iterators and apply all filters in one pass
@@ -442,7 +442,7 @@ impl PeerList {
                 let exclude = exclude_peers
                     .as_ref()
                     .is_some_and(|excluded| excluded.contains(peer_id));
-                !exclude && peer.reputation_score.is_active() && peer.is_online
+                !exclude && peer.is_active()
             });
 
         let mut peers: Vec<(IrysPeerId, PeerListItem)> = filtered_peers.collect();
@@ -480,6 +480,9 @@ impl PeerList {
         peers
     }
 
+    /// Peers worth re-probing. Keyed on `is_active`, not reputation alone:
+    /// that misses well-scored peers that are merely offline, and returns
+    /// nothing at all when scoring is disabled.
     pub fn inactive_peers(&self) -> Vec<(IrysPeerId, PeerListItem)> {
         let guard = self.read();
         let mut inactive = Vec::new();
@@ -489,7 +492,7 @@ impl PeerList {
             guard
                 .persistent_peers_cache
                 .iter()
-                .filter(|(_peer_id, peer)| !peer.reputation_score.is_active())
+                .filter(|(_peer_id, peer)| !peer.is_active())
                 .map(|(peer_id, peer)| (*peer_id, peer.clone())),
         );
 
@@ -498,7 +501,7 @@ impl PeerList {
             guard
                 .unstaked_peer_purgatory
                 .iter()
-                .filter(|(_peer_id, peer)| !peer.reputation_score.is_active())
+                .filter(|(_peer_id, peer)| !peer.is_active())
                 .map(|(peer_id, peer)| (*peer_id, peer.clone())),
         );
 
@@ -762,11 +765,11 @@ impl PeerListDataInner {
         let was_active = self
             .persistent_peers_cache
             .get(&peer_id)
-            .map(|p| p.reputation_score.is_active() && p.is_online)
+            .map(PeerListItem::is_active)
             .or_else(|| {
                 self.unstaked_peer_purgatory
                     .peek(&peer_id)
-                    .map(|p| p.reputation_score.is_active() && p.is_online)
+                    .map(PeerListItem::is_active)
             })
             .unwrap_or(false);
 
@@ -780,7 +783,7 @@ impl PeerListDataInner {
             .or_else(|| self.unstaked_peer_purgatory.peek(&peer_id).cloned());
 
         if let Some(now_peer) = now_peer {
-            let now_active = now_peer.reputation_score.is_active() && now_peer.is_online;
+            let now_active = now_peer.is_active();
             if !was_active && now_active {
                 self.emit_peer_event(PeerEvent::BecameActive {
                     mining_addr,
@@ -836,7 +839,7 @@ impl PeerListDataInner {
         }
 
         if let Some(peer) = self.persistent_peers_cache.get_mut(peer_id) {
-            let was_active = peer.reputation_score.is_active() && peer.is_online;
+            let was_active = peer.is_active();
             match reason {
                 ScoreIncreaseReason::Online => {
                     peer.reputation_score.increase_online();
@@ -848,7 +851,7 @@ impl PeerListDataInner {
                     peer.reputation_score.increase_online();
                 }
             }
-            let now_active = peer.reputation_score.is_active() && peer.is_online;
+            let now_active = peer.is_active();
             let to_send = (!was_active && now_active).then(|| peer.clone());
             let _ = peer;
             if let Some(peer) = to_send {
@@ -857,7 +860,7 @@ impl PeerListDataInner {
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(peer_id) {
             // Update score in purgatory
-            let was_active = peer.reputation_score.is_active() && peer.is_online;
+            let was_active = peer.is_active();
             match reason {
                 ScoreIncreaseReason::Online => {
                     peer.reputation_score.increase_online();
@@ -890,7 +893,7 @@ impl PeerListDataInner {
                 .cloned()
                 .or_else(|| self.unstaked_peer_purgatory.peek(peer_id).cloned());
             if let Some(now_peer) = now_peer {
-                let now_active = now_peer.reputation_score.is_active() && now_peer.is_online;
+                let now_active = now_peer.is_active();
                 if !was_active && now_active {
                     let mining_addr = now_peer.mining_address;
                     self.emit_peer_event(PeerEvent::BecameActive {
@@ -917,7 +920,7 @@ impl PeerListDataInner {
 
         // Check the persistent cache first
         if let Some(peer_item) = self.persistent_peers_cache.get_mut(peer_id) {
-            let was_active = peer_item.reputation_score.is_active() && peer_item.is_online;
+            let was_active = peer_item.is_active();
             match reason {
                 ScoreDecreaseReason::BogusData(message) => {
                     peer_item.reputation_score.decrease_bogus_data(&message);
@@ -934,14 +937,14 @@ impl PeerListDataInner {
             }
 
             // Don't propagate inactive peers
-            if !peer_item.reputation_score.is_active() {
+            if !peer_item.reputation_score.is_reputable() {
                 warn!(
                     "Peer's {:?} score dropped below an active threshold, removing from the persistent cache",
                     peer_id
                 );
                 self.known_peers_cache.remove(&peer_item.address);
             }
-            let now_active = peer_item.reputation_score.is_active() && peer_item.is_online;
+            let now_active = peer_item.is_active();
             if was_active && !now_active {
                 warn!("Peer {:?} became inactive", peer_id);
                 let peer_clone = peer_item.clone();
@@ -979,7 +982,7 @@ impl PeerListDataInner {
                             );
                         }
                     }
-                    !peer_item.reputation_score.is_active()
+                    !peer_item.reputation_score.is_reputable()
                 } else {
                     false
                 };
@@ -1437,6 +1440,64 @@ mod tests {
         PeerList(Arc::new(RwLock::new(peer_list_data)))
     }
 
+    /// Reputation alone stranded this peer: excluded from selection for being
+    /// offline, and invisible to the check that would find it again.
+    #[test]
+    fn inactive_peers_includes_a_reputable_peer_that_is_offline() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let (_, offline_peer_id, mut offline_peer) = create_test_peer(1);
+        offline_peer.reputation_score = PeerScore::new(PeerScore::MAX);
+        offline_peer.is_online = false;
+        peer_list.add_or_update_peer(offline_peer, true);
+
+        // The control: reputable *and* reachable, so it is in use and must not
+        // be handed to the health check.
+        let (_, healthy_peer_id, healthy_peer) = create_test_peer(2);
+        peer_list.add_or_update_peer(healthy_peer, true);
+
+        let inactive: Vec<_> = peer_list
+            .inactive_peers()
+            .into_iter()
+            .map(|(peer_id, _)| peer_id)
+            .collect();
+
+        assert!(
+            inactive.contains(&offline_peer_id),
+            "a reputable but unreachable peer must still be probed"
+        );
+        assert!(
+            !inactive.contains(&healthy_peer_id),
+            "a usable peer must not be handed to the health check"
+        );
+    }
+
+    /// Scoring disabled pins every score to MAX, which retires a
+    /// reputation-only health check entirely.
+    #[test]
+    fn inactive_peers_still_finds_offline_peers_when_scoring_is_disabled() {
+        let mut node_config = NodeConfig::testing();
+        node_config.p2p_gossip.enable_scoring = false;
+        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(node_config));
+
+        let (_, offline_peer_id, mut offline_peer) = create_test_peer(1);
+        offline_peer.is_online = false;
+        peer_list.add_or_update_peer(offline_peer, true);
+
+        let inactive: Vec<_> = peer_list
+            .inactive_peers()
+            .into_iter()
+            .map(|(peer_id, _)| peer_id)
+            .collect();
+
+        assert_eq!(
+            inactive,
+            vec![offline_peer_id],
+            "an offline peer must be probeable with scoring disabled"
+        );
+    }
+
     /// Evicting a staked peer by its API address must clear it from every
     /// lookup path so the gossip data plane (`check_peer_v*`) stops trusting it.
     #[test]
@@ -1591,7 +1652,7 @@ mod tests {
             let updated_peer = peer_list.get_peer(&peer_id);
 
             if let Some(p) = updated_peer
-                && !p.reputation_score.is_active()
+                && !p.reputation_score.is_reputable()
             {
                 assert!(!peer_list.all_known_peers().contains(&peer.address));
             }
@@ -1661,7 +1722,7 @@ mod tests {
                 updated_peer.reputation_score.get(),
                 PeerScore::ACTIVE_THRESHOLD - 1
             );
-            assert!(!updated_peer.reputation_score.is_active());
+            assert!(!updated_peer.reputation_score.is_reputable());
 
             peer_list.increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::Online);
             let final_peer = peer_list.get_peer(&peer_id).unwrap();
@@ -1669,7 +1730,7 @@ mod tests {
                 final_peer.reputation_score.get(),
                 PeerScore::ACTIVE_THRESHOLD
             );
-            assert!(final_peer.reputation_score.is_active());
+            assert!(final_peer.reputation_score.is_reputable());
         }
 
         #[test]
@@ -2103,13 +2164,13 @@ mod tests {
             let persistent_active = bindings
                 .persistent_peers_cache
                 .values()
-                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .filter(|peer| peer.is_active())
                 .count();
             let purgatory_active = bindings
                 .unstaked_peer_purgatory
                 .iter()
                 .map(|(_, v)| v)
-                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .filter(|peer| peer.is_active())
                 .count();
             persistent_active + purgatory_active
         };
@@ -2127,13 +2188,13 @@ mod tests {
             let persistent_active = bindings
                 .persistent_peers_cache
                 .values()
-                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .filter(|peer| peer.is_active())
                 .count();
             let purgatory_active = bindings
                 .unstaked_peer_purgatory
                 .iter()
                 .map(|(_, v)| v)
-                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .filter(|peer| peer.is_active())
                 .count();
             persistent_active + purgatory_active
         };

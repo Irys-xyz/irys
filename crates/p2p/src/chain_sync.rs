@@ -204,7 +204,92 @@ pub struct ChainSyncServiceInner<B: BlockDiscoveryFacade, M: MempoolFacade> {
     /// `VdfState`.
     vdf_controller: VdfController,
     is_update_whitelist_task_running: Arc<AtomicBool>,
+    /// Set while a periodic sync check is in flight, so ticks arriving faster
+    /// than the check completes are dropped rather than queued. The check is
+    /// dominated by network probes of the same peers, so a concurrent second
+    /// pass would only re-measure what the first is already measuring.
+    is_periodic_check_running: Arc<AtomicBool>,
+    /// Set when the service loop exits. The periodic check runs detached, so
+    /// without this it can outlive the loop and start a whole sync — VDF pause,
+    /// peer hydration, `sync_chain` — on a service that is already gone.
+    is_shutting_down: Arc<AtomicBool>,
     runtime_handle: tokio::runtime::Handle,
+}
+
+/// Sets [`ChainSyncServiceInner::is_shutting_down`] on drop.
+///
+/// A guard, not a store after the loop: the loop also exits by `?`, and every
+/// exit has to be visible to the detached periodic check.
+struct ShutdownFlagGuard(Arc<AtomicBool>);
+
+impl Drop for ShutdownFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Clears [`ChainSyncServiceInner::is_periodic_check_running`] on drop.
+///
+/// A plain store at the end of the task would leak the flag if the task is
+/// aborted (runtime shutdown) or panics, and a permanently-set flag silently
+/// disables every later periodic check — the one failure that leaves a node
+/// stuck behind with nothing in the log to say why.
+struct PeriodicCheckGuard(Arc<AtomicBool>);
+
+impl Drop for PeriodicCheckGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Releases the claim on [`ChainSyncServiceInner::is_sync_task_spawned`].
+///
+/// The sync task can panic (hydration, payload repair or `sync_chain`) or be
+/// dropped at runtime shutdown. Releasing the slot by hand at the end of the
+/// task would miss both, and a claimed slot that is never released turns every
+/// later sync request — periodic or explicit — into a no-op for the rest of
+/// the process, which is exactly the "node quietly stops catching up" failure.
+struct SyncTaskSlotGuard(Arc<AtomicBool>);
+
+impl Drop for SyncTaskSlotGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Finishes the sync if `sync_chain` never returned.
+///
+/// `sync_chain` sets the syncing flag partway through and clears it on both of
+/// its own exits, so only an unwind out of the middle leaves it set. That flag
+/// gates later sync requests *and* disables gossip broadcast, so a stuck one
+/// is worse than a stuck spawn slot: the node neither catches up nor
+/// broadcasts. `disarm` is called once `sync_chain` returns, leaving the
+/// success and error paths to clear the flag exactly as before.
+struct SyncInProgressGuard {
+    sync_state: ChainSyncState,
+    armed: bool,
+}
+
+impl SyncInProgressGuard {
+    fn new(sync_state: ChainSyncState) -> Self {
+        Self {
+            sync_state,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SyncInProgressGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            warn!("Sync task ended without finishing the sync; clearing the syncing flag");
+            self.sync_state.finish_sync();
+        }
+    }
 }
 
 /// Main sync service that runs in its own tokio task
@@ -264,7 +349,78 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             reth_service,
             vdf_controller,
             is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
+            is_periodic_check_running: Arc::new(AtomicBool::new(false)),
+            is_shutting_down: Arc::new(AtomicBool::new(false)),
             runtime_handle,
+        }
+    }
+
+    /// Run the periodic sync check on its own task.
+    ///
+    /// The check probes every known peer over the network before it can decide
+    /// whether we are behind, so it must never be awaited on the service's
+    /// select loop: that loop also dispatches the catch-up chain
+    /// (`BlockProcessedByThePool` -> `process_orphaned_ancestors` -> next
+    /// block), so a node whose peers are unreachable would stop processing
+    /// blocks for as long as the slowest probe takes to fail.
+    fn spawn_periodic_sync_check(&self) {
+        if self
+            .is_periodic_check_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            debug!("Sync service: previous periodic sync check still running, skipping this tick");
+            return;
+        }
+
+        // Build the guard here, not inside the task body: a task dropped before
+        // its first poll (runtime shutdown right after `spawn`) never runs the
+        // body, so a guard constructed there would leave the flag set forever.
+        let guard = PeriodicCheckGuard(Arc::clone(&self.is_periodic_check_running));
+        let inner = self.clone();
+        self.runtime_handle.spawn(
+            async move {
+                let _guard = guard;
+                inner.handle_periodic_sync_check().await;
+            }
+            .in_current_span(),
+        );
+    }
+
+    #[instrument(level = "trace", skip_all)]
+    async fn handle_periodic_sync_check(&self) {
+        self.gossip_data_handler
+            .gossip_client
+            .hydrate_peers_online_status(&self.peer_list)
+            .await;
+        debug!("Starting a periodic sync check routine");
+        match is_local_index_is_behind_trusted_peers(
+            &self.config,
+            &self.peer_list,
+            &self.gossip_data_handler.gossip_client,
+            &self.block_index,
+        )
+        .await
+        {
+            Ok(true) => {
+                // This check is detached, so it can still be running after the
+                // service loop exited; starting a sync then would outlive it.
+                if self.is_shutting_down.load(Ordering::Acquire) {
+                    debug!("Periodic sync check: service is shutting down, not starting a sync");
+                    return;
+                }
+                info!("Periodic sync check: We're behind the network, starting sync");
+                self.spawn_chain_sync_task(None, false);
+            }
+            Ok(false) => {
+                debug!("Periodic sync check: We're up to date with the network");
+            }
+            Err(e) => {
+                error!(
+                    "Periodic sync check: Failed to check if behind network: {:?}, trusted peers are likely offline",
+                    e
+                );
+            }
         }
     }
 
@@ -275,10 +431,18 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         is_initial_sync: bool,
     ) {
         let is_already_syncing = !is_initial_sync && self.sync_state.is_syncing();
-        let is_task_spawned_but_has_not_started_syncing_yet =
-            self.is_sync_task_spawned.load(Ordering::Relaxed);
 
-        if is_already_syncing || is_task_spawned_but_has_not_started_syncing_yet {
+        // Claim the spawn slot with a CAS, not a load followed by a store: the
+        // periodic check runs on its own task and calls in here, so it races
+        // the service loop's own requests. Two winners would mean two hydrate
+        // passes, two VDF pauses and two concurrent `sync_chain` runs.
+        let has_claimed_spawn_slot = !is_already_syncing
+            && self
+                .is_sync_task_spawned
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+
+        if !has_claimed_spawn_slot {
             debug!("Sync task: Sync already in progress, skipping the new sync request");
             if let Some(response_sender) = response
                 && let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
@@ -292,13 +456,12 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
         // Check if we have any new whitelist updates
         self.spawn_stake_and_pledge_update_task();
-        self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
         let sync_state = self.sync_state.clone();
         let gossip_data_handler = self.gossip_data_handler.clone();
-        let is_sync_task_spawned = self.is_sync_task_spawned.clone();
+        let sync_task_slot = SyncTaskSlotGuard(Arc::clone(&self.is_sync_task_spawned));
         let block_pool = self.block_pool.clone();
         let reth_service = self.reth_service.clone();
         let vdf_controller = self.vdf_controller.clone();
@@ -328,6 +491,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     );
                 }
 
+                let mut sync_in_progress = SyncInProgressGuard::new(sync_state.clone());
                 let res = sync_chain(
                     sync_state.clone(),
                     &peer_list,
@@ -339,11 +503,16 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     &runtime_handle,
                 )
                 .await;
+                sync_in_progress.disarm();
 
                 // Restore the pre-sync mining state (compare-and-swap guarded).
                 vdf_sync_pause.restore();
 
-                is_sync_task_spawned.store(false, Ordering::Relaxed);
+                // Release the slot before answering the caller, so a client that
+                // awaits this response can immediately request another sync.
+                // Dropping the guard early keeps that ordering while still
+                // covering every earlier panic or cancellation.
+                drop(sync_task_slot);
 
                 match &res {
                     Ok(()) => info!("Sync task completed successfully"),
@@ -509,7 +678,17 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 GossipError::Advisory(AdvisoryGossipError::BlockPoolError(_)) => {
                     Some("block_pool_advisory_retain_cache")
                 }
-                _ => None,
+                GossipError::Network(_)
+                | GossipError::CircuitBreakerOpen(_)
+                | GossipError::InvalidPeer(_)
+                | GossipError::Cache(_)
+                | GossipError::Internal(_)
+                | GossipError::InvalidData(_)
+                | GossipError::TransactionIsAlreadyHandled
+                | GossipError::CommitmentValidation(_)
+                | GossipError::PeerNetwork(_)
+                | GossipError::RateLimited
+                | GossipError::Advisory(_) => None,
             };
             if let Some(reason) = rejection_reason {
                 irys_actors::record_chain_sync_block_rejected(reason);
@@ -578,6 +757,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
     #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> ChainSyncResult<()> {
         info!("Starting the sync service");
+        let _shutdown_flag = ShutdownFlagGuard(Arc::clone(&self.inner.is_shutting_down));
         let period_secs = self
             .inner
             .config
@@ -610,9 +790,11 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     break;
                 }
 
-                // Handle periodic sync checks
+                // Handle periodic sync checks. Spawned, never awaited here: the
+                // check is network-bound and this loop also dispatches the
+                // catch-up chain.
                 _ = periodic_timer.tick() => {
-                    self.handle_periodic_sync_check().await;
+                    self.inner.spawn_periodic_sync_check();
                 }
 
                 // Handle commands
@@ -643,7 +825,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     .spawn_chain_sync_task(Some(response_sender), true);
             }
             SyncChainServiceMessage::PeriodicSyncCheck => {
-                self.handle_periodic_sync_check().await;
+                self.inner.spawn_periodic_sync_check();
             }
             SyncChainServiceMessage::BlockProcessedByThePool {
                 block_hash,
@@ -745,39 +927,6 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
             }
         }
         Ok(())
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    async fn handle_periodic_sync_check(&self) {
-        self.inner
-            .gossip_data_handler
-            .gossip_client
-            .hydrate_peers_online_status(&self.inner.peer_list)
-            .await;
-        debug!("Starting a periodic sync check routine");
-        // Check if we're behind the network
-        match is_local_index_is_behind_trusted_peers(
-            &self.inner.config,
-            &self.inner.peer_list,
-            &self.inner.gossip_data_handler.gossip_client,
-            &self.inner.block_index,
-        )
-        .await
-        {
-            Ok(true) => {
-                info!("Periodic sync check: We're behind the network, starting sync");
-                self.inner.spawn_chain_sync_task(None, false);
-            }
-            Ok(false) => {
-                debug!("Periodic sync check: We're up to date with the network");
-            }
-            Err(e) => {
-                error!(
-                    "Periodic sync check: Failed to check if behind network: {:?}, trusted peers are likely offline",
-                    e
-                );
-            }
-        }
     }
 }
 
@@ -2041,6 +2190,152 @@ mod tests {
         assert!(
             controller.is_enabled(),
             "concurrent enable during a disabled sync window survives the CAS-guarded restore"
+        );
+    }
+
+    /// The invariant that matters: a task holding the guard can be aborted
+    /// mid-await (e.g. runtime shutdown, or any future cancellation) and the
+    /// flag must still be cleared. A plain store at the end of
+    /// `handle_periodic_sync_check` would miss this path entirely and leave
+    /// every later periodic check silently disabled.
+    #[tokio::test]
+    async fn periodic_check_guard_clears_flag_when_task_is_aborted() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let started = Arc::new(AtomicBool::new(false));
+
+        let flag_clone = Arc::clone(&flag);
+        let started_clone = Arc::clone(&started);
+        let handle = tokio::spawn(async move {
+            let _guard = PeriodicCheckGuard(flag_clone);
+            started_clone.store(true, Ordering::Release);
+            std::future::pending::<()>().await;
+        });
+
+        // Make sure the guard has actually been constructed before aborting.
+        // Bounded so a task that never runs fails the test instead of hanging.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("spawned task must reach the guard");
+
+        handle.abort();
+        let result = handle.await;
+        assert!(result.unwrap_err().is_cancelled());
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "aborting the task must still clear the flag via Drop"
+        );
+    }
+
+    /// The window the abort test cannot reach: a task dropped before its first
+    /// poll. This is why the guard is built at the spawn site — a guard
+    /// constructed in the future body never exists on this path, so the flag
+    /// would stay set and disable every later periodic check.
+    #[test]
+    fn periodic_check_guard_clears_flag_when_task_is_dropped_before_first_poll() {
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("to build a test runtime");
+        let guard = PeriodicCheckGuard(Arc::clone(&flag));
+        runtime.handle().spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+
+        // The runtime is never driven, so dropping it drops an unpolled future.
+        drop(runtime);
+
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "dropping the task before its first poll must still clear the flag"
+        );
+    }
+
+    /// The loop also exits by `?`, not just by `break`, so the flag is set from
+    /// a guard rather than after the loop.
+    #[test]
+    fn shutdown_flag_is_set_on_every_exit_from_the_service_loop() {
+        let flag = Arc::new(AtomicBool::new(false));
+
+        let exit_by_error = || -> ChainSyncResult<()> {
+            let _guard = ShutdownFlagGuard(Arc::clone(&flag));
+            Err(ChainSyncError::Internal("loop bailed".into()))
+        };
+        assert!(exit_by_error().is_err());
+
+        assert!(
+            flag.load(Ordering::Acquire),
+            "an early return must still mark the service as shutting down"
+        );
+    }
+
+    /// A sync task that panics must hand the slot back. Releasing it by hand at
+    /// the end of the task would skip this path, and a slot that is never
+    /// released makes every later sync request a silent no-op.
+    #[tokio::test]
+    async fn sync_task_slot_is_released_when_the_task_panics() {
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let guard = SyncTaskSlotGuard(Arc::clone(&flag));
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("sync task blew up");
+        });
+        assert!(handle.await.unwrap_err().is_panic());
+
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "a panicking sync task must still release the slot"
+        );
+    }
+
+    /// A panic mid-sync must also clear the syncing flag. It gates later sync
+    /// requests and disables gossip broadcast, so leaving it set stops the node
+    /// from both catching up and broadcasting — releasing only the spawn slot
+    /// would not be enough.
+    #[tokio::test]
+    async fn sync_state_is_finished_when_the_task_panics() {
+        let sync_state = ChainSyncState::new(false, false);
+        sync_state.set_is_syncing(true);
+        assert!(!sync_state.is_gossip_broadcast_enabled());
+
+        let guarded_state = sync_state.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = SyncInProgressGuard::new(guarded_state);
+            panic!("sync blew up mid-flight");
+        });
+        assert!(handle.await.unwrap_err().is_panic());
+
+        assert!(
+            !sync_state.is_syncing(),
+            "a panicking sync task must clear the syncing flag"
+        );
+        assert!(
+            sync_state.is_gossip_broadcast_enabled(),
+            "clearing the flag must re-enable gossip broadcast"
+        );
+    }
+
+    /// Once `sync_chain` returns, the flag belongs to its own success and error
+    /// paths again — the guard must not clear a state a later sync just claimed.
+    #[tokio::test]
+    async fn disarmed_sync_guard_leaves_the_syncing_flag_alone() {
+        let sync_state = ChainSyncState::new(false, false);
+        sync_state.set_is_syncing(true);
+
+        {
+            let mut guard = SyncInProgressGuard::new(sync_state.clone());
+            guard.disarm();
+        }
+
+        assert!(
+            sync_state.is_syncing(),
+            "a disarmed guard must leave the flag as it found it"
         );
     }
 

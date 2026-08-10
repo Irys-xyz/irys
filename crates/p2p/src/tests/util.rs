@@ -590,6 +590,7 @@ struct FakeGossipDataHandler {
     on_info_request: Box<dyn Fn() -> GossipResponse<NodeInfo> + Send + Sync>,
     on_block_index_request:
         Box<dyn Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>> + Send + Sync>,
+    protocol_versions: Vec<u32>,
 }
 
 impl FakeGossipDataHandler {
@@ -599,6 +600,7 @@ impl FakeGossipDataHandler {
             on_pull_data_request: Box::new(|_| GossipResponse::Accepted(None)),
             on_info_request: Box::new(|| GossipResponse::Accepted(NodeInfo::default())),
             on_block_index_request: Box::new(|_| GossipResponse::Accepted(Vec::new())),
+            protocol_versions: vec![1, 2],
         }
     }
 
@@ -679,6 +681,15 @@ impl FakeGossipServer {
             self.run(SocketAddr::from(([127, 0, 0, 1], 0)));
         tokio::spawn(server_handle);
         fake_peer_gossip_addr
+    }
+
+    /// Advertise a specific protocol-version set (default: V1 + V2), so a test
+    /// can drive the no-compatible-version handshake path.
+    pub(crate) fn set_protocol_versions(&self, versions: Vec<u32>) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .protocol_versions = versions;
     }
 
     pub(crate) fn set_on_block_data_request(
@@ -929,11 +940,17 @@ async fn handle_info(
     }
 }
 
-async fn handle_protocol_version() -> HttpResponse {
-    // Return both V1 and V2 support
+async fn handle_protocol_version(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+) -> HttpResponse {
+    let versions = handler
+        .read()
+        .expect("to unlock handler")
+        .protocol_versions
+        .clone();
     HttpResponse::Ok()
         .content_type("application/json")
-        .json(vec![1_u32, 2_u32])
+        .json(versions)
 }
 
 async fn handle_health() -> HttpResponse {

@@ -462,7 +462,11 @@ impl BlockTreeService {
                     }
                     debug!("Skipping BlockValidationFinished during shutdown drain");
                 }
-                msg => self.inner.handle_message(msg, parent_span).await?,
+                msg @ (BlockTreeServiceMessage::GetBlockTreeReadGuard { .. }
+                | BlockTreeServiceMessage::BlockPreValidated { .. }
+                | BlockTreeServiceMessage::SetStorageModulesGuard(_)) => {
+                    self.inner.handle_message(msg, parent_span).await?
+                }
             }
         }
 

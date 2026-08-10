@@ -57,7 +57,12 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
                     pledge_count_before_executing - 1,
                 )
             }
-            _ => unreachable!("only unpledge expected here"),
+            CommitmentTypeV2::Stake
+            | CommitmentTypeV2::Pledge { .. }
+            | CommitmentTypeV2::Unstake
+            | CommitmentTypeV2::UpdateRewardAddress { .. } => {
+                unreachable!("only unpledge expected here")
+            }
         };
         out.push(UnpledgeRefundEvent {
             account: tx.signer(),

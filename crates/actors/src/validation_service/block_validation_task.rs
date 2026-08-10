@@ -1332,18 +1332,20 @@ impl StageFaultCaptures {
     /// later abandoned by a cancel-arm win.
     fn merge(&mut self, result: &ValidationResult) {
         match result {
-            ValidationResult::InternalFailure(inner) if inner.is_node_fault() => {
-                if self.node_fault.is_none() {
+            ValidationResult::InternalFailure(inner) => {
+                if inner.is_node_fault() && self.node_fault.is_none() {
                     self.node_fault = Some(inner.clone());
                 }
+                // Soft InternalFailure: deliberately not captured (see
+                // type-level doc on priority).
             }
-            ValidationResult::Invalid(rejection) if self.invalid.is_none() => {
-                self.invalid = Some(rejection.clone());
+            ValidationResult::Invalid(rejection) => {
+                if self.invalid.is_none() {
+                    self.invalid = Some(rejection.clone());
+                }
             }
             // Valid: nothing to capture.
-            // Soft InternalFailure: deliberately not captured (see
-            // type-level doc on priority).
-            _ => {}
+            ValidationResult::Valid => {}
         }
     }
 
@@ -1464,8 +1466,14 @@ fn merge_stage_results_with_cancel(
     // Tier 1: node-fault InternalFailure must win over Invalid so the
     // supervisor restarts the node.
     if let Some(node_fault) = stage_results.iter().find_map(|r| match r {
-        ValidationResult::InternalFailure(inner) if inner.is_node_fault() => Some(inner.clone()),
-        _ => None,
+        ValidationResult::InternalFailure(inner) => {
+            if inner.is_node_fault() {
+                Some(inner.clone())
+            } else {
+                None
+            }
+        }
+        ValidationResult::Valid | ValidationResult::Invalid(_) => None,
     }) {
         return ValidationResult::InternalFailure(node_fault);
     }
@@ -1473,7 +1481,7 @@ fn merge_stage_results_with_cancel(
     // Tier 2: consensus rejection.
     if let Some(invalid) = stage_results.iter().find_map(|r| match r {
         ValidationResult::Invalid(rejection) => Some(rejection.clone()),
-        _ => None,
+        ValidationResult::Valid | ValidationResult::InternalFailure(_) => None,
     }) {
         return ValidationResult::Invalid(invalid);
     }
@@ -1490,7 +1498,7 @@ fn merge_stage_results_with_cancel(
     // retry, no peer attribution.
     if let Some(internal) = stage_results.iter().find_map(|r| match r {
         ValidationResult::InternalFailure(inner) => Some(inner.clone()),
-        _ => None,
+        ValidationResult::Valid | ValidationResult::Invalid(_) => None,
     }) {
         return ValidationResult::InternalFailure(internal);
     }

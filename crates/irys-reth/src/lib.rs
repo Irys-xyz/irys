@@ -2651,7 +2651,17 @@ pub mod test_utils {
                 let priority_fee = match &shadow_tx {
                     ShadowTransaction::V1 { packet, .. } => match packet {
                         TransactionPacket::BlockReward(_) => 0,
-                        _ => DEFAULT_PRIORITY_FEE,
+                        TransactionPacket::UnstakeDebit(_)
+                        | TransactionPacket::Stake(_)
+                        | TransactionPacket::StorageFees(_)
+                        | TransactionPacket::Pledge(_)
+                        | TransactionPacket::Unpledge(_)
+                        | TransactionPacket::UnpledgeRefund(_)
+                        | TransactionPacket::TermFeeReward(_)
+                        | TransactionPacket::IngressProofReward(_)
+                        | TransactionPacket::PermFeeRefund(_)
+                        | TransactionPacket::UnstakeRefund(_)
+                        | TransactionPacket::UpdateRewardAddress(_) => DEFAULT_PRIORITY_FEE,
                     },
                 };
 

@@ -1069,11 +1069,15 @@ impl BlockTree {
                     self.update_longest_chain_cache();
                     Ok(())
                 }
-                _ => Err(eyre::eyre!(
-                    "unable to mark block as valid: chain_state {:?} {}",
-                    entry.chain_state,
-                    entry.block.header().block_hash,
-                )),
+                ChainState::Onchain
+                | ChainState::Validated(BlockState::Unknown | BlockState::ValidBlock)
+                | ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidBlock) => {
+                    Err(eyre::eyre!(
+                        "unable to mark block as valid: chain_state {:?} {}",
+                        entry.chain_state,
+                        entry.block.header().block_hash,
+                    ))
+                }
             }
         } else {
             Err(eyre::eyre!(

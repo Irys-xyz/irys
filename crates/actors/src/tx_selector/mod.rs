@@ -704,7 +704,7 @@ pub async fn select_best_txs(
                 let epoch_length = match ledger {
                     DataLedger::OneYear => cascade.one_year_epoch_length,
                     DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                    _ => unreachable!(),
+                    DataLedger::Publish | DataLedger::Submit => unreachable!(),
                 };
                 let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
                     next_block_height,

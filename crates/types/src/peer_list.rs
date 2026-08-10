@@ -78,7 +78,9 @@ impl PeerScore {
         self.0 = Self::MAX;
     }
 
-    pub fn is_active(&self) -> bool {
+    /// Reputation only — a peer can be reputable and unreachable. For
+    /// usability use [`PeerListItem::is_active`].
+    pub fn is_reputable(&self) -> bool {
         self.0 >= Self::ACTIVE_THRESHOLD
     }
 
@@ -144,6 +146,13 @@ pub struct PeerListItem {
 }
 
 impl PeerListItem {
+    /// Usable right now: reputable *and* reachable. Disabling scoring pins
+    /// every score to `PeerScore::MAX`, leaving reachability the only half
+    /// that still carries information.
+    pub fn is_active(&self) -> bool {
+        self.reputation_score.is_reputable() && self.is_online
+    }
+
     /// Create a PeerListItem from PeerListItemInner loaded from a database.
     /// Uses the mining_address_key (DB key) as fallback for missing fields.
     pub fn from_inner(inner: PeerListItemInner, peer_id: IrysPeerId) -> Self {
@@ -806,7 +815,7 @@ mod tests {
         ) {
             let mut score = PeerScore::new(initial);
             score.decrease_by(decrease);
-            assert_eq!(score.is_active(), should_be_active);
+            assert_eq!(score.is_reputable(), should_be_active);
         }
 
         #[rstest]

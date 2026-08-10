@@ -182,7 +182,10 @@ impl EventHandlers {
                 )
                 .await;
             }
-            _ => {}
+            MenuSelection::Nodes
+            | MenuSelection::Metrics
+            | MenuSelection::Logs
+            | MenuSelection::Settings => {}
         }
     }
 
@@ -252,7 +255,13 @@ impl EventHandlers {
             MenuSelection::DataSync => {
                 state.select_previous_node();
             }
-            _ => {
+            MenuSelection::Mempool
+            | MenuSelection::Mining
+            | MenuSelection::Forks
+            | MenuSelection::Metrics
+            | MenuSelection::Config
+            | MenuSelection::Logs
+            | MenuSelection::Settings => {
                 menu.previous();
             }
         }
@@ -272,7 +281,13 @@ impl EventHandlers {
             MenuSelection::DataSync => {
                 state.select_next_node();
             }
-            _ => {
+            MenuSelection::Mempool
+            | MenuSelection::Mining
+            | MenuSelection::Forks
+            | MenuSelection::Metrics
+            | MenuSelection::Config
+            | MenuSelection::Logs
+            | MenuSelection::Settings => {
                 menu.next();
             }
         }
@@ -301,7 +316,12 @@ impl EventHandlers {
                     let _ = RefreshManager::refresh_mining_data(state, api_client, database_writer)
                         .await;
                 }
-                _ => {}
+                MenuSelection::Nodes
+                | MenuSelection::Forks
+                | MenuSelection::Metrics
+                | MenuSelection::Config
+                | MenuSelection::Logs
+                | MenuSelection::Settings => {}
             }
         }
     }

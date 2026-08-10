@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{Instrument as _, debug, error, instrument, warn};
 
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
@@ -104,7 +105,9 @@ fn pull_failure_reason(err: &GossipError) -> &'static str {
             PeerNetworkError::FailedToRequestData(_) => "failed_to_request_data",
             PeerNetworkError::UnexpectedData(_) => "unexpected_data",
             PeerNetworkError::InvalidBlockBody { .. } => "invalid_block_body",
-            _ => "peer_network_other",
+            PeerNetworkError::Database(_)
+            | PeerNetworkError::InternalSendError(_)
+            | PeerNetworkError::OtherInternalError(_) => "peer_network_other",
         },
         GossipError::RateLimited => "rate_limited",
         GossipError::Advisory(_) => "advisory",
@@ -165,6 +168,26 @@ const NORMAL_RESPONSE_THRESHOLD: Duration = Duration::from_secs(2);
 /// Timeout to wait for handshake completion before retrying
 const HANDSHAKE_WAIT_TIMEOUT: Duration = Duration::from_millis(1000);
 
+/// Concurrent health probes per `hydrate_peers_online_status` pass.
+///
+/// Bounded rather than unbounded: the pass covers the whole peer list, and one
+/// socket per known peer is a burst this node has no reason to create.
+const HYDRATE_HEALTH_CHECK_CONCURRENCY: usize = 16;
+
+/// Wall-clock budget for one `hydrate_peers_online_status` pass.
+///
+/// Sized above the 5s per-request timeout its callers construct the client with,
+/// so a full round of concurrent probes can time out normally and still be
+/// recorded; the budget is the backstop for a pass that would otherwise outlast
+/// the caller's own cadence, not the per-peer timeout.
+const HYDRATE_PASS_BUDGET: Duration = Duration::from_secs(10);
+
+/// Skip a pass if the last one finished less than this ago. Set to the pass
+/// budget: below it, a fresh sweep would finish no more current than the flags
+/// already held. The periodic sync check hydrates and then, if it finds us
+/// behind, starts a sync task that would otherwise hydrate straight afterwards.
+const HYDRATE_MIN_INTERVAL: Duration = HYDRATE_PASS_BUDGET;
+
 /// Control flow outcome for `handle_peer_pull_response`.
 #[derive(Debug)]
 enum PeerPullOutcome<T> {
@@ -183,6 +206,11 @@ pub enum GossipClientError {
     GetJsonResponsePayload(String, String),
     #[error("Circuit breaker open for peer {0}")]
     CircuitBreakerOpen(IrysPeerId),
+    /// The peer applied backpressure. Distinct from a transport failure: the
+    /// peer is up and talking to us, it is just asking us to come back later,
+    /// so the caller should back off rather than treat it as a fault.
+    #[error("Peer {0} rate limited the request")]
+    RateLimited(String),
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +220,25 @@ pub struct GossipClient {
     client: Client,
     circuit_breaker: CircuitBreakerManager<IrysPeerId>,
     runtime_handle: tokio::runtime::Handle,
+    /// Where the next `hydrate_peers_online_status` pass starts in the peer
+    /// list. Shared by every clone of this client, since the passes it paces
+    /// are the same passes.
+    hydrate_cursor: Arc<AtomicUsize>,
+    /// Held for the duration of a hydration pass; carries when the last one
+    /// finished. Serialises passes and backs the freshness skip.
+    hydrate_pass: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
+}
+
+/// What a `/gossip/health` probe learned about a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerHealth {
+    /// Answered and serving gossip.
+    Healthy,
+    /// Answered; not serving us yet for a reason that clears on its own.
+    /// Never trips the breaker, which would suppress the probe that sees it clear.
+    AnsweredNotServing,
+    /// Answered and will not serve us, or reported itself not healthy.
+    Unhealthy,
 }
 
 fn gossip_error_type(err: &GossipError) -> &'static str {
@@ -249,6 +296,8 @@ impl GossipClient {
                 .expect("Failed to create reqwest client"),
             circuit_breaker,
             runtime_handle,
+            hydrate_cursor: Arc::new(AtomicUsize::new(0)),
+            hydrate_pass: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -667,7 +716,18 @@ impl GossipClient {
                         retry_after: None,
                     },
                 )),
-                _ => Err(GossipClientError::GetRequest(
+                // Backpressure, not a fault: the peer is up and asking us to
+                // come back later, so the caller backs off and retries rather
+                // than recording an unexplained request failure.
+                RejectionReason::RateLimited => {
+                    Err(GossipClientError::RateLimited(peer.to_string()))
+                }
+                RejectionReason::HandshakeRequired(_)
+                | RejectionReason::GossipDisabled
+                | RejectionReason::InvalidData
+                | RejectionReason::UnableToVerifyOrigin
+                | RejectionReason::UnsupportedProtocolVersion(_)
+                | RejectionReason::UnsupportedFeature => Err(GossipClientError::GetRequest(
                     peer.to_string(),
                     format!("Unexpected rejection reason: {:?}", reason),
                 )),
@@ -742,7 +802,18 @@ impl GossipClient {
                         retry_after: None,
                     },
                 )),
-                _ => Err(GossipClientError::GetRequest(
+                // Backpressure, not a fault: the peer is up and asking us to
+                // come back later, so the caller backs off and retries rather
+                // than recording an unexplained request failure.
+                RejectionReason::RateLimited => {
+                    Err(GossipClientError::RateLimited(peer.to_string()))
+                }
+                RejectionReason::HandshakeRequired(_)
+                | RejectionReason::GossipDisabled
+                | RejectionReason::InvalidData
+                | RejectionReason::UnableToVerifyOrigin
+                | RejectionReason::UnsupportedProtocolVersion(_)
+                | RejectionReason::UnsupportedFeature => Err(GossipClientError::GetRequest(
                     peer.to_string(),
                     format!("Unexpected rejection reason: {:?}", reason),
                 )),
@@ -874,6 +945,12 @@ impl GossipClient {
         Ok(versions)
     }
 
+    /// Probe a peer's `/gossip/health` endpoint.
+    ///
+    /// The outcome distinguishes "serving us" from "answered but refusing us",
+    /// because the two deserve different reputation treatment: a peer that
+    /// declines until we re-handshake is alive and worth keeping enumerable,
+    /// but it is not earning credit while it turns our probes away.
     #[instrument(level = "trace", skip(self, peer_list), fields(%peer_id))]
     pub async fn check_health(
         &self,
@@ -881,7 +958,7 @@ impl GossipClient {
         peer: PeerAddress,
         protocol_version: ProtocolVersion,
         peer_list: &PeerList,
-    ) -> Result<bool, GossipClientError> {
+    ) -> Result<PeerHealth, GossipClientError> {
         if !self.circuit_breaker.is_available(peer_id) {
             tracing::debug!(?peer_id, "circuit breaker open, skipping health check");
             return Err(GossipClientError::CircuitBreakerOpen(*peer_id));
@@ -937,36 +1014,45 @@ impl GossipClient {
         };
 
         match response {
-            GossipResponse::Accepted(val) => {
-                if val {
+            GossipResponse::Accepted(is_gossip_enabled) => {
+                if is_gossip_enabled {
                     self.circuit_breaker.record_success(peer_id);
+                    Ok(PeerHealth::Healthy)
                 } else {
                     self.circuit_breaker.record_failure(peer_id);
+                    Ok(PeerHealth::Unhealthy)
                 }
-                Ok(val)
             }
             GossipResponse::Rejected(reason) => {
                 warn!("Health check rejected with reason: {:?}", reason);
-                self.circuit_breaker.record_failure(peer_id);
+                // Exhaustive on purpose: a new rejection reason must not inherit
+                // a neighbour's answer. Split on whether the reason clears itself.
                 match reason {
-                    RejectionReason::HandshakeRequired(reason) => {
-                        warn!("Health check requires handshake: {:?}", reason);
+                    RejectionReason::HandshakeRequired(requirement) => {
+                        warn!("Health check requires handshake: {:?}", requirement);
+                        // No breaker failure: this peer answered, and the
+                        // handshake below is what repairs it. Tripping the
+                        // breaker would strand it — an open breaker short-
+                        // circuits this method before the handshake is asked
+                        // for, so the condition could never clear.
                         peer_list.initiate_handshake(peer.api, peer.gossip, true);
+                        Ok(PeerHealth::AnsweredNotServing)
                     }
-                    RejectionReason::GossipDisabled => {
-                        return Ok(false);
+                    // Backpressure, not a fault. Expires on its own, so unlike
+                    // the arm above there is nothing to initiate.
+                    RejectionReason::RateLimited => Ok(PeerHealth::AnsweredNotServing),
+                    RejectionReason::GossipDisabled
+                    | RejectionReason::InvalidData
+                    | RejectionReason::UnableToVerifyOrigin
+                    | RejectionReason::InvalidCredentials
+                    | RejectionReason::ProtocolMismatch
+                    | RejectionReason::UnsupportedProtocolVersion(_)
+                    | RejectionReason::UnsupportedFeature
+                    | RejectionReason::ChainIdMismatch => {
+                        self.circuit_breaker.record_failure(peer_id);
+                        Ok(PeerHealth::Unhealthy)
                     }
-                    RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
-                        warn!("Health check rejected with reason: {:?}", reason);
-                    }
-                    _ => {
-                        warn!(
-                            "Unexpected rejection reason for the health check: {:?}",
-                            reason
-                        );
-                    }
-                };
-                Ok(true)
+                }
             }
         }
     }
@@ -1597,7 +1683,12 @@ impl GossipClient {
                         PeerNetworkError::UnexpectedData(format!("Invalid block body: {e:?}"))
                     })
                 }
-                _ => Err(PeerNetworkError::UnexpectedData(format!(
+                GossipDataV2::Chunk(_)
+                | GossipDataV2::Transaction(_)
+                | GossipDataV2::CommitmentTransaction(_)
+                | GossipDataV2::BlockHeader(_)
+                | GossipDataV2::ExecutionPayload(_)
+                | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                     "Expected BlockBody, got {:?}",
                     gossip_data.data_type_and_id()
                 ))),
@@ -1701,7 +1792,12 @@ impl GossipClient {
     fn block(gossip_data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::BlockHeader(block) => Ok(block),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::Transaction(_)
+            | GossipDataV2::CommitmentTransaction(_)
+            | GossipDataV2::BlockBody(_)
+            | GossipDataV2::ExecutionPayload(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected IrysBlockHeader, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1711,7 +1807,12 @@ impl GossipClient {
     fn execution_payload(gossip_data: GossipDataV2) -> Result<Block, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::ExecutionPayload(block) => Ok(block),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::Transaction(_)
+            | GossipDataV2::CommitmentTransaction(_)
+            | GossipDataV2::BlockHeader(_)
+            | GossipDataV2::BlockBody(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected ExecutionPayload, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1722,7 +1823,11 @@ impl GossipClient {
         match gossip_data {
             GossipDataV2::Transaction(tx) => Ok(IrysTransactionResponse::Storage(tx)),
             GossipDataV2::CommitmentTransaction(tx) => Ok(IrysTransactionResponse::Commitment(tx)),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::BlockHeader(_)
+            | GossipDataV2::BlockBody(_)
+            | GossipDataV2::ExecutionPayload(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected Transaction or CommitmentTransaction, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1732,7 +1837,12 @@ impl GossipClient {
     fn block_body(gossip_data: GossipDataV2) -> Result<Arc<BlockBody>, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::BlockBody(body) => Ok(body),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::Transaction(_)
+            | GossipDataV2::CommitmentTransaction(_)
+            | GossipDataV2::BlockHeader(_)
+            | GossipDataV2::ExecutionPayload(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected BlockBody, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1868,7 +1978,12 @@ impl GossipClient {
                                 peer.0, data_request, reason
                             );
                         }
-                        _ => {}
+                        RejectionReason::InvalidData
+                        | RejectionReason::RateLimited
+                        | RejectionReason::UnableToVerifyOrigin
+                        | RejectionReason::UnsupportedProtocolVersion(_)
+                        | RejectionReason::UnsupportedFeature
+                        | RejectionReason::ChainIdMismatch => {}
                     }
                     PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(format!(
                         "Peer {:?} rejected {:?} request: {:?}",
@@ -1878,7 +1993,17 @@ impl GossipClient {
             },
             Err(err) => match err {
                 GossipError::PeerNetwork(e) => PeerPullOutcome::Err(e),
-                other => {
+                other @ (GossipError::Network(_)
+                | GossipError::CircuitBreakerOpen(_)
+                | GossipError::InvalidPeer(_)
+                | GossipError::Cache(_)
+                | GossipError::Internal(_)
+                | GossipError::InvalidData(_)
+                | GossipError::BlockPool(_)
+                | GossipError::TransactionIsAlreadyHandled
+                | GossipError::CommitmentValidation(_)
+                | GossipError::RateLimited
+                | GossipError::Advisory(_)) => {
                     PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(other.to_string()))
                 }
             },
@@ -2256,17 +2381,99 @@ impl GossipClient {
         ))
     }
 
+    /// Refresh every known peer's online flag.
+    ///
+    /// Probes run concurrently, capped at [`HYDRATE_HEALTH_CHECK_CONCURRENCY`],
+    /// under a single [`HYDRATE_PASS_BUDGET`] deadline. Sequential probing made
+    /// the pass cost the *sum* of every unreachable peer's request timeout,
+    /// which is paid by the caller — the sync service's periodic check.
+    ///
+    /// Peers still unresolved when the budget expires keep their previous flag.
+    /// Marking them offline would attribute our own impatience to the peer, and
+    /// the flag feeds peer selection for block and chunk pulls.
+    ///
+    /// Sets the online flag only. A timeout cannot tell a peer that is down
+    /// from a lost local uplink, and this sweep covers every peer, so scoring
+    /// here would charge the whole list for one local fault. Probe-driven
+    /// reputation belongs to the peer-network service's health check.
     pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
+        self.hydrate_peers_online_status_within(
+            peer_list,
+            HYDRATE_PASS_BUDGET,
+            HYDRATE_MIN_INTERVAL,
+        )
+        .await;
+    }
+
+    /// [`Self::hydrate_peers_online_status`] with explicit bounds, so a test can
+    /// exercise the expiry path without waiting out the shipped ones. A
+    /// `min_interval` of zero disables the freshness skip.
+    async fn hydrate_peers_online_status_within(
+        &self,
+        peer_list: &PeerList,
+        budget: Duration,
+        min_interval: Duration,
+    ) {
+        // Skip rather than queue. Two passes would sweep the same peers, fight
+        // over the cursor, and double the probe burst.
+        let Ok(mut last_finished) = self.hydrate_pass.try_lock() else {
+            debug!("Peer hydration already in flight, skipping this pass");
+            return;
+        };
+        if let Some(finished) = *last_finished
+            && finished.elapsed() < min_interval
+        {
+            debug!("Peer hydration ran recently, skipping this pass");
+            return;
+        }
+
         debug!("Hydrating peers online status");
-        let peers = peer_list.all_peers_sorted_by_score();
-        for peer in peers {
-            match self
-                .check_health(&peer.0, peer.1.address, peer.1.protocol_version, peer_list)
-                .await
-            {
-                Ok(is_healthy) => {
-                    debug!("Peer {} is healthy: {}", peer.0, is_healthy);
-                    peer_list.set_is_online_by_peer_id(&peer.0, is_healthy);
+        let mut peers = peer_list.all_peers_sorted_by_score();
+        let total = peers.len();
+
+        // Resume where the previous pass stopped. The budget covers only part of
+        // a long peer list, and nothing about the order guarantees a peer ever
+        // reaches the front: with scoring disabled every peer holds the same
+        // score, so the order is whatever the caches enumerate. Always starting
+        // at the head can therefore leave the same tail unprobed indefinitely,
+        // holding a stale online flag that peer selection then acts on.
+        let start = if total == 0 {
+            0
+        } else {
+            self.hydrate_cursor.load(Ordering::Relaxed) % total
+        };
+        peers.rotate_left(start);
+
+        // Counted as each probe starts, not as it finishes: a pass whose probes
+        // all hang resolves nothing, and the cursor still has to move past the
+        // peers it tried or the next pass would retry the same stalled head.
+        // The cost is that peers still in flight when the budget fires are
+        // stepped over, keeping their previous flag until the cursor wraps.
+        let attempted = AtomicUsize::new(0);
+        let probes = futures::stream::iter(peers.into_iter().map(|peer| {
+            let attempted = &attempted;
+            async move {
+                attempted.fetch_add(1, Ordering::Relaxed);
+                let outcome = self
+                    .check_health(&peer.0, peer.1.address, peer.1.protocol_version, peer_list)
+                    .await;
+                (peer.0, outcome)
+            }
+        }))
+        .buffer_unordered(HYDRATE_HEALTH_CHECK_CONCURRENCY);
+
+        let mut resolved = 0_usize;
+        let pass = probes.for_each(|(peer_id, outcome)| {
+            resolved += 1;
+            match outcome {
+                Ok(health) => {
+                    debug!("Peer {} health: {:?}", peer_id, health);
+                    // A peer awaiting a handshake answered, so it stays online
+                    // and enumerable — `check_health` has already asked for the
+                    // handshake that repairs it.
+                    let is_online =
+                        matches!(health, PeerHealth::Healthy | PeerHealth::AnsweredNotServing);
+                    peer_list.set_is_online_by_peer_id(&peer_id, is_online);
                 }
                 Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
                     debug!(
@@ -2278,12 +2485,31 @@ impl GossipClient {
                 Err(err) => {
                     warn!(
                         "Failed to check the health of peer {}: {}, setting offline status",
-                        peer.0, err
+                        peer_id, err
                     );
-                    peer_list.set_is_online_by_peer_id(&peer.0, false);
+                    peer_list.set_is_online_by_peer_id(&peer_id, false);
                 }
             }
+            std::future::ready(())
+        });
+
+        if tokio::time::timeout(budget, pass).await.is_err() {
+            warn!(
+                peers.total = total,
+                peers.resolved = resolved,
+                ?budget,
+                "Peer online-status hydration hit its budget; unresolved peers keep their previous status"
+            );
         }
+
+        // Advance past the peers this pass tried, so the next one picks up where
+        // the budget cut it off. Coverage therefore does not depend on scoring
+        // being enabled to reorder the list.
+        self.hydrate_cursor.store(
+            start.saturating_add(attempted.load(Ordering::Relaxed)),
+            Ordering::Relaxed,
+        );
+        *last_finished = Some(std::time::Instant::now());
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -2762,6 +2988,85 @@ mod tests {
         }
     }
 
+    mod handshake_rejection_tests {
+        use super::*;
+        use irys_types::{HandshakeRequest, HandshakeRequestV2};
+
+        fn rejection_body(reason: RejectionReason) -> String {
+            serde_json::to_string(&GossipResponse::<()>::Rejected(reason))
+                .expect("to serialize a rejection")
+        }
+
+        /// A rate limit is the peer applying backpressure, not a fault. It has
+        /// to be distinguishable from an unexpected rejection so the caller can
+        /// back off instead of recording an unexplained request failure.
+        #[tokio::test]
+        async fn v1_handshake_reports_a_rate_limit_as_a_rate_limit() {
+            let body = rejection_body(RejectionReason::RateLimited);
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+
+            let result = fixture
+                .client
+                .post_handshake_v1(
+                    format!("127.0.0.1:{}", server.port()).parse().unwrap(),
+                    HandshakeRequest::default(),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(GossipClientError::RateLimited(_))),
+                "expected a rate-limit error, got {:?}",
+                result
+            );
+        }
+
+        #[tokio::test]
+        async fn v2_handshake_reports_a_rate_limit_as_a_rate_limit() {
+            let body = rejection_body(RejectionReason::RateLimited);
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+
+            let result = fixture
+                .client
+                .post_handshake_v2(
+                    format!("127.0.0.1:{}", server.port()).parse().unwrap(),
+                    HandshakeRequestV2::default(),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(GossipClientError::RateLimited(_))),
+                "expected a rate-limit error, got {:?}",
+                result
+            );
+        }
+
+        /// The reasons we genuinely do not expect from a handshake must stay
+        /// distinct from backpressure, or splitting the rate limit out buys
+        /// nothing.
+        #[tokio::test]
+        async fn v1_handshake_still_reports_an_unexpected_reason_as_a_request_error() {
+            let body = rejection_body(RejectionReason::GossipDisabled);
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let fixture = TestFixture::new();
+
+            let result = fixture
+                .client
+                .post_handshake_v1(
+                    format!("127.0.0.1:{}", server.port()).parse().unwrap(),
+                    HandshakeRequest::default(),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(GossipClientError::GetRequest(_, _))),
+                "expected an unexpected-rejection request error, got {:?}",
+                result
+            );
+        }
+    }
+
     mod health_check_v2_tests {
         use super::*;
 
@@ -2811,7 +3116,11 @@ mod tests {
                 "V2 health check should succeed: {:?}",
                 result
             );
-            assert!(result.unwrap(), "V2 health check should return true");
+            assert_eq!(
+                result.unwrap(),
+                PeerHealth::Healthy,
+                "V2 health check should report the peer healthy"
+            );
         }
 
         #[tokio::test]
@@ -3375,6 +3684,128 @@ mod tests {
         use super::*;
         use irys_types::IrysAddress;
 
+        /// Probe `probed_peer` `count` times, each against a fresh server that
+        /// answers with `reason`, asserting the health verdict every time.
+        async fn probe_repeatedly_with_rejection(
+            client: &GossipClient,
+            peer_list: &PeerList,
+            probed_peer: &IrysPeerId,
+            reason: RejectionReason,
+            count: u32,
+            expected: PeerHealth,
+        ) {
+            let body = serde_json::to_string(&GossipResponse::<()>::Rejected(reason))
+                .expect("to serialize a rejection");
+            for _ in 0..count {
+                let server = MockHttpServer::new_with_response(200, &body, "application/json");
+                let port = server.port();
+                let health = client
+                    .check_health(
+                        probed_peer,
+                        create_peer_address("127.0.0.1", port),
+                        ProtocolVersion::V1,
+                        peer_list,
+                    )
+                    .await;
+                match health {
+                    Ok(health) => assert_eq!(health, expected),
+                    Err(err) => {
+                        // The probe never reached this server — an open breaker
+                        // short-circuits `check_health`. Connect so the mock's
+                        // accept thread can finish, or its `Drop` joins forever
+                        // and the failure surfaces as a hang instead.
+                        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+                        panic!("probe did not reach the peer: {err:?}");
+                    }
+                }
+            }
+        }
+
+        fn client_with_production_breaker() -> GossipClient {
+            GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(1),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([1_u8; 20]),
+                CircuitBreakerConfig::p2p_defaults(),
+                tokio::runtime::Handle::current(),
+            )
+        }
+
+        /// A peer asking for a handshake is answering us, and the handshake the
+        /// probe requests is what repairs it. Tripping the breaker on that reply
+        /// would strand the peer: an open breaker short-circuits `check_health`
+        /// before it can ask for the handshake, so the condition never clears.
+        #[tokio::test]
+        async fn repeated_handshake_required_does_not_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([9_u8; 20]));
+
+            // Well past the production failure threshold of 5.
+            probe_repeatedly_with_rejection(
+                &client,
+                &peer_list,
+                &probed_peer,
+                RejectionReason::HandshakeRequired(None),
+                8,
+                PeerHealth::AnsweredNotServing,
+            )
+            .await;
+
+            assert!(
+                client.circuit_breaker.is_available(&probed_peer),
+                "a peer awaiting a handshake must stay probeable"
+            );
+        }
+
+        /// An open breaker would outlast the rate limit that caused it.
+        #[tokio::test]
+        async fn repeated_rate_limits_do_not_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([11_u8; 20]));
+
+            // Well past the production failure threshold of 5.
+            probe_repeatedly_with_rejection(
+                &client,
+                &peer_list,
+                &probed_peer,
+                RejectionReason::RateLimited,
+                8,
+                PeerHealth::AnsweredNotServing,
+            )
+            .await;
+
+            assert!(
+                client.circuit_breaker.is_available(&probed_peer),
+                "a peer asking us to back off must stay probeable"
+            );
+        }
+
+        /// The control: a rejection that means "I will not serve you" must still
+        /// trip the breaker, or moving the failure record buys nothing.
+        #[tokio::test]
+        async fn repeated_unhealthy_rejections_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([10_u8; 20]));
+
+            probe_repeatedly_with_rejection(
+                &client,
+                &peer_list,
+                &probed_peer,
+                RejectionReason::ChainIdMismatch,
+                5,
+                PeerHealth::Unhealthy,
+            )
+            .await;
+
+            assert!(
+                !client.circuit_breaker.is_available(&probed_peer),
+                "a peer that will not serve us must trip the breaker"
+            );
+        }
+
         #[tokio::test]
         async fn test_health_check_respects_circuit_breaker() {
             let fixture = TestFixture::new();
@@ -3475,6 +3906,521 @@ mod tests {
             assert!(
                 fixture.client.circuit_breaker.is_available(&peer_id),
                 "after CB recovery, peer must be eligible for re-onlining"
+            );
+        }
+    }
+
+    mod hydrate_concurrency_tests {
+        use super::*;
+        use irys_types::{
+            IrysAddress, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, RethPeerInfo,
+        };
+        use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+        use std::time::Instant;
+
+        /// Builds a peer pointed at an unroutable address (TEST-NET-1, RFC 5737),
+        /// which genuinely blocks the connect attempt until the client's request
+        /// timeout fires rather than failing fast — the same address class the
+        /// existing `test_request_timeout` test relies on.
+        fn unreachable_peer(id_byte: u8, port: u16, is_online: bool) -> (IrysPeerId, PeerListItem) {
+            let addr = IrysAddress::from([id_byte; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            let peer = PeerListItem {
+                peer_id,
+                mining_address: addr,
+                address: PeerAddress {
+                    gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), port)),
+                    api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), port)),
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online,
+                protocol_version: ProtocolVersion::default(),
+            };
+            (peer_id, peer)
+        }
+
+        /// A pass over many unreachable peers must cost roughly ONE request
+        /// timeout, not the sum of every peer's timeout. Before the fix,
+        /// `hydrate_peers_online_status` probed peers sequentially, so 20 peers
+        /// at a 300ms timeout would take ~6s; concurrent probing (capped at
+        /// `HYDRATE_HEALTH_CHECK_CONCURRENCY` = 16) finishes in about two
+        /// batches, well under 1.5s.
+        #[tokio::test]
+        async fn hydrate_probes_unreachable_peers_concurrently() {
+            let timeout = Duration::from_millis(300);
+            let fixture = TestFixture::with_timeout(timeout);
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            const PEER_COUNT: u16 = 20;
+            for i in 0..PEER_COUNT {
+                let (_, peer) = unreachable_peer((i + 1) as u8, 8000 + i, true);
+                peer_list.add_or_update_peer(peer, true);
+            }
+
+            let start = Instant::now();
+            fixture.client.hydrate_peers_online_status(&peer_list).await;
+            let elapsed = start.elapsed();
+
+            // Sequential would cost PEER_COUNT * timeout = 6s. Concurrent
+            // (2 batches of <=16) should land close to 2 * timeout; the bound is
+            // 5 * timeout so a slow CI host cannot fail it, while still being
+            // four times under the sequential cost this test guards against.
+            assert!(
+                elapsed < timeout * 5,
+                "expected concurrent hydration well under {:?} (sequential bound would be {:?}), got {:?}",
+                timeout * 5,
+                timeout * u32::from(PEER_COUNT),
+                elapsed
+            );
+        }
+
+        /// When the pass budget expires before every peer resolves, peers that
+        /// already resolved must keep their fresh status, and peers still
+        /// in-flight must keep their PREVIOUS status rather than being forced
+        /// offline — and the call must not panic.
+        ///
+        /// Drives `hydrate_peers_online_status_within` with a short budget rather
+        /// than waiting out the shipped `HYDRATE_PASS_BUDGET`: the behaviour under
+        /// test is "the budget cut the pass short", which does not depend on the
+        /// budget's magnitude. The per-request timeout is set well above the test
+        /// budget so the unreachable peer is guaranteed still in-flight when the
+        /// budget fires.
+        #[tokio::test]
+        async fn hydrate_budget_expiry_keeps_resolved_peers_and_previous_status_for_the_rest() {
+            const TEST_BUDGET: Duration = Duration::from_millis(300);
+            let fixture = TestFixture::with_timeout(Duration::from_secs(11));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            // Fast peer: a real local server answering immediately, regardless
+            // of the 11s client timeout.
+            let fast_body = serde_json::to_string(&GossipResponse::Accepted(true)).unwrap();
+            let fast_server =
+                MockHttpServer::new_with_response(200, &fast_body, "application/json");
+            let fast_addr = IrysAddress::from([200_u8; 20]);
+            let fast_peer_id = IrysPeerId::from(fast_addr);
+            let fast_peer = PeerListItem {
+                peer_id: fast_peer_id,
+                mining_address: fast_addr,
+                address: create_peer_address("127.0.0.1", fast_server.port()),
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: false,
+                protocol_version: ProtocolVersion::default(),
+            };
+            peer_list.add_or_update_peer(fast_peer, true);
+
+            // Slow peer: unroutable, so still in-flight when the budget fires
+            // (its own timeout is 11s). Pre-set online so we can tell whether the
+            // budget-expiry path left it alone.
+            let (slow_peer_id, slow_peer) = unreachable_peer(201, 9_000, true);
+            peer_list.add_or_update_peer(slow_peer, true);
+
+            let start = Instant::now();
+            fixture
+                .client
+                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET, Duration::ZERO)
+                .await;
+            let elapsed = start.elapsed();
+
+            // Lower bound: the budget, not an early return. Upper bound: well
+            // under the 11s per-request timeout, so it was the budget that cut
+            // the pass short and not the probe completing.
+            assert!(
+                elapsed >= TEST_BUDGET && elapsed < Duration::from_secs(5),
+                "expected the pass to be cut short by the {TEST_BUDGET:?} budget, got {elapsed:?}"
+            );
+            assert!(
+                peer_list
+                    .get_peer(&fast_peer_id)
+                    .expect("fast peer exists")
+                    .is_online,
+                "resolved peer must keep its fresh status"
+            );
+            assert!(
+                peer_list
+                    .get_peer(&slow_peer_id)
+                    .expect("slow peer exists")
+                    .is_online,
+                "unresolved peer must keep its previous status rather than being forced offline"
+            );
+        }
+
+        /// Charging a failed probe would charge every peer at once when this
+        /// node loses its own uplink, sinking the whole list below
+        /// `ACTIVE_THRESHOLD`. The credit is pinned too, so scoring cannot
+        /// creep back in on the other side.
+        #[tokio::test]
+        async fn hydrate_sets_online_flags_without_touching_reputation() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(200));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let body = serde_json::to_string(&GossipResponse::Accepted(true)).unwrap();
+            let server = MockHttpServer::new_with_response(200, &body, "application/json");
+            let healthy_addr = IrysAddress::from([220_u8; 20]);
+            let healthy_id = IrysPeerId::from(healthy_addr);
+            peer_list.add_or_update_peer(
+                PeerListItem {
+                    peer_id: healthy_id,
+                    mining_address: healthy_addr,
+                    address: create_peer_address("127.0.0.1", server.port()),
+                    reputation_score: PeerScore::new(PeerScore::INITIAL),
+                    response_time: 0,
+                    last_seen: 0,
+                    is_online: false,
+                    protocol_version: ProtocolVersion::default(),
+                },
+                true,
+            );
+
+            // Unroutable, so the probe fails once the 200ms client timeout fires,
+            // well inside the pass budget.
+            let (failing_id, failing_peer) = unreachable_peer(221, 9_100, true);
+            peer_list.add_or_update_peer(failing_peer, true);
+
+            fixture
+                .client
+                .hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    Duration::ZERO,
+                )
+                .await;
+
+            let failing_score = peer_list
+                .get_peer(&failing_id)
+                .expect("failing peer still listed")
+                .reputation_score
+                .get();
+            let healthy_score = peer_list
+                .get_peer(&healthy_id)
+                .expect("healthy peer still listed")
+                .reputation_score
+                .get();
+
+            assert_eq!(
+                failing_score,
+                PeerScore::INITIAL,
+                "a failed probe must not charge the peer for a fault it may not own"
+            );
+            assert_eq!(
+                healthy_score,
+                PeerScore::INITIAL,
+                "a healthy probe must not credit the peer either"
+            );
+
+            // The flags still move — the pass does its actual job.
+            assert!(
+                peer_list
+                    .get_peer(&healthy_id)
+                    .expect("healthy peer still listed")
+                    .is_online,
+                "a peer that answered must be marked online"
+            );
+            assert!(
+                !peer_list
+                    .get_peer(&failing_id)
+                    .expect("failing peer still listed")
+                    .is_online,
+                "a peer that did not answer must be marked offline"
+            );
+        }
+
+        /// Adds a peer served by `body`, and returns its id.
+        fn peer_answering_with(
+            peer_list: &PeerList,
+            id_byte: u8,
+            body: &str,
+            is_online: bool,
+        ) -> (IrysPeerId, MockHttpServer) {
+            let server = MockHttpServer::new_with_response(200, body, "application/json");
+            let addr = IrysAddress::from([id_byte; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            peer_list.add_or_update_peer(
+                PeerListItem {
+                    peer_id,
+                    mining_address: addr,
+                    address: create_peer_address("127.0.0.1", server.port()),
+                    reputation_score: PeerScore::new(PeerScore::INITIAL),
+                    response_time: 0,
+                    last_seen: 0,
+                    is_online,
+                    protocol_version: ProtocolVersion::V1,
+                },
+                true,
+            );
+            (peer_id, server)
+        }
+
+        /// A peer that answers "handshake first" is alive, so it keeps its online
+        /// flag and stays enumerable — but it earns no credit while it is
+        /// refusing to serve us.
+        #[tokio::test]
+        async fn hydrate_keeps_a_handshake_pending_peer_online_without_crediting_it() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(200));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let body = serde_json::to_string(&GossipResponse::<bool>::Rejected(
+                RejectionReason::HandshakeRequired(None),
+            ))
+            .unwrap();
+            let (peer_id, _server) = peer_answering_with(&peer_list, 230, &body, false);
+
+            fixture
+                .client
+                .hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    Duration::ZERO,
+                )
+                .await;
+
+            let peer = peer_list.get_peer(&peer_id).expect("peer still listed");
+            assert!(peer.is_online, "a peer that answered is still reachable");
+            assert_eq!(
+                peer.reputation_score.get(),
+                PeerScore::INITIAL,
+                "a peer refusing our probe must not earn credit"
+            );
+        }
+
+        /// Any other rejection means the peer will not serve us, so it is not
+        /// online. Before the rejection match was made exhaustive these reasons
+        /// fell through to the `HandshakeRequired` answer and marked the peer
+        /// online — feeding it to block and chunk pull selection.
+        #[tokio::test]
+        async fn hydrate_marks_a_peer_rejecting_us_offline() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(200));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let body = serde_json::to_string(&GossipResponse::<bool>::Rejected(
+                RejectionReason::ChainIdMismatch,
+            ))
+            .unwrap();
+            let (peer_id, _server) = peer_answering_with(&peer_list, 231, &body, true);
+
+            fixture
+                .client
+                .hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    Duration::ZERO,
+                )
+                .await;
+
+            assert!(
+                !peer_list
+                    .get_peer(&peer_id)
+                    .expect("peer still listed")
+                    .is_online,
+                "a peer on another chain must not be left online"
+            );
+        }
+
+        /// The periodic sync check hydrates, then starts a sync task that would
+        /// hydrate again immediately — two sweeps of the same peers seconds
+        /// apart.
+        #[tokio::test]
+        async fn hydrate_skips_a_pass_that_follows_a_recent_one() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(200));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            // Answers every pass, unlike MockHttpServer which serves once and
+            // would make the skip below indistinguishable from a dead server.
+            let server = crate::tests::util::FakeGossipServer::new();
+            let address = server.spawn();
+            let addr = IrysAddress::from([240_u8; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            peer_list.add_or_update_peer(
+                PeerListItem {
+                    peer_id,
+                    mining_address: addr,
+                    address: create_peer_address(&address.ip().to_string(), address.port()),
+                    reputation_score: PeerScore::new(PeerScore::INITIAL),
+                    response_time: 0,
+                    last_seen: 0,
+                    is_online: false,
+                    // V1 hits /gossip/health, the route the fake server serves.
+                    protocol_version: ProtocolVersion::V1,
+                },
+                true,
+            );
+
+            let sweep = |min_interval| {
+                fixture.client.hydrate_peers_online_status_within(
+                    &peer_list,
+                    Duration::from_secs(5),
+                    min_interval,
+                )
+            };
+
+            sweep(Duration::ZERO).await;
+            assert!(
+                peer_list.get_peer(&peer_id).expect("listed").is_online,
+                "pre-condition: the first pass resolves the peer"
+            );
+
+            // Force the peer offline; a pass that runs would flip it back.
+            peer_list.set_is_online_by_peer_id(&peer_id, false);
+
+            sweep(Duration::from_secs(30)).await;
+            assert!(
+                !peer_list.get_peer(&peer_id).expect("listed").is_online,
+                "a pass inside the freshness window must not run"
+            );
+
+            // The control: the same sweep without the window does flip it back,
+            // so the assertion above pinned the skip and not a dead server.
+            sweep(Duration::ZERO).await;
+            assert!(
+                peer_list.get_peer(&peer_id).expect("listed").is_online,
+                "the peer was still answering; only the freshness window held the pass back"
+            );
+        }
+
+        /// Concurrent passes would sweep the same peers and fight over the
+        /// cursor, so the second skips instead of queueing behind the first.
+        #[tokio::test]
+        async fn hydrate_skips_a_pass_while_another_is_in_flight() {
+            // Long per-request timeout so the first pass is still in flight.
+            let fixture = TestFixture::with_timeout(Duration::from_secs(11));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let (_, stalled_peer) = unreachable_peer(241, 9_200, true);
+            peer_list.add_or_update_peer(stalled_peer, true);
+
+            let first = fixture.client.hydrate_peers_online_status_within(
+                &peer_list,
+                Duration::from_millis(600),
+                Duration::ZERO,
+            );
+            let second = async {
+                // Let the first pass take the lock before this one tries.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let start = Instant::now();
+                fixture
+                    .client
+                    .hydrate_peers_online_status_within(
+                        &peer_list,
+                        Duration::from_millis(600),
+                        Duration::ZERO,
+                    )
+                    .await;
+                start.elapsed()
+            };
+
+            let (_, second_elapsed) = tokio::join!(first, second);
+
+            assert!(
+                second_elapsed < Duration::from_millis(100),
+                "the second pass must return at once rather than run or queue, took {second_elapsed:?}"
+            );
+        }
+
+        /// Consecutive budget-limited passes must reach peers the previous pass
+        /// did not. The stalled head never resolves, so no score changes can
+        /// reorder the list between the two passes: without the cursor the same
+        /// head would be retried forever, leaving the tail on a stale online flag
+        /// that block and chunk pull selection then acts on.
+        #[tokio::test]
+        async fn hydrate_passes_advance_past_peers_the_budget_cut_off() {
+            const TEST_BUDGET: Duration = Duration::from_millis(300);
+            const STALLED_PEERS: usize = HYDRATE_HEALTH_CHECK_CONCURRENCY;
+
+            // One client for both passes: the cursor lives on it. The request
+            // timeout is far above the budget so the stalled head is still in
+            // flight when the budget fires.
+            let fixture = TestFixture::with_timeout(Duration::from_secs(11));
+
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            // A full concurrency window of peers that accept a connection and
+            // never answer, so every one of them is still in flight when the
+            // budget fires. Bound listeners that are never accepted from: the
+            // kernel completes the handshake into the backlog, so the probe
+            // blocks on the response rather than on connect. Deliberately not
+            // unroutable addresses — whether those hang or fail fast depends on
+            // the host's routing, and one fast failure would pull an extra peer
+            // into the window and shift the cursor.
+            let mut stalled_listeners = Vec::with_capacity(STALLED_PEERS);
+            for i in 0..STALLED_PEERS {
+                let listener =
+                    std::net::TcpListener::bind("127.0.0.1:0").expect("to bind a stalled listener");
+                let address = listener.local_addr().expect("listener address");
+                let addr = IrysAddress::from([(i + 1) as u8; 20]);
+                peer_list.add_or_update_peer(
+                    PeerListItem {
+                        peer_id: IrysPeerId::from(addr),
+                        mining_address: addr,
+                        address: create_peer_address("127.0.0.1", address.port()),
+                        // Above the tail's score, so the stalled peers are
+                        // deterministically at the head of the pass.
+                        reputation_score: PeerScore::new(PeerScore::INITIAL + 10),
+                        response_time: 0,
+                        last_seen: 0,
+                        is_online: true,
+                        protocol_version: ProtocolVersion::V1,
+                    },
+                    true,
+                );
+                stalled_listeners.push(listener);
+            }
+
+            // One healthy peer behind the stalled head, offline so that a
+            // successful probe is visible. Served by `FakeGossipServer` rather
+            // than `MockHttpServer`: the latter joins its accept thread on drop,
+            // so a server this test never reaches would hang instead of failing.
+            let tail_server = crate::tests::util::FakeGossipServer::new();
+            let tail_address = tail_server.spawn();
+            let tail_addr = IrysAddress::from([240_u8; 20]);
+            let tail_id = IrysPeerId::from(tail_addr);
+            peer_list.add_or_update_peer(
+                PeerListItem {
+                    peer_id: tail_id,
+                    mining_address: tail_addr,
+                    address: create_peer_address(
+                        &tail_address.ip().to_string(),
+                        tail_address.port(),
+                    ),
+                    reputation_score: PeerScore::new(PeerScore::INITIAL),
+                    response_time: 0,
+                    last_seen: 0,
+                    is_online: false,
+                    // V1, so the probe hits `/gossip/health` — the route the fake
+                    // server serves.
+                    protocol_version: ProtocolVersion::V1,
+                },
+                true,
+            );
+
+            // First pass: the stalled head fills the concurrency window and the
+            // budget fires before any of it resolves, so the tail is never probed.
+            fixture
+                .client
+                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET, Duration::ZERO)
+                .await;
+            assert!(
+                !peer_list
+                    .get_peer(&tail_id)
+                    .expect("tail peer listed")
+                    .is_online,
+                "pre-condition: the first pass cannot reach the tail"
+            );
+
+            // Second pass: starts where the first stopped, so the tail resolves.
+            fixture
+                .client
+                .hydrate_peers_online_status_within(&peer_list, TEST_BUDGET, Duration::ZERO)
+                .await;
+            assert!(
+                peer_list
+                    .get_peer(&tail_id)
+                    .expect("tail peer listed")
+                    .is_online,
+                "the next pass must reach the peer the budget cut off"
             );
         }
     }

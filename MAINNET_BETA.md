@@ -140,10 +140,10 @@ __GPU__ packing is slower per core but can process thousands of chunks in parall
 
 ```toml
 [vdf]
-parallel_verification_thread_limit = 4
+# parallel_verification_thread_limit = 4
 ```
 
- `parallel_verification_thread_limit` controls the maximum number of threads to use when validating VDF steps in blocks. A value that is too low could lead to you lagging behind the network - we recommend setting this to 2-4 cores below the total available. VDF validation is very CPU intensive, especially when syncing with the chain for the first time.
+ `parallel_verification_thread_limit` controls the maximum number of threads to use when validating VDF steps in blocks. Leave it commented out and it defaults to two below your core count — one core held back for the VDF thread, one for the rest of the node — never below 1, so a bigger host gets faster on its own. Set it only to pin a specific value. VDF validation is very CPU intensive, especially when syncing with the chain for the first time. The limit applies to each of the two verification thread pools — block prevalidation and full block validation — so a node doing both at once can use up to twice this many threads. The pools stay separate so prevalidation cannot be delayed behind a validation batch. The default and any value you pin are capped at the consensus `num_checkpoints_in_vdf_step`: the checkpoint pass gives one checkpoint to each thread, so threads beyond that count have nothing to do.
 
 ```toml
 [[oracles]]

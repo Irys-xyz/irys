@@ -103,7 +103,13 @@ impl From<ChunkIngressError> for GossipError {
                 // retry signal and penalising the peer for our own
                 // backpressure.
                 AdvisoryChunkIngressError::Overloaded => Self::RateLimited,
-                other => Self::Advisory(AdvisoryGossipError::ChunkIngress(other)),
+                other @ (AdvisoryChunkIngressError::PreHeaderOversizedBytes
+                | AdvisoryChunkIngressError::PreHeaderOversizedDataPath
+                | AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap
+                | AdvisoryChunkIngressError::PreHeaderInvalidOffset(_)
+                | AdvisoryChunkIngressError::Other(_)) => {
+                    Self::Advisory(AdvisoryGossipError::ChunkIngress(other))
+                }
             },
         }
     }
@@ -328,7 +334,15 @@ pub(crate) fn rejected_v2_json(reason: RejectionReason) -> serde_json::Value {
             serde_json::json!({ "HandshakeRequired": payload })
         }
         // All other variants serialize identically in v1 and v2.
-        other => serde_json::to_value(other)
+        other @ (RejectionReason::GossipDisabled
+        | RejectionReason::InvalidData
+        | RejectionReason::RateLimited
+        | RejectionReason::UnableToVerifyOrigin
+        | RejectionReason::InvalidCredentials
+        | RejectionReason::ProtocolMismatch
+        | RejectionReason::UnsupportedProtocolVersion(_)
+        | RejectionReason::UnsupportedFeature
+        | RejectionReason::ChainIdMismatch) => serde_json::to_value(other)
             .expect("RejectionReason serialize is infallible for in-memory values"),
     };
     serde_json::json!({ "Rejected": inner })

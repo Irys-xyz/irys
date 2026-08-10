@@ -197,6 +197,14 @@ impl Config {
             self.consensus.vdf.num_checkpoints_in_vdf_step > 0,
             "vdf.num_checkpoints_in_vdf_step must be > 0"
         );
+        // Checked after the checkpoint count, which this value is clamped to, so
+        // a zero there reports itself rather than surfacing here. Rayon reads
+        // `num_threads(0)` as "size the pool yourself", so a pinned zero would
+        // widen the pool to every core instead of narrowing it.
+        ensure!(
+            self.vdf.parallel_verification_thread_limit > 0,
+            "vdf.parallel_verification_thread_limit must be > 0; remove the setting to derive it from the core count"
+        );
         // Else iterations-per-checkpoint floor to 0 and VDF steps do no sequential work.
         ensure!(
             self.consensus.vdf.sha_1s_difficulty
@@ -617,9 +625,17 @@ impl From<&NodeConfig> for VdfConfig {
             progress_timeout_secs,
             validation_batch_size,
         } = &value.vdf;
+
+        // A pass hands one checkpoint per thread, so the surplus is pure
+        // oversubscription — doubly so, since two pools are built from this
+        // limit and it also floors `validation_batch_size`. Clamped here
+        // because this merge is the only place that sees both halves.
+        let parallel_verification_thread_limit =
+            (*parallel_verification_thread_limit).min(num_checkpoints_in_vdf_step);
+
         Self {
             reset_frequency,
-            parallel_verification_thread_limit: *parallel_verification_thread_limit,
+            parallel_verification_thread_limit,
             num_checkpoints_in_vdf_step,
             max_allowed_vdf_fork_steps,
             sha_1s_difficulty,
@@ -1017,6 +1033,61 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use toml;
+
+    /// The derived default (cores - 2) exceeds this on any wide host.
+    #[test]
+    fn vdf_thread_limit_is_clamped_to_the_checkpoint_count() {
+        let mut node_config = NodeConfig::testing();
+        let checkpoints = node_config
+            .consensus_config()
+            .vdf
+            .num_checkpoints_in_vdf_step;
+        node_config.vdf.parallel_verification_thread_limit = checkpoints * 4;
+
+        assert_eq!(
+            node_config.vdf().parallel_verification_thread_limit,
+            checkpoints,
+            "a limit above the checkpoint count must be clamped to it"
+        );
+    }
+
+    /// A ceiling, not an assignment — a narrow host keeps its smaller limit.
+    #[test]
+    fn vdf_thread_limit_below_the_checkpoint_count_is_left_alone() {
+        let mut node_config = NodeConfig::testing();
+        let checkpoints = node_config
+            .consensus_config()
+            .vdf
+            .num_checkpoints_in_vdf_step;
+        assert!(
+            checkpoints > 1,
+            "test needs headroom below the checkpoint count"
+        );
+        node_config.vdf.parallel_verification_thread_limit = 1;
+
+        assert_eq!(
+            node_config.vdf().parallel_verification_thread_limit,
+            1,
+            "a limit under the checkpoint count must survive the merge"
+        );
+    }
+
+    /// The merge only puts a ceiling on the limit, so a pinned zero survives it
+    /// and must be refused before it reaches the pool builder.
+    #[test]
+    fn vdf_thread_limit_of_zero_is_refused() {
+        let mut node_config = NodeConfig::testing();
+        node_config.vdf.parallel_verification_thread_limit = 0;
+
+        let err = Config::new(node_config, IrysPeerId::random())
+            .validate()
+            .expect_err("a zero thread limit must fail validation");
+        assert!(
+            err.to_string()
+                .contains("vdf.parallel_verification_thread_limit must be > 0"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn test_deserialize_consensus_config_from_toml() {

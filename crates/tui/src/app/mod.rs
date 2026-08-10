@@ -259,7 +259,10 @@ impl<State> App<State> {
                                 )
                                 .await?;
                             }
-                            _ => {}
+                            MenuSelection::Nodes
+                            | MenuSelection::Metrics
+                            | MenuSelection::Logs
+                            | MenuSelection::Settings => {}
                         }
                     }
                 }

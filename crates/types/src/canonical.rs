@@ -709,13 +709,13 @@ impl<'de> de::VariantAccess<'de> for VariantDe {
     fn unit_variant(self) -> Result<(), Error> {
         match self {
             Self::Unit => Ok(()),
-            _ => Err(Error("expected unit variant".into())),
+            Self::Value(_) => Err(Error("expected unit variant".into())),
         }
     }
     fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, Error> {
         match self {
             Self::Value(v) => seed.deserialize(CanonicalDeserializer(v)),
-            _ => Err(Error("expected newtype variant".into())),
+            Self::Unit => Err(Error("expected newtype variant".into())),
         }
     }
     fn tuple_variant<V: de::Visitor<'de>>(self, _: usize, visitor: V) -> Result<V::Value, Error> {

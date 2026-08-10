@@ -634,7 +634,9 @@ impl ChunkOrchestrator {
 
         let (expected_peer, start_instant) = match request.request_state {
             ChunkRequestState::Requested(addr, started) => (addr, started),
-            ref invalid_state => {
+            ref invalid_state @ (ChunkRequestState::Pending
+            | ChunkRequestState::Completed
+            | ChunkRequestState::Blocked(_)) => {
                 return Err(eyre::eyre!(
                     "Invalid state for chunk fetch at offset {}: expected Requested, got {:?}",
                     chunk_offset,
@@ -804,7 +806,9 @@ impl ChunkOrchestrator {
 
         let expected_peer = match request.request_state {
             ChunkRequestState::Requested(addr, _) => addr,
-            _ => {
+            ChunkRequestState::Pending
+            | ChunkRequestState::Completed
+            | ChunkRequestState::Blocked(_) => {
                 return Err(eyre::eyre!(
                     "Invalid request state for chunk failure: {:?}",
                     chunk_offset
