@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786126947752,
+  "lastUpdate": 1786962075752,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14299,6 +14299,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1c5123cb08d90f36139b705f4278ad2524b9f04e",
+          "message": "chore(agents): adopt AGENTS.md standard and point CLAUDE.md at it (#1551)\n\n* chore(agents): adopt AGENTS.md standard and point CLAUDE.md at it\n\nMove the tracked agent instructions and skill/command sources out of the\nClaude-specific .claude/ directory into harness-neutral locations:\n\n- AGENTS.md now holds the guidance; CLAUDE.md is a pointer to it\n- skills and commands move to .agents/skills/ and .agents/commands/\n  (the Agent Skills open standard; native location for Codex, VS Code,\n  and opencode)\n- .gitignore allows local harness bridges (.claude/skills,\n  .claude/commands) and .agents/local without tracking them\n- design-extraction workflow sparse-checkouts the trusted skill from\n  .agents/skills/ and installs it into .claude/skills/ for Claude Code\n\n* fix(ci): fail closed when the design-extraction skill is missing\n\nThe skill-source selection only covered the trusted-base and PR\ncheckout locations; if neither existed, the job silently skipped the\ninstall and ran the extraction without the skill it depends on.\nLog an error and exit nonzero instead.",
+          "timestamp": "2026-08-17T10:57:56+01:00",
+          "tree_id": "225d8c9ccd50933fff2448a922fac83b026c273f",
+          "url": "https://github.com/Irys-xyz/irys/commit/1c5123cb08d90f36139b705f4278ad2524b9f04e"
+        },
+        "date": 1786962073170,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012461,
+            "range": "± 0.0005",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119313,
+            "range": "± 0.004783",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.229115,
+            "range": "± 0.041939",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.078198,
+            "range": "± 0.340792",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078181,
+            "range": "± 0.000805",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 771.654187,
+            "range": "± 27.252309",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.969564,
+            "range": "± 5.958005",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121398,
+            "range": "± 0.002192",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1225.194191,
+            "range": "± 13.4542",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1611.045581,
+            "range": "± 23.368852",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033776,
+            "range": "± 0.002508",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.062919,
+            "range": "± 1.783704",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.550579,
+            "range": "± 1.828885",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
