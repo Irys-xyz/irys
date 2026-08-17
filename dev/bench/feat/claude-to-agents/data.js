@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786126947752,
+  "lastUpdate": 1786959910089,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14299,6 +14299,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "ef915e5217e6c8ba1a7705d7732af6f78de5c525",
+          "message": "chore(agents): adopt AGENTS.md standard and point CLAUDE.md at it",
+          "timestamp": "2026-08-11T17:34:04Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1551/commits/ef915e5217e6c8ba1a7705d7732af6f78de5c525"
+        },
+        "date": 1786959908725,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011914,
+            "range": "± 0.000234",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.118828,
+            "range": "± 0.000136",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.197371,
+            "range": "± 0.026158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.888705,
+            "range": "± 0.03409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074716,
+            "range": "± 0.000127",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.718807,
+            "range": "± 0.559541",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 969.04039,
+            "range": "± 0.642241",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119999,
+            "range": "± 0.000289",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1198.157887,
+            "range": "± 1.9969",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1558.537258,
+            "range": "± 2.52122",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033741,
+            "range": "± 0.001309",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 219.205622,
+            "range": "± 12.305084",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 280.852628,
+            "range": "± 11.983069",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000122,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
