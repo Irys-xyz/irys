@@ -118,12 +118,13 @@ jobs:
           elif [ -d .agents/skills/design-extraction ]; then
             echo "::warning::Skill not found on base branch — using PR version (bootstrap)"
             SKILL_SRC=.agents/skills/design-extraction
+          else
+            echo "::error::Skill not found on base branch or in PR — the design-extraction skill is required to run this workflow"
+            exit 1
           fi
-          if [ -n "${SKILL_SRC:-}" ]; then
-            mkdir -p .claude/skills
-            rm -rf .claude/skills/design-extraction
-            cp -r "$SKILL_SRC" .claude/skills/design-extraction
-          fi
+          mkdir -p .claude/skills
+          rm -rf .claude/skills/design-extraction
+          cp -r "$SKILL_SRC" .claude/skills/design-extraction
           rm -rf trusted-base
 
       - name: Extract design plan section
