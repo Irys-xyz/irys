@@ -12,7 +12,7 @@ Your job is to gather the right context, build a prompt that gives Codex enough 
 
 ### Step 1: Gather Context
 
-Read the Architecture Overview section of `CLAUDE.md` for a high-level understanding. Then, based on what the user is asking about, selectively read the files that are most relevant. Use these heuristics:
+Read the Architecture Overview section of `AGENTS.md` for a high-level understanding. Then, based on what the user is asking about, selectively read the files that are most relevant. Use these heuristics:
 
 - **If actor services are involved**: read the service's message types and the `ServiceSenders`/`ServiceReceivers` pattern
 - **If types crate is involved**: check wire formats (`BlockBody`, `BlockHeader`, `DataTransactionHeader`)

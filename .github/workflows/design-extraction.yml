@@ -89,7 +89,7 @@ jobs:
         with:
           ref: ${{ steps.pr.outputs.base_sha }}
           path: trusted-base
-          sparse-checkout: .claude/skills/design-extraction
+          sparse-checkout: .agents/skills/design-extraction
           fetch-depth: 1
 
       - uses: actions/setup-node@v4
@@ -109,17 +109,22 @@ jobs:
 
       - name: Install trusted skill
         run: |
-          if [ -L .claude ] || [ -L .claude/skills ]; then
-            echo "::error::Symlink detected at .claude/ or .claude/skills/ — aborting"
+          if [ -L .agents ] || [ -L .agents/skills ] || [ -L .agents/skills/design-extraction ]; then
+            echo "::error::Symlink detected at .agents/, .agents/skills/, or the skill directory — aborting"
             exit 1
           fi
-          if [ -d trusted-base/.claude/skills/design-extraction ]; then
-            rm -rf .claude/skills/design-extraction
-            mkdir -p .claude/skills
-            cp -r trusted-base/.claude/skills/design-extraction .claude/skills/design-extraction
-          else
+          if [ -d trusted-base/.agents/skills/design-extraction ]; then
+            SKILL_SRC=trusted-base/.agents/skills/design-extraction
+          elif [ -d .agents/skills/design-extraction ]; then
             echo "::warning::Skill not found on base branch — using PR version (bootstrap)"
+            SKILL_SRC=.agents/skills/design-extraction
+          else
+            echo "::error::Skill not found on base branch or in PR — the design-extraction skill is required to run this workflow"
+            exit 1
           fi
+          mkdir -p .claude/skills
+          rm -rf .claude/skills/design-extraction
+          cp -r "$SKILL_SRC" .claude/skills/design-extraction
           rm -rf trusted-base
 
       - name: Extract design plan section
