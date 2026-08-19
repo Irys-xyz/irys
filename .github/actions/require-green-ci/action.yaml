@@ -124,13 +124,14 @@ runs:
         }
 
         # Benchmarks and Coverage are telemetry, not a release correctness gate.
-        # Match the job names those workflows publish as check runs (unprefixed
-        # today; "Workflow / job" if GitHub starts using that form). A pending or
-        # failed bench/coverage run must not block release and must not count as
-        # the required successful CI result.
+        # `gate` is a skip-controller job, not a correctness result. Match the
+        # job names those workflows publish as check runs (unprefixed today;
+        # "Workflow / job" if GitHub starts using that form). A pending or
+        # failed bench/coverage/gate run must not block release and must not
+        # count as the required successful CI result.
         is_non_core_check() {
           case "$1" in
-            coverage|"cargo bench"|"cleanup branch benchmark data")
+            coverage|gate|"cargo bench"|"cleanup branch benchmark data")
               return 0
               ;;
             "Benchmarks / "*|"Coverage / "*)
