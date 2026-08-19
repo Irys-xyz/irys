@@ -113,26 +113,42 @@ jobs:
 
       - name: Convert benchmark output to milliseconds
         run: |
-          python3 -c "
-          import re, json
+          python3 <<'PY'
+          import json, re, sys
+
+          # Criterion --output-format bencher is supposed to emit one line:
+          #   test NAME ... bench: N ns/iter (+/- M)
+          # When no prior baseline exists it injects an ERROR after "..." and
+          # puts "bench:" on the next line. Bind the name, then the bench line.
+          test_re = re.compile(r'^\s*test\s+(.+?)\s+\.\.\.')
+          bench_re = re.compile(r'bench:\s+([\d,]+)\s+ns/iter\s+\(\+/-\s+([\d,]+)\)')
+
           results = []
+          current_name = None
           with open('bench-output.txt') as f:
               for line in f:
-                  m = re.match(r'test\s+(.+?)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns/iter\s+\(\+/-\s+([\d,]+)\)', line)
-                  if m:
-                      name = m.group(1)
-                      value_ns = int(m.group(2).replace(',', ''))
-                      range_ns = int(m.group(3).replace(',', ''))
+                  test_m = test_re.search(line)
+                  if test_m:
+                      current_name = test_m.group(1)
+                  bench_m = bench_re.search(line)
+                  if bench_m and current_name:
+                      value_ns = int(bench_m.group(1).replace(',', ''))
+                      range_ns = int(bench_m.group(2).replace(',', ''))
                       results.append({
-                          'name': name,
+                          'name': current_name,
                           'unit': 'ms/iter',
                           'value': round(value_ns / 1e6, 6),
-                          'range': '± ' + str(round(range_ns / 1e6, 6))
+                          'range': '± ' + str(round(range_ns / 1e6, 6)),
                       })
+                      current_name = None
+
+          if not results:
+              sys.exit('No benchmark results parsed from bench-output.txt')
+
           with open('bench-output.json', 'w') as f:
               json.dump(results, f, indent=2)
           print(f'Converted {len(results)} benchmarks from ns to ms')
-          "
+          PY
 
       - name: Seed branch with master baseline
         if: (github.head_ref || github.ref_name) != github.event.repository.default_branch
