@@ -122,4 +122,4 @@ Reusable skills and commands live in the harness-neutral locations `.agents/skil
 
 ### Local changes
 
-NOTE: all the above instructions can be overridden and added to as instructed in `./.agents/local/AGENTS.md` - if it exists, read it and follow any listed instructions before continuing.
+NOTE: all the above instructions can be overridden and added to as instructed in `./.agents/local/AGENTS.md` or `./.local/agents/AGENTS.md` - if it exists, read it and follow any listed instructions before continuing.
