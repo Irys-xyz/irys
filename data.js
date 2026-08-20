@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786962075752,
+  "lastUpdate": 1787213555367,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14407,6 +14407,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "92ee2205779a07f809d5d1d0e5ec61b756c4d8be",
+          "message": "fix: release ci (#1552)\n\n* fix(release): gate releases on core CI only\n\nBenchmarks and Coverage are telemetry, not a correctness signal. A\npending or failed run of those jobs must not block a release and must\nnot count as the required green result. The gate still requires a\npassing core CI run (Rust Checks and other non-excluded workflows).\n\n* fix(ci): parse Criterion bench output across split lines\n\nCriterion prints a missing-baseline error between \"test NAME ...\" and\n\"bench:\", so a one-line regex stored zero results. Bind the name, then\nthe bench line, and fail if nothing was parsed.\n\n* fix(ci): exclude workflow gate jobs from release CI check\n\nThe skip-controller job is named `gate`. Treating it as core CI let a\ncancelled or pending Benchmarks gate block release, and a successful\nskip-gate could count as a passing run.\n\n* fixes",
+          "timestamp": "2026-08-20T08:57:05+01:00",
+          "tree_id": "896babc635bac8f22d3c89e6578c016c3c7031f1",
+          "url": "https://github.com/Irys-xyz/irys/commit/92ee2205779a07f809d5d1d0e5ec61b756c4d8be"
+        },
+        "date": 1787213553680,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015053,
+            "range": "± 0.000694",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.151517,
+            "range": "± 0.00366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.546069,
+            "range": "± 0.05669",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.759881,
+            "range": "± 0.441342",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083159,
+            "range": "± 0.003331",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 838.983728,
+            "range": "± 11.685308",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 999.23653,
+            "range": "± 22.876179",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120068,
+            "range": "± 0.000217",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1214.079238,
+            "range": "± 8.997393",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1631.919926,
+            "range": "± 140.079631",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034606,
+            "range": "± 0.001",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.307494,
+            "range": "± 0.906384",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 283.788198,
+            "range": "± 14.90256",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00012,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
