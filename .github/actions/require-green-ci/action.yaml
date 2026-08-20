@@ -1,12 +1,15 @@
 name: "Require green CI"
 description: >-
-  Fails unless a commit has a fully passing CI result. The release workflow uses
+  Fails unless a commit has a passing core CI result. The release workflow uses
   this to gate a release on the release/<major>.x merge-base — the substantive
   upstream code being shipped — having passed CI, as defense-in-depth on top of
-  branch protection. A commit is "fully green" when:
-    - it has at least one successful check run (or a green combined commit
-      status), proving CI actually ran; AND
-    - no check run is still running, and none concluded failure / cancelled /
+  branch protection. Core CI is the required correctness lane (Rust Checks and
+  any other non-excluded workflows). Benchmarks and Coverage do not gate: they
+  may be failed, cancelled, or still running. A commit is "core-green" when:
+    - it has at least one successful core check run (or a green combined commit
+      status), proving CI actually ran. A green skip-controller check does not
+      count: it proves only that CI decided whether to run; AND
+    - no core check run is still running, and none concluded failure / cancelled /
       timed_out / action_required / stale / startup_failure; AND
     - the combined legacy commit status (if any contexts exist) is success.
   A commit with no CI results at all is a hard failure — absence of a run is not
@@ -23,12 +26,13 @@ inputs:
     required: true
   wait-timeout-seconds:
     description: >-
-      Max seconds to wait for still-running CI to finish before evaluating.
-      0 (the default) preserves the original fail-fast behavior: any check
+      Max seconds to wait for still-running core CI to finish before evaluating.
+      0 (the default) preserves the original fail-fast behavior: any core check
       still running is an immediate failure. A positive value polls until every
-      check has settled (or the timeout elapses). A commit that concludes with a
-      real failure/cancellation fails immediately regardless of this value —
-      only in-progress checks are waited on.
+      core check has settled (or the timeout elapses). A commit that concludes
+      with a real core failure/cancellation fails immediately regardless of this
+      value — only in-progress core checks are waited on. Benchmarks and Coverage
+      are never waited on.
     required: false
     default: "0"
   poll-interval-seconds:
@@ -120,6 +124,36 @@ runs:
           exit 1
         }
 
+        # Benchmarks and Coverage are telemetry, not a release correctness gate.
+        # Match the job names those workflows publish as check runs (unprefixed
+        # today; "Workflow / job" if GitHub starts using that form). A pending or
+        # failed bench/coverage run must not block release and must not count as
+        # the required successful CI result.
+        is_non_core_check() {
+          case "$1" in
+            coverage|"benchmarks gate"|"cargo bench"|"cleanup branch benchmark data")
+              return 0
+              ;;
+            "Benchmarks / "*|"Coverage / "*)
+              return 0
+              ;;
+          esac
+          return 1
+        }
+
+        # The core Rust lane's `gate` job only decides whether the real checks
+        # run. It is core — a failed or in-progress gate means the checks it
+        # controls did not report, so it must block — but its own success proves
+        # nothing about the code, so it cannot be the result that proves CI ran.
+        # Otherwise a commit whose gate short-circuits every real check (e.g.
+        # #disable-ci) would release on the gate's green alone.
+        is_skip_controller_check() {
+          case "$1" in
+            gate) return 0 ;;
+          esac
+          return 1
+        }
+
         # SECONDS is bash's monotonic elapsed-seconds counter since shell start;
         # the poll loop below waits until SECONDS exceeds this deadline.
         deadline=$((SECONDS + WAIT_TIMEOUT))
@@ -128,7 +162,7 @@ runs:
           api_error=0    # a read failed after its retries (transient API error)
 
           # GitHub Actions jobs surface as "check runs"; external CI / bots surface
-          # as legacy "commit statuses". A fully passing CI result must satisfy both.
+          # as legacy "commit statuses". A passing core CI result must satisfy both.
           # filter=latest (the API default) collapses re-runs to the most recent run
           # per check name, so a red run that was later re-run green is not counted.
           if runs_tsv=$(gh_api --paginate \
@@ -147,11 +181,30 @@ runs:
           no_results=0    # no checks/statuses registered yet (also waitable)
           pending_names=""
           successes=0
+          check_successes=0
           total_runs=0
           if [ -n "${runs_tsv}" ]; then
             while IFS=$'\t' read -r name status conclusion; do
               [ -z "${name}" ] && continue
-              total_runs=$((total_runs + 1))
+              if is_non_core_check "${name}"; then
+                if [ "${status}" = "completed" ]; then
+                  case "${conclusion}" in
+                    success|skipped|neutral) ;;
+                    *)
+                      echo "Ignoring non-core check '${name}' (conclusion=${conclusion}) on ${SHA}."
+                      ;;
+                  esac
+                fi
+                continue
+              fi
+              # A skip controller still blocks, but is not counted as one of the
+              # core results that prove CI ran.
+              qualifying=1
+              if is_skip_controller_check "${name}"; then
+                qualifying=0
+              else
+                total_runs=$((total_runs + 1))
+              fi
               if [ "${status}" != "completed" ]; then
                 echo "Check '${name}' is still running (status=${status}) on ${SHA}."
                 pending=$((pending + 1))
@@ -160,7 +213,10 @@ runs:
               fi
               case "${conclusion}" in
                 success)
-                  successes=$((successes + 1))
+                  if [ "${qualifying}" -eq 1 ]; then
+                    successes=$((successes + 1))
+                    check_successes=$((check_successes + 1))
+                  fi
                   ;;
                 skipped|neutral)
                   # Non-blocking, mirrors GitHub's required-status-check semantics.
@@ -212,7 +268,7 @@ runs:
           # red is proven red regardless of the other endpoint. Checked before the
           # api_error branch so a known failure is never deferred behind a read blip.
           if [ "${fail}" -ne 0 ]; then
-            echo "::error::CI for ${SHA} is not fully green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
+            echo "::error::Core CI for ${SHA} is not green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
             exit 1
           fi
 
@@ -238,8 +294,8 @@ runs:
           # registered — so treat it as waitable and let later polls see them appear.
           # With WAIT_TIMEOUT=0 the deadline is already past, so the pending branch
           # below still fails fast on the first poll, preserving the original behavior.
-          if [ "${total_runs}" -eq 0 ] && [ "${status_total}" -eq 0 ]; then
-            echo "No CI check runs or commit statuses found yet for ${SHA}."
+          if [ "${total_runs}" -eq 0 ] && [ "${status_total}" -eq 0 ] && [ "${pending}" -eq 0 ]; then
+            echo "No core CI check runs or commit statuses found yet for ${SHA}."
             no_results=1
             pending=$((pending + 1))
           fi
@@ -250,13 +306,13 @@ runs:
           # already past so this is the original fail-fast behavior.
           if [ "${pending}" -ne 0 ]; then
             if [ "${no_results}" -ne 0 ]; then
-              waiting_for="CI to register on ${SHA}"
+              waiting_for="core CI to register on ${SHA}"
             else
               waiting_for="${pending} in-progress CI check(s) on ${SHA} to finish (${pending_names})"
             fi
             if [ "${SECONDS}" -ge "${deadline}" ]; then
               if [ "${no_results}" -ne 0 ]; then
-                echo "::error::Timed out after ${WAIT_TIMEOUT}s: no CI check runs or commit statuses ever appeared for ${SHA}. Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
+                echo "::error::Timed out after ${WAIT_TIMEOUT}s: no core CI check runs or commit statuses ever appeared for ${SHA}. Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
               else
                 echo "::error::Timed out after ${WAIT_TIMEOUT}s waiting for ${waiting_for} (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
               fi
@@ -275,8 +331,13 @@ runs:
         # actually ran (e.g. a #disable-ci gate short-circuit), so there is no
         # passing run to stand behind.
         if [ "${successes}" -eq 0 ]; then
-          echo "::error::No successful CI result for ${SHA} (all checks skipped/neutral, no green status). Cannot prove a real CI run passed. (Emergency hotfixes can bypass with force=true.)"
+          echo "::error::No successful core CI result for ${SHA} (all core checks skipped/neutral, no green status). Cannot prove a real CI run passed. (Emergency hotfixes can bypass with force=true.)"
           exit 1
         fi
 
-        echo "CI for ${SHA} is fully green (${successes} successful result(s) across ${total_runs} check run(s))."
+        if [ "${status_total}" -gt 0 ]; then
+          status_summary="combined commit status: ${status_state}"
+        else
+          status_summary="no commit statuses"
+        fi
+        echo "Core CI for ${SHA} is green (${check_successes} of ${total_runs} core check run(s) successful; ${status_summary})."

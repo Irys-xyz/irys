@@ -99,7 +99,7 @@ The workflow will:
 
 1. Verify the commit is on `release/testnet/<major>.x`, **and is the tip of that branch** — releasing a non-tip commit silently drops the later commits on the branch and is a hard error unless you dispatch with `allow_non_tip_commit=true`.
 2. Verify `crates/chain/Cargo.toml` version equals `1.2.3`.
-3. Verify the CI gate target had a fully passing CI run. By default this is the commit's `release/1.x` merge-base (the upstream code being shipped, env-patches aside); dispatch with `gate_ci_on_trunk=false` to instead gate the release commit itself (use when the deployment branch is expected to be green in its own right). Skipped entirely with `force=true` or `dry_run=true`.
+3. Verify the CI gate target had a passing **core** CI run (Rust Checks and other required jobs; Benchmarks and Coverage do not gate). By default this is the commit's `release/1.x` merge-base (the upstream code being shipped, env-patches aside); dispatch with `gate_ci_on_trunk=false` to instead gate the release commit itself (use when the deployment branch is expected to be green in its own right). Skipped entirely with `force=true` or `dry_run=true`.
 4. Build `ghcr.io/<owner>/irys-testnet:1.2.3`.
 5. Push git tag `testnet-1.2.3`, push the Docker image, move the `testnet-latest` git tag.
 6. Auto-publish a GitHub **prerelease** with the auto-generated changelog body.

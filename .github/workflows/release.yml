@@ -147,9 +147,10 @@ jobs:
         with:
           commit: ${{ steps.base.outputs.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Wait for in-progress CI on the gate target to finish rather than
-          # failing immediately, so a release kicked off while its gate-target CI
-          # is still running blocks until the result is known (up to 60 min).
+          # Wait for in-progress *core* CI on the gate target to finish rather
+          # than failing immediately, so a release kicked off while its
+          # gate-target CI is still running blocks until the result is known
+          # (up to 60 min). Benchmarks and Coverage are not part of this wait.
           wait-timeout-seconds: "3600"
           poll-interval-seconds: "30"
 
