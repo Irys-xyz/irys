@@ -7,7 +7,8 @@ description: >-
   any other non-excluded workflows). Benchmarks and Coverage do not gate: they
   may be failed, cancelled, or still running. A commit is "core-green" when:
     - it has at least one successful core check run (or a green combined commit
-      status), proving CI actually ran; AND
+      status), proving CI actually ran. A green skip-controller check does not
+      count: it proves only that CI decided whether to run; AND
     - no core check run is still running, and none concluded failure / cancelled /
       timed_out / action_required / stale / startup_failure; AND
     - the combined legacy commit status (if any contexts exist) is success.
@@ -124,19 +125,31 @@ runs:
         }
 
         # Benchmarks and Coverage are telemetry, not a release correctness gate.
-        # `gate` is a skip-controller job, not a correctness result. Match the
-        # job names those workflows publish as check runs (unprefixed today;
-        # "Workflow / job" if GitHub starts using that form). A pending or
-        # failed bench/coverage/gate run must not block release and must not
-        # count as the required successful CI result.
+        # Match the job names those workflows publish as check runs (unprefixed
+        # today; "Workflow / job" if GitHub starts using that form). A pending or
+        # failed bench/coverage run must not block release and must not count as
+        # the required successful CI result.
         is_non_core_check() {
           case "$1" in
-            coverage|gate|"cargo bench"|"cleanup branch benchmark data")
+            coverage|"benchmarks gate"|"cargo bench"|"cleanup branch benchmark data")
               return 0
               ;;
             "Benchmarks / "*|"Coverage / "*)
               return 0
               ;;
+          esac
+          return 1
+        }
+
+        # The core Rust lane's `gate` job only decides whether the real checks
+        # run. It is core — a failed or in-progress gate means the checks it
+        # controls did not report, so it must block — but its own success proves
+        # nothing about the code, so it cannot be the result that proves CI ran.
+        # Otherwise a commit whose gate short-circuits every real check (e.g.
+        # #disable-ci) would release on the gate's green alone.
+        is_skip_controller_check() {
+          case "$1" in
+            gate) return 0 ;;
           esac
           return 1
         }
@@ -168,6 +181,7 @@ runs:
           no_results=0    # no checks/statuses registered yet (also waitable)
           pending_names=""
           successes=0
+          check_successes=0
           total_runs=0
           if [ -n "${runs_tsv}" ]; then
             while IFS=$'\t' read -r name status conclusion; do
@@ -183,7 +197,14 @@ runs:
                 fi
                 continue
               fi
-              total_runs=$((total_runs + 1))
+              # A skip controller still blocks, but is not counted as one of the
+              # core results that prove CI ran.
+              qualifying=1
+              if is_skip_controller_check "${name}"; then
+                qualifying=0
+              else
+                total_runs=$((total_runs + 1))
+              fi
               if [ "${status}" != "completed" ]; then
                 echo "Check '${name}' is still running (status=${status}) on ${SHA}."
                 pending=$((pending + 1))
@@ -192,7 +213,10 @@ runs:
               fi
               case "${conclusion}" in
                 success)
-                  successes=$((successes + 1))
+                  if [ "${qualifying}" -eq 1 ]; then
+                    successes=$((successes + 1))
+                    check_successes=$((check_successes + 1))
+                  fi
                   ;;
                 skipped|neutral)
                   # Non-blocking, mirrors GitHub's required-status-check semantics.
@@ -270,7 +294,7 @@ runs:
           # registered — so treat it as waitable and let later polls see them appear.
           # With WAIT_TIMEOUT=0 the deadline is already past, so the pending branch
           # below still fails fast on the first poll, preserving the original behavior.
-          if [ "${total_runs}" -eq 0 ] && [ "${status_total}" -eq 0 ]; then
+          if [ "${total_runs}" -eq 0 ] && [ "${status_total}" -eq 0 ] && [ "${pending}" -eq 0 ]; then
             echo "No core CI check runs or commit statuses found yet for ${SHA}."
             no_results=1
             pending=$((pending + 1))
@@ -311,4 +335,9 @@ runs:
           exit 1
         fi
 
-        echo "Core CI for ${SHA} is green (${successes} successful result(s) across ${total_runs} core check run(s))."
+        if [ "${status_total}" -gt 0 ]; then
+          status_summary="combined commit status: ${status_state}"
+        else
+          status_summary="no commit statuses"
+        fi
+        echo "Core CI for ${SHA} is green (${check_successes} of ${total_runs} core check run(s) successful; ${status_summary})."
