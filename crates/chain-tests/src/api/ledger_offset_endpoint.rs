@@ -1,14 +1,17 @@
 //! Integration tests for the canonical ledger attribution endpoints:
-//! `GET /v1/ledger/{ledger_id}/offset/{ledger_offset}/tx` and the
+//! `GET /v1/ledger/{ledger_id}/offset/{ledger_offset}/tx`, the
 //! slot-relative variant
-//! `GET /v1/ledger/{ledger_id}/slot/{slot_index}/offset/{slot_offset}/tx`.
+//! `GET /v1/ledger/{ledger_id}/slot/{slot_index}/offset/{slot_offset}/tx`,
+//! and the range list variants
+//! `GET /v1/ledger/{ledger_id}/txs` /
+//! `GET /v1/ledger/{ledger_id}/slot/{slot_index}/txs`.
 
 use crate::utils::IrysNodeTest;
 use actix_web::body::MessageBody;
 use actix_web::dev::{Service, ServiceResponse};
 use actix_web::http::StatusCode;
 use actix_web::test::{TestRequest, call_service, read_body_json};
-use irys_api_server::routes::ledger::LedgerOffsetTxResponse;
+use irys_api_server::routes::ledger::{LedgerOffsetTxResponse, LedgerOffsetTxsResponse};
 use irys_api_server::routes::tx::TxOffset;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
@@ -28,6 +31,17 @@ where
 }
 
 async fn get_attribution<T, B>(app: &T, uri: &str) -> LedgerOffsetTxResponse
+where
+    T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
+    B: MessageBody,
+{
+    let req = TestRequest::get().uri(uri).to_request();
+    let resp = call_service(app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK, "GET {uri} should succeed");
+    read_body_json(resp).await
+}
+
+async fn get_tx_range<T, B>(app: &T, uri: &str) -> LedgerOffsetTxsResponse
 where
     T: Service<actix_http::Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
     B: MessageBody,
@@ -156,9 +170,74 @@ async fn heavy_ledger_offset_tx_endpoint() -> eyre::Result<()> {
         serde_json::to_value(&via_slot)?
     );
 
+    // Range list: one row per overlapping tx, not per chunk
+    let all = get_tx_range(&app, "/v1/ledger/1/txs?from=0&to=6").await;
+    assert_eq!(all.txs.len(), 2);
+    assert_eq!(all.txs[0].tx_id, at_boundary_left.tx_id);
+    assert_eq!(all.txs[0].tx_start_offset, 0);
+    assert_eq!(all.txs[0].tx_end_offset, 3);
+    assert_eq!(all.txs[1].tx_id, at_boundary_right.tx_id);
+    assert_eq!(all.txs[1].tx_start_offset, 3);
+    assert_eq!(all.txs[1].tx_end_offset, 6);
+    assert!(
+        all.txs
+            .iter()
+            .all(|tx| tx.ledger == DataLedger::Submit && tx.chunks_in_tx == 3)
+    );
+
+    // Window that straddles the tx boundary still returns both unique txs
+    let straddle = get_tx_range(&app, "/v1/ledger/1/txs?from=2&to=4").await;
+    assert_eq!(straddle.txs.len(), 2);
+    assert_eq!(straddle.txs[0].tx_id, all.txs[0].tx_id);
+    assert_eq!(straddle.txs[1].tx_id, all.txs[1].tx_id);
+
+    let only_b = get_tx_range(&app, "/v1/ledger/1/txs?from=3&to=4").await;
+    assert_eq!(only_b.txs.len(), 1);
+    assert_eq!(only_b.txs[0].tx_id, at_boundary_right.tx_id);
+
+    let via_slot_range = get_tx_range(&app, "/v1/ledger/1/slot/0/txs?from=0&to=6").await;
+    assert_eq!(
+        serde_json::to_value(&all)?,
+        serde_json::to_value(&via_slot_range)?
+    );
+
+    // Empty window
+    let empty = get_tx_range(&app, "/v1/ledger/1/txs?from=2&to=2").await;
+    assert!(empty.txs.is_empty());
+
+    // `to` past the frontier is clamped to indexed data
+    let clamped = get_tx_range(&app, "/v1/ledger/1/txs?from=0&to=10").await;
+    assert_eq!(clamped.txs.len(), 2);
+
+    // Window larger than one partition
+    assert_eq!(
+        get_status(&app, "/v1/ledger/1/txs?from=0&to=11").await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get_status(&app, "/v1/ledger/1/txs?from=5&to=4").await,
+        StatusCode::BAD_REQUEST
+    );
+    // Slot-relative `to` may equal the partition size (exclusive end) but not exceed it
+    assert_eq!(
+        get_tx_range(&app, "/v1/ledger/1/slot/0/txs?from=0&to=10")
+            .await
+            .txs
+            .len(),
+        2
+    );
+    assert_eq!(
+        get_status(&app, "/v1/ledger/1/slot/0/txs?from=0&to=11").await,
+        StatusCode::BAD_REQUEST
+    );
+
     // Beyond the Submit frontier
     assert_eq!(
         get_status(&app, "/v1/ledger/1/offset/6/tx").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_status(&app, "/v1/ledger/1/txs?from=6&to=7").await,
         StatusCode::NOT_FOUND
     );
     // Cascade term ledgers are not active on this chain: no data, clean 404
@@ -199,6 +278,28 @@ async fn heavy_ledger_offset_tx_endpoint() -> eyre::Result<()> {
         get_status(&app, &format!("/v1/ledger/1/slot/{}/offset/0/tx", u64::MAX)).await,
         StatusCode::BAD_REQUEST
     );
+
+    // A later block's tx is included when the window crosses the block boundary
+    let tx_c = node
+        .post_data_tx(
+            node.get_anchor().await?,
+            vec![3_u8; chunk_size as usize],
+            &signer,
+        )
+        .await;
+    node.wait_for_mempool(tx_c.header.id, 20).await?;
+    let second_inclusion = node.mine_block().await?;
+    node.mine_block().await?;
+    node.wait_for_block_in_index_height(second_inclusion.height, 20)
+        .await?;
+    let cross_block = get_tx_range(&app, "/v1/ledger/1/txs?from=5&to=7").await;
+    assert_eq!(cross_block.txs.len(), 2);
+    assert_eq!(cross_block.txs[0].tx_id, at_boundary_right.tx_id);
+    assert_eq!(cross_block.txs[0].block_height, inclusion_block.height);
+    assert_eq!(cross_block.txs[1].tx_id, tx_c.header.id);
+    assert_eq!(cross_block.txs[1].block_height, second_inclusion.height);
+    assert_eq!(cross_block.txs[1].tx_start_offset, 6);
+    assert_eq!(cross_block.txs[1].tx_end_offset, 7);
 
     // Promote tx_a into the Publish ledger, then cross-check attribution
     // against the storage-derived start offset (the spec's reverse check)
@@ -330,6 +431,12 @@ async fn heavy_ledger_offset_tx_endpoint_cascade_term_ledgers() -> eyre::Result<
         serde_json::to_value(&direct)?,
         serde_json::to_value(&via_slot)?
     );
+
+    let term_range = get_tx_range(&app, "/v1/ledger/20/txs?from=0&to=3").await;
+    assert_eq!(term_range.txs.len(), 1);
+    assert_eq!(term_range.txs[0].tx_id, direct.tx_id);
+    assert_eq!(term_range.txs[0].tx_start_offset, 0);
+    assert_eq!(term_range.txs[0].tx_end_offset, 3);
 
     // Term txs never pass through the Submit staging ledger
     assert_eq!(
