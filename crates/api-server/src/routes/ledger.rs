@@ -1,7 +1,7 @@
 use crate::ApiState;
 use crate::error::ApiError;
 use crate::routes::parse_ledger_id;
-use actix_web::web::{Data, Json, Path};
+use actix_web::web::{Data, Json, Path, Query};
 use awc::http::StatusCode;
 use irys_database::{block_header_by_hash, database, db::IrysDatabaseExt as _};
 use irys_domain::{BlockBounds, BlockBoundsError, BlockIndex};
@@ -606,6 +606,45 @@ pub struct LedgerOffsetTxResponse {
     pub chunks_in_tx: u64,
 }
 
+/// One unique tx whose `[txStartOffset, txEndOffset)` overlaps a `/txs`
+/// window. Same fields as [`LedgerOffsetTxResponse`] minus the dummy query
+/// offset (`ledgerOffset` / `slotOffset`).
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerTxRangeItem {
+    pub ledger_id: u32,
+    pub ledger: DataLedger,
+    #[serde(with = "string_u64")]
+    pub slot_index: u64,
+    #[serde(with = "string_u64")]
+    pub block_height: u64,
+    pub block_hash: H256,
+    #[serde(with = "string_u64")]
+    pub block_start_offset: u64,
+    #[serde(with = "string_u64")]
+    pub block_end_offset: u64,
+    pub tx_id: H256,
+    pub data_root: H256,
+    pub tx_index: u32,
+    #[serde(with = "string_u64")]
+    pub tx_start_offset: u64,
+    #[serde(with = "string_u64")]
+    pub tx_end_offset: u64,
+    #[serde(with = "string_u64")]
+    pub chunks_in_tx: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerOffsetTxsResponse {
+    pub txs: Vec<LedgerTxRangeItem>,
+}
+
+/// Max txs a `/txs` range query may return. Combined with the one-partition
+/// window cap so a client cannot dump the whole Submit ledger: a partition
+/// can still hold one tx per chunk.
+const MAX_LEDGER_TX_RANGE: usize = 10_000;
+
 #[derive(Deserialize)]
 pub struct LedgerOffsetPath {
     ledger_id: u32,
@@ -659,6 +698,61 @@ pub async fn get_tx_by_slot_offset(
         })
 }
 
+#[derive(Deserialize)]
+pub struct LedgerIdPath {
+    ledger_id: u32,
+}
+
+#[derive(Deserialize)]
+pub struct LedgerSlotIndexPath {
+    ledger_id: u32,
+    slot_index: u64,
+}
+
+#[derive(Deserialize)]
+pub struct LedgerTxRangeQuery {
+    from: u64,
+    to: u64,
+}
+
+pub async fn get_txs_by_ledger_offset_range(
+    state: Data<ApiState>,
+    path: Path<LedgerIdPath>,
+    query: Query<LedgerTxRangeQuery>,
+) -> Result<Json<LedgerOffsetTxsResponse>, ApiError> {
+    let ledger = parse_ledger_id(path.ledger_id)?;
+    Ok(Json(resolve_txs_by_ledger_range(
+        &state, ledger, query.from, query.to,
+    )?))
+}
+
+pub async fn get_txs_by_slot_offset_range(
+    state: Data<ApiState>,
+    path: Path<LedgerSlotIndexPath>,
+    query: Query<LedgerTxRangeQuery>,
+) -> Result<Json<LedgerOffsetTxsResponse>, ApiError> {
+    let ledger = parse_ledger_id(path.ledger_id)?;
+    let (from, to) = slot_range_to_ledger_range(
+        path.slot_index,
+        query.from,
+        query.to,
+        state.config.consensus.num_chunks_in_partition,
+    )
+    .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;
+    resolve_txs_by_ledger_range(&state, ledger, from, to)
+        .map(Json)
+        .map_err(|err| match err {
+            ApiError::CustomWithStatus(msg, StatusCode::NOT_FOUND) => ApiError::CustomWithStatus(
+                format!(
+                    "{msg} (requested slot {}, slot offsets [{}, {}))",
+                    path.slot_index, query.from, query.to
+                ),
+                StatusCode::NOT_FOUND,
+            ),
+            other => other,
+        })
+}
+
 fn internal(msg: impl Into<String>) -> ApiError {
     ApiError::CustomWithStatus(msg.into(), StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -685,6 +779,52 @@ fn slot_to_ledger_offset(
         .checked_mul(num_chunks_in_partition)
         .and_then(|base| base.checked_add(slot_offset))
         .ok_or_else(|| format!("Slot index {slot_index} exceeds the ledger offset space"))
+}
+
+/// Slot-relative `[from, to)` with exclusive `to` allowed at the partition
+/// size (end of the slot). Absolute `[from, to)` is then bounded by that
+/// single slot.
+fn slot_range_to_ledger_range(
+    slot_index: u64,
+    from: u64,
+    to: u64,
+    num_chunks_in_partition: u64,
+) -> Result<(u64, u64), String> {
+    if to < from {
+        return Err(format!(
+            "Query parameter `to` ({to}) must be >= `from` ({from})"
+        ));
+    }
+    if from > num_chunks_in_partition || to > num_chunks_in_partition {
+        return Err(format!(
+            "Slot offsets must be in [0, {num_chunks_in_partition}] with `to` exclusive"
+        ));
+    }
+    let base = slot_index
+        .checked_mul(num_chunks_in_partition)
+        .ok_or_else(|| format!("Slot index {slot_index} exceeds the ledger offset space"))?;
+    let from_abs = base
+        .checked_add(from)
+        .ok_or_else(|| format!("Slot index {slot_index} exceeds the ledger offset space"))?;
+    let to_abs = base
+        .checked_add(to)
+        .ok_or_else(|| format!("Slot index {slot_index} exceeds the ledger offset space"))?;
+    Ok((from_abs, to_abs))
+}
+
+fn validate_ledger_tx_range(from: u64, to: u64, max_window: u64) -> Result<(), String> {
+    if to < from {
+        return Err(format!(
+            "Query parameter `to` ({to}) must be >= `from` ({from})"
+        ));
+    }
+    let span = to - from;
+    if span > max_window {
+        return Err(format!(
+            "Range [{from}, {to}) spans {span} chunks; the maximum window is {max_window} chunks (one partition)"
+        ));
+    }
+    Ok(())
 }
 
 /// Resolves a canonical ledger chunk offset to the data transaction that owns
@@ -775,6 +915,132 @@ fn resolve_tx_by_ledger_offset(
         .map_err(|e| internal(format!("Database read failed: {e}")))?
 }
 
+/// Lists unique txs whose `[txStart, txEnd)` overlaps `[from, to)`. Starts at
+/// `block_bounds_in_tx(from)` and walks subsequent index blocks until `to`.
+///
+/// `from` beyond the frontier is 404 (same as the point lookup). `to` past
+/// the frontier is clamped. Empty `[from, from)` is 200 with no rows.
+fn resolve_txs_by_ledger_range(
+    state: &ApiState,
+    ledger: DataLedger,
+    from: u64,
+    to: u64,
+) -> Result<LedgerOffsetTxsResponse, ApiError> {
+    let consensus = &state.config.consensus;
+    let chunk_size = consensus.chunk_size;
+    let num_chunks_in_partition = consensus.num_chunks_in_partition;
+
+    validate_ledger_tx_range(from, to, num_chunks_in_partition)
+        .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;
+
+    if from == to {
+        return Ok(LedgerOffsetTxsResponse { txs: vec![] });
+    }
+
+    state
+        .db
+        .view_eyre(|tx| {
+            let mut txs = Vec::new();
+            let mut cursor = from;
+            while cursor < to {
+                let bounds = match BlockIndex::block_bounds_in_tx(
+                    tx,
+                    ledger,
+                    LedgerChunkOffset::from(cursor),
+                ) {
+                    Ok(bounds) => bounds,
+                    Err(e) => {
+                        let first_lookup = txs.is_empty() && cursor == from;
+                        match &e {
+                            BlockBoundsError::OffsetBeyondFrontier { .. } if !first_lookup => {
+                                break;
+                            }
+                            _ => return Ok(Err(bounds_error_to_api(ledger, from, e))),
+                        }
+                    }
+                };
+
+                let Some(block) = block_header_by_hash(tx, &bounds.block_hash, false)? else {
+                    return Ok(Err(internal(format!(
+                        "Block {} at height {} is in the block index but its header was not found",
+                        bounds.block_hash, bounds.height
+                    ))));
+                };
+
+                let ledger_entry = match validate_block_against_index(&bounds, &block) {
+                    Ok(entry) => entry,
+                    Err(msg) => return Ok(Err(internal(msg))),
+                };
+
+                let overlapping = match overlapping_txs_in_block(
+                    bounds.height,
+                    (bounds.start_chunk_offset, bounds.end_chunk_offset),
+                    &ledger_entry.tx_ids.0,
+                    chunk_size,
+                    (from, to),
+                    |tx_id| database::tx_header_by_txid(tx, tx_id),
+                ) {
+                    Ok(overlapping) => overlapping,
+                    Err(e) => return Ok(Err(internal(e.to_string()))),
+                };
+
+                for attr in overlapping {
+                    if txs.len() >= MAX_LEDGER_TX_RANGE {
+                        return Ok(Err(ApiError::CustomWithStatus(
+                            format!(
+                                "Range [{from}, {to}) matches more than {MAX_LEDGER_TX_RANGE} transactions; narrow `from`/`to`"
+                            ),
+                            StatusCode::BAD_REQUEST,
+                        )));
+                    }
+                    match ledger_tx_range_item(ledger, num_chunks_in_partition, &bounds, attr) {
+                        Ok(item) => txs.push(item),
+                        Err(e) => return Ok(Err(e)),
+                    }
+                }
+
+                if bounds.end_chunk_offset <= cursor {
+                    return Ok(Err(internal(format!(
+                        "Block {} at height {} did not advance the {:?} ledger past offset {cursor}",
+                        bounds.block_hash, bounds.height, ledger
+                    ))));
+                }
+                cursor = bounds.end_chunk_offset;
+            }
+            Ok(Ok(LedgerOffsetTxsResponse { txs }))
+        })
+        .map_err(|e| internal(format!("Database read failed: {e}")))?
+}
+
+fn ledger_tx_range_item(
+    ledger: DataLedger,
+    num_chunks_in_partition: u64,
+    bounds: &BlockBounds,
+    attr: TxAttribution,
+) -> Result<LedgerTxRangeItem, ApiError> {
+    let tx_index = match u32::try_from(attr.tx_index) {
+        Ok(tx_index) => tx_index,
+        Err(_) => {
+            return Err(internal(format!("tx index {} exceeds u32", attr.tx_index)));
+        }
+    };
+    Ok(LedgerTxRangeItem {
+        ledger_id: ledger.get_id(),
+        ledger,
+        slot_index: attr.tx_start_offset / num_chunks_in_partition,
+        block_height: bounds.height,
+        block_hash: bounds.block_hash,
+        block_start_offset: bounds.start_chunk_offset,
+        block_end_offset: bounds.end_chunk_offset,
+        tx_id: attr.header.id,
+        data_root: attr.header.data_root,
+        tx_index,
+        tx_start_offset: attr.tx_start_offset,
+        tx_end_offset: attr.tx_end_offset,
+        chunks_in_tx: attr.chunks_in_tx,
+    })
+}
+
 /// Maps the typed bounds-lookup outcomes onto HTTP semantics: "this offset is
 /// not (yet) allocated" variants become 404s, real failures become 500s.
 fn bounds_error_to_api(ledger: DataLedger, ledger_offset: u64, err: BlockBoundsError) -> ApiError {
@@ -833,7 +1099,7 @@ fn validate_block_against_index<'a>(
 }
 
 /// A transaction located within a block's appended chunk range.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TxAttribution {
     tx_index: usize,
     header: DataTransactionHeader,
@@ -873,15 +1139,18 @@ enum AttributionError {
 /// Walks a block's ledger txs in order, assigning each the chunk range
 /// `[cursor, cursor + ceil(data_size / chunk_size))` starting from the block's
 /// first appended offset — mirroring how `BlockIndex::push_block` accumulates
-/// `total_chunks` — and returns the tx whose range contains `ledger_offset`.
-fn attribute_tx_at_offset(
+/// `total_chunks`.
+///
+/// `visit` is called for each tx; return `false` to stop the walk early.
+/// Returns the cursor after the last visited tx (or `block_start` if none).
+fn walk_block_txs(
     height: u64,
     (block_start, block_end): (u64, u64),
     tx_ids: &[H256],
     chunk_size: u64,
-    ledger_offset: u64,
     mut load_tx_header: impl FnMut(&H256) -> eyre::Result<Option<DataTransactionHeader>>,
-) -> Result<TxAttribution, AttributionError> {
+    mut visit: impl FnMut(&TxAttribution) -> bool,
+) -> Result<u64, AttributionError> {
     let mut cursor = block_start;
     for (tx_index, tx_id) in tx_ids.iter().enumerate() {
         let header = load_tx_header(tx_id)
@@ -907,24 +1176,95 @@ fn attribute_tx_at_offset(
                 tx_end_offset,
             });
         }
-        if (cursor..tx_end_offset).contains(&ledger_offset) {
-            return Ok(TxAttribution {
-                tx_index,
-                header,
-                tx_start_offset: cursor,
-                tx_end_offset,
-                chunks_in_tx,
-            });
-        }
+        let attr = TxAttribution {
+            tx_index,
+            header,
+            tx_start_offset: cursor,
+            tx_end_offset,
+            chunks_in_tx,
+        };
+        let keep_going = visit(&attr);
         cursor = tx_end_offset;
+        if !keep_going {
+            break;
+        }
     }
-    Err(AttributionError::RangeNotCovered {
+    Ok(cursor)
+}
+
+/// Returns the tx whose range contains `ledger_offset`.
+fn attribute_tx_at_offset(
+    height: u64,
+    block_range: (u64, u64),
+    tx_ids: &[H256],
+    chunk_size: u64,
+    ledger_offset: u64,
+    load_tx_header: impl FnMut(&H256) -> eyre::Result<Option<DataTransactionHeader>>,
+) -> Result<TxAttribution, AttributionError> {
+    let (block_start, block_end) = block_range;
+    let mut found = None;
+    let cursor = walk_block_txs(
+        height,
+        block_range,
+        tx_ids,
+        chunk_size,
+        load_tx_header,
+        |attr| {
+            if (attr.tx_start_offset..attr.tx_end_offset).contains(&ledger_offset) {
+                found = Some(attr.clone());
+                false
+            } else {
+                true
+            }
+        },
+    )?;
+    found.ok_or(AttributionError::RangeNotCovered {
         height,
         block_start,
         block_end,
         cursor,
         ledger_offset,
     })
+}
+
+/// Unique txs in this block whose `[txStart, txEnd)` overlaps `[from, to)`.
+fn overlapping_txs_in_block(
+    height: u64,
+    block_range: (u64, u64),
+    tx_ids: &[H256],
+    chunk_size: u64,
+    (from, to): (u64, u64),
+    load_tx_header: impl FnMut(&H256) -> eyre::Result<Option<DataTransactionHeader>>,
+) -> Result<Vec<TxAttribution>, AttributionError> {
+    let (block_start, block_end) = block_range;
+    let mut overlapping = Vec::new();
+    let cursor = walk_block_txs(
+        height,
+        block_range,
+        tx_ids,
+        chunk_size,
+        load_tx_header,
+        |attr| {
+            if attr.tx_start_offset >= to {
+                return false;
+            }
+            if attr.tx_end_offset > from {
+                overlapping.push(attr.clone());
+            }
+            true
+        },
+    )?;
+    // Hole at the end of the block that still overlaps the query window.
+    if cursor < block_end && cursor < to && block_end > from {
+        return Err(AttributionError::RangeNotCovered {
+            height,
+            block_start,
+            block_end,
+            cursor,
+            ledger_offset: cursor.max(from),
+        });
+    }
+    Ok(overlapping)
 }
 
 #[cfg(test)]
@@ -1508,6 +1848,80 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn overlapping_window_includes_partial_edge_txs() {
+        // tx0: [100, 102), tx1: [102, 105), tx2: [105, 106)
+        let txs = vec![
+            data_tx(1, 2 * CHUNK_SIZE),
+            data_tx(2, 3 * CHUNK_SIZE),
+            data_tx(3, 1),
+        ];
+        let found = overlapping_txs_in_block(
+            9,
+            (100, 106),
+            &tx_ids(&txs),
+            CHUNK_SIZE,
+            (101, 105),
+            lookup(&txs),
+        )
+        .unwrap();
+        // Window [101, 105) overlaps tx0 and tx1, not tx2 (starts at 105)
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].header.id, txs[0].id);
+        assert_eq!(found[1].header.id, txs[1].id);
+    }
+
+    #[test]
+    fn overlapping_window_one_tx_per_row() {
+        let txs = vec![data_tx(1, 3 * CHUNK_SIZE)];
+        let found =
+            overlapping_txs_in_block(1, (0, 3), &tx_ids(&txs), CHUNK_SIZE, (0, 3), lookup(&txs))
+                .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].tx_start_offset, 0);
+        assert_eq!(found[0].tx_end_offset, 3);
+    }
+
+    #[test]
+    fn overlapping_empty_window_returns_no_txs() {
+        let txs = vec![data_tx(1, CHUNK_SIZE)];
+        let found =
+            overlapping_txs_in_block(1, (0, 1), &tx_ids(&txs), CHUNK_SIZE, (0, 0), lookup(&txs))
+                .unwrap();
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn overlapping_skips_zero_size_tx() {
+        let txs = vec![data_tx(1, 0), data_tx(2, CHUNK_SIZE)];
+        let found = overlapping_txs_in_block(
+            4,
+            (50, 51),
+            &tx_ids(&txs),
+            CHUNK_SIZE,
+            (50, 51),
+            lookup(&txs),
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].header.id, txs[1].id);
+    }
+
+    #[test]
+    fn overlapping_hole_in_window_is_an_error() {
+        let txs = vec![data_tx(1, 2 * CHUNK_SIZE)];
+        let result =
+            overlapping_txs_in_block(4, (0, 3), &tx_ids(&txs), CHUNK_SIZE, (0, 3), lookup(&txs));
+        assert!(matches!(
+            result,
+            Err(AttributionError::RangeNotCovered {
+                cursor: 2,
+                ledger_offset: 2,
+                ..
+            })
+        ));
+    }
+
     fn bounds_and_block(ledger: DataLedger) -> (BlockBounds, irys_types::IrysBlockHeader) {
         let tx_root = H256::from([7; 32]);
         let block_hash = H256::from([8; 32]);
@@ -1602,6 +2016,35 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::full_slot(0, 0, 100, 100, Ok((0, 100)))]
+    #[case::partial(1, 10, 20, 100, Ok((110, 120)))]
+    #[case::empty(0, 5, 5, 100, Ok((5, 5)))]
+    #[case::from_after_to(0, 6, 5, 100, Err(()))]
+    #[case::to_past_slot(0, 0, 101, 100, Err(()))]
+    #[case::overflow(u64::MAX, 0, 1, 100, Err(()))]
+    fn slot_range_to_ledger_range_cases(
+        #[case] slot_index: u64,
+        #[case] from: u64,
+        #[case] to: u64,
+        #[case] num_chunks: u64,
+        #[case] expected: Result<(u64, u64), ()>,
+    ) {
+        let result = slot_range_to_ledger_range(slot_index, from, to, num_chunks);
+        match expected {
+            Ok(range) => assert_eq!(result.unwrap(), range),
+            Err(()) => assert!(result.is_err()),
+        }
+    }
+
+    #[test]
+    fn validate_ledger_tx_range_rejects_inverted_and_oversized() {
+        assert!(validate_ledger_tx_range(0, 10, 10).is_ok());
+        assert!(validate_ledger_tx_range(3, 3, 10).is_ok());
+        assert!(validate_ledger_tx_range(5, 4, 10).is_err());
+        assert!(validate_ledger_tx_range(0, 11, 10).is_err());
+    }
+
     #[test]
     fn ledger_offset_response_serialization_contract() {
         let response = LedgerOffsetTxResponse {
@@ -1636,6 +2079,33 @@ mod tests {
         assert_eq!(json["txStartOffset"], "127");
         assert_eq!(json["txEndOffset"], "130");
         assert_eq!(json["chunksInTx"], "3");
+    }
+
+    #[test]
+    fn ledger_tx_range_item_omits_query_offset_fields() {
+        let item = LedgerTxRangeItem {
+            ledger_id: 1,
+            ledger: DataLedger::Submit,
+            slot_index: 0,
+            block_height: 157_860,
+            block_hash: H256::from([1; 32]),
+            block_start_offset: 127,
+            block_end_offset: 130,
+            tx_id: H256::from([2; 32]),
+            data_root: H256::from([3; 32]),
+            tx_index: 2,
+            tx_start_offset: 127,
+            tx_end_offset: 130,
+            chunks_in_tx: 3,
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert!(json.get("ledgerOffset").is_none());
+        assert!(json.get("slotOffset").is_none());
+        assert_eq!(json["txStartOffset"], "127");
+        assert_eq!(json["txEndOffset"], "130");
+        assert_eq!(json["chunksInTx"], "3");
+        assert_eq!(json["txIndex"], 2);
+        assert_eq!(json["slotIndex"], "0");
     }
 
     #[test]
