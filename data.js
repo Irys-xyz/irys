@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787213555367,
+  "lastUpdate": 1787497698749,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14514,6 +14514,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.00012,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6cbc03b40db82f345395656e4c6e2e89ad3487f0",
+          "message": "feat(api): list txs overlapping a ledger offset window (#1553)\n\nAdd GET /v1/ledger/{id}/txs and the slot-relative /slot/{slot}/txs\nrange endpoints so clients can fetch unique tx spans for a window\ninstead of probing each offset.",
+          "timestamp": "2026-08-23T07:54:27-07:00",
+          "tree_id": "2eb9fd5b84303645a977757d3887c7859533055a",
+          "url": "https://github.com/Irys-xyz/irys/commit/6cbc03b40db82f345395656e4c6e2e89ad3487f0"
+        },
+        "date": 1787497697166,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015087,
+            "range": "± 0.000936",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.156951,
+            "range": "± 0.008108",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.545592,
+            "range": "± 0.057022",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.627831,
+            "range": "± 0.474645",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083041,
+            "range": "± 0.002317",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 827.447499,
+            "range": "± 23.273717",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1009.402487,
+            "range": "± 36.355243",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120622,
+            "range": "± 0.008602",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1234.165166,
+            "range": "± 58.446079",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1573.948367,
+            "range": "± 167.992911",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033178,
+            "range": "± 0.00062",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.472885,
+            "range": "± 1.109947",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.932004,
+            "range": "± 1.529364",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
