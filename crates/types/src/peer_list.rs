@@ -1,5 +1,5 @@
 use crate::{
-    BlockHash, ChunkPathHash, Compact, IrysAddress, IrysPeerId, PeerAddress, ProtocolVersion,
+    BlockHash, ChunkPathHash, Compact, H256, IrysAddress, IrysPeerId, PeerAddress, ProtocolVersion,
 };
 
 use crate::v2::GossipDataRequestV2;
@@ -8,6 +8,7 @@ use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use reth::providers::errors::db::DatabaseError;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -131,7 +132,7 @@ impl Default for PeerListItemInner {
 /// PeerListItem is the main type used throughout the codebase.
 /// It has non-optional peer_id and mining_address fields for type safety.
 /// PeerListItemInner is only used for database serialization.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerListItem {
     /// Peer network identifier (separate from mining address)
     pub peer_id: IrysPeerId,
@@ -143,6 +144,60 @@ pub struct PeerListItem {
     pub last_seen: u64,
     pub is_online: bool,
     pub protocol_version: ProtocolVersion,
+    /// Handshake-observed software version. Memory-only — not Compact/DB
+    /// persisted. `None` until a handshake has been seen this process.
+    #[serde(skip)]
+    pub software_version: Option<semver::Version>,
+    /// Handshake V2 `consensus_config_hash`. Memory-only. `None` for V1
+    /// peers or until a V2 handshake is observed.
+    #[serde(skip)]
+    pub consensus_config_hash: Option<H256>,
+}
+
+impl PartialEq for PeerListItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.peer_id == other.peer_id
+            && self.mining_address == other.mining_address
+            && self.reputation_score == other.reputation_score
+            && self.response_time == other.response_time
+            && self.address == other.address
+            && self.last_seen == other.last_seen
+            && self.is_online == other.is_online
+            && self.protocol_version == other.protocol_version
+    }
+}
+
+impl Eq for PeerListItem {}
+
+impl Hash for PeerListItem {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.peer_id.hash(state);
+        self.mining_address.hash(state);
+        self.reputation_score.hash(state);
+        self.response_time.hash(state);
+        self.address.hash(state);
+        self.last_seen.hash(state);
+        self.is_online.hash(state);
+        self.protocol_version.hash(state);
+    }
+}
+
+impl Default for PeerListItem {
+    fn default() -> Self {
+        let inner = PeerListItemInner::default();
+        Self {
+            peer_id: IrysPeerId::ZERO,
+            mining_address: IrysAddress::ZERO,
+            reputation_score: inner.reputation_score,
+            response_time: inner.response_time,
+            address: inner.address,
+            last_seen: inner.last_seen,
+            is_online: inner.is_online,
+            protocol_version: inner.protocol_version,
+            software_version: None,
+            consensus_config_hash: None,
+        }
+    }
 }
 
 impl PeerListItem {
@@ -179,6 +234,37 @@ impl PeerListItem {
             last_seen: inner.last_seen,
             is_online: inner.is_online,
             protocol_version: inner.protocol_version,
+            software_version: None,
+            consensus_config_hash: None,
+        }
+    }
+
+    /// Handshake-observed software version, or `"unknown"` before the first
+    /// handshake this process.
+    pub fn software_version_string(&self) -> String {
+        self.software_version
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Copy handshake-observed fields from `other` when present. Used by
+    /// cache-update paths so a later handshake cannot wipe a known version
+    /// or config hash with `None`.
+    pub fn merge_handshake_meta(&mut self, other: &Self) {
+        self.merge_handshake_observed(other.software_version.clone(), other.consensus_config_hash);
+    }
+
+    pub fn merge_handshake_observed(
+        &mut self,
+        software_version: Option<semver::Version>,
+        consensus_config_hash: Option<H256>,
+    ) {
+        if software_version.is_some() {
+            self.software_version = software_version;
+        }
+        if consensus_config_hash.is_some() {
+            self.consensus_config_hash = consensus_config_hash;
         }
     }
 

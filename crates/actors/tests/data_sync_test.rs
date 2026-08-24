@@ -490,6 +490,7 @@ impl TestSetup {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             },
             PeerListItem {
                 peer_id: IrysPeerId::from(stable_peer_addr),
@@ -504,6 +505,7 @@ impl TestSetup {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             },
             PeerListItem {
                 peer_id: IrysPeerId::from(fast_peer_addr),
@@ -518,6 +520,7 @@ impl TestSetup {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             },
         ];
 

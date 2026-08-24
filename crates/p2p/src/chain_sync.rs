@@ -2462,6 +2462,7 @@ mod tests {
                     last_seen: 0,
                     is_online: true,
                     protocol_version: Default::default(),
+                    ..Default::default()
                 },
                 true,
             );
@@ -2578,6 +2579,7 @@ mod tests {
                     last_seen: 0,
                     is_online: true,
                     protocol_version: Default::default(),
+                    ..Default::default()
                 },
                 true,
             );
@@ -2716,6 +2718,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: Default::default(),
+                ..Default::default()
             };
             let peer2 = PeerListItem {
                 peer_id: IrysPeerId::from(addr_b),
@@ -2730,6 +2733,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: Default::default(),
+                ..Default::default()
             };
 
             peer_list_guard.add_or_update_peer(peer1, true);
@@ -2846,6 +2850,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: Default::default(),
+                ..Default::default()
             };
             let peer2 = PeerListItem {
                 peer_id: IrysPeerId::from(addr_b),
@@ -2860,6 +2865,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: Default::default(),
+                ..Default::default()
             };
             peer_list_guard.add_or_update_peer(peer1, true);
             peer_list_guard.add_or_update_peer(peer2, true);
@@ -2910,6 +2916,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: Default::default(),
+                ..Default::default()
             }
         }
 

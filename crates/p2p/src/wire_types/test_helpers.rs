@@ -420,6 +420,12 @@ pub(crate) fn canonical_node_info() -> irys_types::version::NodeInfo {
         uptime_secs: 3600,
         mining_address: test_address(0xAA),
         cumulative_difficulty: U256::from(50_000_u64),
+        git_sha: Some("abc1234".to_string()),
+        dirty: false,
+        protocol_version: 2,
+        supported_protocol_versions: vec![1, 2],
+        db_schema_version: 3,
+        consensus_config_hash: Some(test_h256(0xBB)),
     }
 }
 

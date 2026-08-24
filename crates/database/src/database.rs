@@ -1625,6 +1625,7 @@ mod tests {
             last_seen: 0,
             is_online: true,
             protocol_version: irys_types::ProtocolVersion::default(),
+            ..Default::default()
         };
 
         db.update_eyre(|tx| insert_peer_list_item(tx, &peer_id, &peer))?;

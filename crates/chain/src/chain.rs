@@ -1267,6 +1267,7 @@ impl IrysNode {
                         started_at,
                         mining_address,
                         chain_id,
+                        config.consensus.keccak256_hash(),
                     )
                     .await
                     {

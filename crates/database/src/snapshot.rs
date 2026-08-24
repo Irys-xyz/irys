@@ -181,6 +181,7 @@ mod tests {
             last_seen: 0,
             is_online: true,
             protocol_version: Default::default(),
+            ..Default::default()
         };
         (peer_id, item)
     }

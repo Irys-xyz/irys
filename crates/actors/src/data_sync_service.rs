@@ -1354,6 +1354,7 @@ mod ingress_proof_peer_tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             },
             PeerListItem {
                 peer_id: IrysPeerId::from(prover),
@@ -1368,6 +1369,7 @@ mod ingress_proof_peer_tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             },
         ];
         let peer_list = PeerList::from_peers(

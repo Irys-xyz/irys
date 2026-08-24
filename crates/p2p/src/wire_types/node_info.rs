@@ -29,12 +29,46 @@ pub struct NodeInfoV1 {
     pub cumulative_difficulty: U256,
 }
 
-super::impl_mirror_from!(irys_types::version::NodeInfo => NodeInfoV1 {
-    version, peer_count, chain_id, height, block_hash,
-    block_index_height, block_index_hash, pending_blocks,
-    is_syncing, current_sync_height, uptime_secs,
-    mining_address, cumulative_difficulty,
-});
+impl From<irys_types::version::NodeInfo> for NodeInfoV1 {
+    fn from(src: irys_types::version::NodeInfo) -> Self {
+        Self {
+            version: src.version,
+            peer_count: src.peer_count,
+            chain_id: src.chain_id,
+            height: src.height,
+            block_hash: src.block_hash,
+            block_index_height: src.block_index_height,
+            block_index_hash: src.block_index_hash,
+            pending_blocks: src.pending_blocks,
+            is_syncing: src.is_syncing,
+            current_sync_height: src.current_sync_height,
+            uptime_secs: src.uptime_secs,
+            mining_address: src.mining_address,
+            cumulative_difficulty: src.cumulative_difficulty,
+        }
+    }
+}
+
+impl From<NodeInfoV1> for irys_types::version::NodeInfo {
+    fn from(src: NodeInfoV1) -> Self {
+        Self {
+            version: src.version,
+            peer_count: src.peer_count,
+            chain_id: src.chain_id,
+            height: src.height,
+            block_hash: src.block_hash,
+            block_index_height: src.block_index_height,
+            block_index_hash: src.block_index_hash,
+            pending_blocks: src.pending_blocks,
+            is_syncing: src.is_syncing,
+            current_sync_height: src.current_sync_height,
+            uptime_secs: src.uptime_secs,
+            mining_address: src.mining_address,
+            cumulative_difficulty: src.cumulative_difficulty,
+            ..Default::default()
+        }
+    }
+}
 
 /// V2 wire type for [`irys_types::version::NodeInfo`].
 ///
@@ -65,9 +99,43 @@ pub struct NodeInfoV2 {
     pub cumulative_difficulty: U256,
 }
 
-super::impl_mirror_from!(irys_types::version::NodeInfo => NodeInfoV2 {
-    version, peer_count, chain_id, height, block_hash,
-    block_index_height, block_index_hash, pending_blocks,
-    is_syncing, current_sync_height, uptime_secs,
-    mining_address, cumulative_difficulty,
-});
+impl From<irys_types::version::NodeInfo> for NodeInfoV2 {
+    fn from(src: irys_types::version::NodeInfo) -> Self {
+        Self {
+            version: src.version,
+            peer_count: src.peer_count,
+            chain_id: src.chain_id,
+            height: src.height,
+            block_hash: src.block_hash,
+            block_index_height: src.block_index_height,
+            block_index_hash: src.block_index_hash,
+            pending_blocks: src.pending_blocks,
+            is_syncing: src.is_syncing,
+            current_sync_height: src.current_sync_height,
+            uptime_secs: src.uptime_secs,
+            mining_address: src.mining_address,
+            cumulative_difficulty: src.cumulative_difficulty,
+        }
+    }
+}
+
+impl From<NodeInfoV2> for irys_types::version::NodeInfo {
+    fn from(src: NodeInfoV2) -> Self {
+        Self {
+            version: src.version,
+            peer_count: src.peer_count,
+            chain_id: src.chain_id,
+            height: src.height,
+            block_hash: src.block_hash,
+            block_index_height: src.block_index_height,
+            block_index_hash: src.block_index_hash,
+            pending_blocks: src.pending_blocks,
+            is_syncing: src.is_syncing,
+            current_sync_height: src.current_sync_height,
+            uptime_secs: src.uptime_secs,
+            mining_address: src.mining_address,
+            cumulative_difficulty: src.cumulative_difficulty,
+            ..Default::default()
+        }
+    }
+}

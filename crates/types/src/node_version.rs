@@ -11,6 +11,16 @@ const VENDOR: &str = "irys-rs";
 /// the plain workspace version if no initializer ran.
 static BUILD_VERSION: OnceLock<Version> = OnceLock::new();
 
+/// Git identity recorded at [`init_version`] time, independent of whether the
+/// SHA is stuffed into semver build metadata (tagged clean builds omit it).
+#[derive(Debug)]
+struct GitIdentity {
+    sha: Option<String>,
+    dirty: bool,
+}
+
+static GIT_IDENTITY: OnceLock<GitIdentity> = OnceLock::new();
+
 /// Returns the build version. Always includes `+irys-rs` vendor tag in build metadata.
 /// If [`init_version`] was called (by the binary), untagged commits also get the
 /// git SHA appended: `3.0.0+irys-rs.abc1234`. Otherwise falls back to `3.0.0+irys-rs`.
@@ -52,6 +62,60 @@ pub fn init_version(pkg_version: &str, git_sha: &str, has_tag: bool, is_dirty: b
         panic!(
             "init_version called too late — BUILD_VERSION already initialized to {existing}, git metadata dropped"
         );
+    }
+    let sha = if git_sha.is_empty() {
+        None
+    } else {
+        Some(git_sha.to_string())
+    };
+    GIT_IDENTITY
+        .set(GitIdentity {
+            sha,
+            dirty: is_dirty,
+        })
+        .expect("GIT_IDENTITY is set only after BUILD_VERSION succeeds");
+}
+
+/// Git SHA recorded at [`init_version`], or parsed from [`get_version`] build
+/// metadata if the initializer never ran. `None` only if truly unknown.
+pub fn git_sha() -> Option<String> {
+    if let Some(identity) = GIT_IDENTITY.get() {
+        return identity.sha.clone();
+    }
+    parse_git_identity_from_version(get_version()).0
+}
+
+/// Working-tree dirty flag recorded at [`init_version`], or parsed from
+/// [`get_version`] build metadata.
+pub fn git_dirty() -> bool {
+    if let Some(identity) = GIT_IDENTITY.get() {
+        return identity.dirty;
+    }
+    parse_git_identity_from_version(get_version()).1
+}
+
+/// Parses `+irys-rs`, `+irys-rs.<sha>`, `+irys-rs.<sha>.dirty`, `+irys-rs.dirty`.
+pub fn parse_git_identity_from_version(version: &Version) -> (Option<String>, bool) {
+    let meta = version.build.as_str();
+    let mut parts = meta.split('.');
+    match parts.next() {
+        Some(VENDOR) => {}
+        Some(_) | None => return (None, meta.ends_with(".dirty")),
+    }
+    let rest: Vec<&str> = parts.collect();
+    match rest.as_slice() {
+        [] => (None, false),
+        ["dirty"] => (None, true),
+        [sha] => (Some((*sha).to_string()), false),
+        [sha, "dirty"] => (Some((*sha).to_string()), true),
+        rest => {
+            let dirty = rest.last().copied() == Some("dirty");
+            let sha = rest
+                .first()
+                .filter(|s| **s != "dirty")
+                .map(|s| (*s).to_string());
+            (sha, dirty)
+        }
     }
 }
 
@@ -128,6 +192,27 @@ mod tests {
     fn version_tagged_dirty() {
         let v = make_version("3.0.0", "", true, true);
         assert_eq!(v.to_string(), "3.0.0+irys-rs.dirty");
+    }
+
+    #[test]
+    fn parse_git_identity_from_vendor_only() {
+        let v = make_version("3.0.0", "", true, false);
+        assert_eq!(parse_git_identity_from_version(&v), (None, false));
+    }
+
+    #[test]
+    fn parse_git_identity_from_sha_and_dirty() {
+        let v = make_version("3.0.0", "abc1234", false, true);
+        assert_eq!(
+            parse_git_identity_from_version(&v),
+            (Some("abc1234".into()), true)
+        );
+    }
+
+    #[test]
+    fn parse_git_identity_tagged_dirty_has_no_sha() {
+        let v = make_version("3.0.0", "", true, true);
+        assert_eq!(parse_git_identity_from_version(&v), (None, true));
     }
 
     // -- Golden-string fixture tests for serialization / deserialization --
