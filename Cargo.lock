@@ -5304,6 +5304,7 @@ dependencies = [
  "rstest",
  "rust_decimal",
  "rust_decimal_macros",
+ "semver 1.0.27",
  "serde",
  "serde_json",
  "test-log",

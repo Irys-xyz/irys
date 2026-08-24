@@ -1148,6 +1148,7 @@ where
             server.data_handler.started_at,
             server.data_handler.gossip_client.mining_address,
             server.data_handler.config.consensus.chain_id,
+            server.data_handler.consensus_config_hash,
         )
         .await
         .map_err(|e| {
@@ -1268,6 +1269,8 @@ where
                 .unwrap_or_default()
                 .as_millis() as u64,
             is_online: true,
+            software_version: Some(version_request.version.clone()),
+            consensus_config_hash: None,
         };
 
         let is_staked = server
@@ -1416,6 +1419,8 @@ where
                 .unwrap_or_default()
                 .as_millis() as u64,
             is_online: true,
+            software_version: Some(version_request.version.clone()),
+            consensus_config_hash: Some(version_request.consensus_config_hash),
         };
 
         let is_staked = server
@@ -2096,6 +2101,7 @@ mod tests {
                 .as_millis() as u64,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
+            ..Default::default()
         };
         peer_list.add_or_update_peer(test_peer, true);
         (miner, peer_list, temp_dir)

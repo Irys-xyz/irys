@@ -16,6 +16,7 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         state.started_at,
         state.mining_address,
         state.config.consensus.chain_id,
+        state.config.consensus.keccak256_hash(),
     )
     .await
     {

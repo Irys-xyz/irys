@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use irys_types::{
     IrysPeerId, U256,
     block::{BlockIndexQuery, DataLedger},
-    version::{NodeInfo, PeerAddress, ProtocolVersion},
+    version::{PeerAddress, ProtocolVersion},
 };
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block as RethBlock;
@@ -595,22 +595,8 @@ fixture_tests! {
     // Standalone ExecutionPayload (RethBlock)
     execution_payload => fixture_execution_payload(),
 
-    // NodeInfo (canonical — backwards compat) and wire type
-    node_info => NodeInfo {
-        version: "1.2.3".to_string(),
-        peer_count: 5,
-        chain_id: 1270,
-        height: 42,
-        block_hash: test_h256(0xBB),
-        block_index_height: 40,
-        block_index_hash: test_h256(0xBC),
-        pending_blocks: 2,
-        is_syncing: false,
-        current_sync_height: 42,
-        uptime_secs: 3600,
-        mining_address: test_address(0xAA),
-        cumulative_difficulty: U256::from(50_000_u64),
-    },
+    // NodeInfo (canonical HTTP shape) and gossip wire types
+    node_info => canonical_node_info(),
     wire_node_info => fixture_node_info(),
     wire_node_info_v2 => fixture_node_info_v2(),
 

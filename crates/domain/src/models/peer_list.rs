@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, warn};
 
 const UNSTAKED_PEER_PURGATORY_CAPACITY: usize = 500;
+const PENDING_HANDSHAKE_CAPACITY: usize = 1024;
 
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
@@ -54,6 +55,9 @@ pub struct PeerListDataInner {
 
     known_peers_cache: HashSet<PeerAddress>,
     trusted_peers_api_to_gossip_addresses: HashMap<SocketAddr, SocketAddr>,
+    /// Outbound handshake has no mining address, so observations wait here
+    /// until `add_or_update_peer` can insert a real `PeerListItem`.
+    pending_handshake: LruCache<SocketAddr, (Option<semver::Version>, Option<irys_types::H256>)>,
     /// Whitelist of allowed peer API addresses based on peer filter mode
     peer_whitelist: HashSet<SocketAddr>,
     peer_network_service_sender: PeerNetworkSender,
@@ -649,6 +653,17 @@ impl PeerList {
             .contains_key(api_address)
     }
 
+    /// Record handshake-observed software version / consensus config hash.
+    pub fn observe_handshake(
+        &self,
+        api_address: SocketAddr,
+        software_version: Option<semver::Version>,
+        consensus_config_hash: Option<irys_types::H256>,
+    ) {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        inner.observe_handshake(api_address, software_version, consensus_config_hash);
+    }
+
     /// Initiate a handshake with a peer by its API address. If force is set to true, the networking
     /// service will attempt to handshake even if the previous handshake was successful.
     pub fn initiate_handshake(
@@ -700,6 +715,10 @@ impl PeerListDataInner {
             gossip_addr_to_peer_id_map: HashMap::new(),
             api_addr_to_peer_id_map: HashMap::new(),
             known_peers_cache: HashSet::new(),
+            pending_handshake: LruCache::new(
+                std::num::NonZeroUsize::new(PENDING_HANDSHAKE_CAPACITY)
+                    .expect("PENDING_HANDSHAKE_CAPACITY > 0"),
+            ),
             trusted_peers_api_to_gossip_addresses,
             peer_whitelist: peer_api_ip_whitelist,
             peer_network_service_sender: peer_network_sender,
@@ -741,6 +760,54 @@ impl PeerListDataInner {
         Ok(peer_list)
     }
 
+    fn observe_handshake(
+        &mut self,
+        api_address: SocketAddr,
+        software_version: Option<semver::Version>,
+        consensus_config_hash: Option<irys_types::H256>,
+    ) {
+        let Some(peer_id) = self.api_addr_to_peer_id_map.get(&api_address).copied() else {
+            self.pending_handshake
+                .put(api_address, (software_version, consensus_config_hash));
+            return;
+        };
+        let peer = if let Some(peer) = self.persistent_peers_cache.get_mut(&peer_id) {
+            Some(peer)
+        } else {
+            self.unstaked_peer_purgatory.get_mut(&peer_id)
+        };
+        if let Some(peer) = peer {
+            peer.merge_handshake_observed(software_version, consensus_config_hash);
+            self.pending_handshake.pop(&api_address);
+        }
+    }
+
+    fn apply_pending_handshake(&mut self, api_address: SocketAddr) {
+        let Some((software_version, consensus_config_hash)) =
+            self.pending_handshake.pop(&api_address)
+        else {
+            return;
+        };
+        let Some(peer_id) = self.api_addr_to_peer_id_map.get(&api_address).copied() else {
+            debug!(
+                "Dropped pending handshake observation for {api_address}: peer not in address map"
+            );
+            return;
+        };
+        let peer = if let Some(peer) = self.persistent_peers_cache.get_mut(&peer_id) {
+            Some(peer)
+        } else {
+            self.unstaked_peer_purgatory.get_mut(&peer_id)
+        };
+        if let Some(peer) = peer {
+            peer.merge_handshake_observed(software_version, consensus_config_hash);
+        } else {
+            debug!(
+                "Dropped pending handshake observation for {api_address}: peer {peer_id:?} not in cache"
+            );
+        }
+    }
+
     /// Helper to emit a peer event to the event bus
     fn emit_peer_event(&self, event: PeerEvent) {
         if let Err(e) = self.peer_events.send(event) {
@@ -774,6 +841,7 @@ impl PeerListDataInner {
             .unwrap_or(false);
 
         let is_updated = self.add_or_update_peer_internal(peer.clone(), is_staked);
+        self.apply_pending_handshake(peer.address.api);
 
         // Determine a new active state
         let now_peer = self
@@ -1048,6 +1116,7 @@ impl PeerListDataInner {
             existing_peer.last_seen = peer.last_seen;
             existing_peer.reputation_score = peer.reputation_score;
             existing_peer.protocol_version = peer.protocol_version;
+            existing_peer.merge_handshake_meta(&peer);
             if existing_peer.address != peer_address {
                 debug!(
                     "Peer address mismatch, updating from {:?} to {:?}",
@@ -1191,6 +1260,7 @@ impl PeerListDataInner {
         self.api_addr_to_peer_id_map.remove(&old_address.api);
         self.api_addr_to_peer_id_map
             .insert(new_address.api, peer_id);
+        self.pending_handshake.pop(&old_address.api);
         // miner_addr_to_peer_id_map doesn't change (unless miner address changes, which shouldn't happen)
         self.known_peers_cache.remove(&old_address);
         self.known_peers_cache.insert(new_address);
@@ -1317,6 +1387,7 @@ impl PeerListDataInner {
                     updated_peer.last_seen = peer.last_seen;
                     updated_peer.reputation_score = peer.reputation_score;
                     updated_peer.protocol_version = peer.protocol_version;
+                    updated_peer.merge_handshake_meta(&peer);
 
                     if old_address != peer_address {
                         updated_peer.address = peer_address;
@@ -1382,7 +1453,9 @@ impl PeerListDataInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{NodeConfig, PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
+    use irys_types::{
+        H256, NodeConfig, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, RethPeerInfo,
+    };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
@@ -1410,6 +1483,7 @@ mod tests {
                 .unwrap()
                 .as_secs(),
             protocol_version: irys_types::ProtocolVersion::default(),
+            ..Default::default()
         };
         (mining_addr, peer_id, peer)
     }
@@ -1427,6 +1501,10 @@ mod tests {
                 std::num::NonZeroUsize::new(UNSTAKED_PEER_PURGATORY_CAPACITY).unwrap(),
             ),
             known_peers_cache: HashSet::new(),
+            pending_handshake: LruCache::new(
+                std::num::NonZeroUsize::new(PENDING_HANDSHAKE_CAPACITY)
+                    .expect("PENDING_HANDSHAKE_CAPACITY > 0"),
+            ),
             gossip_addr_to_peer_id_map: HashMap::new(),
             api_addr_to_peer_id_map: HashMap::new(),
             miner_addr_to_peer_id_map: HashMap::new(),
@@ -2383,5 +2461,48 @@ mod tests {
                 .copied(),
             Some(peer_id_new),
         );
+    }
+
+    #[test]
+    fn promoting_unstaked_peer_keeps_handshake_version_and_hash() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (_addr, peer_id, mut peer) = create_test_peer(1);
+        peer.protocol_version = ProtocolVersion::V1;
+        peer.software_version = Some("4.0.5+irys-rs".parse().unwrap());
+        peer.consensus_config_hash = None;
+        peer_list.add_or_update_peer(peer.clone(), false);
+
+        peer.protocol_version = ProtocolVersion::V2;
+        peer.software_version = Some("4.0.6+irys-rs".parse().unwrap());
+        peer.consensus_config_hash = Some(H256::from([7; 32]));
+        peer_list.add_or_update_peer(peer, true);
+
+        let stored = peer_list.peer_by_id(&peer_id).unwrap();
+        assert_eq!(stored.protocol_version, ProtocolVersion::V2);
+        assert_eq!(stored.software_version_string(), "4.0.6+irys-rs");
+        assert_eq!(stored.consensus_config_hash, Some(H256::from([7; 32])));
+    }
+
+    #[test]
+    fn outbound_handshake_observation_applies_when_peer_is_inserted() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (_addr, peer_id, peer) = create_test_peer(1);
+
+        peer_list.observe_handshake(
+            peer.address.api,
+            Some("4.0.6+irys-rs.6cbc03b".parse().unwrap()),
+            Some(H256::from([9; 32])),
+        );
+        assert!(
+            peer_list.peer_by_id(&peer_id).is_none(),
+            "observation must not invent a peer without mining address"
+        );
+
+        peer_list.add_or_update_peer(peer, true);
+        let stored = peer_list.peer_by_id(&peer_id).unwrap();
+        assert_eq!(stored.software_version_string(), "4.0.6+irys-rs.6cbc03b");
+        assert_eq!(stored.consensus_config_hash, Some(H256::from([9; 32])));
     }
 }

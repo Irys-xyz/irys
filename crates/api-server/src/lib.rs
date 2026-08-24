@@ -117,6 +117,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/network/config", web::get().to(config::get_config))
         .route("/peer-list", web::get().to(peer_list::peer_list_route))
         .route(
+            "/network/peers",
+            web::get().to(peer_list::network_peers_route),
+        )
+        .route(
             "/price/commitment/stake",
             web::get().to(price::get_stake_price),
         )

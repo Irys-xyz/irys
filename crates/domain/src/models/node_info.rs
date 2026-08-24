@@ -2,7 +2,7 @@ use crate::{
     BlockIndexReadGuard, BlockTreeReadGuard, PeerList, chain_sync_state::ChainSyncState,
     get_canonical_chain,
 };
-use irys_types::{H256, NodeInfo};
+use irys_types::{DatabaseVersion, H256, NodeInfo, ProtocolVersion, git_dirty, git_sha};
 
 pub async fn get_node_info(
     block_index: &BlockIndexReadGuard,
@@ -12,6 +12,7 @@ pub async fn get_node_info(
     started_at: std::time::Instant,
     mining_address: irys_types::IrysAddress,
     chain_id: u64,
+    consensus_config_hash: H256,
 ) -> eyre::Result<NodeInfo> {
     let (block_index_height, block_index_hash) = {
         let state = block_index.read();
@@ -43,5 +44,11 @@ pub async fn get_node_info(
         uptime_secs: started_at.elapsed().as_secs(),
         cumulative_difficulty: max_diff.0,
         mining_address,
+        git_sha: git_sha(),
+        dirty: git_dirty(),
+        protocol_version: ProtocolVersion::current() as u32,
+        supported_protocol_versions: ProtocolVersion::supported_versions_u32().to_vec(),
+        db_schema_version: u32::from(DatabaseVersion::CURRENT),
+        consensus_config_hash: Some(consensus_config_hash),
     })
 }

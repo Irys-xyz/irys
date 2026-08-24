@@ -3258,6 +3258,7 @@ mod tests {
                     .unwrap()
                     .as_secs(),
                 protocol_version: Default::default(),
+                ..Default::default()
             };
             (peer_id, mining_addr, peer)
         }
@@ -3489,6 +3490,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             };
             (peer_id, peer)
         }
@@ -3866,6 +3868,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             };
             peer_list.add_or_update_peer(peer, true);
 
@@ -3938,6 +3941,7 @@ mod tests {
                 last_seen: 0,
                 is_online,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             };
             (peer_id, peer)
         }
@@ -4010,6 +4014,7 @@ mod tests {
                 last_seen: 0,
                 is_online: false,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             };
             peer_list.add_or_update_peer(fast_peer, true);
 
@@ -4072,6 +4077,7 @@ mod tests {
                     last_seen: 0,
                     is_online: false,
                     protocol_version: ProtocolVersion::default(),
+                    ..Default::default()
                 },
                 true,
             );
@@ -4149,6 +4155,7 @@ mod tests {
                     last_seen: 0,
                     is_online,
                     protocol_version: ProtocolVersion::V1,
+                    ..Default::default()
                 },
                 true,
             );
@@ -4245,6 +4252,7 @@ mod tests {
                     is_online: false,
                     // V1 hits /gossip/health, the route the fake server serves.
                     protocol_version: ProtocolVersion::V1,
+                    ..Default::default()
                 },
                 true,
             );
@@ -4363,6 +4371,7 @@ mod tests {
                         last_seen: 0,
                         is_online: true,
                         protocol_version: ProtocolVersion::V1,
+                        ..Default::default()
                     },
                     true,
                 );
@@ -4392,6 +4401,7 @@ mod tests {
                     // V1, so the probe hits `/gossip/health` — the route the fake
                     // server serves.
                     protocol_version: ProtocolVersion::V1,
+                    ..Default::default()
                 },
                 true,
             );
@@ -4452,6 +4462,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::default(),
+                ..Default::default()
             };
             peer_list.add_or_update_peer(peer, true);
 
@@ -4573,6 +4584,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::V2,
+                ..Default::default()
             };
             (peer_id, item)
         }
@@ -4738,6 +4750,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: ProtocolVersion::V2,
+                ..Default::default()
             };
             (peer_id, item)
         }

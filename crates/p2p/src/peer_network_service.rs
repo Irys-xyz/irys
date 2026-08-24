@@ -1153,6 +1153,17 @@ impl PeerNetworkService {
                 // An accepted handshake is the only real success.
                 report_announcement_finished(&sender, api_address, gossip_address, true, false);
 
+                let observed_hash = if protocol_version == ProtocolVersion::V1 {
+                    None
+                } else {
+                    Some(accepted_peers.consensus_config_hash)
+                };
+                peer_list.observe_handshake(
+                    api_address,
+                    Some(accepted_peers.version.clone()),
+                    observed_hash,
+                );
+
                 // Only log mismatch if the version is not V1 - V1 peers have zero hash
                 if protocol_version != ProtocolVersion::V1 {
                     let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
@@ -1358,6 +1369,7 @@ mod tests {
             last_seen: 123,
             is_online,
             protocol_version: Default::default(),
+            ..Default::default()
         };
         (mining_addr, peer)
     }

@@ -351,6 +351,32 @@ fn test_gossip_data_v2_roundtrip() {
 // NodeInfo roundtrip
 // =============================================================================
 
+fn assert_gossip_node_info_roundtrip(roundtrip: irys_types::version::NodeInfo) {
+    let canonical = canonical_node_info();
+    assert_eq!(roundtrip.version, canonical.version);
+    assert_eq!(roundtrip.peer_count, canonical.peer_count);
+    assert_eq!(roundtrip.chain_id, canonical.chain_id);
+    assert_eq!(roundtrip.height, canonical.height);
+    assert_eq!(roundtrip.block_hash, canonical.block_hash);
+    assert_eq!(roundtrip.block_index_height, canonical.block_index_height);
+    assert_eq!(roundtrip.block_index_hash, canonical.block_index_hash);
+    assert_eq!(roundtrip.pending_blocks, canonical.pending_blocks);
+    assert_eq!(roundtrip.is_syncing, canonical.is_syncing);
+    assert_eq!(roundtrip.current_sync_height, canonical.current_sync_height);
+    assert_eq!(roundtrip.uptime_secs, canonical.uptime_secs);
+    assert_eq!(roundtrip.mining_address, canonical.mining_address);
+    assert_eq!(
+        roundtrip.cumulative_difficulty,
+        canonical.cumulative_difficulty
+    );
+    assert_eq!(roundtrip.git_sha, None);
+    assert!(!roundtrip.dirty);
+    assert_eq!(roundtrip.protocol_version, 0);
+    assert!(roundtrip.supported_protocol_versions.is_empty());
+    assert_eq!(roundtrip.db_schema_version, 0);
+    assert_eq!(roundtrip.consensus_config_hash, None);
+}
+
 #[test]
 fn test_node_info_roundtrip() {
     let wire_type: wire::NodeInfoV1 = canonical_node_info().into();
@@ -358,7 +384,7 @@ fn test_node_info_roundtrip() {
     let wire_json = serde_json::to_string(&wire_type).unwrap();
     let deserialized: wire::NodeInfoV1 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::version::NodeInfo = deserialized.into();
-    assert_eq!(canonical_node_info(), roundtrip);
+    assert_gossip_node_info_roundtrip(roundtrip);
 }
 
 #[test]
@@ -373,7 +399,7 @@ fn test_node_info_v2_roundtrip() {
     );
     let deserialized: wire::NodeInfoV2 = serde_json::from_str(&wire_json).unwrap();
     let roundtrip: irys_types::version::NodeInfo = deserialized.into();
-    assert_eq!(canonical_node_info(), roundtrip);
+    assert_gossip_node_info_roundtrip(roundtrip);
 }
 
 // =============================================================================
