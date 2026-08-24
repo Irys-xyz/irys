@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787497698749,
+  "lastUpdate": 1787604929670,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14622,6 +14622,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c3e313d81fa7bd7cd69fe66c1cab5c4d84f64ee9",
+          "message": "feat(api): add /v1/network/peers and extra /v1/info build fields (#1554)\n\nStore handshake software version in memory so one HTTPS call can\nreturn this node plus known peers with the versions they advertised.",
+          "timestamp": "2026-08-24T13:40:04-07:00",
+          "tree_id": "696229ff2f85d3cfcaab2f4c0709d4196c56ed9b",
+          "url": "https://github.com/Irys-xyz/irys/commit/c3e313d81fa7bd7cd69fe66c1cab5c4d84f64ee9"
+        },
+        "date": 1787604928082,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.014795,
+            "range": "± 0.000736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153265,
+            "range": "± 0.004196",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.558826,
+            "range": "± 0.083924",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.10229,
+            "range": "± 0.864208",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.081208,
+            "range": "± 0.00242",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 829.358051,
+            "range": "± 31.368152",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 998.809837,
+            "range": "± 11.366033",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12446,
+            "range": "± 0.004091",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1217.173649,
+            "range": "± 69.36994",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1540.97189,
+            "range": "± 59.872244",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034425,
+            "range": "± 0.000639",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.169809,
+            "range": "± 1.344281",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.111906,
+            "range": "± 1.02777",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
