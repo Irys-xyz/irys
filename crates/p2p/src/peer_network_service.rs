@@ -280,7 +280,8 @@ impl PeerNetworkServiceInner {
             let mut state = self.state.lock().await;
             let db = state.db.clone();
             let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
-            let removals = std::mem::take(&mut state.pending_db_removals);
+            let mut removals = std::mem::take(&mut state.pending_db_removals);
+            removals.extend(self.peer_list.take_pending_db_removals());
             (db, persistable_peers, removals)
         };
 
@@ -1540,6 +1541,72 @@ mod tests {
             db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_none()))
                 .unwrap(),
             "a peer staged for removal must be deleted by flush and not re-inserted from the snapshot"
+        );
+    }
+
+    #[test]
+    async fn flush_deletes_v1_row_orphaned_when_loading_the_same_gossip_socket() {
+        use irys_database::reth_db::transaction::DbTx as _;
+        use irys_types::ProtocolVersion;
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = TempDirBuilder::new().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let db = open_db(temp_dir.path());
+        let mining = IrysAddress::from([0x4A; 20]);
+        let v1_id = IrysPeerId::from(mining);
+        let v2_id = IrysPeerId::from([0xB2; 20]);
+        let gossip = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(89, 35, 53, 102), 9009));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let make_item = |peer_id: IrysPeerId, api_port: u16, last_seen: u64| PeerListItem {
+            peer_id,
+            mining_address: mining,
+            address: PeerAddress {
+                gossip,
+                api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(89, 35, 53, 102), api_port)),
+                execution: RethPeerInfo::default(),
+            },
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            response_time: 0,
+            last_seen,
+            is_online: true,
+            protocol_version: ProtocolVersion::V2,
+            ..Default::default()
+        };
+        let v1 = make_item(v1_id, 80, now);
+        let v2 = make_item(v2_id, 8080, now + 1);
+
+        db.update_scoped(|tx| {
+            insert_peer_list_item(tx, &v1_id, &v1)?;
+            insert_peer_list_item(tx, &v2_id, &v2)?;
+            Ok::<(), eyre::Report>(())
+        })
+        .expect("db tx")
+        .expect("insert peers");
+        drop(db);
+
+        let harness = TestHarness::new(temp_dir.path(), config);
+        assert_eq!(harness.peer_list().peer_count(), 1);
+        assert!(harness.peer_list().peer_by_id(&v1_id).is_none());
+        assert!(harness.peer_list().peer_by_id(&v2_id).is_some());
+
+        harness.inner.flush().await.expect("flush");
+
+        let db = harness.inner.state.lock().await.db.clone();
+        assert!(
+            db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(v1_id)?.is_none()))
+                .unwrap(),
+            "the leftover V1 peer_id must be deleted so restart does not reload the duplicate"
+        );
+        assert!(
+            db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(v2_id)?.is_some()))
+                .unwrap(),
+            "the generated peer_id row must remain"
         );
     }
 
