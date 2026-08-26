@@ -611,7 +611,19 @@ impl ChunkIngressServiceInner {
                 e
             );
             record_flush_failure();
-            return Ok(());
+            // Forget the chunk before reporting, so a re-send is processed rather than skipped.
+            // This chunk was recorded as recently valid before the flush, and the duplicate check
+            // at the top of this function returns early on that record without reaching the
+            // ingress proof check — so leaving it in place would make every retry a silent
+            // no-op and the failure permanent after all.
+            self.recent_valid_chunks.write().await.pop(&chunk_path_hash);
+            // Report the failure rather than returning success. The chunk is not durably stored,
+            // and the ingress proof check below is skipped, so a caller told this succeeded has no
+            // way to learn that the transaction can never be promoted: nothing revisits the proof
+            // for a data_root once its last chunk has been acknowledged. Failing here surfaces the
+            // storage error and leaves the caller free to re-send, which is how every other write
+            // failure on this path already behaves.
+            return Err(CriticalChunkIngressError::DatabaseError.into());
         }
 
         self.try_generate_ingress_proof_for_root(root_hash.into(), chunk_size)
