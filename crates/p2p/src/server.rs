@@ -25,7 +25,8 @@ use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     BlockBody, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
     GossipRequest, GossipRequestV2, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
-    NodeInfo, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk, parse_user_agent,
+    NodeInfo, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
+    parse_user_agent,
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
@@ -40,6 +41,16 @@ use tracing_actix_web::TracingLogger;
 /// Default deduplication window for data requests.
 /// Prevents rapid duplicate requests within this time window.
 const DEFAULT_DUPLICATE_REQUEST_WINDOW: Duration = Duration::from_secs(10);
+
+/// Handshake `peers` payload: unique advertised addresses, then shuffle+cap.
+fn handshake_peer_addresses(peer_list: &PeerList, cap: usize) -> Vec<PeerAddress> {
+    let mut peers = peer_list.all_known_peers();
+    peers.shuffle(&mut rand::thread_rng());
+    if peers.len() > cap {
+        peers.truncate(cap);
+    }
+    peers
+}
 
 #[derive(Debug)]
 pub struct GossipServer<M, B>
@@ -1242,17 +1253,13 @@ where
             return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         }
 
-        let mut peers = server.peer_list.all_known_peers();
-        peers.shuffle(&mut rand::thread_rng());
         let cap = server
             .data_handler
             .config
             .node_config
             .p2p_handshake
             .server_peer_list_cap;
-        if peers.len() > cap {
-            peers.truncate(cap);
-        }
+        let peers = handshake_peer_addresses(&server.peer_list, cap);
 
         let peer_address = version_request.address;
         let mining_addr = version_request.mining_address;
@@ -1391,17 +1398,13 @@ where
             );
         }
 
-        let mut peers = server.peer_list.all_known_peers();
-        peers.shuffle(&mut rand::thread_rng());
         let cap = server
             .data_handler
             .config
             .node_config
             .p2p_handshake
             .server_peer_list_cap;
-        if peers.len() > cap {
-            peers.truncate(cap);
-        }
+        let peers = handshake_peer_addresses(&server.peer_list, cap);
 
         let peer_address = version_request.address;
         let mining_addr = version_request.mining_address;
@@ -2064,6 +2067,42 @@ mod tests {
             serde_json::json!({ "Rejected": "HandshakeRequired" }),
             "v1 routes must flatten to the bare string mainnet v1 peers parse",
         );
+    }
+
+    #[test]
+    fn handshake_peer_payload_is_unique_then_capped() {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (events, _) = tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(8);
+        let list = PeerList::from_peers(vec![], PeerNetworkSender::new(tx), &config, events)
+            .expect("peer list");
+
+        for id in 1_u8..=5 {
+            let mining = IrysAddress::from([id; 20]);
+            let peer = PeerListItem {
+                peer_id: IrysPeerId::from([id.wrapping_add(50); 20]),
+                mining_address: mining,
+                address: PeerAddress {
+                    gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, id), 8000)),
+                    api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, id), 9000)),
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 1,
+                is_online: true,
+                protocol_version: ProtocolVersion::V2,
+                ..Default::default()
+            };
+            list.add_or_update_peer(peer, true);
+        }
+
+        let payload = handshake_peer_addresses(&list, 3);
+        assert_eq!(payload.len(), 3);
+        let unique: std::collections::HashSet<_> = payload.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "cap must apply after uniqueness");
+        assert_eq!(list.all_known_peers().len(), 5);
     }
 
     fn setup_peer_list() -> (IrysAddress, PeerList, tempfile::TempDir) {

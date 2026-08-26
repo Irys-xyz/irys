@@ -380,4 +380,36 @@ mod tests {
         assert!(!object.contains_key("version"));
         assert!(!object.contains_key("peerId"));
     }
+
+    #[test]
+    fn peer_list_emits_one_row_for_the_same_gossip_socket() {
+        let mining = IrysAddress::from([0x4A; 20]);
+        let mut v1 = peer_item(1, true, None, None, 80);
+        v1.peer_id = IrysPeerId::from(mining);
+        v1.mining_address = mining;
+        v1.address.gossip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(89, 35, 53, 102)), 9009);
+        v1.address.api = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(89, 35, 53, 102)), 80);
+
+        let mut v2 = peer_item(2, true, None, None, 8080);
+        v2.mining_address = mining;
+        v2.address.gossip = v1.address.gossip;
+        v2.address.api = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(89, 35, 53, 102)), 8080);
+
+        let config = test_config_with_trusted(vec![]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (events, _) = broadcast::channel::<PeerEvent>(16);
+        let list = PeerList::from_peers(vec![v1, v2], PeerNetworkSender::new(tx), &config, events)
+            .expect("peer list");
+
+        let ips = list.all_known_peers();
+        let json = serde_json::to_value(&ips).unwrap();
+        let arr = json.as_array().expect("peer-list is a JSON array");
+        assert_eq!(
+            arr.len(),
+            1,
+            "same gossip socket must be one advertised peer"
+        );
+        assert_eq!(arr[0]["api"], "89.35.53.102:8080");
+        assert_eq!(arr[0]["gossip"], "89.35.53.102:9009");
+    }
 }

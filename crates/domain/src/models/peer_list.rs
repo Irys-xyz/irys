@@ -53,7 +53,9 @@ pub struct PeerListDataInner {
     gossip_addr_to_peer_id_map: HashMap<IpAddr, IrysPeerId>,
     api_addr_to_peer_id_map: HashMap<SocketAddr, IrysPeerId>,
 
-    known_peers_cache: HashSet<PeerAddress>,
+    /// Old `peer_id` rows left behind by V1→V2 migration or a duplicate load.
+    /// `PeerNetworkService::flush` is the sole DB writer and drains this set.
+    pending_db_removals: HashSet<IrysPeerId>,
     trusted_peers_api_to_gossip_addresses: HashMap<SocketAddr, SocketAddr>,
     /// Outbound handshake has no mining address, so observations wait here
     /// until `add_or_update_peer` can insert a real `PeerListItem`.
@@ -280,8 +282,16 @@ impl PeerList {
             .cloned()
     }
 
+    /// Addresses we advertise (`GET /v1/peer-list`, handshake `peers`).
+    /// One socket triple per `peer_id`; low-score peers are omitted.
     pub fn all_known_peers(&self) -> Vec<PeerAddress> {
-        self.read().known_peers_cache.iter().copied().collect()
+        self.read().advertised_addresses()
+    }
+
+    /// `peer_id`s that must be deleted from the peer-list table on the next flush.
+    pub fn take_pending_db_removals(&self) -> HashSet<IrysPeerId> {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        std::mem::take(&mut inner.pending_db_removals)
     }
 
     /// Get all peers (persistent + purgatory) for gossip purposes
@@ -714,7 +724,7 @@ impl PeerListDataInner {
             peer_id_to_miner_addr_map: HashMap::new(),
             gossip_addr_to_peer_id_map: HashMap::new(),
             api_addr_to_peer_id_map: HashMap::new(),
-            known_peers_cache: HashSet::new(),
+            pending_db_removals: HashSet::new(),
             pending_handshake: LruCache::new(
                 std::num::NonZeroUsize::new(PENDING_HANDSHAKE_CAPACITY)
                     .expect("PENDING_HANDSHAKE_CAPACITY > 0"),
@@ -726,19 +736,39 @@ impl PeerListDataInner {
             config: config.clone(),
         };
 
+        // One row per process: the generated `peer_id` is the identity, and the
+        // gossip listen socket is unique per process (two nodes cannot bind it).
+        // A V1 leftover (`peer_id == mining_address`) can sit next to a V2 row
+        // for the same process after upgrade; the flush path only inserts, so
+        // the leftover key survives restart unless we drop it here and stage it
+        // for delete. Do not collapse on mining address — observers never stake
+        // and two processes can share a copied mining key.
+        let mut by_gossip: HashMap<SocketAddr, PeerListItem> = HashMap::new();
         for mut peer_list_item in peers {
-            // If scoring is disabled, set all peer scores to max
             if !config.node_config.p2p_gossip.enable_scoring {
                 peer_list_item.reputation_score.set_to_max();
             }
 
-            // At this point, peer_list_item should already have peer_id and mining_address set
-            // (either from DB via from_inner() or from creation in application code)
+            let gossip = peer_list_item.address.gossip;
+            match by_gossip.remove(&gossip) {
+                None => {
+                    by_gossip.insert(gossip, peer_list_item);
+                }
+                Some(existing) => {
+                    let (keep, drop) = Self::prefer_canonical_item(existing, peer_list_item);
+                    if drop.peer_id != keep.peer_id {
+                        peer_list.pending_db_removals.insert(drop.peer_id);
+                    }
+                    by_gossip.insert(keep.address.gossip, keep);
+                }
+            }
+        }
+
+        for peer_list_item in by_gossip.into_values() {
             let peer_id = peer_list_item.peer_id;
             let mining_address = peer_list_item.mining_address;
             let address = peer_list_item.address;
 
-            // Build all the index maps
             peer_list
                 .gossip_addr_to_peer_id_map
                 .insert(peer_list_item.address.gossip.ip(), peer_id);
@@ -754,7 +784,6 @@ impl PeerListDataInner {
             peer_list
                 .persistent_peers_cache
                 .insert(peer_id, peer_list_item);
-            peer_list.known_peers_cache.insert(address);
         }
 
         Ok(peer_list)
@@ -949,9 +978,7 @@ impl PeerListDataInner {
                 // Move from purgatory to persistent cache
                 let peer_clone = peer.clone();
                 self.unstaked_peer_purgatory.pop(peer_id);
-                self.persistent_peers_cache
-                    .insert(*peer_id, peer_clone.clone());
-                self.known_peers_cache.insert(peer_clone.address);
+                self.persistent_peers_cache.insert(*peer_id, peer_clone);
             }
 
             // Check post-state (may be in persistent now)
@@ -1004,13 +1031,14 @@ impl PeerListDataInner {
                 }
             }
 
-            // Don't propagate inactive peers
+            // Don't propagate inactive peers. `all_known_peers` projects from
+            // `is_reputable()`, so dropping below the threshold unlists the
+            // address without deleting the cached item.
             if !peer_item.reputation_score.is_reputable() {
                 warn!(
-                    "Peer's {:?} score dropped below an active threshold, removing from the persistent cache",
+                    "Peer's {:?} score dropped below an active threshold, excluding from advertised peer list",
                     peer_id
                 );
-                self.known_peers_cache.remove(&peer_item.address);
             }
             let now_active = peer_item.is_active();
             if was_active && !now_active {
@@ -1062,7 +1090,6 @@ impl PeerListDataInner {
                 self.api_addr_to_peer_id_map.remove(&peer.address.api);
                 self.miner_addr_to_peer_id_map.remove(&mining_addr);
                 self.peer_id_to_miner_addr_map.remove(peer_id);
-                self.known_peers_cache.remove(&peer.address);
                 debug!("Removed unstaked peer {:?} from all caches", peer_id);
                 self.emit_peer_event(PeerEvent::PeerRemoved { mining_addr, peer });
             }
@@ -1084,7 +1111,6 @@ impl PeerListDataInner {
         self.api_addr_to_peer_id_map.remove(&peer.address.api);
         self.miner_addr_to_peer_id_map.remove(&mining_addr);
         self.peer_id_to_miner_addr_map.remove(&peer_id);
-        self.known_peers_cache.remove(&peer.address);
         debug!(
             "Evicted peer {:?} (api {:?}) from all caches",
             peer_id, api_address
@@ -1232,8 +1258,10 @@ impl PeerListDataInner {
     ) {
         if is_persistent {
             self.persistent_peers_cache.insert(peer_id, peer);
-        } else {
-            self.unstaked_peer_purgatory.put(peer_id, peer);
+        } else if let Some((evicted_id, evicted)) = self.unstaked_peer_purgatory.push(peer_id, peer)
+            && evicted_id != peer_id
+        {
+            self.unlink_peer_lookups(evicted_id, &evicted);
         }
 
         self.gossip_addr_to_peer_id_map
@@ -1242,7 +1270,6 @@ impl PeerListDataInner {
             .insert(peer_address.api, peer_id);
         self.miner_addr_to_peer_id_map.insert(mining_addr, peer_id);
         self.peer_id_to_miner_addr_map.insert(peer_id, mining_addr);
-        self.known_peers_cache.insert(peer_address);
     }
 
     /// Helper method to update address mappings
@@ -1262,8 +1289,102 @@ impl PeerListDataInner {
             .insert(new_address.api, peer_id);
         self.pending_handshake.pop(&old_address.api);
         // miner_addr_to_peer_id_map doesn't change (unless miner address changes, which shouldn't happen)
-        self.known_peers_cache.remove(&old_address);
-        self.known_peers_cache.insert(new_address);
+    }
+
+    fn advertised_addresses(&self) -> Vec<PeerAddress> {
+        self.persistent_peers_cache
+            .values()
+            .chain(self.unstaked_peer_purgatory.iter().map(|(_, peer)| peer))
+            .filter(|peer| peer.reputation_score.is_reputable())
+            .map(|peer| peer.address)
+            .collect()
+    }
+
+    /// V1 handshakes set `peer_id` to the mining address. A later V2 handshake
+    /// from the same process uses the generated gossip id.
+    fn is_v1_identity(peer: &PeerListItem) -> bool {
+        peer.peer_id == IrysPeerId::from(peer.mining_address)
+    }
+
+    fn prefer_canonical_item(a: PeerListItem, b: PeerListItem) -> (PeerListItem, PeerListItem) {
+        let a_v1 = Self::is_v1_identity(&a);
+        let b_v1 = Self::is_v1_identity(&b);
+        match (a_v1, b_v1) {
+            (true, false) => (b, a),
+            (false, true) => (a, b),
+            _ if b.last_seen > a.last_seen => (b, a),
+            _ => (a, b),
+        }
+    }
+
+    fn unlink_peer_lookups(&mut self, peer_id: IrysPeerId, peer: &PeerListItem) {
+        if self
+            .gossip_addr_to_peer_id_map
+            .get(&peer.address.gossip.ip())
+            == Some(&peer_id)
+        {
+            self.gossip_addr_to_peer_id_map
+                .remove(&peer.address.gossip.ip());
+        }
+        if self.api_addr_to_peer_id_map.get(&peer.address.api) == Some(&peer_id) {
+            self.api_addr_to_peer_id_map.remove(&peer.address.api);
+        }
+        if self.miner_addr_to_peer_id_map.get(&peer.mining_address) == Some(&peer_id) {
+            self.miner_addr_to_peer_id_map.remove(&peer.mining_address);
+        }
+        self.peer_id_to_miner_addr_map.remove(&peer_id);
+        self.pending_handshake.pop(&peer.address.api);
+    }
+
+    fn find_peer_id_sharing_gossip(
+        &self,
+        gossip: SocketAddr,
+        except: IrysPeerId,
+    ) -> Option<IrysPeerId> {
+        for (id, peer) in &self.persistent_peers_cache {
+            if *id != except && peer.address.gossip == gossip {
+                return Some(*id);
+            }
+        }
+        for (id, peer) in self.unstaked_peer_purgatory.iter() {
+            if *id != except && peer.address.gossip == gossip {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    /// Drop extra cache entries that share this process's gossip socket.
+    /// Does not emit `PeerRemoved`: the peer is still present under `keep`.
+    fn evict_duplicate_identities(&mut self, gossip: SocketAddr, keep: IrysPeerId) {
+        let mut extras = Vec::new();
+        for (id, peer) in &self.persistent_peers_cache {
+            if peer.address.gossip == gossip && *id != keep {
+                extras.push(*id);
+            }
+        }
+        for (id, peer) in self.unstaked_peer_purgatory.iter() {
+            if peer.address.gossip == gossip && *id != keep {
+                extras.push(*id);
+            }
+        }
+
+        for extra_id in extras {
+            let extra = self
+                .persistent_peers_cache
+                .remove(&extra_id)
+                .or_else(|| self.unstaked_peer_purgatory.pop(&extra_id));
+            if let Some(extra) = extra {
+                debug!(
+                    gossip_addr = %gossip,
+                    dropped_peer_id = ?extra_id,
+                    kept_peer_id = ?keep,
+                    "Dropping duplicate peer identity for the same gossip socket"
+                );
+                self.unlink_peer_lookups(extra_id, &extra);
+                self.pending_db_removals.insert(extra_id);
+            }
+        }
     }
 
     /// Add or update a peer in the appropriate cache based on staking status and current location.
@@ -1272,24 +1393,14 @@ impl PeerListDataInner {
         let gossip_addr = peer.address.gossip;
         let peer_address = peer.address;
 
-        // At this point, peer should already have peer_id and mining_address set
+        // Identity is `peer_id` (generated at first start). Mining address is
+        // the chain key and is not unique: observers never stake, and two
+        // processes can copy the same mining key. Same gossip listen socket
+        // means the same process (V1 leftover or a regenerated `peer_key.bin`).
         let peer_id = peer.peer_id;
         let mining_addr = peer.mining_address;
 
-        // Check if peer exists by peer_id OR by mining_address (for updates where peer_id changed)
-        let existing_peer_id = self.miner_addr_to_peer_id_map.get(&mining_addr).copied();
-        let lookup_peer_id = existing_peer_id.unwrap_or(peer_id);
-
-        // Check if peer exists in persistent cache
-        let in_persistent = self.persistent_peers_cache.contains_key(&lookup_peer_id);
-        // Check if peer exists in purgatory
-        let in_purgatory = self.unstaked_peer_purgatory.contains(&lookup_peer_id);
-
-        // If we found an existing peer with a different peer_id, we need to update the mapping
-        if let Some(old_peer_id) = existing_peer_id
-            && old_peer_id != peer_id
-        {
-            // Peer ID changed - need to migrate the entry
+        if let Some(old_peer_id) = self.find_peer_id_sharing_gossip(gossip_addr, peer_id) {
             debug!(
                 "Peer {:?} changed peer_id from {:?} to {:?}, migrating entry",
                 mining_addr, old_peer_id, peer_id
@@ -1306,7 +1417,6 @@ impl PeerListDataInner {
                 self.unstaked_peer_purgatory.put(peer_id, old_peer);
             }
 
-            // Update all mappings to use new peer_id
             self.miner_addr_to_peer_id_map.insert(mining_addr, peer_id);
             self.peer_id_to_miner_addr_map.remove(&old_peer_id);
             self.peer_id_to_miner_addr_map.insert(peer_id, mining_addr);
@@ -1320,7 +1430,17 @@ impl PeerListDataInner {
                 self.api_addr_to_peer_id_map
                     .insert(peer_item.address.api, peer_id);
             }
+            // Flush only inserts current keys; the old row stays on disk unless
+            // we stage it. Drop the new key from the delete set if a previous
+            // collapse had marked it.
+            self.pending_db_removals.insert(old_peer_id);
+            self.pending_db_removals.remove(&peer_id);
         }
+
+        self.evict_duplicate_identities(gossip_addr, peer_id);
+
+        let in_persistent = self.persistent_peers_cache.contains_key(&peer_id);
+        let in_purgatory = self.unstaked_peer_purgatory.contains(&peer_id);
 
         match (is_staked, in_persistent, in_purgatory) {
             // Case 1: Update peer in persistent cache (both staked and unstaked peers)
@@ -1400,7 +1520,6 @@ impl PeerListDataInner {
                     }
 
                     self.persistent_peers_cache.insert(peer_id, updated_peer);
-                    self.known_peers_cache.insert(peer_address);
                     debug!(
                         "Peer {:?} ({}) moved from purgatory to persistent cache",
                         mining_addr,
@@ -1500,7 +1619,7 @@ mod tests {
             unstaked_peer_purgatory: LruCache::new(
                 std::num::NonZeroUsize::new(UNSTAKED_PEER_PURGATORY_CAPACITY).unwrap(),
             ),
-            known_peers_cache: HashSet::new(),
+            pending_db_removals: HashSet::new(),
             pending_handshake: LruCache::new(
                 std::num::NonZeroUsize::new(PENDING_HANDSHAKE_CAPACITY)
                     .expect("PENDING_HANDSHAKE_CAPACITY > 0"),
@@ -2504,5 +2623,201 @@ mod tests {
         let stored = peer_list.peer_by_id(&peer_id).unwrap();
         assert_eq!(stored.software_version_string(), "4.0.6+irys-rs.6cbc03b");
         assert_eq!(stored.consensus_config_hash, Some(H256::from([9; 32])));
+    }
+
+    fn list_from_loaded_peers(peers: Vec<PeerListItem>) -> PeerList {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (events, _) = broadcast::channel::<PeerEvent>(100);
+        PeerList::from_peers(
+            peers,
+            PeerNetworkSender::new(tx),
+            &Config::new_with_random_peer_id(NodeConfig::testing()),
+            events,
+        )
+        .expect("peer list")
+    }
+
+    /// Same host as the mainnet duplicate: one gossip socket, two API ports.
+    fn mainnet_shaped_peer(
+        mining: IrysAddress,
+        peer_id: IrysPeerId,
+        api_port: u16,
+        last_seen: u64,
+    ) -> PeerListItem {
+        PeerListItem {
+            peer_id,
+            mining_address: mining,
+            address: PeerAddress {
+                gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(89, 35, 53, 102)), 9009),
+                api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(89, 35, 53, 102)), api_port),
+                execution: RethPeerInfo {
+                    peering_tcp_addr: SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::new(89, 35, 53, 102)),
+                        30303,
+                    ),
+                    ..RethPeerInfo::default()
+                },
+            },
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            response_time: 100,
+            is_online: true,
+            last_seen,
+            protocol_version: ProtocolVersion::V2,
+            ..Default::default()
+        }
+    }
+
+    fn advertised_api_ports(peer_list: &PeerList) -> Vec<u16> {
+        let mut ports: Vec<u16> = peer_list
+            .all_known_peers()
+            .into_iter()
+            .map(|addr| addr.api.port())
+            .collect();
+        ports.sort_unstable();
+        ports
+    }
+
+    #[test]
+    fn db_load_collapses_v1_and_v2_same_miner_to_one_address() {
+        let mining = IrysAddress::from([0x4A; 20]);
+        let v1_id = IrysPeerId::from(mining);
+        let v2_id = IrysPeerId::from([0xB2; 20]);
+        let v1 = mainnet_shaped_peer(mining, v1_id, 80, 1_000);
+        let v2 = mainnet_shaped_peer(mining, v2_id, 8080, 2_000);
+
+        let peer_list = list_from_loaded_peers(vec![v1, v2]);
+
+        assert_eq!(peer_list.peer_count(), 1, "one cached item per miner");
+        assert_eq!(advertised_api_ports(&peer_list), vec![8080]);
+        assert!(peer_list.peer_by_id(&v1_id).is_none());
+        assert_eq!(
+            peer_list.peer_by_id(&v2_id).map(|p| p.address.api.port()),
+            Some(8080)
+        );
+        assert_eq!(
+            peer_list.take_pending_db_removals(),
+            std::iter::once(v1_id).collect()
+        );
+    }
+
+    #[test]
+    fn handshake_api_port_change_keeps_latest_socket() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let mining = IrysAddress::from([0x11; 20]);
+        let peer_id = IrysPeerId::from([0x22; 20]);
+        peer_list.add_or_update_peer(mainnet_shaped_peer(mining, peer_id, 80, 1_000), true);
+        peer_list.add_or_update_peer(mainnet_shaped_peer(mining, peer_id, 8080, 2_000), true);
+
+        assert_eq!(peer_list.peer_count(), 1);
+        assert_eq!(advertised_api_ports(&peer_list), vec![8080]);
+        let stored = peer_list.peer_by_id(&peer_id).unwrap();
+        assert_eq!(stored.address.api.port(), 8080);
+        assert_eq!(stored.address.gossip.port(), 9009);
+    }
+
+    #[test]
+    fn v1_then_v2_handshake_migrates_and_drops_old_address() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let mining = IrysAddress::from([0x33; 20]);
+        let v1_id = IrysPeerId::from(mining);
+        let v2_id = IrysPeerId::from([0x44; 20]);
+        peer_list.add_or_update_peer(mainnet_shaped_peer(mining, v1_id, 80, 1_000), true);
+        peer_list.add_or_update_peer(mainnet_shaped_peer(mining, v2_id, 8080, 2_000), true);
+
+        assert_eq!(peer_list.peer_count(), 1);
+        assert_eq!(advertised_api_ports(&peer_list), vec![8080]);
+        assert!(peer_list.peer_by_id(&v1_id).is_none());
+        assert_eq!(
+            peer_list.peer_by_mining_address(&mining).unwrap().peer_id,
+            v2_id
+        );
+        assert!(
+            peer_list.take_pending_db_removals().contains(&v1_id),
+            "old peer_id must be staged so flush deletes the leftover DB row"
+        );
+    }
+
+    #[test]
+    fn two_miners_on_the_same_ip_both_appear() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let miner_a = IrysAddress::from([0x01; 20]);
+        let miner_b = IrysAddress::from([0x02; 20]);
+        peer_list.add_or_update_peer(
+            mainnet_shaped_peer(miner_a, IrysPeerId::from([0xA1; 20]), 8080, 1_000),
+            true,
+        );
+        let mut other = mainnet_shaped_peer(miner_b, IrysPeerId::from([0xB1; 20]), 8081, 1_000);
+        other.address.gossip.set_port(9010);
+        peer_list.add_or_update_peer(other, true);
+
+        assert_eq!(peer_list.peer_count(), 2);
+        let mut ports = advertised_api_ports(&peer_list);
+        ports.sort_unstable();
+        assert_eq!(ports, vec![8080, 8081]);
+    }
+
+    #[test]
+    fn observers_sharing_a_mining_key_stay_two_rows() {
+        // Observers never stake; they still have a config key. Two processes
+        // that copied the same key must remain two peers — identity is peer_id
+        // (and the gossip listen socket), not mining address.
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let shared_key = IrysAddress::from([0x0B; 20]);
+        let observer_a = IrysPeerId::from([0xA1; 20]);
+        let observer_b = IrysPeerId::from([0xB2; 20]);
+        peer_list.add_or_update_peer(
+            mainnet_shaped_peer(shared_key, observer_a, 8080, 1_000),
+            false,
+        );
+        let mut other = mainnet_shaped_peer(shared_key, observer_b, 8081, 1_000);
+        other.address.gossip.set_port(9010);
+        peer_list.add_or_update_peer(other, false);
+
+        assert_eq!(peer_list.peer_count(), 2);
+        assert!(peer_list.peer_by_id(&observer_a).is_some());
+        assert!(peer_list.peer_by_id(&observer_b).is_some());
+        assert_eq!(advertised_api_ports(&peer_list), vec![8080, 8081]);
+    }
+
+    #[test]
+    fn handshake_after_duplicate_load_keeps_one_row() {
+        let mining = IrysAddress::from([0x55; 20]);
+        let v1_id = IrysPeerId::from(mining);
+        let v2_id = IrysPeerId::from([0x66; 20]);
+        let peer_list = list_from_loaded_peers(vec![
+            mainnet_shaped_peer(mining, v1_id, 80, 1_000),
+            mainnet_shaped_peer(mining, v2_id, 8080, 1_500),
+        ]);
+        peer_list.add_or_update_peer(mainnet_shaped_peer(mining, v2_id, 8080, 3_000), true);
+
+        assert_eq!(peer_list.peer_count(), 1);
+        assert_eq!(advertised_api_ports(&peer_list), vec![8080]);
+        assert_eq!(peer_list.all_peers().iter().count(), 1);
+    }
+
+    #[test]
+    fn recovered_score_is_advertised_again() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (_mining, peer_id, mut peer) = create_test_peer(1);
+        peer.reputation_score = PeerScore::new(14);
+        peer_list.add_or_update_peer(peer.clone(), true);
+        assert!(peer_list.all_known_peers().contains(&peer.address));
+
+        peer_list.decrease_peer_score_by_peer_id(
+            &peer_id,
+            ScoreDecreaseReason::BogusData("bogus".into()),
+        );
+        assert!(!peer_list.all_known_peers().contains(&peer.address));
+
+        peer_list.increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::Online);
+        assert!(
+            peer_list.all_known_peers().contains(&peer.address),
+            "a peer that recovers to the reputable threshold must be advertised again"
+        );
     }
 }

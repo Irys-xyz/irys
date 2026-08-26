@@ -1338,15 +1338,17 @@ mod ingress_proof_peer_tests {
         .unwrap();
 
         // Peer list: assignee + online prover (no Submit assignment for prover).
+        // Distinct gossip sockets — two processes cannot share a listen address.
         let (service_senders, _rx) = ServiceSenders::new();
-        let peer_api = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999);
+        let assignee_api = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9998);
+        let prover_api = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999);
         let peers = vec![
             PeerListItem {
                 peer_id: IrysPeerId::from(assignee),
                 mining_address: assignee,
                 address: PeerAddress {
-                    gossip: peer_api,
-                    api: peer_api,
+                    gossip: assignee_api,
+                    api: assignee_api,
                     ..Default::default()
                 },
                 reputation_score: PeerScore::new(PeerScore::INITIAL),
@@ -1360,8 +1362,8 @@ mod ingress_proof_peer_tests {
                 peer_id: IrysPeerId::from(prover),
                 mining_address: prover,
                 address: PeerAddress {
-                    gossip: peer_api,
-                    api: peer_api,
+                    gossip: prover_api,
+                    api: prover_api,
                     ..Default::default()
                 },
                 reputation_score: PeerScore::new(PeerScore::INITIAL),
