@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787756716809,
+  "lastUpdate": 1787772117357,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14839,6 +14839,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a809757f38aa6cb80c6f9523881514310bc51c57",
+          "message": "fix(p2p): advertise one peer-list row per node (#1557)\n\n* fix(p2p): advertise one peer-list row per node\n\nThe public peer list and handshake replies treated a full API socket as\na unique peer, so one process could appear twice after an API port\nchange. Identify peers by the generated peer ID, collapse leftover\nsockets that share a gossip listen address, and delete the old DB row\non flush so the duplicate does not come back after restart.\n\n* test(data-sync): give fixture peers distinct gossip sockets\n\nThe residual-hole peer test put assignee and prover on the same listen\naddress, so the one-row-per-process peer list dropped one of them.",
+          "timestamp": "2026-08-26T12:06:07-07:00",
+          "tree_id": "d78ab56d9a7bf92ca6a42fdbf189937bb0a852f8",
+          "url": "https://github.com/Irys-xyz/irys/commit/a809757f38aa6cb80c6f9523881514310bc51c57"
+        },
+        "date": 1787772115744,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015429,
+            "range": "± 0.00068",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.154742,
+            "range": "± 0.006866",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.563437,
+            "range": "± 0.056695",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.443016,
+            "range": "± 0.18592",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082981,
+            "range": "± 0.001208",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 785.071146,
+            "range": "± 29.964944",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 976.776394,
+            "range": "± 5.609164",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118607,
+            "range": "± 0.004137",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1225.164811,
+            "range": "± 83.60388",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1543.180855,
+            "range": "± 19.372446",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034322,
+            "range": "± 0.00106",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.700993,
+            "range": "± 1.610852",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.009597,
+            "range": "± 1.402112",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
