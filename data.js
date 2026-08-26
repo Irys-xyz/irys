@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787604929670,
+  "lastUpdate": 1787756716809,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14725,6 +14725,114 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 273.111906,
             "range": "± 1.02777",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e33db84063eaa43ae968cfe09a9397ed555e8c6d",
+          "message": "fix(chunk-ingress): report a failed writer flush instead of answering success (#1558)\n\n* fix(chunk-ingress): report a failed writer flush instead of answering success\n\nA failed flush logged the error and returned Ok(()), which post_chunk maps to\n200. The chunk was not durably stored, and the early return also skipped the\ningress-proof check, so the transaction could never be promoted: proof\ngeneration is only attempted on a chunk arrival or on block confirmation, and\nonce the last chunk has been acknowledged neither happens again.\n\nA client was therefore told every chunk succeeded while the transaction sat\nun-promoted indefinitely, with no signal to act on.\n\nReturn a database error, as the write-behind enqueue failure a few lines above\nalready does. That maps to 500 and lets the caller re-send, and the re-sent\nchunk re-triggers the proof check.\n\n* fix(chunk-ingress): forget a chunk whose flush failed so a re-send is not skipped\n\nThe chunk is recorded as recently valid before the flush, and the duplicate\ncheck at the top of the handler returns early on that record without reaching\nthe ingress proof check. Reporting the flush failure without clearing it would\nmake the first retry — and every retry after it — a silent success that does no\nwork, leaving the transaction un-promotable regardless.",
+          "timestamp": "2026-08-26T15:49:35+01:00",
+          "tree_id": "084965c375aae440dc408c9ca96d10232294418b",
+          "url": "https://github.com/Irys-xyz/irys/commit/e33db84063eaa43ae968cfe09a9397ed555e8c6d"
+        },
+        "date": 1787756715180,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015458,
+            "range": "± 0.000609",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153614,
+            "range": "± 0.015956",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.578702,
+            "range": "± 0.120191",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.908247,
+            "range": "± 0.961965",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082047,
+            "range": "± 0.003871",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 827.271874,
+            "range": "± 25.946431",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1017.283444,
+            "range": "± 33.615534",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.144256,
+            "range": "± 0.007401",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1264.771977,
+            "range": "± 85.411747",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1597.417693,
+            "range": "± 110.957494",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034506,
+            "range": "± 0.001052",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.895532,
+            "range": "± 1.024791",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.398258,
+            "range": "± 1.928394",
             "unit": "ms/iter"
           },
           {
