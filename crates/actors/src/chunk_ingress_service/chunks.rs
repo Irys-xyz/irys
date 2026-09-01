@@ -456,9 +456,21 @@ impl ChunkIngressServiceInner {
         validate_path_byte_range(
             &path_result,
             (expected_min_byte_range, expected_max_byte_range),
-            is_last_chunk,
         )
         .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
+
+        // Once the layout is confirmed, Merkle rightmost status must agree
+        // with the transaction position. Before confirmation, a full prefix
+        // chunk may validly belong to a larger root than an incorrect header
+        // claims; accepting it preserves overlapping-data-root recovery while
+        // the genuinely rightmost path remains the only size authority.
+        if data_size_confirmed && path_result.is_rightmost_chunk != is_last_chunk {
+            return Err(CriticalChunkIngressError::InvalidOffset(
+                "data path rightmost status does not match the confirmed chunk position"
+                    .to_string(),
+            )
+            .into());
+        }
 
         // Check that the leaf hash on the data_path matches the chunk_hash
         let hash_256 = hash_sha256(&chunk.bytes.0);

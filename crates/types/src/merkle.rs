@@ -55,12 +55,12 @@ pub fn expected_chunk_byte_range(
     Ok((min, max))
 }
 
-/// Verifies that a validated Merkle path identifies exactly the chunk range
-/// selected by transaction metadata.
+/// Verifies that a validated Merkle path identifies exactly the expected chunk
+/// range. Rightmost status is checked separately because provisional
+/// transaction metadata may understate the size committed by the data root.
 pub fn validate_path_byte_range(
     path: &ValidatePathResult,
     expected: (u64, u64),
-    expected_rightmost: bool,
 ) -> Result<(), Error> {
     let actual = (
         u64::try_from(path.min_byte_range)
@@ -75,10 +75,6 @@ pub fn validate_path_byte_range(
         actual.1,
         expected.0,
         expected.1
-    );
-    eyre::ensure!(
-        path.is_rightmost_chunk == expected_rightmost,
-        "data path rightmost status does not match the chunk position"
     );
     Ok(())
 }
@@ -760,16 +756,13 @@ mod tests {
             max_byte_range: 71,
             is_rightmost_chunk: true,
         };
-        assert!(validate_path_byte_range(&path, (64, 71), true).is_ok());
+        assert!(validate_path_byte_range(&path, (64, 71)).is_ok());
 
         path.min_byte_range = 63;
-        assert!(validate_path_byte_range(&path, (64, 71), true).is_err());
+        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
         path.min_byte_range = 64;
         path.max_byte_range = 70;
-        assert!(validate_path_byte_range(&path, (64, 71), true).is_err());
-        path.max_byte_range = 71;
-        path.is_rightmost_chunk = false;
-        assert!(validate_path_byte_range(&path, (64, 71), true).is_err());
+        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
     }
 
     #[test]
