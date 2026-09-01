@@ -3,15 +3,20 @@ pub mod chunk_orchestrator;
 pub mod peer_bandwidth_manager;
 pub mod peer_stats;
 
-use crate::{chunk_fetcher::ChunkFetcherFactory, metrics, services::ServiceSenders};
+use crate::{
+    chunk_fetcher::ChunkFetcherFactory,
+    chunk_ingress_service::{ChunkIngressError, facade::ChunkIngressFacadeImpl},
+    metrics,
+    services::ServiceSenders,
+};
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule, WriteDataChunkError};
 use irys_packing::unpack;
 use irys_types::{
-    ChunkFormat, Config, DataRoot, IrysAddress, PartitionChunkOffset, SendTraced as _,
-    TokioServiceHandle, Traced, UnpackedChunk, app_state::DatabaseProvider,
+    ChunkFormat, Config, DataRoot, IrysAddress, PartitionChunkOffset, TokioServiceHandle, Traced,
+    UnpackedChunk, app_state::DatabaseProvider,
 };
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
@@ -76,16 +81,13 @@ fn attempt_data_sync_write(
     }
 }
 
-fn forward_chunk_to_ingress(service_senders: &ServiceSenders, unpacked: UnpackedChunk) {
-    if let Err(e) = service_senders
-        .chunk_ingress
-        .send_traced(crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(unpacked, None))
-    {
-        warn!(
-            error = %e,
-            "Failed to forward data-sync chunk to chunk ingress validation"
-        );
-    }
+async fn forward_chunk_to_ingress(
+    service_senders: &ServiceSenders,
+    unpacked: UnpackedChunk,
+) -> Result<(), ChunkIngressError> {
+    ChunkIngressFacadeImpl::from(service_senders)
+        .handle_chunk_ingress(unpacked)
+        .await
 }
 
 pub struct DataSyncService {
@@ -211,7 +213,7 @@ impl DataSyncServiceInner {
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
-    pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
+    pub async fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
                 // New membership / post-heal: probe again promptly.
@@ -226,8 +228,9 @@ impl DataSyncServiceInner {
             } => {
                 // Fetch succeeded — record that separately from durable store.
                 metrics::record_data_sync_chunk_fetched();
-                if let Err(e) =
-                    self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
+                if let Err(e) = self
+                    .on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
+                    .await
                 {
                     error!(
                         storage_module.id = storage_module_id,
@@ -451,7 +454,7 @@ impl DataSyncServiceInner {
         chunk.offset = %chunk_offset,
         peer.address = %peer_addr,
     ))]
-    fn on_chunk_completed(
+    async fn on_chunk_completed(
         &mut self,
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
@@ -473,6 +476,21 @@ impl DataSyncServiceInner {
                 consensus.chain_id,
             ),
         };
+
+        // The ingress acknowledgement is the durable compact-leaf fence. Do
+        // not let the storage module make this fetch permanently complete
+        // until validation has committed the cached body and signer-specific
+        // ingress hash. This also makes a closed ingress channel retryable.
+        if let Err(error) =
+            forward_chunk_to_ingress(&self.service_senders, unpacked_chunk.clone()).await
+        {
+            if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+                orchestrator.requeue_after_local_write_failure(chunk_offset)?;
+            }
+            return Err(eyre::eyre!(
+                "chunk ingress rejected data-sync body before durable write: {error}"
+            ));
+        }
 
         let sm = storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)
             .ok_or_else(|| eyre::eyre!("storage_module_id {storage_module_id} not found"))?;
@@ -576,13 +594,6 @@ impl DataSyncServiceInner {
                 }
             }
         }
-
-        // Storage placement and ingress-proof credit have different trust
-        // boundaries. Route every fetched body through the existing ingress
-        // validator so data sync can rebuild compact leaves without duplicating
-        // Merkle validation here. The ingress path also persists body + hash
-        // atomically; storage durability remains independently tracked above.
-        forward_chunk_to_ingress(&self.service_senders, unpacked_chunk);
 
         Ok(())
     }
@@ -1109,8 +1120,8 @@ impl DataSyncService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
-                            let (msg, _entered) = traced.into_inner();
-                            self.inner.handle_message(msg)?;
+                            let (msg, span) = traced.into_parts();
+                            self.inner.handle_message(msg).instrument(span).await?;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -1160,12 +1171,32 @@ impl DataSyncService {
 
         // Process remaining messages before shutdown
         while let Ok(traced) = self.msg_rx.try_recv() {
-            let (msg, _entered) = traced.into_inner();
-            self.inner.handle_message(msg)?;
+            let (msg, span) = traced.into_parts();
+            self.inner.handle_message(msg).instrument(span).await?;
         }
 
         tracing::info!("shutting down DataSync Service gracefully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod ingress_handoff_tests {
+    use super::forward_chunk_to_ingress;
+    use crate::services::ServiceSenders;
+    use irys_types::UnpackedChunk;
+
+    #[tokio::test]
+    async fn closed_ingress_channel_fails_the_handoff() {
+        let (senders, receivers) = ServiceSenders::new();
+        drop(receivers.chunk_ingress);
+
+        assert!(
+            forward_chunk_to_ingress(&senders, UnpackedChunk::default())
+                .await
+                .is_err(),
+            "data sync must not credit a body that ingress cannot durably acknowledge"
+        );
     }
 }
 

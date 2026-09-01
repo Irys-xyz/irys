@@ -182,6 +182,7 @@ impl ChunkOrchestrator {
 
             if self.storage_module.is_data_chunk_durable_at(*offset) {
                 request.request_state = ChunkRequestState::Completed;
+                metrics::record_data_sync_chunk_stored();
                 debug!(
                     chunk.offset = %offset,
                     "data_sync chunk durably stored"
@@ -189,6 +190,7 @@ impl ChunkOrchestrator {
             } else if now.saturating_duration_since(started) >= timeout {
                 request.request_state = ChunkRequestState::Pending;
                 request.excluded = None;
+                metrics::record_data_sync_durability_stalled();
                 warn!(
                     chunk.offset = %offset,
                     timeout_secs = timeout.as_secs(),

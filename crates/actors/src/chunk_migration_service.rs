@@ -256,7 +256,6 @@ pub fn process_ledger_transactions(
     storage_modules_guard: &StorageModulesReadGuard,
     db: &Arc<DatabaseProvider>,
 ) -> Result<(), MigrationError> {
-    let chunk_size = config.consensus.chunk_size as usize;
     let path_pairs = get_tx_path_pairs(block, ledger, txs).map_err(|e| {
         MigrationError::Other(format!("tx path merklization failed for {ledger:?}: {e}"))
     })?;
@@ -266,7 +265,7 @@ pub fn process_ledger_transactions(
     for ((_txid, tx_path), tx) in path_pairs {
         let num_chunks_in_tx: u32 = tx
             .data_size
-            .div_ceil(chunk_size as u64)
+            .div_ceil(config.consensus.chunk_size)
             .try_into()
             .map_err(|_| {
                 MigrationError::Other(format!(
@@ -375,10 +374,25 @@ fn load_chunk_for_migration(
     tx_offset: TxChunkOffset,
     config: &Config,
 ) -> Result<Option<UnpackedChunk>, MigrationError> {
-    let chunk_size = config.consensus.chunk_size as usize;
+    let chunk_size = usize::try_from(config.consensus.chunk_size).map_err(|_| {
+        MigrationError::Other(format!(
+            "configured chunk size {} does not fit usize",
+            config.consensus.chunk_size
+        ))
+    })?;
     match get_cached_chunk(db, tx.data_root, tx_offset) {
         Ok(Some((_metadata, cached))) if cached.chunk.is_some() => {
-            return validate_chunk_for_migration(cached, tx, tx_offset, chunk_size).map(Some);
+            match validate_chunk_for_migration(cached, tx, tx_offset, chunk_size) {
+                Ok(chunk) => return Ok(Some(chunk)),
+                Err(error) => {
+                    tracing::warn!(
+                        data_root = %tx.data_root,
+                        %tx_offset,
+                        ?error,
+                        "Cached chunk failed migration validation; checking durable fallback"
+                    );
+                }
+            }
         }
         Ok(_) => {}
         Err(error) => {
@@ -437,19 +451,34 @@ fn load_chunk_for_migration(
                 config.consensus.chain_id,
             );
             if unpacked.data_root != tx.data_root || unpacked.tx_offset != tx_offset {
-                return Err(MigrationError::Other(format!(
-                    "durable Submit chunk identity mismatch for {} offset {}",
-                    tx.data_root, tx_offset
-                )));
+                tracing::warn!(
+                    data_root = %tx.data_root,
+                    %tx_offset,
+                    storage_module.id = module.id,
+                    partition.offset = %partition_offset,
+                    "Durable Submit chunk identity mismatch; checking another replica"
+                );
+                continue;
             }
-            return validate_chunk_parts_for_migration(
+            match validate_chunk_parts_for_migration(
                 unpacked.data_path,
                 unpacked.bytes,
                 tx,
                 tx_offset,
                 chunk_size,
-            )
-            .map(Some);
+            ) {
+                Ok(chunk) => return Ok(Some(chunk)),
+                Err(error) => {
+                    tracing::warn!(
+                        data_root = %tx.data_root,
+                        %tx_offset,
+                        storage_module.id = module.id,
+                        partition.offset = %partition_offset,
+                        ?error,
+                        "Durable Submit chunk failed migration validation; checking another replica"
+                    );
+                }
+            }
         }
     }
     Ok(None)

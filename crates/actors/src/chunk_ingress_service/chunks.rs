@@ -493,7 +493,14 @@ impl ChunkIngressServiceInner {
                         expected_max_byte_range,
                     )
                 })
-                .expect("confirm_data_size database operation to succeed");
+                .map_err(|error| {
+                    error!(
+                        %error,
+                        data_root = %chunk.data_root,
+                        "Failed to confirm data-root size"
+                    );
+                    CriticalChunkIngressError::DatabaseError
+                })?;
         }
 
         record_validation_duration(validation_start.elapsed_ms());
@@ -648,6 +655,7 @@ impl ChunkIngressServiceInner {
 
         // Early return if we have a valid existing local proof
         if existing_local_proof.is_some() {
+            self.ingress_proof_generation_state.clear_retries(data_root);
             info!(
                 "Local ingress proof already exists and is valid for data root {}",
                 &data_root
@@ -685,8 +693,11 @@ impl ChunkIngressServiceInner {
             let block_tree_read_guard = self.block_tree_read_guard.clone();
             let config = self.config.clone();
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            let retry_sender = self.service_senders.chunk_ingress.clone();
+            let generation_state = self.ingress_proof_generation_state.clone();
+            let runtime_handle = tokio::runtime::Handle::current();
             let _fut = self.exec.clone().spawn_blocking(move || {
-                if let Err(error) = generate_and_store_ingress_proof_from_leaves(
+                match generate_and_store_ingress_proof_from_leaves(
                     &block_tree_read_guard,
                     &db,
                     &config,
@@ -696,10 +707,31 @@ impl ChunkIngressServiceInner {
                     &gossip_sender,
                     generation_lease,
                 ) {
-                    if error.is_benign() {
+                    Ok(_) => generation_state.clear_retries(data_root),
+                    Err(error) if error.is_benign() => {
                         debug!(proof.data_root = ?data_root, "Skipped ingress proof generation: {error}");
-                    } else {
+                    }
+                    Err(error) => {
                         warn!(proof.data_root = ?data_root, "Failed to generate ingress proof: {error}");
+                        if let Some(delay) = generation_state.reserve_retry(data_root) {
+                            let retry_state = generation_state.clone();
+                            runtime_handle.spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                retry_state.mark_retry_dispatched(data_root);
+                                if let Err(send_error) = retry_sender.send_traced(
+                                    ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![
+                                        data_root,
+                                    ]),
+                                ) {
+                                    retry_state.clear_retries(data_root);
+                                    warn!(
+                                        proof.data_root = ?data_root,
+                                        ?send_error,
+                                        "Failed to schedule ingress-proof retry"
+                                    );
+                                }
+                            });
+                        }
                     }
                 }
             }).in_current_span();

@@ -254,6 +254,8 @@ mod tests {
         let data_root = H256::random();
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0_u32);
+        // The stored repeat-byte hash intentionally conflicts with the hash
+        // generated from these bytes, forcing the whole auto-drained batch to fail.
         let chunk = Arc::new(UnpackedChunk {
             data_root,
             data_size: 8,

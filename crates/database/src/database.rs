@@ -134,6 +134,58 @@ mod compact_ingress_leaf_tests {
     }
 
     #[test]
+    fn deleting_ingress_leaves_is_scoped_to_one_data_root() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let target_root = H256::random();
+        let other_root = H256::random();
+        let first_signer = IrysAddress::random();
+        let second_signer = IrysAddress::random();
+
+        db.update_eyre(|tx| {
+            store_ingress_data_hash(
+                tx,
+                target_root,
+                first_signer,
+                TxChunkOffset::from(0),
+                H256::random(),
+            )?;
+            store_ingress_data_hash(
+                tx,
+                target_root,
+                second_signer,
+                TxChunkOffset::from(1),
+                H256::random(),
+            )?;
+            store_ingress_data_hash(
+                tx,
+                other_root,
+                first_signer,
+                TxChunkOffset::from(0),
+                H256::random(),
+            )?;
+            assert_eq!(delete_ingress_leaves_by_data_root(tx, target_root)?, 2);
+            Ok(())
+        })?;
+
+        db.view_eyre(|tx| {
+            assert!(
+                cached_ingress_leaf(tx, target_root, first_signer, TxChunkOffset::from(0))?
+                    .is_none()
+            );
+            assert!(
+                cached_ingress_leaf(tx, target_root, second_signer, TxChunkOffset::from(1))?
+                    .is_none()
+            );
+            assert!(
+                cached_ingress_leaf(tx, other_root, first_signer, TxChunkOffset::from(0))?
+                    .is_some(),
+                "deleting one root must preserve another root's leaves"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
     fn startup_backfill_recovers_legacy_cached_bodies_idempotently() -> eyre::Result<()> {
         let (_dir, db) = open_test_db()?;
         let address = IrysAddress::random();

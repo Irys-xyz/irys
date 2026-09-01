@@ -325,17 +325,25 @@ impl ChunkIngressService {
                         ingress_proof_generation_state,
                     }),
                 };
-                for data_root in retry_roots {
-                    if let Err(error) = service.inner.try_generate_ingress_proof_for_root(
-                        data_root,
-                        service.inner.config.consensus.chunk_size,
-                    ) {
-                        warn!(
-                            %data_root,
-                            ?error,
-                            "Failed startup ingress-proof retry after compact-hash backfill"
-                        );
-                    }
+                let retry_inner = Arc::clone(&service.inner);
+                if let Err(error) = handle_for_inner
+                    .spawn_blocking(move || {
+                        let chunk_size = retry_inner.config.consensus.chunk_size;
+                        for data_root in retry_roots {
+                            if let Err(error) = retry_inner
+                                .try_generate_ingress_proof_for_root(data_root, chunk_size)
+                            {
+                                warn!(
+                                    %data_root,
+                                    ?error,
+                                    "Failed startup ingress-proof retry after compact-hash backfill"
+                                );
+                            }
+                        }
+                    })
+                    .await
+                {
+                    warn!(?error, "Startup ingress-proof retry task failed");
                 }
                 service
                     .start(handle_for_inner)

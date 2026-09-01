@@ -623,7 +623,9 @@ impl StorageModule {
             if relative_offset < 0 || relative_offset as u64 >= num_chunks_in_partition {
                 continue;
             }
-            offsets.push(PartitionChunkOffset::from(relative_offset as u32));
+            let relative_offset = u32::try_from(relative_offset)
+                .map_err(|_| eyre::eyre!("partition-relative chunk offset exceeds u32"))?;
+            offsets.push(PartitionChunkOffset::from(relative_offset));
         }
         offsets.sort_unstable();
         offsets.dedup();
@@ -677,11 +679,12 @@ impl StorageModule {
                 if relative_offset < 0 || relative_offset as u64 >= num_chunks_in_partition {
                     continue;
                 }
+                let relative_offset = u32::try_from(relative_offset)
+                    .map_err(|_| eyre::eyre!("partition-relative chunk offset exceeds u32"))?;
                 // One short lock acquisition per offset rather than holding
                 // pending/intervals across the whole loop: this runs on the
                 // background prune path and must not stall chunk writes.
-                if self.is_data_chunk_durable_at(PartitionChunkOffset::from(relative_offset as u32))
-                {
+                if self.is_data_chunk_durable_at(PartitionChunkOffset::from(relative_offset)) {
                     durable.insert(*tx_offset);
                     break;
                 }

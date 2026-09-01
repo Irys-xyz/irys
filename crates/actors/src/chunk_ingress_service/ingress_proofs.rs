@@ -1,5 +1,6 @@
 use super::ChunkIngressServiceInner;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::store_ingress_proof;
 use irys_database::{cached_data_root_by_data_root, complete_ingress_leaves};
 use irys_domain::BlockTreeReadGuard;
@@ -10,8 +11,9 @@ use irys_types::{
     SendTraced as _, Traced,
 };
 use reth_db::DatabaseError;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tracing::{debug, error, warn};
 
 /// Shared, process-local exclusion for proof generation by data root.
@@ -21,7 +23,14 @@ use tracing::{debug, error, warn};
 /// check-then-notify race through the cache-service channel.
 #[derive(Clone, Debug, Default)]
 pub struct IngressProofGenerationState {
-    inner: Arc<RwLock<HashSet<DataRoot>>>,
+    inner: Arc<RwLock<IngressProofGenerationStateInner>>,
+}
+
+#[derive(Debug, Default)]
+struct IngressProofGenerationStateInner {
+    active: HashSet<DataRoot>,
+    retry_attempts: HashMap<DataRoot, u8>,
+    retry_scheduled: HashSet<DataRoot>,
 }
 
 impl IngressProofGenerationState {
@@ -34,6 +43,7 @@ impl IngressProofGenerationState {
             .inner
             .write()
             .expect("proof generation state lock poisoned")
+            .active
             .insert(data_root);
         inserted.then(|| IngressProofGenerationLease {
             state: self.clone(),
@@ -46,7 +56,46 @@ impl IngressProofGenerationState {
         self.inner
             .read()
             .expect("proof generation state lock poisoned")
+            .active
             .contains(&data_root)
+    }
+
+    /// Reserves one bounded, monotonic retry for a failed generation attempt.
+    /// Concurrent failures coalesce, and persistent failures stop after the
+    /// capped sequence instead of creating an unbounded retry loop.
+    pub(crate) fn reserve_retry(&self, data_root: DataRoot) -> Option<Duration> {
+        const MAX_RETRIES: u8 = 6;
+        let mut inner = self
+            .inner
+            .write()
+            .expect("proof generation state lock poisoned");
+        if inner.retry_scheduled.contains(&data_root) {
+            return None;
+        }
+        let attempt = *inner.retry_attempts.get(&data_root).unwrap_or(&0);
+        if attempt >= MAX_RETRIES {
+            return None;
+        }
+        inner.retry_attempts.insert(data_root, attempt + 1);
+        inner.retry_scheduled.insert(data_root);
+        Some(Duration::from_secs(1_u64 << attempt))
+    }
+
+    pub(crate) fn mark_retry_dispatched(&self, data_root: DataRoot) {
+        self.inner
+            .write()
+            .expect("proof generation state lock poisoned")
+            .retry_scheduled
+            .remove(&data_root);
+    }
+
+    pub(crate) fn clear_retries(&self, data_root: DataRoot) {
+        let mut inner = self
+            .inner
+            .write()
+            .expect("proof generation state lock poisoned");
+        inner.retry_attempts.remove(&data_root);
+        inner.retry_scheduled.remove(&data_root);
     }
 }
 
@@ -61,6 +110,7 @@ impl Drop for IngressProofGenerationLease {
             .inner
             .write()
             .expect("proof generation state lock poisoned")
+            .active
             .remove(&self.data_root);
     }
 }
@@ -102,6 +152,12 @@ pub enum IngressProofGenerationError {
     /// Invalid data size for the transaction.
     #[error("Invalid data size: {0}")]
     InvalidDataSize(String),
+    /// The data root was removed before proof generation could begin.
+    #[error("Cached data root is no longer available")]
+    DataRootUnavailable,
+    /// Validated compact leaves have not arrived for every expected position.
+    #[error("Compact ingress leaves are incomplete")]
+    IncompleteLeaves,
     /// Failed to generate the proof.
     #[error("Proof generation failed: {0}")]
     GenerationFailed(String),
@@ -110,7 +166,13 @@ pub enum IngressProofGenerationError {
 impl IngressProofGenerationError {
     /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
     pub fn is_benign(&self) -> bool {
-        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
+        matches!(
+            self,
+            Self::NodeNotStaked
+                | Self::AlreadyGenerating
+                | Self::DataRootUnavailable
+                | Self::IncompleteLeaves
+        )
     }
 }
 
@@ -378,7 +440,7 @@ pub fn generate_and_store_ingress_proof(
     let generation_lease = generation_state
         .try_acquire(data_root)
         .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
-    generate_and_store_ingress_proof_inner(
+    generate_and_store_ingress_proof_from_leaves(
         block_tree_guard,
         db,
         config,
@@ -403,28 +465,7 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     generation_lease: IngressProofGenerationLease,
 ) -> Result<IngressProof, IngressProofGenerationError> {
-    generate_and_store_ingress_proof_inner(
-        block_tree_guard,
-        db,
-        config,
-        data_root,
-        anchor_hint,
-        leaves,
-        gossip_sender,
-        generation_lease,
-    )
-}
-
-fn generate_and_store_ingress_proof_inner(
-    block_tree_guard: &BlockTreeReadGuard,
-    db: &DatabaseProvider,
-    config: &Config,
-    data_root: DataRoot,
-    anchor_hint: Option<H256>,
-    leaves: Vec<IngressMerkleLeaf>,
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
-    _generation_lease: IngressProofGenerationLease,
-) -> Result<IngressProof, IngressProofGenerationError> {
+    let _generation_lease = generation_lease;
     let signer: IrysSigner = config.irys_signer();
 
     // Only staked nodes should generate ingress proofs
@@ -536,21 +577,17 @@ pub fn load_complete_ingress_leaves(
     address: irys_types::IrysAddress,
     chunk_size: u64,
 ) -> Result<Vec<IngressMerkleLeaf>, IngressProofGenerationError> {
-    let err = |msg: String| IngressProofGenerationError::InvalidDataSize(msg);
+    let cdr = db
+        .view_eyre(|tx| cached_data_root_by_data_root(tx, data_root))
+        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
+        .ok_or(IngressProofGenerationError::DataRootUnavailable)?;
 
-    // Load data_size & confirm we have metadata for this root
-    db.view_eyre(|tx| {
-        let data_size = cached_data_root_by_data_root(tx, data_root)
-            .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
-            .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
-            .data_size;
-        let leaves = complete_ingress_leaves(tx, data_root, address, data_size, chunk_size)?
-            .ok_or_else(|| {
-                eyre::eyre!("compact ingress leaves are incomplete for data_root {data_root:?}")
-            })?;
-        Ok(leaves)
-    })
-    .map_err(|e| err(e.to_string()))
+    data_size_to_chunk_count(cdr.data_size, chunk_size)
+        .map_err(|error| IngressProofGenerationError::InvalidDataSize(error.to_string()))?;
+
+    db.view_eyre(|tx| complete_ingress_leaves(tx, data_root, address, cdr.data_size, chunk_size))
+        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
+        .ok_or(IngressProofGenerationError::IncompleteLeaves)
 }
 
 #[cfg(test)]
@@ -569,5 +606,27 @@ mod generation_state_tests {
         drop(lease);
         assert!(!state.is_generating(data_root));
         assert!(state.try_acquire(data_root).is_some());
+    }
+
+    #[test]
+    fn generation_retries_are_bounded_and_coalesced() {
+        let state = IngressProofGenerationState::new();
+        let data_root = H256::random();
+
+        assert_eq!(state.reserve_retry(data_root), Some(Duration::from_secs(1)));
+        assert_eq!(state.reserve_retry(data_root), None, "one retry at a time");
+
+        for expected_secs in [2, 4, 8, 16, 32] {
+            state.mark_retry_dispatched(data_root);
+            assert_eq!(
+                state.reserve_retry(data_root),
+                Some(Duration::from_secs(expected_secs))
+            );
+        }
+        state.mark_retry_dispatched(data_root);
+        assert_eq!(state.reserve_retry(data_root), None, "retry cap");
+
+        state.clear_retries(data_root);
+        assert_eq!(state.reserve_retry(data_root), Some(Duration::from_secs(1)));
     }
 }

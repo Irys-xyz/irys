@@ -30,6 +30,7 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_CHUNK_WRITE_FAILED("irys.data_sync.chunk_write_failed_total", "Data sync local write failures after a successful fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_BLOCKED("irys.data_sync.chunk_blocked_total", "Data sync offsets blocked from hot re-fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync Blocked offsets re-queued after local index-ready probe (MissingDataRootIndex → Pending)");
+    counter DATA_SYNC_DURABILITY_STALLED("irys.data_sync.durability_stalled_total", "Data sync writes that did not become durable before the monotonic durability deadline");
     counter DATA_INDEX_HEAL_UNREPAIRED("irys.storage.index_heal_unrepaired_total", "Ledger SMs still gapped/uncertain after a heal pass (labelled by reason)");
     counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync peer fetches by peer source and outcome (source=assigned|ingress_proof, outcome=success|fail)");
     gauge DATA_SYNC_ACTIVE_PEERS("irys.data_sync.active_peers", "Number of active data sync peers");
@@ -271,6 +272,10 @@ pub(crate) fn record_data_sync_chunk_fetched() {
 pub(crate) fn record_data_sync_chunk_stored() {
     DATA_SYNC_CHUNKS_STORED.add(1, &[]);
     DATA_SYNC_CHUNKS_COMPLETED.add(1, &[]);
+}
+
+pub(crate) fn record_data_sync_durability_stalled() {
+    DATA_SYNC_DURABILITY_STALLED.add(1, &[]);
 }
 
 pub(crate) fn record_data_sync_chunk_failure() {

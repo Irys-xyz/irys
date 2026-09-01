@@ -421,10 +421,12 @@ impl InnerCacheTask {
             }
         }
 
-        let mut evictions_performed: usize = 0;
+        let mut pruned_chunks = 0_u64;
         for batch in durable_by_root.chunks(256) {
-            self.db
+            let batch_pruned = self
+                .db
                 .update_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
+                    let mut batch_pruned = 0_u64;
                     for (root, durable_tx_offsets) in batch {
                         trace!(
                             chunk.data_root = ?root,
@@ -438,16 +440,18 @@ impl InnerCacheTask {
                             delete_chunks_older_than,
                         )?;
                         if pruned > 0 {
-                            evictions_performed = evictions_performed.saturating_add(1);
+                            batch_pruned = batch_pruned.saturating_add(pruned);
                             debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned durably stored cached chunk bodies");
                         }
                     }
-                    Ok(())
+                    Ok(batch_pruned)
                 })?;
+            // Count only deletes whose enclosing MDBX transaction committed.
+            pruned_chunks = pruned_chunks.saturating_add(batch_pruned);
         }
 
         info!(
-            chunk.eviction_batches = evictions_performed,
+            chunk.pruned_chunks = pruned_chunks,
             "Completed chunk pruning pass"
         );
         Ok(())
