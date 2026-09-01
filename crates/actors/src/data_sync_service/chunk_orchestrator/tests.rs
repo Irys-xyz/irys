@@ -1,5 +1,6 @@
 use super::*;
 use crate::{chunk_fetcher::MockChunkFetcher, test_helpers::build_test_service_senders};
+use irys_domain::ChunkType;
 use irys_domain::{BlockTree, StorageModuleInfo};
 use irys_testing_utils::TempDirBuilder;
 use irys_types::{
@@ -62,6 +63,25 @@ fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrat
     )
 }
 
+/// Makes `offset` durably `Data` the way the write path does: buffer, then
+/// flush + fsync. `is_data_chunk_durable_at` only becomes true after the fsync.
+fn store_durable_data(sm: &StorageModule, offset: PartitionChunkOffset, chunk_size: usize) {
+    assert!(
+        !sm.is_data_chunk_durable_at(offset),
+        "offset must start non-durable"
+    );
+    sm.write_chunk(offset, vec![9_u8; chunk_size], ChunkType::Data);
+    assert!(
+        !sm.is_data_chunk_durable_at(offset),
+        "a buffered write must not be reported as durable"
+    );
+    sm.force_sync_pending_chunks().expect("flush");
+    assert!(
+        sm.is_data_chunk_durable_at(offset),
+        "an fsynced write must be reported as durable"
+    );
+}
+
 fn insert_requested(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, peer: IrysAddress) {
     orch.chunk_requests.insert(
         offset,
@@ -74,7 +94,7 @@ fn insert_requested(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, 
 }
 
 #[test_log::test(tokio::test)]
-async fn mark_helpers_require_requested_state() {
+async fn mark_helpers_require_valid_source_state() {
     let tmp = TempDirBuilder::new().with_tracing().build();
     let num_chunks = 4;
     let config = test_config(tmp.path().to_path_buf(), num_chunks);
@@ -84,7 +104,8 @@ async fn mark_helpers_require_requested_state() {
     let offset = PartitionChunkOffset::from(0_u32);
 
     // Unknown offset
-    assert!(orch.mark_chunk_stored(offset).is_err());
+    assert!(orch.mark_chunk_awaiting_durability(offset).is_err());
+    assert!(orch.mark_chunk_already_durable(offset).is_err());
     assert!(
         orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
             .is_err()
@@ -100,16 +121,26 @@ async fn mark_helpers_require_requested_state() {
             request_state: ChunkRequestState::Pending,
         },
     );
-    assert!(orch.mark_chunk_stored(offset).is_err());
+    assert!(orch.mark_chunk_awaiting_durability(offset).is_err());
+    assert!(orch.mark_chunk_already_durable(offset).is_err());
     assert!(
         orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
             .is_err()
     );
     assert!(orch.requeue_after_local_write_failure(offset).is_err());
 
-    // Requested accepts each transition
+    // Requested accepts each initial local outcome.
     insert_requested(&mut orch, offset, peer);
-    orch.mark_chunk_stored(offset).expect("store");
+    orch.mark_chunk_awaiting_durability(offset).expect("buffer");
+    assert!(
+        matches!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::AwaitingDurability(..)
+        ),
+        "buffered write must wait for durability"
+    );
+    store_durable_data(&orch.storage_module, offset, 32);
+    orch.reconcile_awaiting_durability(Instant::now(), DURABILITY_WAIT_TIMEOUT);
     assert_eq!(
         orch.chunk_requests[&offset].request_state,
         ChunkRequestState::Completed
@@ -132,6 +163,134 @@ async fn mark_helpers_require_requested_state() {
     );
     // Requeue must not blame the delivering peer.
     assert!(orch.chunk_requests[&offset].excluded.is_none());
+}
+
+#[test_log::test(tokio::test)]
+async fn durability_poll_promotes_only_fsynced_offsets() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(Arc::clone(&sm), &config);
+    let peer = IrysAddress::from([8_u8; 20]);
+    let waiting = PartitionChunkOffset::from(1_u32);
+    let other = PartitionChunkOffset::from(2_u32);
+
+    insert_requested(&mut orch, waiting, peer);
+    orch.mark_chunk_awaiting_durability(waiting).unwrap();
+
+    // Another offset becoming durable must not promote this one.
+    store_durable_data(&sm, other, 32);
+    orch.reconcile_awaiting_durability(Instant::now(), DURABILITY_WAIT_TIMEOUT);
+    assert!(
+        matches!(
+            orch.chunk_requests[&waiting].request_state,
+            ChunkRequestState::AwaitingDurability(..)
+        ),
+        "durability credit must not leak across offsets"
+    );
+
+    store_durable_data(&sm, waiting, 32);
+    orch.reconcile_awaiting_durability(Instant::now(), DURABILITY_WAIT_TIMEOUT);
+    assert_eq!(
+        orch.chunk_requests[&waiting].request_state,
+        ChunkRequestState::Completed
+    );
+
+    // Polling again is a no-op: a completed request stays completed.
+    orch.reconcile_awaiting_durability(Instant::now(), DURABILITY_WAIT_TIMEOUT);
+    assert_eq!(
+        orch.chunk_requests[&waiting].request_state,
+        ChunkRequestState::Completed
+    );
+}
+
+#[test_log::test(tokio::test)]
+async fn durability_poll_returns_a_stalled_wait_to_pending() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = IrysAddress::from([8_u8; 20]);
+    let waiting = PartitionChunkOffset::from(1_u32);
+
+    insert_requested(&mut orch, waiting, peer);
+    orch.mark_chunk_awaiting_durability(waiting).unwrap();
+
+    let started = Instant::now();
+    orch.reconcile_awaiting_durability(started, DURABILITY_WAIT_TIMEOUT);
+    assert!(matches!(
+        orch.chunk_requests[&waiting].request_state,
+        ChunkRequestState::AwaitingDurability(..)
+    ));
+
+    orch.reconcile_awaiting_durability(
+        started + DURABILITY_WAIT_TIMEOUT + Duration::from_secs(1),
+        DURABILITY_WAIT_TIMEOUT,
+    );
+    assert_eq!(
+        orch.chunk_requests[&waiting].request_state,
+        ChunkRequestState::Pending,
+        "a write that never became durable must be re-fetchable"
+    );
+    assert!(
+        orch.chunk_requests[&waiting].excluded.is_none(),
+        "a stalled local write must not blame the delivering peer"
+    );
+}
+
+#[test_log::test(tokio::test)]
+async fn awaiting_durability_is_observable_and_times_out_to_pending() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = IrysAddress::from([9_u8; 20]);
+    let offset = PartitionChunkOffset::from(1_u32);
+
+    insert_requested(&mut orch, offset, peer);
+    orch.mark_chunk_awaiting_durability(offset).unwrap();
+    let metrics = orch.get_metrics();
+    assert_eq!(metrics.awaiting_durability_requests, 1);
+    assert_eq!(metrics.active_requests, 0);
+
+    orch.reconcile_awaiting_durability(Instant::now(), Duration::ZERO);
+    assert_eq!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Pending,
+        "a stalled durability wait must not park data sync forever"
+    );
+    assert_eq!(orch.get_metrics().awaiting_durability_requests, 0);
+}
+
+#[test_log::test(tokio::test)]
+async fn awaiting_durability_rechecks_storage_before_refetching() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(Arc::clone(&sm), &config);
+    let peer = IrysAddress::from([10_u8; 20]);
+    let offset = PartitionChunkOffset::from(1_u32);
+
+    insert_requested(&mut orch, offset, peer);
+    orch.mark_chunk_awaiting_durability(offset).unwrap();
+    sm.write_chunk(
+        offset,
+        vec![0xab; config.consensus.chunk_size as usize],
+        ChunkType::Data,
+    );
+    sm.sync_pending_chunks().unwrap();
+    assert!(sm.is_data_chunk_durable_at(offset));
+
+    orch.reconcile_awaiting_durability(Instant::now(), Duration::ZERO);
+    assert_eq!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Completed,
+        "durable storage must win over a stale wait state"
+    );
 }
 
 #[test_log::test(tokio::test)]
@@ -279,7 +438,9 @@ async fn unblock_missing_data_root_index_requeues_only_that_reason() {
     );
 
     insert_requested(&mut orch, completed, peer);
-    orch.mark_chunk_stored(completed).unwrap();
+    orch.mark_chunk_awaiting_durability(completed).unwrap();
+    store_durable_data(&orch.storage_module, completed, 32);
+    orch.reconcile_awaiting_durability(Instant::now(), DURABILITY_WAIT_TIMEOUT);
 
     insert_requested(&mut orch, requested, peer);
 

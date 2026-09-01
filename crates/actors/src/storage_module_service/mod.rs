@@ -138,13 +138,26 @@ impl StorageModuleServiceInner {
         };
 
         for sm in storage_modules.iter() {
-            if sm.last_pending_write().elapsed() > Duration::from_secs(5)
-                && let Err(e) = sm.force_sync_pending_chunks()
-            {
-                error!(
-                    "Couldn't flush pending chunks for storage_module {}: {}",
-                    sm.id, e
-                );
+            if sm.has_pending_writes() {
+                // Check the configured per-submodule batch threshold once per
+                // service tick, not once per ingested chunk.
+                if let Err(e) = sm.sync_pending_chunks() {
+                    error!(
+                        "Couldn't sync buffered chunks for storage_module {}: {}",
+                        sm.id, e
+                    );
+                }
+                // `last_pending_write` is monotonic. Force only an idle tail;
+                // active ingress continues to benefit from striped batches.
+                if sm.has_pending_writes()
+                    && sm.last_pending_write().elapsed() > Duration::from_secs(5)
+                    && let Err(e) = sm.force_sync_pending_chunks()
+                {
+                    error!(
+                        "Couldn't flush idle pending chunks for storage_module {}: {}",
+                        sm.id, e
+                    );
+                }
             }
         }
     }

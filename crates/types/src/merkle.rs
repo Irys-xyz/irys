@@ -4,6 +4,7 @@ use crate::Base64;
 use crate::ChunkBytes;
 use crate::H256;
 use crate::IrysAddress;
+use crate::TxChunkOffset;
 use crate::chunked::ChunkedIterator;
 use borsh::BorshDeserialize as _;
 use borsh_derive::BorshDeserialize;
@@ -22,6 +23,60 @@ pub struct Node {
     pub max_byte_range: usize,
     pub left_child: Option<Box<Self>>,
     pub right_child: Option<Box<Self>>,
+}
+
+/// Minimal in-memory representation of a miner-specific ingress Merkle leaf.
+/// Persisted compact state stores only the ingress data hash; callers derive
+/// this identity and boundary from that hash and authoritative transaction
+/// metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressMerkleLeaf {
+    pub id: H256,
+    pub max_byte_range: u64,
+}
+
+/// Returns the exact transaction-relative byte range assigned to a chunk
+/// position under the protocol's fixed-size chunking rule.
+pub fn expected_chunk_byte_range(
+    tx_offset: TxChunkOffset,
+    data_size: u64,
+    chunk_size: u64,
+) -> Result<(u64, u64), Error> {
+    eyre::ensure!(data_size > 0, "data size must be non-zero");
+    eyre::ensure!(chunk_size > 0, "chunk size must be non-zero");
+    let min = u64::from(*tx_offset)
+        .checked_mul(chunk_size)
+        .ok_or_else(|| eyre!("chunk byte range overflow"))?;
+    eyre::ensure!(min < data_size, "chunk offset is past the data size");
+    let max = min
+        .checked_add(chunk_size)
+        .ok_or_else(|| eyre!("chunk byte range overflow"))?
+        .min(data_size);
+    Ok((min, max))
+}
+
+/// Verifies that a validated Merkle path identifies exactly the expected chunk
+/// range. Rightmost status is checked separately because provisional
+/// transaction metadata may understate the size committed by the data root.
+pub fn validate_path_byte_range(
+    path: &ValidatePathResult,
+    expected: (u64, u64),
+) -> Result<(), Error> {
+    let actual = (
+        u64::try_from(path.min_byte_range)
+            .map_err(|_| eyre!("validated chunk start boundary exceeds u64"))?,
+        u64::try_from(path.max_byte_range)
+            .map_err(|_| eyre!("validated chunk end boundary exceeds u64"))?,
+    );
+    eyre::ensure!(
+        actual == expected,
+        "data path range {}..{} does not match expected range {}..{}",
+        actual.0,
+        actual.1,
+        expected.0,
+        expected.1
+    );
+    Ok(())
 }
 
 /// Concatenated ids and max byte ranges for full set of nodes for an original data chunk, starting with the root.
@@ -433,14 +488,19 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
     for chunk in chunks {
         let chunk = chunk?;
         let bytes = chunk.as_ref();
-        let data_hash = hash_ingress_sha256(bytes, address);
         let max_byte_range = min_byte_range + bytes.len();
+        let ingress_data_hash = generate_ingress_data_hash(bytes, address);
+        let compact_leaf = generate_ingress_leaf_from_data_hash(
+            ingress_data_hash,
+            max_byte_range
+                .try_into()
+                .map_err(|_| eyre!("ingress leaf byte range exceeds u64"))?,
+        )?;
         let max_byte_range_bytes = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_hash, &max_byte_range_bytes]);
 
         leaves.push(Node {
-            id,
-            data_hash: Some(data_hash),
+            id: compact_leaf.id.0,
+            data_hash: Some(ingress_data_hash.0),
             min_byte_range,
             max_byte_range,
             left_child: None,
@@ -463,6 +523,73 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
         min_byte_range += bytes.len();
     }
     Ok((leaves, and_regular.then_some(regular_leaves)))
+}
+
+/// Computes the miner-specific hash that cannot be reconstructed after the
+/// chunk body is reclaimed.
+pub fn generate_ingress_data_hash(chunk: impl AsRef<[u8]>, address: IrysAddress) -> H256 {
+    H256(hash_ingress_sha256(chunk.as_ref(), address))
+}
+
+/// Constructs an ingress leaf from its miner-specific data hash and an
+/// authoritative transaction-relative byte boundary.
+pub fn generate_ingress_leaf_from_data_hash(
+    ingress_data_hash: H256,
+    max_byte_range: u64,
+) -> Result<IngressMerkleLeaf, Error> {
+    let max_byte_range_usize: usize = max_byte_range
+        .try_into()
+        .map_err(|_| eyre!("ingress leaf byte range exceeds usize"))?;
+    let id = hash_all_sha256(vec![
+        &ingress_data_hash.0,
+        &max_byte_range_usize.to_note_vec(),
+    ]);
+    Ok(IngressMerkleLeaf {
+        id: H256(id),
+        max_byte_range,
+    })
+}
+
+/// Rebuilds the existing ingress Merkle root from ordered compact leaves.
+///
+/// Callers that know the transaction size/chunk size must additionally verify
+/// that every expected position is present and has its exact expected byte
+/// boundary before calling this helper. This function still rejects duplicate
+/// or decreasing boundaries so malformed persisted state cannot be folded into
+/// a root silently.
+pub fn generate_ingress_root_from_leaves(
+    leaves: impl IntoIterator<Item = IngressMerkleLeaf>,
+) -> Result<Node, Error> {
+    let mut min_byte_range = 0_usize;
+    let nodes = leaves
+        .into_iter()
+        .map(|leaf| {
+            let max_byte_range: usize = leaf
+                .max_byte_range
+                .try_into()
+                .map_err(|_| eyre!("ingress leaf byte range exceeds usize"))?;
+            if max_byte_range <= min_byte_range {
+                return Err(eyre!(
+                    "ingress leaf boundaries must be strictly increasing: {} then {}",
+                    min_byte_range,
+                    max_byte_range
+                ));
+            }
+            let node = Node {
+                id: leaf.id.0,
+                // Compact leaves intentionally omit the intermediate data hash.
+                // `generate_data_root` only consumes leaf ids and byte ranges.
+                data_hash: None,
+                min_byte_range,
+                max_byte_range,
+                left_child: None,
+                right_child: None,
+            };
+            min_byte_range = max_byte_range;
+            Ok(node)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    generate_data_root(nodes)
 }
 
 pub struct DataRootLeaf {
@@ -603,6 +730,40 @@ pub fn hash_all_sha256(messages: Vec<&[u8]>) -> [u8; 32] {
 mod tests {
     use super::ProofDeserialize as _;
     use super::*;
+
+    #[test]
+    fn expected_chunk_ranges_include_a_partial_tail() {
+        assert_eq!(
+            expected_chunk_byte_range(TxChunkOffset::from(0), 71, 32).unwrap(),
+            (0, 32)
+        );
+        assert_eq!(
+            expected_chunk_byte_range(TxChunkOffset::from(1), 71, 32).unwrap(),
+            (32, 64)
+        );
+        assert_eq!(
+            expected_chunk_byte_range(TxChunkOffset::from(2), 71, 32).unwrap(),
+            (64, 71)
+        );
+        assert!(expected_chunk_byte_range(TxChunkOffset::from(3), 71, 32).is_err());
+    }
+
+    #[test]
+    fn path_range_must_match_chunk_position_exactly() {
+        let mut path = ValidatePathResult {
+            leaf_hash: [0; HASH_SIZE],
+            min_byte_range: 64,
+            max_byte_range: 71,
+            is_rightmost_chunk: true,
+        };
+        assert!(validate_path_byte_range(&path, (64, 71)).is_ok());
+
+        path.min_byte_range = 63;
+        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
+        path.min_byte_range = 64;
+        path.max_byte_range = 70;
+        assert!(validate_path_byte_range(&path, (64, 71)).is_err());
+    }
 
     #[test]
     fn validate_is_rightmost_chunk() {

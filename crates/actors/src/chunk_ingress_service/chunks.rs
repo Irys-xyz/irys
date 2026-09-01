@@ -1,32 +1,26 @@
 use super::ChunkIngressMessage;
 use super::ChunkIngressServiceInner;
-use super::ingress_proofs::generate_and_store_ingress_proof;
+use super::ingress_proofs::generate_and_store_ingress_proof_from_leaves;
 use super::metrics::{
     record_chunk_duplicate, record_chunk_ingested, record_enqueue_duration, record_flush_failure,
     record_validation_duration,
 };
-use eyre::eyre;
+
 use irys_database::{
-    confirm_data_size_for_data_root,
-    db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
-    db_cache::data_size_to_chunk_count,
-    tables::{CachedChunks, CachedChunksIndex},
+    complete_ingress_leaves, confirm_data_size_for_data_root, db::IrysDatabaseExt as _,
 };
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    DataLedger, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _,
-    chunk::{UnpackedChunk, max_chunk_offset},
-    hash_sha256,
-    irys::IrysSigner,
-    validate_path,
+    DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof, SendTraced as _,
+    chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256, irys::IrysSigner, validate_path,
+    validate_path_byte_range,
 };
 use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
-use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _};
+use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{collections::HashSet, fmt::Display};
 use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 
 /// CDR-only ingress-proof eligibility gate, factored out so the contract is
@@ -399,44 +393,29 @@ impl ChunkIngressServiceInner {
         // data_root->chunk_hash
         let _proof_span = info_span!("chunk.validate_proof").entered();
 
-        let Some(max_valid_offset) = max_chunk_offset(data_size, chunk_size) else {
+        // Before confirmation, CachedDataRoot holds the largest size claimed by
+        // any header sharing this root. Validate against this chunk's claim so
+        // a rightmost data path can authoritatively correct that provisional
+        // maximum downward. Once confirmed, only the cached size is accepted.
+        let layout_data_size = if data_size_confirmed {
+            data_size
+        } else {
+            chunk.data_size
+        };
+        if layout_data_size == 0 {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                 CriticalChunkIngressError::InvalidDataSize,
                 chunk.data_root,
             );
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
-        };
-
-        let offset_u64 = u64::from(*chunk.tx_offset);
-
-        if offset_u64 > max_valid_offset {
-            let num_chunks = data_size.div_ceil(chunk_size);
-            error!(
-                "Invalid tx_offset: {} exceeds max valid offset {} for data_size {} (num_chunks: {})",
-                offset_u64, max_valid_offset, data_size, num_chunks
-            );
-            return Err(CriticalChunkIngressError::InvalidOffset(format!(
-                "tx_offset {} exceeds max valid offset {} for data_size {}",
-                offset_u64, max_valid_offset, data_size
-            ))
-            .into());
         }
 
+        let (expected_min_byte_range, expected_max_byte_range) =
+            expected_chunk_byte_range(chunk.tx_offset, layout_data_size, chunk_size)
+                .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
+        let target_offset = u128::from(expected_max_byte_range - 1);
         let root_hash = chunk.data_root.0;
-        let target_offset = match chunk.end_byte_offset_checked(chunk_size) {
-            Some(offset) => u128::from(offset),
-            None => {
-                error!(
-                    "Byte offset calculation failed for tx_offset {} with data_size {}",
-                    *chunk.tx_offset, chunk.data_size
-                );
-                return Err(CriticalChunkIngressError::InvalidOffset(
-                    "Byte offset calculation overflow or invalid offset".to_string(),
-                )
-                .into());
-            }
-        };
         let path_buff = &chunk.data_path;
 
         info!(
@@ -455,27 +434,6 @@ impl ChunkIngressServiceInner {
             Ok(v) => v,
         };
 
-        // Check and see if this is the rightmost chunk
-        if path_result.is_rightmost_chunk {
-            // If this is the rightmost chunk in the data_root we can use it to
-            // validate the data_size and mark it as "confirmed" in the cache.
-            //
-            // In this case the data path stores offsets so we need to add one
-            // to get the size in bytes.
-            let confirmed_data_size: u64 = path_result
-                .max_byte_range
-                .try_into()
-                .expect("to convert U128 path_result.max_byte_range to data_size to u64");
-
-            self.irys_db
-                .update_eyre(|db_tx| {
-                    confirm_data_size_for_data_root(db_tx, &chunk.data_root, confirmed_data_size)
-                })
-                .expect("confirm_data_size database operation to succeed");
-        }
-
-        // Use data_size to identify and validate that only the last chunk
-        // can be less than chunk_size
         let chunk_len = u64::try_from(chunk.bytes.len())
             .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
 
@@ -485,28 +443,33 @@ impl ChunkIngressServiceInner {
         // consensus size, then the data_root is actually invalid and no future
         // chunks from that data_root should be ingressed.
 
-        // Note: num_chunks, chunk_size, offset_u64, and max_valid_offset already
-        // computed in offset validation above
-        let is_last_chunk = offset_u64 == max_valid_offset;
+        let expected_chunk_len = expected_max_byte_range - expected_min_byte_range;
+        if chunk_len != expected_chunk_len {
+            error!(
+                "Chunk has wrong size: tx_offset {} chunk_len {} expected {}",
+                chunk.tx_offset, chunk_len, expected_chunk_len
+            );
+            return Ok(());
+        }
 
-        if is_last_chunk {
-            // Last chunk can be <= chunk_size
-            if chunk_len > chunk_size {
-                error!(
-                    "Last chunk exceeds max size: tx_offset {} chunk_len {} max {}",
-                    chunk.tx_offset, chunk_len, chunk_size
-                );
-                return Ok(());
-            }
-        } else {
-            // Non-last chunk must be exactly chunk_size
-            if chunk_len != chunk_size {
-                error!(
-                    "Non-last chunk has wrong size: tx_offset {} chunk_len {} expected {}",
-                    chunk.tx_offset, chunk_len, chunk_size
-                );
-                return Ok(());
-            }
+        let is_last_chunk = expected_max_byte_range == layout_data_size;
+        validate_path_byte_range(
+            &path_result,
+            (expected_min_byte_range, expected_max_byte_range),
+        )
+        .map_err(|error| CriticalChunkIngressError::InvalidOffset(error.to_string()))?;
+
+        // Once the layout is confirmed, Merkle rightmost status must agree
+        // with the transaction position. Before confirmation, a full prefix
+        // chunk may validly belong to a larger root than an incorrect header
+        // claims; accepting it preserves overlapping-data-root recovery while
+        // the genuinely rightmost path remains the only size authority.
+        if data_size_confirmed && path_result.is_rightmost_chunk != is_last_chunk {
+            return Err(CriticalChunkIngressError::InvalidOffset(
+                "data path rightmost status does not match the confirmed chunk position"
+                    .to_string(),
+            )
+            .into());
         }
 
         // Check that the leaf hash on the data_path matches the chunk_hash
@@ -519,34 +482,69 @@ impl ChunkIngressServiceInner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
+        // A rightmost path attests the declared data size only after its exact
+        // range and body have both been validated.
+        if path_result.is_rightmost_chunk {
+            self.irys_db
+                .update_eyre(|db_tx| {
+                    confirm_data_size_for_data_root(
+                        db_tx,
+                        &chunk.data_root,
+                        expected_max_byte_range,
+                    )
+                })
+                .map_err(|error| {
+                    error!(
+                        %error,
+                        data_root = %chunk.data_root,
+                        "Failed to confirm data-root size"
+                    );
+                    CriticalChunkIngressError::DatabaseError
+                })?;
+        }
+
         record_validation_duration(validation_start.elapsed_ms());
 
         drop(_proof_span);
 
-        // Write-behind: defers MDBX write for throughput
+        // The background writer batches concurrent MDBX writes, but returns
+        // only after the exact batch containing this chunk commits.
         let storage_start = Instant::now();
-        match self
+        let queued_write = match self
             .chunk_data_writer
             .queue_write(Arc::clone(&chunk))
             .instrument(info_span!("chunk.cache_write"))
             .await
         {
-            Ok(true) => {
-                record_chunk_duplicate();
-            }
-            Ok(false) => {}
+            Ok(queued) => queued,
             Err(e) => {
                 error!(
-                    "Write-behind queue error for chunk data_root {:?} tx_offset {}: {:?}",
+                    "Failed to queue chunk cache write for data_root {:?} tx_offset {}: {:?}",
                     chunk.data_root, chunk.tx_offset, e
                 );
-                return Err(CriticalChunkIngressError::Other(format!(
-                    "Write-behind channel closed: {e:?}"
-                ))
-                .into());
+                return Err(CriticalChunkIngressError::DatabaseError.into());
             }
+        };
+        if queued_write.is_duplicate() {
+            record_chunk_duplicate();
         }
         record_enqueue_duration(storage_start.elapsed_ms());
+
+        // Commit the validated body and assignment-independent leaf before
+        // making the chunk eligible for storage-module durability. Otherwise a
+        // fast SM fsync could delete the cache row before this batch commits,
+        // and a delayed writer could reinsert the body. The acknowledgement is
+        // tied to this exact write, so another batch cannot mask its failure.
+        if let Err(error) = queued_write.committed().await {
+            error!(
+                %error,
+                data_root = %chunk.data_root,
+                tx_offset = %chunk.tx_offset,
+                "Chunk cache batch failed"
+            );
+            record_flush_failure();
+            return Err(CriticalChunkIngressError::DatabaseError.into());
+        }
 
         // Add to recent valid chunks cache to prevent re-processing
         self.recent_valid_chunks
@@ -604,36 +602,21 @@ impl ChunkIngressServiceInner {
             );
         }
 
-        // Flush to ensure chunks are committed before ingress proof check.
-        if let Err(e) = self.chunk_data_writer.flush().await {
-            error!(
-                "Failed to flush chunk data writer before ingress proof check: {:?}",
-                e
-            );
-            record_flush_failure();
-            // Forget the chunk before reporting, so a re-send is processed rather than skipped.
-            // This chunk was recorded as recently valid before the flush, and the duplicate check
-            // at the top of this function returns early on that record without reaching the
-            // ingress proof check — so leaving it in place would make every retry a silent
-            // no-op and the failure permanent after all.
-            self.recent_valid_chunks.write().await.pop(&chunk_path_hash);
-            // Report the failure rather than returning success. The chunk is not durably stored,
-            // and the ingress proof check below is skipped, so a caller told this succeeded has no
-            // way to learn that the transaction can never be promoted: nothing revisits the proof
-            // for a data_root once its last chunk has been acknowledged. Failing here surfaces the
-            // storage error and leaves the caller free to re-send, which is how every other write
-            // failure on this path already behaves.
-            return Err(CriticalChunkIngressError::DatabaseError.into());
-        }
+        // Leaf persistence is assignment-independent: any staked node that
+        // validates every chunk can produce the same proof it could before the
+        // compact-leaf refactor. Storage-module durability separately authorizes
+        // body reclamation; leaf presence alone is never an eviction fence.
+        self.try_generate_ingress_proof_for_root(chunk_data_root, chunk_size)?;
 
-        self.try_generate_ingress_proof_for_root(root_hash.into(), chunk_size)
+        // Storage-module writes retain their normal batching/striping policy.
+        Ok(())
     }
 
     /// Checks whether an ingress proof should be generated for the given `data_root`
     /// and spawns proof generation if all prerequisites are met:
     /// - the CDR-only prerequisites in [`should_skip_ingress_proof_generation`]
     /// - no local proof already exists
-    /// - all expected chunks are present
+    /// - every expected validated compact leaf is present with no gaps
     pub(crate) fn try_generate_ingress_proof_for_root(
         &self,
         data_root: H256,
@@ -656,30 +639,15 @@ impl ChunkIngressServiceInner {
         // Be explicit that data_size used from here on is the confirmed data size
         let data_size = cdr.data_size;
 
-        // check if we have generated an ingress proof for this tx already
-        // if we have, update it's expiry height
-
-        // Determine existing proof state and chunk count
         let local_address = self.config.irys_signer().address();
-        let (chunk_count, existing_local_proof) = self
+        let existing_local_proof = self
             .irys_db
             .view_eyre(|tx| {
-                let existing_local_proof = irys_database::ingress_proof_by_data_root_address(
-                    tx,
-                    data_root,
-                    local_address,
-                )?;
-
-                // Count chunks (needed for generation & potential regeneration)
-                let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-                let count = cursor
-                    .dup_count(data_root)?
-                    .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
-                Ok((count, existing_local_proof))
+                irys_database::ingress_proof_by_data_root_address(tx, data_root, local_address)
             })
             .map_err(|e| {
                 error!(
-                    "Database error checking ingress proof/chunk count for data_root {:?}: {:?}",
+                    "Database error checking ingress proof for data_root {:?}: {:?}",
                     data_root, e
                 );
                 CriticalChunkIngressError::DatabaseError
@@ -687,6 +655,7 @@ impl ChunkIngressServiceInner {
 
         // Early return if we have a valid existing local proof
         if existing_local_proof.is_some() {
+            self.ingress_proof_generation_state.clear_retries(data_root);
             info!(
                 "Local ingress proof already exists and is valid for data root {}",
                 &data_root
@@ -694,38 +663,75 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
-        // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
-        let Ok(expected_chunk_count) = data_size_to_chunk_count(data_size, chunk_size) else {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: {:?}",
-                CriticalChunkIngressError::InvalidDataSize,
-                data_root,
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
-        };
+        // `complete_ingress_leaves` uses a dup-count only as a cheap prefilter,
+        // then verifies every exact offset and byte boundary before returning.
+        let leaves = self
+            .irys_db
+            .view_eyre(|tx| {
+                complete_ingress_leaves(tx, data_root, local_address, data_size, chunk_size)
+            })
+            .map_err(|error| {
+                error!(
+                    ?data_root,
+                    ?error,
+                    "Database error loading compact ingress leaves"
+                );
+                CriticalChunkIngressError::DatabaseError
+            })?;
 
-        if chunk_count == expected_chunk_count {
-            // we *should* have all the chunks
+        if let Some(leaves) = leaves {
+            // Acquire only after this snapshot is complete. If an incomplete
+            // scan held the lease while the final writer committed, the final
+            // handler could lose its only proof-generation wake-up to
+            // contention. Every lease holder is therefore ready to make
+            // progress, and competing complete scans can safely coalesce.
+            let Some(generation_lease) = self.ingress_proof_generation_state.try_acquire(data_root)
+            else {
+                return Ok(());
+            };
             let db = self.irys_db.clone();
             let block_tree_read_guard = self.block_tree_read_guard.clone();
             let config = self.config.clone();
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
-            let cache_sender = self.service_senders.chunk_cache.clone();
+            let retry_sender = self.service_senders.chunk_ingress.clone();
+            let generation_state = self.ingress_proof_generation_state.clone();
+            let runtime_handle = tokio::runtime::Handle::current();
             let _fut = self.exec.clone().spawn_blocking(move || {
-                if let Err(error) = generate_and_store_ingress_proof(
+                match generate_and_store_ingress_proof_from_leaves(
                     &block_tree_read_guard,
                     &db,
                     &config,
                     data_root,
                     None,
+                    leaves,
                     &gossip_sender,
-                    &cache_sender,
+                    generation_lease,
                 ) {
-                    if error.is_benign() {
+                    Ok(_) => generation_state.clear_retries(data_root),
+                    Err(error) if error.is_benign() => {
                         debug!(proof.data_root = ?data_root, "Skipped ingress proof generation: {error}");
-                    } else {
+                    }
+                    Err(error) => {
                         warn!(proof.data_root = ?data_root, "Failed to generate ingress proof: {error}");
+                        if let Some(delay) = generation_state.reserve_retry(data_root) {
+                            let retry_state = generation_state.clone();
+                            runtime_handle.spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                retry_state.mark_retry_dispatched(data_root);
+                                if let Err(send_error) = retry_sender.send_traced(
+                                    ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![
+                                        data_root,
+                                    ]),
+                                ) {
+                                    retry_state.clear_retries(data_root);
+                                    warn!(
+                                        proof.data_root = ?data_root,
+                                        ?send_error,
+                                        "Failed to schedule ingress-proof retry"
+                                    );
+                                }
+                            });
+                        }
                     }
                 }
             }).in_current_span();
@@ -911,91 +917,25 @@ impl AdvisoryChunkIngressError {
     }
 }
 
-/// Generates an ingress proof for a specific `data_root`
-/// pulls required data from all sources
+/// Generates an ingress proof for a specific `data_root` from its ordered,
+/// persisted compact leaves. Cached chunk bodies are not read on this path.
 #[must_use = "the generated ingress proof should be used or stored"]
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
     data_root: DataRoot,
-    size: u64,
-    chunk_size: u64,
+    leaves: Vec<IngressMerkleLeaf>,
     signer: IrysSigner,
     chain_id: ChainId,
     anchor: H256,
 ) -> eyre::Result<IngressProof> {
-    // load the chunks from the DB
-    // TODO: for now we assume the chunks all all in the DB chunk cache
-    // in future, we'll need access to whatever unified storage provider API we have to get chunks
-    // regardless of actual location
-
-    let expected_chunk_count = data_size_to_chunk_count(size, chunk_size)?;
-
-    let (proof, actual_data_size, actual_chunk_count) = db.view_eyre(|tx| {
-        let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-
-        // start from first duplicate entry for this root_hash
-        let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
-
-        // we need to validate that the index is valid
-        // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
-        // if we have, we *must* error
-        let mut set = HashSet::<H256>::new();
-
-        let mut chunk_count: u32 = 0;
-        let mut total_data_size: u64 = 0;
-
-        let iter = dup_walker.into_iter().map(|entry| {
-            let (root_hash2, index_entry) = entry?;
-            // make sure we haven't traversed into the wrong key
-            assert_eq!(data_root, root_hash2);
-
-            let chunk_path_hash = index_entry.meta.chunk_path_hash;
-            if set.contains(&chunk_path_hash) {
-                return Err(eyre!(
-                    "Chunk with hash {} has been found twice for index entry {} of data_root {}",
-                    &chunk_path_hash,
-                    &index_entry.index,
-                    &data_root
-                ));
-            }
-            set.insert(chunk_path_hash);
-
-            // TODO: add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
-            let chunk = tx
-                .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
-                .ok_or(eyre!(
-                    "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
-                ))?;
-
-            let chunk_bin = chunk
-                .chunk
-                .ok_or(eyre!(
-                    "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
-                ))?
-                .0;
-            let chunk_len =
-                u64::try_from(chunk_bin.len()).map_err(|_| eyre!("chunk length exceeds u64"))?;
-            total_data_size += chunk_len;
-            chunk_count += 1;
-
-            Ok(chunk_bin)
-        });
-
-        // generate the ingress proof hash
-        let proof = irys_types::ingress::generate_ingress_proof(
-            &signer, data_root, iter, chain_id, anchor,
-        )?;
-
-        Ok((proof, total_data_size, chunk_count))
-    })?;
+    let proof = irys_types::ingress::generate_ingress_proof_from_leaves(
+        &signer, data_root, leaves, chain_id, anchor,
+    )?;
 
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
     );
-    assert_eq!(actual_data_size, size);
-    assert_eq!(actual_chunk_count, expected_chunk_count);
-
     db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
     Ok(proof)

@@ -1889,6 +1889,16 @@ impl IrysNode {
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
+        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+
+        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
+        let ingress_proof_generation_state =
+            irys_actors::chunk_ingress_service::IngressProofGenerationState::default();
+
+        // Spawned after the storage modules: capacity pruning asks them which
+        // cached bodies are already fsynced before reclaiming any.
         let chunk_cache_handle = ChunkCacheService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),
@@ -1897,15 +1907,11 @@ impl IrysNode {
             config.clone(),
             service_senders.gossip_broadcast.clone(),
             service_senders.chunk_cache.clone(),
+            storage_modules_guard.clone(),
+            ingress_proof_generation_state.clone(),
             runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
-
-        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
-
-        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
-        let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Provide storage modules guard to block migration service for partition recovery
         service_senders
@@ -1945,6 +1951,7 @@ impl IrysNode {
                 receivers.chunk_ingress,
                 &config,
                 &service_senders,
+                ingress_proof_generation_state,
                 runtime_handle.clone(),
                 task_exec.clone(),
             );
