@@ -5,10 +5,13 @@ pub mod peer_stats;
 
 use crate::{
     chunk_fetcher::ChunkFetcherFactory,
-    chunk_ingress_service::{ChunkIngressError, facade::ChunkIngressFacadeImpl},
+    chunk_ingress_service::{
+        ChunkIngressError, CriticalChunkIngressError, facade::ChunkIngressFacadeImpl,
+    },
     metrics,
     services::ServiceSenders,
 };
+use chunk_fetcher::ChunkFetchFailureKind;
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::ingress_proofs_by_data_root;
@@ -81,6 +84,19 @@ fn attempt_data_sync_write(
     }
 }
 
+fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
+    matches!(
+        error,
+        ChunkIngressError::Critical(
+            CriticalChunkIngressError::InvalidProof
+                | CriticalChunkIngressError::InvalidDataHash
+                | CriticalChunkIngressError::InvalidChunkSize
+                | CriticalChunkIngressError::InvalidDataSize
+                | CriticalChunkIngressError::InvalidOffset(_)
+        )
+    )
+}
+
 async fn forward_chunk_to_ingress(
     service_senders: &ServiceSenders,
     unpacked: UnpackedChunk,
@@ -131,6 +147,9 @@ pub struct DataSyncServiceInner {
     rearm_backoff_remaining: u64,
     /// Skip budget applied after the next zero-yield pass (grows, capped).
     rearm_backoff_next_skips: u64,
+    /// Rotates which storage module gets the first opportunity to consume
+    /// shared peer concurrency on each scheduler tick.
+    orchestrator_dispatch_cursor: usize,
 }
 
 /// Re-arm `Blocked(MissingDataRootIndex)` when the local index looks ready.
@@ -149,6 +168,66 @@ const REARM_BACKOFF_INITIAL_SKIPS: u64 = 1;
 
 /// Cap zero-yield skip budget (~16s at 1s re-arm cadence).
 const REARM_BACKOFF_MAX_SKIPS: u64 = 16;
+
+/// Give every storage module one dispatch opportunity per round, rotating the
+/// first module between ticks. The callback returns whether it consumed work.
+/// Rounds stop once no module can use another shared peer permit.
+fn dispatch_round_robin<T: Copy>(
+    ids: &mut [T],
+    cursor: usize,
+    mut dispatch: impl FnMut(T) -> bool,
+) -> usize {
+    if ids.is_empty() {
+        return 0;
+    }
+    let start = cursor % ids.len();
+    ids.rotate_left(start);
+    loop {
+        let mut dispatched = false;
+        for id in ids.iter().copied() {
+            dispatched |= dispatch(id);
+        }
+        if !dispatched {
+            break;
+        }
+    }
+    (cursor + 1) % ids.len()
+}
+
+#[cfg(test)]
+mod scheduler_fairness_tests {
+    use super::dispatch_round_robin;
+
+    #[test]
+    fn shared_capacity_is_round_robin_across_storage_modules() {
+        let mut ids = [0_u8, 1_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let next_cursor = dispatch_round_robin(&mut ids, 0, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![0, 1, 0]);
+        assert_eq!(next_cursor, 1);
+
+        let mut ids = [0_u8, 1_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let _ = dispatch_round_robin(&mut ids, next_cursor, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![1, 0, 1]);
+    }
+}
 
 pub enum DataSyncServiceMessage {
     /// Refresh peer/orchestrator membership for current ledger-assigned SMs.
@@ -169,11 +248,7 @@ pub enum DataSyncServiceMessage {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
-    },
-    ChunkTimedOut {
-        storage_module_id: usize,
-        chunk_offset: PartitionChunkOffset,
-        peer_address: IrysAddress,
+        failure_kind: ChunkFetchFailureKind,
     },
     PeerListUpdated,
     PeerDisconnected {
@@ -207,6 +282,7 @@ impl DataSyncServiceInner {
             rearm_tick: 0,
             rearm_backoff_remaining: 0,
             rearm_backoff_next_skips: 0,
+            orchestrator_dispatch_cursor: 0,
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -226,8 +302,6 @@ impl DataSyncServiceInner {
                 peer_address: peer_addr,
                 chunk,
             } => {
-                // Fetch succeeded — record that separately from durable store.
-                metrics::record_data_sync_chunk_fetched();
                 if let Err(e) = self
                     .on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
                     .await
@@ -244,24 +318,14 @@ impl DataSyncServiceInner {
                 storage_module_id,
                 chunk_offset,
                 peer_addr,
+                failure_kind,
             } => {
                 metrics::record_data_sync_chunk_failure();
-                if let Err(e) = self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr) {
+                if let Err(e) =
+                    self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr, failure_kind)
+                {
                     error!(
                         "Failed to handle chunk failure for storage_module {} chunk_offset {} from peer {}: {e:?}",
-                        storage_module_id, chunk_offset, peer_addr
-                    );
-                }
-            }
-            DataSyncServiceMessage::ChunkTimedOut {
-                storage_module_id,
-                chunk_offset,
-                peer_address: peer_addr,
-            } => {
-                metrics::record_data_sync_chunk_failure();
-                if let Err(e) = self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr) {
-                    error!(
-                        "Failed to handle chunk timeout for storage_module {} chunk_offset {} from peer {}: {e:?}",
                         storage_module_id, chunk_offset, peer_addr
                     );
                 }
@@ -277,8 +341,38 @@ impl DataSyncServiceInner {
 
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn tick(&mut self) -> eyre::Result<()> {
-        for orchestrator in self.chunk_orchestrators.values_mut() {
-            orchestrator.tick()?;
+        let mut orchestrator_ids: Vec<_> = self.chunk_orchestrators.keys().copied().collect();
+        orchestrator_ids.sort_unstable();
+        for id in &orchestrator_ids {
+            if let Some(orchestrator) = self.chunk_orchestrators.get_mut(id) {
+                orchestrator.prepare_tick();
+            }
+        }
+
+        if !orchestrator_ids.is_empty() {
+            // One request per storage module per round. A sparse term ledger
+            // therefore cannot fill every shared peer permit before Publish or
+            // another storage module gets an opportunity to dispatch.
+            self.orchestrator_dispatch_cursor = dispatch_round_robin(
+                &mut orchestrator_ids,
+                self.orchestrator_dispatch_cursor,
+                |id| {
+                    self.chunk_orchestrators
+                        .get_mut(&id)
+                        .is_some_and(ChunkOrchestrator::dispatch_next)
+                },
+            );
+
+            for id in &orchestrator_ids {
+                if let Some(orchestrator) = self.chunk_orchestrators.get(id) {
+                    let state = orchestrator.get_metrics();
+                    metrics::record_data_sync_scheduler_state(
+                        orchestrator.ledger_id(),
+                        *id,
+                        &state,
+                    );
+                }
+            }
         }
         self.optimize_peer_concurrency();
         self.rearm_tick = self.rearm_tick.wrapping_add(1);
@@ -461,11 +555,6 @@ impl DataSyncServiceInner {
         peer_addr: IrysAddress,
         chunk: ChunkFormat,
     ) -> eyre::Result<()> {
-        // Peer delivery success: credit bandwidth stats, leave Requested until write outcome.
-        if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-            orchestrator.on_chunk_fetched(chunk_offset, peer_addr)?;
-        }
-
         let consensus = &self.config.consensus;
         let unpacked_chunk = match chunk {
             ChunkFormat::Unpacked(u) => u,
@@ -485,11 +574,36 @@ impl DataSyncServiceInner {
             forward_chunk_to_ingress(&self.service_senders, unpacked_chunk.clone()).await
         {
             if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-                orchestrator.requeue_after_local_write_failure(chunk_offset)?;
+                if ingress_error_is_invalid_peer_data(&error) {
+                    metrics::record_data_sync_chunk_failure();
+                    metrics::record_data_sync_fetch_failure(
+                        orchestrator.ledger_id(),
+                        peer_addr,
+                        "invalid_chunk",
+                    );
+                    orchestrator.on_chunk_failed(
+                        chunk_offset,
+                        peer_addr,
+                        ChunkFetchFailureKind::InvalidResponse,
+                    )?;
+                } else {
+                    // The peer delivered valid bytes as far as the network is
+                    // concerned; local ingress/database pressure must not
+                    // penalize that peer, but the offset remains unresolved.
+                    orchestrator.on_chunk_fetched(chunk_offset, peer_addr)?;
+                    orchestrator.requeue_after_local_write_failure(chunk_offset)?;
+                }
             }
             return Err(eyre::eyre!(
                 "chunk ingress rejected data-sync body before durable write: {error}"
             ));
+        }
+
+        // Validation accepted the body. Credit the fetch separately from the
+        // later storage-module durability transition.
+        metrics::record_data_sync_chunk_fetched();
+        if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+            orchestrator.on_chunk_fetched(chunk_offset, peer_addr)?;
         }
 
         let sm = storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)
@@ -604,33 +718,21 @@ impl DataSyncServiceInner {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
+        failure_kind: ChunkFetchFailureKind,
     ) -> eyre::Result<()> {
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-            orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
+            orchestrator.on_chunk_failed(chunk_offset, peer_addr, failure_kind)?;
 
-            let pa = orchestrator
-                .storage_module
-                .partition_assignment()
-                .expect("A partition assignment present");
-            debug!(
-                "chunk failed: ledger:{:?}, slot_index:{:?} chunk_offset:{} peer:{}",
-                pa.ledger_id, pa.slot_index, chunk_offset, peer_addr
-            );
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(level = "trace", skip_all, err)]
-    fn on_chunk_timeout(
-        &mut self,
-        storage_module_id: usize,
-        chunk_offset: PartitionChunkOffset,
-        peer_addr: IrysAddress,
-    ) -> eyre::Result<()> {
-        // TODO: Opportunity to do custom timeout tracking/handling here
-        debug!("chunk timed out: {} peer:{}", chunk_offset, peer_addr);
-        if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-            orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
+            if failure_kind != ChunkFetchFailureKind::NotFound {
+                let pa = orchestrator
+                    .storage_module
+                    .partition_assignment()
+                    .expect("A partition assignment present");
+                debug!(
+                    "chunk failed: ledger:{:?}, slot_index:{:?} chunk_offset:{} peer:{} kind:{:?}",
+                    pa.ledger_id, pa.slot_index, chunk_offset, peer_addr, failure_kind
+                );
+            }
         }
         Ok(())
     }
@@ -959,7 +1061,7 @@ impl DataSyncServiceInner {
                         })
                     })
                     .count();
-                debug!(
+                tracing::trace!(
                     "data_sync_probe empty_peers sm_id={} ledger={:?} slot={:?} managers={} matching_assignments={}",
                     sm_id,
                     pa.ledger_id,
@@ -1182,7 +1284,8 @@ impl DataSyncService {
 
 #[cfg(test)]
 mod ingress_handoff_tests {
-    use super::forward_chunk_to_ingress;
+    use super::{forward_chunk_to_ingress, ingress_error_is_invalid_peer_data};
+    use crate::chunk_ingress_service::{ChunkIngressError, CriticalChunkIngressError};
     use crate::services::ServiceSenders;
     use irys_types::UnpackedChunk;
 
@@ -1197,6 +1300,16 @@ mod ingress_handoff_tests {
                 .is_err(),
             "data sync must not credit a body that ingress cannot durably acknowledge"
         );
+    }
+
+    #[test]
+    fn only_validation_failures_penalize_the_source_peer() {
+        assert!(ingress_error_is_invalid_peer_data(
+            &ChunkIngressError::Critical(CriticalChunkIngressError::InvalidProof,)
+        ));
+        assert!(!ingress_error_is_invalid_peer_data(
+            &ChunkIngressError::Critical(CriticalChunkIngressError::DatabaseError,)
+        ));
     }
 }
 

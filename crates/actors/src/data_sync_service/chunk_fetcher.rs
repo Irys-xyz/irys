@@ -27,6 +27,39 @@ pub enum ChunkFetchError {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkFetchFailureKind {
+    NotFound,
+    Timeout,
+    Transport,
+    Server,
+    InvalidResponse,
+}
+
+impl ChunkFetchFailureKind {
+    pub const fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Timeout => "timeout",
+            Self::Transport => "transport",
+            Self::Server => "server",
+            Self::InvalidResponse => "invalid_response",
+        }
+    }
+}
+
+impl ChunkFetchError {
+    pub const fn kind(&self) -> ChunkFetchFailureKind {
+        match self {
+            Self::NotFound { .. } => ChunkFetchFailureKind::NotFound,
+            Self::Timeout => ChunkFetchFailureKind::Timeout,
+            Self::NetworkError { .. } => ChunkFetchFailureKind::Transport,
+            Self::ServerError { .. } => ChunkFetchFailureKind::Server,
+            Self::InvalidResponse { .. } => ChunkFetchFailureKind::InvalidResponse,
+        }
+    }
+}
+
 impl std::fmt::Display for ChunkFetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

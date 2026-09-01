@@ -120,6 +120,13 @@ impl PeerStats {
         self.total_failures += 1;
     }
 
+    /// A 404 is offset-specific negative information, not evidence that the
+    /// peer transport is unhealthy. Release concurrency without penalizing the
+    /// peer's global health score.
+    pub fn record_request_not_found(&mut self) {
+        self.active_requests = self.active_requests.saturating_sub(1);
+    }
+
     pub fn average_completion_time(&self) -> Duration {
         if self.completion_time_samples.is_empty() {
             return Duration::from_millis(100); // Default to 100ms as a baseline
