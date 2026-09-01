@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787830600594,
+  "lastUpdate": 1788303358579,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -15055,6 +15055,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000125,
             "range": "± 0.00001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "61ba01445c254de1563d4298c690978477d2022d",
+          "message": "fix(storage): decouple ingress proofs from chunk cache (#1560)\n\n* fix(storage): decouple ingress proofs from chunk cache\n\n* fix(ingress): allow unconfirmed data-root prefixes\n\n* fix(storage): harden ingress durability failure paths",
+          "timestamp": "2026-09-01T15:35:36-07:00",
+          "tree_id": "dc1a316e9f4cb56602c39ff476c0a347d4834716",
+          "url": "https://github.com/Irys-xyz/irys/commit/61ba01445c254de1563d4298c690978477d2022d"
+        },
+        "date": 1788303356073,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.0119,
+            "range": "± 0.000057",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125727,
+            "range": "± 0.001422",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.27041,
+            "range": "± 0.080275",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.8968,
+            "range": "± 0.154032",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078449,
+            "range": "± 0.001131",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 767.647088,
+            "range": "± 7.043085",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1008.091236,
+            "range": "± 35.547586",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117855,
+            "range": "± 0.000875",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1196.144917,
+            "range": "± 16.127778",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1568.935247,
+            "range": "± 19.467166",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034529,
+            "range": "± 0.001165",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.589884,
+            "range": "± 1.9942",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.444756,
+            "range": "± 1.257819",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
