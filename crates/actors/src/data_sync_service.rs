@@ -32,8 +32,10 @@ const MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN: usize = 16;
 /// Local write outcome after a successful peer fetch.
 #[derive(Debug, PartialEq, Eq)]
 enum DataSyncWriteOutcome {
-    /// Offset is durably [`ChunkType::Data`] after pending flush + fsync.
-    Stored,
+    /// Another writer already made the requested offset durably `Data`.
+    AlreadyDurable,
+    /// Offset is buffered as [`ChunkType::Data`] and awaits a completed fsync.
+    AwaitingDurability,
     /// SM has no `DataRootInfos` entry for this data_root — needs index rebuild.
     MissingDataRootIndex,
     /// data_root is indexed but no Entropy target at the expected offsets.
@@ -52,20 +54,14 @@ fn attempt_data_sync_write(
         Err(e) => DataSyncWriteOutcome::Other(e.to_string()),
         Ok(()) => {
             // write_data_chunk only enqueues into pending_writes; get_chunk_type
-            // can report Data before persistence. Do not mark Stored (or
-            // Completed in the orchestrator) until force_sync flushes + fsyncs.
-            // On flush failure we return Other → requeue; the request stays
-            // Requested until this function returns an outcome that advances it.
+            // can report Data before persistence. Keep the request in an
+            // explicit awaiting-durability state until the normal batched sync
+            // becomes durably visible after a completed fsync.
             if matches!(sm.get_chunk_type(&expected_offset), Some(ChunkType::Data)) {
-                if let Err(e) = sm.force_sync_pending_chunks() {
-                    return DataSyncWriteOutcome::Other(e.to_string());
-                }
-                if matches!(sm.get_chunk_type(&expected_offset), Some(ChunkType::Data)) {
-                    DataSyncWriteOutcome::Stored
+                if sm.is_data_chunk_durable_at(expected_offset) {
+                    DataSyncWriteOutcome::AlreadyDurable
                 } else {
-                    DataSyncWriteOutcome::Other(
-                        "chunk not Data after force_sync_pending_chunks".into(),
-                    )
+                    DataSyncWriteOutcome::AwaitingDurability
                 }
             } else if matches!(
                 sm.collect_data_root_infos(unpacked.data_root),
@@ -80,14 +76,14 @@ fn attempt_data_sync_write(
     }
 }
 
-fn try_send_chunk_to_ingress(service_senders: &ServiceSenders, unpacked: UnpackedChunk) {
+fn forward_chunk_to_ingress(service_senders: &ServiceSenders, unpacked: UnpackedChunk) {
     if let Err(e) = service_senders
         .chunk_ingress
         .send_traced(crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(unpacked, None))
     {
         warn!(
             error = %e,
-            "Failed to send ChunkIngressMessage to chunk ingress channel after data_sync write failure"
+            "Failed to forward data-sync chunk to chunk ingress validation"
         );
     }
 }
@@ -489,10 +485,10 @@ impl DataSyncServiceInner {
         let write_outcome = attempt_data_sync_write(&sm, &unpacked_chunk, chunk_offset);
 
         match write_outcome {
-            DataSyncWriteOutcome::Stored => {
+            DataSyncWriteOutcome::AlreadyDurable => {
                 metrics::record_data_sync_chunk_stored();
                 if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-                    orchestrator.mark_chunk_stored(chunk_offset)?;
+                    orchestrator.mark_chunk_already_durable(chunk_offset)?;
                 }
                 debug!(
                     storage_module.id = storage_module_id,
@@ -502,7 +498,22 @@ impl DataSyncServiceInner {
                     ?slot_index,
                     ?partition_hash,
                     peer.address = %peer_addr,
-                    "data_sync chunk stored"
+                    "data_sync chunk was already durably stored"
+                );
+            }
+            DataSyncWriteOutcome::AwaitingDurability => {
+                if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+                    orchestrator.mark_chunk_awaiting_durability(chunk_offset)?;
+                }
+                debug!(
+                    storage_module.id = storage_module_id,
+                    chunk.offset = %chunk_offset,
+                    chunk.data_root = %unpacked_chunk.data_root,
+                    ?ledger_id,
+                    ?slot_index,
+                    ?partition_hash,
+                    peer.address = %peer_addr,
+                    "data_sync chunk buffered awaiting durable batch"
                 );
             }
             DataSyncWriteOutcome::MissingDataRootIndex => {
@@ -526,9 +537,6 @@ impl DataSyncServiceInner {
                     orchestrator
                         .mark_chunk_blocked(chunk_offset, ChunkBlockReason::MissingDataRootIndex)?;
                 }
-                // Best-effort: mempool/ingress may still place the chunk if another
-                // path holds indexes; do not treat handoff as durable success.
-                try_send_chunk_to_ingress(&self.service_senders, unpacked_chunk);
             }
             DataSyncWriteOutcome::NoWriteableOffset => {
                 metrics::record_data_sync_chunk_write_failed("no_writeable_offset");
@@ -547,7 +555,6 @@ impl DataSyncServiceInner {
                 if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
                     orchestrator.requeue_after_local_write_failure(chunk_offset)?;
                 }
-                try_send_chunk_to_ingress(&self.service_senders, unpacked_chunk);
             }
             DataSyncWriteOutcome::Other(err) => {
                 metrics::record_data_sync_chunk_write_failed("other");
@@ -567,9 +574,15 @@ impl DataSyncServiceInner {
                 if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
                     orchestrator.requeue_after_local_write_failure(chunk_offset)?;
                 }
-                try_send_chunk_to_ingress(&self.service_senders, unpacked_chunk);
             }
         }
+
+        // Storage placement and ingress-proof credit have different trust
+        // boundaries. Route every fetched body through the existing ingress
+        // validator so data sync can rebuild compact leaves without duplicating
+        // Merkle validation here. The ingress path also persists body + hash
+        // atomically; storage durability remains independently tracked above.
+        forward_chunk_to_ingress(&self.service_senders, unpacked_chunk);
 
         Ok(())
     }
@@ -1450,11 +1463,16 @@ mod ingress_proof_peer_tests {
 #[cfg(test)]
 mod write_outcome_tests {
     use super::{DataSyncWriteOutcome, attempt_data_sync_write};
+    use irys_database::{
+        db::IrysDatabaseExt as _,
+        submodule::{add_data_root_info, tables::DataRootInfo},
+    };
     use irys_domain::{StorageModule, StorageModuleInfo, WriteDataChunkError};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PartitionChunkOffset,
-        TxChunkOffset, UnpackedChunk, partition::PartitionAssignment, partition_chunk_offset_ie,
+        RelativeChunkOffset, StorageSyncConfig, TxChunkOffset, UnpackedChunk,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::Arc;
 
@@ -1515,5 +1533,84 @@ mod write_outcome_tests {
 
         let outcome = attempt_data_sync_write(&sm, &chunk, PartitionChunkOffset::from(0_u32));
         assert_eq!(outcome, DataSyncWriteOutcome::MissingDataRootIndex);
+    }
+
+    #[test]
+    fn successful_data_sync_write_stays_buffered_below_sync_threshold() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let num_chunks = 10_u64;
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: num_chunks,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: num_chunks,
+            },
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                ledger_id: Some(DataLedger::Publish.into()),
+                slot_index: Some(0),
+                miner_address: IrysAddress::from([7_u8; 20]),
+                partition_hash: H256::random(),
+            }),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, num_chunks as u32),
+                "chunks".into(),
+            )],
+        };
+        let sm = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        sm.pack_with_zeros();
+
+        let data_root = H256::random();
+        let offset = PartitionChunkOffset::from(0_u32);
+        let (_, submodule) = sm
+            .get_submodule_for_offset(offset)
+            .expect("submodule for offset");
+        submodule
+            .db
+            .update_eyre(|tx| {
+                add_data_root_info(
+                    tx,
+                    data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset::from(0_i32),
+                        data_size: chunk_size,
+                    },
+                )
+            })
+            .expect("index data root");
+
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: chunk_size,
+            data_path: vec![1, 2, 3, 4].into(),
+            bytes: vec![0xcd; chunk_size as usize].into(),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+
+        assert_eq!(
+            attempt_data_sync_write(&sm, &chunk, offset),
+            DataSyncWriteOutcome::AwaitingDurability
+        );
+        assert!(
+            sm.has_pending_writes(),
+            "the per-chunk data-sync path must not force a below-threshold fsync"
+        );
+        assert!(
+            !sm.is_data_chunk_durable_at(offset),
+            "buffered Data must not be reported as durable"
+        );
     }
 }

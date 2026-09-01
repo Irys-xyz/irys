@@ -1,19 +1,69 @@
 use super::ChunkIngressServiceInner;
-use crate::cache_service::{CacheServiceAction, CacheServiceSender};
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
-use irys_database::reth_db::transaction::DbTx as _;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::store_ingress_proof;
-use irys_database::{
-    cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
-};
+use irys_database::{cached_data_root_by_data_root, complete_ingress_leaves};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _, Traced,
+    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
+    SendTraced as _, Traced,
 };
 use reth_db::DatabaseError;
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 use tracing::{debug, error, warn};
+
+/// Shared, process-local exclusion for proof generation by data root.
+///
+/// Cache eviction no longer depends on this state. It belongs to proof
+/// generation itself and is acquired atomically, avoiding the former
+/// check-then-notify race through the cache-service channel.
+#[derive(Clone, Debug, Default)]
+pub struct IngressProofGenerationState {
+    inner: Arc<RwLock<HashSet<DataRoot>>>,
+}
+
+impl IngressProofGenerationState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn try_acquire(&self, data_root: DataRoot) -> Option<IngressProofGenerationLease> {
+        let inserted = self
+            .inner
+            .write()
+            .expect("proof generation state lock poisoned")
+            .insert(data_root);
+        inserted.then(|| IngressProofGenerationLease {
+            state: self.clone(),
+            data_root,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_generating(&self, data_root: DataRoot) -> bool {
+        self.inner
+            .read()
+            .expect("proof generation state lock poisoned")
+            .contains(&data_root)
+    }
+}
+
+pub struct IngressProofGenerationLease {
+    state: IngressProofGenerationState,
+    data_root: DataRoot,
+}
+
+impl Drop for IngressProofGenerationLease {
+    fn drop(&mut self) {
+        self.state
+            .inner
+            .write()
+            .expect("proof generation state lock poisoned")
+            .remove(&self.data_root);
+    }
+}
 
 /// Errors that can occur when ingesting an external ingress proof.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -49,9 +99,6 @@ pub enum IngressProofGenerationError {
     /// Proof generation is already in progress for this data root.
     #[error("Proof generation already in progress")]
     AlreadyGenerating,
-    /// Failed to communicate with cache service.
-    #[error("Cache service error: {0}")]
-    CacheServiceError(String),
     /// Invalid data size for the transaction.
     #[error("Invalid data size: {0}")]
     InvalidDataSize(String),
@@ -306,7 +353,8 @@ impl ProofCheckResult {
     }
 }
 
-/// Generates (and stores) an ingress proof for the provided `data_root` if all chunks are present.
+/// Generates and stores an ingress proof once every expected validated compact
+/// leaf is present for the local signer.
 /// Validates the generated proof's anchor against the canonical chain and gossips it if valid.
 /// Returns the generated proof on success.
 pub fn generate_and_store_ingress_proof(
@@ -316,7 +364,66 @@ pub fn generate_and_store_ingress_proof(
     data_root: DataRoot,
     anchor_hint: Option<H256>,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
-    cache_sender: &CacheServiceSender,
+    generation_state: &IngressProofGenerationState,
+) -> Result<IngressProof, IngressProofGenerationError> {
+    // Resolve readiness before taking the exclusion lease. A caller holding
+    // the lease with an incomplete snapshot could otherwise race the final
+    // leaf writer, causing that writer to drop its only generation wake-up.
+    let leaves = load_complete_ingress_leaves(
+        db,
+        data_root,
+        config.irys_signer().address(),
+        config.consensus.chunk_size,
+    )?;
+    let generation_lease = generation_state
+        .try_acquire(data_root)
+        .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
+    generate_and_store_ingress_proof_inner(
+        block_tree_guard,
+        db,
+        config,
+        data_root,
+        anchor_hint,
+        leaves,
+        gossip_sender,
+        generation_lease,
+    )
+}
+
+/// Generates a proof from a leaf sequence already verified by the readiness
+/// check while holding the root's generation lease. This keeps the hot ingress
+/// path to one ordered leaf walk.
+pub(crate) fn generate_and_store_ingress_proof_from_leaves(
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+    data_root: DataRoot,
+    anchor_hint: Option<H256>,
+    leaves: Vec<IngressMerkleLeaf>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
+    generation_lease: IngressProofGenerationLease,
+) -> Result<IngressProof, IngressProofGenerationError> {
+    generate_and_store_ingress_proof_inner(
+        block_tree_guard,
+        db,
+        config,
+        data_root,
+        anchor_hint,
+        leaves,
+        gossip_sender,
+        generation_lease,
+    )
+}
+
+fn generate_and_store_ingress_proof_inner(
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+    data_root: DataRoot,
+    anchor_hint: Option<H256>,
+    leaves: Vec<IngressMerkleLeaf>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
+    _generation_lease: IngressProofGenerationLease,
 ) -> Result<IngressProof, IngressProofGenerationError> {
     let signer: IrysSigner = config.irys_signer();
 
@@ -327,9 +434,6 @@ pub fn generate_and_store_ingress_proof(
     }
 
     let chain_id = config.consensus.chain_id;
-    let chunk_size = config.consensus.chunk_size;
-
-    let data_size = calculate_and_validate_data_size(db, data_root, chunk_size)?;
 
     // Pick anchor: hint or latest canonical block
     let latest_anchor = block_tree_guard
@@ -338,75 +442,17 @@ pub fn generate_and_store_ingress_proof(
         .block_hash();
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
-    let is_already_generating = {
-        let (response_sender, response_receiver) = std::sync::mpsc::channel();
-        if let Err(err) =
-            cache_sender.send_traced(CacheServiceAction::RequestIngressProofGenerationState {
-                data_root,
-                response_sender,
-            })
-        {
-            return Err(IngressProofGenerationError::CacheServiceError(format!(
-                "Failed to request ingress proof generation state: {err}"
-            )));
-        }
-
-        response_receiver.recv().map_err(|err| {
-            IngressProofGenerationError::CacheServiceError(format!(
-                "Failed to receive ingress proof generation state response: {err}"
-            ))
-        })?
-    };
-
-    if is_already_generating {
-        return Err(IngressProofGenerationError::AlreadyGenerating);
-    }
-
-    // Notify start of proof generation
-    if let Err(e) =
-        cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationStarted(data_root))
-    {
-        warn!(
-            ?data_root,
-            "Failed to notify cache of proof generation start: {e}"
-        );
-    }
-
-    let proof_res = super::chunks::generate_ingress_proof(
+    let proof = super::chunks::generate_ingress_proof(
         db.clone(),
         data_root,
-        data_size,
-        chunk_size,
+        leaves,
         signer,
         chain_id,
         anchor,
-    );
-
-    let proof = match proof_res {
-        Ok(p) => p,
-        Err(e) => {
-            if let Err(e) = cache_sender.send_traced(
-                CacheServiceAction::NotifyProofGenerationCompleted(data_root),
-            ) {
-                warn!(
-                    ?data_root,
-                    "Failed to notify cache of proof generation completion: {e}"
-                );
-            }
-            return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
-        }
-    };
+    )
+    .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
-
-    if let Err(e) = cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationCompleted(
-        data_root,
-    )) {
-        warn!(
-            ?data_root,
-            "Failed to notify cache of proof generation completion: {e}"
-        );
-    }
     Ok(proof)
 }
 
@@ -417,7 +463,7 @@ pub fn reanchor_and_store_ingress_proof(
     signer: &IrysSigner,
     proof: &IngressProof,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<Traced<GossipBroadcastMessageV2>>,
-    cache_sender: &CacheServiceSender,
+    generation_state: &IngressProofGenerationState,
 ) -> Result<IngressProof, IngressProofGenerationError> {
     // Only staked nodes should reanchor ingress proofs
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
@@ -425,46 +471,16 @@ pub fn reanchor_and_store_ingress_proof(
         return Err(IngressProofGenerationError::NodeNotStaked);
     }
 
-    let is_already_generating = {
-        let (response_sender, response_receiver) = std::sync::mpsc::channel();
-        if let Err(err) =
-            cache_sender.send_traced(CacheServiceAction::RequestIngressProofGenerationState {
-                data_root: proof.data_root,
-                response_sender,
-            })
-        {
-            return Err(IngressProofGenerationError::CacheServiceError(format!(
-                "Failed to request ingress proof generation state: {err}"
-            )));
-        }
-
-        response_receiver.recv().map_err(|err| {
-            IngressProofGenerationError::CacheServiceError(format!(
-                "Failed to receive ingress proof generation state response: {err}"
-            ))
-        })?
-    };
-
-    if is_already_generating {
-        return Err(IngressProofGenerationError::AlreadyGenerating);
-    }
-
-    if let Err(e) = cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationStarted(
+    load_complete_ingress_leaves(
+        db,
         proof.data_root,
-    )) {
-        warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation start: {e}");
-    }
+        signer.address(),
+        config.consensus.chunk_size,
+    )?;
 
-    if let Err(e) =
-        calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)
-    {
-        if let Err(e) = cache_sender.send_traced(
-            CacheServiceAction::NotifyProofGenerationCompleted(proof.data_root),
-        ) {
-            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
-        }
-        return Err(e);
-    }
+    let _generation_lease = generation_state
+        .try_acquire(proof.data_root)
+        .ok_or(IngressProofGenerationError::AlreadyGenerating)?;
 
     let latest_anchor = block_tree_guard
         .read()
@@ -474,31 +490,14 @@ pub fn reanchor_and_store_ingress_proof(
     let mut proof = proof.clone();
     // Re-anchor and re-sign
     proof.anchor = latest_anchor;
-    if let Err(e) = signer.sign_ingress_proof(&mut proof) {
-        if let Err(e) = cache_sender.send_traced(
-            CacheServiceAction::NotifyProofGenerationCompleted(proof.data_root),
-        ) {
-            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
-        }
-        return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
-    }
+    signer
+        .sign_ingress_proof(&mut proof)
+        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
 
-    if let Err(e) = store_ingress_proof(db, &proof, signer) {
-        if let Err(e) = cache_sender.send_traced(
-            CacheServiceAction::NotifyProofGenerationCompleted(proof.data_root),
-        ) {
-            warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
-        }
-        return Err(IngressProofGenerationError::GenerationFailed(e.to_string()));
-    }
+    store_ingress_proof(db, &proof, signer)
+        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
-
-    if let Err(e) = cache_sender.send_traced(CacheServiceAction::NotifyProofGenerationCompleted(
-        proof.data_root,
-    )) {
-        warn!(data_root = ?proof.data_root, "Failed to notify cache of proof generation completion: {e}");
-    }
     Ok(proof)
 }
 
@@ -529,35 +528,46 @@ pub fn gossip_ingress_proof(
     }
 }
 
-pub fn calculate_and_validate_data_size(
+/// Loads the exact gap-free compact leaf sequence for a confirmed data root.
+/// This is the sole database scan used by proof generation.
+pub fn load_complete_ingress_leaves(
     db: &DatabaseProvider,
     data_root: DataRoot,
+    address: irys_types::IrysAddress,
     chunk_size: u64,
-) -> Result<u64, IngressProofGenerationError> {
+) -> Result<Vec<IngressMerkleLeaf>, IngressProofGenerationError> {
     let err = |msg: String| IngressProofGenerationError::InvalidDataSize(msg);
 
     // Load data_size & confirm we have metadata for this root
-    let (data_size, chunk_count) = db
-        .view_eyre(|tx| {
-            let data_size = cached_data_root_by_data_root(tx, data_root)
-                .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
-                .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
-                .data_size;
-            let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-            let count = cursor
-                .dup_count(data_root)?
-                .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
-            Ok((data_size, count))
-        })
-        .map_err(|e| err(e.to_string()))?;
+    db.view_eyre(|tx| {
+        let data_size = cached_data_root_by_data_root(tx, data_root)
+            .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
+            .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
+            .data_size;
+        let leaves = complete_ingress_leaves(tx, data_root, address, data_size, chunk_size)?
+            .ok_or_else(|| {
+                eyre::eyre!("compact ingress leaves are incomplete for data_root {data_root:?}")
+            })?;
+        Ok(leaves)
+    })
+    .map_err(|e| err(e.to_string()))
+}
 
-    let expected =
-        data_size_to_chunk_count(data_size, chunk_size).map_err(|e| err(e.to_string()))?;
-    if chunk_count != expected {
-        return Err(err(format!(
-            "have {chunk_count} chunks, expected {expected}"
-        )));
+#[cfg(test)]
+mod generation_state_tests {
+    use super::*;
+
+    #[test]
+    fn generation_lease_is_atomic_and_released_on_drop() {
+        let state = IngressProofGenerationState::new();
+        let data_root = H256::random();
+
+        let lease = state.try_acquire(data_root).expect("first acquisition");
+        assert!(state.is_generating(data_root));
+        assert!(state.try_acquire(data_root).is_none());
+
+        drop(lease);
+        assert!(!state.is_generating(data_root));
+        assert!(state.try_acquire(data_root).is_some());
     }
-
-    Ok(data_size)
 }

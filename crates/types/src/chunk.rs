@@ -134,22 +134,9 @@ impl UnpackedChunk {
         if self.data_size == 0 {
             return Some(0);
         }
-
-        let max_offset = self.max_valid_offset(chunk_size)?;
-        let offset_u64 = u64::from(self.tx_offset.0);
-
-        if offset_u64 > max_offset {
-            return None;
-        }
-
-        if offset_u64 == max_offset {
-            Some(self.data_size.saturating_sub(1))
-        } else {
-            offset_u64
-                .checked_add(1)?
-                .checked_mul(chunk_size)?
-                .checked_sub(1)
-        }
+        crate::expected_chunk_byte_range(self.tx_offset, self.data_size, chunk_size)
+            .ok()
+            .map(|(_, max)| max - 1)
     }
 }
 

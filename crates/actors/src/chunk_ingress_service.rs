@@ -6,7 +6,9 @@ pub(crate) mod metrics;
 pub mod pending_chunks;
 
 pub use chunks::{AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError};
-pub use ingress_proofs::{IngressProofError, IngressProofGenerationError};
+pub use ingress_proofs::{
+    IngressProofError, IngressProofGenerationError, IngressProofGenerationState,
+};
 pub use pending_chunks::PriorityPendingChunks;
 
 use std::num::NonZeroUsize;
@@ -107,6 +109,7 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
+    pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
 }
 
 impl ChunkIngressServiceInner {
@@ -157,13 +160,6 @@ impl ChunkIngressServiceInner {
                 self.process_pending_chunks_for_root(data_root).await;
             }
             ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(data_roots) => {
-                // Flush to ensure any buffered chunk writes are visible before reading.
-                if let Err(e) = self.chunk_data_writer.flush().await {
-                    error!(
-                        "Failed to flush chunk data writer before post-confirmation proof check: {:?}",
-                        e
-                    );
-                }
                 let chunk_size = self.config.consensus.chunk_size;
                 for data_root in data_roots {
                     if let Err(e) = self.try_generate_ingress_proof_for_root(data_root, chunk_size)
@@ -208,6 +204,7 @@ impl ChunkIngressService {
         rx: UnboundedReceiver<Traced<ChunkIngressMessage>>,
         config: &Config,
         service_senders: &ServiceSenders,
+        ingress_proof_generation_state: IngressProofGenerationState,
         runtime_handle: tokio::runtime::Handle,
         task_executor: TaskExecutor,
     ) -> (TokioServiceHandle, ChunkIngressState) {
@@ -276,8 +273,32 @@ impl ChunkIngressService {
                 let recent_valid_chunks = tokio::sync::RwLock::new(LruCache::new(
                     NonZeroUsize::new(max_valid_chunks).unwrap(),
                 ));
+                let ingress_address = config.irys_signer().address();
+                let ingress_chunk_size = config.consensus.chunk_size;
+                let backfill_db = irys_db.clone();
+                let retry_roots = match handle_for_inner
+                    .spawn_blocking(move || {
+                        irys_database::backfill_cached_ingress_data_hashes(
+                            &backfill_db,
+                            ingress_address,
+                            ingress_chunk_size,
+                        )
+                    })
+                    .await
+                {
+                    Ok(Ok(roots)) => roots,
+                    Ok(Err(error)) => {
+                        warn!(?error, "Failed to backfill cached ingress hashes");
+                        Default::default()
+                    }
+                    Err(error) => {
+                        warn!(?error, "Cached ingress-hash backfill task failed");
+                        Default::default()
+                    }
+                };
                 let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
                     irys_db.clone(),
+                    ingress_address,
                     chunk_writer_buffer_size,
                     &handle_for_inner,
                 );
@@ -301,8 +322,21 @@ impl ChunkIngressService {
                         recent_valid_chunks,
                         pending_chunks,
                         chunk_data_writer,
+                        ingress_proof_generation_state,
                     }),
                 };
+                for data_root in retry_roots {
+                    if let Err(error) = service.inner.try_generate_ingress_proof_for_root(
+                        data_root,
+                        service.inner.config.consensus.chunk_size,
+                    ) {
+                        warn!(
+                            %data_root,
+                            ?error,
+                            "Failed startup ingress-proof retry after compact-hash backfill"
+                        );
+                    }
+                }
                 service
                     .start(handle_for_inner)
                     .await
@@ -457,68 +491,46 @@ impl ChunkIngressService {
             }
         }
 
-        // Phase 2: drain BOTH lanes before flushing. `process_pending_chunks_for_root`
-        // runs on the control-plane lane and queues writes through `chunk_data_writer`,
-        // so an early flush before control-plane quiescence would race those writers
-        // and lose chunks on exit. Use `acquire_many_owned` so permits are not
-        // lifetime-tied to the semaphore arcs.
+        // Phase 2: drain both lanes. Every ingress writer awaits the exact MDBX
+        // batch containing its own chunk, so handler quiescence also guarantees
+        // there are no unacknowledged chunk-cache writes. Use
+        // `acquire_many_owned` so permits are not lifetime-tied to the semaphore
+        // arcs.
         let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let chunk_acquire = self
             .inner
             .message_handler_semaphore
             .clone()
             .acquire_many_owned(self.inner.max_concurrent_tasks);
-        let chunk_quiesced = match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
+        match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
             Ok(Ok(permits)) => {
                 tracing::debug!("All chunk ingress handlers completed");
                 let _permits = permits;
-                true
             }
             Ok(Err(_)) => {
                 error!("Chunk-lane semaphore closed during chunk ingress shutdown drain");
-                false
             }
             Err(_) => {
                 warn!("Timed out waiting for in-flight chunk ingress handlers");
-                false
             }
-        };
+        }
 
         let control_acquire = self
             .inner
             .control_plane_semaphore
             .clone()
             .acquire_many_owned(self.inner.max_control_plane_tasks);
-        let control_quiesced = match tokio::time::timeout_at(drain_deadline, control_acquire).await
-        {
+        match tokio::time::timeout_at(drain_deadline, control_acquire).await {
             Ok(Ok(permits)) => {
                 tracing::debug!("All control-plane handlers completed");
                 let _permits = permits;
-                true
             }
             Ok(Err(_)) => {
                 error!("Control-plane semaphore closed during chunk ingress shutdown drain");
-                false
             }
             Err(_) => {
                 warn!("Timed out waiting for in-flight control-plane handlers");
-                false
             }
-        };
-
-        // Flush only when both lanes are quiesced, otherwise an in-flight
-        // control-plane writer could queue chunk writes after the flush
-        // returns — losing those chunks on exit.
-        if chunk_quiesced && control_quiesced {
-            if let Err(e) = self.inner.chunk_data_writer.flush().await {
-                warn!("Failed to flush chunk writer on shutdown: {:?}", e);
-            }
-        } else {
-            warn!(
-                chunk_quiesced,
-                control_quiesced,
-                "Skipping chunk-writer flush; not all lanes quiesced before timeout"
-            );
         }
 
         info!("ChunkIngressService shut down");

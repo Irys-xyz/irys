@@ -1,7 +1,8 @@
 use crate::irys::IrysSigner;
 use crate::{
-    DataRoot, H256, IrysAddress, IrysSignature, Node, Signable, VersionDiscriminant, Versioned,
-    decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves,
+    DataRoot, H256, IngressMerkleLeaf, IrysAddress, IrysSignature, Node, Signable,
+    VersionDiscriminant, Versioned, decode_rlp_version, encode_rlp_version, generate_data_root,
+    generate_ingress_leaves, generate_ingress_root_from_leaves,
 };
 use alloy_primitives::{ChainId, keccak256};
 use alloy_rlp::Encodable as _;
@@ -180,18 +181,41 @@ pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     anchor: H256,
 ) -> eyre::Result<IngressProof> {
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
-    let proof = H256(root.id);
+    generate_ingress_proof_from_root(signer, data_root, H256(root.id), chain_id, anchor)
+}
 
+/// Signs the existing ingress-proof payload for a precomputed ingress root.
+/// This is deliberately the same payload and signer path used by full-body
+/// generation; only the storage lifecycle that produced `ingress_root` differs.
+pub fn generate_ingress_proof_from_root(
+    signer: &IrysSigner,
+    data_root: DataRoot,
+    ingress_root: H256,
+    chain_id: u64,
+    anchor: H256,
+) -> eyre::Result<IngressProof> {
     let mut proof = IngressProof::V1(IngressProofV1 {
         signature: Default::default(),
         data_root,
-        proof,
+        proof: ingress_root,
         chain_id,
         anchor,
     });
 
     signer.sign_ingress_proof(&mut proof)?;
     Ok(proof)
+}
+
+/// Builds and signs an ingress proof from ordered compact leaves.
+pub fn generate_ingress_proof_from_leaves(
+    signer: &IrysSigner,
+    data_root: DataRoot,
+    leaves: impl IntoIterator<Item = IngressMerkleLeaf>,
+    chain_id: u64,
+    anchor: H256,
+) -> eyre::Result<IngressProof> {
+    let root = generate_ingress_root_from_leaves(leaves)?;
+    generate_ingress_proof_from_root(signer, data_root, H256(root.id), chain_id, anchor)
 }
 
 pub fn verify_ingress_proof<C: AsRef<[u8]>>(
@@ -238,11 +262,46 @@ mod tests {
     use rand::Rng as _;
 
     use crate::{
-        ConsensusConfig, H256, generate_data_root, generate_leaves, hash_sha256,
+        ConsensusConfig, H256, generate_data_root, generate_ingress_data_hash,
+        generate_ingress_leaf_from_data_hash, generate_leaves, hash_sha256,
         ingress::verify_ingress_proof, irys::IrysSigner,
     };
 
-    use super::generate_ingress_proof;
+    use super::{generate_ingress_proof, generate_ingress_proof_from_leaves};
+
+    #[test]
+    fn compact_leaves_match_full_body_proof_with_partial_final_chunk() -> eyre::Result<()> {
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+        let chunks = [vec![1_u8; 32], vec![2_u8; 32], vec![3_u8; 7]];
+        let data = chunks.concat();
+        let regular_leaves = generate_leaves(std::iter::once(Ok(data)), 32)?;
+        let data_root = H256(generate_data_root(regular_leaves)?.id);
+        let anchor = H256::random();
+
+        let full = generate_ingress_proof(
+            &signer,
+            data_root,
+            chunks.iter().map(|chunk| Ok(chunk.as_slice())),
+            17,
+            anchor,
+        )?;
+        let mut boundary = 0_u64;
+        let compact = chunks
+            .iter()
+            .map(|chunk| {
+                boundary += chunk.len() as u64;
+                let persisted_hash = generate_ingress_data_hash(chunk, signer.address());
+                generate_ingress_leaf_from_data_hash(persisted_hash, boundary)
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        let from_compact =
+            generate_ingress_proof_from_leaves(&signer, data_root, compact, 17, anchor)?;
+
+        assert_eq!(from_compact, full);
+        assert!(verify_ingress_proof(&from_compact, &chunks, 17)?);
+        Ok(())
+    }
 
     #[test]
     fn interleave_test() -> eyre::Result<()> {

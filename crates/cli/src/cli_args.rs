@@ -157,7 +157,8 @@ pub(crate) enum SnapshotMode {
         output: PathBuf,
 
         /// Include cache tables (CachedDataRoots, CachedChunksIndex, CachedChunks,
-        /// IngressProofs). Off by default — caches are rebuildable from canonical data.
+        /// CachedIngressLeaves, IngressProofs). Off by default — caches are rebuildable
+        /// from canonical data.
         #[arg(long)]
         include_caches: bool,
 

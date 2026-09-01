@@ -8,11 +8,13 @@ use irys_database::{
 use irys_domain::{
     BlockIndex, StorageModule, StorageModulesReadGuard, get_overlapped_storage_modules,
 };
+use irys_packing::unpack;
 use irys_storage::{InclusiveInterval as _, ie, ii};
 use irys_types::{
     Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
     H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
     TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+    hash_sha256, validate_path,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{collections::HashMap, sync::Arc};
@@ -173,7 +175,7 @@ impl ChunkMigrationServiceInner {
         // Collect working variables to move into the closure
         let block = block_header;
         let block_index = self.block_index.clone();
-        let chunk_size = self.config.consensus.chunk_size as usize;
+        let config = self.config.clone();
         let storage_modules = Arc::new(self.storage_modules_guard.clone());
         let db = Arc::new(self.db.clone());
         let service_senders = self.service_senders.clone();
@@ -222,7 +224,7 @@ impl ChunkMigrationServiceInner {
                 ledger,
                 txs,
                 &block_index,
-                chunk_size,
+                &config,
                 &storage_modules,
                 &db,
             )?;
@@ -250,10 +252,11 @@ pub fn process_ledger_transactions(
     ledger: DataLedger,
     txs: &[DataTransactionHeader],
     block_index: &BlockIndex,
-    chunk_size: usize,
+    config: &Config,
     storage_modules_guard: &StorageModulesReadGuard,
     db: &Arc<DatabaseProvider>,
 ) -> Result<(), MigrationError> {
+    let chunk_size = config.consensus.chunk_size as usize;
     let path_pairs = get_tx_path_pairs(block, ledger, txs).map_err(|e| {
         MigrationError::Other(format!("tx path merklization failed for {ledger:?}: {e}"))
     })?;
@@ -292,6 +295,7 @@ pub fn process_ledger_transactions(
             ledger,
             storage_modules_guard,
             db,
+            config,
         )?;
 
         for module in storage_modules_guard.read().iter() {
@@ -313,26 +317,142 @@ fn process_transaction_chunks(
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
     db: &DatabaseProvider,
+    config: &Config,
 ) -> Result<(), MigrationError> {
     for tx_chunk_offset in 0..num_chunks_in_tx {
         let tx_chunk_offset = TxChunkOffset::from(tx_chunk_offset);
-        // Attempt to retrieve the cached chunk from the mempool
-        let chunk_info = match get_cached_chunk(db, tx.data_root, tx_chunk_offset) {
-            Ok(Some(info)) => info,
-            _ => continue,
-        };
-
         // Find which storage module intersects this chunk
         let ledger_offset = tx_chunk_range.start() + *tx_chunk_offset;
-        let storage_module =
-            find_storage_module(storage_modules_guard, ledger, ledger_offset.into());
+        let Some(storage_module) =
+            find_storage_module(storage_modules_guard, ledger, ledger_offset.into())
+        else {
+            continue;
+        };
 
-        // Write the chunk data to the Storage Module
-        if let Some(module) = storage_module {
-            write_chunk_to_module(&module, chunk_info, tx, tx_chunk_offset)?;
+        // Idempotent replay: an already-durable target needs no source body, so
+        // a re-migrated block does not have to re-read or rewrite the chunk.
+        if let Some(target_offsets) = storage_module
+            .partition_offsets_for_data_root_chunk(tx.data_root, tx_chunk_offset)
+            .map_err(|error| {
+                MigrationError::Other(format!("resolving migration target: {error}"))
+            })?
+            && !target_offsets.is_empty()
+            && target_offsets
+                .iter()
+                .all(|offset| storage_module.is_data_chunk_durable_at(*offset))
+        {
+            continue;
         }
+
+        let Some(chunk) = load_chunk_for_migration(
+            storage_modules_guard,
+            db,
+            ledger,
+            tx,
+            tx_chunk_offset,
+            config,
+        )?
+        else {
+            tracing::warn!(
+                target_ledger = ?ledger,
+                data_root = %tx.data_root,
+                %tx_chunk_offset,
+                "Chunk body unavailable during migration; leaving the target offset for data sync"
+            );
+            continue;
+        };
+
+        write_chunk_to_module(&storage_module, &chunk)?;
     }
     Ok(())
+}
+
+fn load_chunk_for_migration(
+    storage_modules_guard: &StorageModulesReadGuard,
+    db: &DatabaseProvider,
+    target_ledger: DataLedger,
+    tx: &DataTransactionHeader,
+    tx_offset: TxChunkOffset,
+    config: &Config,
+) -> Result<Option<UnpackedChunk>, MigrationError> {
+    let chunk_size = config.consensus.chunk_size as usize;
+    match get_cached_chunk(db, tx.data_root, tx_offset) {
+        Ok(Some((_metadata, cached))) if cached.chunk.is_some() => {
+            return validate_chunk_for_migration(cached, tx, tx_offset, chunk_size).map(Some);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                data_root = %tx.data_root,
+                %tx_offset,
+                ?error,
+                "Failed to read cached chunk during migration; checking durable fallback"
+            );
+        }
+    }
+
+    // Submit is the only ledger whose transaction is later copied into a
+    // second ledger. Its cached body may be reclaimed after the Submit fsync,
+    // so Publish migration sources that normal cache-miss path from the durable
+    // Submit replica. Term-ledger transactions are written only once and do not
+    // need a cross-ledger fallback. If the Submit replica was reassigned or
+    // reset, the caller leaves a visible hole for data sync instead.
+    if target_ledger != DataLedger::Publish {
+        return Ok(None);
+    }
+
+    let storage_modules = storage_modules_guard.read().clone();
+    for module in &storage_modules {
+        let is_submit = module
+            .partition_assignment()
+            .and_then(|assignment| assignment.ledger_id)
+            == Some(DataLedger::Submit as u32);
+        if !is_submit {
+            continue;
+        }
+        let Some(partition_offsets) = module
+            .partition_offsets_for_data_root_chunk(tx.data_root, tx_offset)
+            .map_err(|error| {
+                MigrationError::Other(format!("resolving Submit fallback: {error}"))
+            })?
+        else {
+            continue;
+        };
+        for partition_offset in partition_offsets {
+            if !module.is_data_chunk_durable_at(partition_offset) {
+                continue;
+            }
+            let Some(packed) = module
+                .generate_full_chunk(partition_offset)
+                .map_err(|error| {
+                    MigrationError::Other(format!("reading durable Submit fallback: {error}"))
+                })?
+            else {
+                continue;
+            };
+            let unpacked = unpack(
+                &packed,
+                config.consensus.entropy_packing_iterations,
+                chunk_size,
+                config.consensus.chain_id,
+            );
+            if unpacked.data_root != tx.data_root || unpacked.tx_offset != tx_offset {
+                return Err(MigrationError::Other(format!(
+                    "durable Submit chunk identity mismatch for {} offset {}",
+                    tx.data_root, tx_offset
+                )));
+            }
+            return validate_chunk_parts_for_migration(
+                unpacked.data_path,
+                unpacked.bytes,
+                tx,
+                tx_offset,
+                chunk_size,
+            )
+            .map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// Computes the range of chunks added to a ledger by the transactions in a block,
@@ -479,30 +599,89 @@ fn find_storage_module(
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,
-    chunk_info: (CachedChunkIndexMetadata, CachedChunk),
+    chunk: &UnpackedChunk,
+) -> Result<(), MigrationError> {
+    storage_module.write_data_chunk(chunk).map_err(|e| {
+        error!(
+            "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
+            chunk.data_root, chunk.tx_offset, chunk.data_size, e
+        );
+        MigrationError::ChunkDataWrite
+    })
+}
+
+fn validate_chunk_for_migration(
+    cached: CachedChunk,
     tx: &DataTransactionHeader,
     chunk_offset: TxChunkOffset,
-) -> Result<(), MigrationError> {
-    let data_path = Base64::from(chunk_info.1.data_path.0.clone());
+    chunk_size: usize,
+) -> Result<UnpackedChunk, MigrationError> {
+    let bytes = cached.chunk.ok_or_else(|| {
+        MigrationError::Other(format!(
+            "cached chunk body missing for {} offset {}",
+            tx.data_root, chunk_offset
+        ))
+    })?;
+    validate_chunk_parts_for_migration(cached.data_path, bytes, tx, chunk_offset, chunk_size)
+}
 
-    if let Some(bytes) = chunk_info.1.chunk {
-        let chunk = UnpackedChunk {
-            data_root: tx.data_root,
-            data_size: tx.data_size,
-            data_path,
-            bytes,
-            tx_offset: chunk_offset,
-        };
-
-        storage_module.write_data_chunk(&chunk).map_err(|e| {
-            error!(
-                "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
-                tx.data_root, chunk_offset, tx.data_size, e
-            );
-            MigrationError::ChunkIndexWrite
+fn validate_chunk_parts_for_migration(
+    data_path: Base64,
+    bytes: Base64,
+    tx: &DataTransactionHeader,
+    chunk_offset: TxChunkOffset,
+    chunk_size: usize,
+) -> Result<UnpackedChunk, MigrationError> {
+    let chunk_size_u64 = u64::try_from(chunk_size)
+        .map_err(|_| MigrationError::Other("configured chunk size exceeds u64".to_string()))?;
+    let min_byte_range = u64::from(*chunk_offset)
+        .checked_mul(chunk_size_u64)
+        .ok_or_else(|| MigrationError::Other("chunk byte range overflow".to_string()))?;
+    let max_byte_range = min_byte_range
+        .checked_add(chunk_size_u64)
+        .map_or(tx.data_size, |end| end.min(tx.data_size));
+    let target_byte_position = max_byte_range.checked_sub(1).ok_or_else(|| {
+        MigrationError::Other(format!(
+            "chunk has an empty byte range for {} offset {}",
+            tx.data_root, chunk_offset
+        ))
+    })?;
+    let validation = validate_path(tx.data_root.0, &data_path, u128::from(target_byte_position))
+        .map_err(|error| {
+            MigrationError::Other(format!(
+                "data path failed revalidation for {} offset {}: {error}",
+                tx.data_root, chunk_offset
+            ))
         })?;
+    if validation.min_byte_range != u128::from(min_byte_range)
+        || validation.max_byte_range != u128::from(max_byte_range)
+    {
+        return Err(MigrationError::Other(format!(
+            "chunk byte range mismatch for {} offset {}: expected {}..{}, got {}..{}",
+            tx.data_root,
+            chunk_offset,
+            min_byte_range,
+            max_byte_range,
+            validation.min_byte_range,
+            validation.max_byte_range
+        )));
     }
-    Ok(())
+    let expected_len = max_byte_range.saturating_sub(min_byte_range);
+    if u64::try_from(bytes.len()).ok() != Some(expected_len)
+        || validation.leaf_hash != hash_sha256(bytes.as_slice())
+    {
+        return Err(MigrationError::Other(format!(
+            "chunk body failed revalidation for {} offset {}",
+            tx.data_root, chunk_offset
+        )));
+    }
+    Ok(UnpackedChunk {
+        data_root: tx.data_root,
+        data_size: tx.data_size,
+        data_path,
+        bytes,
+        tx_offset: chunk_offset,
+    })
 }
 
 impl ChunkMigrationService {

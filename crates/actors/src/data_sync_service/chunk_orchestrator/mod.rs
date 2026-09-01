@@ -13,7 +13,7 @@ use irys_types::{
 use std::{
     collections::{HashMap, HashSet, hash_map},
     sync::{Arc, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tracing::{Instrument as _, debug, warn};
 
@@ -22,6 +22,11 @@ use tracing::{Instrument as _, debug, warn};
 /// behind while the packing tail (high offsets) is still legitimately Entropy —
 /// gating on low offsets keeps the probes quiet on healthy modules.
 pub(crate) const LOW_OFFSET_PROBE_THRESHOLD: u32 = 20_000;
+
+/// Durability normally follows the five-second idle-tail flush. A much larger
+/// monotonic deadline prevents a stalled write from parking sync forever
+/// without turning ordinary buffered writes into duplicate network requests.
+const DURABILITY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How to request a missing body from a selected peer.
 ///
@@ -64,10 +69,16 @@ pub enum ChunkRequestState {
     /// Used for tracking timeouts and preventing duplicate requests.
     Requested(IrysAddress, Instant),
 
+    /// Peer delivery was accepted into the storage module's pending-write
+    /// buffer. Advanced to `Completed` once the storage module reports the body
+    /// as fsynced, polled every tick by `reconcile_awaiting_durability`.
+    AwaitingDurability(Instant),
+
     /// Chunk was successfully fetched **and** durably written as [`ChunkType::Data`].
     ///
     /// Fetch alone is not enough — see [`Self::on_chunk_fetched`] then
-    /// [`Self::mark_chunk_stored`].
+    /// [`Self::mark_chunk_awaiting_durability`], then the durability poll in
+    /// `reconcile_awaiting_durability`.
     Completed,
 
     /// Locally blocked from hot re-fetch (index gap, etc.). Still retained while
@@ -157,15 +168,51 @@ impl ChunkOrchestrator {
         Ok(())
     }
 
+    /// Promotes buffered writes the storage module now reports as fsynced, and
+    /// returns a wait that has outlived `timeout` to the fetch queue.
+    ///
+    /// This polls the storage module's interval state rather than consuming a
+    /// notification, so nothing can strand a request and the answer is always
+    /// the one restart recovery would reload.
+    fn reconcile_awaiting_durability(&mut self, now: Instant, timeout: Duration) {
+        for (offset, request) in &mut self.chunk_requests {
+            let ChunkRequestState::AwaitingDurability(started) = request.request_state else {
+                continue;
+            };
+
+            if self.storage_module.is_data_chunk_durable_at(*offset) {
+                request.request_state = ChunkRequestState::Completed;
+                debug!(
+                    chunk.offset = %offset,
+                    "data_sync chunk durably stored"
+                );
+            } else if now.saturating_duration_since(started) >= timeout {
+                request.request_state = ChunkRequestState::Pending;
+                request.excluded = None;
+                warn!(
+                    chunk.offset = %offset,
+                    timeout_secs = timeout.as_secs(),
+                    "Data-sync write did not become durable in time; returning chunk to pending"
+                );
+            }
+        }
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     fn populate_request_queue(&mut self) {
+        self.reconcile_awaiting_durability(Instant::now(), DURABILITY_WAIT_TIMEOUT);
+
         // Retain in-flight requests (for telemetry tracking) and pending entropy requests.
         // Remove completed requests and pending requests for chunks that changed type
         // (satisfied via gossip/upload or invalidated by storage fault/expiry).
 
         self.chunk_requests.retain(|offset, cr| {
-            // Always retain in-flight requests
-            if matches!(cr.request_state, ChunkRequestState::Requested(..)) {
+            // Retain network requests and locally buffered writes until their
+            // respective completion event arrives.
+            if matches!(
+                cr.request_state,
+                ChunkRequestState::Requested(..) | ChunkRequestState::AwaitingDurability(..)
+            ) {
                 return true;
             }
 
@@ -616,7 +663,7 @@ impl ChunkOrchestrator {
 
     /// Peer delivered the chunk body. Credits peer bandwidth stats but leaves
     /// the request in [`ChunkRequestState::Requested`] until
-    /// [`Self::mark_chunk_stored`] / [`Self::mark_chunk_blocked`] /
+    /// [`Self::mark_chunk_awaiting_durability`] / [`Self::mark_chunk_blocked`] /
     /// [`Self::requeue_after_local_write_failure`] decides the local outcome.
     ///
     /// Peer delivery success must not be conflated with durable local storage.
@@ -635,6 +682,7 @@ impl ChunkOrchestrator {
         let (expected_peer, start_instant) = match request.request_state {
             ChunkRequestState::Requested(addr, started) => (addr, started),
             ref invalid_state @ (ChunkRequestState::Pending
+            | ChunkRequestState::AwaitingDurability(..)
             | ChunkRequestState::Completed
             | ChunkRequestState::Blocked(_)) => {
                 return Err(eyre::eyre!(
@@ -671,14 +719,44 @@ impl ChunkOrchestrator {
         Ok(completion_record)
     }
 
-    /// Durable local store succeeded — offset is (or will be observed as) Data.
-    pub fn mark_chunk_stored(&mut self, chunk_offset: PartitionChunkOffset) -> eyre::Result<()> {
+    /// Local write entered the pending buffer. Durability is confirmed
+    /// separately by the per-tick `reconcile_awaiting_durability` poll.
+    pub fn mark_chunk_awaiting_durability(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
         let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
-            eyre::eyre!("mark_chunk_stored for unknown offset: {:?}", chunk_offset)
+            eyre::eyre!(
+                "mark_chunk_awaiting_durability for unknown offset: {:?}",
+                chunk_offset
+            )
         })?;
         if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
             return Err(eyre::eyre!(
-                "mark_chunk_stored expected Requested state at {:?}, got {:?}",
+                "mark_chunk_awaiting_durability expected Requested state at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::AwaitingDurability(Instant::now());
+        Ok(())
+    }
+
+    /// A concurrent local writer already completed this offset before the
+    /// fetched body reached the pending buffer.
+    pub fn mark_chunk_already_durable(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!(
+                "mark_chunk_already_durable for unknown offset: {:?}",
+                chunk_offset
+            )
+        })?;
+        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+            return Err(eyre::eyre!(
+                "mark_chunk_already_durable expected Requested state at {:?}, got {:?}",
                 chunk_offset,
                 request.request_state
             ));
@@ -807,6 +885,7 @@ impl ChunkOrchestrator {
         let expected_peer = match request.request_state {
             ChunkRequestState::Requested(addr, _) => addr,
             ChunkRequestState::Pending
+            | ChunkRequestState::AwaitingDurability(..)
             | ChunkRequestState::Completed
             | ChunkRequestState::Blocked(_) => {
                 return Err(eyre::eyre!(
@@ -865,17 +944,18 @@ impl ChunkOrchestrator {
     }
 
     pub fn get_metrics(&self) -> OrchestrationMetrics {
-        let (pending, active, completed, blocked) =
-            self.chunk_requests
-                .values()
-                .fold((0, 0, 0, 0), |(p, a, c, b), request| {
-                    match request.request_state {
-                        ChunkRequestState::Pending => (p + 1, a, c, b),
-                        ChunkRequestState::Requested(_, _) => (p, a + 1, c, b),
-                        ChunkRequestState::Completed => (p, a, c + 1, b),
-                        ChunkRequestState::Blocked(_) => (p, a, c, b + 1),
-                    }
-                });
+        let (pending, active, awaiting_durability, completed, blocked) = self
+            .chunk_requests
+            .values()
+            .fold((0, 0, 0, 0, 0), |(p, a, d, c, b), request| {
+                match request.request_state {
+                    ChunkRequestState::Pending => (p + 1, a, d, c, b),
+                    ChunkRequestState::Requested(_, _) => (p, a + 1, d, c, b),
+                    ChunkRequestState::AwaitingDurability(..) => (p, a, d + 1, c, b),
+                    ChunkRequestState::Completed => (p, a, d, c + 1, b),
+                    ChunkRequestState::Blocked(_) => (p, a, d, c, b + 1),
+                }
+            });
 
         let total_throughput_bps = if let Ok(peers) = self.active_sync_peers.read() {
             self.current_peers
@@ -891,6 +971,7 @@ impl ChunkOrchestrator {
             total_peers: self.current_peers.len(),
             pending_requests: pending,
             active_requests: active,
+            awaiting_durability_requests: awaiting_durability,
             completed_requests: completed,
             blocked_requests: blocked,
             total_throughput_bps,
@@ -903,6 +984,7 @@ pub struct OrchestrationMetrics {
     pub total_peers: usize,
     pub pending_requests: usize,
     pub active_requests: usize,
+    pub awaiting_durability_requests: usize,
     pub completed_requests: usize,
     pub blocked_requests: usize,
     pub total_throughput_bps: u64,

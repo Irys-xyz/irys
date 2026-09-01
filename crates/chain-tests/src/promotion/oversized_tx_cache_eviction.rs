@@ -8,33 +8,15 @@ use irys_types::{DataLedger, NodeConfig, irys::IrysSigner};
 use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 
-/// Exposes a flaw in the current promotion mechanism: a submit tx whose data is larger
-/// than the bounded chunk cache can never be promoted, no matter how it is uploaded.
+/// Regression: a Submit transaction larger than the bounded chunk cache can
+/// generate its ingress proof from persisted compact leaves and promote, even
+/// though its chunk bodies never coexist in the cache.
 ///
-/// THIS TEST ASSERTS THE BUGGY BEHAVIOR ON PURPOSE. The assertions below encode what the
-/// system does *today*, not what it should do. It is a characterization test guarding a
-/// known defect so the behavior is visible and cannot change silently.
-///
-/// The flaw: ingress-proof generation
-/// (`chunk_ingress_service::chunks::generate_ingress_proof`) reads *every* chunk of a
-/// data_root out of the `CachedChunks` DB cache and requires the complete set to be
-/// resident simultaneously (it asserts `actual_chunk_count == expected_chunk_count`).
-/// That cache is size-bounded (`cache.max_cache_size_bytes`) and pruned on block
-/// migration. So a tx whose data exceeds the cache can never have all its chunks resident
-/// at once — early chunks are evicted before the last one arrives — no ingress proof is
-/// ever produced, and the tx can never be promoted to the Publish ledger.
-///
-/// Scaled down here: chunk_size=32, a 3-chunk tx, and a cache sized below the tx. Two
-/// chunks are uploaded, aged past `min_chunk_age`, and evicted by the migration-driven
-/// prune before the third is uploaded, so the full set is never simultaneously present.
-///
-/// WHEN THE FLAW IS FIXED (e.g. ingress-proof generation streams chunks incrementally, or
-/// promotion no longer requires the whole data_root cached at once), this test SHOULD
-/// START FAILING. That failure is the signal the fix works. At that point invert it: the
-/// oversized tx should now produce an ingress proof and promote, so flip the two
-/// assertions at the end to expect `proof.is_ok()` and `get_is_promoted(..) == true`.
+/// Also pins the two invariants that make that safe: capacity pruning reclaims
+/// only bodies a storage module reports as fsynced, and Publish migration falls
+/// back to the durable Submit replica once a body has been reclaimed.
 #[test_log::test(tokio::test)]
-async fn heavy_test_oversized_tx_cache_eviction_blocks_promotion() -> eyre::Result<()> {
+async fn heavy_test_oversized_tx_cache_eviction_allows_promotion() -> eyre::Result<()> {
     initialize_tracing();
 
     let mut config = NodeConfig::testing();
@@ -48,7 +30,9 @@ async fn heavy_test_oversized_tx_cache_eviction_blocks_promotion() -> eyre::Resu
         // Single node self-promotes with a single proof.
         c.hardforks.frontier.number_of_ingress_proofs_total = 1;
     }
-    config.storage.num_writes_before_sync = 1;
+    // Keep batching enabled: chunks stripe together and the tail is flushed by
+    // the storage module's idle drain, so nothing on the write path force-syncs.
+    config.storage.num_writes_before_sync = 2;
     // Cache far below the 3-chunk (96 B) tx, and prune eagerly.
     config.cache.max_cache_size_bytes = 32;
     config.cache.cache_clean_lag = 0;
@@ -69,6 +53,7 @@ async fn heavy_test_oversized_tx_cache_eviction_blocks_promotion() -> eyre::Resu
             * consensus.difficulty_adjustment.block_time;
 
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
+    let ingress_address = node.node_ctx.config.irys_signer().address();
     node.node_ctx
         .packing_waiter
         .wait_for_idle(Some(Duration::from_secs(10)))
@@ -95,57 +80,126 @@ async fn heavy_test_oversized_tx_cache_eviction_blocks_promotion() -> eyre::Resu
     node.wait_for_mempool(tx.header.id, 20).await?;
     node.mine_blocks(2).await?;
 
-    // Upload only the first two chunks.
-    node.post_chunk_32b(&tx, 0, &data_chunks).await;
-    node.post_chunk_32b(&tx, 1, &data_chunks).await;
-
-    // Age them past min_chunk_age, then mine to drive the migration-triggered prune
-    // until the bounded cache has evicted the staged chunks.
-    tokio::time::sleep(Duration::from_secs(min_chunk_age_secs + 2)).await;
-
     let cached_count = |root| -> eyre::Result<u32> {
         node.node_ctx.db.view_eyre(|tx| {
             let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
             Ok(cursor.dup_count(root)?.unwrap_or(0))
         })
     };
+    let leaf_count = |root| -> eyre::Result<usize> {
+        node.node_ctx.db.view_eyre(|db_tx| {
+            (0..3_u32).try_fold(0_usize, |count, offset| {
+                Ok(count
+                    + usize::from(
+                        irys_database::cached_ingress_leaf(
+                            db_tx,
+                            root,
+                            ingress_address,
+                            offset.into(),
+                        )?
+                        .is_some(),
+                    ))
+            })
+        })
+    };
 
-    let mut evicted = false;
+    // Each validated chunk records its leaf immediately, independent of any
+    // storage assignment, and keeps its cached body until the body is durable.
+    node.post_chunk_32b(&tx, 0, &data_chunks).await;
+    assert_eq!(cached_count(data_root)?, 1);
+    assert_eq!(leaf_count(data_root)?, 1);
+
+    node.post_chunk_32b(&tx, 1, &data_chunks).await;
+    assert_eq!(cached_count(data_root)?, 2);
+    assert_eq!(leaf_count(data_root)?, 2);
+
+    // Age the bodies past min_chunk_age and mine to drive the capacity-pruning
+    // pass. The cache is configured far below the tx size, so the pass runs;
+    // it may reclaim only what a storage module reports as fsynced.
+    tokio::time::sleep(Duration::from_secs(min_chunk_age_secs + 2)).await;
+    let mut early_chunks_reclaimed = false;
     for _ in 0..10 {
         node.mine_block().await?;
         if cached_count(data_root)? == 0 {
-            evicted = true;
+            early_chunks_reclaimed = true;
             break;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(
-        evicted,
-        "precondition unmet: bounded cache never evicted the staged chunks"
+        early_chunks_reclaimed,
+        "durable early chunk bodies were never capacity-reclaimed"
+    );
+    assert_eq!(
+        leaf_count(data_root)?,
+        2,
+        "reclaiming a body must not discard the leaf derived from it"
     );
 
-    // Upload the final chunk. The complete 3-chunk set is never simultaneously
-    // resident, so ingress-proof generation can never fire.
+    // Leaves live in the main DB, so a restart keeps proof readiness without
+    // any cached body present.
+    let node = node.stop().await.start().await;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
+    let leaves_after_restart = node.node_ctx.db.view_eyre(|db_tx| {
+        (0..3_u32).try_fold(0_usize, |count, offset| {
+            Ok(count
+                + usize::from(
+                    irys_database::cached_ingress_leaf(
+                        db_tx,
+                        data_root,
+                        ingress_address,
+                        offset.into(),
+                    )?
+                    .is_some(),
+                ))
+        })
+    })?;
+    assert_eq!(
+        leaves_after_restart, 2,
+        "compact leaves must survive a restart"
+    );
+    let cached_after_restart = node.node_ctx.db.view_eyre(|tx| {
+        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        Ok(cursor.dup_count(data_root)?.unwrap_or(0))
+    })?;
+    assert_eq!(
+        cached_after_restart, 0,
+        "proof readiness must not depend on cached chunk bodies"
+    );
+
+    // Upload the final chunk. The complete 3-chunk body set never needs to be
+    // resident: proof generation uses the three persisted compact leaves.
     node.post_chunk_32b(&tx, 2, &data_chunks).await;
 
-    // BUG BEING CHARACTERIZED: no ingress proof is ever produced for this data_root,
-    // because the full chunk set is never simultaneously cached. When the flaw is fixed
-    // this assertion should flip to `proof.is_ok()`.
     let proof = node
         .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 10)
         .await;
     assert!(
-        proof.is_err(),
-        "expected no ingress proof for the oversized tx (current flawed behavior), got: {proof:?}"
+        proof.is_ok(),
+        "expected an ingress proof built from persisted compact leaves, got: {proof:?}"
     );
 
-    // BUG BEING CHARACTERIZED: consequently the tx is never promoted, even after further
-    // mining. When the flaw is fixed this assertion should flip to expect promotion.
     node.mine_blocks(3).await?;
     assert!(
-        !node.get_is_promoted(&tx.header.id).await?,
-        "oversized submit tx does not promote today (current flawed behavior)"
+        node.get_is_promoted(&tx.header.id).await?,
+        "oversized submit tx should promote after compact ingress proof generation"
     );
+
+    // Cached Submit bodies were reclaimed before promotion. Publish migration
+    // must therefore read the validated durable Submit copy, not silently
+    // leave holes when CachedChunks no longer contains the body.
+    let app = node.start_public_api().await;
+    for publish_offset in 0..3 {
+        node.future_or_mine_on_timeout(
+            node.wait_for_chunk(&app, DataLedger::Publish, publish_offset, 60),
+            Duration::from_secs(5),
+        )
+        .await??;
+    }
+    drop(app);
 
     node.stop().await;
     Ok(())
