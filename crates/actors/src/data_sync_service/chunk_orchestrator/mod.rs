@@ -5,7 +5,7 @@ use crate::{
 };
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
 use irys_types::{
-    IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
+    DataLedger, IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
     hardfork_config::DataLedgerLookup,
 };
 use std::{
@@ -330,11 +330,29 @@ impl ChunkOrchestrator {
         // eventual reconciliation without falsely marking a 404 synchronized.
         let entropy_intervals = self.storage_module.get_intervals(ChunkType::Entropy);
 
+        let max_offset = *max_chunk_offset;
+
+        // Term ledgers (especially Submit) are a small write head on a packed
+        // entropy tail. A low-to-high Entropy walk spends the hot budget on
+        // the prefix, so the newest migrated offset is not even queued — the
+        // replica looks one chunk short of the frontier. Enqueue that write
+        // head first. The service dispatcher also visits term SMs before
+        // Publish so a permanent backlog cannot skip this offset; Publish
+        // later copies Submit data and needs Submit replicas on the frontier.
+        if requests_to_add > 0
+            && self.prioritizes_write_frontier()
+            && entropy_intervals
+                .iter()
+                .any(|interval| *interval.start() <= max_offset && max_offset <= *interval.end())
+            && self.enqueue_pending(PartitionChunkOffset::from(max_offset), now, true)
+        {
+            requests_to_add -= 1;
+        }
+
         if requests_to_add == 0 {
             return;
         }
 
-        let max_offset = *max_chunk_offset;
         self.scan_cursor = self.scan_cursor.min(max_offset);
         let cursor = self.scan_cursor;
         let ranges = [(cursor, max_offset), (0, cursor.saturating_sub(1))];
@@ -360,23 +378,7 @@ impl ChunkOrchestrator {
                     };
 
                     let chunk_offset = PartitionChunkOffset::from(interval_step);
-                    let inserted = if let hash_map::Entry::Vacant(entry) =
-                        self.chunk_requests.entry(chunk_offset)
-                    {
-                        entry.insert(ChunkRequest {
-                            excluded: HashSet::new(),
-                            request_state: ChunkRequestState::Pending,
-                            attempt_count: 0,
-                            retry_round: 0,
-                            ready_since: now,
-                        });
-                        true
-                    } else {
-                        false
-                    };
-
-                    if inserted {
-                        self.ready_offsets.push_back(chunk_offset);
+                    if self.enqueue_pending(chunk_offset, now, false) {
                         requests_to_add -= 1;
                         if requests_to_add == 0 {
                             break 'scan;
@@ -388,6 +390,45 @@ impl ChunkOrchestrator {
                 }
             }
         }
+    }
+
+    /// Submit / OneYear / ThirtyDay: prefer the migrated write head. Publish
+    /// keeps the existing low-to-high walk so a large permanent backlog still
+    /// fills from the start of the slot. The service dispatcher also visits
+    /// these orchestrators before Publish so Submit replicas stay on the
+    /// frontier and Publish has many sources to copy from.
+    pub(crate) fn prioritizes_write_frontier(&self) -> bool {
+        matches!(
+            DataLedger::try_from(self.ledger_id),
+            Ok(DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay)
+        )
+    }
+
+    /// Insert `offset` as Pending if it is not already tracked. `at_front`
+    /// places it at the dispatch head (term-ledger write head); otherwise it
+    /// joins the FIFO tail.
+    fn enqueue_pending(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+        now: Instant,
+        at_front: bool,
+    ) -> bool {
+        let hash_map::Entry::Vacant(entry) = self.chunk_requests.entry(chunk_offset) else {
+            return false;
+        };
+        entry.insert(ChunkRequest {
+            excluded: HashSet::new(),
+            request_state: ChunkRequestState::Pending,
+            attempt_count: 0,
+            retry_round: 0,
+            ready_since: now,
+        });
+        if at_front {
+            self.ready_offsets.push_front(chunk_offset);
+        } else {
+            self.ready_offsets.push_back(chunk_offset);
+        }
+        true
     }
 
     /// Dispatch at most one ready offset. Returning `false` lets the service

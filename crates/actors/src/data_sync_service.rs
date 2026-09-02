@@ -147,9 +147,10 @@ pub struct DataSyncServiceInner {
     rearm_backoff_remaining: u64,
     /// Skip budget applied after the next zero-yield pass (grows, capped).
     rearm_backoff_next_skips: u64,
-    /// Rotates which storage module gets the first opportunity to consume
-    /// shared peer concurrency on each scheduler tick.
-    orchestrator_dispatch_cursor: usize,
+    /// Rotates which term-ledger storage module is visited first each tick.
+    term_dispatch_cursor: usize,
+    /// Rotates which Publish storage module is visited first each tick.
+    publish_dispatch_cursor: usize,
 }
 
 /// Re-arm `Blocked(MissingDataRootIndex)` when the local index looks ready.
@@ -172,6 +173,7 @@ const REARM_BACKOFF_MAX_SKIPS: u64 = 16;
 /// Give every storage module one dispatch opportunity per round, rotating the
 /// first module between ticks. The callback returns whether it consumed work.
 /// Rounds stop once no module can use another shared peer permit.
+#[cfg(test)]
 fn dispatch_round_robin<T: Copy>(
     ids: &mut [T],
     cursor: usize,
@@ -194,9 +196,52 @@ fn dispatch_round_robin<T: Copy>(
     (cursor + 1) % ids.len()
 }
 
+/// Term-ledger SMs (Submit / OneYear / ThirtyDay) take a turn before Publish
+/// in each inner pass. Publish copies Submit data for promotion; if Submit
+/// replicas stay on the write frontier, Publish has many sources. When shared
+/// peer permits are fewer than the number of SMs, this keeps a busy permanent
+/// backlog from skipping the term write head. Within each group the start
+/// index still rotates so two Submit SMs share fairly.
+fn dispatch_term_then_publish<T: Copy>(
+    term_ids: &mut [T],
+    publish_ids: &mut [T],
+    term_cursor: usize,
+    publish_cursor: usize,
+    mut dispatch: impl FnMut(T) -> bool,
+) -> (usize, usize) {
+    let next_term = if term_ids.is_empty() {
+        0
+    } else {
+        let start = term_cursor % term_ids.len();
+        term_ids.rotate_left(start);
+        (term_cursor + 1) % term_ids.len()
+    };
+    let next_publish = if publish_ids.is_empty() {
+        0
+    } else {
+        let start = publish_cursor % publish_ids.len();
+        publish_ids.rotate_left(start);
+        (publish_cursor + 1) % publish_ids.len()
+    };
+
+    loop {
+        let mut dispatched = false;
+        for id in term_ids.iter().copied() {
+            dispatched |= dispatch(id);
+        }
+        for id in publish_ids.iter().copied() {
+            dispatched |= dispatch(id);
+        }
+        if !dispatched {
+            break;
+        }
+    }
+    (next_term, next_publish)
+}
+
 #[cfg(test)]
 mod scheduler_fairness_tests {
-    use super::dispatch_round_robin;
+    use super::{dispatch_round_robin, dispatch_term_then_publish};
 
     #[test]
     fn shared_capacity_is_round_robin_across_storage_modules() {
@@ -226,6 +271,61 @@ mod scheduler_fairness_tests {
             true
         });
         assert_eq!(order, vec![1, 0, 1]);
+    }
+
+    #[test]
+    fn term_ledgers_take_permits_before_publish_when_capacity_is_scarce() {
+        // 1 Submit + 3 Publish, only 3 shared permits: Submit must not be the
+        // SM left out, or the term write head waits behind a permanent backlog.
+        let mut term = [1_u8];
+        let mut publish = [0_u8, 2_u8, 3_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![1, 0, 2]);
+        assert!(!order.contains(&3), "a Publish SM is the one that waits");
+    }
+
+    #[test]
+    fn two_term_ledgers_rotate_fairly_ahead_of_publish() {
+        let mut term = [1_u8, 4_u8];
+        let mut publish = [0_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let (next_term, next_publish) =
+            dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
+                if permits == 0 {
+                    return false;
+                }
+                permits -= 1;
+                order.push(id);
+                true
+            });
+        assert_eq!(order, vec![1, 4, 0]);
+        assert_eq!(next_term, 1);
+        assert_eq!(next_publish, 0);
+
+        let mut term = [1_u8, 4_u8];
+        let mut publish = [0_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let _ =
+            dispatch_term_then_publish(&mut term, &mut publish, next_term, next_publish, |id| {
+                if permits == 0 {
+                    return false;
+                }
+                permits -= 1;
+                order.push(id);
+                true
+            });
+        assert_eq!(order, vec![4, 1, 0]);
     }
 }
 
@@ -282,7 +382,8 @@ impl DataSyncServiceInner {
             rearm_tick: 0,
             rearm_backoff_remaining: 0,
             rearm_backoff_next_skips: 0,
-            orchestrator_dispatch_cursor: 0,
+            term_dispatch_cursor: 0,
+            publish_dispatch_cursor: 0,
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -350,18 +451,38 @@ impl DataSyncServiceInner {
         }
 
         if !orchestrator_ids.is_empty() {
-            // One request per storage module per round. A sparse term ledger
-            // therefore cannot fill every shared peer permit before Publish or
-            // another storage module gets an opportunity to dispatch.
-            self.orchestrator_dispatch_cursor = dispatch_round_robin(
-                &mut orchestrator_ids,
-                self.orchestrator_dispatch_cursor,
+            // Term-ledger SMs (especially Submit) visit first in each pass so
+            // a large Publish backlog cannot consume every shared peer permit
+            // before the term write head is fetched. Publish later copies
+            // Submit data; that path is healthy when Submit replicas are on
+            // the frontier. Within each group, rotate so two Submit SMs still
+            // share fairly.
+            let mut term_ids = Vec::new();
+            let mut publish_ids = Vec::new();
+            for id in orchestrator_ids.iter().copied() {
+                if self
+                    .chunk_orchestrators
+                    .get(&id)
+                    .is_some_and(ChunkOrchestrator::prioritizes_write_frontier)
+                {
+                    term_ids.push(id);
+                } else {
+                    publish_ids.push(id);
+                }
+            }
+            let (next_term, next_publish) = dispatch_term_then_publish(
+                &mut term_ids,
+                &mut publish_ids,
+                self.term_dispatch_cursor,
+                self.publish_dispatch_cursor,
                 |id| {
                     self.chunk_orchestrators
                         .get_mut(&id)
                         .is_some_and(ChunkOrchestrator::dispatch_next)
                 },
             );
+            self.term_dispatch_cursor = next_term;
+            self.publish_dispatch_cursor = next_publish;
 
             for id in &orchestrator_ids {
                 if let Some(orchestrator) = self.chunk_orchestrators.get(id) {
