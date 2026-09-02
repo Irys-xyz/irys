@@ -526,17 +526,25 @@ impl ChunkOrchestrator {
             .get_storage_module_ledger_offsets()
             .expect("storage module should be assigned to a ledger");
 
-        // Fetch the most recently migrated block
-        // We only want to download migrated chunks from other peers
+        // Fetch the most recently migrated block.
+        // We only want to download migrated chunks from other peers — the
+        // index is the same as `tree_safe_height`: `depth` behind the
+        // canonical tip, or genesis while the chain is still shorter than
+        // `block_migration_depth`. `canonical[len - depth]` is one too new
+        // (the tip when depth == 1) and would advertise unmigrated chunks.
         let max_chunk_offset: Option<u64> = {
             let tree = self.block_tree.read();
             let (canonical, _) = tree.get_canonical_chain();
             let block_migration_depth =
                 self.config.consensus_config().block_migration_depth as usize;
 
-            if canonical.len() >= block_migration_depth {
-                let most_recent_migrated_block =
-                    &canonical[canonical.len() - block_migration_depth];
+            if !canonical.is_empty() {
+                let migrated_idx = if canonical.len() > block_migration_depth {
+                    canonical.len() - 1 - block_migration_depth
+                } else {
+                    0
+                };
+                let most_recent_migrated_block = &canonical[migrated_idx];
 
                 let block = most_recent_migrated_block.header();
 
@@ -546,6 +554,9 @@ impl ChunkOrchestrator {
                     .classify_data_ledger(block, self.ledger_id)
                 {
                     DataLedgerLookup::Present(dl) if dl.total_chunks == 0 => None,
+                    // `total_chunks` is the exclusive write frontier (chunk
+                    // count). Convert to the inclusive last offset so the
+                    // entropy scan `start..=max` includes the frontier chunk.
                     DataLedgerLookup::Present(dl) => Some(dl.total_chunks.saturating_sub(1)),
                     // A migrated block that predates this ledger's activation
                     // (e.g. a pre-Cascade block for the OneYear/ThirtyDay term

@@ -1,11 +1,15 @@
 use super::*;
 use crate::{chunk_fetcher::MockChunkFetcher, test_helpers::build_test_service_senders};
 use irys_domain::ChunkType;
-use irys_domain::{BlockTree, StorageModuleInfo};
+use irys_domain::{
+    BlockTree, ChainState, CommitmentSnapshot, EpochSnapshot, StorageModuleInfo, dummy_ema_snapshot,
+};
+use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_testing_utils::TempDirBuilder;
 use irys_types::{
-    Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PeerAddress, PeerListItem,
-    partition::PartitionAssignment, partition_chunk_offset_ie,
+    BlockTransactions, Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader,
+    NodeConfig, PeerAddress, PeerListItem, SealedBlock, U256, partition::PartitionAssignment,
+    partition_chunk_offset_ie,
 };
 
 fn test_config(base_directory: std::path::PathBuf, num_chunks: u64) -> Config {
@@ -1091,4 +1095,127 @@ async fn restart_recovers_from_durable_storage_and_entropy_intervals() {
             .contains_key(&PartitionChunkOffset::from(2_u32)),
         "restart must still discover work after the formerly delayed offset"
     );
+}
+
+fn make_orchestrator_with_tree(
+    sm: Arc<StorageModule>,
+    config: &Config,
+    block_tree: BlockTree,
+) -> ChunkOrchestrator {
+    let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+    let (service_senders, _receivers) = build_test_service_senders();
+    ChunkOrchestrator::new(
+        sm,
+        Arc::new(RwLock::new(HashMap::new())),
+        block_tree_guard,
+        &service_senders,
+        Arc::new(MockChunkFetcher::new(DataLedger::Publish as usize)),
+        config.node_config.clone(),
+        tokio::runtime::Handle::current(),
+    )
+}
+
+fn signed_publish_header(
+    height: u64,
+    previous_block_hash: H256,
+    cumulative_diff: u64,
+    publish_total_chunks: u64,
+) -> IrysBlockHeader {
+    let mut header = IrysBlockHeader::new_mock_header();
+    header.height = height;
+    header.previous_block_hash = previous_block_hash;
+    header.cumulative_diff = U256::from(cumulative_diff);
+    header.data_ledgers[DataLedger::Publish].total_chunks = publish_total_chunks;
+    header.test_sign();
+    header
+}
+
+fn insert_onchain(tree: &mut BlockTree, header: &IrysBlockHeader) {
+    let sealed = Arc::new(SealedBlock::new_unchecked(
+        Arc::new(header.clone()),
+        BlockTransactions::default(),
+    ));
+    tree.add_common(
+        header.block_hash,
+        &sealed,
+        Arc::new(CommitmentSnapshot::default()),
+        Arc::new(EpochSnapshot::default()),
+        dummy_ema_snapshot(),
+        ChainState::Onchain,
+    )
+    .expect("onchain block");
+}
+
+#[test_log::test(tokio::test)]
+async fn populate_includes_the_inclusive_frontier_chunk() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 8);
+    let sm = packed_sm(&config, 8);
+
+    // A single-chunk ledger is the classic exclusive-range miss: max offset 0
+    // must still be discovered.
+    let mut orch = make_orchestrator_with_ledger_chunks(Arc::clone(&sm), &config, 1);
+    orch.populate_request_queue();
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32)),
+        "the sole chunk at the exclusive frontier of 1 must be requested"
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(1_u32)),
+        "must not request past the write frontier"
+    );
+
+    // Partial partition: total_chunks=5 → inclusive last offset 4.
+    let mut orch = make_orchestrator_with_ledger_chunks(Arc::clone(&sm), &config, 5);
+    orch.populate_request_queue();
+    for offset in 0..5_u32 {
+        assert!(
+            orch.chunk_requests
+                .contains_key(&PartitionChunkOffset::from(offset)),
+            "entropy scan must include frontier offset {offset} when total_chunks=5"
+        );
+    }
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(5_u32))
+    );
+
+    // Full partition: last valid offset is num_chunks - 1.
+    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 8);
+    orch.populate_request_queue();
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(7_u32)),
+        "a fully written partition must still request its last chunk"
+    );
+}
+
+#[test_log::test(tokio::test)]
+async fn max_chunk_offset_uses_the_migrated_block_not_the_tip() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    // depth=1: the tip is not migrated; its parent is.
+    let config = test_config(tmp.path().to_path_buf(), 8);
+    let sm = packed_sm(&config, 8);
+
+    let genesis = signed_publish_header(0, H256::zero(), 1, 3);
+    let block1 = signed_publish_header(1, genesis.block_hash, 2, 5);
+    let tip = signed_publish_header(2, block1.block_hash, 3, 6);
+
+    let mut tree = BlockTree::new(&genesis, config.consensus.clone());
+    insert_onchain(&mut tree, &block1);
+    insert_onchain(&mut tree, &tip);
+
+    let orch = make_orchestrator_with_tree(sm, &config, tree);
+    let (part_max, ledger_max) = orch
+        .get_max_chunk_offset()
+        .expect("migrated block 1 has chunks");
+    assert_eq!(
+        *ledger_max, 4,
+        "must use block 1's exclusive frontier of 5, not the tip's 6"
+    );
+    assert_eq!(*part_max, 4);
 }
