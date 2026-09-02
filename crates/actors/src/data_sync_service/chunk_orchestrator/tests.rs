@@ -85,10 +85,19 @@ fn make_orchestrator_with_ledger_chunks(
     config: &Config,
     total_chunks: u64,
 ) -> ChunkOrchestrator {
+    make_orchestrator_with_ledger_total(sm, config, DataLedger::Publish, total_chunks)
+}
+
+fn make_orchestrator_with_ledger_total(
+    sm: Arc<StorageModule>,
+    config: &Config,
+    ledger: DataLedger,
+    total_chunks: u64,
+) -> ChunkOrchestrator {
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
 
     let mut genesis = irys_testing_utils::new_mock_signed_header();
-    genesis.data_ledgers[DataLedger::Publish].total_chunks = total_chunks;
+    genesis.data_ledgers[ledger].total_chunks = total_chunks;
     genesis.test_sign();
     let block_tree = BlockTree::new(&genesis, config.consensus.clone());
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
@@ -98,7 +107,7 @@ fn make_orchestrator_with_ledger_chunks(
         Arc::new(RwLock::new(HashMap::new())),
         block_tree_guard,
         &service_senders,
-        Arc::new(MockChunkFetcher::new(DataLedger::Publish as usize)),
+        Arc::new(MockChunkFetcher::new(ledger as usize)),
         config.node_config.clone(),
         tokio::runtime::Handle::current(),
     )
@@ -1090,5 +1099,123 @@ async fn restart_recovers_from_durable_storage_and_entropy_intervals() {
             .chunk_requests
             .contains_key(&PartitionChunkOffset::from(2_u32)),
         "restart must still discover work after the formerly delayed offset"
+    );
+}
+
+/// If the prefix is already Data and the hot budget is one slot, a low-to-high
+/// Entropy walk queues `frontier-1` and never discovers the write head. That
+/// is the "replica is one chunk below the frontier" shape: everything except
+/// the newest migrated offset is durable. Term ledgers must queue the write
+/// head first.
+#[test_log::test(tokio::test)]
+async fn term_ledger_hot_budget_queues_the_write_head_before_the_prefix() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, 1);
+    let sm = packed_sm_for_ledger(&config, 8, DataLedger::Submit);
+    for value in 0..6_u32 {
+        store_durable_data(&sm, PartitionChunkOffset::from(value), 32);
+    }
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, 8);
+    orch.populate_request_queue();
+
+    let frontier = PartitionChunkOffset::from(7_u32);
+    let just_behind = PartitionChunkOffset::from(6_u32);
+    assert_eq!(
+        orch.ready_offsets.front().copied(),
+        Some(frontier),
+        "the term-ledger write head must dispatch before the remaining prefix hole"
+    );
+    assert!(orch.chunk_requests.contains_key(&frontier));
+    assert!(
+        !orch.chunk_requests.contains_key(&just_behind),
+        "a one-slot hot budget must not be spent on frontier-1 while the write head is still Entropy"
+    );
+}
+
+#[test_log::test(tokio::test)]
+async fn publish_hot_budget_still_walks_from_the_slot_start() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, 1);
+    let sm = packed_sm(&config, 8);
+    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 8);
+    orch.populate_request_queue();
+
+    assert_eq!(
+        orch.ready_offsets.front().copied(),
+        Some(PartitionChunkOffset::from(0_u32)),
+        "Publish must keep filling from the start of the slot"
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(7_u32)),
+        "Publish must not spend its only hot slot on the write head"
+    );
+}
+
+/// Term-ledger gaps at low offsets are often abandoned uploads. Discovery
+/// must walk down from the write head so a small hot budget is spent on
+/// frontier Entropy, not on the prefix.
+#[test_log::test(tokio::test)]
+async fn term_ledger_scan_walks_from_the_frontier_downward() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, 2);
+    let sm = packed_sm_for_ledger(&config, 8, DataLedger::Submit);
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, 8);
+    orch.populate_request_queue();
+
+    assert_eq!(
+        orch.ready_offsets.front().copied(),
+        Some(PartitionChunkOffset::from(7_u32))
+    );
+    assert_eq!(
+        orch.ready_offsets.back().copied(),
+        Some(PartitionChunkOffset::from(6_u32))
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32)),
+        "a two-slot budget must not be spent on the abandoned-upload prefix"
+    );
+}
+
+/// After the frontier has been scanned, the reverse walk wraps and still
+/// probes low-offset Entropy — just not first.
+#[test_log::test(tokio::test)]
+async fn term_ledger_reverse_scan_visits_the_prefix_after_the_frontier() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, 2);
+    let sm = packed_sm_for_ledger(&config, 8, DataLedger::Submit);
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, 8);
+    let peer = add_assigned_peer(&mut orch, &config, 91, 9091);
+
+    orch.populate_request_queue();
+    for value in [7_u32, 6_u32] {
+        let offset = PartitionChunkOffset::from(value);
+        orch.chunk_requests.get_mut(&offset).unwrap().request_state =
+            ChunkRequestState::Requested(peer, Instant::now());
+        orch.on_chunk_failed(
+            offset,
+            peer,
+            crate::chunk_fetcher::ChunkFetchFailureKind::NotFound,
+        )
+        .unwrap();
+    }
+
+    orch.populate_request_queue();
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(5_u32))
+            && orch
+                .chunk_requests
+                .contains_key(&PartitionChunkOffset::from(4_u32)),
+        "after the frontier is delayed, reverse discovery must continue downward"
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32)),
+        "the prefix must still wait until higher offsets have been scanned"
     );
 }
