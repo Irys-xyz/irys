@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788309230647,
+  "lastUpdate": 1788383288942,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -15271,6 +15271,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00012,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ac1972e4428a3f3fced6335a2e3adedb487da30f",
+          "message": "fix(data-sync): fetch term-ledger write heads before Publish backlog (#1563)\n\n* fix(data-sync): fetch term-ledger write heads before Publish backlog\n\nA term-ledger replica that has already stored 0..=N-2 still walks Entropy\nlow-to-high. With a small hot budget that queues frontier-1 and never\ndiscovers N-1, so the miner looks one chunk short of the migrated\nfrontier. Submit/OneYear/ThirtyDay now enqueue the write-head offset\nfirst.\n\nThe shared dispatcher also visits term-ledger storage modules before\nPublish each pass. Publish copies Submit data for promotion; that path\nneeds Submit replicas on the frontier, and a large permanent backlog\nmust not consume every peer permit first. Within each group the start\nindex still rotates so two Submit modules share fairly.\n\n* fix(data-sync): walk term ledgers down from the frontier\n\nLow-offset Entropy on Submit/OneYear/ThirtyDay is often an abandoned\nupload; live data is at the write head. Discovery now scans high-to-low\nfrom the migrated frontier and only wraps to the prefix after that pass.\n\nPublish still walks low-to-high: older offsets are the ones peers are\nmost likely to already hold on Submit or Publish partitions.",
+          "timestamp": "2026-09-02T13:52:26-07:00",
+          "tree_id": "0714692fdaa33ebac4197e4c58e4dc6ee5761fae",
+          "url": "https://github.com/Irys-xyz/irys/commit/ac1972e4428a3f3fced6335a2e3adedb487da30f"
+        },
+        "date": 1788383287486,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015159,
+            "range": "± 0.000289",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.15483,
+            "range": "± 0.012914",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.594402,
+            "range": "± 0.054274",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.557119,
+            "range": "± 0.391495",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083277,
+            "range": "± 0.001751",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 821.544176,
+            "range": "± 28.775206",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 994.506665,
+            "range": "± 5.801093",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.124056,
+            "range": "± 0.003542",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1241.145375,
+            "range": "± 76.221281",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1549.922788,
+            "range": "± 21.879928",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034926,
+            "range": "± 0.000958",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.709137,
+            "range": "± 1.363534",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.364643,
+            "range": "± 0.941946",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000116,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
