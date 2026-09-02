@@ -32,7 +32,17 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync Blocked offsets re-queued after local index-ready probe (MissingDataRootIndex → Pending)");
     counter DATA_SYNC_DURABILITY_STALLED("irys.data_sync.durability_stalled_total", "Data sync writes that did not become durable before the monotonic durability deadline");
     counter DATA_INDEX_HEAL_UNREPAIRED("irys.storage.index_heal_unrepaired_total", "Ledger SMs still gapped/uncertain after a heal pass (labelled by reason)");
-    counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync peer fetches by peer source and outcome (source=assigned|ingress_proof, outcome=success|fail)");
+    counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync peer fetches by source and classified outcome");
+    counter DATA_SYNC_FETCH_FAILURES("irys.data_sync.fetch_failures_total", "Data sync fetch failures by ledger, peer, and failure class");
+    counter DATA_SYNC_ATTEMPTS("irys.data_sync.attempts_total", "Data sync scheduling attempts by ledger and fresh/retry class");
+    counter DATA_SYNC_UNIQUE_OFFSETS_ATTEMPTED("irys.data_sync.unique_offsets_attempted_total", "Offsets attempted for the first time in the current in-memory scheduler lifecycle");
+    counter DATA_SYNC_PEERS_EXHAUSTED("irys.data_sync.peer_cycles_exhausted_total", "Offsets delayed after exhausting all currently eligible peers");
+    gauge DATA_SYNC_READY("irys.data_sync.ready_work", "Ready data sync offsets by ledger and storage module");
+    gauge DATA_SYNC_FETCHING("irys.data_sync.fetching_work", "Fetching data sync offsets by ledger and storage module");
+    gauge DATA_SYNC_DELAYED("irys.data_sync.delayed_work", "Delayed data sync offsets by ledger and storage module");
+    gauge DATA_SYNC_ELIGIBLE_PEERS("irys.data_sync.eligible_peers", "Currently eligible data sync peers by ledger and storage module");
+    gauge DATA_SYNC_OLDEST_READY_AGE_MS("irys.data_sync.oldest_ready_age_ms", "Monotonic age of the oldest ready offset by ledger and storage module");
+    gauge DATA_SYNC_SCAN_CURSOR("irys.data_sync.scan_cursor", "Partition-relative data sync discovery cursor by ledger and storage module");
     gauge DATA_SYNC_ACTIVE_PEERS("irys.data_sync.active_peers", "Number of active data sync peers");
     counter MINING_SOLUTIONS_FOUND("irys.mining.solutions_found_total", "Mining solutions found");
     gauge PACKING_ACTIVE_WORKERS("irys.packing.active_workers", "Number of active packing workers");
@@ -91,6 +101,11 @@ irys_utils::define_metrics! {
         "irys.block_producer.parent_wait_duration_ms",
         "Time the block producer waits for the chosen parent block to be fully validated in milliseconds",
         vec![10.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 30000.0, 60000.0, 300000.0, 600000.0]
+    );
+    histogram DATA_SYNC_RETRY_DELAY_MS(
+        "irys.data_sync.retry_delay_ms",
+        "Delay assigned after a data sync offset exhausts all currently eligible peers",
+        vec![1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 60000.0]
     );
 
     counter VALIDATION_RESULTS("irys.validation.results_total", "Validation results by stage and result (labelled)");
@@ -313,7 +328,8 @@ pub(crate) fn record_data_sync_active_peers(count: u64) {
     DATA_SYNC_ACTIVE_PEERS.record(count, &[]);
 }
 
-/// `source`: `assigned` | `ingress_proof`. `outcome`: `success` | `fail`.
+/// `source`: `assigned` | `ingress_proof`. `outcome`: `success` or a
+/// [`crate::chunk_fetcher::ChunkFetchFailureKind`] metric label.
 pub(crate) fn record_data_sync_fetch_by_source(source: &'static str, outcome: &'static str) {
     DATA_SYNC_FETCH_BY_SOURCE.add(
         1,
@@ -322,6 +338,63 @@ pub(crate) fn record_data_sync_fetch_by_source(source: &'static str, outcome: &'
             KeyValue::new("outcome", outcome),
         ],
     );
+}
+
+pub(crate) fn record_data_sync_fetch_failure(
+    ledger_id: u32,
+    peer: irys_types::IrysAddress,
+    failure: &'static str,
+) {
+    DATA_SYNC_FETCH_FAILURES.add(
+        1,
+        &[
+            KeyValue::new("ledger", i64::from(ledger_id)),
+            KeyValue::new("peer", peer.to_string()),
+            KeyValue::new("failure", failure),
+        ],
+    );
+}
+
+pub(crate) fn record_data_sync_attempt(ledger_id: u32, attempt: &'static str) {
+    DATA_SYNC_ATTEMPTS.add(
+        1,
+        &[
+            KeyValue::new("ledger", i64::from(ledger_id)),
+            KeyValue::new("attempt", attempt),
+        ],
+    );
+}
+
+pub(crate) fn record_data_sync_unique_offset_attempted(ledger_id: u32) {
+    DATA_SYNC_UNIQUE_OFFSETS_ATTEMPTED.add(1, &[KeyValue::new("ledger", i64::from(ledger_id))]);
+}
+
+pub(crate) fn record_data_sync_peers_exhausted(ledger_id: u32) {
+    DATA_SYNC_PEERS_EXHAUSTED.add(1, &[KeyValue::new("ledger", i64::from(ledger_id))]);
+}
+
+pub(crate) fn record_data_sync_retry_delay(ledger_id: u32, delay: std::time::Duration) {
+    DATA_SYNC_RETRY_DELAY_MS.record(
+        delay.as_secs_f64() * 1000.0,
+        &[KeyValue::new("ledger", i64::from(ledger_id))],
+    );
+}
+
+pub(crate) fn record_data_sync_scheduler_state(
+    ledger_id: u32,
+    storage_module_id: usize,
+    state: &crate::data_sync_service::chunk_orchestrator::OrchestrationMetrics,
+) {
+    let labels = [
+        KeyValue::new("ledger", i64::from(ledger_id)),
+        KeyValue::new("storage_module", storage_module_id.to_string()),
+    ];
+    DATA_SYNC_READY.record(state.pending_requests as u64, &labels);
+    DATA_SYNC_FETCHING.record(state.active_requests as u64, &labels);
+    DATA_SYNC_DELAYED.record(state.delayed_requests as u64, &labels);
+    DATA_SYNC_ELIGIBLE_PEERS.record(state.total_peers as u64, &labels);
+    DATA_SYNC_OLDEST_READY_AGE_MS.record(state.oldest_ready_age.as_millis() as u64, &labels);
+    DATA_SYNC_SCAN_CURSOR.record(u64::from(state.scan_cursor), &labels);
 }
 
 pub(crate) fn record_mining_solution_found() {
