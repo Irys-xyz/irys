@@ -900,23 +900,29 @@ async fn exhausting_all_peers_delays_then_rearms_offset() {
 }
 
 #[test_log::test(tokio::test)]
-async fn delayed_retry_metadata_is_bounded() {
+async fn delayed_retry_metadata_discards_soonest_deadline_within_bound() {
     let tmp = TempDirBuilder::new().with_tracing().build();
     let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, 2);
     let sm = packed_sm(&config, 8);
     let mut orch = make_orchestrator(sm, &config);
-    let peer = add_assigned_peer(&mut orch, &config, 51, 9051);
+    let now = Instant::now();
 
     for value in 0..3_u32 {
         let offset = PartitionChunkOffset::from(value);
-        insert_requested(&mut orch, offset, peer);
-        orch.on_chunk_failed(
+        orch.chunk_requests.insert(
             offset,
-            peer,
-            crate::chunk_fetcher::ChunkFetchFailureKind::NotFound,
-        )
-        .unwrap();
+            ChunkRequest {
+                excluded: HashSet::new(),
+                request_state: ChunkRequestState::Delayed {
+                    retry_at: now + Duration::from_secs(u64::from(value) + 1),
+                },
+                attempt_count: 1,
+                retry_round: 1,
+                ready_since: now,
+            },
+        );
     }
+    orch.trim_delayed_requests();
 
     assert_eq!(
         orch.chunk_requests
@@ -929,8 +935,33 @@ async fn delayed_retry_metadata_is_bounded() {
         !orch
             .chunk_requests
             .contains_key(&PartitionChunkOffset::from(0_u32)),
-        "old retry metadata is dropped; Entropy remains the reconciliation source"
+        "the soonest retry has the least suppression left and returns to Entropy reconciliation"
     );
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(2_u32)),
+        "the longest remaining backoff must be retained"
+    );
+}
+
+#[test_log::test(tokio::test)]
+async fn dispatch_restores_pending_offset_when_selected_peer_disappears() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = add_assigned_peer(&mut orch, &config, 52, 9052);
+    let offset = PartitionChunkOffset::from(0_u32);
+    insert_pending(&mut orch, offset);
+    orch.ready_offsets.clear();
+    orch.active_sync_peers.write().unwrap().remove(&peer);
+
+    assert!(!orch.dispatch_chunk_request(offset, peer));
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Pending
+    ));
+    assert_eq!(orch.ready_offsets.front(), Some(&offset));
 }
 
 #[test_log::test(tokio::test)]

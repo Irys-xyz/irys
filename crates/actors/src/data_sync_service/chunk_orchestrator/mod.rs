@@ -25,16 +25,19 @@ pub(crate) const LOW_OFFSET_PROBE_THRESHOLD: u32 = 20_000;
 const DURABILITY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Retry an offset only after other ready work has had an opportunity to run.
-/// The delay is monotonic, doubles after each exhausted peer cycle, and is
-/// capped so data that appears later is eventually rediscovered.
+/// While its in-memory request record is retained, the delay is monotonic,
+/// doubles after each exhausted peer cycle, and is capped so data that appears
+/// later is eventually rediscovered.
 const RETRY_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// Bound scheduler bookkeeping independently from the partition's Entropy
 /// intervals, which remain the durable source of unresolved work on restart.
-/// When this many delayed entries are retained, the oldest delayed metadata is
-/// discarded; the rotating discovery cursor will encounter that Entropy offset
-/// again after giving the rest of the range an opportunity to run.
+/// When this many delayed entries are retained, the entry with the soonest
+/// retry deadline is discarded because it has the least suppression left.
+/// This retains the longer backoff for repeat offenders while the rotating
+/// discovery cursor eventually rediscovers the discarded Entropy offset. As
+/// on restart, rediscovery resets that offset's ephemeral backoff.
 const DELAYED_REQUEST_LIMIT_MULTIPLIER: usize = 1;
 
 /// How to request a missing body from a selected peer.
@@ -657,9 +660,15 @@ impl ChunkOrchestrator {
         let (api_addr, use_ledger_offset) = {
             let peers = match self.active_sync_peers.read() {
                 Ok(p) => p,
-                Err(_) => return false,
+                Err(_) => {
+                    self.ready_offsets.push_back(chunk_offset);
+                    return false;
+                }
             };
             let Some(peer_manager) = peers.get(&peer_addr) else {
+                // The peer can disappear between selection and dispatch. Keep
+                // the still-Pending offset in the FIFO for another peer.
+                self.ready_offsets.push_back(chunk_offset);
                 return false;
             };
             (
@@ -1132,13 +1141,12 @@ impl ChunkOrchestrator {
                 },
             );
 
+        let now = Instant::now();
         let oldest_ready_age = self
             .chunk_requests
             .values()
             .filter_map(|request| match request.request_state {
-                ChunkRequestState::Pending => {
-                    Some(Instant::now().duration_since(request.ready_since))
-                }
+                ChunkRequestState::Pending => Some(now.duration_since(request.ready_since)),
                 _ => None,
             })
             .max()
