@@ -210,7 +210,12 @@ impl UnixTimestampMs {
     /// Converts to seconds (lossy - truncates sub-second precision)
     #[inline]
     pub const fn to_secs(self) -> UnixTimestamp {
-        UnixTimestamp::from_secs((self.0 / 1000) as u64)
+        let secs = self.0 / 1000;
+        UnixTimestamp::from_secs(if secs > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            secs as u64
+        })
     }
 
     /// Creates from a UnixTimestamp (lossless - extends with zero milliseconds)
@@ -650,6 +655,12 @@ mod unix_timestamp_ms_tests {
     }
 
     #[test]
+    fn test_to_secs_saturates_on_overflow() {
+        let ts = UnixTimestampMs::from_millis((u64::MAX as u128 + 1) * 1000);
+        assert_eq!(ts.to_secs(), UnixTimestamp::from_secs(u64::MAX));
+    }
+
+    #[test]
     fn test_serde_json_string_format() {
         // Verify JSON serializes as string (matches string_u128 format)
         let ts = UnixTimestampMs::from_millis(1609459200000);
@@ -696,9 +707,14 @@ mod unix_timestamp_ms_property_tests {
         }
 
         #[test]
-        fn to_secs_consistent_with_division(millis in any::<u128>()) {
+        fn to_secs_consistent_with_saturating_division(millis in any::<u128>()) {
             let ts = UnixTimestampMs::from_millis(millis);
-            let expected_secs = (millis / 1000) as u64;
+            let secs = millis / 1000;
+            let expected_secs = if secs > u64::MAX as u128 {
+                u64::MAX
+            } else {
+                secs as u64
+            };
             prop_assert_eq!(ts.to_secs().as_secs(), expected_secs);
         }
 
