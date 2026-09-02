@@ -1152,3 +1152,70 @@ async fn publish_hot_budget_still_walks_from_the_slot_start() {
         "Publish must not spend its only hot slot on the write head"
     );
 }
+
+/// Term-ledger gaps at low offsets are often abandoned uploads. Discovery
+/// must walk down from the write head so a small hot budget is spent on
+/// frontier Entropy, not on the prefix.
+#[test_log::test(tokio::test)]
+async fn term_ledger_scan_walks_from_the_frontier_downward() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, 2);
+    let sm = packed_sm_for_ledger(&config, 8, DataLedger::Submit);
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, 8);
+    orch.populate_request_queue();
+
+    assert_eq!(
+        orch.ready_offsets.front().copied(),
+        Some(PartitionChunkOffset::from(7_u32))
+    );
+    assert_eq!(
+        orch.ready_offsets.back().copied(),
+        Some(PartitionChunkOffset::from(6_u32))
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32)),
+        "a two-slot budget must not be spent on the abandoned-upload prefix"
+    );
+}
+
+/// After the frontier has been scanned, the reverse walk wraps and still
+/// probes low-offset Entropy — just not first.
+#[test_log::test(tokio::test)]
+async fn term_ledger_reverse_scan_visits_the_prefix_after_the_frontier() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 8, 2);
+    let sm = packed_sm_for_ledger(&config, 8, DataLedger::Submit);
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, 8);
+    let peer = add_assigned_peer(&mut orch, &config, 91, 9091);
+
+    orch.populate_request_queue();
+    for value in [7_u32, 6_u32] {
+        let offset = PartitionChunkOffset::from(value);
+        orch.chunk_requests.get_mut(&offset).unwrap().request_state =
+            ChunkRequestState::Requested(peer, Instant::now());
+        orch.on_chunk_failed(
+            offset,
+            peer,
+            crate::chunk_fetcher::ChunkFetchFailureKind::NotFound,
+        )
+        .unwrap();
+    }
+
+    orch.populate_request_queue();
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(5_u32))
+            && orch
+                .chunk_requests
+                .contains_key(&PartitionChunkOffset::from(4_u32)),
+        "after the frontier is delayed, reverse discovery must continue downward"
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32)),
+        "the prefix must still wait until higher offsets have been scanned"
+    );
+}

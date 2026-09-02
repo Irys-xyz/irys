@@ -136,7 +136,9 @@ pub struct ChunkOrchestrator {
     /// request changes state, keeping state ownership in `chunk_requests`.
     ready_offsets: VecDeque<PartitionChunkOffset>,
     /// Next partition-relative offset considered while discovering Entropy.
-    /// This prevents a low sparse prefix from monopolizing queue population.
+    /// Publish walks low-to-high from here. Term ledgers walk high-to-low
+    /// (`u32::MAX` means "start at the write head") so abandoned low-offset
+    /// gaps are visited only after the frontier has been scanned.
     scan_cursor: u32,
     pub current_peers: Vec<IrysAddress>,
     block_tree: BlockTreeReadGuard,
@@ -170,7 +172,11 @@ impl ChunkOrchestrator {
             storage_module,
             chunk_requests: Default::default(),
             ready_offsets: Default::default(),
-            scan_cursor: 0,
+            scan_cursor: if Self::ledger_prioritizes_write_frontier(ledger_id) {
+                u32::MAX
+            } else {
+                0
+            },
             recent_chunk_times: CircularBuffer::new(8000),
             current_peers: Default::default(),
             block_tree,
@@ -353,39 +359,71 @@ impl ChunkOrchestrator {
             return;
         }
 
-        self.scan_cursor = self.scan_cursor.min(max_offset);
-        let cursor = self.scan_cursor;
-        let ranges = [(cursor, max_offset), (0, cursor.saturating_sub(1))];
         let max_probes = max_requests.saturating_mul(4).max(max_requests);
         let mut probes = 0_usize;
-
-        'scan: for (range_start, range_end) in ranges {
-            if range_start > range_end {
-                continue;
-            }
-            for interval in &entropy_intervals {
-                let start = (*interval.start()).max(range_start);
-                let end = (*interval.end()).min(range_end).min(max_offset);
-                if start > end {
+        if self.prioritizes_write_frontier() {
+            // High offsets near the write head are live data; low-offset Entropy
+            // on a term ledger is often an abandoned upload. Walk down from the
+            // frontier and only wrap to the prefix after that pass.
+            let cursor = self.scan_cursor.min(max_offset);
+            let ranges: [(u32, u32); 2] = if cursor == max_offset {
+                [(0, max_offset), (1, 0)]
+            } else {
+                [(0, cursor), (cursor.saturating_add(1), max_offset)]
+            };
+            'scan: for (range_start, range_end) in ranges {
+                if range_start > range_end {
                     continue;
                 }
-                for interval_step in start..=end {
-                    probes += 1;
-                    self.scan_cursor = if interval_step == max_offset {
-                        0
-                    } else {
-                        interval_step.saturating_add(1)
-                    };
-
-                    let chunk_offset = PartitionChunkOffset::from(interval_step);
-                    if self.enqueue_pending(chunk_offset, now, false) {
-                        requests_to_add -= 1;
-                        if requests_to_add == 0 {
+                for interval in entropy_intervals.iter().rev() {
+                    let start = (*interval.start()).max(range_start);
+                    let end = (*interval.end()).min(range_end).min(max_offset);
+                    if start > end {
+                        continue;
+                    }
+                    for interval_step in (start..=end).rev() {
+                        if self.note_scan_offset(
+                            interval_step,
+                            max_offset,
+                            true,
+                            now,
+                            &mut probes,
+                            max_probes,
+                            &mut requests_to_add,
+                        ) {
                             break 'scan;
                         }
                     }
-                    if probes >= max_probes {
-                        break 'scan;
+                }
+            }
+        } else {
+            // Publish: older (lower) offsets are more likely already replicated
+            // on Submit/Publish peers, so fill from the start of the slot.
+            self.scan_cursor = self.scan_cursor.min(max_offset);
+            let cursor = self.scan_cursor;
+            let ranges = [(cursor, max_offset), (0, cursor.saturating_sub(1))];
+            'scan: for (range_start, range_end) in ranges {
+                if range_start > range_end {
+                    continue;
+                }
+                for interval in &entropy_intervals {
+                    let start = (*interval.start()).max(range_start);
+                    let end = (*interval.end()).min(range_end).min(max_offset);
+                    if start > end {
+                        continue;
+                    }
+                    for interval_step in start..=end {
+                        if self.note_scan_offset(
+                            interval_step,
+                            max_offset,
+                            false,
+                            now,
+                            &mut probes,
+                            max_probes,
+                            &mut requests_to_add,
+                        ) {
+                            break 'scan;
+                        }
                     }
                 }
             }
@@ -398,10 +436,47 @@ impl ChunkOrchestrator {
     /// these orchestrators before Publish so Submit replicas stay on the
     /// frontier and Publish has many sources to copy from.
     pub(crate) fn prioritizes_write_frontier(&self) -> bool {
+        Self::ledger_prioritizes_write_frontier(self.ledger_id)
+    }
+
+    fn ledger_prioritizes_write_frontier(ledger_id: u32) -> bool {
         matches!(
-            DataLedger::try_from(self.ledger_id),
+            DataLedger::try_from(ledger_id),
             Ok(DataLedger::Submit | DataLedger::OneYear | DataLedger::ThirtyDay)
         )
+    }
+
+    /// Advance `scan_cursor` past `interval_step` and maybe enqueue it.
+    /// Returns true when the scan should stop (budget or probe cap).
+    fn note_scan_offset(
+        &mut self,
+        interval_step: u32,
+        max_offset: u32,
+        reverse: bool,
+        now: Instant,
+        probes: &mut usize,
+        max_probes: usize,
+        requests_to_add: &mut usize,
+    ) -> bool {
+        *probes += 1;
+        self.scan_cursor = if reverse {
+            if interval_step == 0 {
+                u32::MAX
+            } else {
+                interval_step - 1
+            }
+        } else if interval_step == max_offset {
+            0
+        } else {
+            interval_step.saturating_add(1)
+        };
+        if self.enqueue_pending(PartitionChunkOffset::from(interval_step), now, false) {
+            *requests_to_add = requests_to_add.saturating_sub(1);
+            if *requests_to_add == 0 {
+                return true;
+            }
+        }
+        *probes >= max_probes
     }
 
     /// Insert `offset` as Pending if it is not already tracked. `at_front`
