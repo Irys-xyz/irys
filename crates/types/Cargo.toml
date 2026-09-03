@@ -66,9 +66,22 @@ test-fuzz.workspace = true
 rstest.workspace = true
 pretty_assertions.workspace = true
 assert_matches.workspace = true
+criterion.workspace = true
 
 [build-dependencies]
 build-print = "0"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "solution_hash_bench"
+harness = false
+
+[[bench]]
+name = "merkle_bench"
+harness = false
+
+[[bench]]
+name = "pricing_bench"
+harness = false
