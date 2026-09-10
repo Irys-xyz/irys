@@ -21,3 +21,5 @@ docker/build-output/
 .claude/skills
 .claude/commands
 .agents/local
+# per-session agent notes, prompts and plans (see ~/.claude CLAUDE.md "Systematic File Naming")
+agents/
