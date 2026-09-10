@@ -5,7 +5,7 @@ irys_utils::define_metrics! {
 
     counter CHUNKS_RECEIVED("irys.gossip.chunks.received_total", "Total chunks received via gossip");
     counter BYTES_RECEIVED("irys.gossip.chunks.bytes_received_total", "Total bytes received in gossip chunk payloads");
-    histogram PROCESSING_MS("irys.gossip.chunks.processing_duration_ms", "Gossip chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
+    histogram PROCESSING_MS("irys.gossip.chunks.processing_duration_ms", "Gossip chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0]);
     counter INBOUND_ERRORS("irys.gossip.inbound.errors_total", "Gossip inbound processing errors by type");
     counter OUTBOUND_ERRORS("irys.gossip.outbound.errors_total", "Gossip outbound send errors by type");
     counter PULL_FAILURES("irys.gossip.pull.failures_total", "Gossip pull failures by request kind and reason");

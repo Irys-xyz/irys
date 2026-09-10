@@ -4,7 +4,7 @@
   "tags": ["irys", "chunks", "ingestion", "gossip"],
   "timezone": "browser",
   "schemaVersion": 38,
-  "version": 2,
+  "version": 3,
   "refresh": "10s",
   "time": {
     "from": "now-1h",
@@ -860,6 +860,66 @@
           }
         }
       }
+    },
+    {
+      "type": "timeseries",
+      "title": "API Chunk POST Latency by Node (p95)",
+      "description": "Application HTTP response latency for POST /v1/chunk, including advisory responses. Finite buckets extend through 30 seconds; quantiles in the overflow bucket remain unresolved. This is separate from the spanmetrics panels above.",
+      "gridPos": { "x": 0, "y": 75, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (job, le) (rate(irys_api_http_request_duration_ms_bucket{job=~\"$node\", method=\"POST\", path=\"/v1/chunk\"}[$__rate_interval])))",
+          "legendFormat": "{{job}} POST p95",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "min": 0 } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Served Ledger Chunk GET 404s",
+      "description": "404 responses served by each node for ledger-offset GETs. These reads bypass chunk-ingress admission but share HTTP workers and storage resources with other requests. A 404 does not identify the caller or prove migration caused the miss.",
+      "gridPos": { "x": 12, "y": 75, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job) (rate(irys_api_http_requests_total{job=~\"$node\", method=\"GET\", path=\"/v1/chunk/ledger/{ledger_id}/{ledger_offset}\", status=\"404\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} served 404/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } }
+    },
+    {
+      "type": "timeseries",
+      "title": "API Chunk POST Overload Advisories",
+      "description": "Overloaded results returned to API chunk POST callers, including gateway callers. This node API currently returns these as HTTP 200 advisory bodies; gateway-facing 503s belong to a different metric boundary. Data-sync GET failures do not increment this API counter.",
+      "gridPos": { "x": 0, "y": 81, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job) (rate(irys_api_chunks_errors_total{job=~\"$node\", error_type=\"overloaded\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} API overload/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Data Sync Fetch Not Found by Requesting Node",
+      "description": "Outbound data-sync fetches classified as not_found, across ledger-offset and data-root fetches. Labels identify the requesting node and ledger. A failed fetch is requeued without entering chunk ingress; successfully fetched bodies share chunk-ingress admission with API POST and gossip bodies.",
+      "gridPos": { "x": 12, "y": 81, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job, ledger) (rate(irys_data_sync_fetch_failures_total{job=~\"$node\", failure=\"not_found\"}[$__rate_interval]))",
+          "legendFormat": "{{job}} ledger {{ledger}} not-found/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } }
     }
   ]
 }
