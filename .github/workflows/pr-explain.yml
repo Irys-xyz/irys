@@ -189,14 +189,23 @@ jobs:
               exit 1
             fi
           done
-          if [ ! -f trusted-base/.agents/skills/explain-diff/SKILL.md ]; then
-            echo "::error::.agents/skills/explain-diff is missing on the base commit; merge the skill to the base branch first"
+          # Prefer the base commit's copy. Until the skill has landed on the
+          # base branch (the PR that introduces it, or a base branch cut before
+          # it), fall back to the PR's own copy with a warning — same-repo
+          # PRs only, so this trusts a collaborator, not a stranger.
+          if [ -f trusted-base/.agents/skills/explain-diff/SKILL.md ]; then
+            SKILL_SRC=trusted-base/.agents/skills/explain-diff
+          elif [ -f .agents/skills/explain-diff/SKILL.md ]; then
+            echo "::warning::.agents/skills/explain-diff is not on the base commit; using the PR's copy (bootstrap)"
+            SKILL_SRC=.agents/skills/explain-diff
+          else
+            echo "::error::.agents/skills/explain-diff is missing on both the base commit and the PR"
             exit 1
           fi
 
           rm -rf .pr-explain
           mkdir -p .pr-explain/out
-          cp -r trusted-base/.agents/skills/explain-diff .pr-explain/skill
+          cp -r "$SKILL_SRC" .pr-explain/skill
           rm -rf trusted-base
 
           # The API's PR diff is base-merge-base..head — the artefact `gh pr
