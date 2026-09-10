@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1566 — explain-diff CI workflow (summary)</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --panel-border: #262b38;
+    --text: #e6e9f0;
+    --muted: #9aa3b2;
+    --accent: #7aa2ff;
+    --accent-2: #7ce3c1;
+    --warn-bg: #3a2a12;
+    --warn-border: #a86a1f;
+    --warn-text: #ffd9a0;
+    --info-bg: #12293a;
+    --info-border: #1f6aa8;
+    --info-text: #a0d4ff;
+    --code-bg: #0b0d12;
+    --link: #7aa2ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  header.page-header {
+    padding: 1.5rem 1.5rem 1rem;
+    border-bottom: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, #11141b, #0f1115);
+  }
+  header.page-header h1 {
+    margin: 0 0 0.4rem;
+    font-size: 1.5rem;
+  }
+  header.page-header p {
+    margin: 0.2rem 0;
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+  header.page-header code {
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+  }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: #12141b;
+    border-bottom: 1px solid var(--panel-border);
+    padding: 0.6rem 1.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    font-size: 0.88rem;
+  }
+  nav.toc a {
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  nav.toc a:hover { text-decoration: underline; }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 1.5rem;
+  }
+  section {
+    margin-bottom: 2.2rem;
+  }
+  section h2 {
+    font-size: 1.15rem;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 0.4rem;
+    margin-top: 0;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+  }
+  .change-map li, .behavior-list li, .watch-list li {
+    margin-bottom: 0.7rem;
+  }
+  .theme-name { color: var(--accent-2); }
+  code.files, code.cite {
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+  }
+  a.cite {
+    color: var(--link);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    text-decoration: none;
+    border: 1px solid #232838;
+  }
+  a.cite:hover { border-color: var(--accent); }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-size: 0.83rem;
+    line-height: 1.5;
+  }
+  .callout {
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    margin: 0.8rem 0;
+    border: 1px solid var(--panel-border);
+  }
+  .callout.info {
+    background: var(--info-bg);
+    border-color: var(--info-border);
+    color: var(--info-text);
+  }
+  .callout.warn {
+    background: var(--warn-bg);
+    border-color: var(--warn-border);
+    color: var(--warn-text);
+  }
+  .callout strong { color: inherit; }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.6rem;
+    margin: 1rem 0;
+  }
+  .flow .box {
+    flex: 1 1 150px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 0.7rem 0.8rem;
+    font-size: 0.85rem;
+  }
+  .flow .box .label {
+    display: block;
+    color: var(--accent-2);
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+    font-size: 0.8rem;
+  }
+  .flow .arrow {
+    align-self: center;
+    color: var(--muted);
+    font-size: 1.3rem;
+    padding: 0 0.2rem;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: #1e2330;
+    color: var(--muted);
+    border: 1px solid var(--panel-border);
+    margin-left: 0.4rem;
+  }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    padding: 1.5rem;
+  }
+  @media (max-width: 600px) {
+    nav.toc { gap: 0.3rem 0.7rem; font-size: 0.82rem; }
+    .flow { flex-direction: column; }
+    .flow .arrow { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+
+<header class="page-header">
+  <h1>Every PR now gets an automated explain-diff writeup, published to gh-pages</h1>
+  <p>PR #1566 — <code>feat(ci): explain pull requests on open and merge with explain-diff</code> — Irys-xyz/irys</p>
+  <p>Mode: <strong>summary</strong> · Stage: <strong>merged</strong> (commit <code>1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4</code>) · Repo root for citations: checkout root · Generated 2026-09-10</p>
+</header>
+
+<nav class="toc">
+  <a href="#what-it-does">What it does</a>
+  <a href="#why">Why</a>
+  <a href="#change-map">Change map</a>
+  <a href="#behavior-changes">Behavior changes</a>
+  <a href="#watch-out">Watch out for</a>
+</nav>
+
+<main>
+
+<section id="what-it-does">
+  <h2>What it does</h2>
+  <div class="panel">
+    <p>This PR vendors the third-party <code>explain-diff</code> skill into <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.agents/skills/explain-diff/SKILL.md#L1">.agents/skills/explain-diff/SKILL.md#L1</a> and adds a new GitHub Actions workflow, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L1">.github/workflows/pr-explain.yml#L1</a>, that runs the skill against every same-repository pull request: once in <code>expert</code> mode when the PR is opened, and once in <code>summary</code> mode when it is merged.</p>
+    <p>Each run has Claude Code read the PR's diff, title/description, and commit messages from pre-staged files, explore the checked-out tree, and write a single self-contained HTML page. The page is copied to the <code>gh-pages</code> branch under <code>dev/explain/&lt;pr&gt;/&lt;stage&gt;.html</code>, and a sticky bot comment on the PR links to whichever stage(s) exist so far.</p>
+    <div class="flow">
+      <div class="box"><span class="label">PR event</span>opened → same-repo check → resolve head/base/merge SHAs</div>
+      <div class="arrow">→</div>
+      <div class="box"><span class="label">Stage inputs</span>fetch pr.diff, pr.md, commits.txt into <code>.pr-explain/</code>; copy skill from base commit</div>
+      <div class="arrow">→</div>
+      <div class="box"><span class="label">Claude Code</span><code>--allowedTools Read,Glob,Grep,Write</code> writes one HTML file</div>
+      <div class="arrow">→</div>
+      <div class="box"><span class="label">Validate + publish</span>git-status diff check → push to <code>gh-pages</code> → sticky PR comment</div>
+    </div>
+  </div>
+</section>
+
+<section id="why">
+  <h2>Why</h2>
+  <div class="panel">
+    <p>Stated intent, from the PR description: <em>"Before: No automated PR explanation; reviewers reconstruct intent from the raw diff, and merged PRs leave no summary. After: The PR Explain workflow runs vendored explain-diff on open (expert) and merge (summary), publishes HTML to gh-pages/dev/explain/&lt;pr&gt;/&lt;stage&gt;.html, and adds a sticky PR comment linking both."</em></p>
+    <p>The commit history shows two commits — <code>feat(ci): explain pull requests on open and merge with explain-diff</code> and <code>fix: address review findings</code> — indicating this already went through one round of review feedback before landing.</p>
+  </div>
+</section>
+
+<section id="change-map">
+  <h2>Change map</h2>
+  <ul class="change-map panel" style="list-style: none; margin: 0; padding: 1rem 1.2rem;">
+    <li><span class="theme-name">Vendored skill</span> (<code class="files">.agents/skills/explain-diff/{SKILL.md,LICENSE,ORIGIN.md,references/*.md}</code>) — imports the upstream MIT-licensed <code>explain-diff</code> skill largely verbatim (per <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.agents/skills/explain-diff/ORIGIN.md#L1">.agents/skills/explain-diff/ORIGIN.md#L1</a>), adding only a "CI mode" addendum at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.agents/skills/explain-diff/SKILL.md#L141">.agents/skills/explain-diff/SKILL.md#L141</a> that redirects input-gathering from <code>git</code>/<code>gh</code> to pre-staged files and GitHub-relative citation links.</li>
+    <li><span class="theme-name">PR Explain workflow scaffold</span> (<code class="files">.github/workflows/pr-explain.yml</code>) — new workflow triggered on <code>pull_request: [opened, closed]</code> and <code>workflow_dispatch</code>, gated to same-repository PRs and merged closes, at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L60">.github/workflows/pr-explain.yml#L60</a>. Mirrors the trusted-base checkout / sparse-checkout pattern already used by <code>.github/workflows/design-extraction.yml</code>.</li>
+    <li><span class="theme-name">Trust boundary for the skill copy</span> — the skill is checked out from the PR's <em>base</em> commit into <code>trusted-base/</code>, not the PR head, at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L167">.github/workflows/pr-explain.yml#L167</a>, so a PR cannot rewrite the instructions used to explain itself — with a same-repo-only bootstrap fallback to the PR's own copy when the base predates the skill, at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L196">.github/workflows/pr-explain.yml#L196</a>.</li>
+    <li><span class="theme-name">Untrusted-input handling and output validation</span> — the diff, PR body, and commit messages are fetched into <code>.pr-explain/{pr.diff,pr.md,commits.txt}</code> rather than interpolated into the prompt (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L276">.github/workflows/pr-explain.yml#L276</a>), Claude Code runs with <code>--allowedTools "Read,Glob,Grep,Write"</code> (no <code>Bash</code>, no network) at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L297">.github/workflows/pr-explain.yml#L297</a>, and a "Validate explanation output" step checks <code>git status --porcelain</code> for anything touched outside <code>.pr-explain/</code> before publishing, at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L306">.github/workflows/pr-explain.yml#L306</a>.</li>
+    <li><span class="theme-name">Publishing and notification</span> — the generated page is copied into a <code>gh-pages</code> checkout and pushed with a rebase-and-retry loop (up to 3 attempts) to tolerate races with <code>bench.yml</code>/<code>coverage.yml</code>, at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L344">.github/workflows/pr-explain.yml#L344</a>; a sticky comment (marker <code>&lt;!-- pr-explain --&gt;</code>) is then created or updated listing every stage that currently exists on disk, at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L373">.github/workflows/pr-explain.yml#L373</a>.</li>
+    <li><span class="theme-name">Unrelated .gitignore tweak</span> (<code class="files">.gitignore</code>) — bundles in an <code>agents/</code> ignore entry for per-session agent notes, at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.gitignore#L23">.gitignore#L23</a>, unrelated to the explain-diff feature itself.</li>
+  </ul>
+</section>
+
+<section id="behavior-changes">
+  <h2>Behavior changes</h2>
+  <div class="panel">
+    <ul class="behavior-list" style="margin: 0; padding-left: 1.2rem;">
+      <li>Opening a same-repository PR → previously nothing happened automatically; now an <code>expert</code>-mode HTML page is generated and published to <code>https://&lt;owner&gt;.github.io/&lt;repo&gt;/dev/explain/&lt;pr&gt;/opened.html</code>, linked from a sticky PR comment (see <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L45">.github/workflows/pr-explain.yml#L45</a> for the trigger).</li>
+      <li>Merging a same-repository PR → previously no durable summary was left behind; now a <code>summary</code>-mode HTML page is generated and published to <code>.../merged.html</code>, only when <code>pull_request.merged == true</code> (a closed-without-merge PR produces nothing), per <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L60">.github/workflows/pr-explain.yml#L60</a>.</li>
+      <li>Fork PRs → no change: the job's <code>if</code> condition requires <code>head.repo.full_name == base.repo.full_name</code>, so external contributions never trigger this workflow or consume <code>ANTHROPIC_API_KEY</code>, per <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L60">.github/workflows/pr-explain.yml#L60</a>.</li>
+      <li>Local development → contributors gain a new <code>/explain-diff [mode] [target]</code> skill they can invoke directly (outside CI mode), documented at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.agents/skills/explain-diff/SKILL.md#L28">.agents/skills/explain-diff/SKILL.md#L28</a>; this does not require the new workflow.</li>
+      <li>A maintainer can also manually (re)generate either page for any same-repo PR via <code>workflow_dispatch</code>, choosing the stage and overriding the mode, per <a class="cite" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L14">.github/workflows/pr-explain.yml#L14</a>.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="watch-out">
+  <h2>Watch out for</h2>
+
+  <div class="callout warn">
+    <strong>1. <a class="cite" style="color: inherit; border-color: var(--warn-border);" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L196">.github/workflows/pr-explain.yml#L196</a></strong> — for this very PR (the one introducing the skill), <code>base_sha</code> predates the skill's existence on the base branch, so the bootstrap fallback at line 198 uses <em>the PR's own, still-unmerged copy</em> of <code>SKILL.md</code> to explain itself, instead of a base-branch-trusted copy. That is a deliberate, same-repo-only exception per the inline comment, but it means the "opened" page for PR #1566 was generated under weaker instruction-provenance guarantees than every PR after it — worth confirming the <code>::warning::</code> at line 199 actually surfaced in that run's log.
+  </div>
+
+  <div class="callout warn">
+    <strong>2. <a class="cite" style="color: inherit; border-color: var(--warn-border);" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L297">.github/workflows/pr-explain.yml#L297</a></strong> — Claude Code runs with <code>Write</code> access to the entire checkout while summarizing attacker-controllable content (<code>pr.diff</code>/<code>pr.md</code>/<code>commits.txt</code> come straight from the PR under review). The only backstop against a successful prompt injection writing outside <code>.pr-explain/out/</code> is the <code>git status --porcelain</code> check in the very next step (<a class="cite" style="color: inherit; border-color: var(--warn-border);" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.github/workflows/pr-explain.yml#L306">.github/workflows/pr-explain.yml#L306</a>). That guard only works because "Validate explanation output" unconditionally runs before "Publish page to gh-pages" — a future reorder, an added <code>continue-on-error</code>, or a step inserted between them that touches git state would silently remove the only check standing between an injected write and a push to <code>gh-pages</code>. (Worth a dedicated code-review pass if this trust boundary is safety-critical.)
+  </div>
+
+  <div class="callout info">
+    <strong>3. <a class="cite" style="color: inherit; border-color: var(--info-border);" href="https://github.com/Irys-xyz/irys/blob/1f9a7e7bf558ed7153e2c930eda0d275c7faf1a4/.gitignore#L23">.gitignore#L23</a></strong> — the <code>.pr-explain/</code> staging directory this workflow creates is not itself added to <code>.gitignore</code>. A contributor who follows the skill's own "CI mode" instructions locally (as this very explanation-generation session did) is left with an untracked <code>.pr-explain/</code> directory in <code>git status</code>. Low severity — <code>actions/checkout</code>'s default clean step wipes it between CI runs — but it's a minor rough edge for local use.
+  </div>
+
+</section>
+
+</main>
+
+<footer>Generated by the explain-diff skill in CI mode · summary · PR #1566</footer>
+
+</body>
+</html>
