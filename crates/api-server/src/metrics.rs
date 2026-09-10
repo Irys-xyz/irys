@@ -13,8 +13,8 @@ irys_utils::define_metrics! {
     counter CHUNKS_RECEIVED("irys.api.chunks.received_total", "Total chunks received via API");
     counter BYTES_RECEIVED("irys.api.chunks.bytes_received_total", "Total bytes received in chunk payloads");
     counter CHUNK_ERRORS("irys.api.chunks.errors_total", "Chunk processing errors by type");
-    histogram CHUNK_PROCESSING_MS("irys.api.chunks.processing_duration_ms", "Chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
-    histogram REQUEST_DURATION_MS("irys.api.http.request_duration_ms", "HTTP request processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
+    histogram CHUNK_PROCESSING_MS("irys.api.chunks.processing_duration_ms", "Chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0]);
+    histogram REQUEST_DURATION_MS("irys.api.http.request_duration_ms", "HTTP request processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0]);
     counter REQUESTS_TOTAL("irys.api.http.requests_total", "Total HTTP requests by method, path, and status");
 }
 

@@ -21,3 +21,4 @@ docker/build-output/
 .claude/skills
 .claude/commands
 .agents/local
+/agents/
