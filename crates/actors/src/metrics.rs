@@ -30,6 +30,12 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_CHUNK_WRITE_FAILED("irys.data_sync.chunk_write_failed_total", "Data sync local write failures after a successful fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_BLOCKED("irys.data_sync.chunk_blocked_total", "Data sync offsets blocked from hot re-fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync Blocked offsets re-queued after local index-ready probe (MissingDataRootIndex → Pending)");
+    gauge BODY_MIGRATION_PENDING_JOBS("irys.chunk_migration.body_pending_jobs", "Outstanding chunk-body migration jobs across all storage modules after the last worker pass");
+    gauge BODY_MIGRATION_OLDEST_PENDING_HEIGHT("irys.chunk_migration.body_oldest_pending_height", "Lowest block height with an outstanding chunk-body migration job before the last pass (0 when none); its distance to the tip is the worker's lag");
+    counter BODY_MIGRATION_CHUNKS_WRITTEN("irys.chunk_migration.body_chunks_written_total", "Chunk bodies the body worker enqueued to storage modules");
+    counter BODY_MIGRATION_JOBS_SETTLED("irys.chunk_migration.body_jobs_settled_total", "Body-migration jobs completed with every offset durable");
+    counter BODY_MIGRATION_JOBS_RETIRED("irys.chunk_migration.body_jobs_retired_total", "Body-migration jobs abandoned to data sync after repeated passes with no local source");
+    counter BODY_MIGRATION_THROTTLED("irys.chunk_migration.body_throttled_total", "Body-migration jobs cut short by a storage module's pending-write ceiling");
     counter DATA_SYNC_DURABILITY_STALLED("irys.data_sync.durability_stalled_total", "Data sync writes that did not become durable before the monotonic durability deadline");
     counter DATA_INDEX_HEAL_UNREPAIRED("irys.storage.index_heal_unrepaired_total", "Ledger SMs still gapped/uncertain after a heal pass (labelled by reason)");
     counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync peer fetches by source and classified outcome");
@@ -211,6 +217,23 @@ pub(crate) fn record_validation_concurrent_cancel_repeated() {
 pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {
     CACHE_CHUNK_COUNT.record(chunk_count, &[]);
     CACHE_CHUNK_SIZE_BYTES.record(chunk_size_bytes, &[]);
+}
+
+/// One body-worker pass: counters for what it did, gauges for what is left.
+pub(crate) fn record_body_migration_pass(
+    written: u64,
+    settled: u64,
+    retired: u64,
+    throttled: u64,
+    pending_jobs: u64,
+    oldest_pending_height: u64,
+) {
+    BODY_MIGRATION_CHUNKS_WRITTEN.add(written, &[]);
+    BODY_MIGRATION_JOBS_SETTLED.add(settled, &[]);
+    BODY_MIGRATION_JOBS_RETIRED.add(retired, &[]);
+    BODY_MIGRATION_THROTTLED.add(throttled, &[]);
+    BODY_MIGRATION_PENDING_JOBS.record(pending_jobs, &[]);
+    BODY_MIGRATION_OLDEST_PENDING_HEIGHT.record(oldest_pending_height, &[]);
 }
 
 pub(crate) fn record_block_discovery_error(error_type: &'static str) {

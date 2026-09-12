@@ -468,12 +468,18 @@ pub struct StorageSyncConfig {
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
+    /// Ceiling, in bytes, on chunk bodies one storage module may hold in memory
+    /// awaiting flush before background body migration pauses writing to it.
+    /// `None` derives `2 × num_writes_before_sync × chunk_size × submodules`
+    /// per module: one flush batch in flight plus one being filled, per disk.
+    pub max_pending_write_bytes: Option<u64>,
 }
 
 impl Default for StorageSyncConfig {
     fn default() -> Self {
         Self {
             num_writes_before_sync: 100,
+            max_pending_write_bytes: None,
         }
     }
 }
@@ -1259,6 +1265,7 @@ impl NodeConfig {
             reward_address,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1447,6 +1454,7 @@ impl NodeConfig {
             reward_address,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
