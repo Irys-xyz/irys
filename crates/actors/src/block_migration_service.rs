@@ -719,7 +719,32 @@ impl BlockMigrationService {
         // rollback. Crash-safe journaled recovery is the proper fix, tracked for
         // the storage-module rework. Everything above this point is read-only, so
         // its failures propagate normally.
+        /// Holds every module's data writes paused for the rollback; resumes on
+        /// drop, including on the abort path.
+        struct PausedDataWrites(Vec<Arc<StorageModule>>);
+        impl PausedDataWrites {
+            fn pause(modules: Vec<Arc<StorageModule>>) -> Self {
+                for module in &modules {
+                    module.pause_data_writes();
+                }
+                Self(modules)
+            }
+        }
+        impl Drop for PausedDataWrites {
+            fn drop(&mut self) {
+                for module in &self.0 {
+                    module.resume_data_writes();
+                }
+            }
+        }
         let apply_rollback = || -> eyre::Result<()> {
+            // Freeze data writes on every module for the whole rollback. The
+            // body worker, data sync and chunk ingress all write through
+            // `write_data_chunk`; any of them landing a write between
+            // `drop_pending_writes_in_range` and the interval re-mark below
+            // would flush orphaned bytes as `Data` over a cleared index.
+            let _writes_paused =
+                PausedDataWrites::pause(storage_modules_guard.read().iter().cloned().collect());
             // Phase 2: Unassign storage module offsets and clear orphaned index entries
             for info in &rollback_infos {
                 for (ledger, range) in &info.ledger_ranges {
@@ -801,6 +826,13 @@ impl BlockMigrationService {
                             PartitionChunkOffset::from(range_start),
                             PartitionChunkOffset::from(range_end),
                             &info.data_roots,
+                        )?;
+                        // The chunk bodies those placements still owed belong to
+                        // orphaned txs: drop the jobs so the body worker never
+                        // writes them into the re-marked range.
+                        module.purge_pending_body_migrations_in_range(
+                            PartitionChunkOffset::from(range_start),
+                            PartitionChunkOffset::from(range_end),
                         )?;
 
                         // Mark offsets as Uninitialized (not Entropy — on-disk bytes are packed data)
@@ -2718,6 +2750,33 @@ mod tests {
             index.push_item(&submit_index_item(&orphan, 8), 1)?;
         }
 
+        // Body-migration jobs: one for the orphaned tx spanning both modules
+        // (block 1), one for a genesis-range tx that must survive (block 0).
+        let body_job_tx = |data_size: u64| {
+            irys_types::DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: irys_types::DataTransactionHeaderV1 {
+                    data_root: H256::random(),
+                    data_size,
+                    ..Default::default()
+                },
+                metadata: irys_types::DataTransactionMetadata::new(),
+            })
+        };
+        let chunk_size = config.consensus.chunk_size;
+        let orphan_tx = body_job_tx(5 * chunk_size);
+        let orphan_range =
+            LedgerChunkRange(ii(LedgerChunkOffset::from(3), LedgerChunkOffset::from(7)));
+        for module in &modules {
+            module.index_transaction_data(&orphan_tx, &vec![1, 2, 3], orphan_range, 1)?;
+        }
+        modules[0].index_transaction_data(
+            &body_job_tx(3 * chunk_size),
+            &vec![4, 5, 6],
+            LedgerChunkRange(ii(LedgerChunkOffset::from(0), LedgerChunkOffset::from(2))),
+            0,
+        )?;
+        assert_eq!(modules[0].pending_body_migrations()?.len(), 2);
+        assert_eq!(modules[1].pending_body_migrations()?.len(), 1);
         svc.recover_from_network_partition(0)?;
 
         {
@@ -2725,6 +2784,17 @@ mod tests {
             assert_eq!(index.num_blocks(), 1);
             assert_eq!(index.latest_height(), 0);
         }
+        // The orphaned tx's body jobs are gone from both modules; the genesis
+        // tx's job (partition offset 0 in slot 0) survives.
+        let surviving: Vec<_> = modules[0]
+            .pending_body_migrations()?
+            .into_iter()
+            .map(|(key, job)| (key, job.block_height))
+            .collect();
+        assert_eq!(surviving, vec![(PartitionChunkOffset::from(0), 0)]);
+        assert!(modules[1].pending_body_migrations()?.is_empty());
+        // The write pause is scoped to the rollback: both modules accept data again.
+        assert!(modules.iter().all(|module| !module.data_writes_paused()));
 
         // Each module had exactly its own slice of [3, 7] unassigned: the
         // genesis chunks [0, 2] stay packed in slot 0, and slot 1's offsets

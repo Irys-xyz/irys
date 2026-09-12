@@ -1,6 +1,6 @@
 use crate::db_cache::{GlobalChunkOffset, PartitionHashes};
 use crate::metadata::MetadataKey;
-use crate::submodule::tables::{DataRootInfos, TxLeafBinding};
+use crate::submodule::tables::{DataRootInfos, PendingBodyMigration, TxLeafBinding};
 use crate::{
     db_cache::{
         CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf, CachedIngressLeafKey,
@@ -103,6 +103,7 @@ impl_compression_for_compact!(
     PartitionHashes,
     DataRootInfos,
     TxLeafBinding,
+    PendingBodyMigration,
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof,

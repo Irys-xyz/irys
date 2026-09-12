@@ -435,6 +435,7 @@ impl TestSetup {
             }),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 100,
@@ -662,6 +663,7 @@ impl TestSetup {
                 &data_tx.header,
                 &tx_path,
                 LedgerChunkRange(ledger_chunk_offset_ie!(0, num_chunks as u64)),
+                0,
             )
             .map_err(|e| {
                 error!(

@@ -1588,6 +1588,7 @@ mod ingress_proof_peer_tests {
             &tx.header,
             &proofs[0].proof,
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
         )
         .expect("index");
 
@@ -1817,6 +1818,7 @@ mod write_outcome_tests {
             }),
             storage: StorageSyncConfig {
                 num_writes_before_sync: num_chunks,
+                max_pending_write_bytes: None,
             },
             base_directory: tmp.path().to_path_buf(),
             ..NodeConfig::testing()
