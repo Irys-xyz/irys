@@ -65,8 +65,9 @@ bind_port = 30303
 [storage]
 num_writes_before_sync = 100
 # Bytes of chunk data one storage module may hold in memory awaiting flush before
-# background body migration pauses writing to it. Default derives from
-# num_writes_before_sync × chunk_size × submodules (floored at 256 chunks per submodule).
+# background body migration pauses writing to it. Default is
+# max(2 × num_writes_before_sync, 256) × chunk_size × submodules (two flush
+# batches, floored at 256 chunks per submodule).
 # max_pending_write_bytes = 67108864
 
 [data_sync]
