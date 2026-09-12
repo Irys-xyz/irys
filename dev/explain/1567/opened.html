@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1567 — expert analysis</title>
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --panel-2: #1d232b;
+    --border: #2a323d;
+    --text: #dfe6ee;
+    --muted: #93a1b0;
+    --accent: #6ea8fe;
+    --accent-2: #9b8cff;
+    --good: #57c785;
+    --warn: #e0a640;
+    --bad: #e0616f;
+    --code-bg: #0b0e12;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+  header.page {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1.1rem;
+    margin-bottom: 1.4rem;
+  }
+  header.page h1 { font-size: 1.5rem; margin: 0 0 0.35rem; }
+  header.page .meta { color: var(--muted); font-size: 0.92rem; }
+  header.page .meta code { color: var(--accent); }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 1.8rem;
+  }
+  nav.toc h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 0.5rem; }
+  nav.toc ol { margin: 0; padding-left: 1.2rem; columns: 2; column-gap: 1.5rem; }
+  nav.toc li { margin-bottom: 0.25rem; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section { margin-bottom: 2.4rem; scroll-margin-top: 1rem; }
+  section > h2 {
+    font-size: 1.15rem;
+    border-left: 3px solid var(--accent);
+    padding-left: 0.6rem;
+    margin: 0 0 0.9rem;
+  }
+  section > h3 { font-size: 1rem; color: var(--accent-2); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.6rem 0; }
+  a { color: var(--accent); }
+  code, pre, .cite { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.86em; }
+  code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+  .cite a {
+    display: inline-block;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.05em 0.4em;
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .cite a:hover { border-color: var(--accent); }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  pre code { background: none; padding: 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.45rem; }
+  table { border-collapse: collapse; width: 100%; margin: 0.8rem 0 1.2rem; font-size: 0.92rem; }
+  th, td { border: 1px solid var(--border); padding: 0.5rem 0.65rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 0.12em 0.5em;
+    border-radius: 999px;
+    margin-right: 0.4em;
+  }
+  .tag.re-established { background: rgba(87,199,133,0.15); color: var(--good); border: 1px solid rgba(87,199,133,0.4); }
+  .tag.dropped { background: rgba(224,166,64,0.15); color: var(--warn); border: 1px solid rgba(224,166,64,0.4); }
+  .tag.unaccounted { background: rgba(224,97,111,0.15); color: var(--bad); border: 1px solid rgba(224,97,111,0.4); }
+  .callout {
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    margin: 0.9rem 0;
+    border: 1px solid var(--border);
+  }
+  .callout.info { background: rgba(110,168,254,0.08); border-color: rgba(110,168,254,0.35); }
+  .callout.warn { background: rgba(224,166,64,0.08); border-color: rgba(224,166,64,0.4); }
+  .callout.risk { background: rgba(224,97,111,0.08); border-color: rgba(224,97,111,0.4); }
+  .callout .lbl { font-weight: 700; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.35rem; }
+  .callout.info .lbl { color: var(--accent); }
+  .callout.warn .lbl { color: var(--warn); }
+  .callout.risk .lbl { color: var(--bad); }
+  .sev { font-weight: 700; }
+  .sev.high { color: var(--bad); }
+  .sev.med { color: var(--warn); }
+  .sev.low { color: var(--muted); }
+
+  /* diagram */
+  .diagram {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    margin: 1rem 0;
+    flex-wrap: wrap;
+  }
+  .dstage {
+    flex: 1;
+    min-width: 220px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    background: var(--panel-2);
+    margin: 0.3rem;
+  }
+  .dstage h4 { margin: 0 0 0.4rem; font-size: 0.85rem; color: var(--accent); }
+  .dstage .note { color: var(--muted); font-size: 0.8rem; }
+  .dstage .data { font-family: ui-monospace, monospace; font-size: 0.78rem; background: var(--code-bg); border-radius: 4px; padding: 0.3rem 0.5rem; margin-top: 0.4rem; }
+  .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 1.4rem;
+    padding: 0 0.3rem;
+  }
+  footer.page { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page">
+  <h1>fix(chunk-migration): split index path from background body migration</h1>
+  <div class="meta">
+    PR #1567 · Irys-xyz/irys · expert mode · mode: <code>expert</code> · comparing base merge-base → head <code>2ea0fa41656275bb7125a9b52b4f6412796c3628</code><br>
+    Repository root for citations: checkout root (<code>crates/…</code> paths below are relative to it). All <code>path:line</code> links point at commit <code>2ea0fa4165</code>.
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#intent">Intent &amp; approach</a></li>
+    <li><a href="#delta">Delta semantics</a></li>
+    <li><a href="#cross-file">Cross-file impact</a></li>
+    <li><a href="#review-focus">Review-focus map</a></li>
+    <li><a href="#open-questions">Open questions</a></li>
+  </ol>
+</nav>
+
+<section id="intent">
+<h2>Intent &amp; approach</h2>
+
+<p>The stated trigger: devnet n3 froze at block 29875 behind a 4.43 GiB Submit tx. <code>ChunkMigrationService</code> did index writes, chunk-body writes, and a per-tx fsync in one synchronous pass per block (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service.rs#L280"><span class="cite"></span>crates/actors/src/chunk_migration_service.rs:280</a>); one oversized tx's body copy blocked every subsequent block's index writes, so the Publish ledger's promotions (indexed via the same path) never landed and data sync parked the whole span on <code>MissingDataRootIndex</code>.</p>
+
+<p>The fix separates two concerns that were previously fused into one synchronous call:</p>
+
+<div class="diagram">
+  <div class="dstage">
+    <h4>Index path — <code>on_block_migrated</code></h4>
+    <div class="note">Runs inline, in block order, MDBX only.</div>
+    <div class="data">tx_path / DataRootInfo → per-submodule txn<br>+ PendingBodyMigration{data_root, data_size, start_offset, block_height, attempts:0}</div>
+    <div class="note">~40 bytes per tx, regardless of tx size.</div>
+  </div>
+  <div class="arrow">→</div>
+  <div class="dstage">
+    <h4>Body path — <code>body_worker.rs</code></h4>
+    <div class="note">Background, one <code>spawn_blocking</code> task per submodule with outstanding rows.</div>
+    <div class="data">cache hit → write_data_chunk<br>cache miss (Publish only) → durable Submit replica<br>no source → left for data sync</div>
+    <div class="note">512 writes/pass budget; stops at a pending-write byte ceiling.</div>
+  </div>
+</div>
+
+<p>The index path is now provably fast and bounded (one small MDBX write per tx, in the same per-submodule transaction as the existing index write — <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/domain/src/models/storage_module.rs#L1403"><span class="cite"></span>crates/domain/src/models/storage_module.rs:1403</a>), so a huge tx can no longer stall later blocks' indexing or Publish promotion. The body path becomes a durable work queue (<code>PendingBodyMigrationsByOffset</code>, <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/database/src/submodule/tables.rs#L68"><span class="cite"></span>crates/database/src/submodule/tables.rs:68</a>) drained by a new worker (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service/body_worker.rs#L171"><span class="cite"></span>crates/actors/src/chunk_migration_service/body_worker.rs:171</a>) that survives restarts, paces itself with a per-pass write budget (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service/body_worker.rs#L41"><span class="cite"></span>body_worker.rs:41</a>), and backs off at a configurable in-memory byte ceiling (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service/body_worker.rs#L62"><span class="cite"></span>body_worker.rs:62</a>) rather than an unbounded queue.</p>
+
+<p><strong>Road not taken:</strong> the PR could have kept body writes synchronous but chunked/streamed within a bounded time budget per <code>on_block_migrated</code> call (spreading one huge tx's writes across several ticks while still blocking new indexes behind it, just less badly). Instead it fully decouples indexing from body copying via a durable job table — this buys unconditional forward progress on indexing at the cost of a new invariant to maintain (job row ⇔ index row, enforced by the shared transaction) and a new failure mode to design for (a job that can never be sourced, handled by an 8-attempt retirement policy that hands the hole to data sync, <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service/body_worker.rs#L35"><span class="cite"></span>body_worker.rs:35</a>).</p>
+
+<p>Bundled into the same PR: making <code>handle_message</code> infallible so one bad block can't kill the whole service (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service.rs#L115"><span class="cite"></span>chunk_migration_service.rs:115</a>); pausing all storage-module data writes during network-partition rollback so the body worker/data sync/chunk ingress can't race the rollback (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/block_migration_service.rs#L724"><span class="cite"></span>block_migration_service.rs:724</a>); and purging orphaned body-migration jobs alongside the existing index purge in that same rollback (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/block_migration_service.rs#L833"><span class="cite"></span>block_migration_service.rs:833</a>).</p>
+</section>
+
+<section id="delta">
+<h2>Delta semantics</h2>
+
+<h3>Contract-level changes</h3>
+<ul>
+<li><strong>Durability timing weakens.</strong> Previously a caller could assume that once <code>BlockMigrated</code> handling returned, every migratable chunk body was already on disk (or explicitly abandoned to data sync). Now bodies land "typically within one worker pass plus one storage-service flush" after indexing — an unbounded-in-the-worst-case, best-effort window. Reads during that window must be served from the chunk cache, not the storage module.</li>
+<li><strong><code>StorageModule::write_chunk</code> gains a return value</strong> (<code>()</code> → <code>bool</code>, <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/domain/src/models/storage_module.rs#L1252"><span class="cite"></span>storage_module.rs:1252</a>): <code>false</code> means a <code>Data</code>-typed write was refused because the module is paused. Entropy writes always return <code>true</code>.</li>
+<li><strong>New error variant</strong> <code>WriteDataChunkError::WritesPaused</code> on <code>write_data_chunk</code>, mapped by every caller into an advisory/non-penalizing outcome rather than a hard failure (chunk ingress → <code>Advisory(Overloaded)</code>, <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_ingress_service/chunks.rs#L574"><span class="cite"></span>chunks.rs:574</a>; migration → a non-error-level log, <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service.rs#L576"><span class="cite"></span>chunk_migration_service.rs:576</a>).</li>
+<li><strong>New signature parameter:</strong> <code>index_transaction_data(&self, data_tx, tx_path, chunk_range, block_height: u64)</code> — every call site across the codebase (and its tests) was updated; a reorg can now purge a block's jobs by the <code>block_height</code> stamped at index time.</li>
+<li><strong>New config surface:</strong> <code>storage.max_pending_write_bytes: Option&lt;u64&gt;</code> (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/types/src/config/node.rs#L471"><span class="cite"></span>config/node.rs:471</a>), validated to reject <code>Some(0)</code> (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/types/src/config/mod.rs#L83"><span class="cite"></span>config/mod.rs:83</a>). No storage schema bump: the new MDBX table is registered in <code>SubmoduleTables::ALL</code> and reth/MDBX creates missing tables lazily on env open, so existing submodule DBs pick it up on next start with no migration step.</li>
+<li><strong>New concurrency primitive:</strong> per-module <code>data_writes_paused: AtomicBool</code>, gated under the same <code>pending_writes</code> write lock used for inserts (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/domain/src/models/storage_module.rs#L621"><span class="cite"></span>storage_module.rs:621</a>), so a pause taken mid-race with a writer's own pre-check still wins — the writer's insert and the pause flag can never observably interleave the wrong way.</li>
+</ul>
+
+<h3>Removed-behavior audit</h3>
+<table>
+<thead><tr><th>Deleted invariant / behavior</th><th>Old enforcement site</th><th>Disposition</th></tr></thead>
+<tbody>
+<tr>
+  <td>Chunk bodies for a block's txs are durably written (or explicitly abandoned) synchronously inside <code>on_block_migrated</code>, before it returns.</td>
+  <td><code>process_transaction_chunks</code> (deleted), called from <code>process_ledger_transactions</code></td>
+  <td><span class="tag re-established">re-established, weaker</span> — replaced by the async body worker; the "before it returns" guarantee is gone, replaced by a best-effort "usually within a pass or two" window (see Delta above and Review-focus #1).</td>
+</tr>
+<tr>
+  <td>A per-tx forced flush (<code>module.sync_pending_chunks()</code>) after every tx during index processing.</td>
+  <td><code>process_ledger_transactions</code> (deleted call)</td>
+  <td><span class="tag re-established">re-established elsewhere</span> — <code>StorageModuleService::tick()</code> already flushes every module on its own 1s timer (<a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/storage_module_service/mod.rs#L134"><span class="cite"></span>storage_module_service/mod.rs:134</a>), independent of migration; the removed call was redundant with that loop, not the only flush path.</td>
+</tr>
+<tr>
+  <td>Any migration error for a block unwinds <code>handle_message</code>, killing <code>ChunkMigrationService::start()</code> for the life of the node.</td>
+  <td><code>handle_message</code>'s <code>Result</code> return + <code>?</code> in the message loop (both deleted)</td>
+  <td><span class="tag dropped">intentionally dropped</span> — this is the PR's own "Hardening" goal; re-covered by structured error logging plus index heal (<code>UpdateStorageModuleIndexes</code>) re-migrating blocks whose indexes are found missing.</td>
+</tr>
+<tr>
+  <td>Single-chunk storage-module lookup by ledger offset (<code>find_storage_module</code>).</td>
+  <td>Deleted alongside its only caller, <code>process_transaction_chunks</code></td>
+  <td><span class="tag re-established">no-op removal</span> — dead code once the per-chunk write loop it served was replaced by <code>get_overlapped_storage_modules</code> + interval-based batches.</td>
+</tr>
+</tbody>
+</table>
+
+<div class="callout warn">
+<span class="lbl">Weakened, not broken</span>
+The most consequential row above is the first: the PR trades "body durable before <code>on_block_migrated</code> returns" for "body durable eventually, sourced from cache or a durable replica, else explicitly left for data sync." That trade is the whole point of the fix, and the fallbacks are real — but it does move a previously-synchronous guarantee onto a background component with its own retry/backoff/retirement policy. See Review-focus #1 for where this surfaces.
+</div>
+</section>
+
+<section id="cross-file">
+<h2>Cross-file impact</h2>
+<ul>
+<li><code>crates/actors/src/chunk_ingress_service/chunks.rs:566-582</code> — <code>write_data_chunk</code>'s new <code>WritesPaused</code> variant is caught and remapped to the pre-existing <code>AdvisoryChunkIngressError::Overloaded</code> (already used for capacity backpressure, <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_ingress_service/chunks.rs#L910"><span class="cite"></span>chunks.rs:910</a>), so gossip peers/HTTP clients are not penalized for a transient recovery pause. Verified this reuses an existing "advisory, not critical" classification rather than inventing new peer-scoring semantics.</li>
+<li><code>crates/actors/src/storage_module_service/mod.rs:134-163</code> (unmodified by this PR) — now the sole source of the periodic flush that used to also run inline per-tx during migration. The body worker's tests explicitly stand in for this tick (<code>force_sync_pending_chunks</code>) rather than relying on it, so the worker's own tests don't depend on this timing, but production behavior does.</li>
+<li><code>crates/actors/src/cache_service.rs</code> (unmodified) — checked both chunk-eviction paths against the new deferred-body window: <code>prune_durably_migrated_chunk_bodies</code> (capacity-triggered) gates deletion on <code>storage_module.durable_tx_offsets_for_data_root</code> per offset, so it cannot outrun the body worker. <code>prune_data_root_cache</code> (epoch-triggered, unconditional <code>delete_cached_chunks_by_data_root</code>) is gated on a data_root's <code>included_height</code> against an epoch-scale slot-expiry horizon, which is far longer than any realistic body-migration backlog. Neither path appears to race the new deferred body writes — see Open Questions for whether this was verified deliberately or is incidental.</li>
+<li>Every non-test caller of <code>write_chunk</code> in production code paths (<code>packing_service/strategies/{cpu,cuda,remote}.rs</code>) only ever writes <code>ChunkType::Entropy</code>, which the new pause gate ignores by design — confirmed by grepping every call site; the new <code>bool</code> return is therefore inert in production today (see Review-focus #4).</li>
+<li><code>crates/domain/tests/storage_module_index_tests.rs</code>, <code>crates/actors/tests/data_sync_test.rs</code>, <code>crates/actors/src/packing_service/mod.rs</code>, <code>crates/domain/src/models/chunk_provider.rs</code> — mechanically updated for the new <code>index_transaction_data</code> arity and the new <code>StorageSyncConfig.max_pending_write_bytes</code> field; no behavior change in these files themselves.</li>
+</ul>
+</section>
+
+<section id="review-focus">
+<h2>Review-focus map</h2>
+
+<div class="callout risk">
+<span class="lbl">1 · <span class="sev high">High likelihood, moderate severity</span></span>
+<strong><a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service/body_worker.rs#L35">body_worker.rs:35</a> / <a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service/body_worker.rs#L41">body_worker.rs:41</a></strong> — the whole point of this PR is that a huge tx (or a burst of large txs) can leave bodies pending for many blocks. The read path for such an offset — chunk cache, then (Publish only) the durable Submit replica — is bounded by <code>MAX_BODY_MIGRATION_ATTEMPTS = 8</code> no-progress passes before the job is retired and the hole handed to data sync. <strong>Concrete scenario:</strong> a burst of several multi-GB Submit txs lands in consecutive blocks under sustained load; the per-submodule 512-writes/pass budget and pending-write ceiling mean the backlog drains slower than 8 passes' worth of wall-clock time for the tail of the backlog; those jobs retire to data sync even though their bodies were sitting in the local chunk cache the whole time and would have been sourced correctly on pass 9+. This is "fail open to a slower path" rather than data loss, but it changes how much load lands on data sync under exactly the failure mode this PR targets, and there is no telemetry correlating retirements with backlog depth beyond the existing counters. Worth a dedicated code-review / load-test pass to confirm the retirement threshold and pacing knobs are tuned for the incident's actual scale (the n3 tx was ~16.9k chunks) rather than just the unit-test scale (3 chunks).
+</div>
+
+<div class="callout warn">
+<span class="lbl">2 · <span class="sev med">Medium likelihood, low-moderate severity</span></span>
+<strong><a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/chunk_migration_service/body_worker.rs#L563">body_worker.rs:563</a></strong> — <code>write_offset</code>'s guard <code>Err(_) if self.sm.data_writes_paused() =&gt; return Ok(WriteAttempt::Paused)</code> catches <em>any</em> error type as long as the module happens to be paused at the moment it's checked, not just errors actually caused by the pause. <strong>Concrete scenario:</strong> if a future code path calls <code>pause_data_writes</code> outside of <code>apply_rollback</code> (today the only caller), or if a genuine, pause-unrelated error (e.g. a corrupted index entry) coincides with an in-flight rollback pause on the same module, the job is silently deferred with zero attempt penalty and no diagnostic, rather than being logged and eventually retired. Today this is masked because the only current pause site (network-partition rollback) also purges the corresponding job row via <code>purge_pending_body_migrations_in_range</code>, so the misclassified job usually disappears before the distinction matters — but the coupling between "this error happened to occur while paused" and "this error was caused by being paused" is implicit, not enforced by the error type.
+</div>
+
+<div class="callout warn">
+<span class="lbl">3 · <span class="sev med">Design pressure</span></span>
+<strong><a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/actors/src/block_migration_service.rs#L747">block_migration_service.rs:747</a></strong> — <code>PausedDataWrites::pause</code> is built from <em>every</em> storage module the node runs (<code>storage_modules_guard.read().iter().cloned().collect()</code>), not just the modules whose ranges the rollback touches (<code>rollback_infos</code>). Combined with the new chunk-ingress mapping to <code>Advisory::Overloaded</code>, a network-partition rollback now makes chunk uploads to <em>every</em> partition on this node advisory-fail for the rollback's duration, including ledgers/slots entirely unrelated to the reorg. The surrounding comment frames this as a deliberate simplicity tradeoff given the file's documented crash-unsafety constraints, so this reads as an accepted design choice rather than an oversight — but the blast radius (node-wide, not rollback-scoped) is worth confirming was intended, especially for a many-partition miner where reorgs are not vanishingly rare.
+</div>
+
+<div class="callout info">
+<span class="lbl">4 · <span class="sev low">Low severity, latent</span></span>
+<strong><a href="https://github.com/Irys-xyz/irys/blob/2ea0fa41656275bb7125a9b52b4f6412796c3628/crates/domain/src/models/storage_module.rs#L1252">storage_module.rs:1252</a></strong> — <code>write_chunk</code>'s new <code>bool</code> return (queued vs. refused-by-pause) is not <code>#[must_use]</code>, so a caller can silently ignore it exactly like the old <code>()</code> signature. Every current production call site only ever writes <code>ChunkType::Entropy</code> (unaffected by the pause gate), so this is inert today; a future <code>ChunkType::Data</code> caller that bypasses <code>write_data_chunk</code> and calls <code>write_chunk</code> directly would silently drop bytes under pause with no compiler nudge to check the result.
+</div>
+
+<p>Items 1–2 look serious enough to be worth a dedicated <code>/code-review</code> pass to verify against real backlog-scale data (chunk counts, disk throughput) rather than the unit-test fixtures' 3-chunk scale; items 3–4 are lower-severity design notes for the author to confirm rather than fix.</p>
+</section>
+
+<section id="open-questions">
+<h2>Open questions</h2>
+<ul>
+<li>Was the interaction between this PR's deferred body-write window and <code>cache_service.rs</code>'s two chunk-eviction paths (<code>prune_durably_migrated_chunk_bodies</code>, durability-gated; <code>prune_data_root_cache</code>, epoch/slot-expiry-gated) explicitly reasoned about and tested, or is their current safety incidental to how each happens to be gated? Neither file is touched by this diff.</li>
+<li>The PR's own test plan leaves "Deploy to devnet n3" unchecked, with the specific acceptance criteria being <code>body_pending_jobs</code> draining and Publish Data climbing from 416,450 toward 512,636. Has that redeploy happened since this PR was opened, and did the backlog drain at a rate consistent with the chosen defaults (512 writes/submodule/pass, 2-flush-batch ceiling)?</li>
+<li>Is <code>MAX_BODY_MIGRATION_ATTEMPTS = 8</code> (paced at <code>BODY_MIGRATION_TICK = 2s</code> between idle ticks, but back-to-back while progress is made) sized against the actual incident scale, or was it chosen primarily to keep the unit tests fast? For a job with no local source at all, retirement to data sync happens quickly regardless of tx size — was that fast-fail intentional, or should "no source" and "too slow to keep up" be distinguished with different budgets?</li>
+<li><code>PausedDataWrites</code> pausing every storage module rather than only the rollback-affected ones (Review-focus #3): deliberate scope, or would scoping it to <code>rollback_infos</code>' modules be a safe follow-up?</li>
+</ul>
+</section>
+
+<footer class="page">
+  Generated by the <code>explain-diff</code> skill in CI mode for PR #1567 (opened stage), against commit <code>2ea0fa41656275bb7125a9b52b4f6412796c3628</code>. Risk callouts are attention pointers derived from static reading of the diff and the surrounding tree, not verified findings — treat "Review-focus" items as a prioritized starting point for a dedicated review pass, not confirmed bugs.
+</footer>
+
+</div>
+</body>
+</html>
