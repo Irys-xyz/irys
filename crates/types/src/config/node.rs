@@ -470,8 +470,10 @@ pub struct StorageSyncConfig {
     pub num_writes_before_sync: u64,
     /// Ceiling, in bytes, on chunk bodies one storage module may hold in memory
     /// awaiting flush before background body migration pauses writing to it.
-    /// `None` derives `2 × num_writes_before_sync × chunk_size × submodules`
-    /// per module: one flush batch in flight plus one being filled, per disk.
+    /// `None` derives `max(2 × num_writes_before_sync, 256) × chunk_size × submodules`
+    /// per module: one flush batch in flight plus one being filled, per disk,
+    /// floored at 256 chunks so a small `num_writes_before_sync` cannot stall
+    /// the worker on the storage service's idle flush.
     pub max_pending_write_bytes: Option<u64>,
 }
 

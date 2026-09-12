@@ -1265,6 +1265,31 @@ mod tests {
         Ok(())
     }
 
+    /// After the bodies are durable, pausing still must not settle. Recovery
+    /// may be about to remap those offsets; the next pass after resume settles
+    /// if they are still Data.
+    #[tokio::test]
+    async fn worker_does_not_settle_a_durable_job_while_paused() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+        let worker = f.worker();
+
+        assert_eq!(worker.drain_pass().await.written, 3);
+        f.sm.force_sync_pending_chunks()?;
+
+        f.sm.pause_data_writes();
+        let pass = worker.drain_pass().await;
+        assert_eq!((pass.written, pass.settled, pass.retired), (0, 0, 0));
+        assert_eq!(f.rows()?.len(), 1);
+
+        f.sm.resume_data_writes();
+        assert_eq!(worker.drain_pass().await.settled, 1);
+        assert!(f.rows()?.is_empty());
+        Ok(())
+    }
+
     /// A job whose index was cleared under it fails on every offset
     /// (`DataRootNotFound`). Failures count as no-progress passes, so the row
     /// is retired after the limit instead of erroring every tick forever.

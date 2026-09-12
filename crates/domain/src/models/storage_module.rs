@@ -1524,14 +1524,19 @@ impl StorageModule {
     /// Delete the job at `key` once every offset it covers is durable (or the
     /// job is being retired). Returns whether a row was removed.
     ///
-    /// Only a row whose `data_root` matches is removed: a late settle from an
-    /// orphaned block's migration must not delete the row the replacement
-    /// block's index wrote at the same offset.
+    /// Only a row whose `data_root` **and** `block_height` match is removed: a
+    /// late settle from an orphaned migration must not delete the replacement
+    /// at the same offset. Refuses while data writes are paused so a mid-pass
+    /// rollback cannot look like a successful drain.
     pub fn settle_pending_body_migration(
         &self,
         key: PartitionChunkOffset,
         data_root: DataRoot,
+        block_height: u64,
     ) -> eyre::Result<bool> {
+        if self.data_writes_paused() {
+            return Ok(false);
+        }
         let (_interval, submodule) = self
             .submodules
             .get_key_value_at_point(key)
@@ -1539,7 +1544,9 @@ impl StorageModule {
         submodule
             .db
             .update_eyre(|tx| match get_pending_body_migration(tx, key)? {
-                Some(job) if job.data_root == data_root => del_pending_body_migration(tx, key),
+                Some(job) if job.data_root == data_root && job.block_height == block_height => {
+                    del_pending_body_migration(tx, key)
+                }
                 _ => Ok(false),
             })
     }
@@ -1564,13 +1571,17 @@ impl StorageModule {
     }
 
     /// Record one drain pass that attempted the job at `key` and made no
-    /// progress. Returns the new attempt count, or `None` if the row is gone or
-    /// belongs to another data_root.
+    /// progress. Returns the new attempt count, or `None` if the row is gone,
+    /// belongs to another job, or data writes are paused.
     pub fn bump_pending_body_migration_attempts(
         &self,
         key: PartitionChunkOffset,
         data_root: DataRoot,
+        block_height: u64,
     ) -> eyre::Result<Option<u32>> {
+        if self.data_writes_paused() {
+            return Ok(None);
+        }
         let (_interval, submodule) = self
             .submodules
             .get_key_value_at_point(key)
@@ -1578,7 +1589,7 @@ impl StorageModule {
         submodule
             .db
             .update_eyre(|tx| match get_pending_body_migration(tx, key)? {
-                Some(mut job) if job.data_root == data_root => {
+                Some(mut job) if job.data_root == data_root && job.block_height == block_height => {
                     job.attempts = job.attempts.saturating_add(1);
                     add_pending_body_migration(tx, key, &job)?;
                     Ok(Some(job.attempts))
@@ -2542,7 +2553,7 @@ mod tests {
     /// submodules must leave one job row per submodule, keyed on that
     /// submodule's clipped start, all carrying the *unclipped* (negative) tx
     /// start. Resolve removes exactly those rows, only for the matching
-    /// data_root, and leaves the index itself untouched.
+    /// data_root and block_height, and leaves the index itself untouched.
     #[test]
     fn index_writes_one_body_job_per_submodule_and_resolve_clears_them() -> eyre::Result<()> {
         let tmp_dir = TempDirBuilder::new()
@@ -2633,16 +2644,48 @@ mod tests {
 
         // Wrong data_root: nothing settled, nothing bumped.
         let key = PartitionChunkOffset::from(5);
-        assert!(!storage_module.settle_pending_body_migration(key, H256::random())?);
+        assert!(!storage_module.settle_pending_body_migration(
+            key,
+            H256::random(),
+            block_height
+        )?);
         assert_eq!(
-            storage_module.bump_pending_body_migration_attempts(key, H256::random())?,
+            storage_module.bump_pending_body_migration_attempts(
+                key,
+                H256::random(),
+                block_height
+            )?,
             None
         );
         assert_eq!(storage_module.pending_body_migrations()?.len(), 3);
 
+        // Wrong block_height: same. A late settle from an orphaned height
+        // must not take the replacement row at this offset.
+        assert!(!storage_module.settle_pending_body_migration(key, data_root, block_height + 1)?);
+        assert_eq!(
+            storage_module.bump_pending_body_migration_attempts(
+                key,
+                data_root,
+                block_height + 1
+            )?,
+            None
+        );
+        assert_eq!(storage_module.pending_body_migrations()?.len(), 3);
+
+        // While paused, even a matching identity is left alone so a mid-pass
+        // rollback cannot look like a successful drain.
+        storage_module.pause_data_writes();
+        assert!(!storage_module.settle_pending_body_migration(key, data_root, block_height)?);
+        assert_eq!(
+            storage_module.bump_pending_body_migration_attempts(key, data_root, block_height)?,
+            None
+        );
+        assert_eq!(storage_module.pending_body_migrations()?.len(), 3);
+        storage_module.resume_data_writes();
+
         // A no-progress pass is counted on the row, not by deleting it.
         assert_eq!(
-            storage_module.bump_pending_body_migration_attempts(key, data_root)?,
+            storage_module.bump_pending_body_migration_attempts(key, data_root, block_height)?,
             Some(1)
         );
         assert_eq!(storage_module.pending_body_migrations()?[1].1.attempts, 1);
@@ -2671,12 +2714,13 @@ mod tests {
         )?;
         assert_eq!(storage_module.pending_body_migrations()?.len(), 3);
 
-        // Right data_root: each key settles once; index still answers.
+        // Right data_root and height: each key settles once; index still answers.
         for key in [0, 5, 10] {
-            assert!(
-                storage_module
-                    .settle_pending_body_migration(PartitionChunkOffset::from(key), data_root)?
-            );
+            assert!(storage_module.settle_pending_body_migration(
+                PartitionChunkOffset::from(key),
+                data_root,
+                block_height
+            )?);
         }
         assert!(storage_module.pending_body_migrations()?.is_empty());
         assert_eq!(
@@ -2687,10 +2731,11 @@ mod tests {
         );
 
         // Settling again is a no-op.
-        assert!(
-            !storage_module
-                .settle_pending_body_migration(PartitionChunkOffset::from(0), data_root)?
-        );
+        assert!(!storage_module.settle_pending_body_migration(
+            PartitionChunkOffset::from(0),
+            data_root,
+            block_height
+        )?);
         Ok(())
     }
 

@@ -566,26 +566,25 @@ impl ChunkIngressServiceInner {
                 .is_empty()
             {
                 info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
-                let result = sm.write_data_chunk(&chunk).map_err(|e| match e {
-                    // Network-partition recovery is rewriting this module's
-                    // ranges. Transient backpressure, not a bad chunk: report it
-                    // the way capacity limits are reported so gossip peers are not
-                    // penalised and HTTP clients retry.
-                    WriteDataChunkError::WritesPaused => {
-                        ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded)
-                    }
-                    e => {
+                match sm.write_data_chunk(&chunk) {
+                    Ok(()) => {}
+                    // Cache already committed; the body worker places this after
+                    // recovery resumes. Failing the request would skip gossip,
+                    // and a retry would no-op at `recent_valid_chunks`.
+                    Err(WriteDataChunkError::WritesPaused) => {}
+                    Err(e) => {
                         error!(
                             "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
                             chunk.data_root, chunk.tx_offset, sm.id, e
                         );
-                        ChunkIngressError::Critical(CriticalChunkIngressError::Other(format!(
-                            "Failed to write chunk to storage_module {}",
-                            sm.id
-                        )))
+                        return Err(ChunkIngressError::Critical(
+                            CriticalChunkIngressError::Other(format!(
+                                "Failed to write chunk to storage_module {}",
+                                sm.id
+                            )),
+                        ));
                     }
-                });
-                result?;
+                }
             }
         }
 

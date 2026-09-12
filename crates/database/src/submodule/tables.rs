@@ -119,8 +119,8 @@ pub struct PendingBodyMigration {
     /// module's range). Maps partition offset <-> tx_chunk_offset for the cache
     /// lookup without re-reading `DataRootInfosByDataRoot`.
     pub start_offset: RelativeChunkOffset,
-    /// Canonical height whose migration enqueued this job. Lets a reorg purge
-    /// the rows an orphaned block left behind.
+    /// Canonical height whose migration enqueued this job. Matched on settle/bump
+    /// so a late drain cannot delete a replacement at the same offset.
     pub block_height: u64,
     /// Drain passes that ended with offsets still outstanding. Drives retirement
     /// so a job whose bodies are gone from the cache is not retried forever.

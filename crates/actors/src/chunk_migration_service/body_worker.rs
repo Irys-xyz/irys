@@ -385,7 +385,7 @@ impl SubmoduleDrain {
     ) {
         match self
             .sm
-            .bump_pending_body_migration_attempts(key, job.data_root)
+            .bump_pending_body_migration_attempts(key, job.data_root, job.block_height)
         {
             Ok(Some(attempts)) if attempts >= MAX_BODY_MIGRATION_ATTEMPTS => {
                 warn!(
@@ -411,7 +411,10 @@ impl SubmoduleDrain {
     }
 
     fn settle(&self, key: PartitionChunkOffset, job: &PendingBodyMigration) -> bool {
-        match self.sm.settle_pending_body_migration(key, job.data_root) {
+        match self
+            .sm
+            .settle_pending_body_migration(key, job.data_root, job.block_height)
+        {
             Ok(removed) => removed,
             Err(error) => {
                 warn!(
