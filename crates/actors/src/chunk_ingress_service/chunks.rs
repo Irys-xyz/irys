@@ -9,6 +9,7 @@ use super::metrics::{
 use irys_database::{
     complete_ingress_leaves, confirm_data_size_for_data_root, db::IrysDatabaseExt as _,
 };
+use irys_domain::WriteDataChunkError;
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
     DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof, SendTraced as _,
@@ -565,19 +566,24 @@ impl ChunkIngressServiceInner {
                 .is_empty()
             {
                 info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
-                let result = sm
-                    .write_data_chunk(&chunk)
-                    .map_err(|e| {
+                match sm.write_data_chunk(&chunk) {
+                    Ok(()) => {}
+                    // Cache already committed; the body worker places this after
+                    // recovery resumes. Failing the request would skip gossip,
+                    // and a retry would no-op at `recent_valid_chunks`.
+                    Err(WriteDataChunkError::WritesPaused) => {}
+                    Err(e) => {
                         error!(
                             "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
                             chunk.data_root, chunk.tx_offset, sm.id, e
                         );
-                        CriticalChunkIngressError::Other(format!(
-                            "Failed to write chunk to storage_module {}", sm.id
-                        ))
-                    });
-                if let Err(e) = result {
-                    return Err(e.into());
+                        return Err(ChunkIngressError::Critical(
+                            CriticalChunkIngressError::Other(format!(
+                                "Failed to write chunk to storage_module {}",
+                                sm.id
+                            )),
+                        ));
+                    }
                 }
             }
         }

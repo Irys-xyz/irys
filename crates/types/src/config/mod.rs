@@ -80,6 +80,11 @@ impl Config {
 
     // validate configuration invariants
     pub fn validate(&self) -> eyre::Result<()> {
+        ensure!(
+            self.node_config.storage.max_pending_write_bytes != Some(0),
+            "storage.max_pending_write_bytes must be > 0 (or omitted for the derived default): \
+             a zero ceiling stops chunk-body migration from ever writing"
+        );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
@@ -1628,6 +1633,23 @@ mod tests {
             err.contains("overflows u64"),
             "expected the slot-lifetime overflow guard, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_zero_pending_write_ceiling() {
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.max_pending_write_bytes = Some(0);
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a zero pending-write ceiling would halt body migration")
+            .to_string();
+        assert!(err.contains("max_pending_write_bytes"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.max_pending_write_bytes = Some(1);
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive ceiling is accepted; the worker floors it");
     }
 
     #[test]
