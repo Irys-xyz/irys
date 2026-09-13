@@ -562,8 +562,10 @@ impl SubmoduleDrain {
         };
         match write_chunk_to_module(&self.sm, &chunk) {
             Ok(()) => {}
-            // The write raced a recovery pause: not a failure of this job.
-            Err(_) if self.sm.data_writes_paused() => return Ok(WriteAttempt::Paused),
+            // The write itself was refused for recovery, not a later state
+            // read: resume between the two would otherwise count a pause as
+            // a stall.
+            Err(MigrationError::WritesPaused) => return Ok(WriteAttempt::Paused),
             Err(error) => return Err(error),
         }
         // `write_data_chunk` decides per placement whether anything was

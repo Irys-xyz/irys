@@ -61,6 +61,10 @@ pub struct ChunkMigrationServiceInner {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MigrationError {
+    /// Recovery holds this module's data writes. The body worker defers; this
+    /// is not a job failure.
+    #[error("storage module data writes paused for recovery")]
+    WritesPaused,
     /// Failed to write chunk data to submodule
     #[error("Failed to write chunk data to submodule")]
     ChunkDataWrite,
@@ -580,9 +584,7 @@ fn write_chunk_to_module(
     storage_module.write_data_chunk(chunk).map_err(|e| match e {
         // Recovery holds the module's data writes; the worker defers, so this
         // is expected and not an error worth an error-level log.
-        WriteDataChunkError::WritesPaused => {
-            MigrationError::Other("storage module data writes paused for recovery".to_owned())
-        }
+        WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,
         e => {
             error!(
                 "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
@@ -1241,6 +1243,29 @@ mod tests {
         f.sm.force_sync_pending_chunks()?;
         let pass = worker.drain_pass().await;
         assert_eq!((pass.written, pass.unwritable), (3, 0));
+        Ok(())
+    }
+
+    /// A paused write is `WritesPaused`, not `Other`. The worker matches that
+    /// variant so a resume before a later state read cannot turn a pause into
+    /// a stall.
+    #[test]
+    fn write_chunk_to_module_maps_pause_to_writes_paused() -> eyre::Result<()> {
+        let f = fixture(1, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.index()?;
+        let chunk = UnpackedChunk {
+            data_root: f.tx.header.data_root,
+            data_size: f.tx.header.data_size,
+            data_path: Base64(f.tx.proofs[0].proof.clone()),
+            bytes: Base64(f.data.clone()),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        f.sm.pause_data_writes();
+        assert!(matches!(
+            write_chunk_to_module(&f.sm, &chunk),
+            Err(MigrationError::WritesPaused)
+        ));
         Ok(())
     }
 
