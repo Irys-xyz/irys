@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1567 — Split index path from background body migration</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #161d2e;
+    --panel-border: #2a3350;
+    --text: #dfe6f5;
+    --muted: #93a0bf;
+    --accent: #6ea8fe;
+    --good: #4fd1a5;
+    --warn: #f7b955;
+    --danger: #f2707a;
+    --code-bg: #0b0f19;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  header {
+    padding: 1.5rem 1.5rem 1rem;
+    border-bottom: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, #141b2c, transparent);
+  }
+  header h1 { margin: 0 0 0.25rem; font-size: 1.5rem; }
+  header .meta { color: var(--muted); font-size: 0.9rem; }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(20, 27, 44, 0.97);
+    border-bottom: 1px solid var(--panel-border);
+    padding: 0.6rem 1.5rem;
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+    backdrop-filter: blur(4px);
+  }
+  nav.toc a { color: var(--accent); text-decoration: none; white-space: nowrap; }
+  nav.toc a:hover { text-decoration: underline; }
+  main { max-width: 880px; margin: 0 auto; padding: 1.5rem; }
+  section { margin-bottom: 2.5rem; }
+  section h2 {
+    font-size: 1.15rem;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 0.4rem;
+    margin-bottom: 1rem;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 0.9rem;
+  }
+  .card b.theme { color: var(--accent); }
+  code, .files { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.85em; }
+  .files { color: var(--muted); }
+  a.cite {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.85em;
+    color: var(--accent);
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  a.cite:hover { border-color: var(--accent); }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.83rem;
+  }
+  ul.watch { list-style: none; padding: 0; margin: 0; }
+  ul.watch li {
+    border-left: 3px solid var(--warn);
+    background: var(--panel);
+    border-radius: 0 6px 6px 0;
+    padding: 0.7rem 1rem;
+    margin-bottom: 0.7rem;
+  }
+  .callout {
+    border-radius: 6px;
+    padding: 0.8rem 1rem;
+    margin: 0.8rem 0;
+    border: 1px solid var(--panel-border);
+  }
+  .callout.info { border-left: 4px solid var(--accent); }
+  .callout.warn { border-left: 4px solid var(--warn); }
+  .diagram {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.6rem;
+    margin: 1rem 0;
+  }
+  .box {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    flex: 1 1 200px;
+    min-width: 180px;
+  }
+  .box h4 { margin: 0 0 0.4rem; font-size: 0.9rem; color: var(--accent); }
+  .box p { margin: 0; font-size: 0.85rem; color: var(--muted); }
+  .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 1.3rem;
+    padding: 0 0.3rem;
+  }
+  .none { color: var(--muted); font-style: italic; }
+  footer { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 2rem 1rem; }
+  @media (max-width: 600px) {
+    .diagram { flex-direction: column; }
+    .arrow { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Chunk migration: index path split from background body migration</h1>
+  <div class="meta">PR #1567 &middot; Irys-xyz/irys &middot; summary mode &middot; repo checkout at <code>3db6f37</code></div>
+</header>
+
+<nav class="toc">
+  <a href="#what-why">What &amp; why</a>
+  <a href="#change-map">Change map</a>
+  <a href="#behavior-changes">Behavior changes</a>
+  <a href="#watch-out">Watch out for</a>
+</nav>
+
+<main>
+
+<section id="what-why">
+<h2>What it does &amp; why</h2>
+<p><b>What it does:</b> Chunk migration used to index a block's transactions and copy every chunk body into the storage module in one synchronous pass. This PR splits that into two decoupled paths: an <b>index path</b> that commits `tx_path`/`data_root` mappings in block order (MDBX-only, no chunk bytes touched) plus a small durable job row per submodule saying bodies are still owed, and a new background <b>body worker</b> that drains those job rows at disk speed, sourcing bytes from the chunk cache or (for Publish) the durable Submit replica, paced by a per-pass write budget and a configurable pending-write byte ceiling.</p>
+<p><b>Why:</b> stated intent (PR description / commit messages) — a single 4.43 GiB Submit tx at block 29875 saturated a storage module's packing writes so its bodies never finished migrating; because indexing and body-writing were one blocking step, every later block's indexes (including Publish promotions that grew the ledger from 416,450 to 512,636 chunks) never got indexed, and data sync parked the whole span on <code>MissingDataRootIndex</code>.</p>
+</section>
+
+<section id="change-map">
+<h2>Change map</h2>
+
+<div class="card">
+<b class="theme">Index/body split &amp; background worker</b> — <span class="files">crates/actors/src/chunk_migration_service.rs, crates/actors/src/chunk_migration_service/body_worker.rs, crates/database/src/submodule/{db,tables}.rs, crates/domain/src/models/storage_module.rs</span><br>
+<code>process_ledger_transactions</code> now only writes indexes plus a new <code>PendingBodyMigrationsByOffset</code> row (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/domain/src/models/storage_module.rs#L1403">crates/domain/src/models/storage_module.rs:1403</a>) in the same submodule txn as the index write. A new <code>BodyMigrationWorker</code> task (spawned alongside the service) drains those rows per submodule, writing bodies via the existing <code>write_data_chunk</code> path.
+</div>
+
+<div class="card">
+<b class="theme">Job identity &amp; safe settle/retire</b> — <span class="files">crates/domain/src/models/storage_module.rs, crates/database/src/submodule/tables.rs</span><br>
+Each job row carries <code>data_root</code> + <code>block_height</code>; settle (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/domain/src/models/storage_module.rs#L1531">crates/domain/src/models/storage_module.rs:1531</a>) and the attempt-bump both require both fields to match, so a late drain from a superseded migration can't delete a replacement job at the same offset. After <code>MAX_BODY_MIGRATION_ATTEMPTS</code> (8) no-progress passes a job is retired and its offsets are left as Entropy holes for data sync.
+</div>
+
+<div class="card">
+<b class="theme">Recovery interaction: pause writes, purge orphaned jobs</b> — <span class="files">crates/actors/src/block_migration_service.rs, crates/domain/src/models/storage_module.rs</span><br>
+Network-partition rollback now pauses data writes on storage modules for the duration of the rollback (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/actors/src/block_migration_service.rs#L747">crates/actors/src/block_migration_service.rs:747</a>) via an RAII guard, and purges any pending body-migration jobs whose offsets are being unassigned so the worker never writes bodies belonging to orphaned txs into a re-marked range.
+</div>
+
+<div class="card">
+<b class="theme"><code>WritesPaused</code> as a typed, propagated error</b> — <span class="files">crates/domain/src/models/storage_module.rs, crates/actors/src/chunk_ingress_service/chunks.rs, crates/actors/src/chunk_migration_service.rs</span><br>
+<code>write_data_chunk</code> / <code>write_chunk</code> now return <code>WriteDataChunkError::WritesPaused</code> / <code>bool</code> instead of silently proceeding, so callers can distinguish "refused for recovery" from a real failure. Chunk ingress treats a paused write as success once the chunk is cached, so gossip still runs (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/actors/src/chunk_ingress_service/chunks.rs#L574">crates/actors/src/chunk_ingress_service/chunks.rs:574</a>).
+</div>
+
+<div class="card">
+<b class="theme">Config: pending-write ceiling</b> — <span class="files">crates/types/src/config/{mod,node}.rs, crates/config/templates/{mainnet,testnet}_config.toml</span><br>
+New <code>storage.max_pending_write_bytes: Option&lt;u64&gt;</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/types/src/config/node.rs#L477">crates/types/src/config/node.rs:477</a>) bounds the body worker's in-flight write memory per module; when unset it derives to two flush batches per submodule, floored at 256 chunks. <code>Config::validate</code> rejects an explicit zero (a zero ceiling would stop body migration from ever writing).
+</div>
+
+<div class="card">
+<b class="theme">Resilience &amp; observability</b> — <span class="files">crates/actors/src/chunk_migration_service.rs, crates/actors/src/metrics.rs</span><br>
+<code>handle_message</code> is now infallible (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/actors/src/chunk_migration_service.rs#L119">crates/actors/src/chunk_migration_service.rs:119</a>): a single block's migration failure is logged and the service keeps processing later blocks instead of unwinding and killing itself. Index heal (<code>UpdateStorageModuleIndexes</code>) reuses the same index-only path. Six new metrics track body-migration throughput, backlog size, and worker lag behind the tip.
+</div>
+
+</section>
+
+<section id="behavior-changes">
+<h2>Behavior changes</h2>
+<ul>
+<li>Chunk-body writes for a migrated block no longer complete before <code>BlockMigrated</code> returns → they land asynchronously afterward; reads for those offsets in the intervening window are served from the chunk cache instead of the storage module.</li>
+<li>A migration failure for one block previously unwound and terminated the chunk-migration service for the node's lifetime → now it is logged and later blocks still migrate; the failed block's indexes are only restored by an index-heal pass.</li>
+<li>Writing a chunk to a storage module during network-partition recovery previously had no defined "paused" outcome → now <code>write_data_chunk</code>/<code>write_chunk</code> explicitly return <code>WritesPaused</code>/<code>false</code>, and chunk ingress treats that as success (gossip still runs) rather than failing the request.</li>
+<li><code>storage.max_pending_write_bytes = 0</code> in config was previously accepted → now <code>Config::validate</code> rejects it at startup.</li>
+<li><code>StorageModule::index_transaction_data</code> and <code>process_ledger_transactions</code> gained a required <code>block_height</code> parameter (only when <code>data_root</code> and <code>block_height</code> both match can a job be settled or retired).</li>
+</ul>
+</section>
+
+<section id="watch-out">
+<h2>Watch out for</h2>
+<ul class="watch">
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/actors/src/chunk_migration_service/body_worker.rs#L461">crates/actors/src/chunk_migration_service/body_worker.rs:461</a> — <code>drain_job</code> snapshots <code>pending_write_bytes()</code> once per job and checks it against the shared per-module ceiling (line 490) without re-reading the live value; because a module's submodules are each drained by their own concurrent <code>spawn_blocking</code> task sharing the same <code>StorageModule</code>, two or more submodule tasks can each observe the ceiling as not-yet-reached and enqueue up to their own budget simultaneously — the module's actual pending-write memory can transiently overshoot the configured ceiling before the next pass's fresh read corrects it (worth a dedicated code-review pass).</li>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/actors/src/data_sync_service.rs#L60">crates/actors/src/data_sync_service.rs:60</a> — unlike chunk ingress and the migration path, this call site has no explicit arm for <code>WriteDataChunkError::WritesPaused</code>; it falls into the generic <code>Other(e.to_string())</code> branch, so every data-sync write that lands during a recovery pause logs a "write failed" warning and increments <code>chunk_write_failed_total{reason="other"}</code> even though the condition is expected and transient.</li>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/3db6f37a57cc5565a9a5be5d3f65852847651741/crates/actors/src/block_migration_service.rs#L747">crates/actors/src/block_migration_service.rs:747</a> — recovery pauses data writes on <i>every</i> storage module for the whole rollback, not only the modules whose ranges are being rewritten, so an unrelated partition's body-worker/data-sync/ingress writes stall for that entire window. The code comment states this is deliberate (simplicity over precision), but it widens the blast radius of a rollback beyond the ranges actually being touched.</li>
+</ul>
+</section>
+
+</main>
+
+<footer>explain-diff &middot; CI mode &middot; generated for commit 3db6f37a</footer>
+
+</body>
+</html>
