@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789046865440,
+  "lastUpdate": 1789278235802,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -15486,6 +15486,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000117,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3db6f37a57cc5565a9a5be5d3f65852847651741",
+          "message": "fix(chunk-migration): split index path from background body migration (#1567)\n\n* fix(chunk-migration): split index path from background body migration\n\nChunk migration indexed and wrote chunk bodies for every tx in one\nsynchronous pass, so a single large Submit tx blocked every later block's\nindexes (n3 froze behind a 4.43 GiB tx, leaving its Publish ledger\nunindexed and data sync unable to fill it).\n\nIndexes now commit in block order and, in the same per-submodule txn,\nrecord a durable PendingBodyMigrationsByOffset row. A background worker\ndrains those rows at disk speed under a per-pass write budget and a\npending-write byte ceiling (storage.max_pending_write_bytes), sourcing\nbodies from the chunk cache or the durable Submit replica and leaving\nunsourceable offsets to data sync.\n\nAlso: purge a range's jobs and pause storage-module data writes during\nnetwork-partition recovery; keep the migration service alive when one\nblock fails; add body-worker metrics.\n\n* fix(chunk-migration): match job identity on settle and keep gossip on pause\n\nSettle and bump require data_root and block_height, and refuse while\nwrites are paused, so a late drain cannot delete a replacement job.\nIngress treats WritesPaused as success once the chunk is in cache, so\ngossip still runs. Document the 256-chunk pending-write floor.\n\n* docs(config): say the pending-write default is two batches with a floor\n\nTemplate comments omitted the 2× flush-batch multiplier and only named\nthe 256-chunk-per-submodule floor. Match the derived formula in\npending_write_ceiling_bytes.\n\n* fix(chunk-migration): keep WritesPaused as a typed migration error\n\nwrite_chunk_to_module flattened pause into Other(String), then the\nworker re-read data_writes_paused(). A resume between those two could\ncount a pause as a stall. Match the refused write itself.",
+          "timestamp": "2026-09-12T22:24:17-07:00",
+          "tree_id": "50733e852b5c76948947a3bd0790f9996a3cf00d",
+          "url": "https://github.com/Irys-xyz/irys/commit/3db6f37a57cc5565a9a5be5d3f65852847651741"
+        },
+        "date": 1789278233266,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011995,
+            "range": "± 0.000124",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.121251,
+            "range": "± 0.001605",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.233201,
+            "range": "± 0.038553",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.960357,
+            "range": "± 0.104819",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077956,
+            "range": "± 0.001608",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 750.12594,
+            "range": "± 7.090349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1012.967762,
+            "range": "± 36.049742",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117961,
+            "range": "± 0.000976",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1192.085449,
+            "range": "± 10.33649",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1554.82261,
+            "range": "± 11.294317",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033017,
+            "range": "± 0.001228",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.200623,
+            "range": "± 2.016086",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.114468,
+            "range": "± 2.87157",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
