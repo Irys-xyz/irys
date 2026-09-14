@@ -3,23 +3,14 @@
 //! Wraps [`U256`] to ensure `term_fee + perm_fee` saturates at MAX instead
 //! of wrapping to zero, which would bypass balance checks.
 
-use crate::{H256, U256};
+use crate::{Compact, H256, U256};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    arbitrary::Arbitrary,
-    reth_codecs::Compact,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, arbitrary::Arbitrary, Compact,
 )]
 #[repr(transparent)]
 pub struct BoundedFee(U256);

@@ -370,10 +370,10 @@ pub struct BlockChunkOffset(u64);
     Eq,
     PartialOrd,
     Ord,
-    Compact,
     Add,
     From,
     Into,
+    Compact,
 )]
 pub struct RelativeChunkOffset(pub i32);
 

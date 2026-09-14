@@ -11,6 +11,7 @@ pub use nodit::{
     interval::{ie, ii},
 };
 use reth_codecs::Compact;
+#[cfg(feature = "db")]
 use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
@@ -43,13 +44,13 @@ pub const TEST_DB_GEOMETRY_MAX_SIZE: usize = 4 * GIGABYTE;
     Eq,
     PartialOrd,
     Ord,
-    Compact,
     Add,
     Sub,
     Div,
     From,
     Into,
     Hash,
+    Compact,
 )]
 pub struct PartitionChunkOffset(pub u32);
 
@@ -80,6 +81,7 @@ macro_rules! partition_chunk_offset_ie {
     };
 }
 
+#[cfg(feature = "db")]
 impl Decode for PartitionChunkOffset {
     fn decode(value: &[u8]) -> Result<Self, reth_db::DatabaseError> {
         if value.len() != 4 {
@@ -96,6 +98,7 @@ impl Decode for PartitionChunkOffset {
         Ok(Self(decoded_value))
     }
 }
+#[cfg(feature = "db")]
 impl Encode for PartitionChunkOffset {
     type Encoded = [u8; std::mem::size_of::<Self>()];
     fn encode(self) -> Self::Encoded {
@@ -241,7 +244,6 @@ impl From<Interval<u32>> for PartitionChunkRange {
     Eq,
     PartialOrd,
     Ord,
-    Compact,
     Add,
     Sub,
     Mul,
@@ -249,6 +251,7 @@ impl From<Interval<u32>> for PartitionChunkRange {
     From,
     Into,
     Hash,
+    Compact,
 )]
 pub struct LedgerChunkOffset(u64);
 

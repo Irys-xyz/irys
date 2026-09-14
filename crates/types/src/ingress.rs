@@ -11,13 +11,14 @@ use bytes::BufMut;
 use eyre::OptionExt as _;
 use irys_macros_integer_tagged::IntegerTagged;
 use reth_codecs::Compact;
+#[cfg(feature = "db")]
 use reth_db::DatabaseError;
+#[cfg(feature = "db")]
 use reth_db_api::table::{Compress, Decompress};
-use reth_primitives_traits::crypto::secp256k1::recover_signer;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
-#[derive(Debug, Clone, PartialEq, IntegerTagged, Eq, Compact, Arbitrary)]
+#[derive(Debug, Clone, PartialEq, IntegerTagged, Eq, Arbitrary, Compact)]
 #[repr(u8)]
 #[integer_tagged(tag = "version")]
 pub enum IngressProof {
@@ -113,7 +114,7 @@ impl IngressProof {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Arbitrary, Compact)]
 pub struct CachedIngressProof {
     pub address: IrysAddress, // subkey
     pub proof: IngressProof,
@@ -127,10 +128,10 @@ pub struct CachedIngressProof {
     Deserialize,
     PartialEq,
     Eq,
-    Compact,
     Arbitrary,
     alloy_rlp::RlpEncodable,
     alloy_rlp::RlpDecodable,
+    Compact,
 )]
 pub struct IngressProofV1 {
     #[rlp(skip)]
@@ -146,12 +147,14 @@ impl Versioned for IngressProofV1 {
     const VERSION: u8 = 1;
 }
 
+#[cfg(feature = "db")]
 impl Compress for IngressProofV1 {
     type Compressed = Vec<u8>;
     fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
         let _ = Compact::to_compact(&self, buf);
     }
 }
+#[cfg(feature = "db")]
 impl Decompress for IngressProofV1 {
     fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
@@ -227,10 +230,9 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
         return Ok(false); // Chain ID mismatch
     }
 
-    let sig = proof.signature.as_bytes();
     let prehash = proof.signature_hash();
 
-    let recovered_address = recover_signer(&sig[..].try_into()?, prehash.into())?;
+    let recovered_address = proof.signature.recover_signer(prehash)?;
 
     // re-compute the ingress proof & regular trees & roots
     let (proof_root, regular_root) =

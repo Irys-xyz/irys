@@ -34,10 +34,11 @@ Reth is a large git dependency. A few things make macOS in particular feel like 
   root `Cargo.toml`. Path deps incrementally compile like workspace members; git
   deps do not.
 
-`irys-types` does **not** depend on the umbrella `reth` crate. Packing / VDF /
-gateway-style consumers still need `reth-codecs` + `reth-db` for MDBX `Compact` /
-`Encode` (orphan rule: those impls have to live next to the types). They should
-not compile the node, RPC, or network stack.
+`irys-types` does **not** depend on the umbrella `reth` crate. Its default `db`
+feature still pulls `reth-db` / mdbx-sys for Compact/Encode. Gateway (and any
+other git consumer that only needs `DataTransaction` / `IrysSigner` / chunks)
+should take `irys-types` with `default-features = false` — that leaves
+`reth-codecs` + ethereum primitives (no mdbx, no vendored OpenSSL).
 
 On macOS, Gatekeeper scanning newly linked native artifacts (`reth-mdbx-sys`,
 vendored OpenSSL) is a separate cost on top of rustc.

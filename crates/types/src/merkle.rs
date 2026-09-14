@@ -11,7 +11,7 @@ use borsh_derive::BorshDeserialize;
 use eyre::Error;
 use eyre::OptionExt as _;
 use eyre::eyre;
-use openssl::sha;
+use sha2::{Digest as _, Sha256};
 use tracing::debug;
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
@@ -708,16 +708,14 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
 }
 
 pub fn hash_sha256(message: &[u8]) -> [u8; 32] {
-    let mut hasher = sha::Sha256::new();
-    hasher.update(message);
-    hasher.finish()
+    Sha256::digest(message).into()
 }
 
 pub fn hash_ingress_sha256(message: &[u8], address: IrysAddress) -> [u8; 32] {
-    let mut hasher = sha::Sha256::new();
+    let mut hasher = Sha256::new();
     hasher.update(message);
     hasher.update(address.as_slice());
-    hasher.finish()
+    hasher.finalize().into()
 }
 
 /// Returns a SHA256 hash of the the concatenated SHA256 hashes of a vector of messages.

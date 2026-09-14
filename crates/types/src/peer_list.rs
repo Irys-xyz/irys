@@ -6,6 +6,7 @@ use crate::v2::GossipDataRequestV2;
 use alloy_primitives::{B256, B512};
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
+#[cfg(feature = "db")]
 use reth_db::DatabaseError;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
@@ -627,6 +628,7 @@ pub enum PeerNetworkServiceMessage {
 
 #[derive(Debug, Error, Clone)]
 pub enum PeerNetworkError {
+    #[cfg(feature = "db")]
     #[error("Internal database error: {0}")]
     Database(DatabaseError),
     #[error("Peer list internal error: {0:?}")]
@@ -649,6 +651,7 @@ impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
     }
 }
 
+#[cfg(feature = "db")]
 impl From<DatabaseError> for PeerNetworkError {
     fn from(err: DatabaseError) -> Self {
         Self::Database(err)
@@ -657,7 +660,14 @@ impl From<DatabaseError> for PeerNetworkError {
 
 impl From<eyre::Report> for PeerNetworkError {
     fn from(err: eyre::Report) -> Self {
-        Self::Database(DatabaseError::Other(err.to_string()))
+        #[cfg(feature = "db")]
+        {
+            Self::Database(DatabaseError::Other(err.to_string()))
+        }
+        #[cfg(not(feature = "db"))]
+        {
+            Self::OtherInternalError(err.to_string())
+        }
     }
 }
 

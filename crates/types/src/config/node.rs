@@ -43,6 +43,7 @@ pub enum DbSyncMode {
     UtterlyNoSync,
 }
 
+#[cfg(feature = "db")]
 impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
     fn from(mode: DbSyncMode) -> Self {
         match mode {
