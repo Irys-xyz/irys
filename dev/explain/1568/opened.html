@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1568 — Expert Analysis: slim Reth deps and gate MDBX behind db</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --panel-2: #1d212c;
+    --border: #2a2f3d;
+    --text: #dfe3ea;
+    --muted: #8b93a7;
+    --accent: #6ea8fe;
+    --accent-2: #f5a623;
+    --danger: #ff6b6b;
+    --danger-bg: #2a1616;
+    --warn-bg: #2a2416;
+    --warn: #f2c94c;
+    --info-bg: #16232a;
+    --info: #6ea8fe;
+    --ok: #4cd07d;
+    --code-bg: #0b0d12;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 28px 24px 18px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #171a22, #0f1115);
+  }
+  header h1 { margin: 0 0 6px; font-size: 1.5rem; }
+  header .meta { color: var(--muted); font-size: 0.92rem; }
+  header .meta code { color: var(--accent); }
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 28px;
+  }
+  nav.toc h2 { margin-top: 0; font-size: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  nav.toc ol { margin: 0; padding-left: 1.2em; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section {
+    margin-bottom: 40px;
+    padding-top: 8px;
+  }
+  section h2 {
+    font-size: 1.25rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+  }
+  section h3 { font-size: 1.02rem; color: var(--accent); margin-top: 22px; }
+  p { margin: 0.6em 0; }
+  a.cite {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    color: var(--accent);
+    background: rgba(110,168,254,0.08);
+    border: 1px solid rgba(110,168,254,0.25);
+    border-radius: 4px;
+    padding: 1px 5px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  a.cite:hover { background: rgba(110,168,254,0.18); }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    white-space: pre;
+    line-height: 1.45;
+  }
+  code { font-family: var(--mono); font-size: 0.92em; }
+  .callout {
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 14px 0;
+    border: 1px solid var(--border);
+  }
+  .callout.info { background: var(--info-bg); border-color: rgba(110,168,254,0.3); }
+  .callout.warn { background: var(--warn-bg); border-color: rgba(242,201,76,0.35); }
+  .callout.risk { background: var(--danger-bg); border-color: rgba(255,107,107,0.35); }
+  .callout .label {
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 4px;
+    display: block;
+  }
+  .callout.info .label { color: var(--info); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.risk .label { color: var(--danger); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 0.92rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: .03em; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .unaccounted { color: var(--danger); font-weight: 700; }
+  .rf-item {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent-2);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  .rf-item .rf-head { font-weight: 600; margin-bottom: 6px; }
+  .rf-item .rf-fail { color: var(--muted); font-size: 0.94rem; }
+  .rf-item .rf-fail b { color: var(--text); }
+  .oq-item {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 16px;
+    margin: 10px 0;
+  }
+  ul { padding-left: 1.3em; }
+  li { margin: 4px 0; }
+  .diagram {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 16px 0;
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+  }
+  .box {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    min-width: 150px;
+  }
+  .box.old { border-color: rgba(255,107,107,0.4); }
+  .box.new { border-color: rgba(76,208,125,0.4); }
+  .box .box-title { font-weight: 700; font-size: 0.78rem; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 12px;
+    color: var(--muted);
+    font-size: 1.3rem;
+  }
+  footer { text-align: center; color: var(--muted); font-size: 0.82rem; padding: 20px; }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    padding: 1px 7px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    margin-left: 6px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>PR #1568 — perf(types): slim Reth deps and gate MDBX behind db</h1>
+  <div class="meta">
+    Irys-xyz/irys · expert mode · commit <code>fcf846906acbd320bc9cee94ca1f800f172de10c</code> ·
+    2 commits: <code>85d932a6</code> (stop compiling the Reth node into irys-types) and <code>fcf84690</code> (gate MDBX behind db feature)
+  </div>
+</header>
+<main>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#intent">Intent &amp; approach</a></li>
+    <li><a href="#delta">Delta semantics</a></li>
+    <li><a href="#cross-file">Cross-file impact</a></li>
+    <li><a href="#review-focus">Review-focus map</a></li>
+    <li><a href="#open-questions">Open questions</a></li>
+  </ol>
+</nav>
+
+<section id="intent">
+<h2>Intent &amp; approach</h2>
+
+<p><code>irys-types</code> previously pulled in the umbrella <code>reth</code> crate and <code>reth-transaction-pool</code> purely for <code>PeerId</code>, which meant every downstream build of <code>irys-packing</code>, <code>irys-vdf</code>, and any git consumer of <code>irys-types</code> (gateway) compiled ~100 Reth crates it never used. This PR does two things in sequence, matching its two commits:</p>
+
+<ul>
+<li><b>Commit 1</b> replaces the umbrella dependency with leaf crates and rewrites <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/adapter.rs#L35">crates/reth-node-bridge/src/adapter.rs:35</a> <code>IrysRethNodeAdapter</code> to wrap the launched <code>FullNode</code> (<code>RethNode</code>) directly, instead of wrapping <code>reth_e2e_test_utils::NodeTestContext</code> — the e2e test harness that had been quietly linked into the production node-bridge build. <code>PeerId</code> becomes <code>alloy_primitives::B512</code>.</li>
+<li><b>Commit 2</b> introduces a <code>db</code> feature on <code>irys-types</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/Cargo.toml#L7">crates/types/Cargo.toml:7</a>), default-on, that gates <code>reth-db</code>/<code>reth-db-api</code>/<code>reth-chainspec</code>/<code>reth-tasks</code> (MDBX, <code>mdbx-sys</code>, vendored OpenSSL) behind it. SHA-256 hashing moves from <code>openssl::sha</code> to <code>sha2</code>, and ECDSA signer recovery moves from <code>reth_primitives_traits::crypto::secp256k1::recover_signer</code> to <code>alloy_primitives::Signature::recover_address_from_prehash</code> — both were only reachable through the umbrella/leaf Reth deps being removed.</li>
+</ul>
+
+<div class="diagram">
+  <div class="box old">
+    <div class="box-title">Before</div>
+    IrysRethNodeAdapter { reth_node: Arc&lt;NodeTestContext&lt;RethNodeAdapter,...&gt;&gt; }<br>
+    → <code>.rpc.inner.eth_api()</code>, <code>.reth_node.inner.provider</code>
+  </div>
+  <div class="arrow">→</div>
+  <div class="box new">
+    <div class="box-title">After</div>
+    IrysRethNodeAdapter { reth_node: Arc&lt;RethNode&gt; } <i>(RethNode = FullNode)</i><br>
+    → <code>.eth_api()</code>, <code>.provider</code> (Deref straight to FullNode)
+  </div>
+</div>
+
+<p><b>Road not taken:</b> the PR could have split <code>irys-types</code> into a slim core crate plus a separate Reth-dependent extension crate, avoiding <code>#[cfg(feature = "db")]</code> scattered across ~15 files. It chose in-place cfg-gating instead — cheaper to land, but it leaves the crate's compile surface implicit in a long tail of per-impl attributes rather than a visible module boundary, and the PR description is explicit that true zero-Reth is still blocked by the <code>Compact</code> orphan rule and gossip <code>Block</code>/<code>Header</code> types staying unconditional.</p>
+
+<div class="callout info">
+<span class="label">Stated intent vs inferred</span>
+The PR description states the crate-count numbers directly (100 → ~23 with default <code>db</code>, 5 with <code>--no-default-features</code>) and that these were verified with <code>cargo check -p irys-types --no-default-features</code> and <code>cargo check --workspace --tests --locked</code>. Everything about <i>why</i> gateway needs this is stated intent; the choice of cfg-gating over a crate split is inferred from the diff shape, not stated.
+</div>
+</section>
+
+<section id="delta">
+<h2>Delta semantics</h2>
+
+<h3>Construction &amp; adapter shape</h3>
+<ul>
+<li><code>IrysRethNodeAdapter::new</code> changes from <code>async fn(node) -&gt; eyre::Result&lt;Self&gt;</code> (awaiting <code>NodeTestContext::new(node, eth_payload_attributes).await?</code>) to a plain synchronous <code>fn(node) -&gt; Self</code> at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/adapter.rs#L46">crates/reth-node-bridge/src/adapter.rs:46</a>. Both call sites (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/node.rs#L230">crates/reth-node-bridge/src/node.rs:230</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/chain/src/chain.rs#L1650">crates/chain/src/chain.rs:1650</a>) drop the trailing <code>.await?</code>.</li>
+<li><code>Deref::Target</code> changes from <code>NodeHelperType</code> (<code>NodeTestContext&lt;...&gt;</code>) to <code>RethNode</code> (<code>FullNode&lt;...&gt;</code>) at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/adapter.rs#L53">crates/reth-node-bridge/src/adapter.rs:53</a>. Every caller that previously reached through <code>.rpc.inner</code> or <code>.reth_node.inner</code> now reaches the same fields (<code>.provider</code>, <code>.network</code>, <code>.pool</code>, <code>.add_ons_handle</code>, <code>.payload_builder_handle</code>) one Deref hop closer.</li>
+<li><code>get_balance_irys_canonical_and_pending</code> moves from an <code>async fn</code> on a deleted extension trait (<code>IrysRethRpcTestContextExt</code>, only implemented for the test-only <code>RpcTestContext</code>) to a plain synchronous inherent method at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/adapter.rs#L110">crates/reth-node-bridge/src/adapter.rs:110</a>. The body (state-provider lookup by block id, then <code>account_balance</code>) is unchanged; only the trait/async wrapper is gone. Both call sites (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/actors/src/mempool_service.rs#L60">crates/actors/src/mempool_service.rs:60</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/actors/src/mempool_service/data_txs.rs#L292">crates/actors/src/mempool_service/data_txs.rs:292</a>) drop <code>.await</code> accordingly.</li>
+<li><code>get_balance</code> / <code>get_balance_irys</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/adapter.rs#L69">crates/reth-node-bridge/src/adapter.rs:69</a>) now call the real <code>EthApiServer::balance</code> RPC handler on <code>self.eth_api()</code>, instead of the deleted <code>IrysRethLoadStateExt::balance</code> blanket impl that read <code>StateProviderBox::account_balance</code> directly and defaulted a missing account to zero locally. This is a genuine implementation swap, not a rename — see review-focus below.</li>
+</ul>
+
+<h3>Feature-gating contract (irys-types <code>db</code> feature)</h3>
+<p>New default-on feature at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/Cargo.toml#L7">crates/types/Cargo.toml:7</a>. With it disabled, <code>irys-types</code> loses: <code>reth_db::table::{Encode,Decode}</code> impls for <code>IrysAddress</code>, <code>DataLedger</code>, <code>IrysPeerId</code>, <code>U256</code>, <code>H256</code>, <code>PartitionChunkOffset</code>, <code>UnixTimestamp</code>/<code>UnixTimestampMs</code>; <code>Compress</code>/<code>Decompress</code> for <code>IngressProofV1</code>; the <code>chainspec</code>, <code>app_state</code>, and <code>arbiter_handle</code> modules entirely; and the <code>PeerNetworkError::Database</code> variant plus its <code>From&lt;DatabaseError&gt;</code> impl. <code>Compact</code> (from <code>reth-codecs</code>) and the ethereum primitive types stay unconditional — they're the orphan-rule / gossip-type floor the PR description calls out as the reason true zero-Reth isn't reachable yet.</p>
+
+<h3>Wire-type substitution</h3>
+<p><code>reth_transaction_pool::PeerId</code> is replaced by <code>alloy_primitives::B512</code> in <code>RethNetworkConfig::peer_id</code> and <code>RethPeerInfo::peer_id</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/peer_list.rs#L295">crates/types/src/peer_list.rs:295</a>). Both are 64-byte fixed-size types (<code>reth_transaction_pool::PeerId</code> is itself a <code>B512</code> alias upstream), so the on-wire/Compact-encoded representation is unchanged; the <code>Compact</code> impl is updated in place to call <code>B512::from_compact</code>.</p>
+
+<h3>Cryptographic primitive substitution (consensus-relevant)</h3>
+<p>SHA-256 (<code>hash_sha256</code>, <code>hash_ingress_sha256</code> at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/merkle.rs#L710">crates/types/src/merkle.rs:710</a>, and <code>compute_solution_hash</code> at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/block.rs#L905">crates/types/src/block.rs:905</a>) moves from <code>openssl::sha::Sha256</code> to the <code>sha2</code> crate. ECDSA signer recovery (<code>IrysSignature::recover_signer</code> at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/signature.rs#L52">crates/types/src/signature.rs:52</a>) moves from <code>reth_primitives_traits::crypto::secp256k1::recover_signer</code> to <code>alloy_primitives::Signature::recover_address_from_prehash</code>. Both are standard, widely-used implementations of the same algorithms, and both feed <code>compute_solution_hash</code> / ingress-proof verification / transaction-signer recovery — all of which must be byte-identical across every node for consensus to hold.</p>
+
+<h3>Removed-behavior audit</h3>
+<table>
+<thead><tr><th>Invariant / behavior removed</th><th>Old enforcement site</th><th>New enforcement site</th></tr></thead>
+<tbody>
+<tr>
+<td>Adapter construction awaited <code>NodeTestContext::new(...)</code> before returning — an implicit "node is RPC-ready" gate at construction time</td>
+<td><code>reth-node-bridge/src/adapter.rs</code> (deleted <code>async fn new</code>)</td>
+<td><b class="unaccounted">Unaccounted for</b> as a distinct check — but both call sites already construct the adapter only after <code>builder.node(...).launch_with_debug_capabilities().into_future().await?</code> has returned a ready <code>FullNode</code> handle, so the removed await may have been redundant rather than load-bearing.</td>
+</tr>
+<tr>
+<td>Balance reads went through a direct <code>StateProviderBox::account_balance</code> lookup that silently defaulted a missing/errored account to zero, entirely bypassing RPC-level pending/safe/finalized resolution rules</td>
+<td><code>reth-node-bridge/src/ext.rs</code> (deleted <code>IrysRethLoadStateExt::balance</code>)</td>
+<td>Re-established via a <i>different</i> code path: <code>get_balance</code>/<code>get_balance_irys</code> now call <code>EthApiServer::balance</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/adapter.rs#L74">adapter.rs:74</a>). Semantically similar, not verified identical for every <code>BlockId</code> shape — see review-focus.</td>
+</tr>
+<tr>
+<td><code>PeerNetworkError::Database</code> variant unconditionally present, matchable by any consumer</td>
+<td><code>crates/types/src/peer_list.rs</code> (previously unconditional enum variant)</td>
+<td>Re-established only while <code>db</code> stays enabled (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/peer_list.rs#L631">peer_list.rs:631</a>); <b class="unaccounted">unaccounted for</b> in <code>crates/p2p/src/gossip_client.rs:108</code>, which still matches the variant with no corresponding cfg guard.</td>
+</tr>
+<tr>
+<td>Concrete SHA-256 implementation (<code>openssl::sha</code>) for solution/ingress hashing</td>
+<td><code>crates/types/src/block.rs</code>, <code>merkle.rs</code> (old <code>use openssl::sha</code>)</td>
+<td>Re-established with <code>sha2::Sha256</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/merkle.rs#L710">merkle.rs:710</a>) — same algorithm, no dedicated golden-vector regression test added for these three functions specifically.</td>
+</tr>
+<tr>
+<td>Concrete secp256k1 recovery implementation (<code>reth_primitives_traits::crypto::secp256k1::recover_signer</code>)</td>
+<td><code>crates/types/src/signature.rs</code> (old)</td>
+<td>Re-established with <code>alloy_primitives::Signature::recover_address_from_prehash</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/signature.rs#L53">signature.rs:53</a>) — covered by existing JS-client parity golden fixtures in the same file's test module (<code>data_tx_signature_signing_serialization</code>, <code>commitment_tx_signature_signing_serialization</code>).</td>
+</tr>
+</tbody>
+</table>
+</section>
+
+<section id="cross-file">
+<h2>Cross-file impact</h2>
+
+<ul>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/p2p/src/gossip_client.rs#L108">crates/p2p/src/gossip_client.rs:108</a> — an exhaustive <code>match</code> on <code>PeerNetworkError</code> that names <code>PeerNetworkError::Database(_)</code> explicitly (no wildcard arm), while that variant became <code>#[cfg(feature = "db")]</code> in this PR. <code>irys-p2p</code> itself carries no matching cfg gate, so it silently depends on <code>irys-types</code>'s <code>db</code> feature staying enabled wherever <code>irys-p2p</code> is built.</li>
+<li>~30 call sites across <code>crates/actors</code>, <code>crates/chain</code>, and <code>crates/chain-tests</code> that read <code>reth_adapter.rpc...</code> or <code>reth_adapter.inner...</code> all had the now-redundant <code>.rpc</code>/<code>.inner</code> segment removed (e.g. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/actors/src/reth_service.rs#L233">crates/actors/src/reth_service.rs:233</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/actors/src/block_validation.rs#L174">crates/actors/src/block_validation.rs:174</a>). No leftover reference to the deleted <code>ext</code> module or <code>IrysRethRpcTestContextExt</code> trait remains anywhere in the tree (verified by grep) — this rename is exhaustive.</li>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/domain/src/models/execution_payload_cache.rs#L108">crates/domain/src/models/execution_payload_cache.rs:108</a> — <code>RethBlockProvider::evm_block</code> now delegates to the new <code>IrysRethNodeAdapter::evm_block</code> helper instead of inlining <code>find_block_by_hash</code> + error-log + double-<code>?</code> flatten; the extracted helper preserves the exact same Result→Option collapsing behavior.</li>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/chain-tests/src/multi_node/mempool_tests.rs#L731">crates/chain-tests/src/multi_node/mempool_tests.rs:731</a> and two sites in <code>crates/chain-tests/src/utils.rs</code> — <code>ctx.rpc_client()</code> becomes the two-step <code>ctx.rpc_server_handle().http_client()</code>, since the adapter no longer stores a pre-built RPC test client.</li>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/Cargo.toml#L19">crates/reth-node-bridge/Cargo.toml:19</a> — the crate no longer depends on <code>reth-e2e-test-utils</code> in production; <code>crates/chain-tests/Cargo.toml</code> gains a direct dependency on it since <code>chain-tests</code> was the actual consumer of <code>TransactionTestContext</code>, previously reached transitively through the bridge crate's re-export.</li>
+</ul>
+</section>
+
+<section id="review-focus">
+<h2>Review-focus map</h2>
+
+<div class="rf-item">
+<div class="rf-head">1. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/reth-node-bridge/src/adapter.rs#L69">crates/reth-node-bridge/src/adapter.rs:69</a> — balance reads switched from a raw state-provider lookup to the full RPC <code>balance()</code> handler <span class="badge">recommend code-review pass</span></div>
+<div class="rf-fail"><b>Concern:</b> <code>get_balance</code>/<code>get_balance_irys</code> used to call a custom <code>IrysRethLoadStateExt::balance</code> that read <code>StateProviderBox::account_balance</code> directly and defaulted any error or missing account to zero. They now call the standard <code>EthApiServer::balance</code> RPC handler, which resolves pending/safe/finalized state through a different internal path.<br>
+<b>Failure scenario:</b> a <code>BlockId</code> that resolves differently between the two implementations (e.g. a very recent block during a reorg window, or a pending-block query) causes <code>get_balance</code> to return a different balance or a hard RPC error where the old path returned a defaulted zero — this would show up as a spurious funding-check failure or an incorrect balance in a test/gossip path, not a compile error, so it is easy to miss.</div>
+</div>
+
+<div class="rf-item">
+<div class="rf-head">2. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/p2p/src/gossip_client.rs#L108">crates/p2p/src/gossip_client.rs:108</a> — non-cfg-gated match on a now-feature-gated enum variant</div>
+<div class="rf-fail"><b>Concern:</b> <code>PeerNetworkError::Database</code> became <code>#[cfg(feature = "db")]</code> in <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/peer_list.rs#L631">crates/types/src/peer_list.rs:631</a>, but the match arm consuming it was left ungated.<br>
+<b>Failure scenario:</b> any future build that compiles <code>irys-p2p</code> against <code>irys-types</code> with <code>default-features = false</code> (the exact configuration this PR asks the gateway project to adopt) fails to compile with "no variant named <code>Database</code>" — a hard break the PR's own stated goal (gateway using <code>default-features = false</code>) could trigger if gateway ever needs <code>irys-p2p</code>.</div>
+</div>
+
+<div class="rf-item">
+<div class="rf-head">3. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/block.rs#L905">crates/types/src/block.rs:905</a> / <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/merkle.rs#L710">crates/types/src/merkle.rs:710</a> — consensus-critical hash implementation swap has no dedicated golden-vector test</div>
+<div class="rf-fail"><b>Concern:</b> <code>compute_solution_hash</code>, <code>hash_sha256</code>, and <code>hash_ingress_sha256</code> switch from <code>openssl::sha</code> to <code>sha2</code>. The signature-recovery swap in the same commits is covered by hardcoded JS-client parity vectors (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fcf846906acbd320bc9cee94ca1f800f172de10c/crates/types/src/signature.rs#L296">signature.rs:296</a>), but these hash helpers are only exercised by self-consistency tests (hash-then-compare-with-itself), not a fixed expected output.<br>
+<b>Failure scenario:</b> both libraries are standard SHA-256 implementations so a mismatch is unlikely, but if one existed it would silently change PoA solution hashes and ingress-proof hashes between nodes running old vs. new binaries — a consensus-fork risk with no test to catch it, rather than a functional bug with an obvious symptom.</div>
+</div>
+
+<p style="margin-top:18px; color:var(--muted);">These are attention pointers, not confirmed defects. Item 1 and 2 in particular are worth a dedicated <code>/code-review</code> pass before merge; item 3 is lower-likelihood but higher-severity if it ever manifested, given the "deterministic output" requirement this codebase holds itself to.</p>
+</section>
+
+<section id="open-questions">
+<h2>Open questions</h2>
+
+<div class="oq-item">Was reordering the <code>Compact</code> derive to be last in the derive list (touches ~12 files: <code>block.rs</code>, <code>chunk.rs</code>, <code>commitment_common.rs</code>, <code>commitment_v1.rs</code>, <code>commitment_v2.rs</code>, <code>ingress.rs</code>, <code>serialization.rs</code>, <code>storage.rs</code>, <code>system_ledger.rs</code>, <code>transaction.rs</code>, <code>bounded_fee.rs</code>) required by a <code>reth-codecs</code> macro-ordering constraint that surfaced after the leaf-crate swap, or is it incidental reformatting? The PR description doesn't mention it, and it's the one change in the diff that reads as "mechanical" but touches the most files.</div>
+
+<div class="oq-item">Is there a CI job planned to actually run <code>cargo check -p irys-types --no-default-features</code> going forward, or does the "5 Reth crates with <code>--no-default-features</code>" guarantee rely solely on the manual verification noted in this PR's description? Nothing under <code>.github/</code> currently enforces it, so a future change to <code>irys-types</code> could silently regress the gateway build without any CI signal.</div>
+
+<div class="oq-item">Gateway is said to pin this exact SHA and build with <code>default-features = false</code>. During a rollout where gateway nodes (built without <code>db</code>) and chain nodes (built with <code>db</code> on) are both live, is <code>alloy_primitives::B512</code> vs. the old <code>reth_transaction_pool::PeerId</code> guaranteed wire- and <code>Compact</code>-compatible in both directions, or does this need a coordinated deploy?</div>
+</section>
+
+</main>
+<footer>Generated by explain-diff (CI mode) for PR #1568 · citations resolve against commit <code>fcf846906acbd320bc9cee94ca1f800f172de10c</code></footer>
+</body>
+</html>
