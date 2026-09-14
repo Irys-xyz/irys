@@ -1,7 +1,6 @@
 use crate::block_validation::calculate_perm_storage_total_fee;
 use crate::mempool_service::TxIngressError;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::storage_pricing::{
     Amount, calculate_term_fee,
     phantoms::{Irys, NetworkFee},
@@ -64,11 +63,7 @@ pub(crate) async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    reth_adapter
-        .reth_node
-        .rpc
-        .get_balances_irys(&signers, block_id)
-        .await
+    reth_adapter.get_balances_irys(&signers, block_id).await
 }
 
 // Helper function that verifies transaction funding and tracks cumulative fees

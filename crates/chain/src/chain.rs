@@ -1647,7 +1647,7 @@ impl IrysNode {
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_node)?;
         debug!("Reth DB initialized");
-        let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into()).await?;
+        let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into());
 
         // initialize packing service early
         let packing_service =
@@ -2553,8 +2553,8 @@ impl IrysNode {
         chunk_ingress_state: irys_actors::ChunkIngressState,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
-        let reth_payload_builder = reth_node_adapter.inner.payload_builder_handle.clone();
-        let consensus_engine_handle = reth_node_adapter.inner.beacon_engine_handle.clone();
+        let reth_payload_builder = reth_node_adapter.payload_builder_handle.clone();
+        let consensus_engine_handle = reth_node_adapter.beacon_engine_handle.clone();
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),

@@ -16,7 +16,7 @@ use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use crate::{MempoolReadGuard, TxMetadata};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
-use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_storage::RecoveredMempoolState;
 use irys_types::CommitmentTypeV2;
 use irys_types::{
@@ -58,9 +58,7 @@ pub async fn validate_funding(
 ) -> Result<(), TxIngressError> {
     // Fetch the current balance of the signer
     let balance: irys_types::U256 = reth_adapter
-        .rpc
         .get_balance_irys_canonical_and_pending(commitment_tx.signer(), parent_evm_block_id)
-        .await
         .map_err(|e| {
             tracing::error!(
                 tx.id = %commitment_tx.id(),

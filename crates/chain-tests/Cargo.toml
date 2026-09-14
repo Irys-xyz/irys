@@ -36,6 +36,7 @@ irys-vdf.workspace = true
 itertools.workspace = true
 reth.workspace = true
 reth-db.workspace = true
+reth-e2e-test-utils.workspace = true
 reth-ethereum-primitives.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
 rand.workspace = true

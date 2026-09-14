@@ -1,12 +1,11 @@
 use crate::PeerList;
+use alloy_primitives::B256;
 use alloy_rpc_types::engine::ExecutionData;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use lru::LruCache;
 use reth::builder::{BeaconOnNewPayloadError, Block as _};
-use reth::core::primitives::SealedBlock;
-use reth::providers::BlockReader as _;
-use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block;
+use reth_primitives_traits::SealedBlock;
 #[cfg(feature = "test-utils")]
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -28,7 +27,7 @@ pub enum RethBlockProvider {
 
 #[derive(Debug)]
 pub enum ExecutionPayloadProviderError {
-    ProviderError(reth::providers::ProviderError),
+    ProviderError(reth_provider::ProviderError),
     ProviderNotSet,
     PayloadNotFound(B256),
     BeaconOnNewPayloadError(BeaconOnNewPayloadError),
@@ -107,22 +106,11 @@ impl RethBlockProvider {
     /// let evm_block_hash = irys_block.evm_block_hash; // Get the EVM block hash
     /// ```
     pub fn evm_block(&self, evm_block_hash: B256) -> Option<Block> {
-        let ctx = match self {
-            Self::IrysRethAdapter(adapter) => &adapter.reth_node,
+        match self {
+            Self::IrysRethAdapter(adapter) => adapter.evm_block(evm_block_hash),
             #[cfg(feature = "test-utils")]
-            Self::Mock(_) => {
-                return self.evm_block_mock(evm_block_hash);
-            }
-        };
-
-        let evm_block = ctx
-            .inner
-            .provider()
-            .find_block_by_hash(evm_block_hash, reth::providers::BlockSource::Any)
-            .inspect_err(|err| tracing::error!(custom.error = ?err))
-            .ok()??;
-
-        Some(evm_block)
+            Self::Mock(_) => self.evm_block_mock(evm_block_hash),
+        }
     }
 
     #[cfg(feature = "test-utils")]

@@ -5019,7 +5019,7 @@ pub async fn submit_payload_to_reth(
         .clone();
 
     // Submit to reth execution layer
-    let engine_api_client = reth_adapter.inner.engine_http_client();
+    let engine_api_client = reth_adapter.engine_http_client();
     // Observability for stuck `Syncing`: log a `warn` at the first minute and
     // again every five minutes thereafter. `Syncing` from `new_payload_v4`
     // means reth's EL is missing predecessors — distinct from "reth currently

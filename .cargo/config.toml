@@ -1,8 +1,13 @@
 # NOTE: Assume changes here affect ALL build environments.
 # For environment-specific settings, use `~/.cargo/config.toml` or the `RUSTFLAGS` environment variable.
 # See https://doc.rust-lang.org/cargo/reference/config.html for more details.
+#
+# `-D warnings` lives here (not in an xtask `RUSTFLAGS` override) so `cargo test`,
+# `cargo check`, and `cargo xtask local-checks` share one rustc fingerprint.
+# Setting `RUSTFLAGS` in the environment *replaces* this list and will rebuild
+# the Reth graph; append to it instead of overwriting.
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-D", "warnings"]
 incremental = true
 
 [alias]

@@ -40,7 +40,7 @@ use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::TempDirBuilder;
@@ -693,7 +693,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         let reth_peer_count = match self
             .node_ctx
             .reth_node_adapter
-            .inner
             .network
             .get_all_peers()
             .await
@@ -706,7 +705,6 @@ impl IrysNodeTest<IrysNodeCtx> {
             .node_ctx
             .reth_node_adapter
             .reth_node
-            .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await
@@ -1997,7 +1995,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let client = self
             .node_ctx
             .reth_node_adapter
-            .rpc_client()
+            .rpc_server_handle()
+            .http_client()
             .ok_or_eyre("Unable to get RPC client")?;
         use alloy_primitives::Bytes;
         use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
@@ -2083,7 +2082,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let rpc = self
             .node_ctx
             .reth_node_adapter
-            .rpc_client()
+            .rpc_server_handle()
+            .http_client()
             .ok_or_eyre("Unable to get RPC client")?;
         let mut last_rpc_error: Option<String> = None;
 
@@ -2156,7 +2156,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 ));
             }
 
-            let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
+            let eth_api = self.node_ctx.reth_node_adapter.eth_api();
             match eth_api.block_by_number(tag, false).await {
                 Ok(Some(block)) if block.header.hash == expected_hash => {
                     return Ok(block.header.hash);
@@ -2352,7 +2352,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         }));
         self.node_ctx
             .reth_node_adapter
-            .rpc
             .get_balance_irys(address, block)
             .await
     }
@@ -3669,16 +3668,16 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn disconnect_all_reth_peers(&self) -> eyre::Result<Vec<PeerInfo>> {
         let ctx = self.node_ctx.reth_node_adapter.clone();
 
-        let all_peers_prior = ctx.inner.network.get_all_peers().await?;
+        let all_peers_prior = ctx.network.get_all_peers().await?;
         for peer in all_peers_prior.iter() {
-            ctx.inner.network.disconnect_peer(peer.remote_id);
+            ctx.network.disconnect_peer(peer.remote_id);
         }
 
-        while !ctx.inner.network.get_all_peers().await?.is_empty() {
+        while !ctx.network.get_all_peers().await?.is_empty() {
             sleep(Duration::from_millis(100)).await;
         }
 
-        let all_peers_after = ctx.inner.network.get_all_peers().await?;
+        let all_peers_after = ctx.network.get_all_peers().await?;
         assert!(
             all_peers_after.is_empty(),
             "the peer should be completely disconnected",
@@ -3692,7 +3691,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         for peer in peers {
             self.node_ctx
                 .reth_node_adapter
-                .inner
                 .network
                 .connect_peer(peer.remote_id, peer.remote_addr);
         }

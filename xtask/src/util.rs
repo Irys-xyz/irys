@@ -38,6 +38,27 @@ pub fn remove_ring_env_vars(cmd: Cmd<'_>) -> Cmd<'_> {
     c
 }
 
+/// rustc flags that must match `.cargo/config.toml` `[build].rustflags`.
+///
+/// Cargo treats the `RUSTFLAGS` env var as a *replacement* for config rustflags,
+/// not a merge. xtask used to set `RUSTFLAGS=-D warnings`, which dropped
+/// `-C target-cpu=native` and rebuilt every Reth crate on each local-checks run.
+/// Prefer leaving `RUSTFLAGS` unset so cargo uses the config list. If a caller
+/// already set `RUSTFLAGS`, append `-D warnings` and keep their flags.
+pub fn rustflags_deny_warnings() -> String {
+    let existing = std::env::var("RUSTFLAGS").unwrap_or_default();
+    if existing.is_empty() {
+        return "-C target-cpu=native -D warnings".to_string();
+    }
+    let has_deny =
+        existing.split_whitespace().any(|t| t == "-Dwarnings") || existing.contains("-D warnings");
+    if has_deny {
+        existing
+    } else {
+        format!("{existing} -D warnings")
+    }
+}
+
 pub trait CmdExt {
     fn remove_and_run(self) -> Result<(), xshell::Error>;
     fn remove_and_read(self) -> Result<String, xshell::Error>;

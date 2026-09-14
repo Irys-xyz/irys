@@ -109,8 +109,6 @@ async fn slow_heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         let latest = node
             .node_ctx
             .reth_node_adapter
-            .rpc
-            .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await?;
@@ -136,8 +134,6 @@ async fn slow_heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         let latest = restarted_node
             .node_ctx
             .reth_node_adapter
-            .rpc
-            .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await?;
@@ -145,8 +141,6 @@ async fn slow_heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         let earliest = restarted_node
             .node_ctx
             .reth_node_adapter
-            .rpc
-            .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Earliest, false)
             .await?;
@@ -162,8 +156,6 @@ async fn slow_heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         let latest = restarted_node
             .node_ctx
             .reth_node_adapter
-            .rpc
-            .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await?;

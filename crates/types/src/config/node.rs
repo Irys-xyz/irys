@@ -643,7 +643,7 @@ pub struct RethNetworkConfig {
     // peer ID
     // WARNING: this gets overridden partway through the startup sequence with the correct value
     #[serde(default)]
-    pub peer_id: reth_transaction_pool::PeerId,
+    pub peer_id: alloy_primitives::B512,
 }
 
 impl_network_config_with_defaults!(RethNetworkConfig);
