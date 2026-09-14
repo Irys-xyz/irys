@@ -24,11 +24,12 @@ Reth is a large git dependency. A few things make macOS in particular feel like 
   `cargo.targetDir = true` in `rust-analyzer.toml` so RA compiles into
   `target/rust-analyzer` and leaves `cargo test` alone.
 - **`RUSTFLAGS` replacing config flags.** `.cargo/config.toml` sets
-  `-C target-cpu=native -D warnings`. An env `RUSTFLAGS=-D warnings` *replaces*
-  that list (it does not append), so the native-cpu fingerprint changes and Reth
-  rebuilds. `cargo xtask local-checks` preserves both flags. Clippy still uses a
-  different compiler driver than rustc, so a clippy run will rebuild Reth relative
-  to `cargo test` — that is inherent, not a config bug.
+  `-C target-cpu=native`. An env `RUSTFLAGS=...` *replaces* that list (it does
+  not append), so the native-cpu fingerprint changes and Reth rebuilds. Leave
+  `RUSTFLAGS` unset. Warnings are denied by `cargo xtask clippy`
+  (`-- -D warnings`), not by rustflags. Clippy still uses a different compiler
+  driver than rustc, so a clippy run will rebuild Reth relative to `cargo test`
+  — that is inherent, not a config bug.
 - **Local Reth checkout.** For Reth work, clone `irys-xyz/reth-irys` to `ext/reth`
   (gitignored) and uncomment the `path = "./ext/reth/..."` workspace deps in the
   root `Cargo.toml`. Path deps incrementally compile like workspace members; git
