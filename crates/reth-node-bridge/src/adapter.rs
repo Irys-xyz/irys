@@ -9,7 +9,6 @@ use crate::node::{RethNode, eth_payload_attributes};
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{Address, B256, BlockNumber, Bytes};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
-use eyre::OptionExt as _;
 use irys_reth::{IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 use irys_types::IrysAddress;
 use reth::transaction_pool::EthPooledTransaction;
@@ -107,6 +106,9 @@ impl IrysRethNodeAdapter {
 
     /// Balance from pending & canonical state. `block_id` of `None` / `Latest`
     /// reads the canonical tip; a hash reads that block's state.
+    ///
+    /// A missing account is balance zero (`StateProvider::account_balance` returns
+    /// `None` when there is no account record). Provider errors still fail.
     pub fn get_balance_irys_canonical_and_pending(
         &self,
         address: IrysAddress,
@@ -126,7 +128,7 @@ impl IrysRethNodeAdapter {
         };
         Ok(state_provider
             .account_balance(&address.into())?
-            .ok_or_eyre("Unable to get account balance from state")?
+            .unwrap_or_default()
             .into())
     }
 
