@@ -19,11 +19,12 @@ retries = 0
 filter = 'test(/.*serial_.*/)'
 test-group = 'serial'
 
-# slow tests
+# slow tests. Priority is capped at 100; keep this below that so individual
+# slow tests can still be pulled to the front of the run.
 [[profile.default.overrides]]
 filter = 'test(/.*slow_.*/)'
 slow-timeout = { period = "90s", terminate-after = 2 }
-priority = 100
+priority = 50
 
 # heavy tests (exclude spiky — they manage their own threads-required)
 [[profile.default.overrides]]
@@ -46,6 +47,14 @@ threads-required = 4
 filter = 'test(/.*spiky_.*/)'
 test-group = 'spiky'
 threads-required = 1
+priority = 100
+
+# 3-node ingress-proof gossip wait. Nextest priority maxes at 100, and `slow_`
+# used to set that for every slow test, so this one started ~#980 next to other
+# heavy4 tests. On a loaded runner peer2 misses the 100s no-mining window; when
+# it ran first on master it finished in ~11s.
+[[profile.default.overrides]]
+filter = 'test(/slow_heavy4_promotion_with_multiple_proofs_test/)'
 priority = 100
 
 
