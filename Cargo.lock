@@ -5544,7 +5544,6 @@ dependencies = [
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
- "async-trait",
  "clap",
  "eyre",
  "irys-database",

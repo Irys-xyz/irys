@@ -236,7 +236,7 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
 
     // re-compute the ingress proof & regular trees & roots
     let (proof_root, regular_root) =
-        generate_ingress_proof_tree(chunks.into_iter().map(Ok), recovered_address.into(), true)?;
+        generate_ingress_proof_tree(chunks.into_iter().map(Ok), recovered_address, true)?;
 
     let data_root = H256(
         regular_root
