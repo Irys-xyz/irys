@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789278235802,
+  "lastUpdate": 1789447852048,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -15594,6 +15594,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "23c925ed6967fc12d2d0d948df82cd8bbe9976bd",
+          "message": "perf(types): slim Reth deps and gate MDBX behind db (#1568)\n\n* perf(build): stop compiling the Reth node into irys-types\n\nirys-types depended on the umbrella `reth` crate and on\nreth-transaction-pool just for PeerId (alloy B512). That pulled ~100\nReth crates into packing, VDF, and any git consumer of irys-types.\n\nReplace those with leaf crates and wrap the launched FullNode directly\ninstead of reth-e2e-test-utils::NodeTestContext, so production\nnode-bridge no longer builds the e2e harness.\n\nAlso pin rust-analyzer to target/rust-analyzer and keep\n-C target-cpu=native -D warnings in .cargo/config.toml so cargo test\nand local-checks share one rustc fingerprint.\n\n* perf(types): gate MDBX behind irys-types db feature\n\nDefault remains on so the node workspace is unchanged. Gateway and other\ngit consumers that only need DataTransaction / IrysSigner can set\ndefault-features = false and skip reth-db, mdbx-sys, and vendored OpenSSL.\n\nSHA-256 in merkle/PoA hashing now uses sha2; signature recovery uses\nalloy-primitives instead of reth-primitives-traits.\n\n* fix(types): drop useless IrysAddress conversion and unused async-trait\n\nrecover_signer now returns IrysAddress, so `.into()` tripped\nclippy::useless_conversion. NodeTestContext removal left async-trait\nunused in reth-node-bridge.\n\n* perf(build): deny warnings via clippy, not rustflags\n\n`-D warnings` in RUSTFLAGS fingerprints every git dep including Reth.\nKeep `[build].rustflags` as `-C target-cpu=native` only; xtask clippy\npasses `-- -D warnings`.\n\n* test: run the 3-node ingress-proof wait first\n\nNextest priority maxes at 100, and every `slow_` test already had that, so\nslow_heavy4_promotion_with_multiple_proofs_test started ~#980 next to other\nheavy4 tests. On a loaded runner peer2 misses the 100s no-mining window.\nDrop the blanket slow_ priority to 50 and pin this test at 100.\n\n* fix(reth-bridge): treat a missing account as zero balance\n\nStateProvider::account_balance returns None when there is no account\nrecord. Mapping that to an error made validate_funding report\nBalanceFetchError for a never-seen signer instead of Unfunded.\n\n* test: run the 3-node ingress-proof wait exclusively\n\nPriority 100 still left it sharing the runner with ~900 other tests\n(completion #987 while it ran 107s). CI logs show genesis had all 3\nproofs and peer1 only 2; peer2 never reached 3. Clamp threads-required\nso nextest occupies the whole pool. Timeout now reports how many proofs\nwere actually present.\n\n* fix(ingress): re-anchor a stale proof before gossiping it\n\nProof generation runs on spawn_blocking. If a block is mined in that\nwindow the signed anchor is already expired, gossip_ingress_proof\nskips broadcast, and the proof stays local. Peers then sit at 2/3\nproofs forever — CI saw genesis miner 2QZrWy missing on peer2 even\nwhen the test ran alone.\n\nAlso fix clippy::unseparated_literal_suffix on the wait helper.\n\n* fix(ingress): park proofs whose anchor block is not yet known\n\nGossiped ingress proofs anchored to a block this node has not imported\nwere rejected as InvalidAnchor. Gossip treated that as InvalidData, did\nnot retry, and peers sat at 2/3 proofs forever — the 3-node promotion\ntest failed in CI even when run exclusively.\n\nPark unknown-anchor proofs after signature and stake checks, ack so\ngossip does not penalise the sender, and retry when the block enters\nthe tree (prevalidation) or is confirmed. Too-old anchors stay a hard\nreject.\n\nRevert generate-path re-anchor-before-gossip: signing against a newer\ntip the peers lack made the race worse.\n\nIn the promotion test, mine the confirming block once, wait for peers\nto import it, then wait for proofs without mining. Drop the exclusive\nnextest 64-thread workaround; keep the have-N wait diagnostic.\n\n* fix(reth-bridge): treat SYNCING forkchoice as success in tests\n\nheavy_test_p2p_evm_gossip_new_rpc FCUs a peer to a block that peer\nhas not imported yet. The engine returns SYNCING and fetches over\nReth gossip; NodeTestContext accepted that. Requiring VALID on the\ntest helper failed in 2s under CI load.\n\nKeep update_forkchoice_full (production CL) strict on VALID.",
+          "timestamp": "2026-09-14T21:31:20-07:00",
+          "tree_id": "fc11568fd6d33298eaa74378271739d690e0b6c2",
+          "url": "https://github.com/Irys-xyz/irys/commit/23c925ed6967fc12d2d0d948df82cd8bbe9976bd"
+        },
+        "date": 1789447850419,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.013581,
+            "range": "± 0.000707",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.1422,
+            "range": "± 0.013923",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.61334,
+            "range": "± 0.22931",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.432973,
+            "range": "± 0.143923",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074823,
+            "range": "± 0.001431",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 773.456577,
+            "range": "± 16.181078",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1001.116695,
+            "range": "± 13.403533",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.134632,
+            "range": "± 0.007029",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1350.602924,
+            "range": "± 149.8094",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1563.411306,
+            "range": "± 8.20494",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034292,
+            "range": "± 0.001337",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.656854,
+            "range": "± 1.553564",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.489806,
+            "range": "± 1.699652",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
