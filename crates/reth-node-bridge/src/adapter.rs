@@ -249,9 +249,33 @@ impl IrysRethNodeAdapter {
     }
 
     /// Test-harness helper: `current_head` is written as both safe and finalized.
+    ///
+    /// `SYNCING` / `ACCEPTED` are success here. Gossip tests FCU a peer to a
+    /// block it may not have imported yet; the engine then fetches it. Callers
+    /// that need the block canonical wait afterwards (`assert_new_block_irys`,
+    /// `wait_for_reth_marker`). Production CL updates use
+    /// [`Self::update_forkchoice_full`], which still requires `VALID`.
     pub async fn update_forkchoice(&self, current_head: B256, new_head: B256) -> eyre::Result<()> {
-        self.update_forkchoice_full(new_head, Some(current_head), Some(current_head))
-            .await
+        let res = self
+            .add_ons_handle
+            .beacon_engine_handle
+            .fork_choice_updated(
+                ForkchoiceState {
+                    head_block_hash: new_head,
+                    safe_block_hash: current_head,
+                    finalized_block_hash: current_head,
+                },
+                None,
+                EngineApiMessageVersion::default(),
+            )
+            .await?;
+
+        match res.payload_status.status {
+            PayloadStatusEnum::Valid | PayloadStatusEnum::Syncing | PayloadStatusEnum::Accepted => {
+                Ok(())
+            }
+            other => eyre::bail!("Reth has gone out of sync: {other:?}"),
+        }
     }
 
     /// Sends forkchoice update to the engine api
@@ -281,7 +305,8 @@ impl IrysRethNodeAdapter {
 
         eyre::ensure!(
             res.payload_status.status == PayloadStatusEnum::Valid,
-            "Reth has gone out of sync"
+            "Reth has gone out of sync: {:?}",
+            res.payload_status.status
         );
 
         Ok(())
