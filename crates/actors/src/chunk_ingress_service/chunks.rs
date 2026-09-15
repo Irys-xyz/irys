@@ -127,11 +127,22 @@ async fn write_chunk_to_assigned_modules(
     chunk: &UnpackedChunk,
 ) -> Result<(), ChunkIngressError> {
     for sm in modules {
-        if sm
-            .get_writeable_offsets(chunk)
-            .unwrap_or_default()
-            .is_empty()
-        {
+        let writeable_offsets = match sm.get_writeable_offsets(chunk) {
+            Ok(offsets) => offsets,
+            Err(error) => {
+                error!(
+                    ?error,
+                    storage_module = sm.id,
+                    data_root = ?chunk.data_root,
+                    tx_offset = %chunk.tx_offset,
+                    "Failed to resolve writeable offsets"
+                );
+                return Err(ChunkIngressError::Critical(
+                    CriticalChunkIngressError::DatabaseError,
+                ));
+            }
+        };
+        if writeable_offsets.is_empty() {
             continue;
         }
         info!(

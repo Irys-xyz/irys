@@ -227,6 +227,13 @@ impl DrainRunner {
             return;
         }
         self.mark_in_flight(&apply);
+        if self.current_generation.load(Ordering::SeqCst) != current_generation {
+            self.clear_in_flight(&apply);
+            for op in apply {
+                send_ack(op.done, Err(WriteDataChunkError::WritesPaused));
+            }
+            return;
+        }
         let result = self.write_batch(&apply);
         self.clear_in_flight(&apply);
         for op in apply {

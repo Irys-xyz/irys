@@ -1933,12 +1933,14 @@ impl StorageModule {
             }
             return Err(error);
         }
+        let mut paused = false;
         for write in prepared {
             let wrote = self.write_chunk(write.offset, write.packed, ChunkType::Data);
             self.release_occupancy(write.offset);
-            if !wrote {
-                return Err(WriteDataChunkError::WritesPaused);
-            }
+            paused |= !wrote;
+        }
+        if paused {
+            return Err(WriteDataChunkError::WritesPaused);
         }
         Ok(())
     }
