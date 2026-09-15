@@ -253,12 +253,10 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
-    use crate::versioning::Signable as _;
-    use crate::{H256, IrysAddress, hash_sha256, validate_chunk};
-    use rand::Rng as _;
-    use reth_primitives_traits::crypto::secp256k1::recover_signer;
-
     use super::IrysSigner;
+    use crate::versioning::Signable as _;
+    use crate::{H256, hash_sha256, validate_chunk};
+    use rand::Rng as _;
 
     #[tokio::test]
     async fn create_and_sign_transaction() {
@@ -324,11 +322,7 @@ mod tests {
 
         // Recover the signer as a way to verify the signature
         let prehash = tx.header.signature_hash();
-        let sig = tx.header.signature.as_bytes();
-
-        let signer: IrysAddress = recover_signer(&sig[..].try_into().unwrap(), prehash.into())
-            .unwrap()
-            .into();
+        let signer = tx.header.signature.recover_signer(prehash).unwrap();
 
         assert_eq!(signer, tx.header.signer);
     }

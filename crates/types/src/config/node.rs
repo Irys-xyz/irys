@@ -43,6 +43,7 @@ pub enum DbSyncMode {
     UtterlyNoSync,
 }
 
+#[cfg(feature = "db")]
 impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
     fn from(mode: DbSyncMode) -> Self {
         match mode {
@@ -643,7 +644,7 @@ pub struct RethNetworkConfig {
     // peer ID
     // WARNING: this gets overridden partway through the startup sequence with the correct value
     #[serde(default)]
-    pub peer_id: reth_transaction_pool::PeerId,
+    pub peer_id: alloy_primitives::B512,
 }
 
 impl_network_config_with_defaults!(RethNetworkConfig);

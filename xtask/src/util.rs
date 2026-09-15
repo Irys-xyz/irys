@@ -38,6 +38,26 @@ pub fn remove_ring_env_vars(cmd: Cmd<'_>) -> Cmd<'_> {
     c
 }
 
+/// Append `-- -D warnings` so clippy fails on rustc/clippy warnings without
+/// putting that flag in `RUSTFLAGS` (Cargo fingerprints rustflags on every
+/// crate, including git deps).
+pub fn with_deny_warnings(mut args: Vec<String>) -> Vec<String> {
+    if !args.iter().any(|a| a == "--") {
+        args.push("--".into());
+    }
+    let already = args
+        .iter()
+        .any(|a| a == "-Dwarnings" || a == "-D=warnings" || a == "--deny=warnings")
+        || args
+            .windows(2)
+            .any(|w| (w[0] == "-D" || w[0] == "--deny") && w[1] == "warnings");
+    if !already {
+        args.push("-D".into());
+        args.push("warnings".into());
+    }
+    args
+}
+
 pub trait CmdExt {
     fn remove_and_run(self) -> Result<(), xshell::Error>;
     fn remove_and_read(self) -> Result<String, xshell::Error>;
@@ -89,4 +109,34 @@ pub fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf
     }
 
     Ok(wrapper_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_deny_warnings;
+
+    #[test]
+    fn adds_deny_when_empty() {
+        assert_eq!(with_deny_warnings(vec![]), ["--", "-D", "warnings"]);
+    }
+
+    #[test]
+    fn keeps_cargo_args_before_dashdash() {
+        assert_eq!(
+            with_deny_warnings(vec!["--all-features".into()]),
+            ["--all-features", "--", "-D", "warnings"]
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_deny() {
+        assert_eq!(
+            with_deny_warnings(vec![
+                "--all-features".into(),
+                "--".into(),
+                "-Dwarnings".into()
+            ]),
+            ["--all-features", "--", "-Dwarnings"]
+        );
+    }
 }

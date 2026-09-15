@@ -22,6 +22,7 @@ use alloy_core::hex::FromHex;
 use alloy_primitives::{Address as AlloyAddress, keccak256};
 use base58::{FromBase58, ToBase58};
 use reth_codecs::Compact;
+#[cfg(feature = "db")]
 use reth_db::{
     DatabaseError,
     table::{Decode, Encode},
@@ -64,6 +65,7 @@ impl Compact for IrysAddress {
     }
 }
 
+#[cfg(feature = "db")]
 impl Encode for IrysAddress {
     type Encoded = [u8; 20];
 
@@ -72,6 +74,7 @@ impl Encode for IrysAddress {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decode for IrysAddress {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         Ok(Self::from_slice(value))

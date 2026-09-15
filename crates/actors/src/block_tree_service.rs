@@ -4,6 +4,7 @@ use crate::{
     block_validation::{
         PreValidationError, build_fork_local_step_window, resolve_header_tree_or_db,
     },
+    chunk_ingress_service::ChunkIngressMessage,
     mempool_service::MempoolServiceMessage,
     metrics,
     mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
@@ -707,6 +708,20 @@ impl BlockTreeServiceInner {
             "scheduling block for validation: {} height: {}",
             block_hash, block_header.height
         );
+
+        // Release the tree write lock before notifying chunk ingress: the
+        // pending-proof drain takes a tree read lock to resolve anchors.
+        drop(cache);
+
+        if let Err(e) = self.service_senders.chunk_ingress.send_traced(
+            ChunkIngressMessage::ProcessPendingIngressProofs(*block_hash),
+        ) {
+            debug!(
+                block.hash = %block_hash,
+                ?e,
+                "Failed to send ProcessPendingIngressProofs after prevalidation"
+            );
+        }
 
         Ok(())
     }

@@ -7,7 +7,7 @@ use crate::metrics;
 use eyre::eyre;
 use irys_database::{db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid};
 use irys_domain::HardforkConfigExt as _;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+
 use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
 use irys_types::v2::GossipBroadcastMessageV2;
@@ -291,9 +291,7 @@ impl Inner {
         // Fetch balance from canonical chain (None = canonical tip)
         let balance: U256 = self
             .reth_node_adapter
-            .rpc
             .get_balance_irys_canonical_and_pending(tx.signer, None)
-            .await
             .map_err(|e| {
                 tracing::error!(
                     tx.id = %tx.id,

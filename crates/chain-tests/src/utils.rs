@@ -40,7 +40,7 @@ use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::TempDirBuilder;
@@ -693,7 +693,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         let reth_peer_count = match self
             .node_ctx
             .reth_node_adapter
-            .inner
             .network
             .get_all_peers()
             .await
@@ -706,7 +705,6 @@ impl IrysNodeTest<IrysNodeCtx> {
             .node_ctx
             .reth_node_adapter
             .reth_node
-            .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await
@@ -1586,6 +1584,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             seconds,
             unconfirmed_promotions
         );
+        let mut last_have = 0_usize;
+        let mut last_header_found = false;
         for _ in 1..=seconds {
             // Do we have any unconfirmed promotions?
             if unconfirmed_promotions.is_empty() {
@@ -1623,19 +1623,29 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Track which txids have met the required number of proofs
             let mut to_remove: HashSet<H256> = HashSet::new();
+            last_have = 0;
+            last_header_found = false;
 
             for (idx, maybe_header) in headers.iter().enumerate() {
-                if let Some(tx_header) = maybe_header
-                    && let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root)
-                    && tx_proofs.len() >= num_proofs
-                {
-                    for ingress_proof in tx_proofs.iter() {
-                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                        tracing::info!(
-                            "proof {} signer: {}",
-                            ingress_proof.proof.id(),
-                            ingress_proof.address
-                        );
+                let Some(tx_header) = maybe_header else {
+                    continue;
+                };
+                last_header_found = true;
+                let n = ingress_proofs_by_root
+                    .get(&tx_header.data_root)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                last_have = n;
+                if n >= num_proofs {
+                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
+                        for ingress_proof in tx_proofs.iter() {
+                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                            tracing::info!(
+                                "proof {} signer: {}",
+                                ingress_proof.proof.id(),
+                                ingress_proof.address
+                            );
+                        }
                     }
                     to_remove.insert(to_check[idx]);
                 }
@@ -1652,12 +1662,17 @@ impl IrysNodeTest<IrysNodeCtx> {
                 self.mine_block().await?;
             }
             sleep(Duration::from_secs(1)).await;
+
+            if last_have == 0 && !last_header_found {
+                tracing::debug!(
+                    want = num_proofs,
+                    "ingress-proof wait: tx header not in mempool/db yet"
+                );
+            }
         }
 
         Err(eyre::eyre!(
-            "Failed waiting {} for ingress proofs. Waited {} seconds",
-            num_proofs,
-            seconds,
+            "Failed waiting {num_proofs} for ingress proofs (have {last_have}, header_found={last_header_found}). Waited {seconds} seconds"
         ))
     }
 
@@ -1997,7 +2012,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let client = self
             .node_ctx
             .reth_node_adapter
-            .rpc_client()
+            .rpc_server_handle()
+            .http_client()
             .ok_or_eyre("Unable to get RPC client")?;
         use alloy_primitives::Bytes;
         use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
@@ -2083,7 +2099,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let rpc = self
             .node_ctx
             .reth_node_adapter
-            .rpc_client()
+            .rpc_server_handle()
+            .http_client()
             .ok_or_eyre("Unable to get RPC client")?;
         let mut last_rpc_error: Option<String> = None;
 
@@ -2156,7 +2173,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 ));
             }
 
-            let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
+            let eth_api = self.node_ctx.reth_node_adapter.eth_api();
             match eth_api.block_by_number(tag, false).await {
                 Ok(Some(block)) if block.header.hash == expected_hash => {
                     return Ok(block.header.hash);
@@ -2352,7 +2369,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         }));
         self.node_ctx
             .reth_node_adapter
-            .rpc
             .get_balance_irys(address, block)
             .await
     }
@@ -3669,16 +3685,16 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn disconnect_all_reth_peers(&self) -> eyre::Result<Vec<PeerInfo>> {
         let ctx = self.node_ctx.reth_node_adapter.clone();
 
-        let all_peers_prior = ctx.inner.network.get_all_peers().await?;
+        let all_peers_prior = ctx.network.get_all_peers().await?;
         for peer in all_peers_prior.iter() {
-            ctx.inner.network.disconnect_peer(peer.remote_id);
+            ctx.network.disconnect_peer(peer.remote_id);
         }
 
-        while !ctx.inner.network.get_all_peers().await?.is_empty() {
+        while !ctx.network.get_all_peers().await?.is_empty() {
             sleep(Duration::from_millis(100)).await;
         }
 
-        let all_peers_after = ctx.inner.network.get_all_peers().await?;
+        let all_peers_after = ctx.network.get_all_peers().await?;
         assert!(
             all_peers_after.is_empty(),
             "the peer should be completely disconnected",
@@ -3692,7 +3708,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         for peer in peers {
             self.node_ctx
                 .reth_node_adapter
-                .inner
                 .network
                 .connect_peer(peer.remote_id, peer.remote_addr);
         }

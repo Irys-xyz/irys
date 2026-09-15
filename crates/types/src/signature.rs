@@ -3,7 +3,6 @@ use alloy_primitives::{U256 as RethU256, bytes};
 use base58::{FromBase58 as _, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
-use reth_primitives_traits::crypto::secp256k1::recover_signer;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 //==============================================================================
@@ -51,7 +50,7 @@ impl IrysSignature {
     }
 
     pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<IrysAddress> {
-        Ok(recover_signer(&self.0, prehash.into())?.into())
+        Ok(self.0.recover_address_from_prehash(&prehash.into())?.into())
     }
 
     pub fn from_base58(str: &str) -> eyre::Result<Self> {

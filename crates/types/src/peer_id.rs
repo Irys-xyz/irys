@@ -1,6 +1,8 @@
 use crate::{Arbitrary, IrysAddress};
 use reth_codecs::Compact;
+#[cfg(feature = "db")]
 use reth_db::DatabaseError;
+#[cfg(feature = "db")]
 use reth_db_api::table::{Decode, Encode};
 
 /// A newtype wrapper for peer network identifier.
@@ -111,6 +113,7 @@ impl Compact for IrysPeerId {
     }
 }
 
+#[cfg(feature = "db")]
 impl Encode for IrysPeerId {
     type Encoded = [u8; 20];
 
@@ -119,6 +122,7 @@ impl Encode for IrysPeerId {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decode for IrysPeerId {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         <IrysAddress as Decode>::decode(value).map(Self)

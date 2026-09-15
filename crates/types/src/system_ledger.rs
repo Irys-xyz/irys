@@ -5,7 +5,7 @@ use std::ops::{Index, IndexMut};
 
 /// Names for each of the system ledgers as well as their `ledger_id` discriminant
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord, Hash, Compact,
 )]
 #[repr(u32)]
 #[derive(Default)]

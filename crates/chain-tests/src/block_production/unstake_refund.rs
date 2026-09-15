@@ -209,7 +209,6 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     );
 
     let txs_inclusion = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(unstake_block.evm_block_hash))?
         .expect("transactions should exist for unstake inclusion block");
@@ -271,7 +270,6 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     );
 
     let epoch_txs = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("epoch block should include refund transactions");
@@ -897,7 +895,6 @@ async fn get_block_receipts(
 
     for retry in 0..=max_retries {
         if let Some(receipts) = reth_ctx
-            .inner
             .provider
             .receipts_by_block(HashOrNumber::Hash(block_hash))?
         {
@@ -1245,7 +1242,6 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
 
     // Decode and verify unpledge refund packets
     let epoch_txs = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("epoch block should have transactions");

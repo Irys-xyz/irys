@@ -10,11 +10,9 @@ use irys_actors::{
     reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_domain::ChainState;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{
     ShadowTransaction, TransactionPacket, shadow_tx_topics,
 };
-use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
 use irys_types::SystemLedger;
 use irys_types::{
@@ -30,6 +28,7 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
+use reth_e2e_test_utils::transaction::TransactionTestContext;
 use tracing::info;
 
 use crate::utils::{
@@ -82,7 +81,6 @@ async fn test_blockprod() -> eyre::Result<()> {
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
         .unwrap();
@@ -119,7 +117,6 @@ async fn test_blockprod() -> eyre::Result<()> {
 
     // ensure that the balance for the storage user has decreased
     let signer_balance = context
-        .inner
         .provider
         .basic_account(&user_account.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
@@ -142,7 +139,6 @@ async fn test_blockprod() -> eyre::Result<()> {
     // ensure that the block reward has increased the block reward address balance
     let block_reward_address = node.cfg.signer().alloy_address();
     let block_reward_balance = context
-        .inner
         .provider
         .basic_account(&block_reward_address)
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
@@ -257,7 +253,7 @@ async fn mine_ten_blocks() -> eyre::Result<()> {
         let _block_hash = node.wait_for_block_at_height(i + 1, 30).await?;
 
         //check reth for built block
-        let reth_block = reth_context.inner.provider.block_by_number(i)?.unwrap();
+        let reth_block = reth_context.provider.block_by_number(i)?.unwrap();
         assert_eq!(i, reth_block.header.number);
         assert_eq!(i, reth_block.number);
 
@@ -342,10 +338,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
-    let _recipient_init_balance = reth_context
-        .rpc
-        .get_balance(recipient.address(), None)
-        .await?;
+    let _recipient_init_balance = reth_context.get_balance(recipient.address(), None).await?;
 
     let evm_tx_req = TransactionRequest {
         to: Some(TxKind::Call(recipient.alloy_address())),
@@ -360,7 +353,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let tx_env = TransactionTestContext::sign_tx(account1.clone().into(), evm_tx_req).await;
 
     let evm_tx_hash = reth_context
-        .rpc
         .inject_tx(tx_env.encoded_2718().into())
         .await
         .expect("tx should be accepted");
@@ -400,7 +392,6 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // Verify the EVM transaction hash matches
     let reth_block = reth_exec_env.block().clone();
     let block_txs = reth_context
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(reth_block.hash()))?
         .unwrap();
@@ -410,7 +401,7 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .expect("EVM transaction should be included in the block");
     assert_eq!(*evm_tx_in_block.hash(), evm_tx_hash);
 
-    let debug_api = reth_context.rpc.inner.debug_api();
+    let debug_api = reth_context.debug_api();
 
     for tx in block_txs {
         let trace = debug_api
@@ -433,17 +424,11 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await?;
 
     // Verify recipient received the transfer
-    let recipient_balance = reth_context
-        .rpc
-        .get_balance(recipient.address(), None)
-        .await?;
+    let recipient_balance = reth_context.get_balance(recipient.address(), None).await?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
 
     // Get account1's final balance after all transactions
-    let final_balance = reth_context
-        .rpc
-        .get_balance(account1.address(), None)
-        .await?;
+    let final_balance = reth_context.get_balance(account1.address(), None).await?;
 
     // Calculate how much account1 actually spent
     // actual_spent = initial_balance - final_balance
@@ -479,7 +464,7 @@ async fn rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+    let mut _init_balance = reth_context.get_balance(reward_address, None).await?;
 
     for _ in 0..3 {
         // mine a single block
@@ -490,7 +475,7 @@ async fn rewards_get_calculated_correctly() -> eyre::Result<()> {
         let new_ts = reth_block.header.timestamp as u128;
 
         prev_ts = Some(new_ts);
-        _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
+        _init_balance = reth_context.get_balance(reward_address, None).await?;
     }
 
     assert!(prev_ts.is_some());
@@ -550,7 +535,6 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify block transactions - should only contain block reward shadow transaction
     let block_txs = context
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
         .unwrap();
@@ -573,7 +557,6 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify unfunded user's balance remains zero
     let user_balance = context
-        .inner
         .provider
         .basic_account(&unfunded_user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
@@ -634,7 +617,6 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify block transactions - should only contain block reward shadow transaction
     let block_txs = context
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
         .unwrap();
@@ -657,7 +639,6 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify nonexistent user's balance is zero (account doesn't exist)
     let user_balance = context
-        .inner
         .provider
         .basic_account(&nonexistent_user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
@@ -734,7 +715,6 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(irys_block.evm_block_hash))?
         .unwrap();
@@ -777,7 +757,6 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
 
     // Verify user's balance
     let user_balance = context
-        .inner
         .provider
         .basic_account(&user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
@@ -828,7 +807,6 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // Get initial balance of the peer signer
     let reth_context = genesis_node.node_ctx.reth_node_adapter.clone();
     let initial_balance = reth_context
-        .inner
         .provider
         .basic_account(&peer_signer.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
@@ -867,7 +845,6 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Get receipts for the first block
     let receipts1 = reth_context
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(irys_block1.evm_block_hash))?
         .unwrap();
@@ -924,7 +901,6 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Get balance after both stake and pledge transactions
     let balance_after_block1 = reth_context
-        .inner
         .provider
         .basic_account(&peer_signer.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
@@ -969,7 +945,6 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Get receipts for the second block
     let receipts2 = reth_context
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(irys_block2.evm_block_hash))?
         .unwrap();
@@ -994,7 +969,6 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Verify block transactions contain the expected shadow transactions in the correct order
     let block_txs1 = reth_context
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(irys_block1.evm_block_hash))?
         .unwrap();

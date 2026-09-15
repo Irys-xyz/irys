@@ -3,8 +3,8 @@ use crate::{
     IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk,
 };
 use alloy_primitives::B256;
-use reth::core::primitives::SealedBlock;
 use reth_ethereum_primitives::Block;
+use reth_primitives_traits::SealedBlock;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 

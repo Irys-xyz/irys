@@ -1,0 +1,5 @@
+# Keep rust-analyzer's cargo check out of `target/`, otherwise its extra
+# `--cfg rust_analyzer` fingerprint dirties every Reth crate and `cargo test`
+# rebuilds the execution-layer graph. `true` means `target/rust-analyzer`.
+[cargo]
+targetDir = true

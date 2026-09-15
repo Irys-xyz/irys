@@ -306,22 +306,16 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     let context = node.node_ctx.reth_node_adapter.clone();
     let latest = context
-        .rpc
-        .inner
         .eth_api()
         .block_by_number(BlockNumberOrTag::Latest, false)
         .await?;
 
     let safe = context
-        .rpc
-        .inner
         .eth_api()
         .block_by_number(BlockNumberOrTag::Safe, false)
         .await?;
 
     let finalized = context
-        .rpc
-        .inner
         .eth_api()
         .block_by_number(BlockNumberOrTag::Finalized, false)
         .await?;
