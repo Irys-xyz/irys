@@ -9,19 +9,21 @@ use super::metrics::{
 use irys_database::{
     complete_ingress_leaves, confirm_data_size_for_data_root, db::IrysDatabaseExt as _,
 };
-use irys_domain::WriteDataChunkError;
+use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof, SendTraced as _,
-    chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256, irys::IrysSigner, validate_path,
-    validate_path_byte_range,
+    ChunkPathHash, DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
+    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
+    irys::IrysSigner, validate_path, validate_path_byte_range,
 };
 use irys_utils::ElapsedMs as _;
+use lru::LruCache;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::RwLock;
 use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 
 /// CDR-only ingress-proof eligibility gate, factored out so the contract is
@@ -118,6 +120,55 @@ pub fn select_data_size_from_storage_modules(
             is_from_publish_ledger: false,
         })
     }
+}
+
+async fn write_chunk_to_assigned_modules(
+    modules: &[Arc<StorageModule>],
+    chunk: &UnpackedChunk,
+) -> Result<(), ChunkIngressError> {
+    for sm in modules {
+        if sm
+            .get_writeable_offsets(chunk)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            continue;
+        }
+        info!(
+            target: "irys::mempool::chunk_ingress",
+            "Writing chunk with offset {} for data_root {} to sm {}",
+            &chunk.tx_offset,
+            &chunk.data_root,
+            &sm.id
+        );
+        match sm.write_data_chunk_queued(chunk).await {
+            Ok(()) => {}
+            Err(WriteDataChunkError::WritesPaused) => {}
+            Err(error) => {
+                error!(
+                    "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
+                    chunk.data_root, chunk.tx_offset, sm.id, error
+                );
+                return Err(ChunkIngressError::Critical(
+                    CriticalChunkIngressError::Other(format!(
+                        "Failed to write chunk to storage_module {}",
+                        sm.id
+                    )),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn remember_after_module_writes(
+    recent_valid_chunks: &RwLock<LruCache<ChunkPathHash, ()>>,
+    chunk_path_hash: ChunkPathHash,
+    write_result: Result<(), ChunkIngressError>,
+) -> Result<(), ChunkIngressError> {
+    write_result?;
+    recent_valid_chunks.write().await.put(chunk_path_hash, ());
+    Ok(())
 }
 
 impl ChunkIngressServiceInner {
@@ -547,48 +598,22 @@ impl ChunkIngressServiceInner {
             return Err(CriticalChunkIngressError::DatabaseError.into());
         }
 
-        // Add to recent valid chunks cache to prevent re-processing
-        self.recent_valid_chunks
-            .write()
-            .await
-            .put(chunk_path_hash, ());
-
         record_chunk_ingested(chunk_len);
 
         // Write chunk to storage modules that have writeable offsets for this chunk.
         // Note: get_writeable_offsets() only returns offsets within the data_size
         // bounds for the data_root stored at that location in the storage module.
-        let _sm_span = info_span!("chunk.write_storage_modules").entered();
-        for sm in self.storage_modules_guard.read().iter() {
-            if !sm
-                .get_writeable_offsets(&chunk)
-                .unwrap_or_default()
-                .is_empty()
-            {
-                info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
-                match sm.write_data_chunk(&chunk) {
-                    Ok(()) => {}
-                    // Cache already committed; the body worker places this after
-                    // recovery resumes. Failing the request would skip gossip,
-                    // and a retry would no-op at `recent_valid_chunks`.
-                    Err(WriteDataChunkError::WritesPaused) => {}
-                    Err(e) => {
-                        error!(
-                            "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
-                            chunk.data_root, chunk.tx_offset, sm.id, e
-                        );
-                        return Err(ChunkIngressError::Critical(
-                            CriticalChunkIngressError::Other(format!(
-                                "Failed to write chunk to storage_module {}",
-                                sm.id
-                            )),
-                        ));
-                    }
-                }
-            }
-        }
-
-        drop(_sm_span);
+        // Clone Arcs and drop the modules guard before awaiting SM ACK so a
+        // drain wait does not hold the std RwLock.
+        let modules: Vec<_> = {
+            let guard = self.storage_modules_guard.read();
+            guard.iter().cloned().collect()
+        };
+        let write_result = write_chunk_to_assigned_modules(&modules, chunk.as_ref())
+            .instrument(info_span!("chunk.write_storage_modules"))
+            .await;
+        remember_after_module_writes(&self.recent_valid_chunks, chunk_path_hash, write_result)
+            .await?;
 
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_root;
@@ -1158,5 +1183,92 @@ mod tests {
             prop_assert_eq!(selected.data_size, expected_publish_max);
             prop_assert!(selected.is_from_publish_ledger);
         }
+    }
+
+    #[tokio::test]
+    async fn failed_sm_write_does_not_remember_chunk_for_retry() -> eyre::Result<()> {
+        use irys_domain::{StorageModule, StorageModuleInfo};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            Config, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionMetadata, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+            PartitionChunkOffset, TxChunkOffset, ledger_chunk_offset_ii,
+            partition::PartitionAssignment, partition_chunk_offset_ii,
+        };
+        use nodit::interval::ii;
+        use std::num::NonZeroUsize;
+
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress_sm_fail_no_lru")
+            .with_tracing()
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?);
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 5,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 5,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0, 1, 2, 3, 4].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        let path_hash = chunk.chunk_path_hash();
+        let recent = RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero")));
+
+        storage_module.fail_next_index_commit();
+        let first = write_chunk_to_assigned_modules(&[Arc::clone(&storage_module)], &chunk).await;
+        remember_after_module_writes(&recent, path_hash, first)
+            .await
+            .expect_err("SM Other must not remember the hash");
+        assert!(
+            !recent.read().await.contains(&path_hash),
+            "retry must not hit recent_valid_chunks after a failed SM write"
+        );
+
+        remember_after_module_writes(
+            &recent,
+            path_hash,
+            write_chunk_to_assigned_modules(&[storage_module], &chunk).await,
+        )
+        .await?;
+        assert!(recent.read().await.contains(&path_hash));
+        Ok(())
     }
 }

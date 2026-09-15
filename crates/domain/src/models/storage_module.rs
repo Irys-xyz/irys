@@ -42,8 +42,7 @@ use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 use irys_database::{
     db::IrysDatabaseExt as _,
     submodule::{
-        add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
-        add_full_tx_path, add_pending_body_migration, add_tx_leaf_binding,
+        add_data_root_info, add_full_tx_path, add_pending_body_migration, add_tx_leaf_binding,
         add_tx_path_hash_to_offset_index, clear_submodule_database, create_or_open_submodule_db,
         del_path_hashes_by_offset, del_pending_body_migration,
         del_pending_body_migrations_in_range, get_data_path_by_offset,
@@ -71,16 +70,24 @@ use reth_db::Database as _;
 use reth_db::transaction::DbTx;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek as _, SeekFrom, Write as _},
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use tracing::{debug, error, info, warn};
 
 use crate::{CircularBuffer, StorageModulesReadGuard};
+
+#[path = "index_drain.rs"]
+mod index_drain;
 
 type SubmodulePath = PathBuf;
 
@@ -137,6 +144,72 @@ fn recover_tx_path_data_root<T: DbTx>(
 // In-memory chunk data indexed by offset within partition
 type ChunkMap = BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>;
 
+#[derive(Debug, Default)]
+struct PendingWrites {
+    chunks: ChunkMap,
+    occupancy: HashSet<PartitionChunkOffset>,
+}
+
+impl Deref for PendingWrites {
+    type Target = ChunkMap;
+    fn deref(&self) -> &ChunkMap {
+        &self.chunks
+    }
+}
+
+impl DerefMut for PendingWrites {
+    fn deref_mut(&mut self) -> &mut ChunkMap {
+        &mut self.chunks
+    }
+}
+
+struct PreparedDataWrite {
+    offset: PartitionChunkOffset,
+    packed: Vec<u8>,
+    done: Option<mpsc::Receiver<Result<(), WriteDataChunkError>>>,
+}
+
+impl PreparedDataWrite {
+    fn take_done(&mut self) -> mpsc::Receiver<Result<(), WriteDataChunkError>> {
+        self.done
+            .take()
+            .expect("index ACK receiver is taken at most once")
+    }
+}
+
+fn recv_index_ack(
+    done: mpsc::Receiver<Result<(), WriteDataChunkError>>,
+) -> Result<(), WriteDataChunkError> {
+    done.recv().unwrap_or_else(|_| {
+        Err(WriteDataChunkError::Other(eyre::eyre!(
+            "index drain closed"
+        )))
+    })
+}
+
+fn recv_index_acks(prepared: &[PreparedDataWrite]) -> Vec<Result<(), WriteDataChunkError>> {
+    prepared
+        .iter()
+        .map(|write| {
+            write
+                .done
+                .as_ref()
+                .map(|done| {
+                    done.recv().unwrap_or_else(|_| {
+                        Err(WriteDataChunkError::Other(eyre::eyre!(
+                            "index drain closed"
+                        )))
+                    })
+                })
+                .unwrap_or_else(|| {
+                    Err(WriteDataChunkError::Other(eyre::eyre!(
+                        "index ACK receiver missing"
+                    )))
+                })
+        })
+        .collect()
+}
+
 /// Storage submodules mapped to their chunk ranges
 type SubmoduleMap =
     NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, StorageSubmodule>;
@@ -178,8 +251,12 @@ pub struct StorageModule {
     pub id: usize,
     /// The (Optional) info about a partition assigned to this storage module
     pub partition_assignment: RwLock<Option<PartitionAssignment>>,
-    /// In-memory chunk buffer awaiting disk write
-    pending_writes: RwLock<ChunkMap>,
+    /// In-memory chunk buffer awaiting disk write. Occupancy (index ops in
+    /// flight) lives under this same lock.
+    pending_writes: RwLock<PendingWrites>,
+    /// Shared with submodule drains so tests can fail the next index commit.
+    #[cfg(any(test, feature = "test-utils"))]
+    index_commit_fail_next: Arc<AtomicBool>,
     /// Serializes flushes so two callers cannot claim and write the same
     /// pending batch concurrently. Pending entries remain present until the
     /// data fsync and interval commit both succeed, and therefore serve as the
@@ -196,6 +273,9 @@ pub struct StorageModule {
     last_pending_write: RwLock<Instant>,
     /// Tracks the storage state of each chunk across all submodules
     intervals: Arc<RwLock<StorageIntervals>>,
+    /// Shared with every submodule drain. `pause_data_writes` / `reset` bump it
+    /// so queued index ops with a stale generation are cancelled.
+    index_write_generation: Arc<AtomicU64>,
     /// Physical storage locations indexed by chunk ranges
     submodules: SubmoduleMap,
     /// Track the speed/throughput of recent disk writes
@@ -261,6 +341,7 @@ pub struct StorageSubmodule {
     /// Mutex containing the interval file path
     /// we create an [`AtomicWriteFile`] for each interval file update, to ensure we are never left with interrupted writes
     intervals_file: Arc<Mutex<PathBuf>>,
+    index_drain: index_drain::IndexDrain,
 }
 
 pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Result<AtomicWriteFile> {
@@ -326,6 +407,8 @@ impl StorageModule {
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
+        let index_write_generation = Arc::new(AtomicU64::new(0));
+        let index_commit_fail_next = Arc::new(AtomicBool::new(false));
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
@@ -438,14 +521,20 @@ impl StorageModule {
 
             // The submodule_map maps submodule intervals to specific instance of StorageSubmodule
             // that maintains system resources connected to the files in that submodule
+            let db = DatabaseProvider(Arc::new(submodule_db));
             submodule_map
                 .insert_strict(
                     submodule_interval,
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
-                        db: DatabaseProvider(Arc::new(submodule_db)),
+                        db: db.clone(),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
+                        index_drain: index_drain::IndexDrain::spawn(
+                            db,
+                            Arc::clone(&index_write_generation),
+                            Arc::clone(&index_commit_fail_next),
+                        )?,
                     },
                 )
                 .map_err(|e| {
@@ -505,16 +594,22 @@ impl StorageModule {
             ));
         }
 
+        #[cfg(not(any(test, feature = "test-utils")))]
+        drop(index_commit_fail_next);
+
         Ok(Self {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
-            pending_writes: RwLock::new(ChunkMap::new()),
+            pending_writes: RwLock::new(PendingWrites::default()),
+            #[cfg(any(test, feature = "test-utils"))]
+            index_commit_fail_next,
             sync_in_progress: Mutex::new(()),
             data_writes_paused: AtomicBool::new(false),
             #[cfg(test)]
             sync_failure: Mutex::new(None),
             last_pending_write: RwLock::new(Instant::now()),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
+            index_write_generation,
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
@@ -587,11 +682,11 @@ impl StorageModule {
     /// queued Entropy write does not count: `write_data_chunk` folds data into
     /// that entry itself, so such an offset is still writable.
     pub fn is_data_write_pending_at(&self, offset: PartitionChunkOffset) -> bool {
-        self.pending_writes
-            .read()
-            .unwrap()
-            .get(&offset)
-            .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
+        let pending = self.pending_writes.read().unwrap();
+        pending.occupancy.contains(&offset)
+            || pending
+                .get(&offset)
+                .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
     }
 
     /// Bytes of chunk data queued in memory awaiting flush. Background body
@@ -620,23 +715,62 @@ impl StorageModule {
     /// them. Entropy (packing) writes are unaffected.
     pub fn pause_data_writes(&self) {
         let _pending = self.pending_writes.write().unwrap();
-        self.data_writes_paused
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.data_writes_paused.store(true, Ordering::SeqCst);
+        self.index_write_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn resume_data_writes(&self) {
-        self.data_writes_paused
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.data_writes_paused.store(false, Ordering::SeqCst);
     }
 
     pub fn data_writes_paused(&self) -> bool {
-        self.data_writes_paused
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.data_writes_paused.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
     fn fail_next_sync_at(&self, point: SyncFailurePoint) {
         *self.sync_failure.lock().unwrap() = Some(point);
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fail_next_index_commit(&self) {
+        self.index_commit_fail_next.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn occupy_offset_for_test(&self, offset: PartitionChunkOffset) {
+        self.pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .insert(offset);
+    }
+
+    #[cfg(test)]
+    fn release_occupied_offset_for_test(&self, offset: PartitionChunkOffset) {
+        self.release_occupancy(offset);
+    }
+
+    #[cfg(test)]
+    fn submit_index_op_for_test(
+        &self,
+        offset: PartitionChunkOffset,
+        data_path: Vec<u8>,
+        generation: u64,
+    ) -> std::sync::mpsc::Receiver<Result<(), WriteDataChunkError>> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let submodule = self
+            .submodules
+            .get_at_point(offset)
+            .expect("test offset must belong to a submodule");
+        submodule.index_drain.submit(index_drain::IndexOp {
+            path_hash: UnpackedChunk::hash_data_path(&data_path),
+            data_path,
+            offset,
+            generation,
+            done: done_tx,
+        });
+        done_rx
     }
 
     #[cfg(test)]
@@ -759,6 +893,15 @@ impl StorageModule {
 
     /// Reinit intervals setting them as Uninitialized, and erase db
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
+        {
+            let mut pending = self.pending_writes.write().unwrap();
+            self.index_write_generation.fetch_add(1, Ordering::SeqCst);
+            for (_, submodule) in self.submodules.iter() {
+                submodule.index_drain.wait_idle();
+            }
+            pending.chunks.clear();
+            pending.occupancy.clear();
+        }
         let storage_interval = {
             let mut intervals = self.intervals.write().unwrap();
             let start = intervals.first_key_value().unwrap().0.start();
@@ -1285,8 +1428,16 @@ impl StorageModule {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) {
+        for (interval, submodule) in self.submodules.iter() {
+            if *interval.end() >= *start && *interval.start() <= *end {
+                submodule.index_drain.wait_idle_in_range(start, end);
+            }
+        }
         let mut pending = self.pending_writes.write().unwrap();
         pending.retain(|offset, _| *offset < start || *offset > end);
+        pending
+            .occupancy
+            .retain(|offset| *offset < start || *offset > end);
     }
 
     /// Clears the per-offset tx-path and data-path offset-index entries in the
@@ -1598,31 +1749,6 @@ impl StorageModule {
             })
     }
 
-    /// Stores the data_path and offset lookups in the correct submodule index
-    pub fn add_data_path_to_index(
-        &self,
-        data_path_hash: ChunkPathHash,
-        data_path: ChunkDataPath,
-        partition_offset: PartitionChunkOffset,
-    ) -> eyre::Result<()> {
-        // Find submodule containing this chunk
-        let res = self.submodules.get_key_value_at_point(partition_offset);
-
-        if let Ok((_interval, submodule)) = res {
-            submodule.db.update_eyre(|tx| -> eyre::Result<()> {
-                add_full_data_path(tx, data_path_hash, data_path)?;
-                add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
-                Ok(())
-            })?;
-            Ok(())
-        } else {
-            Err(eyre::eyre!(
-                "No submodule found for Partition Offset {:?}",
-                partition_offset
-            ))
-        }
-    }
-
     pub fn get_writeable_offsets(
         &self,
         chunk: &UnpackedChunk,
@@ -1635,7 +1761,7 @@ impl StorageModule {
         };
 
         let intervals = self.intervals.read().unwrap();
-        Ok(offsets
+        let entropy_offsets: Vec<_> = offsets
             .iter()
             .copied()
             .filter(|partition_offset| {
@@ -1643,16 +1769,51 @@ impl StorageModule {
                     .get_at_point(*partition_offset)
                     .is_some_and(|s| *s == ChunkType::Entropy)
             })
+            .collect();
+        drop(intervals);
+        let pending = self.pending_writes.read().unwrap();
+        Ok(entropy_offsets
+            .into_iter()
+            .filter(|offset| !pending.occupancy.contains(offset))
             .collect())
     }
 
     /// Writes chunk data and its data_path to relevant storage locations
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> Result<(), WriteDataChunkError> {
-        let data_path = &chunk.data_path.0;
-        let data_path_hash = UnpackedChunk::hash_data_path(data_path);
+        let prepared = self.prepare_data_index_writes(chunk)?;
+        let results = recv_index_acks(&prepared);
+        self.finish_data_index_writes(prepared, results)
+    }
 
-        // Fast path; the authoritative check is under the pending-writes lock
-        // at each insert below.
+    /// Same as [`Self::write_data_chunk`] but waits for the index ACK on the
+    /// blocking pool so async callers do not `recv` on a tokio worker.
+    pub async fn write_data_chunk_queued(
+        &self,
+        chunk: &UnpackedChunk,
+    ) -> Result<(), WriteDataChunkError> {
+        let mut prepared = self.prepare_data_index_writes(chunk)?;
+        if prepared.is_empty() {
+            return Ok(());
+        }
+        let receivers: Vec<_> = prepared
+            .iter_mut()
+            .map(PreparedDataWrite::take_done)
+            .collect();
+        let results = tokio::task::spawn_blocking(move || {
+            receivers
+                .into_iter()
+                .map(recv_index_ack)
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|error| WriteDataChunkError::Other(eyre::eyre!("{error}")))?;
+        self.finish_data_index_writes(prepared, results)
+    }
+
+    fn prepare_data_index_writes(
+        &self,
+        chunk: &UnpackedChunk,
+    ) -> Result<Vec<PreparedDataWrite>, WriteDataChunkError> {
         if self.data_writes_paused() {
             return Err(WriteDataChunkError::WritesPaused);
         }
@@ -1663,75 +1824,131 @@ impl StorageModule {
             return Err(WriteDataChunkError::DataRootNotFound);
         };
 
-        // Lists for both types of offsets to process
-        let mut writeable_offsets = vec![];
-        let mut pending_offsets = vec![];
+        let data_path = chunk.data_path.0.clone();
+        let data_path_hash = UnpackedChunk::hash_data_path(&data_path);
 
-        // Scan all funded local placements and categorize them.
-        for partition_offset in partition_offsets {
-            // Check if there's an entropy chunk in the intervals map at this location and collect if present
-            let intervals = self.intervals.read().unwrap();
-            if intervals
-                .get_at_point(partition_offset)
-                .is_some_and(|s| *s == ChunkType::Entropy)
-            {
-                writeable_offsets.push(partition_offset);
-                continue;
-            }
-            drop(intervals);
-
-            // Check and collect offsets with pending entropy chunks
-            let pending = self.pending_writes.read().unwrap();
-            if pending
-                .get(&partition_offset)
-                .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Entropy)
-            {
-                pending_offsets.push(partition_offset);
-            }
+        enum EntropySource {
+            Disk,
+            Pending(Vec<u8>),
         }
 
-        // Process chunk offsets with entropy in pending writes list
-        for partition_offset in pending_offsets {
+        let disk_entropy: HashSet<PartitionChunkOffset> = {
+            let intervals = self.intervals.read().unwrap();
+            partition_offsets
+                .iter()
+                .copied()
+                .filter(|offset| {
+                    intervals
+                        .get_at_point(*offset)
+                        .is_some_and(|ty| *ty == ChunkType::Entropy)
+                })
+                .collect()
+        };
+
+        let mut occupied = Vec::new();
+        {
             let mut pending = self.pending_writes.write().unwrap();
             if self.data_writes_paused() {
                 return Err(WriteDataChunkError::WritesPaused);
             }
-
-            match pending.get(&partition_offset) {
-                Some((entropy_bytes, ChunkType::Entropy)) => {
-                    // Pack the data with entropy and update pending
-                    let packed_data = packing_xor_vec_u8(entropy_bytes.clone(), &chunk.bytes.0);
-                    // Update the existing pending Entropy write to be a Data write
-                    pending.insert(partition_offset, (packed_data, ChunkType::Data));
-                    self.add_data_path_to_index(
-                        data_path_hash,
-                        data_path.clone(),
-                        partition_offset,
-                    )?;
-
-                    *self.last_pending_write.write().unwrap() = Instant::now();
+            let generation = self.index_write_generation.load(Ordering::SeqCst);
+            for partition_offset in partition_offsets {
+                if pending.occupancy.contains(&partition_offset)
+                    || pending
+                        .get(&partition_offset)
+                        .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
+                {
+                    continue;
                 }
-
-                _ => continue,
+                let pending_entropy = pending
+                    .get(&partition_offset)
+                    .and_then(|(bytes, ty)| (*ty == ChunkType::Entropy).then(|| bytes.clone()));
+                let source = if let Some(entropy) = pending_entropy {
+                    EntropySource::Pending(entropy)
+                } else if disk_entropy.contains(&partition_offset) {
+                    EntropySource::Disk
+                } else {
+                    continue;
+                };
+                pending.occupancy.insert(partition_offset);
+                occupied.push((partition_offset, generation, source));
             }
         }
 
-        // Process all locations with entropy on disk in storage module
-        for partition_offset in writeable_offsets {
-            // read entropy from the storage module
-            let entropy = self.read_chunk_internal(partition_offset)?;
-
-            // xor is commutative, so we can avoid a clone of the chunk's data and use the entropy as the mutable component
-            // (this also handles cases where the chunk's data isn't the full size, as the entropy will be)
+        let mut prepared: Vec<PreparedDataWrite> = Vec::with_capacity(occupied.len());
+        for (partition_offset, generation, source) in occupied {
+            let entropy = match source {
+                EntropySource::Pending(bytes) => bytes,
+                EntropySource::Disk => match self.read_chunk_internal(partition_offset) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.release_occupancy(partition_offset);
+                        for write in &prepared {
+                            self.release_occupancy(write.offset);
+                        }
+                        return Err(WriteDataChunkError::Other(error));
+                    }
+                },
+            };
             let packed_data = packing_xor_vec_u8(entropy, &chunk.bytes.0);
+            let (done_tx, done_rx) = mpsc::channel();
+            let Some((_, submodule)) = self
+                .submodules
+                .get_key_value_at_point(partition_offset)
+                .ok()
+            else {
+                self.release_occupancy(partition_offset);
+                for write in &prepared {
+                    self.release_occupancy(write.offset);
+                }
+                return Err(WriteDataChunkError::Other(eyre::eyre!(
+                    "No submodule found for Partition Offset {partition_offset:?}"
+                )));
+            };
+            // clone: each IndexOp owns a path copy for the drain txn
+            submodule.index_drain.submit(index_drain::IndexOp {
+                path_hash: data_path_hash,
+                data_path: data_path.clone(),
+                offset: partition_offset,
+                generation,
+                done: done_tx,
+            });
+            prepared.push(PreparedDataWrite {
+                offset: partition_offset,
+                packed: packed_data,
+                done: Some(done_rx),
+            });
+        }
+        Ok(prepared)
+    }
 
-            if !self.write_chunk(partition_offset, packed_data, ChunkType::Data) {
+    fn finish_data_index_writes(
+        &self,
+        prepared: Vec<PreparedDataWrite>,
+        results: Vec<Result<(), WriteDataChunkError>>,
+    ) -> Result<(), WriteDataChunkError> {
+        if let Some(error) = results.into_iter().find_map(Result::err) {
+            for write in prepared {
+                self.release_occupancy(write.offset);
+            }
+            return Err(error);
+        }
+        for write in prepared {
+            let wrote = self.write_chunk(write.offset, write.packed, ChunkType::Data);
+            self.release_occupancy(write.offset);
+            if !wrote {
                 return Err(WriteDataChunkError::WritesPaused);
             }
-            self.add_data_path_to_index(data_path_hash, data_path.clone(), partition_offset)?;
         }
-
         Ok(())
+    }
+
+    fn release_occupancy(&self, offset: PartitionChunkOffset) {
+        self.pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .remove(&offset);
     }
 
     /// Aggregates DataRootInfo entries for a data_root across all submodules.
@@ -2328,6 +2545,9 @@ impl StorageModule {
 
 impl Drop for StorageModule {
     fn drop(&mut self) {
+        for (_, submodule) in self.submodules.iter() {
+            submodule.index_drain.shutdown();
+        }
         info!("Syncing SM {} to disk...", &self.id);
         if let Err(e) = self.force_sync_pending_chunks() {
             error!(
@@ -2819,6 +3039,278 @@ mod tests {
 
         storage_module.resume_data_writes();
         storage_module.write_data_chunk(&chunk)?;
+        assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        Ok(())
+    }
+
+    #[test]
+    fn reset_waits_for_inflight_drain_and_clears_pending() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("reset_clears_pending")
+            .with_tracing()
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?;
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+
+        assert!(storage_module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![9; 5],
+            ChunkType::Data
+        ));
+        assert!(storage_module.has_pending_writes());
+
+        storage_module.pause_data_writes();
+        let queued = storage_module.submit_index_op_for_test(
+            PartitionChunkOffset::from(1),
+            vec![1, 2, 3],
+            0,
+        );
+        let _ = storage_module.reset()?;
+        assert!(!storage_module.has_pending_writes());
+        assert!(matches!(
+            queued.recv()?,
+            Err(WriteDataChunkError::WritesPaused)
+        ));
+        storage_module
+            .get_submodule(PartitionChunkOffset::from(1))
+            .ok_or_eyre("submodule")?
+            .db
+            .view_eyre(|tx| {
+                assert!(get_path_hashes_by_offset(tx, PartitionChunkOffset::from(1))?.is_none());
+                Ok(())
+            })?;
+
+        storage_module.resume_data_writes();
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 5,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        storage_module.write_data_chunk(&UnpackedChunk {
+            data_root,
+            data_size: 5,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0, 1, 2, 3, 4].into(),
+            tx_offset: TxChunkOffset::from(0),
+        })?;
+        assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        Ok(())
+    }
+
+    fn packed_submit_fixture(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        StorageModule,
+        UnpackedChunk,
+    )> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?;
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 5,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 5,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0, 1, 2, 3, 4].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        Ok((tmp_dir, storage_module, chunk))
+    }
+
+    #[test]
+    fn failed_index_commit_does_not_insert_pending_data() -> eyre::Result<()> {
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("failed_index_no_pending")?;
+        let offset = PartitionChunkOffset::from(0);
+        storage_module.fail_next_index_commit();
+        assert!(storage_module.write_data_chunk(&chunk).is_err());
+        assert!(!storage_module.is_data_write_pending_at(offset));
+        assert!(!storage_module.is_data_chunk_durable_at(offset));
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Entropy)
+        );
+        storage_module.write_data_chunk(&chunk)?;
+        assert!(storage_module.is_data_write_pending_at(offset));
+        Ok(())
+    }
+
+    #[test]
+    fn pending_entropy_is_replaced_only_after_index_ack() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("pending_entropy_after_ack")
+            .with_tracing()
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage_module.write_chunk(offset, vec![0; 5], ChunkType::Entropy));
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 5,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 5,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0, 1, 2, 3, 4].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        storage_module.fail_next_index_commit();
+        assert!(storage_module.write_data_chunk(&chunk).is_err());
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Entropy)
+        );
+        assert!(
+            !storage_module
+                .pending_writes
+                .read()
+                .unwrap()
+                .occupancy
+                .contains(&offset)
+        );
+        storage_module.write_data_chunk(&chunk)?;
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inflight_index_occupies_offset_against_second_writer() -> eyre::Result<()> {
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("inflight_occupies")?;
+        let offset = PartitionChunkOffset::from(0);
+        storage_module.occupy_offset_for_test(offset);
+        assert!(storage_module.is_data_write_pending_at(offset));
+        assert!(
+            !storage_module
+                .get_writeable_offsets(&chunk)?
+                .contains(&offset)
+        );
+        storage_module.write_data_chunk(&chunk)?;
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Entropy)
+        );
+        storage_module.release_occupied_offset_for_test(offset);
+        storage_module.write_data_chunk(&chunk)?;
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_data_chunk_queued_inserts_pending_after_ack() -> eyre::Result<()> {
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("queued_after_ack")?;
+        storage_module.write_data_chunk_queued(&chunk).await?;
         assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
         Ok(())
     }
