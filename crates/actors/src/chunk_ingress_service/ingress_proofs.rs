@@ -14,7 +14,7 @@ use reth_db::DatabaseError;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 /// Shared, process-local exclusion for proof generation by data root.
 ///
@@ -483,17 +483,51 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
         .block_hash();
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
-    let proof = super::chunks::generate_ingress_proof(
+    let mut proof = super::chunks::generate_ingress_proof(
         db.clone(),
         data_root,
         leaves,
-        signer,
+        signer.clone(),
         chain_id,
         anchor,
     )
     .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
 
-    gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
+    // Generation runs on `spawn_blocking`. The wait-for-proofs test (and live
+    // packing) can mine a block in that window, so the signed anchor is already
+    // stale when we try to gossip — the proof stays in the local DB and peers
+    // never see it. Re-anchor rather than skip broadcast.
+    if ChunkIngressServiceInner::validate_ingress_proof_anchor_static(
+        block_tree_guard,
+        db,
+        config,
+        &proof,
+    )
+    .is_err()
+    {
+        let latest_anchor = block_tree_guard
+            .read()
+            .get_latest_canonical_entry()
+            .block_hash();
+        proof.anchor = latest_anchor;
+        signer
+            .sign_ingress_proof(&mut proof)
+            .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
+        store_ingress_proof(db, &proof, &signer)
+            .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
+        info!(
+            proof.data_root = ?data_root,
+            "re-anchored locally generated ingress proof before gossip"
+        );
+    }
+
+    let gossip_root = proof.data_root;
+    if let Err(error) = gossip_sender.send_traced(GossipBroadcastMessageV2::from(proof.clone())) {
+        error!(
+            "Failed to send gossip data for ingress proof data_root {:?}: {:?}",
+            gossip_root, error
+        );
+    }
     Ok(proof)
 }
 
@@ -564,7 +598,7 @@ pub fn gossip_ingress_proof(
         }
         Err(e) => {
             // Skip gossip; proof stored for potential later use/regeneration.
-            tracing::debug!(proof.data_root = ?ingress_proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
+            warn!(proof.data_root = ?ingress_proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
         }
     }
 }

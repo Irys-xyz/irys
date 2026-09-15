@@ -1584,7 +1584,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             seconds,
             unconfirmed_promotions
         );
-        let mut last_have = 0usize;
+        let mut last_have = 0_usize;
         let mut last_header_found = false;
         for _ in 1..=seconds {
             // Do we have any unconfirmed promotions?
