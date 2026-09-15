@@ -166,6 +166,7 @@ impl DerefMut for PendingWrites {
 struct PreparedDataWrite {
     offset: PartitionChunkOffset,
     packed: Vec<u8>,
+    generation: u64,
     done: Option<mpsc::Receiver<Result<(), WriteDataChunkError>>>,
 }
 
@@ -1778,6 +1779,19 @@ impl StorageModule {
             .collect())
     }
 
+    /// True when this module has an index op in flight for any placement of `chunk`.
+    pub fn has_in_flight_index_for(&self, chunk: &UnpackedChunk) -> bool {
+        let Ok(Some(offsets)) =
+            self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)
+        else {
+            return false;
+        };
+        let pending = self.pending_writes.read().unwrap();
+        offsets
+            .iter()
+            .any(|offset| pending.occupancy.contains(offset))
+    }
+
     /// Writes chunk data and its data_path to relevant storage locations
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> Result<(), WriteDataChunkError> {
         let prepared = self.prepare_data_index_writes(chunk)?;
@@ -1852,7 +1866,7 @@ impl StorageModule {
                 return Err(WriteDataChunkError::WritesPaused);
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
-            for partition_offset in partition_offsets {
+            for partition_offset in partition_offsets.iter().copied() {
                 if pending.occupancy.contains(&partition_offset)
                     || pending
                         .get(&partition_offset)
@@ -1916,8 +1930,20 @@ impl StorageModule {
             prepared.push(PreparedDataWrite {
                 offset: partition_offset,
                 packed: packed_data,
+                generation,
                 done: Some(done_rx),
             });
+        }
+        if prepared.is_empty() {
+            let pending = self.pending_writes.read().unwrap();
+            if partition_offsets
+                .iter()
+                .any(|offset| pending.occupancy.contains(offset))
+            {
+                return Err(WriteDataChunkError::Other(eyre::eyre!(
+                    "index write already in flight"
+                )));
+            }
         }
         Ok(prepared)
     }
@@ -1935,14 +1961,25 @@ impl StorageModule {
         }
         let mut paused = false;
         for write in prepared {
-            let wrote = self.write_chunk(write.offset, write.packed, ChunkType::Data);
-            self.release_occupancy(write.offset);
-            paused |= !wrote;
+            paused |= !self.insert_pending_data_if_generation_current(write);
         }
         if paused {
             return Err(WriteDataChunkError::WritesPaused);
         }
         Ok(())
+    }
+
+    fn insert_pending_data_if_generation_current(&self, write: PreparedDataWrite) -> bool {
+        let mut pending = self.pending_writes.write().unwrap();
+        pending.occupancy.remove(&write.offset);
+        if self.data_writes_paused()
+            || self.index_write_generation.load(Ordering::SeqCst) != write.generation
+        {
+            return false;
+        }
+        pending.insert(write.offset, (write.packed, ChunkType::Data));
+        *self.last_pending_write.write().unwrap() = Instant::now();
+        true
     }
 
     fn release_occupancy(&self, offset: PartitionChunkOffset) {

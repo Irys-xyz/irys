@@ -126,6 +126,8 @@ async fn write_chunk_to_assigned_modules(
     modules: &[Arc<StorageModule>],
     chunk: &UnpackedChunk,
 ) -> Result<(), ChunkIngressError> {
+    let mut wrote_any = false;
+    let mut in_flight = false;
     for sm in modules {
         let writeable_offsets = match sm.get_writeable_offsets(chunk) {
             Ok(offsets) => offsets,
@@ -143,6 +145,9 @@ async fn write_chunk_to_assigned_modules(
             }
         };
         if writeable_offsets.is_empty() {
+            if sm.has_in_flight_index_for(chunk) {
+                in_flight = true;
+            }
             continue;
         }
         info!(
@@ -153,7 +158,7 @@ async fn write_chunk_to_assigned_modules(
             &sm.id
         );
         match sm.write_data_chunk_queued(chunk).await {
-            Ok(()) => {}
+            Ok(()) => wrote_any = true,
             Err(WriteDataChunkError::WritesPaused) => {}
             Err(error) => {
                 error!(
@@ -168,6 +173,13 @@ async fn write_chunk_to_assigned_modules(
                 ));
             }
         }
+    }
+    if !wrote_any && in_flight {
+        return Err(ChunkIngressError::Critical(
+            CriticalChunkIngressError::Other(
+                "index write already in flight on an assigned storage module".into(),
+            ),
+        ));
     }
     Ok(())
 }
