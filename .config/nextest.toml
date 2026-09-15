@@ -49,13 +49,13 @@ test-group = 'spiky'
 threads-required = 1
 priority = 100
 
-# 3-node ingress-proof gossip wait. Nextest priority maxes at 100, and `slow_`
-# used to set that for every slow test, so this one started ~#980 next to other
-# heavy4 tests. On a loaded runner peer2 misses the 100s no-mining window; when
-# it ran first on master it finished in ~11s.
+# 3-node ingress-proof gossip wait. Priority 100 starts it first, but it still
+# shares the runner with hundreds of other tests (completion #987 while it ran
+# 107s). Clamp threads-required to the whole pool so nextest runs it alone.
 [[profile.default.overrides]]
 filter = 'test(/slow_heavy4_promotion_with_multiple_proofs_test/)'
 priority = 100
+threads-required = 64
 
 
 # Define the monitoring wrapper script

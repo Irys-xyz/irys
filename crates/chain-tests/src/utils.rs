@@ -1584,6 +1584,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             seconds,
             unconfirmed_promotions
         );
+        let mut last_have = 0usize;
+        let mut last_header_found = false;
         for _ in 1..=seconds {
             // Do we have any unconfirmed promotions?
             if unconfirmed_promotions.is_empty() {
@@ -1621,19 +1623,29 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Track which txids have met the required number of proofs
             let mut to_remove: HashSet<H256> = HashSet::new();
+            last_have = 0;
+            last_header_found = false;
 
             for (idx, maybe_header) in headers.iter().enumerate() {
-                if let Some(tx_header) = maybe_header
-                    && let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root)
-                    && tx_proofs.len() >= num_proofs
-                {
-                    for ingress_proof in tx_proofs.iter() {
-                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                        tracing::info!(
-                            "proof {} signer: {}",
-                            ingress_proof.proof.id(),
-                            ingress_proof.address
-                        );
+                let Some(tx_header) = maybe_header else {
+                    continue;
+                };
+                last_header_found = true;
+                let n = ingress_proofs_by_root
+                    .get(&tx_header.data_root)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                last_have = n;
+                if n >= num_proofs {
+                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
+                        for ingress_proof in tx_proofs.iter() {
+                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                            tracing::info!(
+                                "proof {} signer: {}",
+                                ingress_proof.proof.id(),
+                                ingress_proof.address
+                            );
+                        }
                     }
                     to_remove.insert(to_check[idx]);
                 }
@@ -1650,12 +1662,17 @@ impl IrysNodeTest<IrysNodeCtx> {
                 self.mine_block().await?;
             }
             sleep(Duration::from_secs(1)).await;
+
+            if last_have == 0 && !last_header_found {
+                tracing::debug!(
+                    want = num_proofs,
+                    "ingress-proof wait: tx header not in mempool/db yet"
+                );
+            }
         }
 
         Err(eyre::eyre!(
-            "Failed waiting {} for ingress proofs. Waited {} seconds",
-            num_proofs,
-            seconds,
+            "Failed waiting {num_proofs} for ingress proofs (have {last_have}, header_found={last_header_found}). Waited {seconds} seconds"
         ))
     }
 
