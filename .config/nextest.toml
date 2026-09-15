@@ -49,14 +49,6 @@ test-group = 'spiky'
 threads-required = 1
 priority = 100
 
-# 3-node ingress-proof gossip wait. Priority 100 starts it first, but it still
-# shares the runner with hundreds of other tests (completion #987 while it ran
-# 107s). Clamp threads-required to the whole pool so nextest runs it alone.
-[[profile.default.overrides]]
-filter = 'test(/slow_heavy4_promotion_with_multiple_proofs_test/)'
-priority = 100
-threads-required = 64
-
 
 # Define the monitoring wrapper script
 [scripts.wrapper.nextest-monitor]

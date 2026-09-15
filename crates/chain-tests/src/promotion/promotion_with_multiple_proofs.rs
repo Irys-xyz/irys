@@ -99,6 +99,17 @@ async fn slow_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     genesis_node.mine_until_next_epoch().await?; // First epoch: Gets peers assigned capacity partitions
     genesis_node.mine_until_next_epoch().await?; // Second epoch: Gets peer partitions assigned to data ledger slots
 
+    // Proofs are signed against genesis's tip. Wait for peers to import those
+    // epoch blocks *before* posting chunks so gossiped proofs aren't dropped
+    // as unknown-anchor while the peers catch up.
+    let height_after_epochs = genesis_node.get_canonical_chain_height().await;
+    peer1_node
+        .wait_until_height(height_after_epochs, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_height(height_after_epochs, seconds_to_wait)
+        .await?;
+
     // Post a data transaction to the genesis node and wait for it to reach the other peers
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();
@@ -125,9 +136,21 @@ async fn slow_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
 
-    // Wait for ingress proof on the genesis node
+    // Proof generation requires the data root in a confirmed block (`block_set`).
+    // Mine that confirmation once, then wait for peers to import it *before*
+    // proofs gossip. Mining *during* the proof wait races gossip against a new
+    // tip: genesis signs against a block peers have not imported yet.
+    genesis_node.mine_block().await?;
+    let height_after_tx = genesis_node.get_canonical_chain_height().await;
+    peer1_node
+        .wait_until_height(height_after_tx, seconds_to_wait)
+        .await?;
+    peer2_node
+        .wait_until_height(height_after_tx, seconds_to_wait)
+        .await?;
+
     let res = genesis_node
-        .wait_for_ingress_proofs(vec![data_tx.header.id], seconds_to_wait)
+        .wait_for_ingress_proofs_no_mining(vec![data_tx.header.id], seconds_to_wait)
         .await;
     assert_matches!(res, Ok(()));
 

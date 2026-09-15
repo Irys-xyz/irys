@@ -4,6 +4,7 @@ pub mod facade;
 pub mod ingress_proofs;
 pub(crate) mod metrics;
 pub mod pending_chunks;
+pub(crate) mod pending_ingress_proofs;
 
 pub use chunks::{AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError};
 pub use ingress_proofs::{
@@ -13,16 +14,17 @@ pub use pending_chunks::PriorityPendingChunks;
 
 use std::num::NonZeroUsize;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, app_state::DatabaseProvider,
-    chunk::UnpackedChunk,
+    BlockHash, ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced,
+    app_state::DatabaseProvider, chunk::UnpackedChunk,
 };
 use lru::LruCache;
+use pending_ingress_proofs::PendingIngressProofs;
 use reth::tasks::TaskExecutor;
 use reth::tasks::shutdown::Shutdown;
 use tokio::sync::{RwLock, Semaphore, mpsc::UnboundedReceiver, oneshot};
@@ -47,6 +49,9 @@ pub enum ChunkIngressMessage {
     /// Try to generate ingress proofs for data roots just confirmed in a block's
     /// submit ledger. Sent by the mempool service after block confirmation.
     TryGenerateProofsForConfirmedRoots(Vec<DataRoot>),
+    /// Retry ingress proofs parked because their anchor block was unknown.
+    /// Sent when that block is added to the tree (prevalidation) or confirmed.
+    ProcessPendingIngressProofs(BlockHash),
 }
 
 impl ChunkIngressMessage {
@@ -57,6 +62,7 @@ impl ChunkIngressMessage {
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::ProcessPendingChunks(_) => "ProcessPendingChunks",
             Self::TryGenerateProofsForConfirmedRoots(_) => "TryGenerateProofsForConfirmedRoots",
+            Self::ProcessPendingIngressProofs(_) => "ProcessPendingIngressProofs",
         }
     }
 
@@ -66,14 +72,18 @@ impl ChunkIngressMessage {
     /// instead — the upstream emit sites
     /// (`mempool_service::data_txs::postprocess_data_ingress` for
     /// `ProcessPendingChunks`, `mempool_service::lifecycle::handle_block_confirmed`
-    /// for `TryGenerateProofsForConfirmedRoots`, and the data_sync_service
+    /// for `TryGenerateProofsForConfirmedRoots` /
+    /// `ProcessPendingIngressProofs`, `block_tree_service::on_block_prevalidated`
+    /// for `ProcessPendingIngressProofs`, and the data_sync_service
     /// SM-write fallback for `IngestChunk(_, None)`) emit each message once,
     /// without retry, so dropping any of them silently strands work.
     pub fn has_reply_channel(&self) -> bool {
         match self {
             Self::IngestChunk(_, reply) => reply.is_some(),
             Self::IngestIngressProof(_, _) => true,
-            Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_) => false,
+            Self::ProcessPendingChunks(_)
+            | Self::TryGenerateProofsForConfirmedRoots(_)
+            | Self::ProcessPendingIngressProofs(_) => false,
         }
     }
 }
@@ -98,9 +108,9 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) irys_db: DatabaseProvider,
     pub(crate) message_handler_semaphore: Arc<Semaphore>,
     /// Reserved lane for control-plane messages (`IngestIngressProof`,
-    /// `ProcessPendingChunks`, `TryGenerateProofsForConfirmedRoots`). Chunk
-    /// floods saturate `message_handler_semaphore` but cannot starve the
-    /// control plane.
+    /// `ProcessPendingChunks`, `TryGenerateProofsForConfirmedRoots`,
+    /// `ProcessPendingIngressProofs`). Chunk floods saturate
+    /// `message_handler_semaphore` but cannot starve the control plane.
     pub(crate) control_plane_semaphore: Arc<Semaphore>,
     pub(crate) max_concurrent_tasks: u32,
     pub(crate) max_control_plane_tasks: u32,
@@ -108,6 +118,7 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
     pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
+    pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
     pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
 }
@@ -120,7 +131,8 @@ impl ChunkIngressServiceInner {
             ChunkIngressMessage::IngestChunk(..) => self.message_handler_semaphore.clone(),
             ChunkIngressMessage::IngestIngressProof(..)
             | ChunkIngressMessage::ProcessPendingChunks(..)
-            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(..) => {
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(..)
+            | ChunkIngressMessage::ProcessPendingIngressProofs(..) => {
                 self.control_plane_semaphore.clone()
             }
         }
@@ -170,6 +182,9 @@ impl ChunkIngressServiceInner {
                         );
                     }
                 }
+            }
+            ChunkIngressMessage::ProcessPendingIngressProofs(anchor) => {
+                self.process_pending_ingress_proofs(anchor);
             }
         }
     }
@@ -321,6 +336,9 @@ impl ChunkIngressService {
                         storage_modules_guard,
                         recent_valid_chunks,
                         pending_chunks,
+                        pending_ingress_proofs: Mutex::new(PendingIngressProofs::new(
+                            pending_ingress_proofs::MAX_PENDING_INGRESS_PROOFS,
+                        )),
                         chunk_data_writer,
                         ingress_proof_generation_state,
                     }),
@@ -565,7 +583,8 @@ impl ChunkIngressService {
             // No response channel — nothing to notify.
             ChunkIngressMessage::IngestChunk(_, None)
             | ChunkIngressMessage::ProcessPendingChunks(_)
-            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_)
+            | ChunkIngressMessage::ProcessPendingIngressProofs(_) => {}
         }
     }
 
@@ -595,7 +614,8 @@ impl ChunkIngressService {
             // production (the recv loop parks for them instead), but the
             // helper must remain total for tests and future callers.
             ChunkIngressMessage::ProcessPendingChunks(_)
-            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_)
+            | ChunkIngressMessage::ProcessPendingIngressProofs(_) => {}
         }
     }
 }
@@ -701,6 +721,11 @@ mod overload_helpers_tests {
                 [2_u8; 32]
             )])
             .has_reply_channel()
+        );
+
+        assert!(
+            !ChunkIngressMessage::ProcessPendingIngressProofs(irys_types::H256::zero())
+                .has_reply_channel()
         );
     }
 }

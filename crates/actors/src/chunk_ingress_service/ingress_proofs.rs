@@ -14,7 +14,7 @@ use reth_db::DatabaseError;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// Shared, process-local exclusion for proof generation by data root.
 ///
@@ -127,9 +127,14 @@ pub enum IngressProofError {
     /// The proof does not come from a staked address
     #[error("Unstaked address")]
     UnstakedAddress,
-    /// The ingress proof is anchored to an unknown/expired anchor
+    /// The ingress proof is anchored to an expired (too old) block
     #[error("Invalid anchor: {0}")]
     InvalidAnchor(BlockHash),
+    /// The ingress proof is anchored to a block this node has not imported yet.
+    /// Distinct from [`Self::InvalidAnchor`]: the sender is not at fault, we are
+    /// behind. Callers should park the proof and retry once the block is known.
+    #[error("Unknown anchor: {0}")]
+    UnknownAnchor(BlockHash),
     /// The service is at capacity and rejected the proof. Distinct from a
     /// network failure: the peer is fine, the receiver is just saturated.
     /// Callers should retry later.
@@ -197,8 +202,29 @@ impl ChunkIngressServiceInner {
             return Err(IngressProofError::UnstakedAddress);
         }
 
-        // Validate the anchor
-        self.validate_ingress_proof_anchor(&ingress_proof)?;
+        // Validate the anchor. An unknown block is a receiver-behind race:
+        // park the proof and ack so gossip does not treat the sender as
+        // InvalidData. Too-old anchors are still a hard reject.
+        match self.validate_ingress_proof_anchor(&ingress_proof) {
+            Ok(()) => {}
+            Err(IngressProofError::UnknownAnchor(anchor)) => {
+                debug!(
+                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    ingress_proof.anchor = ?anchor,
+                    "parking ingress proof until its anchor block is known"
+                );
+                let queued = self
+                    .pending_ingress_proofs
+                    .lock()
+                    .expect("pending ingress proofs lock poisoned")
+                    .put(ingress_proof);
+                if queued {
+                    return Ok(());
+                }
+                return Err(IngressProofError::Overloaded);
+            }
+            Err(error) => return Err(error),
+        }
 
         // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
         let res = self
@@ -232,6 +258,23 @@ impl ChunkIngressServiceInner {
         }
 
         Ok(())
+    }
+
+    /// Re-ingest proofs parked for `anchor` now that that block is in the tree.
+    pub(crate) fn process_pending_ingress_proofs(&self, anchor: irys_types::BlockHash) {
+        let pending = self
+            .pending_ingress_proofs
+            .lock()
+            .expect("pending ingress proofs lock poisoned")
+            .take_for_anchor(anchor);
+        for proof in pending {
+            if let Err(error) = self.handle_ingest_ingress_proof(proof) {
+                warn!(
+                    proof.anchor = ?anchor,
+                    "Failed to ingest parked ingress proof after its anchor became known: {error:?}"
+                );
+            }
+        }
     }
 
     pub(crate) fn validate_ingress_proof_anchor(
@@ -269,8 +312,7 @@ impl ChunkIngressServiceInner {
         {
             Some(height) => height,
             None => {
-                // Unknown anchor
-                return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+                return Err(IngressProofError::UnknownAnchor(ingress_proof.anchor));
             }
         };
 
@@ -317,7 +359,8 @@ impl ChunkIngressServiceInner {
             }
             Err(e) => {
                 match e {
-                    IngressProofError::InvalidAnchor(_block_hash) => {
+                    IngressProofError::InvalidAnchor(_block_hash)
+                    | IngressProofError::UnknownAnchor(_block_hash) => {
                         warn!(
                             ingress_proof.data_root = ?ingress_proof.data_root,
                             ingress_proof.anchor = ?ingress_proof.anchor,
@@ -483,51 +526,17 @@ pub(crate) fn generate_and_store_ingress_proof_from_leaves(
         .block_hash();
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
-    let mut proof = super::chunks::generate_ingress_proof(
+    let proof = super::chunks::generate_ingress_proof(
         db.clone(),
         data_root,
         leaves,
-        signer.clone(),
+        signer,
         chain_id,
         anchor,
     )
     .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
 
-    // Generation runs on `spawn_blocking`. The wait-for-proofs test (and live
-    // packing) can mine a block in that window, so the signed anchor is already
-    // stale when we try to gossip — the proof stays in the local DB and peers
-    // never see it. Re-anchor rather than skip broadcast.
-    if ChunkIngressServiceInner::validate_ingress_proof_anchor_static(
-        block_tree_guard,
-        db,
-        config,
-        &proof,
-    )
-    .is_err()
-    {
-        let latest_anchor = block_tree_guard
-            .read()
-            .get_latest_canonical_entry()
-            .block_hash();
-        proof.anchor = latest_anchor;
-        signer
-            .sign_ingress_proof(&mut proof)
-            .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
-        store_ingress_proof(db, &proof, &signer)
-            .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
-        info!(
-            proof.data_root = ?data_root,
-            "re-anchored locally generated ingress proof before gossip"
-        );
-    }
-
-    let gossip_root = proof.data_root;
-    if let Err(error) = gossip_sender.send_traced(GossipBroadcastMessageV2::from(proof.clone())) {
-        error!(
-            "Failed to send gossip data for ingress proof data_root {:?}: {:?}",
-            gossip_root, error
-        );
-    }
+    gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
     Ok(proof)
 }
 
@@ -662,5 +671,72 @@ mod generation_state_tests {
 
         state.clear_retries(data_root);
         assert_eq!(state.reserve_retry(data_root), Some(Duration::from_secs(1)));
+    }
+}
+
+#[cfg(test)]
+mod unknown_anchor_tests {
+    use super::*;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::BlockTree;
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::{
+        ConsensusConfig, IrysBlockHeader, IrysSignature, NodeConfig, ingress::IngressProofV1,
+    };
+    use reth_db::mdbx::DatabaseArguments;
+    use std::sync::RwLock as StdRwLock;
+
+    fn signed_genesis() -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = 0;
+        header.poa.chunk = Some(Default::default());
+        header.test_sign();
+        header
+    }
+
+    fn dummy_proof(anchor: H256) -> IngressProof {
+        IngressProof::V1(IngressProofV1 {
+            signature: IrysSignature::default(),
+            data_root: H256::zero(),
+            proof: H256::zero(),
+            chain_id: 0,
+            anchor,
+        })
+    }
+
+    #[test]
+    fn unknown_anchor_is_distinct_from_a_known_valid_anchor() {
+        let genesis = signed_genesis();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(StdRwLock::new(tree)));
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let db = DatabaseProvider(Arc::new(db));
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+
+        let err = ChunkIngressServiceInner::validate_ingress_proof_anchor_static(
+            &block_tree,
+            &db,
+            &config,
+            &dummy_proof(H256::random()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, IngressProofError::UnknownAnchor(_)),
+            "expected UnknownAnchor, got {err:?}"
+        );
+
+        ChunkIngressServiceInner::validate_ingress_proof_anchor_static(
+            &block_tree,
+            &db,
+            &config,
+            &dummy_proof(genesis.block_hash()),
+        )
+        .expect("genesis anchor is known and within expiry");
     }
 }
