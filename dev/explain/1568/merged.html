@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1568 — perf(types): slim Reth deps and gate MDBX behind db</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-border: #262b3a;
+    --text: #e6e8ef;
+    --muted: #9aa3b8;
+    --accent: #7aa2ff;
+    --good: #3fbf7f;
+    --warn: #e0a63c;
+    --bad: #e0603c;
+    --code-bg: #11141c;
+    --link: #8ab4ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  header {
+    padding: 1.5rem 1.25rem 1rem;
+    border-bottom: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, #171a23, #0f1117);
+  }
+  header h1 { font-size: 1.3rem; margin: 0 0 0.35rem; }
+  header .meta { color: var(--muted); font-size: 0.85rem; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 0 1.25rem; }
+  nav.toc {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(15,17,23,0.96);
+    backdrop-filter: blur(4px);
+    border-bottom: 1px solid var(--panel-border);
+    padding: 0.6rem 1.25rem;
+    font-size: 0.85rem;
+  }
+  nav.toc .wrap { display: flex; flex-wrap: wrap; gap: 0.9rem; }
+  nav.toc a { color: var(--link); text-decoration: none; white-space: nowrap; }
+  nav.toc a:hover { text-decoration: underline; }
+  main { padding: 1.5rem 0 3rem; }
+  section { margin-bottom: 2.2rem; }
+  h2 {
+    font-size: 1.05rem;
+    border-left: 3px solid var(--accent);
+    padding-left: 0.6rem;
+    margin: 0 0 0.8rem;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+  }
+  p { margin: 0.5rem 0; }
+  ul { margin: 0.4rem 0; padding-left: 1.3rem; }
+  li { margin-bottom: 0.55rem; }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+  }
+  code.inline {
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  a.cite {
+    color: var(--link);
+    text-decoration: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    border-bottom: 1px dotted var(--link);
+  }
+  a.cite:hover { border-bottom-style: solid; }
+  .theme { margin-bottom: 1rem; }
+  .theme .name { font-weight: 600; }
+  .theme .files { color: var(--muted); font-size: 0.82rem; }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    margin-left: 0.4rem;
+    vertical-align: middle;
+  }
+  .badge.good { background: rgba(63,191,127,0.15); color: var(--good); border: 1px solid rgba(63,191,127,0.4); }
+  .badge.warn { background: rgba(224,166,60,0.15); color: var(--warn); border: 1px solid rgba(224,166,60,0.4); }
+  .watch-item {
+    border-left: 3px solid var(--warn);
+    padding: 0.5rem 0.8rem;
+    background: rgba(224,166,60,0.06);
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 0.7rem;
+  }
+  .watch-item .loc { display: block; margin-bottom: 0.2rem; }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.8rem 0;
+    font-size: 0.85rem;
+  }
+  .box {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 0.5rem 0.7rem;
+  }
+  .arrow { color: var(--muted); }
+  footer { color: var(--muted); font-size: 0.8rem; padding: 1rem 0 2rem; border-top: 1px solid var(--panel-border); }
+  @media (max-width: 600px) {
+    nav.toc .wrap { gap: 0.5rem; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>PR #1568 — perf(types): slim Reth deps and gate MDBX behind db</h1>
+    <div class="meta">Irys-xyz/irys · summary mode · CI mode (post-merge) · commit
+      <code class="inline">23c925ed69</code>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#what-why">What &amp; Why</a>
+    <a href="#change-map">Change map</a>
+    <a href="#behavior-changes">Behavior changes</a>
+    <a href="#watch-out">Watch out for</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+<section id="what-why">
+  <h2>Cutting irys-types loose from the Reth umbrella crate</h2>
+  <div class="card">
+    <p><strong>What it does:</strong> <code class="inline">irys-types</code> stops depending on the umbrella <code class="inline">reth</code> crate and on <code class="inline">reth-transaction-pool</code> (it only needed that for <code class="inline">PeerId</code>, now <code class="inline">alloy_primitives::B512</code>). A new <code class="inline">db</code> feature, default‑on, gates the expensive part — <code class="inline">reth-db</code>/<code class="inline">reth-db-api</code>/<code class="inline">reth-chainspec</code>/<code class="inline">reth-tasks</code> (MDBX, <code class="inline">mdbx-sys</code>, vendored OpenSSL) — behind <code class="inline">#[cfg(feature = "db")]</code>, so a git consumer like gateway can build with <code class="inline">default-features = false</code> and skip all of that. SHA‑256 moves from <code class="inline">openssl</code> to <code class="inline">sha2</code>, and signature recovery moves from <code class="inline">reth_primitives_traits</code> to <code class="inline">alloy_primitives</code>. <code class="inline">reth-node-bridge</code>'s production adapter now wraps the launched <code class="inline">FullNode</code> directly instead of <code class="inline">reth_e2e_test_utils::NodeTestContext</code>, so production no longer builds the e2e test harness. Riding along in the same PR (per the commit log, not the PR description): a fix that parks ingress proofs anchored to a not‑yet-imported block instead of hard‑rejecting them, a balance‑fetch fix, and several test-flakiness fixes for a 3‑node promotion test.</p>
+    <p><strong>Why:</strong> the PR description states the umbrella <code class="inline">reth</code>/<code class="inline">reth-transaction-pool</code> deps pulled roughly 100 Reth crates into packing, VDF, and any git consumer of <code class="inline">irys-types</code> — with default <code class="inline">db</code> on, packing still sees ~23 Reth crates, but <code class="inline">--no-default-features</code> drops that to 5 with no <code class="inline">mdbx-sys</code> and no Reth-vendored OpenSSL. The bundled ingress-proof/test fixes are stated in the commit messages as CI-flake root causes discovered while stabilizing the branch, not part of the stated Reth-slimming goal.</p>
+  </div>
+</section>
+
+<section id="change-map">
+  <h2>Change map</h2>
+  <div class="card">
+    <div class="theme">
+      <div class="name">1. Gate MDBX/Compact-adjacent Reth deps behind a <code class="inline">db</code> feature</div>
+      <div class="files">crates/types/Cargo.toml, address.rs, app_state.rs, block.rs, chainspec.rs, peer_id.rs, peer_list.rs, serialization.rs, storage.rs, lib.rs</div>
+      <p>New <a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/types/Cargo.toml#L7">crates/types/Cargo.toml:7</a> default-on <code class="inline">db</code> feature (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/types/Cargo.toml#L13">Cargo.toml:13</a>) makes <code class="inline">reth-chainspec</code>/<code class="inline">reth-db</code>/<code class="inline">reth-db-api</code>/<code class="inline">reth-tasks</code> optional; every <code class="inline">Encode</code>/<code class="inline">Decode</code> impl and the modules that only exist for MDBX storage (<code class="inline">app_state</code>, <code class="inline">arbiter_handle</code>, <code class="inline">chainspec</code>) get <code class="inline">#[cfg(feature = "db")]</code>. <code class="inline">Compact</code> (from <code class="inline">reth-codecs</code>, an orphan-rule requirement) and the ethereum-primitive types stay always-on.</p>
+    </div>
+    <div class="theme">
+      <div class="name">2. Drop <code class="inline">reth-transaction-pool</code> and the umbrella <code class="inline">reth</code> crate from the type layer</div>
+      <div class="files">crates/types/src/peer_list.rs, arbiter_handle.rs, signature.rs, merkle.rs, block.rs</div>
+      <p><code class="inline">RethPeerInfo::peer_id</code> becomes <code class="inline">alloy_primitives::B512</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/types/src/peer_list.rs#L295">peer_list.rs:295</a>); signature recovery calls <code class="inline">Signature::recover_address_from_prehash</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/types/src/signature.rs#L53">signature.rs:53</a>) instead of <code class="inline">reth_primitives_traits::crypto::secp256k1::recover_signer</code>; PoA/merkle SHA‑256 uses the <code class="inline">sha2</code> crate (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/types/src/merkle.rs#L710">merkle.rs:710</a>) instead of <code class="inline">openssl::sha</code>.</p>
+    </div>
+    <div class="theme">
+      <div class="name">3. Production reth-node-bridge stops building the e2e test harness</div>
+      <div class="files">crates/reth-node-bridge/src/adapter.rs, ext.rs (deleted), lib.rs, node.rs, Cargo.toml; crates/actors/src/reth_service.rs, block_validation.rs</div>
+      <p><code class="inline">IrysRethNodeAdapter</code> now wraps <code class="inline">RethNode</code> (the launched <code class="inline">FullNode</code>) directly; <code class="inline">new()</code> is synchronous (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/reth-node-bridge/src/adapter.rs#L45">adapter.rs:45</a>) instead of async-wrapping <code class="inline">reth_e2e_test_utils::NodeTestContext</code>. The balance/inject-tx/canonical-state helpers that used to live in the deleted <code class="inline">ext.rs</code> trait extensions are now inherent methods on the adapter (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/reth-node-bridge/src/adapter.rs#L112">adapter.rs:112</a>). Every caller that went through <code class="inline">.reth_node.inner.X</code> now calls <code class="inline">.X</code> directly, e.g. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/actors/src/reth_service.rs#L219">reth_service.rs:219</a>.</p>
+    </div>
+    <div class="theme">
+      <div class="name">4. Deny warnings via clippy args, not <code class="inline">RUSTFLAGS</code></div>
+      <div class="files">.cargo/config.toml, xtask/src/main.rs, xtask/src/util.rs, .github/workflows/rust.yml, rust-analyzer.toml, AGENTS.md, SETUP.md</div>
+      <p><code class="inline">RUSTFLAGS="-D warnings"</code> fingerprinted every crate including git-dep Reth, forcing rebuilds; a new <code class="inline">with_deny_warnings</code> helper (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/xtask/src/util.rs#L44">xtask/util.rs:44</a>) appends <code class="inline">-- -D warnings</code> to the clippy invocation instead, and <code class="inline">.cargo/config.toml</code> keeps only <code class="inline">-C target-cpu=native</code>. <code class="inline">rust-analyzer.toml</code> now builds into its own <code class="inline">target/rust-analyzer</code> so RA and <code class="inline">cargo test</code> don't invalidate each other's fingerprint.</p>
+    </div>
+    <div class="theme">
+      <div class="name">5. Park ingress proofs with an unknown anchor instead of rejecting them (bundled fix)</div>
+      <div class="files">crates/actors/src/chunk_ingress_service.rs, chunk_ingress_service/ingress_proofs.rs, chunk_ingress_service/pending_ingress_proofs.rs (new), block_tree_service.rs, mempool_service/lifecycle.rs</div>
+      <p>A gossiped proof anchored to a block this node hasn't imported yet used to be rejected as <code class="inline">InvalidAnchor</code> (peers then sat at 2/3 proofs forever). It's now <code class="inline">UnknownAnchor</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/actors/src/chunk_ingress_service/ingress_proofs.rs#L210">ingress_proofs.rs:210</a>), parked in a new bounded cache (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/actors/src/chunk_ingress_service/pending_ingress_proofs.rs#L8">pending_ingress_proofs.rs:8</a>), and retried once <code class="inline">block_tree_service</code> prevalidates or confirms that block (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/actors/src/block_tree_service.rs#L717">block_tree_service.rs:717</a>).</p>
+    </div>
+    <div class="theme">
+      <div class="name">6. Test-flakiness fixes for the 3-node ingress-proof promotion test</div>
+      <div class="files">.config/nextest.toml, crates/chain-tests/src/promotion/promotion_with_multiple_proofs.rs, utils.rs; crates/reth-node-bridge/src/adapter.rs (update_forkchoice); crates/actors/src/reth_service.rs</div>
+      <p>Slow-test nextest priority drops from 100 to 50 so this specific test can be pinned above the rest (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/.config/nextest.toml#L27">nextest.toml:27</a>); a missing account is now treated as zero balance rather than an error in <code class="inline">get_balance_irys_canonical_and_pending</code>; a test-only <code class="inline">update_forkchoice</code> accepts <code class="inline">SYNCING</code>/<code class="inline">ACCEPTED</code> as success, while production forkchoice updates still require <code class="inline">VALID</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section id="behavior-changes">
+  <h2>Behavior changes</h2>
+  <div class="card">
+    <ul>
+      <li><strong>Gateway/git consumers of <code class="inline">irys-types</code></strong>: before → pulled in the full Reth/MDBX/OpenSSL graph unconditionally. After → building with <code class="inline">default-features = false</code> compiles only 5 Reth crates (<code class="inline">reth-codecs</code>, its derive, ethereum-primitives, primitives-traits, zstd-compressors), no <code class="inline">mdbx-sys</code>, no vendored OpenSSL. Default builds (the node workspace) are unaffected since <code class="inline">db</code> is on by default.</li>
+      <li><strong>Gossiped ingress proofs anchored to a not-yet-imported block</strong>: before → hard-rejected as <code class="inline">InvalidAnchor</code>, gossip treated it as bad data and did not retry, so a lagging peer could get stuck below the quorum of proofs indefinitely. After → parked as <code class="inline">UnknownAnchor</code>, acked (so the sender isn't penalized by gossip), and automatically retried once the anchor block enters the block tree or is confirmed. A too-old anchor is still a hard reject.</li>
+      <li><strong>Balance lookup for a never-seen account</strong> (<code class="inline">get_balance_irys_canonical_and_pending</code>): before → <code class="inline">None</code> from the state provider surfaced as <code class="inline">BalanceFetchError</code>. After → treated as a zero balance, so funding validation reports <code class="inline">Unfunded</code> instead of an internal error for a signer that has never had a balance.</li>
+      <li><strong>CI's <code class="inline">cargo check</code> step</strong>: before → ran under <code class="inline">RUSTFLAGS="-D warnings"</code>, so any rustc warning failed the check job. After → runs plain <code class="inline">cargo xtask full-check</code> (no warnings deny); only the separate <code class="inline">cargo xtask clippy</code> job now denies warnings, via appended clippy args rather than rustflags.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="watch-out">
+  <h2>Watch out for</h2>
+  <div class="card">
+    <div class="watch-item">
+      <span class="loc"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/types/Cargo.toml#L7">crates/types/Cargo.toml:7</a></span>
+      No CI job builds <code class="inline">irys-types</code> with <code class="inline">--no-default-features</code> (checked with <code class="inline">grep</code> against <code class="inline">.github/workflows/rust.yml</code>) — the "5 Reth crates, no mdbx" claim in the PR description was verified once by hand, not by an ongoing gate. A future change that adds a non-<code class="inline">#[cfg(feature = "db")]</code> use of a gated symbol under one of these files would only be caught by whoever next runs the manual check, and gateway (an external consumer) would find out at its own build time (worth a dedicated code-review pass to confirm nothing was missed).
+    </div>
+    <div class="watch-item">
+      <span class="loc"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/.github/workflows/rust.yml#L220">.github/workflows/rust.yml:220</a></span>
+      The check job no longer denies warnings at all (only clippy does, and clippy uses a different rustc driver). A warning rustc emits but clippy doesn't would now pass CI silently where it previously failed the check job.
+    </div>
+    <div class="watch-item">
+      <span class="loc"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/actors/src/chunk_ingress_service/pending_ingress_proofs.rs#L8">pending_ingress_proofs.rs:8</a></span>
+      Parked proofs live only in an in-process <code class="inline">Mutex</code>-guarded map, capped at 512 entries, with no persistence. A node restart while proofs are still parked drops them (the sender must re-gossip), and once 512 distinct unknown-anchor proofs are queued, new ones are rejected with <code class="inline">Overloaded</code> rather than parked — worth confirming the cap is sized for realistic lag windows.
+    </div>
+    <div class="watch-item">
+      <span class="loc"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/reth-node-bridge/src/adapter.rs#L112">adapter.rs:112</a></span>
+      <code class="inline">get_balance_irys_canonical_and_pending</code> now folds "account not found" and "zero balance" into the same <code class="inline">Ok(zero)</code> result. That's the intended fix for the funding-validation caller, but any other current or future caller that needs to distinguish "never seen this address" from "confirmed zero balance" loses that distinction silently.
+    </div>
+    <div class="watch-item">
+      <span class="loc"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/23c925ed6967fc12d2d0d948df82cd8bbe9976bd/crates/reth-node-bridge/src/adapter.rs#L45">adapter.rs:45</a></span>
+      The mechanical <code class="inline">.reth_node.inner.X</code> → <code class="inline">.X</code> rewrite touches call sites across <code class="inline">reth_service.rs</code> and <code class="inline">block_validation.rs</code>; a wide, repetitive rewrite like this is exactly where a missed or over-eager replacement hides (a fully compiling but semantically wrong field/method swap), so it's worth a dedicated code-review pass over those call sites specifically.
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    Generated by the explain-diff skill, CI mode. Citations link to
+    <code class="inline">github.com/Irys-xyz/irys@23c925ed69</code>. This page explains and directs attention;
+    it does not contain verified findings — treat "Watch out for" as pointers for a follow-up review.
+  </div>
+</footer>
+
+</body>
+</html>
