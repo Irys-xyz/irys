@@ -70,7 +70,7 @@ use reth_db::Database as _;
 use reth_db::transaction::DbTx;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     ops::{Deref, DerefMut},
@@ -147,7 +147,8 @@ type ChunkMap = BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>;
 #[derive(Debug, Default)]
 struct PendingWrites {
     chunks: ChunkMap,
-    occupancy: HashSet<PartitionChunkOffset>,
+    /// Offset → generation that reserved it. Only that generation may release.
+    occupancy: HashMap<PartitionChunkOffset, u64>,
 }
 
 impl Deref for PendingWrites {
@@ -258,6 +259,10 @@ pub struct StorageModule {
     /// Shared with submodule drains so tests can fail the next index commit.
     #[cfg(any(test, feature = "test-utils"))]
     index_commit_fail_next: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_entropy_read_nth: AtomicU64,
+    #[cfg(test)]
+    entropy_read_seq: AtomicU64,
     /// Serializes flushes so two callers cannot claim and write the same
     /// pending batch concurrently. Pending entries remain present until the
     /// data fsync and interval commit both succeed, and therefore serve as the
@@ -604,6 +609,10 @@ impl StorageModule {
             pending_writes: RwLock::new(PendingWrites::default()),
             #[cfg(any(test, feature = "test-utils"))]
             index_commit_fail_next,
+            #[cfg(test)]
+            fail_entropy_read_nth: AtomicU64::new(0),
+            #[cfg(test)]
+            entropy_read_seq: AtomicU64::new(0),
             sync_in_progress: Mutex::new(()),
             data_writes_paused: AtomicBool::new(false),
             #[cfg(test)]
@@ -684,7 +693,7 @@ impl StorageModule {
     /// that entry itself, so such an offset is still writable.
     pub fn is_data_write_pending_at(&self, offset: PartitionChunkOffset) -> bool {
         let pending = self.pending_writes.read().unwrap();
-        pending.occupancy.contains(&offset)
+        pending.occupancy.contains_key(&offset)
             || pending
                 .get(&offset)
                 .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
@@ -740,16 +749,27 @@ impl StorageModule {
 
     #[cfg(test)]
     fn occupy_offset_for_test(&self, offset: PartitionChunkOffset) {
+        let generation = self.index_write_generation.load(Ordering::SeqCst);
         self.pending_writes
             .write()
             .unwrap()
             .occupancy
-            .insert(offset);
+            .insert(offset, generation);
     }
 
     #[cfg(test)]
     fn release_occupied_offset_for_test(&self, offset: PartitionChunkOffset) {
-        self.release_occupancy(offset);
+        self.pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .remove(&offset);
+    }
+
+    #[cfg(test)]
+    fn fail_entropy_read_at(&self, n: u64) {
+        self.fail_entropy_read_nth.store(n, Ordering::SeqCst);
+        self.entropy_read_seq.store(0, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -1438,7 +1458,7 @@ impl StorageModule {
         pending.retain(|offset, _| *offset < start || *offset > end);
         pending
             .occupancy
-            .retain(|offset| *offset < start || *offset > end);
+            .retain(|offset, _| *offset < start || *offset > end);
     }
 
     /// Clears the per-offset tx-path and data-path offset-index entries in the
@@ -1775,7 +1795,7 @@ impl StorageModule {
         let pending = self.pending_writes.read().unwrap();
         Ok(entropy_offsets
             .into_iter()
-            .filter(|offset| !pending.occupancy.contains(offset))
+            .filter(|offset| !pending.occupancy.contains_key(offset))
             .collect())
     }
 
@@ -1789,7 +1809,7 @@ impl StorageModule {
         let pending = self.pending_writes.read().unwrap();
         offsets
             .iter()
-            .any(|offset| pending.occupancy.contains(offset))
+            .any(|offset| pending.occupancy.contains_key(offset))
     }
 
     /// Writes chunk data and its data_path to relevant storage locations
@@ -1813,14 +1833,22 @@ impl StorageModule {
             .iter_mut()
             .map(PreparedDataWrite::take_done)
             .collect();
-        let results = tokio::task::spawn_blocking(move || {
+        let results = match tokio::task::spawn_blocking(move || {
             receivers
                 .into_iter()
                 .map(recv_index_ack)
                 .collect::<Vec<_>>()
         })
         .await
-        .map_err(|error| WriteDataChunkError::Other(eyre::eyre!("{error}")))?;
+        {
+            Ok(results) => results,
+            Err(error) => {
+                for write in prepared {
+                    self.release_occupancy(write.offset, write.generation);
+                }
+                return Err(WriteDataChunkError::Other(eyre::eyre!("{error}")));
+            }
+        };
         self.finish_data_index_writes(prepared, results)
     }
 
@@ -1867,7 +1895,7 @@ impl StorageModule {
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
             for partition_offset in partition_offsets.iter().copied() {
-                if pending.occupancy.contains(&partition_offset)
+                if pending.occupancy.contains_key(&partition_offset)
                     || pending
                         .get(&partition_offset)
                         .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
@@ -1884,25 +1912,39 @@ impl StorageModule {
                 } else {
                     continue;
                 };
-                pending.occupancy.insert(partition_offset);
+                pending.occupancy.insert(partition_offset, generation);
                 occupied.push((partition_offset, generation, source));
             }
         }
 
         let mut prepared: Vec<PreparedDataWrite> = Vec::with_capacity(occupied.len());
-        for (partition_offset, generation, source) in occupied {
+        let mut occupied = occupied.into_iter();
+        while let Some((partition_offset, generation, source)) = occupied.next() {
             let entropy = match source {
                 EntropySource::Pending(bytes) => bytes,
-                EntropySource::Disk => match self.read_chunk_internal(partition_offset) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        self.release_occupancy(partition_offset);
-                        for write in &prepared {
-                            self.release_occupancy(write.offset);
-                        }
-                        return Err(WriteDataChunkError::Other(error));
+                EntropySource::Disk => {
+                    if let Some(error) = self.injected_entropy_read_error() {
+                        self.abort_prepare(
+                            prepared,
+                            std::iter::once((partition_offset, generation)).chain(
+                                occupied.map(|(offset, generation, _)| (offset, generation)),
+                            ),
+                        );
+                        return Err(error);
                     }
-                },
+                    match self.read_chunk_internal(partition_offset) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            self.abort_prepare(
+                                prepared,
+                                std::iter::once((partition_offset, generation)).chain(
+                                    occupied.map(|(offset, generation, _)| (offset, generation)),
+                                ),
+                            );
+                            return Err(WriteDataChunkError::Other(error));
+                        }
+                    }
+                }
             };
             let packed_data = packing_xor_vec_u8(entropy, &chunk.bytes.0);
             let (done_tx, done_rx) = mpsc::channel();
@@ -1911,10 +1953,11 @@ impl StorageModule {
                 .get_key_value_at_point(partition_offset)
                 .ok()
             else {
-                self.release_occupancy(partition_offset);
-                for write in &prepared {
-                    self.release_occupancy(write.offset);
-                }
+                self.abort_prepare(
+                    prepared,
+                    std::iter::once((partition_offset, generation))
+                        .chain(occupied.map(|(offset, generation, _)| (offset, generation))),
+                );
                 return Err(WriteDataChunkError::Other(eyre::eyre!(
                     "No submodule found for Partition Offset {partition_offset:?}"
                 )));
@@ -1938,7 +1981,7 @@ impl StorageModule {
             let pending = self.pending_writes.read().unwrap();
             if partition_offsets
                 .iter()
-                .any(|offset| pending.occupancy.contains(offset))
+                .any(|offset| pending.occupancy.contains_key(offset))
             {
                 return Err(WriteDataChunkError::Other(eyre::eyre!(
                     "index write already in flight"
@@ -1955,7 +1998,7 @@ impl StorageModule {
     ) -> Result<(), WriteDataChunkError> {
         if let Some(error) = results.into_iter().find_map(Result::err) {
             for write in prepared {
-                self.release_occupancy(write.offset);
+                self.release_occupancy(write.offset, write.generation);
             }
             return Err(error);
         }
@@ -1969,8 +2012,28 @@ impl StorageModule {
         Ok(())
     }
 
+    fn abort_prepare(
+        &self,
+        prepared: Vec<PreparedDataWrite>,
+        remaining: impl IntoIterator<Item = (PartitionChunkOffset, u64)>,
+    ) {
+        for (offset, generation) in remaining {
+            self.release_occupancy(offset, generation);
+        }
+        if prepared.is_empty() {
+            return;
+        }
+        recv_index_acks(&prepared);
+        for write in prepared {
+            self.release_occupancy(write.offset, write.generation);
+        }
+    }
+
     fn insert_pending_data_if_generation_current(&self, write: PreparedDataWrite) -> bool {
         let mut pending = self.pending_writes.write().unwrap();
+        if pending.occupancy.get(&write.offset).copied() != Some(write.generation) {
+            return false;
+        }
         pending.occupancy.remove(&write.offset);
         if self.data_writes_paused()
             || self.index_write_generation.load(Ordering::SeqCst) != write.generation
@@ -1982,12 +2045,27 @@ impl StorageModule {
         true
     }
 
-    fn release_occupancy(&self, offset: PartitionChunkOffset) {
-        self.pending_writes
-            .write()
-            .unwrap()
-            .occupancy
-            .remove(&offset);
+    fn release_occupancy(&self, offset: PartitionChunkOffset, generation: u64) {
+        let mut pending = self.pending_writes.write().unwrap();
+        if pending.occupancy.get(&offset).copied() == Some(generation) {
+            pending.occupancy.remove(&offset);
+        }
+    }
+
+    fn injected_entropy_read_error(&self) -> Option<WriteDataChunkError> {
+        #[cfg(test)]
+        {
+            let at = self.fail_entropy_read_nth.load(Ordering::SeqCst);
+            if at != 0 {
+                let n = self.entropy_read_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == at {
+                    return Some(WriteDataChunkError::Other(eyre::eyre!(
+                        "injected entropy read failure"
+                    )));
+                }
+            }
+        }
+        None
     }
 
     /// Aggregates DataRootInfo entries for a data_root across all submodules.
@@ -3311,7 +3389,7 @@ mod tests {
                 .read()
                 .unwrap()
                 .occupancy
-                .contains(&offset)
+                .contains_key(&offset)
         );
         storage_module.write_data_chunk(&chunk)?;
         assert_eq!(
@@ -3349,6 +3427,37 @@ mod tests {
             storage_module.get_chunk_type(&offset),
             Some(ChunkType::Data)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn entropy_read_failure_releases_all_reserved_offsets() -> eyre::Result<()> {
+        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_types::RelativeChunkOffset;
+
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("entropy_read_releases")?;
+        let (_, submodule) =
+            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.update_eyre(|tx| {
+            add_data_root_info(
+                tx,
+                chunk.data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(1),
+                    data_size: 5,
+                },
+            )
+        })?;
+
+        storage_module.fail_entropy_read_at(2);
+        assert!(storage_module.write_data_chunk(&chunk).is_err());
+        storage_module.fail_entropy_read_at(0);
+        assert!(!storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        assert!(!storage_module.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+
+        storage_module.write_data_chunk(&chunk)?;
+        assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(1)));
         Ok(())
     }
 
