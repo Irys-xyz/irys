@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1569 — Batch submodule data-path index commits (expert)</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1d222c;
+    --text: #dbe1ea;
+    --muted: #8b94a7;
+    --accent: #5aa9ff;
+    --good: #4cc38a;
+    --warn: #e0a02f;
+    --bad: #e0605a;
+    --border: #2a2f3a;
+    --code-bg: #10131a;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 1.75rem 1.5rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #171b24, #0f1115);
+  }
+  header h1 { margin: 0 0 0.35rem; font-size: 1.5rem; }
+  header .meta { color: var(--muted); font-size: 0.9rem; }
+  header .meta code { color: var(--accent); }
+  .layout { display: flex; max-width: 1200px; margin: 0 auto; }
+  nav#toc {
+    flex: 0 0 240px;
+    padding: 1.25rem 1rem;
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    max-height: 100vh;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+  }
+  nav#toc h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.75rem; }
+  nav#toc ul { list-style: none; margin: 0; padding: 0; }
+  nav#toc li { margin-bottom: 0.5rem; }
+  nav#toc a { color: var(--text); text-decoration: none; font-size: 0.88rem; }
+  nav#toc a:hover { color: var(--accent); }
+  main { flex: 1; min-width: 0; padding: 1.5rem 2rem 4rem; }
+  section { margin-bottom: 2.75rem; }
+  section h2 {
+    font-size: 1.15rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  section h3 { font-size: 1rem; color: var(--accent); margin: 1.5rem 0 0.5rem; }
+  p { margin: 0.6rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.5rem; }
+  a.cite {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: var(--code-bg);
+    color: var(--accent);
+    padding: 0.05rem 0.35rem;
+    border-radius: 4px;
+    text-decoration: none;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+    font-size: 0.85rem;
+  }
+  a.cite:hover { border-color: var(--accent); }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+  table { width: 100%; border-collapse: collapse; margin: 0.75rem 0 1.25rem; font-size: 0.92rem; }
+  th, td { border: 1px solid var(--border); padding: 0.55rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  td.unaccounted { color: var(--bad); font-weight: 700; }
+  td.reestablished { color: var(--good); font-weight: 600; }
+  td.new-inv { color: var(--accent); font-weight: 600; }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--panel);
+    border-radius: 0 6px 6px 0;
+    padding: 0.85rem 1rem;
+    margin: 0.9rem 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.bad { border-left-color: var(--bad); }
+  .callout .tag {
+    display: inline-block;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+    color: var(--warn);
+    margin-bottom: 0.35rem;
+  }
+  .callout.bad .tag { color: var(--bad); }
+  .rank {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    margin-bottom: 1rem;
+  }
+  .rank .num {
+    flex: 0 0 auto;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: var(--panel-2);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+  }
+  .rank .body h4 { margin: 0 0 0.35rem; font-size: 0.98rem; }
+  .diagram {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: wrap;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1rem 0;
+    font-size: 0.85rem;
+  }
+  .box {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.7rem 0.9rem;
+    min-width: 150px;
+    text-align: center;
+  }
+  .box .title { font-weight: 700; color: var(--accent); margin-bottom: 0.3rem; font-size: 0.82rem; }
+  .box .sub { color: var(--muted); font-size: 0.75rem; }
+  .arrow {
+    flex: 0 0 auto;
+    padding: 0 0.6rem;
+    color: var(--muted);
+    font-size: 1.1rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 70px;
+  }
+  .arrow .lbl { font-size: 0.68rem; color: var(--muted); margin-top: 0.15rem; text-align: center; }
+  .diagram-col { display: flex; flex-direction: column; gap: 0.5rem; align-items: stretch; }
+  footer { color: var(--muted); font-size: 0.8rem; padding: 1.5rem; text-align: center; border-top: 1px solid var(--border); }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    nav#toc { position: static; max-height: none; border-right: none; border-bottom: 1px solid var(--border); width: 100%; }
+    main { padding: 1.25rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>perf(storage): batch submodule data-path index commits</h1>
+  <div class="meta">
+    PR #1569 · Irys-xyz/irys · mode: <strong>expert</strong> · commit <code>28eaa78180</code> ·
+    repo root for citations: checkout root · citations resolve against
+    <code>https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244</code>
+  </div>
+</header>
+
+<div class="layout">
+  <nav id="toc">
+    <h2>Contents</h2>
+    <ul>
+      <li><a href="#intent">Intent &amp; approach</a></li>
+      <li><a href="#delta">Delta semantics</a></li>
+      <li><a href="#cross-file">Cross-file impact</a></li>
+      <li><a href="#review-focus">Review-focus map</a></li>
+      <li><a href="#open-questions">Open questions</a></li>
+    </ul>
+  </nav>
+
+  <main>
+
+    <section id="intent">
+      <h2>Intent &amp; approach</h2>
+      <p>
+        Each data-path index write (<code>add_full_data_path</code> + <code>add_data_path_hash_to_offset_index</code>)
+        used to be its own MDBX transaction, committed synchronously on the calling thread inside
+        <code>StorageModule::write_data_chunk</code>. The PR moves that commit off the caller entirely: every
+        <code>StorageSubmodule</code> now owns a dedicated background thread ("index drain",
+        <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L70">crates/domain/src/models/index_drain.rs:70</a>)
+        that pulls queued <code>IndexOp</code>s off an <code>mpsc</code> channel, batches up to
+        <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L20">64 ops (index_drain.rs:20)</a>,
+        and commits them in one <code>db.update_eyre</code> transaction
+        (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L262">index_drain.rs:262</a>).
+        Callers submit an op and block on a per-op <code>mpsc</code> ack channel instead of taking the MDBX write lock themselves.
+      </p>
+      <p>
+        This forced a second change: <code>write_data_chunk</code> is split into
+        <code>prepare_data_index_writes</code> (claims offsets, submits index ops) and
+        <code>finish_data_index_writes</code> (waits for acks, then writes the packed bytes into
+        <code>pending_writes</code>) —
+        <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1813">storage_module.rs:1813</a>,
+        <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1925">storage_module.rs:1925</a>.
+        A new async sibling, <code>write_data_chunk_queued</code>
+        (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1790">storage_module.rs:1790</a>),
+        moves the ack-wait onto <code>tokio::task::spawn_blocking</code> so the ingress hot path
+        (<code>chunk_ingress_service</code>) does not <code>recv()</code> on a Tokio worker. A per-offset
+        <code>occupancy: HashSet&lt;PartitionChunkOffset&gt;</code>
+        (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L150">storage_module.rs:150</a>)
+        under the same lock as <code>pending_writes</code> now marks an offset as "claimed" for the
+        window between submitting the index op and receiving its data.
+      </p>
+      <div class="diagram">
+        <div class="diagram-col">
+          <div class="box"><div class="title">write_data_chunk(_queued)</div><div class="sub">caller thread / tokio task</div></div>
+        </div>
+        <div class="arrow">submit IndexOp<div class="lbl">mpsc::channel</div></div>
+        <div class="diagram-col">
+          <div class="box"><div class="title">IndexDrain thread</div><div class="sub">1 per StorageSubmodule</div></div>
+        </div>
+        <div class="arrow">batch ≤64<div class="lbl">db.update_eyre</div></div>
+        <div class="diagram-col">
+          <div class="box"><div class="title">Submodule MDBX env</div><div class="sub">one txn, N ops</div></div>
+        </div>
+        <div class="arrow">ack<div class="lbl">per-op mpsc</div></div>
+        <div class="diagram-col">
+          <div class="box"><div class="title">finish_data_index_writes</div><div class="sub">write_chunk on Ok</div></div>
+        </div>
+      </div>
+      <p>
+        Road not taken: the PR keeps one MDBX env and one dedicated OS thread per submodule (default 3 submodules
+        per storage module, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/config/src/submodules.rs#L16">crates/config/src/submodules.rs:16</a>)
+        rather than a single node-wide batching writer or an async write-behind queue. That keeps each submodule's
+        commit ordering local and simple, but it means batching — and the failure/atomicity boundary described below —
+        is scoped per submodule, not per logical chunk write, which matters once a chunk's placements span submodules
+        (see <a href="#review-focus">review-focus #1</a>).
+      </p>
+    </section>
+
+    <section id="delta">
+      <h2>Delta semantics</h2>
+      <p>
+        <strong>Removed-behavior audit.</strong> The PR restructures write ordering enough to change two invariants
+        and add a third; the table below lists old vs. new enforcement site for each.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Invariant</th><th>Old enforcement</th><th>New enforcement</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>A pending <code>ChunkType::Data</code> entry only exists for an offset whose data-path index row is already durably committed.</td>
+            <td>Neither branch of the old <code>write_data_chunk</code> guaranteed this: the pending-entropy path called <code>pending.insert(.., ChunkType::Data)</code> <em>before</em> <code>add_data_path_to_index</code>, and the disk-entropy path called <code>write_chunk</code> before the index add — a failed index commit left <code>pending_writes</code> at <code>Data</code> with no matching index row.</td>
+            <td class="reestablished">Re-established — <code>finish_data_index_writes</code> only calls <code>write_chunk</code> after every prepared offset's index ack is <code>Ok</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1936">storage_module.rs:1936</a>), verified by <code>failed_index_commit_does_not_insert_pending_data</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1467">storage_module.rs:1467</a>).</td>
+          </tr>
+          <tr>
+            <td><code>recent_valid_chunks</code> remembers a chunk hash only once it was actually accepted into storage.</td>
+            <td>Chunk-ingress inserted the hash unconditionally right after the body-cache commit, before the storage-module write loop ran at all — a later critical SM-write error still left the hash cached, which per the code's own comment about retries "no-op at <code>recent_valid_chunks</code>" would silently swallow a legitimate retry.</td>
+            <td class="reestablished">Re-established — <code>remember_after_module_writes</code> only inserts after <code>write_chunk_to_assigned_modules</code> returns <code>Ok</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/actors/src/chunk_ingress_service/chunks.rs#L164">chunks.rs:164</a>), verified by <code>failed_sm_write_does_not_remember_chunk_for_retry</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/actors/src/chunk_ingress_service/chunks.rs#L152">chunks.rs:152</a>).</td>
+          </tr>
+          <tr>
+            <td>An offset mid entropy→data conversion cannot be claimed by a second concurrent writer.</td>
+            <td>None — no occupancy tracking existed; the only guard was the pending-writes lock's per-call granularity.</td>
+            <td class="new-inv">New capability, not a re-establishment — <code>occupancy</code> set gates <code>get_writeable_offsets</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1752">storage_module.rs:1752</a>) and is claimed/released around each prepare/finish cycle.</td>
+          </tr>
+          <tr>
+            <td>A single <code>write_data_chunk</code> call is all-or-nothing across every offset it targets.</td>
+            <td>True only incidentally — the old code processed offsets in one sequential loop inside one function, so a mid-loop error left only the offsets already visited in a (different) inconsistent state.</td>
+            <td class="unaccounted">Unaccounted for — <code>finish_data_index_writes</code> discards <em>every</em> prepared write, including ones whose index commit already durably succeeded in a sibling submodule, the instant any one offset's ack is an <code>Err</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1930">storage_module.rs:1930</a>). No test constructs a multi-submodule <code>StorageModuleInfo</code> to exercise this.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        <strong>Ordering / concurrency.</strong> Index commits move from "on the caller's thread, inline with the rest
+        of the write" to "on a per-submodule background thread, batched with other concurrent callers." That widens
+        the set of things a single slow or failing write can be entangled with: a <code>write_data_chunk_queued</code>
+        caller's latency now depends on whichever other ops land in the same ≤64-op batch
+        (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L213">index_drain.rs:213</a>).
+      </p>
+      <p>
+        <strong>Compatibility.</strong> <code>StorageModule::add_data_path_to_index</code> (the old public per-offset
+        index-write method) is deleted outright rather than deprecated; a repo-wide search found no callers outside
+        this file, so this is a safe removal, not a compatibility break.
+      </p>
+    </section>
+
+    <section id="cross-file">
+      <h2>Cross-file impact</h2>
+      <ul>
+        <li>
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/actors/src/data_sync_service.rs#L60">crates/actors/src/data_sync_service.rs:60</a>
+          and
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/actors/src/chunk_migration_service.rs#L584">crates/actors/src/chunk_migration_service.rs:584</a>
+          still call the synchronous <code>write_data_chunk</code>, invoked directly inside <code>async fn</code>s on the
+          shared Tokio runtime (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/actors/src/data_sync_service.rs#L738">data_sync_service.rs:738</a>)
+          without <code>spawn_blocking</code>. Blocking a Tokio worker here is not new (the old code also ran an inline
+          MDBX commit on that thread), but the wait is now coupled to whatever else is in the same submodule's batch —
+          including <code>write_data_chunk_queued</code> traffic from chunk ingress — which was not previously possible.
+        </li>
+        <li>
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1752">get_writeable_offsets (storage_module.rs:1752)</a>
+          and
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L684">is_data_write_pending_at (storage_module.rs:684)</a>
+          were extended to consult <code>occupancy</code>. Every existing caller (chunk ingress's
+          <code>write_chunk_to_assigned_modules</code>, the data-sync write path) transparently gets the new
+          "occupied offsets are not writeable" filtering with no call-site changes — the previously-possible
+          double-claim race on those offsets is now suppressed instead of surfaced.
+        </li>
+        <li>
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/actors/src/chunk_ingress_service/chunks.rs#L612">chunks.rs:612</a>
+          clones the <code>Arc&lt;StorageModule&gt;</code> list and drops the <code>storage_modules_guard</code> read lock
+          before awaiting <code>write_chunk_to_assigned_modules</code> — required now that the write path crosses an
+          <code>.await</code> point; holding a sync <code>RwLockReadGuard</code> there would previously have been a compile
+          error or a held-lock-across-await hazard. Correctly handled.
+        </li>
+        <li>
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L2546">Drop for StorageModule (storage_module.rs:2546)</a>
+          now shuts down every submodule's <code>IndexDrain</code> (joining its thread) before
+          <code>force_sync_pending_chunks</code> runs. Since a writer thread can only be mid-write while holding its own
+          <code>Arc&lt;StorageModule&gt;</code> clone, and <code>Drop</code> only fires once the last clone is gone, this
+          does not race with an in-flight caller — no issue found here.
+        </li>
+      </ul>
+    </section>
+
+    <section id="review-focus">
+      <h2>Review-focus map</h2>
+      <p>These are attention pointers from reading the code, not verified findings. Recommend a dedicated code-review pass on #1 and #2 before merge.</p>
+
+      <div class="rank">
+        <div class="num">1</div>
+        <div class="body">
+          <h4><a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1925">storage_module.rs:1925</a> — cross-submodule partial-batch failure discards a durably-committed index row</h4>
+          <p>
+            <strong>Failure scenario:</strong> a chunk's <code>data_root</code> has two placements inside one
+            <code>StorageModule</code> that land in <em>different</em> submodules (the default node config uses 3
+            submodules per storage module, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/config/src/submodules.rs#L16">submodules.rs:16</a>,
+            so this is the normal shape, not an edge case). <code>prepare_data_index_writes</code> submits one
+            <code>IndexOp</code> per offset to each offset's own submodule drain. Submodule A's batch commits
+            successfully; submodule B's fails (I/O error, or the test-only <code>fail_next_index_commit</code> hook).
+            <code>finish_data_index_writes</code> (storage_module.rs:1930) sees the one <code>Err</code> and releases
+            occupancy for <em>every</em> prepared offset without calling <code>write_chunk</code> for any of them —
+            including submodule A's offset, whose <code>add_full_data_path</code> /
+            <code>add_data_path_hash_to_offset_index</code> row is already durably committed
+            (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L514">index_drain.rs:514</a>).
+            Until a retry resubmits the same chunk, submodule A's on-disk index claims a data-path exists at that
+            offset while the chunk buffer there is untouched (still whatever it held before). All fixtures in this
+            PR's tests use a single submodule spanning the whole offset range
+            (e.g. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L1344">storage_module.rs:1344</a>), so this interaction is untested.
+          </p>
+        </div>
+      </div>
+
+      <div class="rank">
+        <div class="num">2</div>
+        <div class="body">
+          <h4><a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L895">storage_module.rs:895</a> (<code>reset</code>) vs. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L213">index_drain.rs:213</a> (<code>commit_batch</code>) — ack delivery is not synchronized with <code>wait_idle</code></h4>
+          <p>
+            <strong>Failure scenario:</strong> <code>reset()</code> bumps <code>index_write_generation</code> then calls
+            <code>wait_idle()</code>, which unblocks as soon as <code>clear_in_flight</code> runs
+            (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L250">index_drain.rs:250</a>).
+            But in <code>commit_batch</code>, <code>clear_in_flight</code> runs <em>before</em> <code>send_ack</code>
+            (index_drain.rs:231-237) — so a writer whose op was already inside an in-progress batch at the moment
+            <code>reset()</code> started waiting can still be sitting on <code>done_rx.recv()</code> after
+            <code>reset()</code> has already cleared <code>pending_writes</code> and erased the submodule database
+            (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/storage_module.rs#L919">storage_module.rs:919</a>).
+            That writer then receives its <code>Ok</code> ack and calls <code>write_chunk</code>
+            (storage_module.rs:1937), reinserting a <code>ChunkType::Data</code> entry into the just-cleared
+            <code>pending_writes</code> map for an offset whose interval <code>reset()</code> just set to
+            <code>Uninitialized</code>. The generation check only protects ops not yet pulled into a batch at bump time;
+            it does not cover ops already past that check and mid-commit.
+          </p>
+        </div>
+      </div>
+
+      <div class="rank">
+        <div class="num">3</div>
+        <div class="body">
+          <h4><a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/domain/src/models/index_drain.rs#L70">index_drain.rs:70</a> — one dedicated OS thread per submodule</h4>
+          <p>
+            <code>IndexDrain::spawn</code> starts a long-lived named thread per <code>StorageSubmodule</code>. With the
+            documented default of 3 submodules per storage module
+            (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/config/src/submodules.rs#L16">submodules.rs:16</a>),
+            a node with many assigned partitions materializes 3× that many index-drain threads for the life of the
+            process. Not a correctness bug, but worth checking against the largest partition counts this is expected
+            to run on.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="open-questions">
+      <h2>Open questions</h2>
+      <ul>
+        <li>
+          Was moving <code>recent_valid_chunks</code>'s insert from "unconditional, before the SM write loop" to
+          "only after <code>write_chunk_to_assigned_modules</code> succeeds"
+          (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/28eaa781803e3c69d7fb223efbbf0dfa46222244/crates/actors/src/chunk_ingress_service/chunks.rs#L164">chunks.rs:164</a>)
+          an intentional retry-safety fix bundled into this perf PR, or an incidental side effect of restructuring
+          for <code>.instrument().await</code>? The PR description only mentions batching MDBX commits.
+        </li>
+        <li>
+          For review-focus #1: is the cross-submodule partial-failure window considered acceptable because a caller
+          always retries the whole chunk until every offset round-trips cleanly? If so, is that retry guaranteed at
+          every call site (<code>chunk_ingress</code>, <code>data_sync_service</code>, <code>chunk_migration_service</code>),
+          or can a bounded-retry path give up while a submodule index still references a not-yet-written offset?
+        </li>
+        <li>
+          For review-focus #2: should <code>IndexDrain::wait_idle</code> block until acks are actually delivered to
+          callers (not just until <code>clear_in_flight</code> runs), to close the <code>reset()</code> race?
+        </li>
+        <li>
+          Was the thread-per-submodule design validated against the largest expected submodules-per-node count in
+          production, or is this expected to stay at the current default of 3 per storage module?
+        </li>
+      </ul>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  Generated by the explain-diff skill (CI mode, expert) for PR #1569 · reviewed at commit 28eaa78180
+</footer>
+
+</body>
+</html>
