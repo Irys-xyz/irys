@@ -3332,7 +3332,13 @@ mod tests {
                 .get_writeable_offsets(&chunk)?
                 .contains(&offset)
         );
-        storage_module.write_data_chunk(&chunk)?;
+        let err = storage_module
+            .write_data_chunk(&chunk)
+            .expect_err("second writer must not succeed while occupied");
+        assert!(
+            err.to_string().contains("index write already in flight"),
+            "expected in-flight error, got {err}"
+        );
         assert_eq!(
             storage_module.get_chunk_type(&offset),
             Some(ChunkType::Entropy)
