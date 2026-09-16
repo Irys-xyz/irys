@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use irys_types::{SendTraced as _, Traced, chunk::UnpackedChunk};
@@ -22,7 +22,16 @@ pub async fn enqueue_http_chunk(
     admission: &Arc<Semaphore>,
     waiters: &Arc<Semaphore>,
     timeout: Duration,
+    accepting: &Arc<Mutex<bool>>,
 ) -> Result<(), HttpChunkEnqueueError> {
+    {
+        let open = accepting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*open {
+            return Err(HttpChunkEnqueueError::ChannelClosed);
+        }
+    }
     let permit = match Arc::clone(admission).try_acquire_owned() {
         Ok(permit) => permit,
         Err(tokio::sync::TryAcquireError::Closed) => {
@@ -47,9 +56,18 @@ pub async fn enqueue_http_chunk(
         }
     };
     let guard = HttpAdmissionGuard::new(permit);
-    sender
-        .send_traced(ChunkIngressMessage::IngestChunk(chunk, None, Some(guard)))
-        .map_err(|_| HttpChunkEnqueueError::ChannelClosed)
+    {
+        let open = accepting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*open {
+            return Err(HttpChunkEnqueueError::ChannelClosed);
+        }
+        sender
+            .send_traced(ChunkIngressMessage::IngestChunk(chunk, None, Some(guard)))
+            .map_err(|_| HttpChunkEnqueueError::ChannelClosed)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -67,6 +85,10 @@ mod tests {
         }
     }
 
+    fn accepting() -> Arc<Mutex<bool>> {
+        Arc::new(Mutex::new(true))
+    }
+
     #[tokio::test]
     async fn enqueue_returns_without_receiver_consuming() {
         let admission = Arc::new(Semaphore::new(1));
@@ -78,6 +100,7 @@ mod tests {
             &admission,
             &waiters,
             Duration::from_secs(1),
+            &accepting(),
         )
         .await
         .expect("enqueue");
@@ -102,6 +125,7 @@ mod tests {
             &admission,
             &waiters,
             Duration::from_millis(50),
+            &accepting(),
         )
         .await
         .expect_err("timeout");
@@ -123,10 +147,32 @@ mod tests {
             &admission,
             &waiters,
             Duration::from_secs(5),
+            &accepting(),
         )
         .await
         .expect_err("saturated");
         assert!(matches!(err, HttpChunkEnqueueError::WaitersSaturated));
         assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejects_when_ingress_closed() {
+        let admission = Arc::new(Semaphore::new(1));
+        let waiters = Arc::new(Semaphore::new(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let accepting = Arc::new(Mutex::new(false));
+        let err = enqueue_http_chunk(
+            dummy_chunk(),
+            &tx,
+            &admission,
+            &waiters,
+            Duration::from_secs(1),
+            &accepting,
+        )
+        .await
+        .expect_err("closed");
+        assert!(matches!(err, HttpChunkEnqueueError::ChannelClosed));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(admission.available_permits(), 1);
     }
 }

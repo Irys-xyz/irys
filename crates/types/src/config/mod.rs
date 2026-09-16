@@ -830,7 +830,8 @@ pub struct MempoolConfig {
 
     /// Max public `POST /v1/chunk` bodies admitted and not yet finished by ingress.
     pub max_http_chunk_admission: usize,
-    /// Max decoded public POSTs waiting for an admission permit (5s timeout).
+    /// Max decoded public POSTs waiting for an admission permit
+    /// (`http_chunk_admission_timeout_millis`).
     pub max_http_chunk_waiters: usize,
     /// Monotonic wait for an admission permit, in milliseconds.
     pub http_chunk_admission_timeout_millis: u64,

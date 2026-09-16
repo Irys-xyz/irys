@@ -58,6 +58,7 @@ pub async fn post_chunk(
         &state.http_chunk_admission,
         &state.http_chunk_waiters,
         timeout,
+        &state.chunk_ingress_state.http_ingress_open,
     )
     .await
     {

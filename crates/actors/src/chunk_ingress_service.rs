@@ -117,6 +117,9 @@ impl ChunkIngressMessage {
 #[derive(Debug, Clone)]
 pub struct ChunkIngressState {
     pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
+    /// When `false`, HTTP enqueue must fail so shutdown drain cannot drop a
+    /// chunk after `POST /v1/chunk` has already returned 200.
+    pub http_ingress_open: Arc<Mutex<bool>>,
 }
 
 impl ChunkIngressState {
@@ -153,6 +156,7 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
     pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
+    http_ingress_open: Arc<Mutex<bool>>,
 }
 
 impl ChunkIngressServiceInner {
@@ -327,8 +331,10 @@ impl ChunkIngressService {
             max_pending_chunk_items,
             max_preheader_chunks_per_item,
         )));
+        let http_ingress_open = Arc::new(Mutex::new(true));
         let chunk_ingress_state = ChunkIngressState {
             pending_chunks: pending_chunks.clone(),
+            http_ingress_open: Arc::clone(&http_ingress_open),
         };
 
         let handle_for_inner = runtime_handle.clone();
@@ -390,6 +396,7 @@ impl ChunkIngressService {
                         )),
                         chunk_data_writer,
                         ingress_proof_generation_state,
+                        http_ingress_open,
                     }),
                 };
                 let retry_inner = Arc::clone(&service.inner);
@@ -552,6 +559,15 @@ impl ChunkIngressService {
                     }
                 }
             }
+        }
+
+        {
+            let mut open = self
+                .inner
+                .http_ingress_open
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *open = false;
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), http_backlog = http_backlog.len(), "processing last in-bound messages before shutdown");
@@ -875,6 +891,7 @@ mod overload_helpers_tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(PriorityPendingChunks::new(8, 8)));
         let state = ChunkIngressState {
             pending_chunks: pending.clone(),
+            http_ingress_open: std::sync::Arc::new(std::sync::Mutex::new(true)),
         };
         let chunk = dummy_chunk();
         assert!(
