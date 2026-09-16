@@ -6784,6 +6784,7 @@ pub async fn data_txs_are_valid(
                                     crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(
                                         unpacked,
                                         Some(ing_tx),
+                                        None,
                                     ),
                                 )
                                 .is_err()

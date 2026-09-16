@@ -34,8 +34,8 @@ pub mod validation_service;
 pub use block_producer::*;
 pub use chunk_ingress_service::{
     AdvisoryChunkIngressError, ChunkIngressError, ChunkIngressMessage, ChunkIngressService,
-    ChunkIngressState, CriticalChunkIngressError, IngressProofError, IngressProofGenerationError,
-    PriorityPendingChunks,
+    ChunkIngressState, CriticalChunkIngressError, HttpAdmissionGuard, HttpChunkEnqueueError,
+    IngressProofError, IngressProofGenerationError, PriorityPendingChunks, enqueue_http_chunk,
 };
 pub use data_sync_service::*;
 pub use mempool_guard::*;

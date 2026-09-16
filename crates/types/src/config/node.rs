@@ -1132,6 +1132,13 @@ pub struct MempoolNodeConfig {
     /// Backpressure channel capacity for the async chunk write-behind buffer.
     /// Controls how many chunk writes can be queued before the sender blocks.
     pub chunk_writer_buffer_size: usize,
+
+    /// Max public `POST /v1/chunk` bodies admitted and not yet finished by ingress.
+    pub max_http_chunk_admission: usize,
+    /// Max decoded public POSTs waiting for an admission permit (5s timeout).
+    pub max_http_chunk_waiters: usize,
+    /// Monotonic wait for an admission permit, in milliseconds.
+    pub http_chunk_admission_timeout_millis: u64,
 }
 
 impl Default for MempoolNodeConfig {
@@ -1159,6 +1166,9 @@ impl Default for MempoolNodeConfig {
             // override this to a positive value to enable the carve-out.
             max_control_plane_concurrent_tasks: 0,
             chunk_writer_buffer_size: 4096,
+            max_http_chunk_admission: 256,
+            max_http_chunk_waiters: 32,
+            http_chunk_admission_timeout_millis: 5000,
         }
     }
 }
@@ -1346,6 +1356,9 @@ impl NodeConfig {
                 max_concurrent_chunk_ingress_tasks: 30,
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
+                max_http_chunk_admission: 256,
+                max_http_chunk_waiters: 32,
+                http_chunk_admission_timeout_millis: 5000,
             },
             metrics: MetricsConfig::default(),
 
@@ -1538,6 +1551,9 @@ impl NodeConfig {
                 max_concurrent_chunk_ingress_tasks: 30,
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
+                max_http_chunk_admission: 256,
+                max_http_chunk_waiters: 32,
+                http_chunk_admission_timeout_millis: 5000,
             },
             metrics: MetricsConfig::default(),
 

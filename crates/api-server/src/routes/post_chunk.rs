@@ -1,6 +1,6 @@
 use crate::{
     ApiState,
-    error::{ApiError, ApiStatusResponse},
+    error::ApiError,
     metrics::{record_chunk_error, record_chunk_processing_duration, record_chunk_received},
 };
 use actix_web::{
@@ -9,16 +9,32 @@ use actix_web::{
     web::{self, Json},
 };
 use awc::http::StatusCode;
-use irys_actors::{ChunkIngressError, chunk_ingress_service::ChunkIngressMessage};
-use irys_types::{SendTraced as _, UnpackedChunk};
+use irys_actors::{HttpChunkEnqueueError, enqueue_http_chunk};
+use irys_types::UnpackedChunk;
 use irys_utils::ElapsedMs as _;
-use std::time::Instant;
-use tracing::{info, instrument, warn};
+use std::time::{Duration, Instant};
+use tracing::{info, instrument};
+
+fn enqueue_error_status(err: &HttpChunkEnqueueError) -> StatusCode {
+    match err {
+        HttpChunkEnqueueError::WaitersSaturated | HttpChunkEnqueueError::AdmissionTimeout => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        HttpChunkEnqueueError::ChannelClosed => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn enqueue_error_type(err: &HttpChunkEnqueueError) -> &'static str {
+    match err {
+        HttpChunkEnqueueError::WaitersSaturated => "waiters_saturated",
+        HttpChunkEnqueueError::AdmissionTimeout => "admission_timeout",
+        HttpChunkEnqueueError::ChannelClosed => "channel_error",
+    }
+}
 
 /// Handles the HTTP POST request for adding a chunk to the chunk ingress service.
-/// This function takes in a JSON payload of a `Chunk` type, encapsulates it
-/// into a `ChunkIngressMessage` for further processing by the chunk ingress service,
-/// and manages error handling based on the results of message delivery and validation.
+/// Returns 200 once the body is admitted onto the ingress channel, not after
+/// merkle validation, MDBX commit, or packing.
 #[instrument(level = "info", skip_all)]
 pub async fn post_chunk(
     state: web::Data<ApiState>,
@@ -27,7 +43,7 @@ pub async fn post_chunk(
     let start = Instant::now();
 
     let chunk = body.into_inner();
-    let chunk_size = chunk.bytes.0.len() as u64;
+    let chunk_size = u64::try_from(chunk.bytes.0.len()).unwrap_or(u64::MAX);
     let data_root = chunk.data_root;
     let number = chunk.tx_offset;
 
@@ -35,73 +51,50 @@ pub async fn post_chunk(
 
     info!(chunk.data_root = ?data_root, chunk.tx_offset = ?number, "Received chunk");
 
-    // Create a message and send it
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = ChunkIngressMessage::IngestChunk(chunk, Some(oneshot_tx));
-
-    // Handle failure to deliver the message (e.g., channel closed)
-    if let Err(err) = state.chunk_ingress.send_traced(tx_ingress_msg) {
-        tracing::error!("Failed to send to chunk ingress channel: {:?}", err);
-        record_chunk_error("channel_error", false);
-        return Err((
-            format!("Failed to send to chunk ingress channel: {err:?}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-            .into());
-    }
-
-    // Handle errors in reading the oneshot response
-    let msg_result = match oneshot_rx.await {
-        Err(err) => {
-            tracing::error!(
-                "API: Errors reading the chunk ingress oneshot response {:?}",
-                err
-            );
-            record_chunk_error("channel_error", false);
-            return Err((
-                format!("Internal error: {err:?}"),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-                .into());
+    let timeout = Duration::from_millis(state.config.mempool.http_chunk_admission_timeout_millis);
+    match enqueue_http_chunk(
+        chunk,
+        &state.chunk_ingress,
+        &state.http_chunk_admission,
+        &state.http_chunk_waiters,
+        timeout,
+    )
+    .await
+    {
+        Ok(()) => {
+            record_chunk_processing_duration(start.elapsed_ms());
+            Ok(HttpResponse::Ok()
+                .content_type(ContentType::json())
+                .finish())
         }
-        Ok(v) => v,
-    };
-
-    // If we received a response, check for validation errors within the response
-    let inner_result: Result<(), ChunkIngressError> = msg_result;
-    if let Err(err) = inner_result {
-        warn!(chunk.data_root = ?data_root, chunk.tx_offset = ?number, "Error processing chunk: {:?}", &err);
-        record_chunk_error(err.error_type(), err.is_advisory());
-
-        return if err.is_advisory() {
-            Ok(ApiStatusResponse(format!("{err:?}"), StatusCode::OK).into())
-        } else {
-            let status = match err {
-                ChunkIngressError::Critical(ref e) => match e {
-                    irys_actors::CriticalChunkIngressError::InvalidProof
-                    | irys_actors::CriticalChunkIngressError::InvalidDataHash
-                    | irys_actors::CriticalChunkIngressError::InvalidChunkSize
-                    | irys_actors::CriticalChunkIngressError::InvalidDataSize
-                    | irys_actors::CriticalChunkIngressError::InvalidOffset(_) => {
-                        StatusCode::BAD_REQUEST
-                    }
-                    irys_actors::CriticalChunkIngressError::DatabaseError
-                    | irys_actors::CriticalChunkIngressError::ServiceUninitialized
-                    | irys_actors::CriticalChunkIngressError::Other(_) => {
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    }
-                },
-                ChunkIngressError::Advisory(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            Err((format!("{err:?}"), status).into())
-        };
+        Err(err) => {
+            let error_type = enqueue_error_type(&err);
+            let advisory = !matches!(err, HttpChunkEnqueueError::ChannelClosed);
+            record_chunk_error(error_type, advisory);
+            let status = enqueue_error_status(&err);
+            Err((err.to_string(), status).into())
+        }
     }
+}
 
-    // Record processing duration on success
-    record_chunk_processing_duration(start.elapsed_ms());
+#[cfg(test)]
+mod enqueue_status_tests {
+    use super::*;
+    use irys_actors::HttpChunkEnqueueError;
 
-    // If everything succeeded, return an HTTP 200 OK response
-    Ok(HttpResponse::Ok()
-        .content_type(ContentType::json())
-        .finish())
+    #[test]
+    fn waiters_and_timeout_are_503_channel_is_500() {
+        assert_eq!(
+            enqueue_error_status(&HttpChunkEnqueueError::WaitersSaturated),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            enqueue_error_status(&HttpChunkEnqueueError::AdmissionTimeout),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            enqueue_error_status(&HttpChunkEnqueueError::ChannelClosed),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }

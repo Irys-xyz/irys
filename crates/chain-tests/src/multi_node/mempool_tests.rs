@@ -5,6 +5,7 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_testing_utils::initialize_tracing;
@@ -298,7 +299,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Ensure it did not get cached
+    genesis_node.wait_for_http_chunk_idle(10).await?;
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
 
     // Post the tx header and confirm cache still empty
@@ -365,7 +366,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Ensure it did not get cached
+    genesis_node.wait_for_http_chunk_idle(10).await?;
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
 
     // Post the tx header and confirm cache still empty
@@ -435,7 +436,15 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    // Now try to add one more chunk - should be rejected (cache full)
+    genesis_node
+        .wait_until_chunk_accepted(
+            tx.header.data_root,
+            TxChunkOffset::from(preheader_cap.saturating_sub(1)),
+            10,
+        )
+        .await?;
+
+    // Now try to add one more chunk - HTTP admits it; the worker rejects the park.
     let overflow_chunk = UnpackedChunk {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
@@ -453,11 +462,26 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = test::read_body(resp).await;
-    let body_str = String::from_utf8_lossy(&body);
+
+    genesis_node.wait_for_http_chunk_idle(10).await?;
     assert!(
-        body_str.contains("PreHeaderOffsetExceedsCap"),
-        "Expected chunk to be rejected with PreHeaderOffsetExceedsCap, got: {body_str}"
+        !genesis_node
+            .node_ctx
+            .chunk_ingress_state
+            .pending_contains(tx.header.data_root, TxChunkOffset::from(preheader_cap))
+            .await,
+        "overflow pre-header chunk must not remain parked"
+    );
+    let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+        irys_database::cached_chunk_by_chunk_offset(
+            db_tx,
+            tx.header.data_root,
+            TxChunkOffset::from(preheader_cap),
+        )
+    })?;
+    assert!(
+        overflow_cached.is_none(),
+        "overflow pre-header chunk must not be cached"
     );
 
     genesis_node.stop().await;

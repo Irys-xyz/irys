@@ -27,6 +27,7 @@ use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
+    cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
@@ -2894,6 +2895,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                 .send_traced(irys_actors::ChunkIngressMessage::IngestChunk(
                                     unpacked,
                                     Some(ctx),
+                                    None,
                                 ))
                                 .expect("failed to send chunk to chunk_ingress");
                             crx.await
@@ -3110,6 +3112,73 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         debug!("chunk_index: {:?}", chunk_index);
         assert_eq!(status, reqwest::StatusCode::OK);
+        let offset = TxChunkOffset::from(u32::try_from(chunk_index).expect("chunk index fits u32"));
+        self.wait_until_chunk_accepted(tx.header.data_root, offset, 10)
+            .await
+            .expect("chunk accepted after POST /v1/chunk 200");
+    }
+
+    pub async fn wait_until_chunk_accepted(
+        &self,
+        data_root: irys_types::DataRoot,
+        tx_offset: TxChunkOffset,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
+        let delay = Duration::from_millis(50);
+        let max_attempts = timeout_secs.saturating_mul(20);
+        for _ in 0..max_attempts {
+            if self
+                .node_ctx
+                .chunk_ingress_state
+                .pending_contains(data_root, tx_offset)
+                .await
+            {
+                return Ok(());
+            }
+            let cached = self
+                .node_ctx
+                .db
+                .view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, tx_offset))?;
+            if cached.is_some() {
+                return Ok(());
+            }
+            for ledger in [DataLedger::Publish, DataLedger::Submit] {
+                if self
+                    .node_ctx
+                    .chunk_provider
+                    .get_chunk_by_data_root(ledger, data_root, tx_offset)?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(delay).await;
+        }
+        Err(eyre!(
+            "timed out after {timeout_secs}s waiting for chunk data_root={data_root} offset={tx_offset} to be cached, packed, or parked"
+        ))
+    }
+
+    pub async fn wait_for_http_chunk_idle(&self, timeout_secs: usize) -> eyre::Result<()> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
+        let delay = Duration::from_millis(50);
+        let max_attempts = timeout_secs.saturating_mul(20);
+        let admission_max = self.node_ctx.config.mempool.max_http_chunk_admission;
+        let waiters_max = self.node_ctx.config.mempool.max_http_chunk_waiters;
+        for _ in 0..max_attempts {
+            if self.node_ctx.http_chunk_admission.available_permits() == admission_max
+                && self.node_ctx.http_chunk_waiters.available_permits() == waiters_max
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+        Err(eyre!(
+            "timed out after {timeout_secs}s waiting for HTTP chunk admission to go idle (admission available={} waiters available={} of {admission_max}/{waiters_max})",
+            self.node_ctx.http_chunk_admission.available_permits(),
+            self.node_ctx.http_chunk_waiters.available_permits(),
+        ))
     }
 
     pub async fn get_chunk(

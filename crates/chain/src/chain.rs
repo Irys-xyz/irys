@@ -83,7 +83,7 @@ use std::{
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc,
+        Semaphore, mpsc,
         mpsc::{Receiver, UnboundedReceiver, UnboundedSender},
         oneshot::{self},
     },
@@ -146,6 +146,8 @@ pub struct IrysNodeCtx {
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
+    pub http_chunk_admission: Arc<Semaphore>,
+    pub http_chunk_waiters: Arc<Semaphore>,
     /// Atomic timestamps tracking the last canonical advance / last reorg
     /// observed by [`BlockTreeService`]; same `Arc` is shared with the
     /// service worker and with [`ApiState`] so `/v1/tip` does not have to
@@ -172,6 +174,8 @@ impl IrysNodeCtx {
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
             chunk_ingress_state: self.chunk_ingress_state.clone(),
+            http_chunk_admission: Arc::clone(&self.http_chunk_admission),
+            http_chunk_waiters: Arc::clone(&self.http_chunk_waiters),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
             block_tree_lifecycle: self.block_tree_lifecycle.clone(),
@@ -2233,6 +2237,8 @@ impl IrysNode {
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
+            http_chunk_admission: Arc::new(Semaphore::new(config.mempool.max_http_chunk_admission)),
+            http_chunk_waiters: Arc::new(Semaphore::new(config.mempool.max_http_chunk_waiters)),
             block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
@@ -2330,6 +2336,8 @@ impl IrysNode {
                 sync_state,
                 mempool_pledge_provider,
                 chunk_ingress_state: irys_node_ctx.chunk_ingress_state.clone(),
+                http_chunk_admission: Arc::clone(&irys_node_ctx.http_chunk_admission),
+                http_chunk_waiters: Arc::clone(&irys_node_ctx.http_chunk_waiters),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
                 block_tree_lifecycle: irys_node_ctx.block_tree_lifecycle.clone(),
