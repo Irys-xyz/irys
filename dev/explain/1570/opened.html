@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1570 — expert analysis</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1d2128;
+    --text: #e6e8ee;
+    --muted: #9aa3b2;
+    --accent: #5aa9ff;
+    --good: #3ecf8e;
+    --warn: #e8b93f;
+    --bad: #ef5b5b;
+    --border: #2a2f3a;
+    --code-bg: #11141a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  header.page {
+    padding: 28px 24px 18px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--panel), var(--bg));
+  }
+  header.page h1 { margin: 0 0 6px; font-size: 1.5rem; }
+  header.page .meta { color: var(--muted); font-size: 0.9rem; }
+  header.page .meta code { color: var(--accent); }
+  .layout { display: flex; max-width: 1180px; margin: 0 auto; align-items: flex-start; }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    width: 230px;
+    flex-shrink: 0;
+    padding: 20px 16px;
+    font-size: 0.88rem;
+  }
+  nav.toc a { display: block; color: var(--muted); text-decoration: none; padding: 5px 8px; border-radius: 6px; }
+  nav.toc a:hover { background: var(--panel-2); color: var(--text); }
+  main { flex: 1; min-width: 0; padding: 20px 24px 60px; }
+  section { margin-bottom: 42px; }
+  h2 {
+    font-size: 1.2rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    margin-top: 0;
+  }
+  h3 { font-size: 1rem; color: var(--text); margin-top: 22px; }
+  p { max-width: 860px; }
+  a { color: var(--accent); }
+  a.cite { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.86rem; white-space: nowrap; }
+  code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+  code.inline { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 0.88rem; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.85rem;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 6px; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.02em; }
+  tr:last-child td { border-bottom: none; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.74rem; font-weight: 600; }
+  .tag.unaccounted { background: rgba(239,91,91,0.15); color: var(--bad); border: 1px solid rgba(239,91,91,0.4); }
+  .tag.reestablished { background: rgba(62,207,142,0.15); color: var(--good); border: 1px solid rgba(62,207,142,0.4); }
+  .tag.dropped { background: rgba(232,185,63,0.15); color: var(--warn); border: 1px solid rgba(232,185,63,0.4); }
+  .callout {
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    padding: 12px 14px;
+    margin: 14px 0;
+  }
+  .callout.risk { border-color: rgba(239,91,91,0.4); background: rgba(239,91,91,0.07); }
+  .callout.info { border-color: rgba(90,169,255,0.4); background: rgba(90,169,255,0.06); }
+  .rank {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    font-size: 0.78rem;
+    margin-right: 8px;
+  }
+  .diagram {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 16px 0;
+    font-size: 0.85rem;
+  }
+  .box {
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    border-radius: 8px;
+    padding: 10px 12px;
+    min-width: 120px;
+  }
+  .box .title { font-weight: 600; margin-bottom: 4px; }
+  .box .sub { color: var(--muted); font-size: 0.78rem; }
+  .arrow { color: var(--muted); font-size: 1.1rem; padding: 0 2px; }
+  .diagram-row { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+  ul.tight li { margin-bottom: 6px; }
+  footer { color: var(--muted); font-size: 0.8rem; padding: 20px 24px 40px; max-width: 860px; }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    nav.toc { position: static; width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>PR #1570 — perf(chunk-ingress): acknowledge HTTP chunk POST on enqueue</h1>
+  <div class="meta">
+    Expert mode · Irys-xyz/irys · opened stage · commit <code>cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb</code> · repo root for citations: checkout root
+  </div>
+</header>
+
+<div class="layout">
+<nav class="toc">
+  <a href="#intent">Intent &amp; approach</a>
+  <a href="#delta">Delta semantics</a>
+  <a href="#cross-file">Cross-file impact</a>
+  <a href="#review-focus">Review-focus map</a>
+  <a href="#open-questions">Open questions</a>
+</nav>
+
+<main>
+
+<section id="intent">
+<h2>Intent &amp; approach</h2>
+<p>
+<code class="inline">POST /v1/chunk</code> previously blocked an Actix worker on a oneshot until <code class="inline">handle_chunk_ingress_message</code> finished merkle validation, the MDBX cache write, storage-module packing, gossip send, and the ingress-proof check
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L7">docs/adr/0001-http-chunk-ack-on-enqueue.md:7</a>).
+This PR moves the acknowledgement point earlier: the handler now returns 200 as soon as the chunk is admitted onto the existing unbounded <code class="inline">chunk_ingress</code> channel
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/api-server/src/routes/post_chunk.rs#L55">crates/api-server/src/routes/post_chunk.rs:55</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/api-server/src/routes/post_chunk.rs#L69">69</a>),
+turning the public HTTP contract from a durability signal into an admission signal. Gossip and data-sync keep the old oneshot contract because they score peers and retry on <code class="inline">ChunkIngressError</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L9">docs/adr/0001-http-chunk-ack-on-enqueue.md:9</a>).
+</p>
+<p>
+The approach layers two independent admission controls rather than one:
+</p>
+<ul class="tight">
+<li><strong>HTTP-only gate</strong> (<code class="inline">enqueue_http_chunk</code>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service/http_admission.rs#L19">crates/actors/src/chunk_ingress_service/http_admission.rs:19</a>) — a <code class="inline">max_http_chunk_admission</code> semaphore (default 256) held from enqueue until the ingress worker finishes, plus a second <code class="inline">max_http_chunk_waiters</code> semaphore (default 32) that bounds how many already-decoded <code class="inline">Json&lt;UnpackedChunk&gt;</code> bodies may block on the first semaphore, since Actix decodes the body before the handler gets a chance to apply backpressure.</li>
+<li><strong>Chunk-lane gate</strong> (pre-existing <code class="inline">message_handler_semaphore</code> inside <code class="inline">ChunkIngressService</code>) — now has a third routing outcome. On saturation, reply-bearing messages still fail fast with <code class="inline">Overloaded</code>; fire-and-forget chunk messages (the new HTTP-admitted case) go onto an in-service <code class="inline">VecDeque</code> backlog instead of parking the receive loop; other fire-and-forget control-plane messages still park (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L253">crates/actors/src/chunk_ingress_service.rs:253</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L261">261</a>).</li>
+</ul>
+<p>
+The road not taken, named explicitly in the ADR: ack after merkle validation (keep 400 for bad proofs) or ack after the MDBX commit introduced in #1558 (keep synchronous durability, async packing only)
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L11">docs/adr/0001-http-chunk-ack-on-enqueue.md:11</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L15">15</a>). The PR takes the most aggressive option: ack on enqueue, with no validation guarantee at all in the HTTP response.
+</p>
+<div class="diagram-row">
+  <div class="diagram">
+    <div class="box"><div class="title">Before</div><div class="sub">POST /v1/chunk</div></div>
+    <span class="arrow">→</span>
+    <div class="box"><div class="title">merkle + MDBX + pack + gossip + proof</div><div class="sub">oneshot awaited in Actix worker</div></div>
+    <span class="arrow">→</span>
+    <div class="box"><div class="title">200 / 400 / 500</div><div class="sub">status reflects validation result</div></div>
+  </div>
+  <div class="diagram">
+    <div class="box"><div class="title">After</div><div class="sub">POST /v1/chunk</div></div>
+    <span class="arrow">→</span>
+    <div class="box"><div class="title">admission semaphore</div><div class="sub">256 slots, 32 waiters, 5s timeout</div></div>
+    <span class="arrow">→</span>
+    <div class="box"><div class="title">200</div><div class="sub">only means "admitted"</div></div>
+  </div>
+  <div class="diagram">
+    <div class="box"><div class="title"></div><div class="sub">(async, no reply)</div></div>
+    <span class="arrow">→</span>
+    <div class="box"><div class="title">chunk_ingress worker</div><div class="sub">merkle + MDBX + pack + gossip + proof</div></div>
+    <span class="arrow">→</span>
+    <div class="box"><div class="title">logs / metrics only</div><div class="sub">caller never sees the result</div></div>
+  </div>
+</div>
+</section>
+
+<section id="delta">
+<h2>Delta semantics</h2>
+
+<h3>Removed-behavior audit</h3>
+<table>
+<thead><tr><th>Invariant removed</th><th>Old enforcement site</th><th>New enforcement / status</th></tr></thead>
+<tbody>
+<tr>
+<td>HTTP status reflects chunk validity (400 for <code class="inline">InvalidProof</code>/<code class="inline">InvalidDataHash</code>/<code class="inline">InvalidChunkSize</code>/<code class="inline">InvalidOffset</code>, 500 for DB/internal errors, 200-with-body for advisories)</td>
+<td><a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L7">docs/adr/0001-http-chunk-ack-on-enqueue.md:7</a> (describes the removed synchronous path)</td>
+<td><span class="tag dropped">intentionally dropped</span> — errors now only reach <code class="inline">metrics::record_chunk_error</code> and a log line in <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L190">crates/actors/src/chunk_ingress_service.rs:190</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L203">203</a>; stated explicitly in the ADR's Consequences (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L27">docs/adr/0001-http-chunk-ack-on-enqueue.md:27</a>).</td>
+</tr>
+<tr>
+<td>Fire-and-forget chunk-ingress messages never queue a Tokio waiter on the shared chunk-lane semaphore (so a released permit is always visible to a concurrent gossip <code class="inline">try_acquire</code>)</td>
+<td>Absent before this PR — the only fire-and-forget path on this semaphore parked the whole receive loop instead of queueing a partial waiter (deleted code, previously unconditional <code class="inline">Park</code> for any non-reply message)</td>
+<td><span class="tag unaccounted">unaccounted for</span> — the new backlog-drain arm registers exactly the kind of semaphore waiter the ADR says was avoided (see <a href="#review-focus">Review-focus #1</a>).</td>
+</tr>
+<tr>
+<td>Strict FIFO ordering of chunk-lane message processing under saturation</td>
+<td>Deleted <code class="inline">tokio::select!</code> nested wait (old code parked the recv loop entirely, so no message after the blocked one could be processed out of order)</td>
+<td><span class="tag unaccounted">unaccounted for</span> — new arrivals can win <code class="inline">try_acquire_owned()</code> races against backlogged messages; no test exercises the ordering under contention.</td>
+</tr>
+<tr>
+<td>Mempool integration test asserted the literal string <code class="inline">"PreHeaderOffsetExceedsCap"</code> in the HTTP response body when the pre-header cache is full</td>
+<td><code class="inline">crates/chain-tests/src/multi_node/mempool_tests.rs</code> (deleted assertion, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain-tests/src/multi_node/mempool_tests.rs#L923">crates/chain-tests/src/multi_node/mempool_tests.rs:923</a> area, pre-PR text)</td>
+<td><span class="tag reestablished">re-established</span> — replaced with polling <code class="inline">wait_until_chunk_accepted</code> / <code class="inline">pending_contains</code> / cache lookups (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain-tests/src/multi_node/mempool_tests.rs#L934">crates/chain-tests/src/multi_node/mempool_tests.rs:934</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain-tests/src/multi_node/mempool_tests.rs#L955">955</a>), correctly reflecting that rejection is now async.</td>
+</tr>
+</tbody>
+</table>
+
+<h3>Other contract changes</h3>
+<ul class="tight">
+<li><strong>New enum shape.</strong> <code class="inline">ChunkIngressMessage::IngestChunk</code> gained a third tuple field, <code class="inline">Option&lt;HttpAdmissionGuard&gt;</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L63">crates/actors/src/chunk_ingress_service.rs:63</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L67">67</a>). All six production/test match sites in the diff were updated; the lens found no missed call site.</li>
+<li><strong>New failure modes on the HTTP route.</strong> <code class="inline">post_chunk</code> can now return 503 (<code class="inline">WaitersSaturated</code>, <code class="inline">AdmissionTimeout</code>) in addition to the pre-existing 500/400, via <code class="inline">enqueue_error_status</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/api-server/src/routes/post_chunk.rs#L18">crates/api-server/src/routes/post_chunk.rs:18</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/api-server/src/routes/post_chunk.rs#L25">25</a>). Any client that only handled 400/500/200 needs to treat 503 as retryable.</li>
+<li><strong>Config compatibility is preserved.</strong> <code class="inline">MempoolNodeConfig</code> carries <code class="inline">#[serde(deny_unknown_fields, default)]</code> at the struct level (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/types/src/config/node.rs#L1068">crates/types/src/config/node.rs:1068</a>), so existing config files that predate the three new fields still deserialize — the new <code class="inline">ensure!</code> checks in <code class="inline">Config::validate()</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/types/src/config/mod.rs#L311">crates/types/src/config/mod.rs:311</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/types/src/config/mod.rs#L322">322</a>) only bite if an operator explicitly sets one of the three fields to zero.</li>
+<li><strong>Ordering between two independent semaphores.</strong> The default HTTP admission budget (256) is far larger than the default chunk-lane budget (<code class="inline">max_concurrent_chunk_ingress_tasks: 30</code>, minus a control-plane carve-out), so under default config the backlog path is the expected steady state under any moderate burst, not an edge case — see Review-focus #1.</li>
+</ul>
+</section>
+
+<section id="cross-file">
+<h2>Cross-file impact</h2>
+<table>
+<thead><tr><th>Location</th><th>Consequence</th></tr></thead>
+<tbody>
+<tr>
+<td><a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/api-server/src/lib.rs#L46">crates/api-server/src/lib.rs:46</a></td>
+<td><code class="inline">ApiState</code> gained two required <code class="inline">Arc&lt;Semaphore&gt;</code> fields. Both real construction sites (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain/src/chain.rs#L161">crates/chain/src/chain.rs:161</a> and <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain/src/chain.rs#L2320">2320</a>) were updated; the two commented-out example literals in <code class="inline">api-server/src/lib.rs:347</code> and <code class="inline">routes/block.rs:247,304</code> are stale but harmless since they don't compile.</td>
+</tr>
+<tr>
+<td><a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L104">crates/actors/src/chunk_ingress_service.rs:104</a></td>
+<td><code class="inline">has_reply_channel()</code>'s doc comment (lines <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L101">101</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L102">102</a>) still attributes fire-and-forget <code class="inline">IngestChunk(_, None)</code> traffic to "the data_sync_service SM-write fallback," but every current production sender of <code class="inline">IngestChunk</code> the lens could find (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service/facade.rs#L26">chunk_ingress_service/facade.rs:26</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/block_validation.rs#L6784">block_validation.rs:6784</a>) passes <code class="inline">Some(reply)</code>. <code class="inline">no_permit_action</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L253">253</a>) now routes <em>any</em> <code class="inline">IngestChunk(_, None, _)</code> to the backlog regardless of whether an <code class="inline">HttpAdmissionGuard</code> is present — see <a href="#open-questions">Open questions</a>.</td>
+</tr>
+<tr>
+<td><a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain-tests/src/multi_node/mempool_tests.rs#L897">crates/chain-tests/src/multi_node/mempool_tests.rs:897</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain-tests/src/multi_node/mempool_tests.rs#L906">906</a></td>
+<td>Two existing tests that relied on "200 means synchronously rejected/not cached" now call the new <code class="inline">wait_for_http_chunk_idle</code> helper before asserting cache state — correctly adapted to the async contract.</td>
+</tr>
+<tr>
+<td><a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/tooling/multiversion-tests/src/data_tx.rs#L244">crates/tooling/multiversion-tests/src/data_tx.rs:244</a></td>
+<td>Not touched by this PR. <code class="inline">upload_chunks_for_tx</code> only checks <code class="inline">status.is_success()</code> and never inspects the body, and downstream promotion checks already poll rather than assume immediate durability — this cross-version tool appears unaffected by the contract change.</td>
+</tr>
+</tbody>
+</table>
+</section>
+
+<section id="review-focus">
+<h2>Review-focus map</h2>
+
+<div class="callout risk">
+<strong>These are attention pointers, not verified findings.</strong> Where a callout below looks serious, treat it as a lead for a dedicated <code class="inline">/code-review</code> pass, not a confirmed bug.
+</div>
+
+<h3><span class="rank">1</span>Backlog-drain arm may queue exactly the kind of semaphore waiter the ADR says it avoids</h3>
+<p>
+The ADR states the design constraint plainly: fire-and-forget HTTP chunks "must not spawn <code class="inline">acquire().await</code> waiters on the shared chunk-lane semaphore: Tokio assigns released permits to that waiter queue before <code class="inline">try_acquire</code>, which would starve gossip," and concludes the chosen design "cannot ... queue Tokio waiters ahead of gossip <code class="inline">try_acquire</code>"
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L23">docs/adr/0001-http-chunk-ack-on-enqueue.md:23</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L30">30</a>).
+The implementation is exactly a conditional <code class="inline">acquire_owned()</code> branch on that same semaphore, active whenever the backlog is non-empty:
+</p>
+<pre>res = Arc::clone(&amp;self.inner.message_handler_semaphore).acquire_owned(), if drain_http_backlog =&gt; { ... }</pre>
+<p>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L444">crates/actors/src/chunk_ingress_service.rs:444</a>), competing in the same <code class="inline">tokio::select!</code> as <code class="inline">self.msg_rx.recv()</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L468">468</a>), which in turn feeds gossip/data-sync's <code class="inline">try_acquire_owned()</code> at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L479">479</a>. Tokio's semaphore (<code class="inline">add_permits_locked</code> in <code class="inline">batch_semaphore.rs</code>) hands a released permit directly to a queued waiter node before any surplus reaches the atomic counter that <code class="inline">try_acquire</code> reads, and <code class="inline">poll_acquire</code> enqueues that node on its very first poll if no permit is immediately available — confirmed by reading the vendored <code class="inline">tokio-1.50.0</code> source, not just the ADR's own description.
+</p>
+<p>
+<strong>Concrete failure scenario:</strong> two traffic shapes each break one of the ADR's two guarantees, depending on which branch <code class="inline">tokio::select!</code> happens to service first each loop iteration:
+</p>
+<ul class="tight">
+<li><em>Continuous load</em> (msg_rx almost always has something ready): the backlog-drain future is constructed and then dropped every single loop iteration before it can be woken by a real permit release, so it rarely wins the race to drain — the backlog can stall while fresh gossip/HTTP arrivals keep winning <code class="inline">try_acquire_owned()</code>.</li>
+<li><em>Bursty load with gaps</em> (a quiet moment while the backlog is non-empty): the future genuinely suspends and registers as a waiter; the next permit release goes straight to it, bypassing the atomic counter — so a gossip chunk that arrives in that same gap gets a fast-fail <code class="inline">Overloaded</code> even though a permit was just freed. This is the specific outcome the ADR says cannot happen.</li>
+</ul>
+<p>Neither direction is covered by a test that actually saturates <code class="inline">message_handler_semaphore</code> under concurrent HTTP + gossip traffic (see Review-focus #2).</p>
+
+<h3><span class="rank">2</span>No test exercises the backlog-drain path under real semaphore contention</h3>
+<p>
+<code class="inline">no_permit_action_backlogs_http_and_overloads_gossip</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L846">crates/actors/src/chunk_ingress_service.rs:846</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L870">870</a>) only tests the pure classification function, not the live <code class="inline">tokio::select!</code> loop. The integration tests that touch saturation (<code class="inline">preheader_rejects_when_cache_full</code>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/chain-tests/src/multi_node/mempool_tests.rs#L910">crates/chain-tests/src/multi_node/mempool_tests.rs:910</a>) exercise the pre-header cache capacity, a different bottleneck from <code class="inline">message_handler_semaphore</code>. A regression in backlog fairness or drain latency under the exact contention pattern in #1 would not be caught by anything in this diff. Worth a dedicated concurrency/stress test before relying on the backlog for production HTTP load.
+</p>
+
+<h3><span class="rank">3</span>Validation failures become invisible to the HTTP caller by design — verify nothing downstream still assumes synchronous rejection</h3>
+<p>
+This is the PR's stated intent, not a surprise, but it is a real behavior change worth a second look: a chunk with a bad merkle proof, wrong data hash, or one that fails the MDBX write now returns <code class="inline">200</code> and the failure is visible only in worker-side logs/metrics
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L190">crates/actors/src/chunk_ingress_service.rs:190</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L203">203</a>). The ADR explicitly calls out that "integration helpers that treated HTTP 200 as 'chunk is stored' must poll" (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/docs/adr/0001-http-chunk-ack-on-enqueue.md#L29">docs/adr/0001-http-chunk-ack-on-enqueue.md:29</a>) and the tests in this diff were updated accordingly, but any uploader outside this repository (SDKs, gateways, bridges) that still treats <code class="inline">200</code> from <code class="inline">/v1/chunk</code> as "accepted and valid" will silently stop detecting bad chunks. Worth confirming with whoever owns client-facing upload tooling before merge.
+</p>
+</section>
+
+<section id="open-questions">
+<h2>Open questions</h2>
+<ul class="tight">
+<li>Is there still a live, non-test caller of fire-and-forget <code class="inline">IngestChunk(_, None, None)</code> (no admission guard) anywhere, matching the "data_sync_service SM-write fallback" the doc comment at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L101">crates/actors/src/chunk_ingress_service.rs:101</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb/crates/actors/src/chunk_ingress_service.rs#L102">102</a> describes? The lens could not find one, but <code class="inline">no_permit_action</code> would route such a message into the same unbounded backlog as HTTP-admitted chunks, with none of the HTTP semaphore's bound on how many can accumulate. If that call site is genuinely gone, the comment should be updated; if it still exists somewhere the lens missed, it changes the sizing story for the backlog.</li>
+<li>Was the choice to make <code class="inline">max_http_chunk_admission</code> (default 256) roughly 8-9× larger than the default chunk-lane concurrency (<code class="inline">max_concurrent_chunk_ingress_tasks: 30</code>) deliberate, or should the two be tied together / validated against each other in <code class="inline">Config::validate()</code>? As shipped, the backlog is the expected steady state under any burst above ~26-30 concurrent chunks, not an edge case.</li>
+<li>Is the 503 on <code class="inline">WaitersSaturated</code> / <code class="inline">AdmissionTimeout</code> intended to be retried by well-behaved clients on a fixed backoff, or should the response carry a <code class="inline">Retry-After</code> header given the 5s default timeout is itself close to typical client request timeouts?</li>
+</ul>
+</section>
+
+</main>
+</div>
+
+<footer>
+Generated by explain-diff (CI mode) for Irys-xyz/irys PR #1570, opened stage, commit <code>cddab38ff72c81c5d4c4eebbe326ad4ad005ddcb</code>.
+</footer>
+
+</body>
+</html>
