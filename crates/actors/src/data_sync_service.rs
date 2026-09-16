@@ -52,12 +52,12 @@ enum DataSyncWriteOutcome {
     Other(String),
 }
 
-fn attempt_data_sync_write(
+async fn attempt_data_sync_write(
     sm: &StorageModule,
     unpacked: &UnpackedChunk,
     expected_offset: PartitionChunkOffset,
 ) -> DataSyncWriteOutcome {
-    match sm.write_data_chunk(unpacked) {
+    match sm.write_data_chunk_queued(unpacked).await {
         Err(WriteDataChunkError::DataRootNotFound) => DataSyncWriteOutcome::MissingDataRootIndex,
         Err(e) => DataSyncWriteOutcome::Other(e.to_string()),
         Ok(()) => {
@@ -735,7 +735,7 @@ impl DataSyncServiceInner {
         let slot_index = pa.and_then(|p| p.slot_index);
         let partition_hash = pa.map(|p| p.partition_hash);
 
-        let write_outcome = attempt_data_sync_write(&sm, &unpacked_chunk, chunk_offset);
+        let write_outcome = attempt_data_sync_write(&sm, &unpacked_chunk, chunk_offset).await;
 
         match write_outcome {
             DataSyncWriteOutcome::AlreadyDurable => {
@@ -1743,8 +1743,8 @@ mod write_outcome_tests {
     use std::sync::Arc;
 
     /// Unindexed data_root must classify as MissingDataRootIndex (not Other/requeue thrash).
-    #[test]
-    fn unindexed_data_root_classifies_as_missing_index() {
+    #[tokio::test]
+    async fn unindexed_data_root_classifies_as_missing_index() {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let num_chunks = 4_u64;
         let chunk_size = 32_u64;
@@ -1797,12 +1797,12 @@ mod write_outcome_tests {
             "expected DataRootNotFound, got: {err:?}"
         );
 
-        let outcome = attempt_data_sync_write(&sm, &chunk, PartitionChunkOffset::from(0_u32));
+        let outcome = attempt_data_sync_write(&sm, &chunk, PartitionChunkOffset::from(0_u32)).await;
         assert_eq!(outcome, DataSyncWriteOutcome::MissingDataRootIndex);
     }
 
-    #[test]
-    fn successful_data_sync_write_stays_buffered_below_sync_threshold() {
+    #[tokio::test]
+    async fn successful_data_sync_write_stays_buffered_below_sync_threshold() {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let num_chunks = 10_u64;
         let chunk_size = 32_u64;
@@ -1868,7 +1868,7 @@ mod write_outcome_tests {
         };
 
         assert_eq!(
-            attempt_data_sync_write(&sm, &chunk, offset),
+            attempt_data_sync_write(&sm, &chunk, offset).await,
             DataSyncWriteOutcome::AwaitingDurability
         );
         assert!(
