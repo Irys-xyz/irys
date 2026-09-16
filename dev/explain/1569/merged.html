@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1569 — Batch submodule data-path index commits</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#161d2e; --panel-2:#1b2436; --text:#e7ecf5; --muted:#9aa7bd;
+    --accent:#5aa9ff; --accent-2:#7fd6c2; --warn:#e8b34a; --danger:#f2685b; --ok:#7fd07f;
+    --border:#2a3550; --code-bg:#0c1120;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.55;
+  }
+  header.page{
+    padding:28px 24px 18px; border-bottom:1px solid var(--border);
+    background:linear-gradient(180deg, #131a2a 0%, var(--bg) 100%);
+  }
+  header.page h1{margin:0 0 6px; font-size:1.5rem;}
+  header.page .meta{color:var(--muted); font-size:0.85rem;}
+  header.page .meta code{background:var(--code-bg); padding:1px 6px; border-radius:4px;}
+  nav.toc{
+    max-width:900px; margin:18px auto 0; padding:14px 18px; background:var(--panel);
+    border:1px solid var(--border); border-radius:10px;
+  }
+  nav.toc strong{display:block; margin-bottom:8px; color:var(--accent-2); font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em;}
+  nav.toc ol{margin:0; padding-left:1.2rem; columns:2; column-gap:24px;}
+  nav.toc li{margin-bottom:4px;}
+  nav.toc a{color:var(--text); text-decoration:none;}
+  nav.toc a:hover{color:var(--accent); text-decoration:underline;}
+  main{max-width:900px; margin:0 auto; padding:8px 24px 60px;}
+  section{margin-top:38px; scroll-margin-top:16px;}
+  section h2{
+    font-size:1.15rem; border-bottom:1px solid var(--border); padding-bottom:8px;
+    color:#fff;
+  }
+  .lead{font-size:1.02rem;}
+  .badge{
+    display:inline-block; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em;
+    padding:2px 8px; border-radius:12px; margin-left:6px; vertical-align:middle;
+  }
+  .badge.inferred{background:#3a3320; color:var(--warn); border:1px solid #5a4a20;}
+  .badge.stated{background:#1e3a2e; color:var(--ok); border:1px solid #2e5a42;}
+  ul.themes{list-style:none; margin:0; padding:0;}
+  ul.themes li{
+    padding:12px 14px; margin-bottom:10px; background:var(--panel); border:1px solid var(--border);
+    border-radius:8px;
+  }
+  ul.themes li .name{color:var(--accent-2); font-weight:600;}
+  ul.themes li .files{color:var(--muted); font-size:0.85rem; display:block; margin:2px 0 6px;}
+  .behavior-list{list-style:none; padding:0; margin:0;}
+  .behavior-list li{
+    padding:10px 14px; border-left:3px solid var(--accent); background:var(--panel-2);
+    border-radius:0 8px 8px 0; margin-bottom:10px;
+  }
+  .before-after{font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:0.92rem;}
+  .before-after .arrow{color:var(--accent); margin:0 8px; font-weight:bold;}
+  ol.watch{padding-left:0; list-style:none; counter-reset:watch;}
+  ol.watch li{
+    counter-increment:watch; position:relative; padding:12px 14px 12px 44px; margin-bottom:10px;
+    background:var(--panel); border:1px solid var(--border); border-left:4px solid var(--danger);
+    border-radius:8px;
+  }
+  ol.watch li.sev-medium{border-left-color:var(--warn);}
+  ol.watch li.sev-low{border-left-color:var(--muted);}
+  ol.watch li::before{
+    content:counter(watch); position:absolute; left:12px; top:12px; font-weight:700;
+    color:var(--muted); font-size:0.85rem;
+  }
+  ol.watch li .flag{
+    display:inline-block; margin-top:6px; font-size:0.75rem; color:var(--warn);
+    background:#3a3320; border:1px solid #5a4a20; padding:2px 8px; border-radius:10px;
+  }
+  a.cite{
+    font-family:ui-monospace,SFMono-Regular,Consolas,monospace; color:var(--accent);
+    text-decoration:none; background:var(--code-bg); padding:1px 6px; border-radius:4px;
+    border:1px solid var(--border); white-space:nowrap;
+  }
+  a.cite:hover{text-decoration:underline;}
+  pre{
+    background:var(--code-bg); border:1px solid var(--border); border-radius:8px;
+    padding:12px 14px; overflow-x:auto; white-space:pre; font-size:0.85rem;
+    font-family:ui-monospace,SFMono-Regular,Consolas,monospace; line-height:1.5;
+  }
+  .callout{
+    padding:14px 16px; border-radius:8px; margin:14px 0; border:1px solid var(--border);
+  }
+  .callout.info{background:#132436; border-color:#204864;}
+  .callout.warn{background:#3a3320; border-color:#5a4a20;}
+  .diagram{
+    display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:18px 0;
+    padding:16px; background:var(--panel-2); border:1px solid var(--border); border-radius:10px;
+  }
+  .box{
+    background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px 12px;
+    min-width:150px; font-size:0.85rem;
+  }
+  .box .t{font-weight:700; color:var(--accent-2); display:block; margin-bottom:4px; font-size:0.75rem; text-transform:uppercase; letter-spacing:0.04em;}
+  .box .d{color:var(--muted); font-family:ui-monospace,monospace; font-size:0.78rem;}
+  .arrow-flow{color:var(--accent); font-size:1.3rem; padding:0 4px;}
+  .arrow-label{font-size:0.72rem; color:var(--muted); text-align:center; min-width:70px;}
+  footer{
+    max-width:900px; margin:0 auto; padding:20px 24px 50px; color:var(--muted); font-size:0.8rem;
+    border-top:1px solid var(--border); margin-top:40px;
+  }
+  @media (max-width:640px){
+    nav.toc ol{columns:1;}
+    .diagram{flex-direction:column;}
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>Submodule data-path index writes now batch into shared MDBX commits</h1>
+  <div class="meta">
+    PR <code>#1569</code> · <code>perf(storage): batch submodule data-path index commits</code> ·
+    mode: <code>summary</code> · repo: <code>Irys-xyz/irys</code> · commit
+    <code>c2070f159c4b7e0cd4593ad005015989b3a8c82c</code><br>
+    Paths below are relative to the repository root; every citation links to the file at this commit.
+  </div>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#what-why">What it does / Why</a></li>
+    <li><a href="#change-map">Change map</a></li>
+    <li><a href="#behavior-changes">Behavior changes</a></li>
+    <li><a href="#watch-out">Watch out for</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="what-why">
+  <h2>What it does &amp; Why</h2>
+  <p class="lead">
+    Before this PR, every chunk write to a storage-module submodule triggered its own synchronous
+    MDBX write transaction just to record the chunk's data-path index entry
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L1816">crates/domain/src/models/storage_module.rs:1816</a>).
+    This PR moves that commit off the caller's path and into a dedicated background thread per submodule
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/index_drain.rs#L1">crates/domain/src/models/index_drain.rs</a>)
+    that opportunistically batches up to 64 concurrent index writes into a single MDBX commit, and callers
+    now enqueue an op and wait for an acknowledgement instead of committing inline. Alongside the batching,
+    it hardens the write path: a second writer can no longer race an offset whose index write is already
+    in flight, a failed storage-module write no longer marks the chunk as processed for retry purposes, and
+    pausing/resetting a module now cancels in-flight index ops instead of letting them land afterward.
+  </p>
+  <p><strong>Why:</strong> <span class="badge stated">stated</span> reduce MDBX commit overhead under
+  concurrent chunk ingestion — the PR description states: "Before: Each data-path index write was its own
+  MDBX commit... After: Concurrent writes on one submodule share one txn (max 64)." The commit history
+  (<code>fix(storage): reject stale and in-flight index finalisation</code>, three
+  <code>fix: address review findings</code> commits) shows the batching change surfaced several correctness
+  gaps around retries and pause/reset that got fixed in the same PR.</p>
+
+  <div class="diagram" aria-label="Data flow before the change">
+    <div class="box"><span class="t">Chunk write (before)</span><span class="d">write_data_chunk(chunk)</span></div>
+    <span class="arrow-flow">&#8594;</span>
+    <div class="arrow-label">inline MDBX commit, 1 chunk</div>
+    <span class="arrow-flow">&#8594;</span>
+    <div class="box"><span class="t">Submodule MDBX</span><span class="d">1 txn per chunk</span></div>
+  </div>
+  <div class="diagram" aria-label="Data flow after the change">
+    <div class="box"><span class="t">Chunk writes (after)</span><span class="d">write_data_chunk_queued(chunk)</span></div>
+    <span class="arrow-flow">&#8594;</span>
+    <div class="arrow-label">IndexOp{path_hash, offset, generation}</div>
+    <span class="arrow-flow">&#8594;</span>
+    <div class="box"><span class="t">IndexDrain thread</span><span class="d">batches up to 64 ops</span></div>
+    <span class="arrow-flow">&#8594;</span>
+    <div class="arrow-label">1 shared MDBX txn</div>
+    <span class="arrow-flow">&#8594;</span>
+    <div class="box"><span class="t">Submodule MDBX</span><span class="d">ack fanned back out</span></div>
+  </div>
+</section>
+
+<section id="change-map">
+  <h2>Change map</h2>
+  <ul class="themes">
+    <li>
+      <span class="name">New per-submodule batching thread</span>
+      <span class="files"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/index_drain.rs#L1">crates/domain/src/models/index_drain.rs</a></span>
+      Adds <code>IndexDrain</code>, a dedicated OS thread per submodule that receives <code>IndexOp</code>s
+      over an <code>mpsc</code> channel, drains up to
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/index_drain.rs#L20">crates/domain/src/models/index_drain.rs:20</a>
+      (<code>MAX_BATCH_SIZE = 64</code>) ops per iteration, and commits them in one
+      <code>write_batch</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/index_drain.rs#L269">crates/domain/src/models/index_drain.rs:269</a>).
+      A generation counter lets stale ops (queued before a pause/reset) be rejected without touching the DB
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/index_drain.rs#L213">crates/domain/src/models/index_drain.rs:213</a>).
+    </li>
+    <li>
+      <span class="name">StorageModule write path split into prepare / submit / await-ack / finish</span>
+      <span class="files"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L1855">crates/domain/src/models/storage_module.rs:1855</a></span>
+      <code>write_data_chunk</code> now delegates to <code>prepare_data_index_writes</code>, which reserves an
+      "occupancy" entry per offset in <code>PendingWrites</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L1855">crates/domain/src/models/storage_module.rs:1855</a>),
+      submits an <code>IndexOp</code> per placement, then <code>finish_data_index_writes</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L1994">crates/domain/src/models/storage_module.rs:1994</a>)
+      inserts the packed chunk bytes into <code>pending_writes</code> only after every ack succeeds. A second
+      writer targeting an already-occupied offset is now rejected instead of racing.
+    </li>
+    <li>
+      <span class="name">Async wrapper for tokio callers</span>
+      <span class="files"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L1824">crates/domain/src/models/storage_module.rs:1824</a>,
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/actors/src/chunk_ingress_service/chunks.rs#L125">crates/actors/src/chunk_ingress_service/chunks.rs:125</a>,
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/actors/src/data_sync_service.rs#L55">crates/actors/src/data_sync_service.rs:55</a></span>
+      New <code>write_data_chunk_queued</code> waits for the drain's ack on
+      <code>tokio::task::spawn_blocking</code> so the tokio runtime worker never blocks on an
+      <code>mpsc::Receiver::recv()</code>. Chunk-ingress and data-sync switch to this async entry point; the
+      body-migration worker keeps calling the synchronous <code>write_data_chunk</code> because it already
+      runs inside its own <code>spawn_blocking</code>
+      (<code>crates/actors/src/chunk_migration_service/body_worker.rs:276</code>).
+    </li>
+    <li>
+      <span class="name">Retry-safety fix: don't remember a chunk until the write succeeds</span>
+      <span class="files"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/actors/src/chunk_ingress_service/chunks.rs#L187">crates/actors/src/chunk_ingress_service/chunks.rs:187</a></span>
+      <code>recent_valid_chunks</code> (the LRU that suppresses re-processing of already-handled chunks) is
+      now populated by <code>remember_after_module_writes</code> only after
+      <code>write_chunk_to_assigned_modules</code> returns <code>Ok</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/actors/src/chunk_ingress_service/chunks.rs#L638">crates/actors/src/chunk_ingress_service/chunks.rs:638</a>),
+      instead of being populated unconditionally before the storage-module write was even attempted.
+    </li>
+    <li>
+      <span class="name">Pause/reset now cancel in-flight index ops</span>
+      <span class="files"><a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L726">crates/domain/src/models/storage_module.rs:726</a>,
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L916">crates/domain/src/models/storage_module.rs:916</a></span>
+      <code>pause_data_writes</code> bumps <code>index_write_generation</code> so any op the drain later
+      commits for a stale generation gets NACKed with <code>WritesPaused</code>. <code>reset</code> goes
+      further: it bumps the generation, then calls <code>index_drain.wait_idle()</code> on every submodule
+      before clearing <code>pending_writes</code> and wiping the submodule DB, closing a race where reset
+      could run concurrently with an in-flight commit.
+    </li>
+  </ul>
+</section>
+
+<section id="behavior-changes">
+  <h2>Behavior changes</h2>
+  <ul class="behavior-list">
+    <li class="before-after">
+      Chunk marked as "seen" for retry purposes
+      <span class="arrow">before</span> as soon as prior validation passed, regardless of whether the
+      storage-module write later failed
+      <span class="arrow">→</span>
+      only after <em>all</em> assigned storage-module writes for that chunk succeed
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/actors/src/chunk_ingress_service/chunks.rs#L187">chunks.rs:187</a>).
+      A failed write is now retryable instead of silently no-op'ing at <code>recent_valid_chunks</code>.
+    </li>
+    <li class="before-after">
+      Data-path index commit granularity
+      <span class="arrow">before</span> one MDBX write transaction per chunk write, per submodule
+      <span class="arrow">→</span>
+      up to 64 concurrently-queued chunk writes on the same submodule share one MDBX transaction
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/index_drain.rs#L20">index_drain.rs:20</a>).
+      Only visible as reduced I/O and, per the "Watch out for" section, a wider blast radius per failed commit.
+    </li>
+    <li class="before-after">
+      Second writer targeting an offset whose index write is already in flight
+      <span class="arrow">before</span> proceeded based on the generic pending-writes check, with no explicit
+      in-flight concept
+      <span class="arrow">→</span>
+      rejected outright with an explicit "index write already in flight" error
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L1987">storage_module.rs:1987</a>,
+      surfaced via <code>get_writeable_offsets</code>/<code>has_in_flight_index_for</code>).
+    </li>
+    <li class="before-after">
+      Chunk-ingress and data-sync calls into a storage module
+      <span class="arrow">before</span> committed the index write inline on the calling tokio task
+      <span class="arrow">→</span>
+      await an ack from the submodule's drain thread via <code>write_data_chunk_queued</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L1824">storage_module.rs:1824</a>).
+      Not visible to end users; adds a hop that can add latency under drain contention (see "Watch out for").
+    </li>
+  </ul>
+</section>
+
+<section id="watch-out">
+  <h2>Watch out for</h2>
+  <ol class="watch">
+    <li class="sev-high">
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L2032">storage_module.rs:2032</a>
+      — <code>insert_pending_data_if_generation_current</code> re-checks
+      <code>index_write_generation</code> <em>after</em> the drain thread's MDBX commit already succeeded.
+      <code>pause_data_writes</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/storage_module.rs#L726">storage_module.rs:726</a>)
+      only bumps the generation counter — it does not call <code>wait_idle</code> or touch the submodule DB
+      the way <code>reset</code> does. So if a pause lands between the drain thread deciding to commit a
+      batch and this function running, the data-path index entry is left durably committed in MDBX while the
+      corresponding chunk bytes are never inserted into <code>pending_writes</code> (the function returns
+      <code>false</code> → mapped to <code>WritesPaused</code>): an index entry could point at an offset
+      whose chunk body was never queued for flush.
+      <span class="flag">worth a dedicated code-review pass</span>
+    </li>
+    <li class="sev-medium">
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/domain/src/models/index_drain.rs#L213">index_drain.rs:213</a>
+      — <code>commit_batch</code> maps a single failing MDBX commit to a failure for every op that happened to
+      be opportunistically batched together (up to 64, via <code>try_recv</code> draining). Under concurrent
+      load, one transient DB error now fails a burst of unrelated chunk writes simultaneously instead of just
+      the one chunk that triggered it previously.
+    </li>
+    <li class="sev-low">
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2070f159c4b7e0cd4593ad005015989b3a8c82c/crates/actors/src/chunk_ingress_service/chunks.rs#L125">chunks.rs:125</a>
+      — <code>write_chunk_to_assigned_modules</code> awaits each assigned storage module in sequence. A chunk
+      assigned to multiple modules now serializes behind however long each module's drain takes to flush its
+      current batch, where previously each module's commit was independent and synchronous per module.
+    </li>
+  </ol>
+</section>
+
+</main>
+
+<footer>
+  Generated by the <code>explain-diff</code> skill in CI mode for PR #1569. Risk callouts above are attention
+  pointers from static analysis of the diff and surrounding code, not verified findings — run a dedicated
+  code-review pass to confirm the high-severity item before relying on this summary alone.
+</footer>
+
+</body>
+</html>
