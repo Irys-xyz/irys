@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1570 — HTTP chunk POST acknowledges on enqueue</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-border: #262c38;
+    --text: #dfe4ee;
+    --muted: #9aa4b8;
+    --accent: #5aa9ff;
+    --accent-2: #7fd8a0;
+    --warn-bg: #2a2010;
+    --warn-border: #6b4f10;
+    --warn-text: #f0c869;
+    --info-bg: #10202a;
+    --info-border: #1c4a63;
+    --info-text: #8fd0f0;
+    --danger-bg: #2a1414;
+    --danger-border: #6b2020;
+    --danger-text: #f0a3a3;
+    --code-bg: #0b0d12;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 2rem 1.25rem 5rem; }
+  header.page-header {
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+  header.page-header h1 {
+    font-size: 1.55rem;
+    margin: 0 0 0.4rem;
+    color: #fff;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
+  .meta code { color: var(--accent-2); }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 2rem;
+  }
+  nav.toc h2 {
+    margin: 0 0 0.6rem;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+  nav.toc ol { margin: 0; padding-left: 1.2rem; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section { margin-bottom: 2.4rem; scroll-margin-top: 1rem; }
+  section h2 {
+    font-size: 1.15rem;
+    color: #fff;
+    border-left: 4px solid var(--accent);
+    padding-left: 0.65rem;
+    margin-bottom: 0.9rem;
+  }
+  a.cite {
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    color: var(--accent-2);
+    background: rgba(127, 216, 160, 0.08);
+    border: 1px solid rgba(127, 216, 160, 0.25);
+    border-radius: 5px;
+    padding: 0.05rem 0.4rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  a.cite:hover { background: rgba(127, 216, 160, 0.18); }
+  ul.themes, ul.watch, ul.behavior { list-style: none; padding: 0; margin: 0; }
+  ul.themes li, ul.watch li, ul.behavior li {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin-bottom: 0.7rem;
+  }
+  ul.themes li strong.theme-name { color: #fff; }
+  .files { color: var(--muted); font-family: var(--mono); font-size: 0.82rem; }
+  .rank {
+    display: inline-block;
+    min-width: 1.4rem;
+    height: 1.4rem;
+    line-height: 1.4rem;
+    text-align: center;
+    background: var(--accent);
+    color: #05131f;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 0.78rem;
+    margin-right: 0.5rem;
+  }
+  .callout {
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin: 0.8rem 0;
+    border: 1px solid;
+  }
+  .callout.info { background: var(--info-bg); border-color: var(--info-border); color: var(--info-text); }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-text); }
+  .callout.danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-text); }
+  .callout strong { color: #fff; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    color: #d3d9e6;
+  }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.5rem;
+    margin: 1rem 0;
+  }
+  .flow .box {
+    flex: 1 1 150px;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 0.7rem 0.8rem;
+    font-size: 0.85rem;
+  }
+  .flow .box.hot { border-color: var(--accent); }
+  .flow .box .label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+  .flow .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 1.3rem;
+    flex: 0 0 auto;
+  }
+  .flow .data {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--accent-2);
+    margin-top: 0.3rem;
+  }
+  .none { color: var(--muted); font-style: italic; }
+  footer { color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--panel-border); padding-top: 1rem; margin-top: 3rem; }
+  @media (max-width: 600px) {
+    .flow { flex-direction: column; }
+    .flow .arrow { transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page-header">
+  <h1>HTTP chunk POST acknowledges on enqueue, not after full ingest</h1>
+  <div class="meta">
+    PR #1570 · <code>perf(chunk-ingress): acknowledge HTTP chunk POST on enqueue</code> ·
+    mode: summary (CI) · repo root paths cite
+    <code>github.com/Irys-xyz/irys@63d1cfff85</code>
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#what-it-does">What it does</a></li>
+    <li><a href="#why">Why</a></li>
+    <li><a href="#change-map">Change map</a></li>
+    <li><a href="#behavior-changes">Behavior changes</a></li>
+    <li><a href="#watch-out-for">Watch out for</a></li>
+  </ol>
+</nav>
+
+<section id="what-it-does">
+  <h2>What it does</h2>
+  <p>
+    <code>POST /v1/chunk</code> used to hold the HTTP response open on a <code>oneshot</code>
+    channel until the chunk ingress worker finished merkle validation, the MDBX cache
+    commit, storage-module write/pack, gossip fan-out, and the ingress-proof check.
+    This PR makes the HTTP response fire as soon as the chunk body is admitted onto
+    the existing ingress channel — a new <code>enqueue_http_chunk</code> helper
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service/http_admission.rs#L24">crates/actors/src/chunk_ingress_service/http_admission.rs:24</a>)
+    gates admission with two semaphores and a timeout, and the actual chunk
+    processing continues asynchronously in the background. Gossip and data-sync
+    ingest paths are untouched: they still block on the oneshot because they use
+    the result to score peers and decide whether to retry.
+  </p>
+  <p>
+    To keep the async handoff safe, <code>ChunkIngressMessage::IngestChunk</code>
+    gained a drop-guard field that holds the admission permit until the worker is
+    done, the chunk-ingress service now backlogs saturated HTTP admissions instead
+    of parking its receive loop (which would otherwise queue ahead of gossip), and
+    shutdown gained an explicit "stop accepting new HTTP chunks" gate plus a
+    backlog-drain phase.
+  </p>
+  <div class="flow">
+    <div class="box hot">
+      <div class="label">Client</div>
+      POST /v1/chunk<br>body: chunk bytes + data_root
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box hot">
+      <div class="label">post_chunk handler</div>
+      enqueue_http_chunk()<br>acquire admission permit
+      <div class="data">timeout: 5000ms default</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box">
+      <div class="label">chunk_ingress channel</div>
+      IngestChunk(chunk, None, Some(guard))
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box">
+      <div class="label">HTTP client sees</div>
+      200 OK<br><span class="data">(admitted, not yet validated/stored)</span>
+    </div>
+  </div>
+  <div class="flow">
+    <div class="box">
+      <div class="label">meanwhile, async</div>
+      merkle check &rarr; MDBX cache &rarr; pack &rarr; gossip &rarr; proof
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="box">
+      <div class="label">on completion</div>
+      guard dropped, admission permit released
+    </div>
+  </div>
+</section>
+
+<section id="why">
+  <h2>Why</h2>
+  <p>
+    Stated intent (PR description and the new ADR): the previous contract made
+    "HTTP 200" a durability signal and held Actix worker threads across packing
+    I/O, which is exactly the latency this change removes. The ADR
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/docs/adr/0001-http-chunk-ack-on-enqueue.md#L1">docs/adr/0001-http-chunk-ack-on-enqueue.md:1</a>)
+    records that ack-on-enqueue was chosen over ack-after-merkle-validation and
+    ack-after-MDBX-commit as the three alternatives considered.
+  </p>
+</section>
+
+<section id="change-map">
+  <h2>Change map</h2>
+  <ul class="themes">
+    <li>
+      <strong class="theme-name">HTTP ack decoupled from processing</strong>
+      <span class="files">(crates/api-server/src/routes/post_chunk.rs, crates/actors/src/chunk_ingress_service/http_admission.rs)</span>
+      — <code>post_chunk</code> now calls
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/api-server/src/routes/post_chunk.rs#L55">crates/api-server/src/routes/post_chunk.rs:55</a>
+      and returns 200 the moment the chunk is admitted onto the channel, instead of
+      awaiting a oneshot for the full ingest result.
+    </li>
+    <li>
+      <strong class="theme-name">Admission permit threaded through the message itself</strong>
+      <span class="files">(crates/actors/src/chunk_ingress_service.rs, block_validation.rs, facade.rs, several tests)</span>
+      — <code>ChunkIngressMessage::IngestChunk</code> gains a third field,
+      <code>Option&lt;HttpAdmissionGuard&gt;</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L63">crates/actors/src/chunk_ingress_service.rs:63</a>),
+      a drop-guard that releases the admission permit once the worker finishes
+      handling the message. Every existing constructor and pattern match on the
+      three-way tuple across the crate was updated, mostly mechanically
+      (adding a trailing <code>None</code> or <code>_</code>).
+    </li>
+    <li>
+      <strong class="theme-name">In-service backlog instead of parking on HTTP saturation</strong>
+      <span class="files">(crates/actors/src/chunk_ingress_service.rs)</span>
+      — a new <code>NoPermitAction</code> enum
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L184">crates/actors/src/chunk_ingress_service.rs:184</a>)
+      distinguishes reply-bearing gossip/data-sync callers (fast-fail
+      <code>Overloaded</code>), HTTP-admitted fire-and-forget chunks (queue on a
+      new <code>http_backlog: VecDeque</code>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L443">crates/actors/src/chunk_ingress_service.rs:443</a>),
+      and other control-plane fire-and-forget messages (still park the recv loop
+      on <code>acquire().await</code>). The backlog is drained opportunistically
+      in the same <code>tokio::select!</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L451">crates/actors/src/chunk_ingress_service.rs:451</a>).
+    </li>
+    <li>
+      <strong class="theme-name">Shutdown correctness gate</strong>
+      <span class="files">(crates/actors/src/chunk_ingress_service.rs, chunk_ingress_service/http_admission.rs)</span>
+      — a shared <code>http_ingress_open: Arc&lt;Mutex&lt;bool&gt;&gt;</code> flips
+      to <code>false</code> at the start of shutdown
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L564">crates/actors/src/chunk_ingress_service.rs:564</a>);
+      <code>enqueue_http_chunk</code> checks the same flag under the same mutex
+      before and after acquiring a permit
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service/http_admission.rs#L36">crates/actors/src/chunk_ingress_service/http_admission.rs:36</a>),
+      so a racing enqueue fails fast with <code>ChannelClosed</code> instead of a
+      chunk landing in a channel that stops being drained. Shutdown also grew a
+      dedicated backlog-drain phase
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L608">crates/actors/src/chunk_ingress_service.rs:608</a>).
+    </li>
+    <li>
+      <strong class="theme-name">New tunables and validation</strong>
+      <span class="files">(crates/types/src/config/mod.rs, config/node.rs)</span>
+      — <code>max_http_chunk_admission</code> (default 256),
+      <code>max_http_chunk_waiters</code> (default 32), and
+      <code>http_chunk_admission_timeout_millis</code> (default 5000), each
+      validated non-zero
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/types/src/config/mod.rs#L312">crates/types/src/config/mod.rs:312</a>).
+    </li>
+    <li>
+      <strong class="theme-name">Tests adapted from synchronous to polled assertions</strong>
+      <span class="files">(crates/chain-tests/src/utils.rs, multi_node/mempool_tests.rs, integration/cache_service.rs)</span>
+      — new helpers <code>wait_until_chunk_accepted</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/chain-tests/src/utils.rs#L3121">crates/chain-tests/src/utils.rs:3121</a>)
+      and <code>wait_for_http_chunk_idle</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/chain-tests/src/utils.rs#L3163">crates/chain-tests/src/utils.rs:3163</a>)
+      replace assertions that used to fire the instant a 200 came back, since a
+      200 no longer implies the chunk was validated, cached, or even parked yet.
+    </li>
+  </ul>
+</section>
+
+<section id="behavior-changes">
+  <h2>Behavior changes</h2>
+  <ul class="behavior">
+    <li>
+      <strong>POST /v1/chunk timing:</strong> before, the response only returned
+      after merkle validation, the MDBX cache commit, storage-module write/pack,
+      gossip send, and the ingress-proof check all completed. After, it returns as
+      soon as the body is admitted onto the ingress channel
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/api-server/src/routes/post_chunk.rs#L65">crates/api-server/src/routes/post_chunk.rs:65</a>);
+      everything else happens asynchronously afterward.
+    </li>
+    <li>
+      <strong>Per-chunk validation feedback:</strong> before, a bad chunk
+      returned a specific status derived from
+      <code>ChunkIngressError</code> — 400 for
+      <code>InvalidProof</code>/<code>InvalidDataHash</code>/<code>InvalidChunkSize</code>/<code>InvalidDataSize</code>/<code>InvalidOffset</code>,
+      500 for DB/other critical errors, and 200-with-error-body for advisory
+      errors. After, the HTTP layer never learns the outcome of validation —
+      <em>every</em> chunk that is admitted onto the channel gets 200, whether it
+      turns out valid or not
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/api-server/src/routes/post_chunk.rs#L18">crates/api-server/src/routes/post_chunk.rs:18</a>).
+    </li>
+    <li>
+      <strong>New failure modes on the HTTP route:</strong> 503 when the
+      admission or waiter semaphore is saturated, or when the admission wait
+      times out (<code>http_chunk_admission_timeout_millis</code>, default
+      5000ms); 500 only if the ingress channel itself is closed. Malformed JSON
+      is still 400 from the Actix extractor, before this handler runs.
+    </li>
+    <li>
+      <strong>Saturation handling for HTTP ingest:</strong> before, all
+      fire-and-forget <code>IngestChunk</code> messages parked the service's
+      receive loop on the chunk-lane semaphore when saturated. After, HTTP-origin
+      fire-and-forget chunks instead queue on an in-memory backlog
+      (bounded by the 256+32 admission/waiter permits), so gossip's
+      <code>try_acquire</code> is not queued behind them.
+    </li>
+  </ul>
+</section>
+
+<section id="watch-out-for">
+  <h2>Watch out for</h2>
+  <ul class="watch">
+    <li>
+      <span class="rank">1</span>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/api-server/src/routes/post_chunk.rs#L65">crates/api-server/src/routes/post_chunk.rs:65</a>
+      — a 200 response no longer means the chunk was valid or stored, only that
+      it was admitted to the queue; any external client, integration tool, or
+      internal caller that still reads the HTTP status to decide whether a chunk
+      needs to be re-uploaded will now treat rejected chunks (bad proof, bad
+      offset, oversized) as successes with no signal to act on
+      (worth a dedicated code-review pass to confirm nothing downstream still
+      depends on the old per-chunk status codes).
+    </li>
+    <li>
+      <span class="rank">2</span>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L622">crates/actors/src/chunk_ingress_service.rs:622</a>
+      — the shutdown backlog-drain loop treats a closed
+      <code>message_handler_semaphore</code> as fatal and <code>break</code>s
+      immediately, leaving every remaining message still in <code>http_backlog</code>
+      dropped without any notification. Because chunk-lane saturation and
+      semaphore closure are shared with the earlier queued-message drain
+      (line <a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service.rs#L594">594</a>),
+      if the semaphore is already closed by the time shutdown reaches the backlog
+      loop, the entire backlog — chunks whose POST already returned 200 — is
+      silently lost in one step.
+    </li>
+    <li>
+      <span class="rank">3</span>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/chain-tests/src/multi_node/mempool_tests.rs#L381">crates/chain-tests/src/multi_node/mempool_tests.rs:381</a>
+      — <code>preheader_rejects_when_cache_full</code> used to assert the
+      response body directly named the rejection reason; it now infers rejection
+      from the chunk's absence from the pending map and the chunk cache after
+      polling to idle. If a future regression makes the overflow chunk get cached
+      instead of dropped, this test still passes as long as it isn't cached by
+      the time the poll settles — a strictly weaker guarantee than the removed
+      synchronous body assertion.
+    </li>
+    <li>
+      <span class="rank">4</span>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592/crates/actors/src/chunk_ingress_service/http_admission.rs#L24">crates/actors/src/chunk_ingress_service/http_admission.rs:24</a>
+      — worst-case retained HTTP chunk bodies are <code>(256 + 32) &times; 1 MiB</code>
+      at the JSON size limit, per the new ADR. That memory footprint is only as
+      safe as the two new config defaults; operators changing
+      <code>max_http_chunk_admission</code> or <code>max_http_chunk_waiters</code>
+      upward without accounting for chunk size change this bound directly.
+    </li>
+  </ul>
+</section>
+
+<footer>
+  Generated by the explain-diff skill (CI mode) for PR #1570, against
+  <code>63d1cfff856ac1fb40c6e29c6afbbb47c10e3592</code>. This page surfaces
+  attention points, not verified findings — the "Watch out for" entries are
+  starting points for a dedicated code-review pass, not confirmed bugs.
+</footer>
+
+</div>
+</body>
+</html>
