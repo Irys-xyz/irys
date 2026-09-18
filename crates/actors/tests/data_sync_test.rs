@@ -56,7 +56,7 @@ async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     let mut chunk_ingress_rx = setup.service_receivers.chunk_ingress;
     tokio::spawn(async move {
         while let Some(traced) = chunk_ingress_rx.recv().await {
-            if let ChunkIngressMessage::IngestChunk(_, Some(reply)) = traced.inner {
+            if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = traced.inner {
                 let _ = reply.send(Ok(()));
             }
         }

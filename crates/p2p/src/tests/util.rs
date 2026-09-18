@@ -995,7 +995,7 @@ fn spawn_test_chunk_ingress_consumer(
         while let Some(traced) = rx.recv().await {
             let (message, _parent_span) = traced.into_parts();
             match message {
-                ChunkIngressMessage::IngestChunk(chunk, reply) => {
+                ChunkIngressMessage::IngestChunk(chunk, reply, _) => {
                     if let Some(ref store) = chunk_store {
                         store.write().expect("to unlock chunk store").push(chunk);
                     }
