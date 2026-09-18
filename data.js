@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789550510548,
+  "lastUpdate": 1789723162167,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -15811,6 +15811,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "63d1cfff856ac1fb40c6e29c6afbbb47c10e3592",
+          "message": "perf(chunk-ingress): acknowledge HTTP chunk POST on enqueue (#1570)\n\n* perf(chunk-ingress): acknowledge HTTP chunk POST on enqueue\n\n* fix: address review findings\n\n* style(chunk-ingress): replace poison-recovery closures with method refs",
+          "timestamp": "2026-09-18T10:00:14+01:00",
+          "tree_id": "5f142d9c60ed87a205a9a0b83b657937a90a5823",
+          "url": "https://github.com/Irys-xyz/irys/commit/63d1cfff856ac1fb40c6e29c6afbbb47c10e3592"
+        },
+        "date": 1789723160475,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011937,
+            "range": "± 0.000131",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120574,
+            "range": "± 0.001386",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.219503,
+            "range": "± 0.047787",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.062936,
+            "range": "± 0.149305",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.076615,
+            "range": "± 0.001647",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 750.445371,
+            "range": "± 2.70017",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1015.115093,
+            "range": "± 37.778187",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117793,
+            "range": "± 0.000369",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1179.996874,
+            "range": "± 12.115417",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1552.361687,
+            "range": "± 14.680186",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033861,
+            "range": "± 0.001319",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.622246,
+            "range": "± 1.794417",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.834846,
+            "range": "± 2.627148",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000123,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
