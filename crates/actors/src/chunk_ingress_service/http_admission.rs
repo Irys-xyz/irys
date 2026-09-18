@@ -27,7 +27,7 @@ pub async fn enqueue_http_chunk(
     {
         let open = accepting
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !*open {
             return Err(HttpChunkEnqueueError::ChannelClosed);
         }
@@ -59,7 +59,7 @@ pub async fn enqueue_http_chunk(
     {
         let open = accepting
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !*open {
             return Err(HttpChunkEnqueueError::ChannelClosed);
         }

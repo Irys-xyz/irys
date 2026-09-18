@@ -566,7 +566,7 @@ impl ChunkIngressService {
                 .inner
                 .http_ingress_open
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *open = false;
         }
 
