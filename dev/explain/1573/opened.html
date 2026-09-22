@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1573 — cap concurrent block-body serves (expert)</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161923;
+    --panel-2: #1d2130;
+    --border: #2a2f3f;
+    --text: #dde1ea;
+    --muted: #9aa3b8;
+    --accent: #6ea8fe;
+    --good: #4caf82;
+    --warn: #e0a53f;
+    --bad: #e0616f;
+    --code-bg: #10131a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  header {
+    padding: 1.5rem 1.25rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--panel), var(--bg));
+  }
+  header h1 { margin: 0 0 0.35rem; font-size: 1.35rem; }
+  header .meta { color: var(--muted); font-size: 0.9rem; }
+  header .meta code { color: var(--accent); }
+  nav#toc {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(15,17,21,0.97);
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 1.25rem;
+    display: flex; flex-wrap: wrap; gap: 0.4rem 1rem;
+    font-size: 0.85rem;
+  }
+  nav#toc a { color: var(--accent); text-decoration: none; white-space: nowrap; }
+  nav#toc a:hover { text-decoration: underline; }
+  main { max-width: 920px; margin: 0 auto; padding: 1.25rem; }
+  section { margin: 2.2rem 0; }
+  section h2 {
+    font-size: 1.15rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin-bottom: 0.9rem;
+  }
+  section h3 { font-size: 1rem; color: var(--accent); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.6rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: 0.4rem 0; }
+  a.cite {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--accent);
+    background: rgba(110,168,254,0.08);
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    text-decoration: none;
+    font-size: 0.88em;
+    white-space: nowrap;
+  }
+  a.cite:hover { background: rgba(110,168,254,0.18); text-decoration: underline; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    margin: 0.75rem 0;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.5rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .unaccounted { color: var(--bad); font-weight: 700; }
+  .reestablished { color: var(--good); font-weight: 600; }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--panel);
+    border-radius: 6px;
+    padding: 0.7rem 1rem;
+    margin: 0.8rem 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.info { border-left-color: var(--accent); }
+  .callout.risk { border-left-color: var(--bad); }
+  .sev {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    margin-right: 0.5rem;
+  }
+  .sev.med { background: rgba(224,165,63,0.15); color: var(--warn); }
+  .sev.low { background: rgba(154,163,184,0.15); color: var(--muted); }
+  .flow {
+    display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.5rem;
+    margin: 1rem 0;
+  }
+  .flow .box {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    font-size: 0.85rem;
+    flex: 1 1 160px;
+    min-width: 140px;
+  }
+  .flow .box .lbl { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.25rem; }
+  .flow .arrow {
+    align-self: center;
+    color: var(--accent);
+    font-size: 1.3rem;
+    padding: 0 0.2rem;
+  }
+  .flow .data { font-family: ui-monospace, monospace; font-size: 0.78rem; color: var(--accent); margin-top: 0.3rem; }
+  footer { color: var(--muted); font-size: 0.8rem; padding: 2rem 1.25rem 3rem; text-align: center; }
+  @media (max-width: 600px) {
+    nav#toc { gap: 0.3rem 0.6rem; }
+    header h1 { font-size: 1.15rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>fix(p2p): cap concurrent block-body serves</h1>
+  <div class="meta">
+    PR #1573 · Irys-xyz/irys · expert mode · commit <code>6c384b3800d639ec8921ec1db809bf6126423972</code><br>
+    Paths cited relative to repo root; line numbers refer to the tree at this commit.
+  </div>
+</header>
+
+<nav id="toc">
+  <a href="#intent">Intent &amp; approach</a>
+  <a href="#delta">Delta semantics</a>
+  <a href="#cross-file">Cross-file impact</a>
+  <a href="#review-focus">Review-focus map</a>
+  <a href="#open-questions">Open questions</a>
+</nav>
+
+<main>
+
+<section id="intent">
+<h2>Intent &amp; approach</h2>
+<p>
+A handshaked peer can request an arbitrary historical <code>BlockBody</code> via either the gossip GetData POST (<code>handle_data_request_inner</code>) or the PullData POST (<code>handle_pull_data</code>/<code>handle_pull_data_v1</code>), both of which resolve into <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L849" target="_blank">gossip_data_handler.rs:849</a> (<code>handle_get_data</code>) or <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L889" target="_blank">gossip_data_handler.rs:889</a> (<code>handle_get_data_sync</code>). Both funnel into <code>resolve_data_request</code> → <code>get_block_body</code>, whose fallback path reconstructs the body from the mempool and consensus DB via <code>build_block_body_for_processed_block_header</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L1307" target="_blank">gossip_data_handler.rs:1307</a>) — the expensive path the PR title targets. The existing dedup/score gate in <code>DataRequestTracker::check_request</code> throttles score accrual per peer but still returns <code>ServeOnly</code> (i.e. <code>should_serve() == true</code>) for duplicate requests inside the window (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/rate_limiting.rs#L158" target="_blank">rate_limiting.rs:158</a> onward), so a single peer repeating a body request at line rate is still fully resolved every time — no per-body-reconstruction ceiling existed before this change.
+</p>
+<p>
+The fix adds a shared <code>tokio::sync::Semaphore</code> (<code>block_body_semaphore</code>) to <code>GossipDataHandler</code>, sized from a new config knob <code>max_concurrent_block_body_serves</code> (default 8, <code>0</code> = unlimited via <code>Semaphore::MAX_PERMITS</code>) at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L81" target="_blank">gossip_data_handler.rs:81</a>. A new helper, <code>acquire_block_body_permit</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L909" target="_blank">gossip_data_handler.rs:909</a>), is a no-op (<code>Ok(None)</code>) for every <code>GossipDataRequestV2</code> variant except <code>BlockBody</code>; for a body request it does a non-blocking <code>try_acquire_owned()</code> and maps failure to <code>GossipError::RateLimited</code>. Both entry points call this helper <em>after</em> the existing dedup/score check but <em>before</em> <code>resolve_data_request</code>, so admission is gated on the semaphore, not on request identity or recency.
+</p>
+<p>
+Road not taken: the cap could have lived inside <code>resolve_data_request</code> or <code>get_block_body</code> itself, scoped to only the expensive reconstruction branch (cache/tree hits are cheap and don't need a permit). Instead the permit is held for the <em>entire</em> <code>resolve_data_request</code> call, including the cheap block-pool-cache and block-tree-read paths that don't touch the DB. This is simpler (one call site, one permit type per request) but means cheap cache hits still consume a concurrency slot for their duration, and — more importantly — the permit is held across a call that itself acquires <code>block_tree.read()</code>, a blocking (non-async-aware) lock; see the review-focus entry below.
+</p>
+</section>
+
+<section id="delta">
+<h2>Delta semantics</h2>
+
+<h3>Removed-behavior audit</h3>
+<table>
+<thead>
+<tr><th>Invariant (pre-PR)</th><th>Old enforcement site</th><th>New status</th></tr>
+</thead>
+<tbody>
+<tr>
+<td>None removed — this PR is additive. The existing dedup-window score gate (<code>DataRequestTracker::check_request</code>) is left fully intact and still runs first in both entry points.</td>
+<td><a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L856" target="_blank">gossip_data_handler.rs:856</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L894" target="_blank">gossip_data_handler.rs:894</a></td>
+<td><span class="reestablished">unchanged</span> — new semaphore check is layered after it, not instead of it</td>
+</tr>
+</tbody>
+</table>
+<p>Nothing is weakened or dropped; the lens finds no unaccounted-for removal in this diff.</p>
+
+<h3>Contract delta</h3>
+<ul>
+<li><strong>New concurrency invariant:</strong> at most <code>max_concurrent_block_body_serves</code> (default 8) <code>BlockBody</code> resolutions may be in flight across <em>all</em> gossip entry points and <em>all</em> clones of <code>GossipDataHandler</code> simultaneously, because the semaphore is <code>Arc</code>-shared and explicitly re-<code>Arc::clone</code>d in <code>Clone::clone</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L133" target="_blank">gossip_data_handler.rs:133</a>). Other request kinds (headers, execution payloads, transactions, chunks) are exempt — <code>acquire_block_body_permit</code> returns <code>Ok(None)</code> for them, so they cannot be starved by the body cap.</li>
+<li><strong>Error-contract widening:</strong> both <code>handle_get_data</code> and <code>handle_get_data_sync</code> can now return <code>Err(GossipError::RateLimited)</code> for a reason unrelated to peer identity or request recency — pure capacity exhaustion. Callers already treat any <code>RateLimited</code> uniformly (mapped to <code>RejectionReason::RateLimited</code> in <code>server.rs</code>), so no caller needs new error-handling code, but the <em>meaning</em> of a <code>RateLimited</code> response to a well-behaved peer has changed: it can now mean "the node is busy," not "you are being throttled."</li>
+<li><strong>Ordering/scope:</strong> the permit is acquired via a scoped <code>let _permit = …</code> binding at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L870" target="_blank">gossip_data_handler.rs:870</a> (inside a block expression) and at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L904" target="_blank">gossip_data_handler.rs:904</a> (function-scoped), so it is held for the full duration of <code>resolve_data_request</code>, released on every exit path (success, <code>?</code>-propagated error, or task cancellation/abort) via `Drop` on `OwnedSemaphorePermit` — this is the property the four concurrency tests at the bottom of the diff exist to pin down.</li>
+<li><strong>Config compatibility:</strong> <code>P2PGossipConfig</code> carries <code>#[serde(deny_unknown_fields, default)]</code> at the struct level (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/types/src/config/node.rs#L785" target="_blank">node.rs:785</a>), so old TOML configs missing the new key deserialize with the struct-level <code>Default</code> (8), not a zero value or a deserialization error — verified by the new <code>block_body_serve_cap_is_eight_when_the_key_is_absent</code> test. An explicit <code>0</code> in config is preserved as "unlimited," not coerced to the default.</li>
+</ul>
+</section>
+
+<section id="cross-file">
+<h2>Cross-file impact</h2>
+<ul>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_service.rs#L356" target="_blank">gossip_service.rs:356</a> — the production <code>GossipDataHandler</code> construction site now builds the semaphore from <code>config.node_config.p2p_gossip.max_concurrent_block_body_serves</code>; any future field added to <code>GossipDataHandler</code> alongside this one would need the same three-site update (this one plus the two below), which the compiler enforces via struct-literal exhaustiveness but is worth noting as a recurring maintenance point.</li>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/tests/util.rs#L373" target="_blank">tests/util.rs:373</a> and <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/tests/util.rs#L386" target="_blank">tests/util.rs:386</a> — both test-fixture constructors (<code>data_handler_stub</code>, <code>data_handler_with_stubbed_pool</code>) now read the same config field, so any existing test that builds a handler through these helpers and exercises many concurrent body requests inherits the cap (default 8) instead of running unthrottled; no such test appears to previously assume unlimited concurrency in this crate.</li>
+<li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/server.rs#L1691" target="_blank">server.rs:1691</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/server.rs#L1789" target="_blank">server.rs:1789</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/server.rs#L1826" target="_blank">server.rs:1826</a> — the three HTTP handlers calling into <code>handle_get_data</code>/<code>handle_get_data_sync</code> already match on <code>Err(GossipError::RateLimited)</code> and translate it to <code>RejectionReason::RateLimited</code>; none required a code change because the new failure mode reuses the existing error variant, but they also cannot distinguish "peer throttled" from "server saturated" in logs or metrics — both look identical to a caller.</li>
+<li><code>get_block_body</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L1288" target="_blank">gossip_data_handler.rs:1288</a>) is unchanged and still takes <code>block_tree.read()</code> (a blocking, non-`.await`-yielding lock per the test comment at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L269" target="_blank">gossip_data_handler.rs:269</a>) inside the region now guarded by the permit — the permit's lifetime was extended to cover an existing blocking call it didn't previously need to coexist with at a bounded concurrency.</li>
+</ul>
+</section>
+
+<section id="review-focus">
+<h2>Review-focus map</h2>
+
+<div class="callout warn">
+<span class="sev med">Medium</span><strong><a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L869" target="_blank">gossip_data_handler.rs:869</a></strong> — the permit is held across the entire <code>resolve_data_request</code> call for <em>every</em> <code>BlockBody</code> request, including the cheap block-pool-cache hit and the block-tree-read hit, not just the expensive DB-reconstruction fallback it was introduced to bound.
+<br><strong>Failure scenario:</strong> 8 concurrent requests for a body that's already cached in the pool (near-instant to resolve) will still occupy all 8 permits for the duration of those cheap lookups; if a 9th request for a genuinely expensive, uncached historical body arrives in that window, it is rejected as <code>RateLimited</code> even though the node had ample spare capacity for the expensive path specifically. The cap conflates "concurrent cheap serves" with "concurrent expensive reconstructions," which is a coarser signal than the PR's stated goal ("limits database reconstruction of historical bodies," per the new field's doc comment at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/types/src/config/node.rs#L798" target="_blank">node.rs:798</a>).
+</div>
+
+<div class="callout warn">
+<span class="sev med">Medium</span><strong><a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L1301" target="_blank">gossip_data_handler.rs:1301</a></strong> — an admitted body serve now holds an owned semaphore permit while blocking on <code>block_tree.read()</code>, a lock that is not tokio-aware; the accompanying test at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L272" target="_blank">gossip_data_handler.rs:272</a> is explicit that this blocks the worker thread, not just the task.
+<br><strong>Failure scenario:</strong> if a writer holds <code>block_tree</code>'s write lock for an extended period (e.g. during reorg processing or block-tree pruning) while up to 8 body-serve tasks each block a runtime worker thread waiting on the read lock, those 8 workers are unavailable for other async work on a runtime with few worker threads, potentially starving unrelated tasks scheduled on the same runtime — the semaphore caps how many requests can pile up this way, but doesn't change the fact that each one parks a whole worker rather than yielding.
+</div>
+
+<div class="callout info">
+<span class="sev low">Low</span><strong><a class="cite" href="https://github.com/Irys-xyz/irys/blob/6c384b3800d639ec8921ec1db809bf6126423972/crates/p2p/src/gossip_data_handler.rs#L81" target="_blank">gossip_data_handler.rs:81</a></strong> — the "0 means unlimited" convention is implemented via <code>Semaphore::MAX_PERMITS</code> rather than bypassing the semaphore entirely.
+<br><strong>Failure scenario:</strong> this is functionally unlimited in practice (a huge permit count), but every <code>BlockBody</code> request still pays the cost of an atomic <code>try_acquire_owned</code>/release pair even when the operator intended "no limiting at all" — negligible overhead, worth a one-line note only if this path turns out to be hotter than expected.
+</div>
+
+<p>These are attention pointers from static reading, not verified findings — a dedicated code-review pass (<code>/code-review</code>) would be the right next step to confirm whether the runtime's worker-thread pool sizing makes the second entry a practical concern in this deployment.</p>
+</section>
+
+<section id="open-questions">
+<h2>Open questions</h2>
+<ul>
+<li>Was scoping the permit to the whole of <code>resolve_data_request</code> (rather than only the DB-reconstruction branch inside <code>get_block_body</code>) a deliberate simplicity trade-off, or should the cap move down to <code>build_block_body_for_processed_block_header</code> specifically so cache/tree hits don't consume a slot?</li>
+<li>Is a default of 8 concurrent body serves calibrated against a specific measurement (mempool/DB reconstruction latency, number of expected simultaneously-syncing peers), or is it a round-number starting point pending production tuning?</li>
+<li>The PR description states the "Before" behavior as the dedup window still serving repeated requests at line rate — was a per-peer cap (in addition to or instead of this global cap) considered, so one abusive peer can't consume all 8 slots and starve legitimate sync traffic from other peers?</li>
+</ul>
+</section>
+
+</main>
+
+<footer>
+Generated by the explain-diff skill in CI mode · expert analysis of PR #1573 · commit 6c384b3800d639ec8921ec1db809bf6126423972
+</footer>
+
+</body>
+</html>
