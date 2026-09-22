@@ -152,7 +152,7 @@ impl IrysApiClient {
             ));
         }
         let mut buf = Vec::new();
-        let mut total = 0u64;
+        let mut total = 0_u64;
         loop {
             let next = response.chunk().await.map_err(|err| err.to_string())?;
             let Some(chunk) = next else {
@@ -768,7 +768,7 @@ mod tests {
 #[cfg(test)]
 mod cap_tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
@@ -777,14 +777,14 @@ mod cap_tests {
         let port = listener.local_addr().expect("addr").port();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut req = [0u8; 2048];
+            let mut req = [0_u8; 2048];
             let _ = stream.read(&mut req);
             stream.write_all(response_prefix).expect("headers");
             if !then_body.is_empty() {
                 stream.write_all(then_body).expect("body");
             }
             stream.flush().expect("flush");
-            let mut sink = [0u8; 64];
+            let mut sink = [0_u8; 64];
             let _ = stream.read(&mut sink);
         });
         // The accept thread needs the socket before the client connects.

@@ -320,7 +320,7 @@ impl GossipClient {
             ));
         }
         let mut buf = Vec::new();
-        let mut total = 0u64;
+        let mut total = 0_u64;
         loop {
             let next = response.chunk().await.map_err(|err| err.to_string())?;
             let Some(chunk) = next else {
@@ -2642,33 +2642,34 @@ impl GossipClient {
                 let status = response.status();
 
                 let res: GossipResult<GossipResponse<Vec<IrysAddress>>> = match status {
-                    StatusCode::OK => {
-                        let bytes = self.read_capped_bytes(response).await.map_err(|e| {
-                            PeerNetworkError::FailedToRequestData(format!(
-                                "Failed to read response from {url}: {e}"
-                            ))
-                        })?;
-                        let text = String::from_utf8(bytes).map_err(|_| {
-                            PeerNetworkError::FailedToRequestData(format!(
+                    StatusCode::OK => match self.read_capped_bytes(response).await {
+                        Err(error) => Err(PeerNetworkError::FailedToRequestData(format!(
+                            "Failed to read response from {url}: {error}"
+                        ))
+                        .into()),
+                        Ok(bytes) => match String::from_utf8(bytes) {
+                            Err(_) => Err(PeerNetworkError::FailedToRequestData(format!(
                                 "peer response from {url} is not valid utf-8"
                             ))
-                        })?;
+                            .into()),
+                            Ok(text) => {
+                                if text.trim().is_empty() {
+                                    return Err(PeerNetworkError::FailedToRequestData(format!(
+                                        "Empty response from {}",
+                                        url
+                                    )));
+                                }
 
-                        if text.trim().is_empty() {
-                            return Err(PeerNetworkError::FailedToRequestData(format!(
-                                "Empty response from {}",
-                                url
-                            )));
-                        }
-
-                        let gossip_response = serde_json::from_str(&text).map_err(|e| {
-                            PeerNetworkError::FailedToRequestData(format!(
-                                "{}: Failed to parse JSON: {} - Response: {}",
-                                url, e, text
-                            ))
-                        })?;
-                        Ok(gossip_response)
-                    }
+                                let gossip_response = serde_json::from_str(&text).map_err(|e| {
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "{}: Failed to parse JSON: {} - Response: {}",
+                                        url, e, text
+                                    ))
+                                })?;
+                                Ok(gossip_response)
+                            }
+                        },
+                    },
                     _ => {
                         let error_text = match self.read_capped_bytes(response).await {
                             Ok(bytes) => String::from_utf8(bytes)
@@ -2858,14 +2859,14 @@ mod tests {
         let port = listener.local_addr().expect("addr").port();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut req = [0u8; 2048];
+            let mut req = [0_u8; 2048];
             let _ = stream.read(&mut req);
             stream.write_all(response_prefix).expect("headers");
             if !then_body.is_empty() {
                 stream.write_all(then_body).expect("body");
             }
             stream.flush().expect("flush");
-            let mut sink = [0u8; 64];
+            let mut sink = [0_u8; 64];
             let _ = stream.read(&mut sink);
         });
         std::thread::sleep(std::time::Duration::from_millis(50));
