@@ -730,11 +730,12 @@ impl IrysNode {
 
         info!("Fetching genesis block from trusted peer: {}", trusted_peer);
 
-        // Create HTTP client and fetch genesis block
-        let http_client = reqwest::Client::new();
-        let genesis_block = fetch_genesis_block(trusted_peer, &http_client)
-            .await
-            .expect("expected genesis block from http api");
+        let genesis_block = fetch_genesis_block(
+            trusted_peer,
+            self.config.node_config.max_peer_response_bytes,
+        )
+        .await
+        .expect("expected genesis block from http api");
 
         // Fetch associated commitment transactions
         let commitments = fetch_genesis_commitments(

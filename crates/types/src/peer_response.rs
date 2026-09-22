@@ -46,10 +46,10 @@ mod tests {
     proptest! {
         #[test]
         fn sums_inside_the_cap_succeed_and_the_crossing_chunk_fails(
-            chunks in prop::collection::vec(0u64..10_000, 0..40),
-            cap in 0u64..500_000u64,
+            chunks in prop::collection::vec(0_u64..10_000, 0..40),
+            cap in 0_u64..500_000_u64,
         ) {
-            let mut total = 0u64;
+            let mut total = 0_u64;
             for chunk in chunks {
                 match accumulate_response_bytes(total, chunk, cap) {
                     Ok(next) => {
