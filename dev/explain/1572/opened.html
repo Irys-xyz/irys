@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1572 — reject chunk lengths that panic validation</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-border: #2a2e38;
+    --text: #dde1e8;
+    --muted: #8b93a3;
+    --accent: #6ea8fe;
+    --good: #59c98f;
+    --warn: #e8b339;
+    --bad: #e8626a;
+    --code-bg: #10131a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 1.5rem 1.5rem 1rem;
+    border-bottom: 1px solid var(--panel-border);
+    position: sticky;
+    top: 0;
+    background: rgba(15,17,21,0.97);
+    backdrop-filter: blur(4px);
+    z-index: 10;
+  }
+  header h1 { margin: 0 0 0.3rem; font-size: 1.3rem; }
+  header .meta { color: var(--muted); font-size: 0.85rem; }
+  nav.toc {
+    padding: 0.75rem 1.5rem;
+    border-bottom: 1px solid var(--panel-border);
+    font-size: 0.85rem;
+  }
+  nav.toc a {
+    color: var(--accent);
+    text-decoration: none;
+    margin-right: 1rem;
+    display: inline-block;
+    margin-bottom: 0.3rem;
+  }
+  nav.toc a:hover { text-decoration: underline; }
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 1.5rem;
+  }
+  section {
+    margin-bottom: 2.5rem;
+  }
+  section h2 {
+    font-size: 1.05rem;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 0.4rem;
+    color: #fff;
+  }
+  section h3 { font-size: 0.95rem; color: var(--accent); margin-top: 1.2rem; }
+  p { margin: 0.6rem 0; }
+  ul, ol { padding-left: 1.3rem; }
+  li { margin-bottom: 0.45rem; }
+  code {
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    font-size: 0.88em;
+    font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+    color: #f0c674;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; color: #cdd6e4; }
+  a.cite {
+    color: var(--accent);
+    font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+    font-size: 0.9em;
+    text-decoration: none;
+    border-bottom: 1px dotted var(--accent);
+  }
+  a.cite:hover { border-bottom-style: solid; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8rem 0 1.2rem;
+    font-size: 0.88rem;
+  }
+  th, td {
+    border: 1px solid var(--panel-border);
+    padding: 0.5rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #1c2029; color: var(--muted); font-weight: 600; }
+  .unaccounted { color: var(--bad); font-weight: 700; }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--panel);
+    border-radius: 0 6px 6px 0;
+    padding: 0.7rem 1rem;
+    margin: 0.8rem 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.info { border-left-color: var(--accent); }
+  .callout.risk { border-left-color: var(--bad); }
+  .sev-high { color: var(--bad); font-weight: 700; }
+  .sev-med { color: var(--warn); font-weight: 700; }
+  .sev-low { color: var(--good); font-weight: 700; }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin: 1rem 0;
+    font-size: 0.85rem;
+  }
+  .flow .box {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 0.55rem 0.8rem;
+    min-width: 140px;
+  }
+  .flow .box.reject {
+    border-color: var(--bad);
+    color: #ffb3b8;
+  }
+  .flow .arrow {
+    color: var(--muted);
+    font-size: 1.1rem;
+  }
+  .flow .sub { color: var(--muted); font-size: 0.78rem; display: block; margin-top: 0.15rem; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    padding: 2rem 0 3rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>fix(poa): reject chunk lengths that panic validation</h1>
+  <div class="meta">
+    PR #1572 · Irys-xyz/irys · expert mode · repo root = checkout root · citations resolve at
+    <code>8e0b8673618cea086f719141e57ed4dd3a30de2e</code>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#intent">Intent &amp; approach</a>
+  <a href="#delta">Delta semantics</a>
+  <a href="#cross-file">Cross-file impact</a>
+  <a href="#review-focus">Review-focus map</a>
+  <a href="#open-questions">Open questions</a>
+</nav>
+
+<main>
+
+<section id="intent">
+<h2>Intent &amp; approach</h2>
+
+<p>
+A peer-supplied PoA chunk with a length outside the bounds the validator implicitly assumed
+could crash the validating node. Two distinct panics were reachable from
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4608">crates/actors/src/block_validation.rs:4608</a>
+(<code>poa_is_valid</code>): an oversized chunk fed
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4763">crates/actors/src/block_validation.rs:4763</a>
+(<code>xor_vec_u8_arrays_in_place</code>, which indexes the shorter entropy buffer by the longer
+chunk's length) triggers an out-of-bounds index panic; an undersized chunk fed the old
+<code>split_at(index)</code> at the same site panicked when <code>index &gt; chunk.len()</code>.
+Both panics happen inside a <code>spawn_blocking</code> task in the validation service
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/validation_service/block_validation_task.rs#L594">crates/actors/src/validation_service/block_validation_task.rs:594</a>),
+which the PR description says surfaced as a node restart rather than a caught error.
+</p>
+
+<p>
+The fix adds explicit length gates ahead of every unchecked use of chunk length, turning both
+panics into typed <code>PreValidationError</code> consensus rejections:
+<code>PoAChunkTooLong</code> (chunk longer than the packing/entropy limit) and
+<code>PoAChunkTooShort</code> (chunk shorter than the Merkle proof's expected byte span). Three
+new helpers carry the logic —
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4562">block_validation.rs:4562</a>
+(<code>reject_poa_chunk_longer_than</code>),
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4577">block_validation.rs:4577</a>
+(<code>poa_chunk_within_configured_len</code>), and
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4593">block_validation.rs:4593</a>
+(<code>poa_split_index</code>) — and are called at three points: the cheap top-level hash check in
+<code>prevalidate_block</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L1676">block_validation.rs:1676</a>),
+the entry of <code>poa_is_valid</code> before any Merkle work
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4624">block_validation.rs:4624</a>),
+and immediately before the two panic-prone operations, the XOR
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4762">block_validation.rs:4762</a>)
+and the trim <code>split_at</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4772">block_validation.rs:4772</a>).
+</p>
+
+<p>
+<strong>Road not taken:</strong> the PR could have relied on the single upstream length check at
+<code>poa_chunk_within_configured_len</code> (comparing against <code>config.chunk_size</code>) and
+trusted that it implies both downstream operations are safe. It instead adds a second,
+independent guard at the entropy-XOR site keyed off <code>entropy_chunk.len()</code> rather than
+<code>config.chunk_size</code>. That choice is not redundant: <code>compute_entropy_chunk</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/c/src/capacity_single.rs#L43">crates/c/src/capacity_single.rs:43</a>)
+only fills <code>(chunk_size / 32) * 32</code> bytes, so for a <code>chunk_size</code> not divisible
+by 32 the entropy buffer is strictly shorter than <code>chunk_size</code> and the upstream check
+alone would not have prevented the XOR panic. See Delta semantics.
+</p>
+
+<h3>Data flow (data-ledger PoA branch)</h3>
+<div class="flow">
+  <div class="box">poa.chunk bytes<span class="sub">from peer</span></div>
+  <div class="arrow">&rarr;</div>
+  <div class="box">poa_chunk_within_configured_len<span class="sub">len &le; chunk_size?</span></div>
+  <div class="arrow">&rarr;</div>
+  <div class="box reject">PoAChunkTooLong<span class="sub">len &gt; chunk_size</span></div>
+</div>
+<div class="flow">
+  <div class="box">…Merkle path checks…</div>
+  <div class="arrow">&rarr;</div>
+  <div class="box">reject_poa_chunk_longer_than<span class="sub">len &le; entropy_chunk.len()?</span></div>
+  <div class="arrow">&rarr;</div>
+  <div class="box reject">PoAChunkTooLong<span class="sub">len &gt; entropy len (chunk_size not %32)</span></div>
+  <div class="arrow">&rarr;</div>
+  <div class="box">xor_vec_u8_arrays_in_place<span class="sub">safe: len &le; entropy len</span></div>
+</div>
+<div class="flow">
+  <div class="box">poa_split_index<span class="sub">trim = min(chunk_size, span)</span></div>
+  <div class="arrow">&rarr;</div>
+  <div class="box">len &lt; trim_index?</div>
+  <div class="arrow">&rarr;</div>
+  <div class="box reject">PoAChunkTooShort<span class="sub">len &lt; proof span</span></div>
+  <div class="arrow">&rarr;</div>
+  <div class="box">split_at(trim_index)<span class="sub">safe: len &ge; trim_index</span></div>
+</div>
+
+</section>
+
+<section id="delta">
+<h2>Delta semantics</h2>
+
+<p>
+<strong>Error surface:</strong> two new <code>PreValidationError</code> variants,
+<code>PoAChunkTooLong { chunk_size, limit, got }</code> and
+<code>PoAChunkTooShort { span, got }</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L181">block_validation.rs:181</a>–<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L190">190</a>),
+both wired into the exhaustive <code>classify()</code> match as <code>ErrorClass::Consensus</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L641">block_validation.rs:641</a>–<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L642">642</a>)
+and the exhaustive <code>metric_reason()</code> match
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L723">block_validation.rs:723</a>–<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L724">724</a>).
+Because both matches lack a wildcard arm by design (per the SAFETY comment at
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L698">block_validation.rs:698</a>),
+the compiler forced both call sites to be updated — this is why the classification is
+trustworthy rather than an oversight.
+</p>
+
+<p>
+<strong>Failure-mode contract, before vs after:</strong> a peer that gossips a PoA chunk whose
+byte length is outside <code>[proof_span, chunk_size]</code> (or outside the entropy buffer's
+actual length when <code>chunk_size % 32 != 0</code>) previously crashed the validating thread;
+it now receives a typed, non-node-fault consensus rejection and the block is treated as invalid
+rather than the node treating itself as broken. <code>is_node_fault()</code> returns <code>false</code>
+for both variants (asserted directly in the new test at
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L2857">block_validation.rs:2857</a>),
+so this is scored as an adversarial/malformed-input rejection, not a local-node health signal.
+</p>
+
+<p>
+<strong>Ordering guarantee added:</strong> the length check in <code>poa_is_valid</code>'s
+data-ledger branch runs before <code>get_data_partition_assignment</code>,
+<code>validate_path</code> (tx_path and data_path), and the owning-tx lookup
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4624">block_validation.rs:4624</a>
+precedes <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4631">block_validation.rs:4631</a> onward).
+The new unit test <code>poa_chunk_longer_than_chunk_size_is_too_long</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/tests/block_validation_tests.rs#L155">crates/actors/tests/block_validation_tests.rs:155</a>)
+constructs a <code>PoaData</code> against a default (empty) <code>EpochSnapshot</code>, so
+oversized-chunk rejection has to win the race against <code>PartitionAssignmentMissing</code> for
+the test to pass — this pins the ordering as a tested invariant, not an implementation accident.
+</p>
+
+<p>
+<strong>u128 subtraction hardening (incidental to the stated fix):</strong> the old trim-index
+expression computed <code>(max_byte_range - min_byte_range) as u64</code> directly on
+<code>u128</code>s; <code>poa_split_index</code> replaces the subtraction with
+<code>saturating_sub</code>
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4594">block_validation.rs:4594</a>),
+which additionally removes a debug-build overflow-panic path if <code>max_byte_range &lt;
+min_byte_range</code> were ever reached (the surrounding bounds checks at
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4745">block_validation.rs:4745</a>
+make that state look unreachable today, but the new code no longer depends on that being true).
+The subsequent masking-and-<code>try_from</code> dance
+(<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4595">block_validation.rs:4595</a>)
+is functionally equivalent to the old truncating <code>as</code> cast on today's inputs; the
+comment at
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4591">block_validation.rs:4591</a>
+frames it as preserving the exact same index, not changing behavior.
+</p>
+
+<h3>Removed-behavior audit</h3>
+<table>
+<thead><tr><th>Invariant (implicit before this PR)</th><th>Old enforcement site</th><th>New enforcement site</th></tr></thead>
+<tbody>
+<tr>
+  <td>PoA chunk length never exceeds the entropy/packing buffer before XOR</td>
+  <td>None — implicit trust that <code>poa_chunk.len() &le; entropy_chunk.len()</code>; violated silently caused an index-out-of-bounds panic in <code>xor_vec_u8_arrays_in_place</code></td>
+  <td>Re-established: <code>reject_poa_chunk_longer_than</code> at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4762">block_validation.rs:4762</a>, plus the coarser upstream gate at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4624">block_validation.rs:4624</a></td>
+</tr>
+<tr>
+  <td>PoA chunk length never shorter than the Merkle proof's expected trim span before <code>split_at</code></td>
+  <td>None — implicit trust that <code>poa_chunk.len() &ge; trim_index</code>; violated silently panicked in <code>Vec::split_at</code></td>
+  <td>Re-established: explicit length check at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4772">block_validation.rs:4772</a>, returning <code>PoAChunkTooShort</code></td>
+</tr>
+<tr>
+  <td>Internal <code>debug!</code>-then-<code>assert!</code> of the raw validation result inside the shared <code>poa_test</code> harness</td>
+  <td>Formerly lived inside the <code>poa_test</code> helper itself, which returned <code>()</code> and asserted success unconditionally for every caller</td>
+  <td><strong class="unaccounted">Intentionally dropped</strong> — <code>poa_test</code> now returns <code>Result&lt;(), PreValidationError&gt;</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L8230">block_validation.rs:8230</a>) and each of the three call sites asserts explicitly instead (e.g. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L8124">block_validation.rs:8124</a>); this is a test-harness refactor needed to let the new short-chunk test inspect the specific error variant, not a coverage loss</td>
+</tr>
+</tbody>
+</table>
+
+</section>
+
+<section id="cross-file">
+<h2>Cross-file impact</h2>
+
+<ul>
+<li>
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/validation_service/block_validation_task.rs#L594">crates/actors/src/validation_service/block_validation_task.rs:594</a>
+— the sole non-test production caller of <code>poa_is_valid</code> outside <code>block_validation.rs</code> itself. It runs the call inside <code>spawn_blocking</code> and does <code>.map(|()| ValidationResult::Valid)</code> on the <code>Result</code>, so the two new error variants flow through unchanged as ordinary <code>Err</code> values — no match arm here needed updating, and the panic this call site used to risk is now an ordinary typed rejection.
+</li>
+<li>
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/chain-tests/src/validation/poa_cases.rs#L190">crates/chain-tests/src/validation/poa_cases.rs:190</a>
+and
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/chain-tests/src/validation/poa_cases.rs#L215">poa_cases.rs:215</a>
+— two more callers of <code>poa_is_valid</code>, untouched by this diff and testing an unrelated fallback path (parent-height block-tree walk); no new preconditions apply to them since their PoA chunks are already correctly sized.
+</li>
+<li>
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/chain-tests/src/block_production/block_validation.rs#L1550">crates/chain-tests/src/block_production/block_validation.rs:1550</a>
+— new integration test <code>test_prevalidation_poa_chunk_length</code> added at the bottom of this file exercises <code>prevalidate_block</code> end-to-end through a produced block, confirming the oversized case fails with <code>PoAChunkTooLong</code> before reaching the chunk-hash comparison, and the undersized case still fails (via <code>PoAChunkHashMismatch</code>, since <code>prevalidate_block</code>'s guard only enforces the upper bound, not the trim span) rather than panicking.
+</li>
+</ul>
+
+</section>
+
+<section id="review-focus">
+<h2>Review-focus map</h2>
+
+<ol>
+<li>
+<span class="sev-low">Low-severity / dead-code:</span>
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4581">block_validation.rs:4581</a>
+— <code>usize::try_from(chunk_size)</code> only fails when <code>chunk_size &gt; u32::MAX</code> on a 32-bit target; on every 64-bit build (the project's actual targets) this branch, and its <code>limit: 0</code> payload, is unreachable. <strong>Failure scenario:</strong> if this ever executed with <code>limit: 0</code>, the error message would misleadingly say the packing limit is <code>0</code> rather than reporting the real overflow — cosmetic today, worth a comment noting it is intentionally unreachable on supported targets rather than a forgotten case.
+</li>
+<li>
+<span class="sev-low">Low-severity / consistency:</span>
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4790">block_validation.rs:4790</a>
+— the capacity-partition branch (no <code>data_path</code>/<code>tx_path</code>/<code>ledger_id</code>) still compares <code>entropy_chunk != poa_chunk</code> with plain <code>Vec</code> equality and never calls <code>reject_poa_chunk_longer_than</code> or checks a trim span. That's safe today (a length mismatch just makes the comparison <code>false</code>, yielding <code>PoACapacityChunkMismatch</code>, not a panic) — <strong>but</strong> this branch is exempt from the new <code>PoAChunkTooLong</code>/<code>TooShort</code> vocabulary purely because <code>Vec::eq</code> happens not to panic on length mismatch. A future edit to this branch that indexes into either buffer directly (mirroring the XOR-based branch) would reintroduce the same class of panic this PR just closed, without the new guard in scope to catch it.
+</li>
+<li>
+<span class="sev-low">Low-severity / test asymmetry:</span>
+<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/chain-tests/src/block_production/block_validation.rs#L1591">crates/chain-tests/src/block_production/block_validation.rs:1591</a>
+— the new end-to-end test only shrinks the chunk by one byte, which fails via <code>PoAChunkHashMismatch</code> rather than <code>PoAChunkTooShort</code> (that variant is only reachable through <code>poa_is_valid</code>'s deeper Merkle branch, not through <code>prevalidate_block</code>'s shallow hash check). The test's own comment acknowledges this ("a short chunk must not be <code>PoAChunkTooLong</code>"), so the gap is at the boundary between the two validation phases rather than a missed assertion — but there is no chain-tests-level (as opposed to unit-level) coverage proving <code>PoAChunkTooShort</code> is reachable via the full node validation path, only via the lower-level unit test at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L8166">block_validation.rs:8166</a>.
+</li>
+</ol>
+
+<p>These are attention pointers, not confirmed defects. If any of them looks worth escalating, run a dedicated code-review pass (<code>/code-review</code>) to verify before acting on it.</p>
+
+</section>
+
+<section id="open-questions">
+<h2>Open questions</h2>
+
+<ul>
+<li>Is 32-bit-target support for the validation crate still a live requirement? If not, the <code>usize::try_from(chunk_size)</code> fallback branch at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4581">block_validation.rs:4581</a> could be simplified or its unreachability documented explicitly.</li>
+<li>Was it deliberate to leave the capacity-partition branch (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8e0b8673618cea086f719141e57ed4dd3a30de2e/crates/actors/src/block_validation.rs#L4790">block_validation.rs:4790</a>) without its own explicit length guard, relying on <code>Vec</code> equality's safe-on-mismatch behavior, or should it get the same <code>reject_poa_chunk_longer_than</code>-style guard for symmetry and future-proofing?</li>
+<li>Does the fix need a chain-tests-level (multi-node / gossip) regression test proving a peer that gossips an undersized PoA chunk is rejected end-to-end via <code>PoAChunkTooShort</code>, given the existing new test only reaches <code>PoAChunkHashMismatch</code> at that layer?</li>
+</ul>
+
+</section>
+
+</main>
+
+<footer>Generated for PR #1572 — expert mode, CI addendum of the explain-diff skill.</footer>
+
+</body>
+</html>
