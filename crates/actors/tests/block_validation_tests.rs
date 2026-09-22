@@ -152,6 +152,57 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
 }
 
 #[test_log::test(test)]
+fn poa_chunk_longer_than_chunk_size_is_too_long() {
+    let config = ConsensusConfig::testing();
+    let chunk_size = usize::try_from(config.chunk_size).unwrap();
+    let _tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+    let db_env = open_or_create_db(
+        _tmp_dir.path(),
+        irys_database::tables::IrysTables::ALL,
+        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
+    )
+    .unwrap();
+    let db = DatabaseProvider(Arc::new(db_env));
+    let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone()));
+    let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+        &new_mock_signed_header(),
+        config.clone(),
+    ))));
+    let poa = PoaData {
+        partition_chunk_offset: 0,
+        partition_hash: H256::zero(),
+        chunk: Some(Base64(vec![0; chunk_size + 1])),
+        ledger_id: Some(DataLedger::Publish.into()),
+        tx_path: Some(Base64(vec![])),
+        data_path: Some(Base64(vec![])),
+    };
+
+    let res = poa_is_valid(
+        &poa,
+        &block_index_guard,
+        &block_tree_guard,
+        &db,
+        H256::zero(),
+        0,
+        &EpochSnapshot::default(),
+        &config,
+        &IrysAddress::ZERO,
+    );
+
+    assert!(
+        matches!(
+            res,
+            Err(PreValidationError::PoAChunkTooLong {
+                got,
+                limit,
+                ..
+            }) if got == chunk_size + 1 && limit == chunk_size
+        ),
+        "oversized chunk must be rejected before Merkle validation, got {res:?}"
+    );
+}
+
+#[test_log::test(test)]
 fn solution_hash_link_valid_ok() {
     let mut block = IrysBlockHeader::new_mock_header();
     // choose deterministic inputs

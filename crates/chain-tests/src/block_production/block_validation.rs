@@ -7,9 +7,9 @@ use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_types::{
-    BoundedFee, CommitmentTransaction, Config, ConsensusOptions, DataLedger, DataTransactionHeader,
-    H256, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemLedger, U256,
-    UnixTimestampMs,
+    Base64, BoundedFee, CommitmentTransaction, Config, ConsensusOptions, DataLedger,
+    DataTransactionHeader, H256, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig,
+    SealedBlock, SystemLedger, U256, UnixTimestampMs,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1541,6 +1541,61 @@ async fn test_prevalidation_ignores_content_verified_row_inside_walk_window() ->
             other
         ),
     }
+
+    ctx.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_prevalidation_poa_chunk_length() -> Result<()> {
+    let ctx = PrevalidationTestContext::new().await?;
+    let chunk_size = ctx.config.consensus_config().chunk_size;
+    let max_len = usize::try_from(chunk_size).unwrap();
+
+    let original = ctx
+        .block
+        .header()
+        .poa
+        .chunk
+        .clone()
+        .expect("produced block has a PoA chunk")
+        .0;
+    assert_eq!(original.len(), max_len);
+
+    let mut long_header = (**ctx.block.header()).clone();
+    let mut long_bytes = original.clone();
+    long_bytes.push(0);
+    long_header.poa.chunk = Some(Base64(long_bytes));
+    ctx.config.signer().sign_block_header(&mut long_header)?;
+    let mut long_body = ctx.block.to_block_body();
+    long_body.block_hash = long_header.block_hash;
+    let long_block = SealedBlock::new(long_header, long_body)?;
+    let long_result = ctx.prevalidate(&long_block).await;
+    assert!(
+        matches!(
+            long_result,
+            Err(PreValidationError::PoAChunkTooLong { got, limit, .. })
+                if got == max_len + 1 && limit == max_len
+        ),
+        "oversized chunk must fail length before chunk_hash, got {long_result:?}"
+    );
+
+    let mut short_header = (**ctx.block.header()).clone();
+    let mut short_bytes = original;
+    short_bytes.pop();
+    short_header.poa.chunk = Some(Base64(short_bytes));
+    ctx.config.signer().sign_block_header(&mut short_header)?;
+    let mut short_body = ctx.block.to_block_body();
+    short_body.block_hash = short_header.block_hash;
+    let short_block = SealedBlock::new(short_header, short_body)?;
+    let short_result = ctx.prevalidate(&short_block).await;
+    assert!(
+        matches!(
+            short_result,
+            Err(PreValidationError::PoAChunkHashMismatch { .. })
+        ),
+        "a short chunk must not be PoAChunkTooLong, got {short_result:?}"
+    );
 
     ctx.stop().await;
     Ok(())
