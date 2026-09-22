@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789723162167,
+  "lastUpdate": 1790082798700,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -15919,6 +15919,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000123,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "866fc30ffb403b2f7df91ad41be84cb5102f8139",
+          "message": "fix(config): reject a zero term-ledger replica count",
+          "timestamp": "2026-09-18T09:00:20Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1571/commits/866fc30ffb403b2f7df91ad41be84cb5102f8139"
+        },
+        "date": 1790082797208,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011806,
+            "range": "± 0.000024",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119247,
+            "range": "± 0.000295",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.215032,
+            "range": "± 0.014263",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.886089,
+            "range": "± 0.017537",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074644,
+            "range": "± 0.000114",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.7462,
+            "range": "± 0.222029",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.59124,
+            "range": "± 0.269848",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120508,
+            "range": "± 0.000331",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1203.043485,
+            "range": "± 1.084969",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1563.229757,
+            "range": "± 0.940892",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035862,
+            "range": "± 0.000611",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.00023,
+            "range": "± 0.241122",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.72694,
+            "range": "± 0.244786",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00012,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
