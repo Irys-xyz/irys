@@ -85,6 +85,10 @@ impl Config {
             "storage.max_pending_write_bytes must be > 0 (or omitted for the derived default): \
              a zero ceiling stops chunk-body migration from ever writing"
         );
+        ensure!(
+            self.node_config.max_peer_response_bytes > 0,
+            "max_peer_response_bytes must be > 0: a zero ceiling rejects every peer response body"
+        );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
@@ -1676,6 +1680,34 @@ mod tests {
         Config::new_with_random_peer_id(node_config)
             .validate()
             .expect("any positive ceiling is accepted; the worker floors it");
+    }
+
+    #[test]
+    fn validate_rejects_zero_peer_response_cap() {
+        assert_eq!(
+            NodeConfig::testing().max_peer_response_bytes,
+            32 * 1024 * 1024,
+            "testing() must use the 32 MiB default"
+        );
+        assert_eq!(
+            NodeConfig::testnet().max_peer_response_bytes,
+            32 * 1024 * 1024,
+            "testnet() must use the 32 MiB default"
+        );
+
+        let mut node_config = NodeConfig::testing();
+        node_config.max_peer_response_bytes = 0;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a zero response cap rejects every peer body")
+            .to_string();
+        assert!(err.contains("max_peer_response_bytes"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.max_peer_response_bytes = 1;
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive cap is accepted");
     }
 
     #[test]

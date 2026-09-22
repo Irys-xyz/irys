@@ -1,9 +1,9 @@
 use crate::metrics;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 pub use irys_reth_node_bridge::node::{RethNode, RethNodeAddOns, RethNodeHandle, RethNodeProvider};
-use irys_types::block::CombinedBlockHeader;
 use irys_types::{
-    BlockIndexItem, CommitmentTransaction, H256, IrysBlockHeader, IrysTransactionResponse,
+    BlockIndexItem, BlockIndexQuery, CommitmentTransaction, H256, IrysBlockHeader,
+    IrysTransactionResponse,
 };
 use std::net::SocketAddr;
 use tracing::warn;
@@ -43,24 +43,36 @@ pub async fn peer_list_endpoint_request(address: &str) -> reqwest::Response {
 
 pub async fn fetch_genesis_block(
     peer: &SocketAddr,
-    client: &reqwest::Client,
+    max_peer_response_bytes: u64,
 ) -> Option<IrysBlockHeader> {
-    let url = format!("http://{}", peer);
-    let response = block_index_endpoint_request(&url, 0, 1).await;
-
-    let block_index_genesis = response
-        .json::<Vec<BlockIndexItem>>()
+    let api_client = IrysApiClient::new(max_peer_response_bytes);
+    let block_index_genesis = api_client
+        .get_block_index(
+            *peer,
+            BlockIndexQuery {
+                height: 0,
+                limit: 1,
+            },
+        )
         .await
-        .expect("expected a valid json deserialize");
+        .expect("expected genesis block index from trusted peer");
 
-    fetch_block(peer, client, block_index_genesis.first().unwrap()).await
+    fetch_block(
+        peer,
+        &api_client,
+        block_index_genesis
+            .first()
+            .expect("genesis block index entry"),
+    )
+    .await
 }
 
 pub async fn fetch_genesis_commitments(
     peer: &SocketAddr,
     irys_block_header: &IrysBlockHeader,
+    max_peer_response_bytes: u64,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(max_peer_response_bytes);
     let system_txs: Vec<H256> = irys_block_header
         .system_ledgers
         .iter()
@@ -120,32 +132,22 @@ pub async fn fetch_txn(
 #[tracing::instrument(level = "trace", skip_all, fields(peer.address = %peer, block.hash = %block_index_item.block_hash))]
 pub async fn fetch_block(
     peer: &SocketAddr,
-    client: &reqwest::Client,
+    api_client: &IrysApiClient,
     block_index_item: &BlockIndexItem,
 ) -> Option<IrysBlockHeader> {
     let url = format!("http://{}/v1/block/{}", peer, block_index_item.block_hash);
-    match client.get(&url).send().await {
-        Ok(resp) => match resp.error_for_status() {
-            Ok(ok) => match ok.json::<CombinedBlockHeader>().await {
-                Ok(combined) => Some(combined.irys),
-                Err(e) => {
-                    warn!("Error parsing block response {}: {}", &url, e);
-                    metrics::record_peer_fetch_error("block_body_parse");
-                    None
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "Non-success from {}: {}",
-                    &url,
-                    e.status().unwrap_or_default()
-                );
-                metrics::record_peer_fetch_error("block_http_error");
-                None
-            }
-        },
-        Err(e) => {
-            warn!("Request to {} failed: {}", &url, e);
+    match api_client
+        .get_block_by_hash(*peer, block_index_item.block_hash, false)
+        .await
+    {
+        Ok(Some(combined)) => Some(combined.irys),
+        Ok(None) => {
+            warn!("Empty block response from {url}");
+            metrics::record_peer_fetch_error("block_http_error");
+            None
+        }
+        Err(error) => {
+            warn!("Error reading block from {url}: {error}");
             metrics::record_peer_fetch_error("block_request_failed");
             None
         }

@@ -19,7 +19,7 @@ impl RemoteNodeClient {
         Ok(Self {
             url,
             http_client,
-            api_client: IrysApiClient::new(),
+            api_client: IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES),
         })
     }
 
