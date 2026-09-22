@@ -737,9 +737,13 @@ impl IrysNode {
             .expect("expected genesis block from http api");
 
         // Fetch associated commitment transactions
-        let commitments = fetch_genesis_commitments(trusted_peer, &genesis_block)
-            .await
-            .expect("Must be able to read genesis commitment tx from trusted peer");
+        let commitments = fetch_genesis_commitments(
+            trusted_peer,
+            &genesis_block,
+            self.config.node_config.max_peer_response_bytes,
+        )
+        .await
+        .expect("Must be able to read genesis commitment tx from trusted peer");
 
         // Validate the fetched genesis block
         if !genesis_block.is_signature_valid() {
@@ -1740,6 +1744,7 @@ impl IrysNode {
             config.peer_id(),
             receivers.gossip_broadcast,
             runtime_handle.clone(),
+            config.node_config.max_peer_response_bytes,
         );
         let sync_state = p2p_service.sync_state.clone();
 

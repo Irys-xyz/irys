@@ -243,6 +243,7 @@ impl PeerNetworkServiceInner {
                 config.node_config.miner_address(),
                 config.peer_id(),
                 runtime_handle.clone(),
+                config.node_config.max_peer_response_bytes,
             ),
             chain_id: config.consensus.chain_id,
             peer_address,

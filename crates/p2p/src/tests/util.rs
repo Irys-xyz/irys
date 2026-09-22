@@ -413,6 +413,7 @@ impl GossipServiceTestFixture {
             self.config.peer_id(),
             self.gossip_receiver.take().expect("to take receiver"),
             tokio::runtime::Handle::current(),
+            self.config.node_config.max_peer_response_bytes,
         );
         info!("Starting gossip service on port {}", self.gossip_port);
         // Reuse the listener bound at construction rather than re-binding the
@@ -1089,6 +1090,7 @@ pub(crate) fn data_handler_stub(
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
             tokio::runtime::Handle::current(),
+            irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,
@@ -1152,6 +1154,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
             tokio::runtime::Handle::current(),
+            irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,

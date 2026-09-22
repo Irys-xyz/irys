@@ -121,23 +121,50 @@ pub use irys_types::{TransactionStatus, TransactionStatusResponse};
 #[derive(Clone, Debug)]
 pub struct IrysApiClient {
     pub client: Client,
+    max_peer_response_bytes: u64,
 }
 
 impl Default for IrysApiClient {
     fn default() -> Self {
-        Self::new()
+        Self::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES)
     }
 }
 
 impl IrysApiClient {
-    pub fn new() -> Self {
+    pub fn new(max_peer_response_bytes: u64) -> Self {
         Self {
             client: Client::builder()
                 .timeout(CLIENT_TIMEOUT)
                 .read_timeout(CLIENT_TIMEOUT)
                 .build()
-                .unwrap(),
+                .expect("reqwest client builds with a fixed timeout"),
+            max_peer_response_bytes,
         }
+    }
+
+    async fn read_capped_bytes(&self, mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+        let cap = self.max_peer_response_bytes;
+        if let Some(len) = response.content_length()
+            && len > cap
+        {
+            return Err(format!(
+                "peer response Content-Length {len} exceeds cap of {cap} bytes"
+            ));
+        }
+        let mut buf = Vec::new();
+        let mut total = 0u64;
+        loop {
+            let next = response.chunk().await.map_err(|err| err.to_string())?;
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk_len = u64::try_from(chunk.len())
+                .map_err(|_| "peer response chunk length does not fit in u64".to_string())?;
+            total = irys_types::accumulate_response_bytes(total, chunk_len, cap)
+                .map_err(|_| format!("peer response exceeds cap of {cap} bytes"))?;
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
     }
 
     pub(crate) async fn make_request<RESBODY: DeserializeOwned, REQBODY: Serialize>(
@@ -172,18 +199,31 @@ impl IrysApiClient {
 
         match status {
             StatusCode::OK => {
-                let text = response.text().await?;
+                let bytes = self
+                    .read_capped_bytes(response)
+                    .await
+                    .map_err(|error| eyre::eyre!(error))?;
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|_| eyre::eyre!("peer response is not valid utf-8"))?;
                 if text.trim().is_empty() {
                     return Ok(None);
                 }
-                let body: RESBODY = serde_json::from_str(&text).map_err(|e| {
+                let body: RESBODY = serde_json::from_str(text).map_err(|e| {
                     eyre::eyre!("{}: Failed to parse JSON: {} - Response: {}", url, e, text)
                 })?;
                 Ok(Some(body))
             }
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
-                let error_text = response.text().await.unwrap_or_default();
+                let error_text = match self.read_capped_bytes(response).await {
+                    Ok(bytes) => String::from_utf8(bytes)
+                        .unwrap_or_else(|_| "peer response is not valid utf-8".to_string()),
+                    Err(cap_error) => {
+                        return Err(eyre::eyre!(
+                            "API request {url} failed with status: {status} - {cap_error}"
+                        ));
+                    }
+                };
                 Err(eyre::eyre!(
                     "API request {} failed with status: {} - {}",
                     url,
@@ -722,5 +762,143 @@ mod tests {
         let base = Url::parse(base).unwrap();
         let result = extend_url(&base, segments).unwrap();
         assert_eq!(result.as_str(), expected);
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    fn spawn_raw(response_prefix: &'static [u8], then_body: &'static [u8]) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut req = [0u8; 2048];
+            let _ = stream.read(&mut req);
+            stream.write_all(response_prefix).expect("headers");
+            if !then_body.is_empty() {
+                stream.write_all(then_body).expect("body");
+            }
+            stream.flush().expect("flush");
+            let mut sink = [0u8; 64];
+            let _ = stream.read(&mut sink);
+        });
+        // The accept thread needs the socket before the client connects.
+        // The gossip client's existing mock server waits the same 50ms.
+        std::thread::sleep(Duration::from_millis(50));
+        port
+    }
+
+    #[tokio::test]
+    async fn content_length_over_cap_fails_before_the_timeout() {
+        let port = spawn_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n", b"");
+        let client = IrysApiClient::new(8);
+        let started = Instant::now();
+        let err = client
+            .make_request_url::<serde_json::Value, ()>(
+                &format!("http://127.0.0.1:{port}/v1/x"),
+                Method::GET,
+                None,
+            )
+            .await
+            .expect_err("over-cap Content-Length");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "waited {:?} — the reader consumed the body or the timeout",
+            started.elapsed()
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("exceeds cap"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn chunked_byte_past_the_cap_fails_before_eof() {
+        // Two complete chunks (8 bytes, then 1). The terminating 0-chunk is withheld.
+        let port = spawn_raw(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"8\r\n12345678\r\n1\r\nX\r\n",
+        );
+        let client = IrysApiClient::new(8);
+        let started = Instant::now();
+        let err = client
+            .make_request_url::<serde_json::Value, ()>(
+                &format!("http://127.0.0.1:{port}/v1/x"),
+                Method::GET,
+                None,
+            )
+            .await
+            .expect_err("ninth byte");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "waited {:?} for a withheld EOF",
+            started.elapsed()
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("exceeds cap"), "{msg}");
+        assert!(
+            !msg.contains("12345678"),
+            "payload leaked into the error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_cap_json_is_parsed() {
+        let port = spawn_raw(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\r\n",
+            b"{\"a\":1}",
+        );
+        let client = IrysApiClient::new(7);
+        let body = client
+            .make_request_url::<serde_json::Value, ()>(
+                &format!("http://127.0.0.1:{port}/v1/x"),
+                Method::GET,
+                None,
+            )
+            .await
+            .expect("exact cap")
+            .expect("body");
+        assert_eq!(body["a"], 1);
+    }
+
+    #[tokio::test]
+    async fn non_success_over_cap_keeps_the_diagnostic() {
+        let port = spawn_raw(
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 9\r\n\r\n",
+            b"",
+        );
+        let client = IrysApiClient::new(8);
+        let err = client
+            .make_request_url::<serde_json::Value, ()>(
+                &format!("http://127.0.0.1:{port}/v1/x"),
+                Method::GET,
+                None,
+            )
+            .await
+            .expect_err("500 over cap");
+        let msg = err.to_string();
+        assert!(msg.contains("exceeds cap"), "{msg}");
+        assert!(msg.contains("500"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn non_success_under_cap_still_includes_the_body() {
+        let port = spawn_raw(
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\n\r\n",
+            b"nope",
+        );
+        let client = IrysApiClient::new(8);
+        let err = client
+            .make_request_url::<serde_json::Value, ()>(
+                &format!("http://127.0.0.1:{port}/v1/x"),
+                Method::GET,
+                None,
+            )
+            .await
+            .expect_err("500 under cap");
+        assert!(err.to_string().contains("nope"), "{}", err);
     }
 }

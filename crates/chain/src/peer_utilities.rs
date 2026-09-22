@@ -59,8 +59,9 @@ pub async fn fetch_genesis_block(
 pub async fn fetch_genesis_commitments(
     peer: &SocketAddr,
     irys_block_header: &IrysBlockHeader,
+    max_peer_response_bytes: u64,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(max_peer_response_bytes);
     let system_txs: Vec<H256> = irys_block_header
         .system_ledgers
         .iter()

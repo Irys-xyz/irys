@@ -218,6 +218,7 @@ pub struct GossipClient {
     pub mining_address: IrysAddress,
     pub peer_id: IrysPeerId,
     client: Client,
+    max_peer_response_bytes: u64,
     circuit_breaker: CircuitBreakerManager<IrysPeerId>,
     runtime_handle: tokio::runtime::Handle,
     /// Where the next `hydrate_peers_online_status` pass starts in the peer
@@ -267,6 +268,7 @@ impl GossipClient {
         mining_address: IrysAddress,
         peer_id: IrysPeerId,
         runtime_handle: tokio::runtime::Handle,
+        max_peer_response_bytes: u64,
     ) -> Self {
         Self::with_circuit_breaker_config(
             timeout,
@@ -274,6 +276,7 @@ impl GossipClient {
             peer_id,
             CircuitBreakerConfig::p2p_defaults(),
             runtime_handle,
+            max_peer_response_bytes,
         )
     }
 
@@ -284,6 +287,7 @@ impl GossipClient {
         peer_id: IrysPeerId,
         circuit_config: CircuitBreakerConfig,
         runtime_handle: tokio::runtime::Handle,
+        max_peer_response_bytes: u64,
     ) -> Self {
         let circuit_breaker = CircuitBreakerManager::new(circuit_config);
 
@@ -294,6 +298,7 @@ impl GossipClient {
                 .timeout(timeout)
                 .build()
                 .expect("Failed to create reqwest client"),
+            max_peer_response_bytes,
             circuit_breaker,
             runtime_handle,
             hydrate_cursor: Arc::new(AtomicUsize::new(0)),
@@ -303,6 +308,31 @@ impl GossipClient {
 
     pub fn internal_client(&self) -> &Client {
         &self.client
+    }
+
+    async fn read_capped_bytes(&self, mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+        let cap = self.max_peer_response_bytes;
+        if let Some(len) = response.content_length()
+            && len > cap
+        {
+            return Err(format!(
+                "peer response Content-Length {len} exceeds cap of {cap} bytes"
+            ));
+        }
+        let mut buf = Vec::new();
+        let mut total = 0u64;
+        loop {
+            let next = response.chunk().await.map_err(|err| err.to_string())?;
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk_len = u64::try_from(chunk.len())
+                .map_err(|_| "peer response chunk length does not fit in u64".to_string())?;
+            total = irys_types::accumulate_response_bytes(total, chunk_len, cap)
+                .map_err(|_| format!("peer response exceeds cap of {cap} bytes"))?;
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
     }
 
     /// Get circuit breaker metrics for monitoring
@@ -581,7 +611,10 @@ impl GossipClient {
                         resp.status().to_string(),
                     ))
                 } else {
-                    match resp.json::<GossipResponse<wire_types::NodeInfoV1>>().await {
+                    match self.read_capped_bytes(resp).await.and_then(|bytes| {
+                        serde_json::from_slice::<GossipResponse<wire_types::NodeInfoV1>>(&bytes)
+                            .map_err(|error| error.to_string())
+                    }) {
                         Ok(GossipResponse::Accepted(wire_info)) => Ok(wire_info.into()),
                         Ok(GossipResponse::Rejected(reason)) => Err(GossipClientError::GetRequest(
                             peer.gossip.to_string(),
@@ -589,7 +622,7 @@ impl GossipClient {
                         )),
                         Err(e) => Err(GossipClientError::GetJsonResponsePayload(
                             peer.gossip.to_string(),
-                            e.to_string(),
+                            e,
                         )),
                     }
                 }
@@ -626,8 +659,12 @@ impl GossipClient {
             ));
         }
 
+        let bytes = self
+            .read_capped_bytes(response)
+            .await
+            .map_err(|error| GossipClientError::GetJsonResponsePayload(peer.to_string(), error))?;
         let response: GossipResponse<Vec<PeerAddress>> =
-            response.json().await.map_err(|error| {
+            serde_json::from_slice(&bytes).map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
 
@@ -670,8 +707,12 @@ impl GossipClient {
             ));
         }
 
+        let bytes = self
+            .read_capped_bytes(response)
+            .await
+            .map_err(|error| GossipClientError::GetJsonResponsePayload(peer.to_string(), error))?;
         let response: GossipResponse<wire_types::HandshakeResponseV1> =
-            response.json().await.map_err(|error| {
+            serde_json::from_slice(&bytes).map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
 
@@ -765,8 +806,12 @@ impl GossipClient {
             ));
         }
 
+        let bytes = self
+            .read_capped_bytes(response)
+            .await
+            .map_err(|error| GossipClientError::GetJsonResponsePayload(peer.to_string(), error))?;
         let response: GossipResponse<wire_types::HandshakeResponseV2> =
-            response.json().await.map_err(|error| {
+            serde_json::from_slice(&bytes).map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
 
@@ -848,10 +893,12 @@ impl GossipClient {
                         resp.status().to_string(),
                     ))
                 } else {
-                    match resp
-                        .json::<GossipResponse<Vec<wire_types::BlockIndexItemV1>>>()
-                        .await
-                    {
+                    match self.read_capped_bytes(resp).await.and_then(|bytes| {
+                        serde_json::from_slice::<GossipResponse<Vec<wire_types::BlockIndexItemV1>>>(
+                            &bytes,
+                        )
+                        .map_err(|error| error.to_string())
+                    }) {
                         Ok(GossipResponse::Accepted(wire_items)) => {
                             Ok(wire_items.into_iter().map(Into::into).collect())
                         }
@@ -861,7 +908,7 @@ impl GossipClient {
                         )),
                         Err(e) => Err(GossipClientError::GetJsonResponsePayload(
                             peer.gossip.to_string(),
-                            e.to_string(),
+                            e,
                         )),
                     }
                 }
@@ -922,7 +969,10 @@ impl GossipClient {
             Many(Vec<u32>),
             Single(u32),
         }
-        let parsed: ProtocolVersionsRepr = response.json().await.map_err(|error| {
+        let bytes = self.read_capped_bytes(response).await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error)
+        })?;
+        let parsed: ProtocolVersionsRepr = serde_json::from_slice(&bytes).map_err(|error| {
             GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
         })?;
         let versions = match parsed {
@@ -1002,13 +1052,22 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<bool> = match response.json().await {
-            Ok(resp) => resp,
+        let response: GossipResponse<bool> = match self.read_capped_bytes(response).await {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    self.circuit_breaker.record_failure(peer_id);
+                    return Err(GossipClientError::GetJsonResponsePayload(
+                        peer_addr_str,
+                        error.to_string(),
+                    ));
+                }
+            },
             Err(error) => {
                 self.circuit_breaker.record_failure(peer_id);
                 return Err(GossipClientError::GetJsonResponsePayload(
                     peer_addr_str,
-                    error.to_string(),
+                    error,
                 ));
             }
         };
@@ -1150,8 +1209,11 @@ impl GossipClient {
 
         match status {
             StatusCode::OK => {
-                let text = response.text().await.map_err(|e| {
-                    GossipError::Network(format!("Failed to read response from {}: {}", url, e))
+                let bytes = self.read_capped_bytes(response).await.map_err(|e| {
+                    GossipError::Network(format!("Failed to read response from {url}: {e}"))
+                })?;
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    GossipError::Network(format!("peer response from {url} is not valid utf-8"))
                 })?;
 
                 if text.trim().is_empty() {
@@ -1167,7 +1229,15 @@ impl GossipClient {
                 Ok(parsed)
             }
             _ => {
-                let error_text = response.text().await.unwrap_or_default();
+                let error_text = match self.read_capped_bytes(response).await {
+                    Ok(bytes) => String::from_utf8(bytes)
+                        .unwrap_or_else(|_| "peer response is not valid utf-8".to_string()),
+                    Err(cap_error) => {
+                        return Err(GossipError::Network(format!(
+                            "API request {url} failed with status: {status} - {cap_error}"
+                        )));
+                    }
+                };
                 Err(GossipError::Network(format!(
                     "API request {} failed with status: {} - {}",
                     url, status, error_text
@@ -1457,8 +1527,11 @@ impl GossipClient {
 
         match status {
             StatusCode::OK => {
-                let text = response.text().await.map_err(|e| {
-                    GossipError::Network(format!("Failed to read response from {}: {}", url, e))
+                let bytes = self.read_capped_bytes(response).await.map_err(|e| {
+                    GossipError::Network(format!("Failed to read response from {url}: {e}"))
+                })?;
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    GossipError::Network(format!("peer response from {url} is not valid utf-8"))
                 })?;
 
                 if text.trim().is_empty() {
@@ -1474,7 +1547,15 @@ impl GossipClient {
                 Ok(body)
             }
             _ => {
-                let error_text = response.text().await.unwrap_or_default();
+                let error_text = match self.read_capped_bytes(response).await {
+                    Ok(bytes) => String::from_utf8(bytes)
+                        .unwrap_or_else(|_| "peer response is not valid utf-8".to_string()),
+                    Err(cap_error) => {
+                        return Err(GossipError::Network(format!(
+                            "API request {url} failed with status: {status} - {cap_error}"
+                        )));
+                    }
+                };
                 Err(GossipError::Network(format!(
                     "API request {} failed with status: {} - {}",
                     url, status, error_text
@@ -2562,10 +2643,14 @@ impl GossipClient {
 
                 let res: GossipResult<GossipResponse<Vec<IrysAddress>>> = match status {
                     StatusCode::OK => {
-                        let text = response.text().await.map_err(|e| {
+                        let bytes = self.read_capped_bytes(response).await.map_err(|e| {
                             PeerNetworkError::FailedToRequestData(format!(
-                                "Failed to read response from {}: {}",
-                                url, e
+                                "Failed to read response from {url}: {e}"
+                            ))
+                        })?;
+                        let text = String::from_utf8(bytes).map_err(|_| {
+                            PeerNetworkError::FailedToRequestData(format!(
+                                "peer response from {url} is not valid utf-8"
                             ))
                         })?;
 
@@ -2585,7 +2670,11 @@ impl GossipClient {
                         Ok(gossip_response)
                     }
                     _ => {
-                        let error_text = response.text().await.unwrap_or_default();
+                        let error_text = match self.read_capped_bytes(response).await {
+                            Ok(bytes) => String::from_utf8(bytes)
+                                .unwrap_or_else(|_| "peer response is not valid utf-8".to_string()),
+                            Err(cap_error) => cap_error,
+                        };
                         Err(PeerNetworkError::FailedToRequestData(format!(
                             "API request {} failed with status: {} - {}",
                             url, status, error_text
@@ -2734,6 +2823,7 @@ mod tests {
                     IrysPeerId::from([1_u8; 20]),
                     CircuitBreakerConfig::testing(),
                     tokio::runtime::Handle::current(),
+                    irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
                 ),
             }
         }
@@ -2746,9 +2836,84 @@ mod tests {
                     IrysPeerId::from([1_u8; 20]),
                     CircuitBreakerConfig::testing(),
                     tokio::runtime::Handle::current(),
+                    irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
                 ),
             }
         }
+    }
+
+    fn client_with_cap(cap: u64) -> GossipClient {
+        GossipClient::with_circuit_breaker_config(
+            Duration::from_secs(5),
+            IrysAddress::from([1_u8; 20]),
+            IrysPeerId::from([1_u8; 20]),
+            CircuitBreakerConfig::testing(),
+            tokio::runtime::Handle::current(),
+            cap,
+        )
+    }
+
+    fn spawn_raw(response_prefix: &'static [u8], then_body: &'static [u8]) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut req = [0u8; 2048];
+            let _ = stream.read(&mut req);
+            stream.write_all(response_prefix).expect("headers");
+            if !then_body.is_empty() {
+                stream.write_all(then_body).expect("body");
+            }
+            stream.flush().expect("flush");
+            let mut sink = [0u8; 64];
+            let _ = stream.read(&mut sink);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        port
+    }
+
+    #[tokio::test]
+    async fn get_peer_list_rejects_an_over_cap_content_length_before_the_timeout() {
+        let port = spawn_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n", b"");
+        let client = client_with_cap(8);
+        let started = std::time::Instant::now();
+        let err = client
+            .get_peer_list(format!("127.0.0.1:{port}").parse().expect("addr"))
+            .await
+            .expect_err("over cap");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "waited {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("exceeds cap"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn capped_reader_rejects_the_chunk_past_the_cap_before_eof() {
+        let port = spawn_raw(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"8\r\n12345678\r\n1\r\nX\r\n",
+        );
+        let client = client_with_cap(8);
+        let response = client
+            .internal_client()
+            .get(format!("http://127.0.0.1:{port}/gossip"))
+            .send()
+            .await
+            .expect("headers");
+        let started = std::time::Instant::now();
+        let err = client
+            .read_capped_bytes(response)
+            .await
+            .expect_err("ninth byte");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "waited {:?}",
+            started.elapsed()
+        );
+        assert!(err.contains("exceeds cap"), "{err}");
+        assert!(!err.contains("12345678"), "{err}");
     }
 
     fn get_free_port() -> u16 {
@@ -3730,6 +3895,7 @@ mod tests {
                 IrysPeerId::from([1_u8; 20]),
                 CircuitBreakerConfig::p2p_defaults(),
                 tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
             )
         }
 
