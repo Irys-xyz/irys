@@ -177,6 +177,11 @@ impl Config {
             self.consensus.num_partitions_per_slot > 0,
             "num_partitions_per_slot must be > 0"
         );
+        // Zero multiplies OneYear/ThirtyDay term fees down to the minimum USD fee.
+        ensure!(
+            self.consensus.num_partitions_per_term_ledger_slot > 0,
+            "num_partitions_per_term_ledger_slot must be > 0"
+        );
 
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
         let minimum_step_capacity = self
@@ -1934,6 +1939,12 @@ mod validate_tests {
             c.num_partitions_per_slot = 0;
         },
         "num_partitions_per_slot"
+    )]
+    #[case::zero_num_partitions_per_term_ledger_slot(
+        |c: &mut ConsensusConfig| {
+            c.num_partitions_per_term_ledger_slot = 0;
+        },
+        "num_partitions_per_term_ledger_slot"
     )]
     #[case::zero_vdf_checkpoints(
         |c: &mut ConsensusConfig| {
