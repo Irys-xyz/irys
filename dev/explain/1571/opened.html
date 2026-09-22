@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1571 — reject a zero term-ledger replica count</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #161923;
+    --panel-2: #1d2130;
+    --border: #2a2f40;
+    --text: #dfe3ee;
+    --muted: #9aa3b8;
+    --accent: #7aa2f7;
+    --warn: #f6b352;
+    --danger: #f26d6d;
+    --ok: #7fd97f;
+    --code-bg: #10131c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header.page {
+    padding: 1.75rem 1.5rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--panel-2), var(--bg));
+  }
+  header.page h1 {
+    margin: 0 0 0.35rem;
+    font-size: 1.5rem;
+  }
+  header.page .meta {
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  header.page .meta code {
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.85rem;
+  }
+  nav.toc {
+    max-width: 900px;
+    margin: 1.25rem auto 0;
+    padding: 0.9rem 1.1rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  nav.toc strong { color: var(--muted); font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; }
+  nav.toc ul { margin: 0.5rem 0 0; padding-left: 1.1rem; }
+  nav.toc li { margin: 0.2rem 0; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  main {
+    max-width: 900px;
+    margin: 1.5rem auto 4rem;
+    padding: 0 1.5rem;
+  }
+  section {
+    margin-bottom: 2.25rem;
+    scroll-margin-top: 1rem;
+  }
+  section h2 {
+    font-size: 1.15rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin-bottom: 0.9rem;
+  }
+  section h3 {
+    font-size: 1rem;
+    color: var(--muted);
+    margin: 1.1rem 0 0.5rem;
+  }
+  p { margin: 0.6rem 0; }
+  ul.plain { padding-left: 1.2rem; }
+  ul.plain li { margin: 0.45rem 0; }
+  a.cite {
+    color: var(--accent);
+    text-decoration: none;
+    font-family: "SF Mono", "Fira Code", Menlo, Consolas, monospace;
+    font-size: 0.92em;
+    background: rgba(122,162,247,0.08);
+    padding: 0.05rem 0.3rem;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  a.cite:hover { background: rgba(122,162,247,0.2); text-decoration: underline; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  code { font-family: "SF Mono", "Fira Code", Menlo, Consolas, monospace; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75rem 0 1rem;
+    font-size: 0.92rem;
+  }
+  table th, table td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.65rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  table th {
+    background: var(--panel-2);
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--panel);
+    border-radius: 0 8px 8px 0;
+    padding: 0.75rem 1rem;
+    margin: 0.9rem 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.danger { border-left-color: var(--danger); }
+  .callout.ok { border-left-color: var(--ok); }
+  .callout .label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-bottom: 0.3rem;
+    display: block;
+  }
+  .diagram {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 1rem 0;
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+  }
+  .diagram .box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    flex: 1 1 160px;
+    min-width: 150px;
+  }
+  .diagram .box .title { font-weight: 600; margin-bottom: 0.25rem; color: var(--accent); }
+  .diagram .box .data { color: var(--muted); font-family: monospace; font-size: 0.8rem; }
+  .diagram .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.6rem;
+    color: var(--muted);
+    font-size: 1.1rem;
+    flex: 0 0 auto;
+  }
+  .sev-high { color: var(--danger); font-weight: 600; }
+  .sev-med { color: var(--warn); font-weight: 600; }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: var(--panel-2);
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  footer {
+    max-width: 900px;
+    margin: 0 auto 3rem;
+    padding: 0 1.5rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  @media (max-width: 600px) {
+    main, nav.toc, footer { padding-left: 1rem; padding-right: 1rem; }
+    table { font-size: 0.82rem; }
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>fix(config): reject a zero term-ledger replica count</h1>
+  <div class="meta">
+    PR #1571 · Irys-xyz/irys · expert mode · commit <code>866fc30ffb40</code> ·
+    repo root for citations: checkout root at <code>866fc30ffb40</code>
+  </div>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#intent">Intent &amp; approach</a></li>
+    <li><a href="#delta">Delta semantics</a></li>
+    <li><a href="#cross-file">Cross-file impact</a></li>
+    <li><a href="#review-focus">Review-focus map</a></li>
+    <li><a href="#open-questions">Open questions</a></li>
+  </ul>
+</nav>
+
+<main>
+
+<section id="intent">
+  <h2>Intent &amp; approach</h2>
+
+  <p>
+  <code>Config::validate</code> already rejects <code>num_partitions_per_slot == 0</code>
+  (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L176">crates/types/src/config/mod.rs:176</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L179">179</a>)
+  because it drives <code>log10(0)</code>/NaN math in genesis capacity computation. It had no analogous guard for
+  <code>num_partitions_per_term_ledger_slot</code>, the independently-configurable replica count used only by the
+  term ledgers (<code>OneYear</code>/<code>ThirtyDay</code>)
+  (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/consensus.rs#L99">crates/types/src/config/consensus.rs:99</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/consensus.rs#L101">101</a>).
+  Zero in that field is not a crash hazard — it is a pricing hazard: it multiplies the term-fee's replica cost down
+  to zero, which then falls back to the configured minimum USD fee for any OneYear/ThirtyDay storage request,
+  regardless of size or duration.
+  </p>
+
+  <p>
+  The fix adds one symmetric <code>ensure!</code> immediately after the sibling
+  <code>num_partitions_per_slot</code> check
+  (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L180">crates/types/src/config/mod.rs:180</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L184">184</a>),
+  plus one new <code>#[case]</code> row in the existing rstest table that already documents
+  "runtime panic / freeze configs that used to pass validate()"
+  (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L1935">crates/types/src/config/mod.rs:1935</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L1948">1948</a>).
+  Nothing else in the diff changes.
+  </p>
+
+  <div class="diagram">
+    <div class="box">
+      <div class="title">TOML config</div>
+      <div class="data">num_partitions_per_term_ledger_slot = 0</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="box">
+      <div class="title">Config::validate()</div>
+      <div class="data">mod.rs:181 ensure! &gt; 0</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="box">
+      <div class="title">before: Ok(())</div>
+      <div class="data">node boots, mispriced fees</div>
+    </div>
+  </div>
+  <div class="diagram">
+    <div class="box">
+      <div class="title">TOML config</div>
+      <div class="data">num_partitions_per_term_ledger_slot = 0</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="box">
+      <div class="title">Config::validate()</div>
+      <div class="data">mod.rs:181 ensure! &gt; 0</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="box">
+      <div class="title">after: Err(...)</div>
+      <div class="data">chain.rs:567 propagates, node refuses to start</div>
+    </div>
+  </div>
+
+  <p>
+  <strong>Approach chosen:</strong> fail fast at config-load time, gating node startup
+  (<code>config.validate()?;</code> at
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/chain/src/chain.rs#L567">crates/chain/src/chain.rs:567</a>),
+  rather than guarding inside the pricing function itself.
+  </p>
+
+  <div class="callout">
+    <span class="label">Road not taken</span>
+    The zero-guard could instead live inside <code>calculate_term_fee</code> / <code>replica_count</code>
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L510">crates/types/src/storage_pricing.rs:510</a>),
+    which would protect every current and future caller regardless of how its replica count was produced.
+    The PR instead keeps the invariant at the one config-loading path, mirroring the sibling
+    <code>num_partitions_per_slot</code> check's placement. That is consistent with the existing style in this
+    file but leaves the pricing function itself trusting its input unconditionally.
+  </div>
+</section>
+
+<section id="delta">
+  <h2>Delta semantics</h2>
+
+  <p>
+  <strong>New invariant:</strong> <code>ConsensusConfig::num_partitions_per_term_ledger_slot &gt; 0</code>,
+  enforced once, at <code>Config::validate()</code>
+  (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L181">crates/types/src/config/mod.rs:181</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L184">184</a>).
+  Nothing is weakened or removed; the diff is purely additive (one <code>ensure!</code>, one test case).
+  </p>
+
+  <h3>Removed-behavior audit</h3>
+  <table>
+    <thead>
+      <tr><th>Invariant</th><th>Old enforcement site</th><th>New enforcement site</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td colspan="3"><em>None — this diff deletes no lines and weakens no existing check. The table is empty by construction; the change is additive only.</em></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Compatibility</h3>
+  <p>
+  Any config that previously set <code>num_partitions_per_term_ledger_slot = 0</code> and passed validation will now
+  fail at startup via
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/chain/src/chain.rs#L567">crates/chain/src/chain.rs:567</a>.
+  None of the in-repo fixtures hit this: the docker data-sync configs set it to <code>3</code>
+  (e.g. <code>docker/tests/data-sync/configs/irys-1.toml:104</code>), the testnet template sets it to <code>1</code>
+  (<code>crates/config/templates/testnet_config.toml:115</code>), and every
+  <code>ConsensusConfig::testing()</code>-style default in
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/consensus.rs#L786">crates/types/src/config/consensus.rs:786</a>,
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/consensus.rs#L883">883</a>,
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/consensus.rs#L1010">1010</a>
+  sets 10, 1, and 10 respectively — none are zero, matching the PR description's claim that
+  <code>NodeConfig::testing()</code> still passes. This is a breaking change only for a deployed config that had 0 in
+  the field already, which is exactly the case this PR intends to make unrepresentable.
+  </p>
+
+  <h3>Error contract</h3>
+  <p>
+  <code>ensure!</code> returns the same error type (<code>anyhow</code>-style, propagated as <code>eyre::Result</code>
+  by the caller) as every other check in this function, so no new error variant or handling path is introduced —
+  the caller at
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/chain/src/chain.rs#L567">crates/chain/src/chain.rs:567</a>
+  already propagates whatever <code>validate()</code> returns.
+  </p>
+</section>
+
+<section id="cross-file">
+  <h2>Cross-file impact</h2>
+
+  <p>
+  The diff touches only <code>crates/types/src/config/mod.rs</code>. It matters because four consumers currently
+  trust <code>num_partitions_per_term_ledger_slot</code> as a replica-count multiplier without any local zero-guard;
+  none of them are modified by this PR — they are the reason the invariant matters, not sites this PR changes.
+  </p>
+
+  <ul class="plain">
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/api-server/src/routes/price.rs#L230">crates/api-server/src/routes/price.rs:230</a>
+      — the public <code>/price</code> endpoint reads the field as <code>replica_count</code> and feeds it straight
+      into <code>calculate_term_fee</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/api-server/src/routes/price.rs#L232">price.rs:232</a>);
+      relies entirely on the config having passed <code>validate()</code> at startup.
+    </li>
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/actors/src/tx_selector/mod.rs#L714">crates/actors/src/tx_selector/mod.rs:714</a>
+      — mempool transaction selection recomputes the expected term fee from the same field to decide whether a
+      pending tx's declared <code>term_fee</code> is sufficient before including it in a block
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/actors/src/tx_selector/mod.rs#L715">mod.rs:715</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/actors/src/tx_selector/mod.rs#L728">728</a>).
+    </li>
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/actors/src/mempool_service/data_txs.rs#L397">crates/actors/src/mempool_service/data_txs.rs:397</a>
+      — the same check runs again at ingress time, before a term-ledger tx is admitted to the mempool at all.
+    </li>
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/actors/src/block_validation.rs#L6133">crates/actors/src/block_validation.rs:6133</a>
+      — block state-validation's <code>calculate_term_storage_base_network_fee</code>
+      (defined at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/actors/src/block_validation.rs#L5988">block_validation.rs:5988</a>)
+      takes the same field as a direct argument; this path runs on every block a validating node processes, not
+      just on the local node's own txs.
+    </li>
+  </ul>
+
+  <p>
+  All four sites call the same underlying
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L510">calculate_term_fee (storage_pricing.rs:510)</a>,
+  which multiplies duration-adjusted cost by <code>replica_count</code> via
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L325">storage_pricing.rs:325</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L332">332</a>
+  (<code>safe_mul(self.amount, U256::from(replicas))</code> — a zero multiplicand silently yields zero, no error)
+  and then clamps up to <code>config.minimum_term_fee_usd</code> whenever the computed fee is below it
+  (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L544">storage_pricing.rs:544</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L548">548</a>).
+  This is the exact mechanism the PR description names: replica_count=0 → base_fee=0 → clamp to minimum, regardless
+  of the requested byte count or storage duration.
+  </p>
+</section>
+
+<section id="review-focus">
+  <h2>Review-focus map</h2>
+
+  <table>
+    <thead>
+      <tr><th>Location</th><th>Concern</th><th>Failure scenario</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="badge sev-med">med</span> <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L181">mod.rs:181</a></td>
+        <td>The guard only fires when <code>Config::validate()</code> actually runs on the config that reaches the four pricing consumers.</td>
+        <td>Any test harness, tool, or future code path that builds a <code>ConsensusConfig</code>/<code>Config</code> directly and hands it to <code>calculate_term_fee</code> without going through <code>validate()</code> (e.g. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/api-server/src/routes/price.rs#L230">price.rs:230</a> or <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/actors/src/tx_selector/mod.rs#L714">tx_selector/mod.rs:714</a>) still reintroduces the minimum-fee underpricing this PR closes, silently. Worth a dedicated code-review pass to enumerate every construction path for a live <code>ConsensusConfig</code> that reaches those four call sites without an intervening <code>validate()</code>.</td>
+      </tr>
+      <tr>
+        <td><span class="badge sev-med">med</span> <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L510">storage_pricing.rs:510</a></td>
+        <td><code>calculate_term_fee</code> itself still has no defensive check on <code>number_of_ingress_proofs_total == 0</code>; it silently produces the minimum fee rather than erroring.</td>
+        <td>This PR closes the one currently-known path that hands the function a zero. Any future caller (a new endpoint, a new consumer of the term-ledger pricing path) that passes 0 — directly, or via a config that skipped <code>validate()</code> — gets the same silent minimum-fee fallback, not an error, with no signal that anything went wrong.</td>
+      </tr>
+      <tr>
+        <td><span class="badge">low</span> <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L1943">mod.rs:1943</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/config/mod.rs#L1948">1948</a></td>
+        <td>The new test only asserts that <code>validate()</code> rejects the zero with the right error substring; it doesn't independently exercise the pricing bug the PR description names.</td>
+        <td>The claim that "num_partitions_per_term_ledger_slot == 0 prices OneYear/ThirtyDay at the minimum USD fee" is stated in the PR body and corroborated by reading <a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L544">storage_pricing.rs:544</a>-<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L548">548</a>, but no test in this diff asserts on <code>calculate_term_fee</code>'s output directly, so a future refactor of that clamp could silently reintroduce the mispricing without this test catching it.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>These are attention pointers, not verified findings. The first two rows are the ones worth chasing down with a dedicated code-review pass before merge; the third is a coverage gap rather than a suspected bug.</p>
+</section>
+
+<section id="open-questions">
+  <h2>Open questions</h2>
+  <ul class="plain">
+    <li>
+      Is <code>Config::validate()</code> guaranteed to run on every path where a <code>ConsensusConfig</code> reaches
+      <code>calculate_term_fee</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L510">storage_pricing.rs:510</a>)
+      — including test-only configs in <code>crates/chain-tests</code>, the multiversion-tests tooling, or the
+      docker data-sync fixtures? None of those currently set the value to 0, but the PR doesn't state whether that
+      was checked deliberately or is incidental.
+    </li>
+    <li>
+      Was a deployed or genesis config found in the field with <code>num_partitions_per_term_ledger_slot == 0</code>
+      that motivated this fix, or is this a defensive fix from code inspection? The PR's "Related Issue(s)" field is
+      unfilled, so it's unclear whether the underpricing was observed in production/testnet or caught pre-emptively.
+    </li>
+    <li>
+      Should the zero-guard also live inside <code>calculate_term_fee</code> / <code>replica_count</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/866fc30ffb403b2f7df91ad41be84cb5102f8139/crates/types/src/storage_pricing.rs#L325">storage_pricing.rs:325</a>),
+      so the invariant travels with the function rather than depending on every caller's config having passed
+      <code>validate()</code> first? This is the "road not taken" named in Intent &amp; approach above.
+    </li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  Expert-mode explanation generated for PR #1571, CI mode. Citations resolve against commit
+  <code>866fc30ffb403b2f7df91ad41be84cb5102f8139</code>. Risk callouts above are attention pointers for review, not
+  verified findings — run a dedicated code-review pass on the flagged rows before relying on them.
+</footer>
+
+</body>
+</html>
