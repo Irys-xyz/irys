@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1574 — fix(p2p): cap a single peer HTTP response body</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-border: #2a2f3d;
+    --text: #dfe3ee;
+    --muted: #9aa3b8;
+    --accent: #6fb3ff;
+    --accent-2: #8de3b8;
+    --warn-bg: #3a2a12;
+    --warn-border: #8a5a1a;
+    --danger-bg: #3a1717;
+    --danger-border: #8a2a2a;
+    --info-bg: #142a3a;
+    --info-border: #1f5a8a;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    padding: 28px clamp(16px, 4vw, 48px) 18px;
+    border-bottom: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, #141826, #0f1117);
+  }
+  header h1 {
+    margin: 0 0 6px;
+    font-size: 1.5rem;
+    color: #fff;
+  }
+  header .meta {
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+  header .meta code { color: var(--accent); }
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 24px clamp(16px, 4vw, 48px) 80px;
+  }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 28px;
+  }
+  nav.toc h2 {
+    margin-top: 0;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+  nav.toc ol {
+    columns: 2;
+    -moz-columns: 2;
+    -webkit-columns: 2;
+    padding-left: 1.2em;
+    margin: 0;
+  }
+  @media (max-width: 640px) {
+    nav.toc ol { columns: 1; }
+  }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section {
+    margin-bottom: 40px;
+    scroll-margin-top: 16px;
+  }
+  section h2 {
+    font-size: 1.2rem;
+    color: #fff;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+  }
+  section h3 {
+    font-size: 1rem;
+    color: var(--accent-2);
+    margin-bottom: 8px;
+  }
+  a.cite {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    color: var(--accent);
+    background: rgba(111, 179, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  a.cite:hover { background: rgba(111, 179, 255, 0.18); text-decoration: underline; }
+  pre {
+    background: #0b0d13;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    color: #cfe3ff;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0 6px;
+    font-size: 0.92rem;
+  }
+  th, td {
+    border: 1px solid var(--panel-border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: #1c2130;
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  td.unaccounted { color: #ffb0b0; font-weight: 600; }
+  ul.clean { padding-left: 1.3em; }
+  ul.clean li { margin-bottom: 8px; }
+  .callout {
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 14px 0;
+    border: 1px solid var(--panel-border);
+  }
+  .callout.info { background: var(--info-bg); border-color: var(--info-border); }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+  .callout.danger { background: var(--danger-bg); border-color: var(--danger-border); }
+  .callout strong.tag {
+    display: block;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .rank {
+    display: inline-block;
+    min-width: 1.4em;
+    text-align: center;
+    background: #262c3d;
+    color: var(--accent-2);
+    border-radius: 50%;
+    font-size: 0.8rem;
+    padding: 1px 6px;
+    margin-right: 6px;
+    font-family: var(--mono);
+  }
+  .diagram {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+    margin: 18px 0;
+    font-size: 0.85rem;
+  }
+  .diagram .box {
+    background: #1a2032;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    min-width: 170px;
+    flex: 1 1 170px;
+  }
+  .diagram .box h4 {
+    margin: 0 0 6px;
+    font-size: 0.82rem;
+    color: var(--accent-2);
+  }
+  .diagram .arrow {
+    flex: 0 0 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    text-align: center;
+    padding: 0 4px;
+  }
+  .diagram .arrow .lbl {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+  code.inline {
+    font-family: var(--mono);
+    background: #1c2130;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  footer {
+    color: var(--muted);
+    font-size: 0.82rem;
+    text-align: center;
+    padding: 24px;
+    border-top: 1px solid var(--panel-border);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>fix(p2p): cap a single peer HTTP response body</h1>
+  <div class="meta">
+    PR #1574 · Irys-xyz/irys · expert mode · CI mode · commit
+    <code>8519da8ecc4aa7884ed22c456f6527d59c420d4c</code>
+    · repo root = checkout root · generated 2026-09-22
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#intent">Intent &amp; approach</a></li>
+    <li><a href="#delta">Delta semantics</a></li>
+    <li><a href="#cross-file">Cross-file impact</a></li>
+    <li><a href="#review-focus">Review-focus map</a></li>
+    <li><a href="#open-questions">Open questions</a></li>
+  </ol>
+</nav>
+
+<section id="intent">
+  <h2>Intent &amp; approach</h2>
+  <p>
+    Every place the node reads an HTTP response body from another peer — the API client (<code class="inline">IrysApiClient</code>) and the gossip client (<code class="inline">GossipClient</code>) — previously called <code class="inline">response.text()</code> / <code class="inline">response.json()</code> directly, which buffer the entire body in memory regardless of size. The PR replaces every such call site with a shared streaming reader, <code class="inline">read_capped_bytes</code>, duplicated verbatim in both clients (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L145">crates/api-client/src/lib.rs:145</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/gossip_client.rs#L313">crates/p2p/src/gossip_client.rs:313</a>), which enforces a new configurable ceiling <code class="inline">max_peer_response_bytes</code> (default 32&nbsp;MiB, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/config/node.rs#L906">crates/types/src/config/node.rs:906</a>).
+  </p>
+  <p>
+    The mechanism has two layers: a fast-path rejection on a declared <code class="inline">Content-Length</code> header that already exceeds the cap (no bytes read), and a streaming accumulator that reads via <code class="inline">response.chunk()</code> and calls the pure helper <code class="inline">accumulate_response_bytes</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/peer_response.rs#L11">crates/types/src/peer_response.rs:11</a>) after every chunk, aborting as soon as the running total crosses the cap rather than waiting for EOF. This defeats both a lying <code class="inline">Content-Length</code> and an unbounded chunked-encoding body, and it aborts mid-stream instead of after a full buffer — the tests assert this explicitly by withholding the terminating chunk and checking the call still returns quickly (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L152">crates/api-client/src/lib.rs:152</a>-179 in <code class="inline">cap_tests</code>).
+  </p>
+  <p>
+    The cap is plumbed as a required constructor argument on both clients rather than a global/thread-local default, so every call site that builds an <code class="inline">IrysApiClient</code> or <code class="inline">GossipClient</code> had to be updated to pass <code class="inline">config.node_config.max_peer_response_bytes</code> or the new <code class="inline">DEFAULT_MAX_PEER_RESPONSE_BYTES</code> constant — this is why the diff touches nine call sites across <code class="inline">chain</code>, <code class="inline">chain-tests</code>, and <code class="inline">p2p</code> test fixtures that have nothing to do with the capping logic itself.
+  </p>
+  <div class="callout info">
+    <strong class="tag">Road not taken</strong>
+    A global/static cap (e.g. a <code class="inline">OnceLock</code> or a constant) would have avoided touching nine constructor call sites, but would have made the cap unconfigurable per-node and untestable per-call (the new tests rely on constructing a client with an artificially tiny cap, e.g. <code class="inline">IrysApiClient::new(8)</code>). The threaded-parameter approach is more invasive but keeps the cap a first-class, validated config field.
+  </div>
+</section>
+
+<section id="delta">
+  <h2>Delta semantics</h2>
+  <h3>Removed-behavior audit</h3>
+  <table>
+    <thead>
+      <tr><th>Invariant removed</th><th>Old enforcement site</th><th>New enforcement / status</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>None — response bodies were previously read to completion unconditionally, i.e. there was no size invariant to remove.</td>
+        <td>—</td>
+        <td>This PR is additive: it introduces a new invariant (bounded body size) rather than removing one. See "new invariants" below.</td>
+      </tr>
+      <tr>
+        <td>Error text for non-2xx responses was always the literal body (<code class="inline">response.text().await.unwrap_or_default()</code>).</td>
+        <td><a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L217">crates/api-client/src/lib.rs:217</a> (pre-PR: unconditional <code class="inline">.text()</code>)</td>
+        <td><strong>Weakened, intentionally.</strong> Now an over-cap non-2xx body replaces the diagnostic text with the cap-exceeded message and discards the real body (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L218">crates/api-client/src/lib.rs:218</a>-226). Covered by <code class="inline">non_success_over_cap_keeps_the_diagnostic</code> (asserts the 500 status still appears) — an accepted trade-off, not an oversight.</td>
+      </tr>
+      <tr>
+        <td>Body text was assumed UTF‑8 implicitly via <code class="inline">response.text()</code> (reqwest itself would error on invalid UTF‑8 there).</td>
+        <td>reqwest's own <code class="inline">.text()</code> internals</td>
+        <td><strong>Re-established</strong> explicitly via <code class="inline">std::str::from_utf8</code> / <code class="inline">String::from_utf8</code> after capping, with a dedicated error message (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L206">crates/api-client/src/lib.rs:206</a>).</td>
+      </tr>
+    </tbody>
+  </table>
+  <h3>New invariants</h3>
+  <ul class="clean">
+    <li><strong>Bounded memory per peer response.</strong> No single call into <code class="inline">IrysApiClient</code> or <code class="inline">GossipClient</code> can buffer more than <code class="inline">max_peer_response_bytes</code> for one response, enforced uniformly (declared-length fast path + streaming fallback) rather than relying on the wire declaring the truth.</li>
+    <li><strong>Config-level validation.</strong> <code class="inline">Config::validate</code> now rejects <code class="inline">max_peer_response_bytes == 0</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/config/mod.rs#L89">crates/types/src/config/mod.rs:89</a>) — a state-machine-adjacent guarantee: a running node can never reach a config state where every peer response is unconditionally rejected.</li>
+    <li><strong>Overflow and over-cap are unified.</strong> <code class="inline">accumulate_response_bytes</code> treats <code class="inline">u64</code> addition overflow the same as exceeding the cap (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/peer_response.rs#L16">crates/types/src/peer_response.rs:16</a>), so a cap near <code class="inline">u64::MAX</code> cannot be bypassed by wraparound — proven by property test (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/peer_response.rs#L46">crates/types/src/peer_response.rs:46</a>).</li>
+  </ul>
+  <h3>Error-contract changes</h3>
+  <p>
+    <code class="inline">GossipClientError::GetJsonResponsePayload</code>'s second field was already <code class="inline">String</code>; call sites that previously did <code class="inline">e.to_string()</code> on a <code class="inline">reqwest::Error</code> now pass the <code class="inline">String</code> produced by <code class="inline">read_capped_bytes</code>/<code class="inline">serde_json</code> directly (e.g. <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/gossip_client.rs#L623">crates/p2p/src/gossip_client.rs:623</a>). No type-level change in the public error enum, but the message text for over-cap failures is new: <code class="inline">"...exceeds cap of N bytes"</code> instead of a reqwest network-error string, which anything doing string-matching on error messages (logs, tests) needs to tolerate.
+  </p>
+  <p>
+    <strong>Compatibility:</strong> a node upgraded to this PR that talks to an old peer sending a legitimately large body (&gt; 32 MiB) will now hard-fail requests that previously succeeded. There is no protocol-version negotiation of the cap — it's a purely local, silent behavior change from the wire's perspective.
+  </p>
+</section>
+
+<section id="cross-file">
+  <h2>Cross-file impact</h2>
+  <ul class="clean">
+    <li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L134">crates/api-client/src/lib.rs:134</a> — <code class="inline">IrysApiClient::new()</code> gained a required <code class="inline">u64</code> parameter; every non-test caller must now source a real config value instead of the old zero-arg constructor. All nine call sites in the diff were updated in lockstep (chain-tests fixtures, <code class="inline">chain.rs</code> genesis fetch, <code class="inline">peer_utilities.rs</code>) — no caller was missed among the files this diff touches, but any out-of-tree or downstream crate calling <code class="inline">IrysApiClient::new()</code> will fail to compile, which is the intended forcing function.</li>
+    <li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/gossip_client.rs#L266">crates/p2p/src/gossip_client.rs:266</a> and <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/gossip_client.rs#L284">:284</a> — same pattern for <code class="inline">GossipClient::new</code> / <code class="inline">with_circuit_breaker_config</code>; propagates through <code class="inline">P2PService::new</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/gossip_service.rs#L131">crates/p2p/src/gossip_service.rs:131</a>) and <code class="inline">PeerNetworkServiceInner</code> construction (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/peer_network_service.rs#L246">crates/p2p/src/peer_network_service.rs:246</a>).</li>
+    <li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/chain/src/peer_utilities.rs#L61">crates/chain/src/peer_utilities.rs:61</a> — <code class="inline">fetch_genesis_commitments</code> gained a <code class="inline">max_peer_response_bytes</code> parameter; its one caller in <code class="inline">chain.rs</code> now reads it from <code class="inline">self.config.node_config</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/chain/src/chain.rs#L373">crates/chain/src/chain.rs:373</a>) — this runs during genesis bootstrap against a trusted peer, so the cap now also bounds how large a genesis commitment set can be before startup fails outright.</li>
+    <li><a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/lib.rs#L31">crates/types/src/lib.rs:31</a> — new public re-exports <code class="inline">DEFAULT_MAX_PEER_RESPONSE_BYTES</code> and <code class="inline">accumulate_response_bytes</code>/<code class="inline">ResponseBodyTooLarge</code> from <code class="inline">irys_types</code> root; both <code class="inline">irys-api-client</code> and <code class="inline">irys-p2p</code> now depend on this shared surface, which is the only piece of logic actually shared between the two otherwise-duplicated <code class="inline">read_capped_bytes</code> implementations.</li>
+    <li><code class="inline">NodeConfig::testing()</code> and <code class="inline">NodeConfig::testnet()</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/config/node.rs#L1397">crates/types/src/config/node.rs:1397</a>, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/config/node.rs#L1591">:1591</a>) both pick up the new field via the same default constant — any test asserting an exhaustive/snapshot view of <code class="inline">NodeConfig</code> (e.g. TOML round-trip golden files) gains a new field and could need a snapshot update; the diff's own new test asserts the default value directly (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/config/mod.rs#L899">crates/types/src/config/mod.rs:899</a>) but does not touch any TOML fixture files.</li>
+  </ul>
+</section>
+
+<section id="review-focus">
+  <h2>Review-focus map</h2>
+
+  <div class="callout warn">
+    <strong class="tag">1 · Design pressure — duplicated capping logic</strong>
+    <code class="inline">read_capped_bytes</code> is implemented twice, near-verbatim, in <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L145">crates/api-client/src/lib.rs:145</a> and <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/gossip_client.rs#L313">crates/p2p/src/gossip_client.rs:313</a>. Both crates already share <code class="inline">accumulate_response_bytes</code> from <code class="inline">irys_types</code>, so the streaming-loop wrapper around it (content-length pre-check, chunk loop, error formatting) is the only part not shared.
+    <br><strong>Failure scenario:</strong> a future fix to the streaming loop (e.g. handling a reqwest edge case in <code class="inline">.chunk()</code>) gets applied to one copy and not the other, silently reintroducing the unbounded-read bug in whichever client is missed.
+  </div>
+
+  <div class="callout warn">
+    <strong class="tag">2 · Non-2xx diagnostics are discarded when the error body itself is oversized</strong>
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/api-client/src/lib.rs#L217">crates/api-client/src/lib.rs:217</a>-226 and the gossip equivalents replace the real error body with a generic cap message whenever a non-success response also happens to exceed the cap.
+    <br><strong>Failure scenario:</strong> a peer returns a 500 with a large but legitimate diagnostic payload (e.g. a verbose stack trace or validation report) that a misbehaving/misconfigured peer emits past 32&nbsp;MiB — the caller now sees only "<code class="inline">exceeds cap of N bytes</code>" instead of the actionable error text, making the real failure harder to diagnose in logs. Low likelihood in practice (error bodies are rarely that large) but worth confirming this is the intended trade-off rather than an oversight of the "keep the diagnostic" test's scope, which only exercises small over-cap bodies (9 bytes vs. an 8-byte cap).
+  </div>
+
+  <div class="callout info">
+    <strong class="tag">3 · Single global cap for structurally different endpoints</strong>
+    The same 32&nbsp;MiB ceiling applies uniformly to small JSON responses (handshake, peer list) and to inherently larger ones like <code class="inline">get_block_index</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/p2p/src/gossip_client.rs#L869">crates/p2p/src/gossip_client.rs:869</a>), whose response size scales with the caller-supplied <code class="inline">BlockIndexQuery.limit</code> (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/block.rs#L1163">crates/types/src/block.rs:1163</a>).
+    <br><strong>Failure scenario:</strong> if <code class="inline">params.block_batch_size</code> in the chain-sync path is ever raised well beyond current defaults, block-index sync could start failing against the new cap in a way that has nothing to do with a hostile peer — worth a sanity check on today's <code class="inline">block_batch_size</code> against the 32&nbsp;MiB ceiling, though at today's default batch sizes each item (~tens of bytes) is nowhere close.
+  </div>
+
+  <p>These are attention pointers based on reading the diff and its surrounding code, not verified bugs — a dedicated code-review pass (<code class="inline">/code-review</code>) would be the right next step to confirm #1 and #2 before merge, and to check current sync batch sizes against #3.</p>
+</section>
+
+<section id="open-questions">
+  <h2>Open questions</h2>
+  <ul class="clean">
+    <li>Is discarding the real error-body diagnostic on an over-cap non-2xx response (review-focus #2) the intended behavior, or should the capped prefix of the body be surfaced instead of a generic message?</li>
+    <li>Was the duplication between the two <code class="inline">read_capped_bytes</code> implementations (review-focus #1) a deliberate choice to keep <code class="inline">irys-api-client</code> and <code class="inline">irys-p2p</code> decoupled, or would a shared helper (e.g. on a small trait, or a free function taking a <code class="inline">reqwest::Response</code> and a cap) be welcome as a follow-up?</li>
+    <li>Is 32&nbsp;MiB sized specifically against today's largest legitimate payload (the PR's own comment ties it to "twice a 30M-gas execution payload" once hex-encoded, <a class="cite" href="https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c/crates/types/src/config/node.rs#L901">crates/types/src/config/node.rs:901</a>), and is there a plan to raise it in lockstep if the gas limit changes, or is that left to operators via config?</li>
+    <li>Should the cap be negotiated or advertised between peers (e.g. in the handshake) so an old peer sending a body that used to be valid gets a clearer signal than a generic HTTP-layer failure, or is a hard local cutoff the intended permanent behavior?</li>
+  </ul>
+</section>
+
+</main>
+
+<footer>
+  explain-diff · expert mode · CI mode · citations resolve against
+  https://github.com/Irys-xyz/irys/blob/8519da8ecc4aa7884ed22c456f6527d59c420d4c
+</footer>
+
+</body>
+</html>
