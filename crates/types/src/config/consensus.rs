@@ -977,9 +977,15 @@ impl ConsensusConfig {
                 borealis: Some(Borealis {
                     activation_timestamp: UnixTimestamp::from_secs(0),
                 }),
-                // Cascade hardfork - not active by default in testing;
-                // tests that need it should override via with_consensus()
-                cascade: None,
+                // Cascade hardfork - enabled from genesis for testing. Cascade is
+                // live, so tests run the live rules by default; a test about
+                // pre-Cascade behaviour sets `cascade = None` itself.
+                cascade: Some(Cascade {
+                    activation_timestamp: UnixTimestamp::from_secs(0),
+                    one_year_epoch_length: 365,
+                    thirty_day_epoch_length: 30,
+                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+                }),
                 // Delta hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 delta: None,
@@ -1332,7 +1338,8 @@ mod tests {
 
     #[test]
     fn test_effective_annual_cost_pre_cascade() {
-        let config = ConsensusConfig::testing();
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.cascade = None;
         // No Cascade configured — should return base value at any timestamp
         assert_eq!(
             config.effective_annual_cost_per_gb(UnixTimestamp::from_secs(0)),
@@ -1441,7 +1448,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("65At1ZvKVtUPtR1jLtA8CcFYX2vHf7tT5TbhBEy3u2XE");
+        let expected_hash = H256::from_base58("26uQbM7kxYCbs3E16sS3VWuHeBWTdTbyZ9TVo2DFxiPu");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

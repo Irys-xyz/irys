@@ -107,10 +107,15 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
             .unwrap_or(false)
     );
 
-    // Epoch 1: Reward address takes effect
+    // Epoch 1: Reward address takes effect. This epoch block also records the
+    // Submit write, which starts slot 0's expiry clock: Cascade anchors expiry
+    // on the last write to a slot, not on its allocation.
     node.mine_until_next_epoch().await?;
 
-    // Epoch 2: Data expires (data_epoch=0 + submit_ledger_epoch_length=2)
+    // Epoch 2
+    node.mine_until_next_epoch().await?;
+
+    // Epoch 3: Data expires (write recorded at epoch 1 + submit_ledger_epoch_length=2)
     let (_, expiry_height) = node.mine_until_next_epoch().await?;
 
     // Verify TermFeeReward goes to custom reward address at the epoch boundary block.

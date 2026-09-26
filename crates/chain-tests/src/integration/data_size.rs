@@ -1,4 +1,5 @@
 use irys_chain::IrysNodeCtx;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_domain::ChunkType;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{DataLedger, LedgerChunkOffset, NodeConfig};
@@ -30,9 +31,12 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
         })
         .with_genesis_peer_discovery_timeout(1000);
 
-    // Start the node
-    let genesis_node = IrysNodeTest::new_genesis(config.clone())
-        .with_time_mode(TimeMode::Real)
+    // Start the node. 5 storage submodules: one partition each for Publish,
+    // OneYear and ThirtyDay, plus one for each of the two Submit slots the data
+    // spans.
+    let genesis_node = IrysNodeTest::new_genesis(config.clone()).with_time_mode(TimeMode::Real);
+    StorageSubmodulesConfig::load_for_test(genesis_node.cfg.base_directory.clone(), 5)?;
+    let genesis_node = genesis_node
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     let genesis_signer = genesis_node.node_ctx.config.irys_signer();

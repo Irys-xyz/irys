@@ -630,7 +630,7 @@ async fn partition_expiration_and_repacking_test() {
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
     let chunk_count = 10;
-    let consensus_config = ConsensusConfig {
+    let mut consensus_config = ConsensusConfig {
         chunk_size,
         num_chunks_in_partition: chunk_count,
         num_chunks_in_recall_range: 2,
@@ -645,6 +645,10 @@ async fn partition_expiration_and_repacking_test() {
         },
         ..ConsensusConfig::testing()
     };
+    // This test drives the pre-Cascade Submit expiry rule: a slot expires on
+    // age alone. Cascade also requires the slot to be fully written, which the
+    // Submit chunk totals in these synthetic epoch blocks never reach.
+    consensus_config.hardforks.cascade = None;
     let mut config = NodeConfig::testing();
     config.base_directory = base_path.clone();
     config.consensus = ConsensusOptions::Custom(consensus_config);
@@ -1172,7 +1176,7 @@ async fn partitions_assignment_determinism_test() {
         .build();
     let base_path = tmp_dir.path().to_path_buf();
     let chunk_size = 32;
-    let consensus_config = ConsensusConfig {
+    let mut consensus_config = ConsensusConfig {
         chunk_size,
         num_chunks_in_partition: 10,
         num_chunks_in_recall_range: 2,
@@ -1188,6 +1192,10 @@ async fn partitions_assignment_determinism_test() {
         },
         ..ConsensusConfig::testing()
     };
+    // The pinned partition hashes below come from the pre-Cascade ledger set
+    // (Publish and Submit only). Cascade adds the term ledgers, which take
+    // partitions from the same pool and so change which hash lands in each slot.
+    consensus_config.hardforks.cascade = None;
     let mut config = NodeConfig::testing();
     config.storage.num_writes_before_sync = 1;
     config.base_directory = base_path.clone();

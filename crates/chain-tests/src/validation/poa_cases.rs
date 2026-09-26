@@ -1,5 +1,6 @@
 use crate::utils::IrysNodeTest;
 use irys_actors::block_validation::poa_is_valid;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
@@ -35,7 +36,11 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
         consensus.block_migration_depth = 1;
     });
 
-    let genesis_node = IrysNodeTest::new_genesis(node_config.clone())
+    // 5 storage submodules: one partition each for Publish, OneYear and ThirtyDay,
+    // plus one for each of the two Submit slots this test validates PoAs in.
+    let genesis_node = IrysNodeTest::new_genesis(node_config.clone());
+    StorageSubmodulesConfig::load_for_test(genesis_node.cfg.base_directory.clone(), 5)?;
+    let genesis_node = genesis_node
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     genesis_node.stop_mining();
@@ -142,7 +147,10 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
 
             let pa = partition_assignments
                 .iter()
-                .find(|pa| pa.slot_index == Some(slot_index))
+                .find(|pa| {
+                    pa.ledger_id == Some(DataLedger::Submit.into())
+                        && pa.slot_index == Some(slot_index)
+                })
                 .expect("to find partition assignment for slot");
 
             let partition_hash = pa.partition_hash;

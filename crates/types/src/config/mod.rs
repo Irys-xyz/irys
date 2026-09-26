@@ -1207,6 +1207,12 @@ mod tests {
         [hardforks.borealis]
         activation_timestamp = "1970-01-01T00:00:00+00:00"
 
+        [hardforks.cascade]
+        activation_timestamp = "1970-01-01T00:00:00+00:00"
+        one_year_epoch_length = 365
+        thirty_day_epoch_length = 30
+        annual_cost_per_gb = 0.028
+
         "#;
 
         // Create the expected config
