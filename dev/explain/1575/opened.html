@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1575 — Expert Analysis: activate Cascade from genesis in testing config</title>
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #161b22;
+    --border: #2a313c;
+    --text: #dbe2ea;
+    --muted: #93a1b0;
+    --accent: #5aa9ff;
+    --warn-bg: #3a2a12;
+    --warn-border: #9a6a1f;
+    --info-bg: #14293a;
+    --info-border: #2f6690;
+    --danger-bg: #3a1616;
+    --danger-border: #9a3131;
+    --code-bg: #0b0d10;
+    --table-alt: #131820;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 80px; }
+  header.page-header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 20px;
+  }
+  header.page-header h1 { font-size: 1.5rem; margin: 0 0 6px; }
+  header.page-header .meta { color: var(--muted); font-size: 0.88rem; }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 28px;
+    position: sticky;
+    top: 10px;
+    z-index: 5;
+  }
+  nav.toc h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px; }
+  nav.toc ol { margin: 0; padding-left: 1.1em; columns: 2; column-gap: 24px; }
+  nav.toc li { margin-bottom: 4px; font-size: 0.92rem; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section { margin-bottom: 38px; }
+  section h2 {
+    font-size: 1.15rem;
+    border-left: 4px solid var(--accent);
+    padding-left: 10px;
+    margin: 0 0 14px;
+  }
+  section h3 { font-size: 0.98rem; color: var(--text); margin: 18px 0 8px; }
+  p { margin: 0 0 12px; }
+  code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.84rem;
+    margin: 8px 0 14px;
+  }
+  a.cite {
+    color: var(--accent);
+    text-decoration: none;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.9em;
+    border-bottom: 1px dotted var(--accent);
+  }
+  a.cite:hover { border-bottom-style: solid; }
+  ul, ol { padding-left: 1.3em; }
+  li { margin-bottom: 6px; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 0.9rem; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  tr:nth-child(even) td { background: var(--table-alt); }
+  .unaccounted { color: #ff8080; font-weight: 700; }
+  .callout {
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 10px 0 16px;
+    border: 1px solid var(--border);
+  }
+  .callout.info { background: var(--info-bg); border-color: var(--info-border); }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+  .callout.danger { background: var(--danger-bg); border-color: var(--danger-border); }
+  .callout .label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 4px; }
+  .rank {
+    display: inline-block;
+    min-width: 22px;
+    text-align: center;
+    background: var(--accent);
+    color: #06121f;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 0.78rem;
+    padding: 1px 0;
+    margin-right: 8px;
+  }
+  .diagram {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 14px 0;
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+  }
+  .dflow { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
+  .dbox {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    min-width: 140px;
+    text-align: center;
+  }
+  .dbox .t { font-weight: 700; margin-bottom: 4px; }
+  .dbox .s { color: var(--muted); font-size: 0.8rem; }
+  .darrow { padding: 0 10px; color: var(--accent); font-size: 1.2rem; align-self: center; }
+  .dcol { display: flex; flex-direction: column; gap: 8px; }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--info-bg);
+    border: 1px solid var(--info-border);
+    color: var(--text);
+    margin-left: 6px;
+  }
+  footer { color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--border); padding-top: 14px; margin-top: 40px; }
+  @media (max-width: 640px) {
+    nav.toc ol { columns: 1; }
+    .wrap { padding: 16px 12px 60px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page-header">
+  <h1>test: activate Cascade from genesis in the testing consensus config</h1>
+  <div class="meta">
+    PR #1575 · Irys-xyz/irys · Expert mode · Repo root for citations: checkout root at commit
+    <code>fb75e567</code> · Analysis date 2026-09-26
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#intent">Intent &amp; approach</a></li>
+    <li><a href="#delta">Delta semantics</a></li>
+    <li><a href="#cross-file">Cross-file impact</a></li>
+    <li><a href="#review-focus">Review-focus map</a></li>
+    <li><a href="#open-questions">Open questions</a></li>
+  </ol>
+</nav>
+
+<section id="intent">
+  <h2>Intent &amp; approach</h2>
+  <p>
+    <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/types/src/config/consensus.rs#L967">crates/types/src/config/consensus.rs:967</a></code>
+    contains the block that builds <code>ConsensusConfig::testing()</code>. This PR flips one field in it:
+    <code>hardforks.cascade</code> goes from <code>None</code> to
+    <code>Some(Cascade { activation_timestamp: 0, one_year_epoch_length: 365, thirty_day_epoch_length: 30, annual_cost_per_gb: default() })</code>
+    (<code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/types/src/config/consensus.rs#L980-L988">crates/types/src/config/consensus.rs:980-988</a></code>).
+    Every other file in the diff is downstream fallout from that one flip: golden values, ledger counts, submodule
+    provisioning, and epoch timing that were implicitly relying on the old default.
+  </p>
+  <p>
+    The stated intent (PR description, commit message) is that Cascade is live on the real network, so the testing
+    config should model the live rule set by default — tests that specifically want pre-Cascade behavior should
+    say so explicitly via <code>cascade = None</code>, rather than the reverse (pre-Cascade being free and Cascade
+    tests opting in). This is a pure default-flip strategy: no production code changes, no new capability, no
+    hardfork-gating logic touched. The road not taken is a parallel <code>ConsensusConfig::testing_pre_cascade()</code>
+    (or similar) that pre-Cascade tests could opt into instead of scattering <code>cascade = None</code>
+    across ~19 call sites; the PR author chose per-test opt-out over a second named config, presumably because
+    most of the pre-Cascade tests are exercising something Cascade-specific about that scenario (allocation-anchored
+    expiry, a fixed two-ledger partition layout) and want that fact visible at the call site, not hidden in a
+    helper's name.
+  </p>
+  <p>
+    The PR is entirely test/config-default code — no file under a non-test, non-config path changes production
+    logic. The only behavior a production binary sees differently is a config file: the TOML round-trip test at
+    <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/types/src/config/mod.rs#L1210-L1215">crates/types/src/config/mod.rs:1210-1215</a></code>
+    gains a <code>[hardforks.cascade]</code> section, confirming the serialized shape, not a new field.
+  </p>
+</section>
+
+<section id="delta">
+  <h2>Delta semantics</h2>
+  <p>
+    The core contract change: <strong><code>ConsensusConfig::testing()</code> now returns a 4-ledger config
+    (Publish, Submit, OneYear, ThirtyDay) with live Cascade fee rates, instead of a 2-ledger config
+    (Publish, Submit) at the base fee rate.</strong> Every test that constructs a node/config via
+    <code>NodeConfig::testing()</code> / <code>ConsensusConfig::testing()</code> and does not override
+    <code>hardforks.cascade</code> is now exercising the Cascade code path where it previously exercised the
+    pre-Cascade path. Two contracts move as a direct result:
+  </p>
+  <ul>
+    <li><strong>Ledger set.</strong> <code>Ledgers::new</code> derives its ledger count from whether Cascade is
+      active (<code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/database/src/data_ledger.rs#L934-L944">crates/database/src/data_ledger.rs:934-944</a></code>:
+      <code>ledgers.len() == 4</code> when Cascade is active vs. <code>2</code> when inactive). Testing nodes now
+      allocate genesis partitions across 4 ledgers instead of 2.</li>
+    <li><strong>Fee rate.</strong> <code>cost_per_chunk_per_epoch_at</code> reads
+      <code>effective_annual_cost_per_gb</code>, which returns the Cascade override ($0.028/GB/yr) instead of the
+      base rate ($0.01/GB/yr) whenever Cascade is active at the given timestamp
+      (<code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/types/src/config/consensus.rs#L611-L629">crates/types/src/config/consensus.rs:611-629</a></code>).
+      Every fee computed through this timestamp-aware path in a default testing config is now 2.8x its old value.
+      Note the non-timestamp-aware sibling, <code>cost_per_chunk_per_epoch()</code>
+      (<code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/types/src/config/consensus.rs#L601-L607">consensus.rs:601-607</a></code>),
+      still reads the base <code>annual_cost_per_gb</code> unconditionally and is untouched by this default —
+      the two pricing-endpoint tests had to be switched from the non-aware to the <code>_at</code> variant to
+      keep testing what the real API path does.</li>
+    <li><strong>Expiry anchor.</strong> Not changed by this PR, but its effect surfaces throughout: pre-Cascade
+      Submit-slot expiry is allocation-anchored (age since the slot was created); Cascade anchors expiry on the
+      slot's <em>last write</em>, and only once the slot is fully written. This is why so many of the "set
+      <code>cascade = None</code>" edits are paired with a comment naming which of the two rules the fixture
+      depends on.</li>
+  </ul>
+
+  <h3>Removed-behavior audit</h3>
+  <p>
+    The only invariant actually <em>removed</em> is "the testing consensus config has no Cascade hardfork." Every
+    row below is a site that depended on that invariant implicitly (by calling
+    <code>ConsensusConfig::testing()</code> / <code>NodeConfig::testing()</code> with no override) and now
+    re-establishes it explicitly, or is a site where the invariant is intentionally not re-established because the
+    scenario is exactly the Cascade behavior being tested.
+  </p>
+  <table>
+    <thead><tr><th>Invariant depended on</th><th>Old enforcement site</th><th>New enforcement site</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Allocation-anchored (age-only) Submit slot expiry</td>
+        <td>Implicit: <code>testing()</code> default had <code>cascade = None</code></td>
+        <td>Explicit <code>cascade = None</code> in 9 fixtures: <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/actors/src/block_producer/ledger_expiry.rs#L4189">ledger_expiry.rs:4189</a></code>,
+        <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/actors/tests/epoch_snapshot_tests.rs#L651">epoch_snapshot_tests.rs:651</a></code>
+        (<code>partition_expiration_and_repacking_test</code>), <code>cache_service.rs</code>,
+        <code>sm_reassignment_tests.rs</code>, <code>term_ledger_expiry/mod.rs:251</code>,
+        <code>multi_replica_expiry.rs</code>, <code>perm_refund.rs</code>,
+        <code>perm_refund_unpledged_slot.rs</code>, and 4 sites in <code>perm_ledger_expiry/mod.rs</code></td>
+      </tr>
+      <tr>
+        <td>Two-ledger (Publish+Submit) partition pool, so pinned partition hashes stay stable</td>
+        <td>Implicit: <code>testing()</code> default had <code>cascade = None</code></td>
+        <td><code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/actors/tests/epoch_snapshot_tests.rs#L1198">epoch_snapshot_tests.rs:1198</a></code>
+        (<code>partitions_assignment_determinism_test</code>) and
+        <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/multi_node/epoch_replay.rs#L64">multi_node/epoch_replay.rs:64</a></code></td>
+      </tr>
+      <tr>
+        <td>Cascade off at genesis, so mid-chain activation actually crosses a boundary</td>
+        <td>Implicit: <code>testing()</code> default had <code>cascade = None</code>; some sites carried a stale
+        comment ("Cascade intentionally NOT configured yet")</td>
+        <td>Explicit <code>cascade = None</code> in
+        <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/cascade_ledger_shape.rs#L131">cascade_ledger_shape.rs:131</a></code>,
+        4 sites in <code>cascade_term_expiry.rs</code>
+        (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/cascade_term_expiry.rs#L604">:604</a>,
+        <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/cascade_term_expiry.rs#L1351">:1351</a>,
+        <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/cascade_term_expiry.rs#L1684">:1684</a>,
+        <a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/cascade_term_expiry.rs#L1839">:1839</a>),
+        <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/promote_after_activation_straddle.rs#L72">promote_after_activation_straddle.rs:72</a></code>, and
+        <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/cascade_block_rejection.rs#L25">cascade_block_rejection.rs:25</a></code>.
+        Three of these (<code>cascade_ledger_shape.rs</code> and two in <code>cascade_term_expiry.rs</code>) were
+        <strong>silently passing without testing the activation transition</strong> before this fix, per the PR
+        description — Cascade was already active at genesis under the old default's absence-turned-presence, so
+        "activate mid-chain" never actually toggled anything.</td>
+      </tr>
+      <tr>
+        <td>2-ledger count from <code>Ledgers::new</code> when a test wants that specific shape (not tied to the
+        testing default)</td>
+        <td>Explicit inline overrides in <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/database/src/data_ledger.rs#L924-L932">data_ledger.rs:924-932</a></code>
+        (<code>test_ledgers_new_without_cascade</code>, passes <code>ForBlock::inactive()</code> — unaffected by
+        the default and left untouched by this PR)</td>
+        <td><code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/database/src/data_ledger.rs#L947-L951">data_ledger.rs:947-951</a></code>
+        (<code>test_ledgers_new_cascade_active_but_no_config</code>) and
+        <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/database/src/data_ledger.rs#L983-L984">data_ledger.rs:983-984</a></code>
+        (<code>test_ledgers_activate_cascade_no_config</code>) now set
+        <code>cascade = None</code> explicitly, since these specifically assert the 2-ledger shape</td>
+      </tr>
+      <tr>
+        <td>Base ($0.01/GB/yr) annual cost driving the storage-pricing golden fees</td>
+        <td><code>ConsensusConfig::testing()</code>'s old <code>cascade: None</code></td>
+        <td><span class="unaccounted">Not re-established — intentionally replaced.</span> Goldens in
+        <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/types/src/storage_pricing.rs#L1400">storage_pricing.rs:1400</a></code>,
+        <code>:1528</code>, <code>:1540</code>, <code>:1575</code>, and <code>:2261</code> are recomputed at
+        2.8x and the derivations are shown in comments alongside each. This is a deliberate rebase of the
+        golden values to the new default, not a gap.</td>
+      </tr>
+      <tr>
+        <td>Consensus config hash (used as a change detector)</td>
+        <td><code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/types/src/config/consensus.rs#L1451">consensus.rs:1451</a></code>: old base58 hash</td>
+        <td>Same line, updated hash — intentional, since the hash covers the now-different default hardfork set.
+        This test exists precisely to catch config changes; it did its job and got updated along with the change
+        it flagged.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="cross-file">
+  <h2>Cross-file impact</h2>
+  <ul>
+    <li>
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/poa_cases.rs#L148-L154">poa_cases.rs:148-154</a></code>
+      — <code>multi_slot_poa_test</code>'s partition-assignment lookup now filters by
+      <code>pa.ledger_id == Some(DataLedger::Submit.into())</code> in addition to <code>slot_index</code>. Before
+      this PR, with only Publish and Submit active, a bare <code>slot_index</code> match happened to be
+      unambiguous for this test's genesis signer. With OneYear and ThirtyDay now also present at genesis, both
+      of those term ledgers get a slot 0, so an unfiltered <code>.find()</code> over
+      <code>get_partition_assignments</code> could match a term ledger's partition instead of Submit's. The same
+      file already used the ledger_id-qualified form elsewhere
+      (<code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/poa_cases.rs#L354">poa_cases.rs:354</a></code>),
+      so this brings the one straggler in line rather than introducing a new pattern.
+    </li>
+    <li>
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/poa_cases.rs#L41-L42">poa_cases.rs:41-42</a></code>
+      and
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/integration/data_size.rs#L37-L38">data_size.rs:37-38</a></code>
+      — both call <code>StorageSubmodulesConfig::load_for_test(..., 5)</code> before packing starts, up from
+      whatever the implicit default provisioned. This is necessary because
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/config/src/submodules.rs#L153-L161">crates/config/src/submodules.rs:153-161</a></code>
+      auto-creates exactly <strong>3</strong> submodules when no config file exists yet — a constant untouched by
+      this PR, sized for the old default of 2 ledgers with modest slot counts. With Cascade's 2 extra term
+      ledgers now consuming genesis partitions from the same pool, these two tests (which each need multiple
+      Submit slots on top of one partition per ledger) run out of capacity under the old default and needed an
+      explicit bump. See the Review-focus map for why this fix looks locally scoped rather than systemic.
+    </li>
+    <li>
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/api/pricing_endpoint.rs#L86-L91">pricing_endpoint.rs:86-91</a></code>
+      and
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/api/pricing_endpoint.rs#L205-L210">pricing_endpoint.rs:205-210</a></code>
+      — switched from <code>cost_per_chunk_per_epoch()</code> to <code>cost_per_chunk_per_epoch_at(UnixTimestamp::from_secs(0))</code>.
+      Callers of the base (non-<code>_at</code>) method elsewhere in the codebase are unaffected by the new
+      default — that method never consulted Cascade — but that also means any other test still calling the base
+      method to model what the live pricing endpoint charges is now silently checking the wrong (pre-Cascade)
+      number, since the endpoint itself is timestamp-aware.
+    </li>
+    <li>
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs#L110-L119">ledger_expiry_with_unstake.rs:110-119</a></code>
+      — <code>heavy_test_ledger_expiry_uses_custom_reward_address</code> now mines a third epoch before checking
+      expiry, because Cascade starts the clock at the epoch that records the write (epoch 1) rather than at
+      allocation (epoch 0). Any other still-passing test that asserts an expiry height by counting epochs from
+      allocation, rather than from last write, is a candidate for the same off-by-one under the new default if it
+      happens not to have been caught by this PR's test run — see Review-focus map.
+    </li>
+  </ul>
+</section>
+
+<section id="review-focus">
+  <h2>Review-focus map</h2>
+  <p>These are attention pointers from the analysis above, not verified findings. Recommend a dedicated
+     code-review pass (<code>/code-review</code>) to confirm any that look serious before merging.</p>
+  <ol>
+    <li>
+      <span class="rank">1</span>
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/config/src/submodules.rs#L153-L161">crates/config/src/submodules.rs:153-161</a></code>
+      — the hard-coded default of 3 auto-created submodules is untouched by this PR, but the default testing
+      config it serves jumped from 2 ledgers to 4. <strong>Failure scenario:</strong> any existing (or future)
+      chain-test that calls <code>IrysNodeTest::new_genesis(...)</code> without an explicit
+      <code>StorageSubmodulesConfig::load_for_test</code> call, and that needs a genesis partition in more than
+      one ledger to reach the assertion it cares about (not just the two tests this PR patched), can now come up
+      short on partitions in a way that manifests as an unrelated-looking failure deep in packing or slot
+      assignment rather than as an obvious config error. The PR's own test-run notes (1739 + 1090 + 328 tests
+      passing) suggest this is not widespread today, but the fix here was per-test rather than a change to the
+      shared default, so the next test added against the new default inherits the same risk with no guardrail.
+    </li>
+    <li>
+      <span class="rank">2</span>
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs#L110-L119">crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs:110-119</a></code>
+      — the fix (wait one more epoch) is a symptom of a codebase-wide semantic shift: any test that computes
+      "data expires at allocation epoch + <code>submit_ledger_epoch_length</code>" is now off by however many
+      epochs elapse between allocation and the write that Cascade anchors on. <strong>Failure scenario:</strong> a
+      test with a similarly allocation-anchored expiry-height calculation that happens to allocate and write in
+      the same epoch block would see no discrepancy (write epoch == allocation epoch), masking the bug for that
+      specific timing but not for a fixture whose write lands even one epoch later — worth a search for other
+      "epoch N: data expires" style assertions that weren't touched by this PR.
+    </li>
+    <li>
+      <span class="rank">3</span>
+      <code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/chain-tests/src/api/pricing_endpoint.rs#L86-L91">crates/chain-tests/src/api/pricing_endpoint.rs:86-91</a></code>
+      (and its sibling at :205-210) — now the only two call sites of <code>cost_per_chunk_per_epoch_at</code> in
+      the diff; every other consumer of the plain <code>cost_per_chunk_per_epoch()</code> outside this PR's
+      changed files is unaffected by the new Cascade default and will keep quoting the base rate.
+      <strong>Failure scenario:</strong> if any other test asserts what the live pricing HTTP endpoint charges by
+      calling the non-timestamp-aware method (instead of following this PR's pattern), it now silently checks a
+      number 2.8x too low relative to what the endpoint actually returns, and would only be caught by chance if
+      its tolerance happens to be loose enough to still fail loudly.
+    </li>
+  </ol>
+</section>
+
+<section id="open-questions">
+  <h2>Open questions</h2>
+  <ul>
+    <li>
+      Was a second named config (e.g. <code>ConsensusConfig::testing_pre_cascade()</code>) considered instead of
+      the ~19 inline <code>cascade = None</code> overrides? The current approach makes each pre-Cascade test's
+      dependency explicit at the call site, but it also means the next contributor adding a pre-Cascade scenario
+      has to remember the incantation rather than reach for a named constructor.
+    </li>
+    <li>
+      Should <code>crates/config/src/submodules.rs</code>'s hard-coded default of 3 auto-created submodules
+      (<code><a class="cite" href="https://github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b/crates/config/src/submodules.rs#L153-L161">submodules.rs:153-161</a></code>)
+      be revisited now that the testing default provisions 4 ledgers rather than 2, or is per-test
+      <code>load_for_test</code> the intended pattern going forward for any test that needs more than the bare
+      minimum?
+    </li>
+    <li>
+      <code>irys-multiversion-tests</code> was not run for this PR (noted in the description). Does that suite
+      construct consensus configs independently of <code>ConsensusConfig::testing()</code>, or does it inherit
+      this default too and need the same audit before merge?
+    </li>
+    <li>
+      Is the flaky failure noted for <code>multi_node::ema_forks::spiky_slow_heavy4_ema_intervals_roll_over_in_forks</code>
+      (one failure, three reruns passing, also intermittent on master) confirmed unrelated to the Cascade default
+      change, or only presumed so because it reproduces on master too? Worth one more look if it recurs in CI.
+    </li>
+  </ul>
+</section>
+
+<footer>
+  Generated by the explain-diff skill, expert mode, CI mode. Source: PR #1575, commit
+  <code>fb75e56702de2ce91dccabc8e5bca43bee02b35b</code>. All citations link to
+  <code>github.com/Irys-xyz/irys/blob/fb75e56702de2ce91dccabc8e5bca43bee02b35b</code>.
+</footer>
+
+</div>
+</body>
+</html>
