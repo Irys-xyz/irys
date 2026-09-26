@@ -62,6 +62,10 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::InvalidAnchor(anchor) => {
                 Self::InvalidData(InvalidDataError::IngressProofAnchor(anchor))
             }
+            // Receiver is behind — do not penalise the sender as bogus data.
+            IngressProofError::UnknownAnchor(_) => Self::Internal(InternalGossipError::Unknown(
+                "Unknown ingress proof anchor".into(),
+            )),
         }
     }
 }
@@ -844,6 +848,17 @@ mod tests {
             matches!(mapped, GossipError::RateLimited),
             "expected GossipError::RateLimited, got {:?}",
             mapped
+        );
+    }
+
+    /// An unknown anchor means the receiver has not imported the block yet.
+    /// Mapping it to `InvalidData` would penalise a well-behaved sender.
+    #[test]
+    fn unknown_ingress_proof_anchor_does_not_penalize_peer() {
+        let mapped: GossipError = IngressProofError::UnknownAnchor(irys_types::H256::zero()).into();
+        assert!(
+            !matches!(mapped, GossipError::InvalidData(_)),
+            "unknown anchor is the receiver being behind, not bogus data: {mapped:?}"
         );
     }
 

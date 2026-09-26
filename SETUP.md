@@ -14,6 +14,36 @@ The NVIDIA feature flag/CUDA accelerated matrix packing requires the latest CUDA
 and GCC-13 (as well as g++ 13).\
 See .devcontainer/setup.sh for more information.
 
+## Faster local builds
+
+Reth is a large git dependency. A few things make macOS in particular feel like it
+"constantly rebuilds" it:
+
+- **rust-analyzer vs `cargo test`.** rust-analyzer injects `--cfg rust_analyzer`, which
+  invalidates every crate fingerprint if it shares `target/`. This repo sets
+  `cargo.targetDir = true` in `rust-analyzer.toml` so RA compiles into
+  `target/rust-analyzer` and leaves `cargo test` alone.
+- **`RUSTFLAGS` replacing config flags.** `.cargo/config.toml` sets
+  `-C target-cpu=native`. An env `RUSTFLAGS=...` *replaces* that list (it does
+  not append), so the native-cpu fingerprint changes and Reth rebuilds. Leave
+  `RUSTFLAGS` unset. Warnings are denied by `cargo xtask clippy`
+  (`-- -D warnings`), not by rustflags. Clippy still uses a different compiler
+  driver than rustc, so a clippy run will rebuild Reth relative to `cargo test`
+  — that is inherent, not a config bug.
+- **Local Reth checkout.** For Reth work, clone `irys-xyz/reth-irys` to `ext/reth`
+  (gitignored) and uncomment the `path = "./ext/reth/..."` workspace deps in the
+  root `Cargo.toml`. Path deps incrementally compile like workspace members; git
+  deps do not.
+
+`irys-types` does **not** depend on the umbrella `reth` crate. Its default `db`
+feature still pulls `reth-db` / mdbx-sys for Compact/Encode. Gateway (and any
+other git consumer that only needs `DataTransaction` / `IrysSigner` / chunks)
+should take `irys-types` with `default-features = false` — that leaves
+`reth-codecs` + ethereum primitives (no mdbx, no vendored OpenSSL).
+
+On macOS, Gatekeeper scanning newly linked native artifacts (`reth-mdbx-sys`,
+vendored OpenSSL) is a separate cost on top of rustc.
+
 
 # Configuring
 You can get the default configuration file (`./config.toml`) from `crates/config/templates/testnet_config.toml`

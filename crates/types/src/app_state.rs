@@ -1,3 +1,4 @@
+#[cfg(feature = "db")]
 use reth_db::DatabaseEnv;
 use std::{ops::Deref, sync::Arc};
 

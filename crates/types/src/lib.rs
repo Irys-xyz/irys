@@ -2,11 +2,14 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
+#[cfg(feature = "db")]
 pub mod app_state;
+#[cfg(feature = "db")]
 pub mod arbiter_handle;
 pub mod block;
 pub mod block_production;
 pub mod block_stream;
+#[cfg(feature = "db")]
 pub mod chainspec;
 pub mod chunk;
 pub mod chunked;
@@ -79,7 +82,9 @@ pub use tx_source::*;
 
 pub use alloy_primitives::{/* Address, */ Signature};
 
+#[cfg(feature = "db")]
 pub use app_state::*;
+#[cfg(feature = "db")]
 pub use arbiter_handle::*;
 pub use arbitrary::Arbitrary;
 pub use chunk::*;

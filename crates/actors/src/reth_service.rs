@@ -216,7 +216,7 @@ impl RethService {
             "Updating Reth fork choice"
         );
         let handle = self.handle.clone();
-        let eth_api = handle.inner.eth_api();
+        let eth_api = handle.eth_api();
 
         let get_blocks = async || {
             let latest_before = eth_api.block_by_number(BlockNumberOrTag::Latest, false);
@@ -282,7 +282,6 @@ impl RethService {
             "Connecting to peer"
         );
         self.handle
-            .inner
             .network
             .add_peer(peer.peer_id, peer.peering_tcp_addr);
         debug!(reth_peer.id = %peer.peer_id, "Peer connection initiated");
@@ -292,8 +291,8 @@ impl RethService {
     #[tracing::instrument(level = "trace", skip_all, err)]
     fn get_peering_info(&self) -> eyre::Result<RethPeerInfo> {
         let handle = self.handle.clone();
-        let peer_id = *handle.inner.network.peer_id();
-        let local_addr = handle.inner.network.local_addr();
+        let peer_id = *handle.network.peer_id();
+        let local_addr = handle.network.local_addr();
 
         debug!(
             reth_peer.id = %peer_id,

@@ -134,6 +134,12 @@ impl Inner {
             warn!("Failed to send TryGenerateProofsForConfirmedRoots: {:?}", e);
         }
 
+        if let Err(e) = self.service_senders.chunk_ingress.send_traced(
+            ChunkIngressMessage::ProcessPendingIngressProofs(block.block_hash),
+        ) {
+            warn!("Failed to send ProcessPendingIngressProofs: {:?}", e);
+        }
+
         self.prune_pending_txs().await;
 
         Ok(())

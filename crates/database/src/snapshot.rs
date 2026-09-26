@@ -12,8 +12,8 @@ use std::ffi::CString;
 use std::path::Path;
 
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockStreamEvents,
-    PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves, IngressProofs,
+    IrysBlockStreamEvents, PeerListItems,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -143,6 +143,8 @@ pub fn strip_node_local(env: &DatabaseEnv, include_caches: bool) -> eyre::Result
             .context("clearing CachedChunksIndex")?;
         tx.clear::<CachedChunks>()
             .context("clearing CachedChunks")?;
+        tx.clear::<CachedIngressLeaves>()
+            .context("clearing CachedIngressLeaves")?;
         tx.clear::<IngressProofs>()
             .context("clearing IngressProofs")?;
     }

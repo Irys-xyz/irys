@@ -225,7 +225,10 @@ reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f
 reth-stages-types = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 
 
-# just used (for local testing)
+# Local Reth path override (gitignored `ext/reth`). Uncomment this block and
+# comment the git `rev =` deps above after `git clone` of irys-xyz/reth-irys
+# into `ext/reth`. Path deps incrementally compile; git deps rebuild as a unit.
+# See SETUP.md "Faster local builds".
 
 # reth = { path = "./ext/reth/bin/reth" }
 # reth-chainspec = { path = "./ext/reth/crates/chainspec" }

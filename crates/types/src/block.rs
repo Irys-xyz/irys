@@ -27,8 +27,10 @@ use alloy_primitives::{B256, TxHash, keccak256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
 use irys_macros_integer_tagged::IntegerTagged;
-use openssl::sha;
+
+#[cfg(feature = "db")]
 use reth_db::DatabaseError;
+#[cfg(feature = "db")]
 use reth_db::table::{Decode, Encode};
 use reth_primitives_traits::Header;
 use rust_decimal_macros::dec;
@@ -55,9 +57,9 @@ pub type EvmBlockHash = B256;
     Deserialize,
     PartialEq,
     Arbitrary,
-    Compact,
     RlpEncodable,
     RlpDecodable,
+    Compact,
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
@@ -429,9 +431,9 @@ impl Versioned for IrysBlockHeaderV1 {
     Deserialize,
     PartialEq,
     Arbitrary,
-    Compact,
     RlpEncodable,
     RlpDecodable,
+    Compact,
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
@@ -652,10 +654,10 @@ fn prev_ema_ignore_genesis_rules(height: u64, blocks_in_price_adjustment_interva
     PartialEq,
     Serialize,
     Deserialize,
-    Compact,
     Arbitrary,
     RlpDecodable,
     RlpEncodable,
+    Compact,
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
@@ -679,10 +681,10 @@ pub type TxRoot = H256;
     PartialEq,
     Serialize,
     Deserialize,
-    Compact,
     Arbitrary,
     RlpDecodable,
     RlpEncodable,
+    Compact,
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
@@ -860,10 +862,10 @@ pub fn get_ingress_proofs(
     PartialEq,
     Serialize,
     Deserialize,
-    Compact,
     Arbitrary,
     RlpDecodable,
     RlpEncodable,
+    Compact,
 )]
 #[rlp(trailing)]
 #[serde(rename_all = "camelCase")]
@@ -901,11 +903,12 @@ impl fmt::Display for IrysBlockHeaderV1 {
 /// let _hash = compute_solution_hash(poa_chunk, offset, &seed);
 /// ```
 pub fn compute_solution_hash(poa_chunk: &[u8], offset_le: u32, seed: &H256) -> H256 {
-    let mut hasher = sha::Sha256::new();
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
     hasher.update(poa_chunk);
-    hasher.update(&offset_le.to_le_bytes());
+    hasher.update(offset_le.to_le_bytes());
     hasher.update(seed.as_bytes());
-    H256::from(hasher.finish())
+    H256::from(<[u8; 32]>::from(hasher.finalize()))
 }
 
 impl IrysBlockHeaderV1 {
@@ -920,7 +923,7 @@ impl IrysBlockHeaderV1 {
         let default_poa_chunk: Vec<u8> = Vec::new();
         let default_partition_chunk_offset: u32 = 0;
         let default_vdf_output = H256::zero();
-        let default_chunk_hash: H256 = H256(openssl::sha::sha256(&default_poa_chunk));
+        let default_chunk_hash: H256 = H256(crate::hash_sha256(&default_poa_chunk));
         let default_solution_hash = compute_solution_hash(
             &default_poa_chunk,
             default_partition_chunk_offset,
@@ -1012,11 +1015,11 @@ pub struct CombinedBlockHeader {
     Eq,
     Serialize,
     Deserialize,
-    Compact,
     PartialOrd,
     Ord,
     Hash,
     Arbitrary,
+    Compact,
 )]
 #[repr(u32)]
 #[derive(Default)]
@@ -1043,6 +1046,7 @@ impl PartialEq<DataLedger> for u32 {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decode for DataLedger {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         if value.len() != 4 {
@@ -1057,6 +1061,7 @@ impl Decode for DataLedger {
     }
 }
 
+#[cfg(feature = "db")]
 impl Encode for DataLedger {
     type Encoded = [u8; 4]; // u32 is 4 bytes
 

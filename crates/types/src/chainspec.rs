@@ -10,6 +10,7 @@ use std::sync::Arc;
 use alloy_eips::BlobScheduleBlobParams;
 use alloy_genesis::{ChainConfig, Genesis};
 use alloy_primitives::{Address, B256, U256};
+#[cfg(feature = "db")]
 use reth_chainspec::{
     BaseFeeParams, BaseFeeParamsKind, Chain, ChainHardforks, ChainSpec, EthereumHardfork,
     ForkCondition, hardfork, make_genesis_header,

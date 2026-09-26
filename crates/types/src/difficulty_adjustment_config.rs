@@ -177,11 +177,11 @@ pub fn next_cumulative_diff(previous_cumulative_diff: U256, new_diff: U256) -> U
 mod tests {
     use super::DifficultyAdjustmentConfig;
     use super::*;
+    use crate::hash_sha256 as protocol_hash_sha256;
     use crate::{
         H256, U256, adjust_difficulty, calculate_difficulty, calculate_initial_difficulty,
         u256_from_le_bytes,
     };
-    use openssl::sha;
     use rstest::{fixture, rstest};
     use std::time::Duration;
 
@@ -405,9 +405,7 @@ mod tests {
 
     /// SHA256 hash the message parameter
     fn hash_sha256(message: &[u8]) -> H256 {
-        let mut hasher = sha::Sha256::new();
-        hasher.update(message);
-        H256::from(hasher.finish())
+        H256::from(protocol_hash_sha256(message))
     }
 
     fn mine_block(hashes_per_second: u64, seed: H256, difficulty: U256) -> (f64, H256) {

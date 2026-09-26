@@ -1,26 +1,33 @@
 pub(crate) mod chunk_data_writer;
 pub mod chunks;
 pub mod facade;
+pub mod http_admission;
 pub mod ingress_proofs;
 pub(crate) mod metrics;
 pub mod pending_chunks;
+pub(crate) mod pending_ingress_proofs;
 
 pub use chunks::{AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError};
-pub use ingress_proofs::{IngressProofError, IngressProofGenerationError};
+pub use http_admission::{HttpChunkEnqueueError, enqueue_http_chunk};
+pub use ingress_proofs::{
+    IngressProofError, IngressProofGenerationError, IngressProofGenerationState,
+};
 pub use pending_chunks::PriorityPendingChunks;
 
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, app_state::DatabaseProvider,
-    chunk::UnpackedChunk,
+    BlockHash, ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, TxChunkOffset,
+    app_state::DatabaseProvider, chunk::UnpackedChunk,
 };
 use lru::LruCache;
+use pending_ingress_proofs::PendingIngressProofs;
 use reth::tasks::TaskExecutor;
 use reth::tasks::shutdown::Shutdown;
 use tokio::sync::{RwLock, Semaphore, mpsc::UnboundedReceiver, oneshot};
@@ -29,6 +36,26 @@ use tracing::{Instrument as _, error, info, warn};
 use crate::mempool_service::wait_with_progress;
 use crate::services::ServiceSenders;
 
+/// Drop-guard holding an HTTP admission permit for a fire-and-forget ingest.
+/// Released when the message is dropped after the worker finishes, or if the
+/// message is dropped unprocessed (backlog drain / shutdown).
+pub struct HttpAdmissionGuard {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl HttpAdmissionGuard {
+    #[must_use]
+    pub fn new(permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self { _permit: permit }
+    }
+}
+
+impl std::fmt::Debug for HttpAdmissionGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HttpAdmissionGuard")
+    }
+}
+
 /// Messages handled by the ChunkIngressService
 #[derive(Debug)]
 pub enum ChunkIngressMessage {
@@ -36,6 +63,7 @@ pub enum ChunkIngressMessage {
     IngestChunk(
         UnpackedChunk,
         Option<oneshot::Sender<Result<(), ChunkIngressError>>>,
+        Option<HttpAdmissionGuard>,
     ),
     /// Ingest an ingress proof received from a peer
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
@@ -45,16 +73,20 @@ pub enum ChunkIngressMessage {
     /// Try to generate ingress proofs for data roots just confirmed in a block's
     /// submit ledger. Sent by the mempool service after block confirmation.
     TryGenerateProofsForConfirmedRoots(Vec<DataRoot>),
+    /// Retry ingress proofs parked because their anchor block was unknown.
+    /// Sent when that block is added to the tree (prevalidation) or confirmed.
+    ProcessPendingIngressProofs(BlockHash),
 }
 
 impl ChunkIngressMessage {
     /// Returns the variant name as a static string for tracing/logging purposes
     pub fn variant_name(&self) -> &'static str {
         match self {
-            Self::IngestChunk(_, _) => "IngestChunk",
+            Self::IngestChunk(_, _, _) => "IngestChunk",
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::ProcessPendingChunks(_) => "ProcessPendingChunks",
             Self::TryGenerateProofsForConfirmedRoots(_) => "TryGenerateProofsForConfirmedRoots",
+            Self::ProcessPendingIngressProofs(_) => "ProcessPendingIngressProofs",
         }
     }
 
@@ -64,14 +96,18 @@ impl ChunkIngressMessage {
     /// instead — the upstream emit sites
     /// (`mempool_service::data_txs::postprocess_data_ingress` for
     /// `ProcessPendingChunks`, `mempool_service::lifecycle::handle_block_confirmed`
-    /// for `TryGenerateProofsForConfirmedRoots`, and the data_sync_service
+    /// for `TryGenerateProofsForConfirmedRoots` /
+    /// `ProcessPendingIngressProofs`, `block_tree_service::on_block_prevalidated`
+    /// for `ProcessPendingIngressProofs`, and the data_sync_service
     /// SM-write fallback for `IngestChunk(_, None)`) emit each message once,
     /// without retry, so dropping any of them silently strands work.
     pub fn has_reply_channel(&self) -> bool {
         match self {
-            Self::IngestChunk(_, reply) => reply.is_some(),
+            Self::IngestChunk(_, reply, _) => reply.is_some(),
             Self::IngestIngressProof(_, _) => true,
-            Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_) => false,
+            Self::ProcessPendingChunks(_)
+            | Self::TryGenerateProofsForConfirmedRoots(_)
+            | Self::ProcessPendingIngressProofs(_) => false,
         }
     }
 }
@@ -81,11 +117,22 @@ impl ChunkIngressMessage {
 #[derive(Debug, Clone)]
 pub struct ChunkIngressState {
     pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
+    /// When `false`, HTTP enqueue must fail so shutdown drain cannot drop a
+    /// chunk after `POST /v1/chunk` has already returned 200.
+    pub http_ingress_open: Arc<Mutex<bool>>,
 }
 
 impl ChunkIngressState {
     pub async fn pending_chunks_count(&self) -> usize {
         self.pending_chunks.read().await.len()
+    }
+
+    pub async fn pending_contains(&self, data_root: DataRoot, tx_offset: TxChunkOffset) -> bool {
+        self.pending_chunks
+            .read()
+            .await
+            .get(&data_root)
+            .is_some_and(|chunks| chunks.peek(&tx_offset).is_some())
     }
 }
 
@@ -96,9 +143,9 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) irys_db: DatabaseProvider,
     pub(crate) message_handler_semaphore: Arc<Semaphore>,
     /// Reserved lane for control-plane messages (`IngestIngressProof`,
-    /// `ProcessPendingChunks`, `TryGenerateProofsForConfirmedRoots`). Chunk
-    /// floods saturate `message_handler_semaphore` but cannot starve the
-    /// control plane.
+    /// `ProcessPendingChunks`, `TryGenerateProofsForConfirmedRoots`,
+    /// `ProcessPendingIngressProofs`). Chunk floods saturate
+    /// `message_handler_semaphore` but cannot starve the control plane.
     pub(crate) control_plane_semaphore: Arc<Semaphore>,
     pub(crate) max_concurrent_tasks: u32,
     pub(crate) max_control_plane_tasks: u32,
@@ -106,7 +153,10 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
     pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
+    pub(crate) pending_ingress_proofs: Mutex<PendingIngressProofs>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
+    pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
+    http_ingress_open: Arc<Mutex<bool>>,
 }
 
 impl ChunkIngressServiceInner {
@@ -117,7 +167,8 @@ impl ChunkIngressServiceInner {
             ChunkIngressMessage::IngestChunk(..) => self.message_handler_semaphore.clone(),
             ChunkIngressMessage::IngestIngressProof(..)
             | ChunkIngressMessage::ProcessPendingChunks(..)
-            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(..) => {
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(..)
+            | ChunkIngressMessage::ProcessPendingIngressProofs(..) => {
                 self.control_plane_semaphore.clone()
             }
         }
@@ -130,10 +181,17 @@ pub struct ChunkIngressService {
     inner: Arc<ChunkIngressServiceInner>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoPermitAction {
+    Overloaded,
+    Park,
+    Backlog,
+}
+
 impl ChunkIngressServiceInner {
     async fn handle_message(&self, msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(chunk, response) => {
+            ChunkIngressMessage::IngestChunk(chunk, response, _admission) => {
                 let result = self.handle_chunk_ingress_message(chunk).await;
                 if let Err(e) = &result {
                     metrics::record_chunk_error(e.error_type(), e.is_advisory());
@@ -157,13 +215,6 @@ impl ChunkIngressServiceInner {
                 self.process_pending_chunks_for_root(data_root).await;
             }
             ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(data_roots) => {
-                // Flush to ensure any buffered chunk writes are visible before reading.
-                if let Err(e) = self.chunk_data_writer.flush().await {
-                    error!(
-                        "Failed to flush chunk data writer before post-confirmation proof check: {:?}",
-                        e
-                    );
-                }
                 let chunk_size = self.config.consensus.chunk_size;
                 for data_root in data_roots {
                     if let Err(e) = self.try_generate_ingress_proof_for_root(data_root, chunk_size)
@@ -174,6 +225,9 @@ impl ChunkIngressServiceInner {
                         );
                     }
                 }
+            }
+            ChunkIngressMessage::ProcessPendingIngressProofs(anchor) => {
+                self.process_pending_ingress_proofs(anchor);
             }
         }
     }
@@ -200,6 +254,16 @@ impl ChunkIngressServiceInner {
 }
 
 impl ChunkIngressService {
+    fn no_permit_action(msg: &ChunkIngressMessage) -> NoPermitAction {
+        if msg.has_reply_channel() {
+            NoPermitAction::Overloaded
+        } else if matches!(msg, ChunkIngressMessage::IngestChunk(_, None, _)) {
+            NoPermitAction::Backlog
+        } else {
+            NoPermitAction::Park
+        }
+    }
+
     /// Spawn a new ChunkIngressService
     pub fn spawn_service(
         irys_db: DatabaseProvider,
@@ -208,6 +272,7 @@ impl ChunkIngressService {
         rx: UnboundedReceiver<Traced<ChunkIngressMessage>>,
         config: &Config,
         service_senders: &ServiceSenders,
+        ingress_proof_generation_state: IngressProofGenerationState,
         runtime_handle: tokio::runtime::Handle,
         task_executor: TaskExecutor,
     ) -> (TokioServiceHandle, ChunkIngressState) {
@@ -266,8 +331,10 @@ impl ChunkIngressService {
             max_pending_chunk_items,
             max_preheader_chunks_per_item,
         )));
+        let http_ingress_open = Arc::new(Mutex::new(true));
         let chunk_ingress_state = ChunkIngressState {
             pending_chunks: pending_chunks.clone(),
+            http_ingress_open: Arc::clone(&http_ingress_open),
         };
 
         let handle_for_inner = runtime_handle.clone();
@@ -276,8 +343,32 @@ impl ChunkIngressService {
                 let recent_valid_chunks = tokio::sync::RwLock::new(LruCache::new(
                     NonZeroUsize::new(max_valid_chunks).unwrap(),
                 ));
+                let ingress_address = config.irys_signer().address();
+                let ingress_chunk_size = config.consensus.chunk_size;
+                let backfill_db = irys_db.clone();
+                let retry_roots = match handle_for_inner
+                    .spawn_blocking(move || {
+                        irys_database::backfill_cached_ingress_data_hashes(
+                            &backfill_db,
+                            ingress_address,
+                            ingress_chunk_size,
+                        )
+                    })
+                    .await
+                {
+                    Ok(Ok(roots)) => roots,
+                    Ok(Err(error)) => {
+                        warn!(?error, "Failed to backfill cached ingress hashes");
+                        Default::default()
+                    }
+                    Err(error) => {
+                        warn!(?error, "Cached ingress-hash backfill task failed");
+                        Default::default()
+                    }
+                };
                 let chunk_data_writer = chunk_data_writer::ChunkDataWriter::spawn(
                     irys_db.clone(),
+                    ingress_address,
                     chunk_writer_buffer_size,
                     &handle_for_inner,
                 );
@@ -300,9 +391,34 @@ impl ChunkIngressService {
                         storage_modules_guard,
                         recent_valid_chunks,
                         pending_chunks,
+                        pending_ingress_proofs: Mutex::new(PendingIngressProofs::new(
+                            pending_ingress_proofs::MAX_PENDING_INGRESS_PROOFS,
+                        )),
                         chunk_data_writer,
+                        ingress_proof_generation_state,
+                        http_ingress_open,
                     }),
                 };
+                let retry_inner = Arc::clone(&service.inner);
+                if let Err(error) = handle_for_inner
+                    .spawn_blocking(move || {
+                        let chunk_size = retry_inner.config.consensus.chunk_size;
+                        for data_root in retry_roots {
+                            if let Err(error) = retry_inner
+                                .try_generate_ingress_proof_for_root(data_root, chunk_size)
+                            {
+                                warn!(
+                                    %data_root,
+                                    ?error,
+                                    "Failed startup ingress-proof retry after compact-hash backfill"
+                                );
+                            }
+                        }
+                    })
+                    .await
+                {
+                    warn!(?error, "Startup ingress-proof retry task failed");
+                }
                 service
                     .start(handle_for_inner)
                     .await
@@ -324,18 +440,43 @@ impl ChunkIngressService {
         info!("starting ChunkIngressService");
 
         let mut shutdown_future = pin!(self.shutdown);
+        let mut http_backlog: VecDeque<(ChunkIngressMessage, tracing::Span)> = VecDeque::new();
         'service: loop {
+            let drain_http_backlog = !http_backlog.is_empty();
             tokio::select! {
                 _ = &mut shutdown_future => {
                     info!("ChunkIngressService received shutdown signal");
                     break 'service;
+                }
+                res = Arc::clone(&self.inner.message_handler_semaphore).acquire_owned(), if drain_http_backlog => {
+                    match res {
+                        Ok(permit) => {
+                            let Some((msg, span)) = http_backlog.pop_front() else {
+                                continue 'service;
+                            };
+                            let msg_type = msg.variant_name();
+                            let inner = Arc::clone(&self.inner);
+                            runtime_handle.spawn(async move {
+                                let _permit = permit;
+                                let task_info = format!("Chunk ingress message handler for {msg_type}");
+                                wait_with_progress(
+                                    inner.handle_message(msg),
+                                    20,
+                                    &task_info,
+                                ).await;
+                            }.instrument(span));
+                        }
+                        Err(_) => {
+                            error!("Chunk ingress semaphore closed while draining HTTP backlog; terminating service");
+                            break 'service;
+                        }
+                    }
                 }
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
                             let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
-                            let has_reply = msg.has_reply_channel();
                             let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
 
                             // Pick the right lane: chunk ingress goes through
@@ -352,51 +493,49 @@ impl ChunkIngressService {
                                     break 'service;
                                 }
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                                    if has_reply {
-                                        // Reply-bearing callers retry on the
-                                        // Overloaded advisory; never park.
-                                        warn!(
-                                            msg_type = %msg_type,
-                                            "Chunk ingress lane saturated; returning Overloaded to caller"
-                                        );
-                                        Self::send_overloaded_errors(msg);
-                                        continue 'service;
-                                    }
-                                    // Fire-and-forget messages
-                                    // (`IngestChunk(_, None)`,
-                                    // `ProcessPendingChunks`,
-                                    // `TryGenerateProofsForConfirmedRoots`)
-                                    // have no upstream re-fire and no caller
-                                    // to advise. Park the recv loop on
-                                    // saturation rather than dropping —
-                                    // dropping would silently strand pending
-                                    // chunks for that data_root or skip the
-                                    // post-confirmation proof attempt for the
-                                    // affected block, with no automatic
-                                    // recovery path.
-                                    //
-                                    // HOL impact is bounded by the in-flight
-                                    // task on the chosen lane: a long
-                                    // proof-generation handler does delay
-                                    // subsequent control-plane work, but the
-                                    // alternative (silent loss) is worse.
-                                    warn!(
-                                        msg_type = %msg_type,
-                                        "Chunk ingress lane saturated; awaiting permit (recv loop parked) to avoid dropping fire-and-forget message"
-                                    );
-                                    tokio::select! {
-                                        _ = &mut shutdown_future => {
-                                            info!("ChunkIngressService received shutdown signal while awaiting permit");
-                                            break 'service;
+                                    match Self::no_permit_action(&msg) {
+                                        NoPermitAction::Overloaded => {
+                                            warn!(
+                                                msg_type = %msg_type,
+                                                "Chunk ingress lane saturated; returning Overloaded to caller"
+                                            );
+                                            Self::send_overloaded_errors(msg);
+                                            continue 'service;
                                         }
-                                        res = semaphore.acquire_owned() => match res {
-                                            Ok(permit) => permit,
-                                            Err(_) => {
-                                                error!(
-                                                    msg_type = %msg_type,
-                                                    "Chunk ingress semaphore closed while awaiting permit; terminating service"
-                                                );
-                                                break 'service;
+                                        NoPermitAction::Backlog => {
+                                            warn!(
+                                                msg_type = %msg_type,
+                                                "Chunk ingress lane saturated; queueing HTTP ingest on in-service backlog"
+                                            );
+                                            http_backlog.push_back((msg, span));
+                                            continue 'service;
+                                        }
+                                        NoPermitAction::Park => {
+                                            // Control-plane fire-and-forget
+                                            // (`ProcessPendingChunks`,
+                                            // `TryGenerateProofsForConfirmedRoots`,
+                                            // `ProcessPendingIngressProofs`)
+                                            // has no upstream re-fire. Park
+                                            // rather than drop.
+                                            warn!(
+                                                msg_type = %msg_type,
+                                                "Chunk ingress lane saturated; awaiting permit (recv loop parked) to avoid dropping fire-and-forget message"
+                                            );
+                                            tokio::select! {
+                                                _ = &mut shutdown_future => {
+                                                    info!("ChunkIngressService received shutdown signal while awaiting permit");
+                                                    break 'service;
+                                                }
+                                                res = semaphore.acquire_owned() => match res {
+                                                    Ok(permit) => permit,
+                                                    Err(_) => {
+                                                        error!(
+                                                            msg_type = %msg_type,
+                                                            "Chunk ingress semaphore closed while awaiting permit; terminating service"
+                                                        );
+                                                        break 'service;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -405,7 +544,7 @@ impl ChunkIngressService {
                             let inner = Arc::clone(&self.inner);
                             runtime_handle.spawn(async move {
                                 let _permit = permit;
-                                let task_info = format!("Chunk ingress message handler for {}", msg_type);
+                                let task_info = format!("Chunk ingress message handler for {msg_type}");
                                 wait_with_progress(
                                     inner.handle_message(msg),
                                     20,
@@ -422,7 +561,16 @@ impl ChunkIngressService {
             }
         }
 
-        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        {
+            let mut open = self
+                .inner
+                .http_ingress_open
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *open = false;
+        }
+
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), http_backlog = http_backlog.len(), "processing last in-bound messages before shutdown");
 
         // Phase 1: drain queued messages, spawning concurrently when permits are available
         while let Ok(traced) = self.msg_rx.try_recv() {
@@ -437,7 +585,7 @@ impl ChunkIngressService {
                     runtime_handle.spawn(
                         async move {
                             let _permit = permit;
-                            let task_info = format!("shutdown drain: {}", msg_type);
+                            let task_info = format!("shutdown drain: {msg_type}");
                             wait_with_progress(inner.handle_message(msg), 20, &task_info).await;
                         }
                         .instrument(span),
@@ -449,7 +597,7 @@ impl ChunkIngressService {
                     break;
                 }
                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                    let task_info = format!("shutdown drain (inline): {}", msg_type);
+                    let task_info = format!("shutdown drain (inline): {msg_type}");
                     wait_with_progress(inner.handle_message(msg), 20, &task_info)
                         .instrument(span)
                         .await;
@@ -457,68 +605,75 @@ impl ChunkIngressService {
             }
         }
 
-        // Phase 2: drain BOTH lanes before flushing. `process_pending_chunks_for_root`
-        // runs on the control-plane lane and queues writes through `chunk_data_writer`,
-        // so an early flush before control-plane quiescence would race those writers
-        // and lose chunks on exit. Use `acquire_many_owned` so permits are not
-        // lifetime-tied to the semaphore arcs.
+        while let Some((msg, span)) = http_backlog.pop_front() {
+            let msg_type = msg.variant_name();
+            let inner = Arc::clone(&self.inner);
+            let semaphore = inner.semaphore_for(&msg);
+            match semaphore.try_acquire_owned() {
+                Ok(permit) => {
+                    runtime_handle.spawn(
+                        async move {
+                            let _permit = permit;
+                            let task_info = format!("shutdown drain (http backlog): {msg_type}");
+                            wait_with_progress(inner.handle_message(msg), 20, &task_info).await;
+                        }
+                        .instrument(span),
+                    );
+                }
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    error!("Semaphore closed during HTTP backlog shutdown drain");
+                    Self::send_timeout_errors(msg);
+                    break;
+                }
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    let task_info = format!("shutdown drain (http backlog inline): {msg_type}");
+                    wait_with_progress(inner.handle_message(msg), 20, &task_info)
+                        .instrument(span)
+                        .await;
+                }
+            }
+        }
+
+        // Phase 2: drain both lanes. Every ingress writer awaits the exact MDBX
+        // batch containing its own chunk, so handler quiescence also guarantees
+        // there are no unacknowledged chunk-cache writes. Use
+        // `acquire_many_owned` so permits are not lifetime-tied to the semaphore
+        // arcs.
         let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let chunk_acquire = self
             .inner
             .message_handler_semaphore
             .clone()
             .acquire_many_owned(self.inner.max_concurrent_tasks);
-        let chunk_quiesced = match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
+        match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
             Ok(Ok(permits)) => {
                 tracing::debug!("All chunk ingress handlers completed");
                 let _permits = permits;
-                true
             }
             Ok(Err(_)) => {
                 error!("Chunk-lane semaphore closed during chunk ingress shutdown drain");
-                false
             }
             Err(_) => {
                 warn!("Timed out waiting for in-flight chunk ingress handlers");
-                false
             }
-        };
+        }
 
         let control_acquire = self
             .inner
             .control_plane_semaphore
             .clone()
             .acquire_many_owned(self.inner.max_control_plane_tasks);
-        let control_quiesced = match tokio::time::timeout_at(drain_deadline, control_acquire).await
-        {
+        match tokio::time::timeout_at(drain_deadline, control_acquire).await {
             Ok(Ok(permits)) => {
                 tracing::debug!("All control-plane handlers completed");
                 let _permits = permits;
-                true
             }
             Ok(Err(_)) => {
                 error!("Control-plane semaphore closed during chunk ingress shutdown drain");
-                false
             }
             Err(_) => {
                 warn!("Timed out waiting for in-flight control-plane handlers");
-                false
             }
-        };
-
-        // Flush only when both lanes are quiesced, otherwise an in-flight
-        // control-plane writer could queue chunk writes after the flush
-        // returns — losing those chunks on exit.
-        if chunk_quiesced && control_quiesced {
-            if let Err(e) = self.inner.chunk_data_writer.flush().await {
-                warn!("Failed to flush chunk writer on shutdown: {:?}", e);
-            }
-        } else {
-            warn!(
-                chunk_quiesced,
-                control_quiesced,
-                "Skipping chunk-writer flush; not all lanes quiesced before timeout"
-            );
         }
 
         info!("ChunkIngressService shut down");
@@ -530,7 +685,7 @@ impl ChunkIngressService {
     /// generic `RecvError` from a silently dropped sender.
     fn send_timeout_errors(msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(_, Some(reply)) => {
+            ChunkIngressMessage::IngestChunk(_, Some(reply), _) => {
                 let _ = reply.send(Err(ChunkIngressError::Critical(
                     CriticalChunkIngressError::Other(
                         "service overloaded: timed out waiting for handler permit".into(),
@@ -543,9 +698,10 @@ impl ChunkIngressService {
                 )));
             }
             // No response channel — nothing to notify.
-            ChunkIngressMessage::IngestChunk(_, None)
+            ChunkIngressMessage::IngestChunk(_, None, _)
             | ChunkIngressMessage::ProcessPendingChunks(_)
-            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_)
+            | ChunkIngressMessage::ProcessPendingIngressProofs(_) => {}
         }
     }
 
@@ -555,7 +711,7 @@ impl ChunkIngressService {
     /// so peers are not penalised for hitting our backpressure.
     fn send_overloaded_errors(msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(_, reply) => {
+            ChunkIngressMessage::IngestChunk(_, reply, _) => {
                 // Record the saturation signal even when there is no reply
                 // channel; otherwise dashboards miss fast-failed chunks.
                 metrics::record_chunk_error(
@@ -575,7 +731,8 @@ impl ChunkIngressService {
             // production (the recv loop parks for them instead), but the
             // helper must remain total for tests and future callers.
             ChunkIngressMessage::ProcessPendingChunks(_)
-            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_)
+            | ChunkIngressMessage::ProcessPendingIngressProofs(_) => {}
         }
     }
 }
@@ -611,7 +768,7 @@ mod overload_helpers_tests {
     #[tokio::test]
     async fn ingest_chunk_overloaded_returns_advisory_overloaded() {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx));
+        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx), None);
 
         ChunkIngressService::send_overloaded_errors(msg);
 
@@ -626,7 +783,7 @@ mod overload_helpers_tests {
     /// channel — there is simply no caller to notify.
     #[tokio::test]
     async fn ingest_chunk_overloaded_no_reply_is_noop() {
-        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), None);
+        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None);
         ChunkIngressService::send_overloaded_errors(msg);
     }
 
@@ -661,9 +818,10 @@ mod overload_helpers_tests {
     fn has_reply_channel_distinguishes_fire_and_forget_from_reply_bearing() {
         let (reply_tx, _reply_rx) = oneshot::channel();
         assert!(
-            ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx)).has_reply_channel()
+            ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx), None)
+                .has_reply_channel()
         );
-        assert!(!ChunkIngressMessage::IngestChunk(dummy_chunk(), None).has_reply_channel());
+        assert!(!ChunkIngressMessage::IngestChunk(dummy_chunk(), None, None).has_reply_channel());
 
         let (reply_tx, _reply_rx) = oneshot::channel();
         assert!(
@@ -682,5 +840,71 @@ mod overload_helpers_tests {
             )])
             .has_reply_channel()
         );
+
+        assert!(
+            !ChunkIngressMessage::ProcessPendingIngressProofs(irys_types::H256::zero())
+                .has_reply_channel()
+        );
+    }
+
+    #[test]
+    fn http_admission_guard_is_debug_and_releases_permit_on_drop() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        {
+            let permit = sem.clone().try_acquire_owned().expect("permit");
+            let guard = HttpAdmissionGuard::new(permit);
+            let _ = format!("{guard:?}");
+            assert_eq!(sem.available_permits(), 0);
+        }
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    #[test]
+    fn no_permit_action_backlogs_http_and_overloads_gossip() {
+        let chunk = dummy_chunk();
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert_eq!(
+            ChunkIngressService::no_permit_action(&ChunkIngressMessage::IngestChunk(
+                chunk.clone(),
+                Some(reply_tx),
+                None
+            )),
+            NoPermitAction::Overloaded
+        );
+        assert_eq!(
+            ChunkIngressService::no_permit_action(&ChunkIngressMessage::IngestChunk(
+                chunk, None, None
+            )),
+            NoPermitAction::Backlog
+        );
+        assert_eq!(
+            ChunkIngressService::no_permit_action(&ChunkIngressMessage::ProcessPendingChunks(
+                DataRoot::from([1_u8; 32])
+            )),
+            NoPermitAction::Park
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_contains_is_false_when_empty_and_true_after_put() {
+        let pending =
+            std::sync::Arc::new(tokio::sync::RwLock::new(PriorityPendingChunks::new(8, 8)));
+        let state = ChunkIngressState {
+            pending_chunks: pending.clone(),
+            http_ingress_open: std::sync::Arc::new(std::sync::Mutex::new(true)),
+        };
+        let chunk = dummy_chunk();
+        assert!(
+            !state
+                .pending_contains(chunk.data_root, chunk.tx_offset)
+                .await
+        );
+        pending.write().await.put(chunk.clone());
+        assert!(
+            state
+                .pending_contains(chunk.data_root, chunk.tx_offset)
+                .await
+        );
+        assert!(!state.pending_contains(chunk.data_root, 1_u32.into()).await);
     }
 }

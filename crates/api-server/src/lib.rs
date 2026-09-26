@@ -31,7 +31,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Semaphore, mpsc::UnboundedSender};
 use tracing::{info, warn};
 use tracing_actix_web::TracingLogger;
 
@@ -46,6 +46,8 @@ const API_SERVER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 pub struct ApiState {
     pub mempool_service: UnboundedSender<Traced<MempoolServiceMessage>>,
     pub chunk_ingress: UnboundedSender<Traced<ChunkIngressMessage>>,
+    pub http_chunk_admission: Arc<Semaphore>,
+    pub http_chunk_waiters: Arc<Semaphore>,
     pub mempool_guard: MempoolReadGuard,
     pub chunk_provider: Arc<ChunkProvider>,
     pub peer_list: PeerList,

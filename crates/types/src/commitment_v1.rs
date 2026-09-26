@@ -20,10 +20,10 @@ use serde::{Deserialize, Serialize};
     Deserialize,
     PartialEq,
     Arbitrary,
-    Compact,
     RlpEncodable,
     RlpDecodable,
     Hash,
+    Compact,
 )]
 #[rlp(trailing)]
 /// Stores deserialized fields from a JSON formatted commitment transaction.

@@ -80,6 +80,11 @@ impl Config {
 
     // validate configuration invariants
     pub fn validate(&self) -> eyre::Result<()> {
+        ensure!(
+            self.node_config.storage.max_pending_write_bytes != Some(0),
+            "storage.max_pending_write_bytes must be > 0 (or omitted for the derived default): \
+             a zero ceiling stops chunk-body migration from ever writing"
+        );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
@@ -302,6 +307,18 @@ impl Config {
         ensure!(
             self.mempool.max_pending_chunk_items > 0,
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
+        );
+        ensure!(
+            self.mempool.max_http_chunk_admission > 0,
+            "mempool.max_http_chunk_admission must be > 0 (used as a Semaphore permit count; zero permits would reject every public POST /v1/chunk)"
+        );
+        ensure!(
+            self.mempool.max_http_chunk_waiters > 0,
+            "mempool.max_http_chunk_waiters must be > 0 (used as a Semaphore permit count; zero waiters would 503 every POST that cannot admit immediately)"
+        );
+        ensure!(
+            self.mempool.http_chunk_admission_timeout_millis > 0,
+            "mempool.http_chunk_admission_timeout_millis must be > 0 (a zero timeout would 503 every POST waiting for admission)"
         );
 
         // Zero satisfies wait_for_active_peers immediately on the empty snapshot,
@@ -673,6 +690,9 @@ impl From<&NodeConfig> for MempoolConfig {
             max_concurrent_chunk_ingress_tasks: value.mempool.max_concurrent_chunk_ingress_tasks,
             max_control_plane_concurrent_tasks: value.mempool.max_control_plane_concurrent_tasks,
             chunk_writer_buffer_size: value.mempool.chunk_writer_buffer_size,
+            max_http_chunk_admission: value.mempool.max_http_chunk_admission,
+            max_http_chunk_waiters: value.mempool.max_http_chunk_waiters,
+            http_chunk_admission_timeout_millis: value.mempool.http_chunk_admission_timeout_millis,
         }
     }
 }
@@ -807,6 +827,14 @@ pub struct MempoolConfig {
 
     /// Backpressure channel capacity for the async chunk write-behind buffer
     pub chunk_writer_buffer_size: usize,
+
+    /// Max public `POST /v1/chunk` bodies admitted and not yet finished by ingress.
+    pub max_http_chunk_admission: usize,
+    /// Max decoded public POSTs waiting for an admission permit
+    /// (`http_chunk_admission_timeout_millis`).
+    pub max_http_chunk_waiters: usize,
+    /// Monotonic wait for an admission permit, in milliseconds.
+    pub http_chunk_admission_timeout_millis: u64,
 }
 
 impl MempoolConfig {
@@ -834,6 +862,9 @@ impl MempoolConfig {
             max_concurrent_chunk_ingress_tasks: 10,
             max_control_plane_concurrent_tasks: 4,
             chunk_writer_buffer_size: 4096,
+            max_http_chunk_admission: 256,
+            max_http_chunk_waiters: 32,
+            http_chunk_admission_timeout_millis: 5000,
         }
     }
 }
@@ -1631,6 +1662,23 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_pending_write_ceiling() {
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.max_pending_write_bytes = Some(0);
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a zero pending-write ceiling would halt body migration")
+            .to_string();
+        assert!(err.contains("max_pending_write_bytes"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.max_pending_write_bytes = Some(1);
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive ceiling is accepted; the worker floors it");
+    }
+
+    #[test]
     fn validate_rejects_epoch_shorter_than_reorg_window() {
         // Expiry+settlement is committed at epoch blocks; a finalized epoch block is
         // irreversible only because it falls block_tree_depth behind head (see
@@ -2153,6 +2201,18 @@ mod validate_tests {
         |nc: &mut NodeConfig| { nc.mempool.max_pending_chunk_items = 0; },
         "max_pending_chunk_items"
     )]
+    #[case::max_http_chunk_admission(
+        |nc: &mut NodeConfig| { nc.mempool.max_http_chunk_admission = 0; },
+        "max_http_chunk_admission"
+    )]
+    #[case::max_http_chunk_waiters(
+        |nc: &mut NodeConfig| { nc.mempool.max_http_chunk_waiters = 0; },
+        "max_http_chunk_waiters"
+    )]
+    #[case::http_chunk_admission_timeout_millis(
+        |nc: &mut NodeConfig| { nc.mempool.http_chunk_admission_timeout_millis = 0; },
+        "http_chunk_admission_timeout_millis"
+    )]
     fn validate_rejects_zero_mempool_capacities(
         #[case] mutate: fn(&mut NodeConfig),
         #[case] expected_msg: &str,
@@ -2283,6 +2343,9 @@ mod validate_tests {
             nc.mempool.max_concurrent_chunk_ingress_tasks, 30,
             "missing field must take the documented default (30)"
         );
+        assert_eq!(nc.mempool.max_http_chunk_admission, 256);
+        assert_eq!(nc.mempool.max_http_chunk_waiters, 32);
+        assert_eq!(nc.mempool.http_chunk_admission_timeout_millis, 5000);
 
         Config::new_with_random_peer_id(nc)
             .validate()

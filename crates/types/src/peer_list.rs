@@ -3,10 +3,11 @@ use crate::{
 };
 
 use crate::v2::GossipDataRequestV2;
-use alloy_primitives::B256;
+use alloy_primitives::{B256, B512};
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
-use reth::providers::errors::db::DatabaseError;
+#[cfg(feature = "db")]
+use reth_db::DatabaseError;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -291,7 +292,7 @@ pub struct RethPeerInfo {
     // Reth's PUBLICLY ACCESSIBLE peering port: https://reth.rs/run/ports.html#peering-ports
     pub peering_tcp_addr: SocketAddr,
     #[serde(default)]
-    pub peer_id: reth_transaction_pool::PeerId,
+    pub peer_id: B512,
 }
 
 impl Default for RethPeerInfo {
@@ -318,7 +319,7 @@ impl Compact for RethPeerInfo {
         let mut buf = buf;
         let (peering_tcp_addr, consumed) = decode_address(buf);
         buf.advance(consumed);
-        let (peer_id, buf) = reth_transaction_pool::PeerId::from_compact(buf, buf.len());
+        let (peer_id, buf) = B512::from_compact(buf, buf.len());
         (
             Self {
                 peering_tcp_addr,
@@ -627,6 +628,7 @@ pub enum PeerNetworkServiceMessage {
 
 #[derive(Debug, Error, Clone)]
 pub enum PeerNetworkError {
+    #[cfg(feature = "db")]
     #[error("Internal database error: {0}")]
     Database(DatabaseError),
     #[error("Peer list internal error: {0:?}")]
@@ -649,6 +651,7 @@ impl From<SendError<PeerNetworkServiceMessage>> for PeerNetworkError {
     }
 }
 
+#[cfg(feature = "db")]
 impl From<DatabaseError> for PeerNetworkError {
     fn from(err: DatabaseError) -> Self {
         Self::Database(err)
@@ -657,7 +660,14 @@ impl From<DatabaseError> for PeerNetworkError {
 
 impl From<eyre::Report> for PeerNetworkError {
     fn from(err: eyre::Report) -> Self {
-        Self::Database(DatabaseError::Other(err.to_string()))
+        #[cfg(feature = "db")]
+        {
+            Self::Database(DatabaseError::Other(err.to_string()))
+        }
+        #[cfg(not(feature = "db"))]
+        {
+            Self::OtherInternalError(err.to_string())
+        }
     }
 }
 
@@ -791,7 +801,7 @@ mod tests {
                         Ipv4Addr::new(172, 16, 0, 1),
                         30303,
                     )),
-                    peer_id: reth_transaction_pool::PeerId::random(),
+                    peer_id: B512::random(),
                 },
             },
             last_seen: 1704067200000, // Jan 1, 2024 timestamp in milliseconds

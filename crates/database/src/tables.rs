@@ -1,8 +1,10 @@
 use crate::db_cache::{GlobalChunkOffset, PartitionHashes};
 use crate::metadata::MetadataKey;
-use crate::submodule::tables::{DataRootInfos, TxLeafBinding};
+use crate::submodule::tables::{DataRootInfos, PendingBodyMigration, TxLeafBinding};
 use crate::{
-    db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
+    db_cache::{
+        CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf, CachedIngressLeafKey,
+    },
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
@@ -96,10 +98,12 @@ impl_compression_for_compact!(
     CachedDataRoot,
     CachedChunkIndexEntry,
     CachedChunk,
+    CachedIngressLeaf,
     ChunkPathHashes,
     PartitionHashes,
     DataRootInfos,
     TxLeafBinding,
+    PendingBodyMigration,
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof,
@@ -125,6 +129,14 @@ impl ValueWithSubKey for CachedChunkIndexEntry {
 
     fn get_subkey(&self) -> Self::SubKey {
         self.index.0
+    }
+}
+
+impl ValueWithSubKey for CachedIngressLeaf {
+    type SubKey = u32;
+
+    fn get_subkey(&self) -> Self::SubKey {
+        self.tx_offset.0
     }
 }
 
@@ -210,6 +222,15 @@ table CachedChunksIndex {
 table CachedChunks {
     type Key = ChunkPathHash;
     type Value = CachedChunk;
+}
+
+/// Stores one compact, miner-specific ingress leaf per transaction-relative
+/// chunk offset, recorded when the chunk is validated. Cached-body reclamation
+/// is gated on storage-module durability, not on the presence of a leaf.
+table CachedIngressLeaves {
+    type Key = CachedIngressLeafKey;
+    type Value = CachedIngressLeaf;
+    type SubKey = u32;
 }
 
 /// Indexes ingress proofs by DataRoot and Address

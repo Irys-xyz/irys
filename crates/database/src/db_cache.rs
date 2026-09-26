@@ -2,7 +2,7 @@ use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use irys_types::{
-    Base64, ChunkPathHash, Compact, H256, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    Base64, ChunkPathHash, Compact, H256, IrysAddress, TxChunkOffset, UnixTimestamp, UnpackedChunk,
     partition::PartitionHash,
 };
 use reth_db::DatabaseError;
@@ -191,6 +191,85 @@ pub struct CachedChunkIndexMetadata {
     pub chunk_path_hash: ChunkPathHash,
     /// Last time this index entry was updated
     pub updated_at: UnixTimestamp,
+}
+
+/// Key for one persisted miner-specific ingress-leaf sequence.
+///
+/// A dupsort value begins with the big-endian transaction offset, preserving
+/// exact `(data_root, address, tx_offset)` ordering while allowing an O(1)
+/// count prefilter before the required gap-free verification walk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Arbitrary)]
+pub struct CachedIngressLeafKey {
+    pub data_root: H256,
+    pub address: IrysAddress,
+}
+
+const CACHED_INGRESS_LEAF_KEY_BYTES: usize = 32 + 20;
+
+impl Encode for CachedIngressLeafKey {
+    type Encoded = [u8; CACHED_INGRESS_LEAF_KEY_BYTES];
+
+    fn encode(self) -> Self::Encoded {
+        let mut encoded = [0_u8; CACHED_INGRESS_LEAF_KEY_BYTES];
+        encoded[..32].copy_from_slice(&self.data_root.0);
+        encoded[32..].copy_from_slice(self.address.as_slice());
+        encoded
+    }
+}
+
+impl Decode for CachedIngressLeafKey {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        if value.len() != CACHED_INGRESS_LEAF_KEY_BYTES {
+            return Err(DatabaseError::Decode);
+        }
+        Ok(Self {
+            data_root: H256::from_slice(&value[..32]),
+            address: IrysAddress::from_slice(&value[32..]),
+        })
+    }
+}
+
+/// Durable compact state sufficient to reconstruct one ingress Merkle leaf.
+///
+/// The byte boundary is deliberately not stored: it is derived from the
+/// transaction offset, confirmed data size, and consensus chunk size. Only the
+/// miner-specific data hash is unavailable after the cached body is reclaimed.
+/// Availability of this record says nothing about whether the chunk body is
+/// durably stored; reclamation is gated separately on storage-module state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Arbitrary)]
+pub struct CachedIngressLeaf {
+    pub tx_offset: TxChunkOffset,
+    pub ingress_data_hash: H256,
+}
+
+const CACHED_INGRESS_LEAF_OFFSET_BYTES: usize = std::mem::size_of::<TxChunkOffset>();
+const CACHED_INGRESS_DATA_HASH_BYTES: usize = 32;
+
+// The uncompressed big-endian tx offset must lead the dupsort value so MDBX
+// subkey seeks and ordered walks follow transaction-relative chunk order.
+impl Compact for CachedIngressLeaf {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        buf.put_slice(&self.tx_offset.to_be_bytes());
+        buf.put_slice(&self.ingress_data_hash.0);
+        CACHED_INGRESS_LEAF_OFFSET_BYTES + CACHED_INGRESS_DATA_HASH_BYTES
+    }
+
+    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+        let offset_end = CACHED_INGRESS_LEAF_OFFSET_BYTES;
+        let hash_end = offset_end + CACHED_INGRESS_DATA_HASH_BYTES;
+        let tx_offset = TxChunkOffset::from_be_bytes(buf[..offset_end].try_into().unwrap());
+        let ingress_data_hash = H256::from_slice(&buf[offset_end..hash_end]);
+        (
+            Self {
+                tx_offset,
+                ingress_data_hash,
+            },
+            &buf[hash_end..],
+        )
+    }
 }
 
 impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {

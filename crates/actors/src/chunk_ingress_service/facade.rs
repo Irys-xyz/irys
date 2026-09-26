@@ -23,7 +23,11 @@ impl ChunkIngressFacadeImpl {
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
         self.service
-            .send_traced(ChunkIngressMessage::IngestChunk(chunk, Some(oneshot_tx)))
+            .send_traced(ChunkIngressMessage::IngestChunk(
+                chunk,
+                Some(oneshot_tx),
+                None,
+            ))
             .map_err(|_| {
                 CriticalChunkIngressError::Other(format!(
                     "Error sending ChunkIngressMessage for chunk data_root {:?} tx_offset {}",

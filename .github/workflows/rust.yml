@@ -217,7 +217,7 @@ jobs:
         run: git submodule update --init --recursive
 
       - name: cargo check
-        run: RUSTFLAGS="-D warnings" cargo xtask full-check
+        run: cargo xtask full-check
 
       - name: sccache stats
         if: always()
@@ -258,7 +258,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo clippy
-        run: cargo xtask clippy -- --all-features -- -Dwarnings
+        run: cargo xtask clippy -- --all-features
 
       - name: sccache stats
         if: always()

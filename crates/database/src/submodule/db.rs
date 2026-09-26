@@ -17,7 +17,8 @@ use crate::{
 
 use super::tables::{
     ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos,
-    SubmoduleTables, TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash,
+    PendingBodyMigration, PendingBodyMigrationsByOffset, SubmoduleTables, TxLeafBinding,
+    TxLeafBindingByTxPathHash, TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database with the given [`DatabaseArguments`].
@@ -363,6 +364,68 @@ pub fn add_data_root_info<T: DbTxMut + DbTx>(
     Ok(())
 }
 
+/// Record that `data_root`'s placement whose clipped range starts at `offset`
+/// still owes this submodule its chunk bodies.
+///
+/// Must run inside the same txn as the index writes for that tx (see
+/// `StorageModule::index_transaction_data`) so a row can never exist without
+/// its index, nor an index without its row.
+pub fn add_pending_body_migration<T: DbTxMut>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+    job: &PendingBodyMigration,
+) -> eyre::Result<()> {
+    tx.put::<PendingBodyMigrationsByOffset>(offset, job.clone())?;
+    Ok(())
+}
+
+pub fn get_pending_body_migration<T: DbTx>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+) -> eyre::Result<Option<PendingBodyMigration>> {
+    Ok(tx.get::<PendingBodyMigrationsByOffset>(offset)?)
+}
+
+/// Remove a resolved (every offset durable) or retired (unsourceable) job.
+/// Returns whether a row existed at `offset`.
+pub fn del_pending_body_migration<T: DbTxMut>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+) -> eyre::Result<bool> {
+    Ok(tx.delete::<PendingBodyMigrationsByOffset>(offset, None)?)
+}
+
+/// Every outstanding body-migration job at or after `start` (all of them for
+/// `None`), in ascending offset order — the order the body worker drains them so
+/// disk access stays sequential.
+pub fn pending_body_migrations_from<T: DbTx>(
+    tx: &T,
+    start: Option<PartitionChunkOffset>,
+) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
+    let mut cursor = tx.cursor_read::<PendingBodyMigrationsByOffset>()?;
+    Ok(cursor.walk(start)?.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Delete every job whose key (clipped tx start) lies in `[start, end]`. Used
+/// by network-partition recovery when those offsets are unassigned: the bodies
+/// they owed belong to txs that are no longer canonical. Returns the number of
+/// rows removed.
+pub fn del_pending_body_migrations_in_range<T: DbTxMut + DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<usize> {
+    let orphaned: Vec<PartitionChunkOffset> = pending_body_migrations_from(tx, Some(start))?
+        .into_iter()
+        .map(|(offset, _)| offset)
+        .take_while(|offset| *offset <= end)
+        .collect();
+    for offset in &orphaned {
+        tx.delete::<PendingBodyMigrationsByOffset>(*offset, None)?;
+    }
+    Ok(orphaned.len())
+}
+
 /// clear db
 pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<ChunkPathHashesByOffset>()?;
@@ -370,6 +433,7 @@ pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<TxPathByTxPathHash>()?;
     tx.clear::<DataRootInfosByDataRoot>()?;
     tx.clear::<TxLeafBindingByTxPathHash>()?;
+    tx.clear::<PendingBodyMigrationsByOffset>()?;
     Ok(())
 }
 
@@ -380,11 +444,17 @@ mod tests {
     use crate::submodule::{
         add_data_root_info, get_data_root_infos_for_data_root, set_data_root_infos_for_data_root,
     };
+    use crate::submodule::{
+        add_pending_body_migration, clear_submodule_database, del_pending_body_migration,
+        del_pending_body_migrations_in_range, get_pending_body_migration,
+        pending_body_migrations_from, tables::PendingBodyMigration,
+    };
     use crate::{
         IrysDatabaseArgs as _, open_or_create_db,
         submodule::tables::{DataRootInfo, SubmoduleTables},
     };
     use irys_types::H256;
+    use irys_types::PartitionChunkOffset;
     use irys_types::RelativeChunkOffset;
     use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
@@ -455,6 +525,166 @@ mod tests {
             db.view_eyre(|tx| get_data_root_infos_for_data_root(tx, random_data_root))?;
 
         assert!(missing_infos.is_none());
+
+        Ok(())
+    }
+
+    fn open_test_submodule_db(prefix: &str) -> eyre::Result<reth_db::DatabaseEnv> {
+        let tmpdir = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix(prefix)
+            .build();
+        open_or_create_db(
+            tmpdir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )
+    }
+
+    fn job(data_root: H256, start_offset: i32, block_height: u64) -> PendingBodyMigration {
+        PendingBodyMigration {
+            data_root,
+            data_size: 4_430_000_000, // ~16.9k chunks, the n3 incident size
+            start_offset: RelativeChunkOffset(start_offset),
+            block_height,
+            attempts: 0,
+        }
+    }
+
+    /// Compact round-trip (including a negative unclipped start_offset and the
+    /// extreme values) plus the ascending cursor walk the worker relies on.
+    #[test]
+    fn pending_body_migration_roundtrip_and_ascending_walk() -> eyre::Result<()> {
+        let db = open_test_submodule_db("irys-pending-body-")?;
+
+        let a = job(H256::random(), -20, 29_875);
+        let b = PendingBodyMigration {
+            data_root: H256::random(),
+            data_size: u64::MAX,
+            start_offset: RelativeChunkOffset(i32::MIN),
+            block_height: u64::MAX,
+            attempts: u32::MAX,
+        };
+        let c = job(H256::random(), 0, 29_876);
+
+        // Insert out of order; the walk must come back sorted by key.
+        db.update_eyre(|tx| {
+            add_pending_body_migration(tx, PartitionChunkOffset::from(100), &a)?;
+            add_pending_body_migration(tx, PartitionChunkOffset::from(0), &b)?;
+            add_pending_body_migration(tx, PartitionChunkOffset::from(7), &c)?;
+            Ok(())
+        })?;
+
+        let all = db.view_eyre(|tx| pending_body_migrations_from(tx, None))?;
+        assert_eq!(
+            all,
+            vec![
+                (PartitionChunkOffset::from(0), b),
+                (PartitionChunkOffset::from(7), c.clone()),
+                (PartitionChunkOffset::from(100), a.clone()),
+            ]
+        );
+
+        // Resumable drain: walking from a key starts at that key, inclusive.
+        let from_seven = db.view_eyre(|tx| {
+            pending_body_migrations_from(tx, Some(PartitionChunkOffset::from(7)))
+        })?;
+        assert_eq!(
+            from_seven,
+            vec![
+                (PartitionChunkOffset::from(7), c),
+                (PartitionChunkOffset::from(100), a.clone()),
+            ]
+        );
+
+        assert_eq!(
+            db.view_eyre(|tx| get_pending_body_migration(tx, PartitionChunkOffset::from(100)))?,
+            Some(a)
+        );
+        assert_eq!(
+            db.view_eyre(|tx| get_pending_body_migration(tx, PartitionChunkOffset::from(1)))?,
+            None
+        );
+
+        // Resolve one job; the rest are untouched.
+        db.update_eyre(|tx| del_pending_body_migration(tx, PartitionChunkOffset::from(7)))?;
+        let remaining = db.view_eyre(|tx| pending_body_migrations_from(tx, None))?;
+        assert_eq!(remaining.len(), 2);
+        assert!(
+            remaining
+                .iter()
+                .all(|(offset, _)| *offset != PartitionChunkOffset::from(7))
+        );
+
+        Ok(())
+    }
+
+    /// Partition recovery unassigns an offset range; only jobs keyed inside it go.
+    #[test]
+    fn pending_body_migrations_purged_by_key_range() -> eyre::Result<()> {
+        let db = open_test_submodule_db("irys-pending-body-range-")?;
+        db.update_eyre(|tx| {
+            for offset in [3_u32, 10, 20, 21, 40] {
+                add_pending_body_migration(
+                    tx,
+                    PartitionChunkOffset::from(offset),
+                    &job(H256::random(), offset as i32, 9),
+                )?;
+            }
+            Ok(())
+        })?;
+
+        // Inclusive on both ends; keys outside are untouched.
+        let removed = db.update_eyre(|tx| {
+            del_pending_body_migrations_in_range(
+                tx,
+                PartitionChunkOffset::from(10),
+                PartitionChunkOffset::from(21),
+            )
+        })?;
+        assert_eq!(removed, 3);
+        let remaining: Vec<_> = db
+            .view_eyre(|tx| pending_body_migrations_from(tx, None))?
+            .into_iter()
+            .map(|(offset, _)| *offset)
+            .collect();
+        assert_eq!(remaining, vec![3, 40]);
+
+        // An empty range is a no-op.
+        let removed = db.update_eyre(|tx| {
+            del_pending_body_migrations_in_range(
+                tx,
+                PartitionChunkOffset::from(11),
+                PartitionChunkOffset::from(19),
+            )
+        })?;
+        assert_eq!(removed, 0);
+        Ok(())
+    }
+
+    /// A submodule reset must not leave jobs aimed at offsets that now belong to
+    /// another partition's data.
+    #[test]
+    fn clear_submodule_database_clears_pending_body_migrations() -> eyre::Result<()> {
+        let db = open_test_submodule_db("irys-pending-body-clear-")?;
+
+        db.update_eyre(|tx| {
+            add_pending_body_migration(
+                tx,
+                PartitionChunkOffset::from(1),
+                &job(H256::random(), 1, 1),
+            )
+        })?;
+        assert_eq!(
+            db.view_eyre(|tx| pending_body_migrations_from(tx, None))?
+                .len(),
+            1
+        );
+
+        db.update_eyre(clear_submodule_database)?;
+        assert!(
+            db.view_eyre(|tx| pending_body_migrations_from(tx, None))?
+                .is_empty()
+        );
 
         Ok(())
     }
