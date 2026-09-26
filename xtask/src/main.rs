@@ -11,7 +11,7 @@ use xtask::failures::{
     get_stats_file_path,
 };
 use xtask::flaky::{FlakyOptions, run_flaky};
-use xtask::util::{CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper};
+use xtask::util::{CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, with_deny_warnings};
 
 const LLVM_COV_VERSION: &str = "0.6.16";
 
@@ -586,6 +586,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Clippy { args } => {
             println!("cargo clippy");
+            let args = with_deny_warnings(args);
             cmd!(
                 sh,
                 "cargo clippy --workspace --tests --all-targets --locked {args...}"
@@ -604,7 +605,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 // clippy --fix applies both rustc and clippy suggestions, so a
                 // separate `cargo fix` pass is unnecessary and would force a full
                 // recompile (clippy uses a different compiler driver).
-                let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
+                // Deny warnings via clippy-driver args, not RUSTFLAGS — rustflags
+                // fingerprint every git dep (Reth).
+                let args = with_deny_warnings(args);
                 cmd!(
                     sh,
                     "cargo clippy --fix --allow-dirty --allow-staged --workspace --tests --all-targets {args...}"
@@ -651,11 +654,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 sh,
             )?;
             if !fix {
-                // When --fix is used, `cargo fix` and `cargo clippy --fix` (in the
-                // Fmt handler) already compile the full workspace with -D warnings
-                // and would fail on any issues, so these verification steps are only
-                // needed for the non-fix (check-only) path.
-                let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
+                // When --fix is used, `cargo clippy --fix` (in the Fmt handler)
+                // already compiles the workspace with `-- -D warnings`.
                 run_command(
                     Commands::Check {
                         args: vec!["--tests".to_string()],

@@ -5,15 +5,16 @@ use irys_types::DbSyncMode;
 
 use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
+    CachedIngressLeaf, CachedIngressLeafKey,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
-    CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems,
-    IrysBlockStreamEvents, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata,
-    MigratedBlockHashes, PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves,
+    CompactCachedIngressProof, CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders,
+    IrysBlockIndexItems, IrysBlockStreamEvents, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks,
+    Metadata, MigratedBlockHashes, PeerListItems,
 };
 
-use crate::db::IrysDatabaseExt as _;
+use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
@@ -21,8 +22,10 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
     DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion,
-    H256, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
-    LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
+    IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp,
+    UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
+    generate_ingress_leaf_from_data_hash, hash_sha256, validate_path,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -35,6 +38,7 @@ use reth_db::{
     cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
 };
+use std::collections::BTreeSet;
 use tracing::{debug, warn};
 
 /// Extension trait adding Irys preset constructors to [`DatabaseArguments`].
@@ -49,6 +53,352 @@ pub trait IrysDatabaseArgs {
 
     /// Cache-tuned args: larger growth/shrink thresholds (50 MB / 100 MB).
     fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments>;
+}
+
+#[cfg(test)]
+mod compact_ingress_leaf_tests {
+    use super::*;
+    use crate::{db_cache::CachedDataRoot, tables::IrysTables};
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{Base64, generate_data_root, generate_leaves, resolve_proofs};
+    use reth_db::mdbx::DatabaseArguments;
+    use std::sync::Arc;
+
+    fn open_test_db() -> eyre::Result<(tempfile::TempDir, DatabaseProvider)> {
+        let dir = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        Ok((dir, DatabaseProvider(Arc::new(env))))
+    }
+
+    #[test]
+    fn complete_leaves_require_every_position_and_signer() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let data_root = H256::random();
+        let address = IrysAddress::random();
+        let other_address = IrysAddress::random();
+        let hashes = [H256::random(), H256::random(), H256::random()];
+        let leaves = [
+            generate_ingress_leaf_from_data_hash(hashes[0], 32)?,
+            generate_ingress_leaf_from_data_hash(hashes[1], 64)?,
+            generate_ingress_leaf_from_data_hash(hashes[2], 71)?,
+        ];
+
+        // Persist out of order and repeat an offset: exact keys make the
+        // duplicate idempotent, but the missing middle position stays incomplete.
+        db.update_eyre(|tx| {
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(2), hashes[2])?;
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(0), hashes[0])?;
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(0), hashes[0])?;
+            Ok(())
+        })?;
+        db.view_eyre(|tx| {
+            assert!(complete_ingress_leaves(tx, data_root, address, 71, 32)?.is_none());
+            assert!(
+                complete_ingress_leaves(tx, data_root, other_address, 71, 32)?.is_none(),
+                "leaves from another signer must not receive completion credit"
+            );
+            Ok(())
+        })?;
+
+        db.update_eyre(|tx| {
+            store_ingress_data_hash(tx, data_root, address, TxChunkOffset::from(1), hashes[1])?;
+            Ok(())
+        })?;
+        db.view_eyre(|tx| {
+            assert_eq!(
+                complete_ingress_leaves(tx, data_root, address, 71, 32)?.unwrap(),
+                leaves
+            );
+            Ok(())
+        })?;
+
+        let conflict = db.update_eyre(|tx| {
+            store_ingress_data_hash(
+                tx,
+                data_root,
+                address,
+                TxChunkOffset::from(1),
+                H256::random(),
+            )
+            .map_err(eyre::Report::from)
+        });
+        assert!(
+            conflict.is_err(),
+            "a duplicate offset cannot change its hash"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_ingress_leaves_is_scoped_to_one_data_root() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let target_root = H256::random();
+        let other_root = H256::random();
+        let first_signer = IrysAddress::random();
+        let second_signer = IrysAddress::random();
+
+        db.update_eyre(|tx| {
+            store_ingress_data_hash(
+                tx,
+                target_root,
+                first_signer,
+                TxChunkOffset::from(0),
+                H256::random(),
+            )?;
+            store_ingress_data_hash(
+                tx,
+                target_root,
+                second_signer,
+                TxChunkOffset::from(1),
+                H256::random(),
+            )?;
+            store_ingress_data_hash(
+                tx,
+                other_root,
+                first_signer,
+                TxChunkOffset::from(0),
+                H256::random(),
+            )?;
+            assert_eq!(delete_ingress_leaves_by_data_root(tx, target_root)?, 2);
+            Ok(())
+        })?;
+
+        db.view_eyre(|tx| {
+            assert!(
+                cached_ingress_leaf(tx, target_root, first_signer, TxChunkOffset::from(0))?
+                    .is_none()
+            );
+            assert!(
+                cached_ingress_leaf(tx, target_root, second_signer, TxChunkOffset::from(1))?
+                    .is_none()
+            );
+            assert!(
+                cached_ingress_leaf(tx, other_root, first_signer, TxChunkOffset::from(0))?
+                    .is_some(),
+                "deleting one root must preserve another root's leaves"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn startup_backfill_recovers_legacy_cached_bodies_idempotently() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let address = IrysAddress::random();
+        let tx_offset = TxChunkOffset::from(0);
+        let chunk_size = 32;
+        let bytes = vec![7_u8; 8];
+        let root = generate_data_root(generate_leaves(
+            std::iter::once(Ok(bytes.clone())),
+            chunk_size as usize,
+        )?)?;
+        let data_root = H256(root.id);
+        let data_path = Base64(resolve_proofs(root, None)?.remove(0).proof);
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 8,
+            data_path,
+            bytes: Base64(bytes),
+            tx_offset,
+        };
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 8,
+                    data_size_confirmed: true,
+                    block_set: vec![H256::random()],
+                    ..Default::default()
+                },
+            )?;
+            cache_chunk(tx, &chunk)?;
+            Ok(())
+        })?;
+
+        assert_eq!(
+            backfill_cached_ingress_data_hashes(&db, address, chunk_size)?,
+            BTreeSet::from([data_root])
+        );
+        let expected = generate_ingress_data_hash(&chunk.bytes.0, address);
+        db.view_eyre(|tx| {
+            assert_eq!(
+                cached_ingress_leaf(tx, data_root, address, tx_offset)?
+                    .expect("legacy cached body must be backfilled")
+                    .ingress_data_hash,
+                expected
+            );
+            Ok(())
+        })?;
+
+        // A second startup sees the existing record and leaves it unchanged.
+        assert_eq!(
+            backfill_cached_ingress_data_hashes(&db, address, chunk_size)?,
+            BTreeSet::from([data_root])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn startup_backfill_rejects_cached_body_that_does_not_match_path() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let address = IrysAddress::random();
+        let chunk_size = 32;
+        let valid_bytes = vec![7_u8; 8];
+        let root = generate_data_root(generate_leaves(
+            std::iter::once(Ok(valid_bytes)),
+            chunk_size as usize,
+        )?)?;
+        let data_root = H256(root.id);
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 8,
+            data_path: Base64(resolve_proofs(root, None)?.remove(0).proof),
+            bytes: Base64(vec![8_u8; 8]),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 8,
+                    data_size_confirmed: true,
+                    block_set: vec![H256::random()],
+                    ..Default::default()
+                },
+            )?;
+            cache_chunk(tx, &chunk)?;
+            Ok(())
+        })?;
+
+        assert!(backfill_cached_ingress_data_hashes(&db, address, chunk_size)?.is_empty());
+        db.view_eyre(|tx| {
+            assert!(
+                cached_ingress_leaf(tx, data_root, address, chunk.tx_offset)?.is_none(),
+                "an invalid cached body must not become ingress-proof input"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn capacity_eviction_requires_a_durable_storage_offset() -> eyre::Result<()> {
+        let (_dir, db) = open_test_db()?;
+        let data_root = H256::random();
+        let address = IrysAddress::random();
+        let tx_offset = TxChunkOffset::from(0);
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 8,
+            data_path: Base64::default(),
+            bytes: Base64(vec![7_u8; 8]),
+            tx_offset,
+        };
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 8,
+                    ..Default::default()
+                },
+            )?;
+            cache_chunk(tx, &chunk)?;
+            let meta = cached_chunk_meta_by_offset(tx, data_root, tx_offset)?.unwrap();
+            tx.delete::<CachedChunksIndex>(data_root, None)?;
+            tx.put::<CachedChunksIndex>(
+                data_root,
+                CachedChunkIndexEntry {
+                    index: tx_offset,
+                    meta: CachedChunkIndexMetadata {
+                        updated_at: UnixTimestamp::from_secs(0),
+                        ..meta
+                    },
+                },
+            )?;
+            Ok(())
+        })?;
+
+        db.update_eyre(|tx| {
+            // Durability without a compact hash is not reclaimable. This is
+            // possible during rolling upgrade before startup backfill reaches
+            // a legacy cached body.
+            assert_eq!(
+                delete_reclaimable_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::from([tx_offset]),
+                    UnixTimestamp::from_secs(1),
+                )?,
+                0,
+                "a durable body without a compact ingress hash must be retained"
+            );
+
+            // A validated hash is not a durability signal either: recording
+            // one must never authorize dropping the body by itself.
+            store_ingress_data_hash(tx, data_root, address, tx_offset, H256::random())?;
+            assert_eq!(
+                delete_reclaimable_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::new(),
+                    UnixTimestamp::from_secs(1),
+                )?,
+                0,
+                "a body no storage module reports as durable must be retained"
+            );
+
+            // A different offset being durable says nothing about this one.
+            assert_eq!(
+                delete_reclaimable_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::from([TxChunkOffset::from(1)]),
+                    UnixTimestamp::from_secs(1),
+                )?,
+                0,
+                "durability credit must not leak across chunk offsets"
+            );
+
+            // Durable, but not yet older than the age threshold.
+            assert_eq!(
+                delete_reclaimable_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::from([tx_offset]),
+                    UnixTimestamp::from_secs(0),
+                )?,
+                0,
+                "a durable body newer than the age threshold must be retained"
+            );
+
+            assert_eq!(
+                delete_reclaimable_cached_chunks_older_than(
+                    tx,
+                    data_root,
+                    address,
+                    &BTreeSet::from([tx_offset]),
+                    UnixTimestamp::from_secs(1),
+                )?,
+                1
+            );
+            assert!(cached_chunk_by_chunk_offset(tx, data_root, tx_offset)?.is_none());
+            assert!(
+                cached_ingress_leaf(tx, data_root, address, tx_offset)?.is_some(),
+                "the leaf must outlive the body it was derived from, so proof \
+                 generation still works after reclamation"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
 }
 
 impl IrysDatabaseArgs for DatabaseArguments {
@@ -842,6 +1192,255 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
     tx.get::<CachedChunks>(*key)
 }
 
+/// Retrieves one validated compact ingress leaf for an exact signer and tx offset.
+pub fn cached_ingress_leaf<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    address: IrysAddress,
+    tx_offset: TxChunkOffset,
+) -> Result<Option<CachedIngressLeaf>, DatabaseError> {
+    let key = CachedIngressLeafKey { data_root, address };
+    let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
+    Ok(cursor
+        .seek_by_key_subkey(key, *tx_offset)?
+        .filter(|leaf| leaf.tx_offset == tx_offset))
+}
+
+/// Loads a complete, gap-free compact ingress-leaf sequence.
+///
+/// `None` means at least one expected validated position has not been recorded.
+/// Boundaries and leaf ids are reconstructed from the stored miner-specific
+/// hashes and authoritative transaction metadata only after every exact offset
+/// is present.
+pub fn complete_ingress_leaves<T>(
+    tx: &T,
+    data_root: DataRoot,
+    address: IrysAddress,
+    data_size: u64,
+    chunk_size: u64,
+) -> eyre::Result<Option<Vec<IngressMerkleLeaf>>>
+where
+    T: DbTx,
+    T::DupCursor<CachedIngressLeaves>: IrysDupCursorExt<CachedIngressLeaves>,
+{
+    let expected_count = crate::db_cache::data_size_to_chunk_count(data_size, chunk_size)?;
+    let key = CachedIngressLeafKey { data_root, address };
+    let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
+    if cursor.dup_count(key)?.unwrap_or(0) != expected_count {
+        return Ok(None);
+    }
+
+    let mut leaves = Vec::with_capacity(expected_count as usize);
+    let mut walker = cursor.walk_dup(Some(key), None)?;
+    for raw_offset in 0..expected_count {
+        let Some((walked_key, leaf)) = walker.next().transpose()? else {
+            return Ok(None);
+        };
+        if walked_key != key || leaf.tx_offset != TxChunkOffset::from(raw_offset) {
+            return Ok(None);
+        }
+        let (_, expected_boundary) =
+            expected_chunk_byte_range(TxChunkOffset::from(raw_offset), data_size, chunk_size)?;
+        leaves.push(generate_ingress_leaf_from_data_hash(
+            leaf.ingress_data_hash,
+            expected_boundary,
+        )?);
+    }
+    Ok(Some(leaves))
+}
+
+/// Persists one validated miner-specific data hash idempotently. The key
+/// includes the signer address, so a key change cannot silently reuse hashes
+/// derived for another miner. Recording a hash never authorizes cached-body eviction; see
+/// [`delete_reclaimable_cached_chunks_older_than`].
+pub fn store_ingress_data_hash<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    address: IrysAddress,
+    tx_offset: TxChunkOffset,
+    ingress_data_hash: H256,
+) -> Result<(), DatabaseError> {
+    let key = CachedIngressLeafKey { data_root, address };
+    let mut cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
+    // A duplicate gossip delivery must not change an already-validated leaf.
+    if let Some(existing) = cursor
+        .seek_by_key_subkey(key, *tx_offset)?
+        .filter(|existing| existing.tx_offset == tx_offset)
+    {
+        if existing.ingress_data_hash != ingress_data_hash {
+            return Err(DatabaseError::Other(format!(
+                "conflicting ingress leaf for data root {data_root}, address {address}, offset {tx_offset}"
+            )));
+        }
+        return Ok(());
+    }
+    drop(cursor);
+    tx.put::<CachedIngressLeaves>(
+        key,
+        CachedIngressLeaf {
+            tx_offset,
+            ingress_data_hash,
+        },
+    )
+}
+
+/// Backfills compact ingress hashes for validated chunk bodies cached by a
+/// pre-compact-leaf binary and returns roots that should retry proof generation.
+///
+/// Existing records are scanned first, so ordinary restarts only perform
+/// metadata reads. Chunk bodies are hashed only when the current signer lacks
+/// the exact `(data_root, tx_offset)` record. The write phase rechecks that the
+/// root and body still exist, preventing terminal cache cleanup from racing a
+/// stale backfill snapshot and resurrecting orphan leaf state.
+pub fn backfill_cached_ingress_data_hashes(
+    db: &DatabaseProvider,
+    address: IrysAddress,
+    chunk_size: u64,
+) -> eyre::Result<BTreeSet<DataRoot>> {
+    let (mut retry_roots, missing) = db.view_eyre(|tx| {
+        let mut existing = BTreeSet::new();
+        let mut retry_roots = BTreeSet::new();
+        let mut leaf_roots = BTreeSet::new();
+        let mut leaf_cursor = tx.cursor_read::<CachedIngressLeaves>()?;
+        let mut leaf_walker = leaf_cursor.walk(None)?;
+        while let Some((key, leaf)) = leaf_walker.next().transpose()? {
+            if key.address != address {
+                continue;
+            }
+            existing.insert((key.data_root, leaf.tx_offset));
+            leaf_roots.insert(key.data_root);
+        }
+        drop(leaf_walker);
+        drop(leaf_cursor);
+
+        for data_root in leaf_roots {
+            if let Some(cdr) = tx.get::<CachedDataRoots>(data_root)?
+                && cdr.data_size_confirmed
+                && !cdr.block_set.is_empty()
+                && ingress_proof_by_data_root_address(tx, data_root, address)?.is_none()
+            {
+                retry_roots.insert(data_root);
+            }
+        }
+
+        let mut missing = Vec::new();
+        let mut chunk_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        let mut chunk_walker = chunk_cursor.walk(None)?;
+        while let Some((data_root, entry)) = chunk_walker.next().transpose()? {
+            if existing.contains(&(data_root, entry.index)) {
+                continue;
+            }
+            let Some(cached) = tx.get::<CachedChunks>(entry.meta.chunk_path_hash)? else {
+                warn!(
+                    %data_root,
+                    tx_offset = %entry.index,
+                    "Skipping ingress-hash backfill for an index entry without a cached body"
+                );
+                continue;
+            };
+            let Some(bytes) = cached.chunk else {
+                continue;
+            };
+            let chunk_len = u64::try_from(bytes.len())?;
+            let validation = (|| {
+                eyre::ensure!(chunk_size > 0, "chunk size must be non-zero");
+                eyre::ensure!(
+                    chunk_len > 0 && chunk_len <= chunk_size,
+                    "cached chunk length {chunk_len} is outside 1..={chunk_size}"
+                );
+                let min_byte_range = u64::from(*entry.index)
+                    .checked_mul(chunk_size)
+                    .ok_or_else(|| eyre::eyre!("cached chunk byte range overflow"))?;
+                let max_byte_range = min_byte_range
+                    .checked_add(chunk_len)
+                    .ok_or_else(|| eyre::eyre!("cached chunk byte range overflow"))?;
+                let path = validate_path(
+                    data_root.0,
+                    &cached.data_path,
+                    u128::from(max_byte_range - 1),
+                )?;
+                eyre::ensure!(
+                    path.min_byte_range == u128::from(min_byte_range)
+                        && path.max_byte_range == u128::from(max_byte_range),
+                    "cached data path range does not match its transaction offset and body length"
+                );
+                eyre::ensure!(
+                    path.is_rightmost_chunk || chunk_len == chunk_size,
+                    "non-rightmost cached chunk is not full-sized"
+                );
+                eyre::ensure!(
+                    path.leaf_hash == hash_sha256(&bytes.0),
+                    "cached body does not match its data path"
+                );
+                eyre::Ok(generate_ingress_data_hash(&bytes.0, address))
+            })();
+            let ingress_data_hash = match validation {
+                Ok(hash) => hash,
+                Err(error) => {
+                    warn!(
+                        %data_root,
+                        tx_offset = %entry.index,
+                        %error,
+                        "Skipping invalid cached chunk during ingress-hash backfill"
+                    );
+                    continue;
+                }
+            };
+            missing.push((
+                data_root,
+                entry.index,
+                entry.meta.chunk_path_hash,
+                ingress_data_hash,
+            ));
+        }
+        Ok((retry_roots, missing))
+    })?;
+
+    let inserted_roots = db.update_eyre(|tx| {
+        let mut inserted_roots = BTreeSet::new();
+        for (data_root, tx_offset, chunk_path_hash, ingress_data_hash) in &missing {
+            if tx.get::<CachedDataRoots>(*data_root)?.is_none()
+                || tx.get::<CachedChunks>(*chunk_path_hash)?.is_none()
+            {
+                continue;
+            }
+            store_ingress_data_hash(tx, *data_root, address, *tx_offset, *ingress_data_hash)?;
+            inserted_roots.insert(*data_root);
+        }
+        Ok(inserted_roots)
+    })?;
+    retry_roots.extend(inserted_roots);
+    Ok(retry_roots)
+}
+
+/// Deletes every compact leaf associated with a data root, across signer keys.
+pub fn delete_ingress_leaves_by_data_root<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+) -> eyre::Result<u64> {
+    let start = CachedIngressLeafKey {
+        data_root,
+        address: IrysAddress::default(),
+    };
+    let mut cursor = tx.cursor_read::<CachedIngressLeaves>()?;
+    let mut walker = cursor.walk(Some(start))?;
+    let mut keys = BTreeSet::new();
+    let mut deleted = 0_u64;
+    while let Some((key, _)) = walker.next().transpose()? {
+        if key.data_root != data_root {
+            break;
+        }
+        keys.insert(key);
+        deleted = deleted.saturating_add(1);
+    }
+    drop(walker);
+    drop(cursor);
+    for key in &keys {
+        tx.delete::<CachedIngressLeaves>(*key, None)?;
+    }
+    Ok(deleted)
+}
+
 /// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
 /// It also removes the index values
 pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
@@ -862,33 +1461,38 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     Ok(chunks_pruned)
 }
 
-/// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
-/// It also removes the index values
-pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
+/// Capacity-prunes only bodies old enough to evict, present in
+/// `durable_tx_offsets`, and backed by the current signer's compact ingress
+/// hash. The independent gates preserve the reclamation invariant during
+/// rolling upgrade as well as normal writes.
+pub fn delete_reclaimable_cached_chunks_older_than<T: DbTx + DbTxMut>(
     tx: &T,
     data_root: DataRoot,
+    address: IrysAddress,
+    durable_tx_offsets: &BTreeSet<TxChunkOffset>,
     older_than: UnixTimestamp,
 ) -> eyre::Result<u64> {
     let mut chunks_pruned = 0;
-    // get all chunks specified by the `CachedChunksIndex`
+    let leaf_key = CachedIngressLeafKey { data_root, address };
+    let mut leaf_cursor = tx.cursor_dup_read::<CachedIngressLeaves>()?;
     let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
-    let mut walker = cursor.walk_dup(Some(data_root), None)?; // iterate a specific key's subkeys
-    while let Some((_k, c)) = walker.next().transpose()? {
-        if c.meta.updated_at >= older_than {
+    let mut walker = cursor.walk_dup(Some(data_root), None)?;
+    while let Some((_key, entry)) = walker.next().transpose()? {
+        let has_ingress_hash = leaf_cursor
+            .seek_by_key_subkey(leaf_key, *entry.index)?
+            .is_some_and(|leaf| leaf.tx_offset == entry.index);
+        if entry.meta.updated_at >= older_than
+            || !durable_tx_offsets.contains(&entry.index)
+            || !has_ingress_hash
+        {
             continue;
         }
-        // delete them
-        tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
-        // delete the specific index entry instead of nuking the whole key
-        tx.delete::<CachedChunksIndex>(data_root, Some(c))?;
+        tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
+        tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
         chunks_pruned += 1;
     }
-    // If we removed all subkeys, remove the empty key bucket
-    let mut check_cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
-    let mut remaining = check_cursor.walk_dup(Some(data_root), None)?;
-    if remaining.next().transpose()?.is_none() {
-        tx.delete::<CachedChunksIndex>(data_root, None)?;
-    }
+    // MDBX removes the dupsort key with its final value, preserving the
+    // `dup_count(root) == None` empty-bucket invariant used by cache callers.
     Ok(chunks_pruned)
 }
 

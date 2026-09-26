@@ -83,7 +83,7 @@ use std::{
 use tokio::{
     runtime::Handle,
     sync::{
-        mpsc,
+        Semaphore, mpsc,
         mpsc::{Receiver, UnboundedReceiver, UnboundedSender},
         oneshot::{self},
     },
@@ -146,6 +146,8 @@ pub struct IrysNodeCtx {
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
+    pub http_chunk_admission: Arc<Semaphore>,
+    pub http_chunk_waiters: Arc<Semaphore>,
     /// Atomic timestamps tracking the last canonical advance / last reorg
     /// observed by [`BlockTreeService`]; same `Arc` is shared with the
     /// service worker and with [`ApiState`] so `/v1/tip` does not have to
@@ -172,6 +174,8 @@ impl IrysNodeCtx {
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
             chunk_ingress_state: self.chunk_ingress_state.clone(),
+            http_chunk_admission: Arc::clone(&self.http_chunk_admission),
+            http_chunk_waiters: Arc::clone(&self.http_chunk_waiters),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
             block_tree_lifecycle: self.block_tree_lifecycle.clone(),
@@ -1647,7 +1651,7 @@ impl IrysNode {
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_node)?;
         debug!("Reth DB initialized");
-        let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into()).await?;
+        let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into());
 
         // initialize packing service early
         let packing_service =
@@ -1889,6 +1893,16 @@ impl IrysNode {
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
+        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+
+        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
+        let ingress_proof_generation_state =
+            irys_actors::chunk_ingress_service::IngressProofGenerationState::default();
+
+        // Spawned after the storage modules: capacity pruning asks them which
+        // cached bodies are already fsynced before reclaiming any.
         let chunk_cache_handle = ChunkCacheService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),
@@ -1897,15 +1911,11 @@ impl IrysNode {
             config.clone(),
             service_senders.gossip_broadcast.clone(),
             service_senders.chunk_cache.clone(),
+            storage_modules_guard.clone(),
+            ingress_proof_generation_state.clone(),
             runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
-
-        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
-
-        let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
-        let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
         // Provide storage modules guard to block migration service for partition recovery
         service_senders
@@ -1945,6 +1955,7 @@ impl IrysNode {
                 receivers.chunk_ingress,
                 &config,
                 &service_senders,
+                ingress_proof_generation_state,
                 runtime_handle.clone(),
                 task_exec.clone(),
             );
@@ -2226,6 +2237,8 @@ impl IrysNode {
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
+            http_chunk_admission: Arc::new(Semaphore::new(config.mempool.max_http_chunk_admission)),
+            http_chunk_waiters: Arc::new(Semaphore::new(config.mempool.max_http_chunk_waiters)),
             block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
@@ -2323,6 +2336,8 @@ impl IrysNode {
                 sync_state,
                 mempool_pledge_provider,
                 chunk_ingress_state: irys_node_ctx.chunk_ingress_state.clone(),
+                http_chunk_admission: Arc::clone(&irys_node_ctx.http_chunk_admission),
+                http_chunk_waiters: Arc::clone(&irys_node_ctx.http_chunk_waiters),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
                 block_tree_lifecycle: irys_node_ctx.block_tree_lifecycle.clone(),
@@ -2546,8 +2561,8 @@ impl IrysNode {
         chunk_ingress_state: irys_actors::ChunkIngressState,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
-        let reth_payload_builder = reth_node_adapter.inner.payload_builder_handle.clone();
-        let consensus_engine_handle = reth_node_adapter.inner.beacon_engine_handle.clone();
+        let reth_payload_builder = reth_node_adapter.payload_builder_handle.clone();
+        let consensus_engine_handle = reth_node_adapter.beacon_engine_handle.clone();
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
             db: irys_db.clone(),
             config: config.clone(),

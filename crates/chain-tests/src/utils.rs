@@ -27,6 +27,7 @@ use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
+    cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
@@ -40,7 +41,7 @@ use irys_macros_diag_slow::diag_slow;
 use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
-use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::TempDirBuilder;
@@ -693,7 +694,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         let reth_peer_count = match self
             .node_ctx
             .reth_node_adapter
-            .inner
             .network
             .get_all_peers()
             .await
@@ -706,7 +706,6 @@ impl IrysNodeTest<IrysNodeCtx> {
             .node_ctx
             .reth_node_adapter
             .reth_node
-            .inner
             .eth_api()
             .block_by_number(BlockNumberOrTag::Latest, false)
             .await
@@ -1586,6 +1585,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             seconds,
             unconfirmed_promotions
         );
+        let mut last_have = 0_usize;
+        let mut last_header_found = false;
         for _ in 1..=seconds {
             // Do we have any unconfirmed promotions?
             if unconfirmed_promotions.is_empty() {
@@ -1623,19 +1624,29 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Track which txids have met the required number of proofs
             let mut to_remove: HashSet<H256> = HashSet::new();
+            last_have = 0;
+            last_header_found = false;
 
             for (idx, maybe_header) in headers.iter().enumerate() {
-                if let Some(tx_header) = maybe_header
-                    && let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root)
-                    && tx_proofs.len() >= num_proofs
-                {
-                    for ingress_proof in tx_proofs.iter() {
-                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                        tracing::info!(
-                            "proof {} signer: {}",
-                            ingress_proof.proof.id(),
-                            ingress_proof.address
-                        );
+                let Some(tx_header) = maybe_header else {
+                    continue;
+                };
+                last_header_found = true;
+                let n = ingress_proofs_by_root
+                    .get(&tx_header.data_root)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                last_have = n;
+                if n >= num_proofs {
+                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
+                        for ingress_proof in tx_proofs.iter() {
+                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                            tracing::info!(
+                                "proof {} signer: {}",
+                                ingress_proof.proof.id(),
+                                ingress_proof.address
+                            );
+                        }
                     }
                     to_remove.insert(to_check[idx]);
                 }
@@ -1652,12 +1663,17 @@ impl IrysNodeTest<IrysNodeCtx> {
                 self.mine_block().await?;
             }
             sleep(Duration::from_secs(1)).await;
+
+            if last_have == 0 && !last_header_found {
+                tracing::debug!(
+                    want = num_proofs,
+                    "ingress-proof wait: tx header not in mempool/db yet"
+                );
+            }
         }
 
         Err(eyre::eyre!(
-            "Failed waiting {} for ingress proofs. Waited {} seconds",
-            num_proofs,
-            seconds,
+            "Failed waiting {num_proofs} for ingress proofs (have {last_have}, header_found={last_header_found}). Waited {seconds} seconds"
         ))
     }
 
@@ -1997,7 +2013,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let client = self
             .node_ctx
             .reth_node_adapter
-            .rpc_client()
+            .rpc_server_handle()
+            .http_client()
             .ok_or_eyre("Unable to get RPC client")?;
         use alloy_primitives::Bytes;
         use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
@@ -2083,7 +2100,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let rpc = self
             .node_ctx
             .reth_node_adapter
-            .rpc_client()
+            .rpc_server_handle()
+            .http_client()
             .ok_or_eyre("Unable to get RPC client")?;
         let mut last_rpc_error: Option<String> = None;
 
@@ -2156,7 +2174,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 ));
             }
 
-            let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
+            let eth_api = self.node_ctx.reth_node_adapter.eth_api();
             match eth_api.block_by_number(tag, false).await {
                 Ok(Some(block)) if block.header.hash == expected_hash => {
                     return Ok(block.header.hash);
@@ -2352,7 +2370,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         }));
         self.node_ctx
             .reth_node_adapter
-            .rpc
             .get_balance_irys(address, block)
             .await
     }
@@ -2878,6 +2895,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                 .send_traced(irys_actors::ChunkIngressMessage::IngestChunk(
                                     unpacked,
                                     Some(ctx),
+                                    None,
                                 ))
                                 .expect("failed to send chunk to chunk_ingress");
                             crx.await
@@ -3094,6 +3112,73 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         debug!("chunk_index: {:?}", chunk_index);
         assert_eq!(status, reqwest::StatusCode::OK);
+        let offset = TxChunkOffset::from(u32::try_from(chunk_index).expect("chunk index fits u32"));
+        self.wait_until_chunk_accepted(tx.header.data_root, offset, 10)
+            .await
+            .expect("chunk accepted after POST /v1/chunk 200");
+    }
+
+    pub async fn wait_until_chunk_accepted(
+        &self,
+        data_root: irys_types::DataRoot,
+        tx_offset: TxChunkOffset,
+        timeout_secs: usize,
+    ) -> eyre::Result<()> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
+        let delay = Duration::from_millis(50);
+        let max_attempts = timeout_secs.saturating_mul(20);
+        for _ in 0..max_attempts {
+            if self
+                .node_ctx
+                .chunk_ingress_state
+                .pending_contains(data_root, tx_offset)
+                .await
+            {
+                return Ok(());
+            }
+            let cached = self
+                .node_ctx
+                .db
+                .view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, tx_offset))?;
+            if cached.is_some() {
+                return Ok(());
+            }
+            for ledger in [DataLedger::Publish, DataLedger::Submit] {
+                if self
+                    .node_ctx
+                    .chunk_provider
+                    .get_chunk_by_data_root(ledger, data_root, tx_offset)?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(delay).await;
+        }
+        Err(eyre!(
+            "timed out after {timeout_secs}s waiting for chunk data_root={data_root} offset={tx_offset} to be cached, packed, or parked"
+        ))
+    }
+
+    pub async fn wait_for_http_chunk_idle(&self, timeout_secs: usize) -> eyre::Result<()> {
+        let timeout_secs = coverage_adjusted_timeout(timeout_secs);
+        let delay = Duration::from_millis(50);
+        let max_attempts = timeout_secs.saturating_mul(20);
+        let admission_max = self.node_ctx.config.mempool.max_http_chunk_admission;
+        let waiters_max = self.node_ctx.config.mempool.max_http_chunk_waiters;
+        for _ in 0..max_attempts {
+            if self.node_ctx.http_chunk_admission.available_permits() == admission_max
+                && self.node_ctx.http_chunk_waiters.available_permits() == waiters_max
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(delay).await;
+        }
+        Err(eyre!(
+            "timed out after {timeout_secs}s waiting for HTTP chunk admission to go idle (admission available={} waiters available={} of {admission_max}/{waiters_max})",
+            self.node_ctx.http_chunk_admission.available_permits(),
+            self.node_ctx.http_chunk_waiters.available_permits(),
+        ))
     }
 
     pub async fn get_chunk(
@@ -3669,16 +3754,16 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn disconnect_all_reth_peers(&self) -> eyre::Result<Vec<PeerInfo>> {
         let ctx = self.node_ctx.reth_node_adapter.clone();
 
-        let all_peers_prior = ctx.inner.network.get_all_peers().await?;
+        let all_peers_prior = ctx.network.get_all_peers().await?;
         for peer in all_peers_prior.iter() {
-            ctx.inner.network.disconnect_peer(peer.remote_id);
+            ctx.network.disconnect_peer(peer.remote_id);
         }
 
-        while !ctx.inner.network.get_all_peers().await?.is_empty() {
+        while !ctx.network.get_all_peers().await?.is_empty() {
             sleep(Duration::from_millis(100)).await;
         }
 
-        let all_peers_after = ctx.inner.network.get_all_peers().await?;
+        let all_peers_after = ctx.network.get_all_peers().await?;
         assert!(
             all_peers_after.is_empty(),
             "the peer should be completely disconnected",
@@ -3692,7 +3777,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         for peer in peers {
             self.node_ctx
                 .reth_node_adapter
-                .inner
                 .network
                 .connect_peer(peer.remote_id, peer.remote_addr);
         }

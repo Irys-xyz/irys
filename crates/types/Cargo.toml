@@ -4,14 +4,24 @@ name = "irys-types"
 version = "0.1.0"
 
 [features]
+default = ["db"]
 test-utils = []
+# MDBX Compact/Encode, chainspec, and EVM gossip types. On by default so the
+# node workspace is unchanged. Gateway (and any other git consumer that only
+# needs DataTransaction / IrysSigner / chunks) should set
+# `default-features = false` to skip reth-db, mdbx-sys, and reth-codecs.
+db = [
+  "dep:reth-chainspec",
+  "dep:reth-db",
+  "dep:reth-db-api",
+  "dep:reth-tasks",
+]
 
 [dependencies]
 semver.workspace = true
 uint = "0.9.5"
 base58 = "0.2.0"
 base64-url.workspace = true
-reth-transaction-pool.workspace = true
 derive_more = { version = "2.0.1", features = [
     "add",
     "mul",
@@ -27,8 +37,8 @@ serde_json = "1.0.107"
 borsh = "1.3.0"
 borsh-derive = "1.3.0"
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
-tokio.workspace = true
-openssl.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+sha2.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
 nodit.workspace = true
@@ -41,19 +51,21 @@ rust_decimal_macros.workspace = true
 bytemuck.workspace = true
 hex.workspace = true
 toml.workspace = true
-alloy-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["k256"] }
+# Compact lives in reth-codecs (small). The `db` feature adds MDBX Encode/Decode
+# (reth-db / mdbx-sys) plus chainspec and task shutdown — skip that in gateway.
 reth-codecs.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-primitives-traits.workspace = true
-reth-chainspec.workspace = true
+reth-chainspec = { workspace = true, optional = true }
 alloy-eips.workspace = true
 alloy-genesis.workspace = true
-reth-db.workspace = true
-reth-db-api.workspace = true
+reth-db = { workspace = true, optional = true }
+reth-db-api = { workspace = true, optional = true }
+reth-tasks = { workspace = true, optional = true }
 alloy-signer.workspace = true
 alloy-core.workspace = true
 alloy-signer-local.workspace = true
-reth.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true

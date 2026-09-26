@@ -12,8 +12,11 @@ use eyre::Error;
 use eyre::eyre;
 use rand::RngCore as _;
 use reth_codecs::Compact;
+#[cfg(feature = "db")]
 use reth_db::table::{Compress, Decompress};
+#[cfg(feature = "db")]
 use reth_db_api::DatabaseError;
+#[cfg(feature = "db")]
 use reth_db_api::table::{Decode, Encode};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
@@ -157,6 +160,7 @@ impl<'a> Arbitrary<'a> for U256 {
     }
 }
 
+#[cfg(feature = "db")]
 impl Encode for U256 {
     type Encoded = [u8; 32];
 
@@ -165,6 +169,7 @@ impl Encode for U256 {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decode for U256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         let res = bytemuck::try_from_bytes::<[u64; 4]>(value).map_err(|_| DatabaseError::Decode)?;
@@ -241,6 +246,7 @@ impl<'a> Arbitrary<'a> for H256 {
     }
 }
 
+#[cfg(feature = "db")]
 impl Encode for H256 {
     type Encoded = [u8; 32];
 
@@ -249,6 +255,7 @@ impl Encode for H256 {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decode for H256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
         let arr: [u8; 32] = value.try_into().map_err(|_| DatabaseError::Decode)?;
@@ -286,13 +293,13 @@ impl Decodable for H256 {
     PartialEq,
     Eq,
     Default,
-    Compact,
     Serialize,
     Deserialize,
     Arbitrary,
     RlpDecodable,
     RlpEncodable,
     Deref,
+    Compact,
 )]
 pub struct IngressProofsList(pub Vec<IngressProof>);
 
@@ -510,6 +517,7 @@ impl Compact for H256 {
     }
 }
 
+#[cfg(feature = "db")]
 impl Compress for H256 {
     type Compressed = Vec<u8>;
 
@@ -518,6 +526,7 @@ impl Compress for H256 {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decompress for H256 {
     fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
@@ -654,7 +663,7 @@ impl<'de> Deserialize<'de> for Base64 {
 // H256List Type
 //------------------------------------------------------------------------------
 /// A struct of [`Vec<H256>`] used for lists of [`Base64`] encoded hashes
-#[derive(Default, Clone, Eq, PartialEq, Compact, Arbitrary, RlpEncodable, RlpDecodable, Deref)]
+#[derive(Default, Clone, Eq, PartialEq, Arbitrary, RlpEncodable, RlpDecodable, Deref, Compact)]
 pub struct H256List(pub Vec<H256>);
 
 impl H256List {

@@ -120,7 +120,6 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
     let receipts_inclusion = reth_ctx
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("receipts should be present for inclusion block");
@@ -156,7 +155,6 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // Decode inclusion transactions to find the Unpledge shadow tx and assert fields
     let txs_inclusion = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("inclusion block should have transactions");
@@ -222,7 +220,6 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // ---------- Assert (epoch): UNPLEDGE_REFUND with value, balances and treasury ----------
     let receipts_epoch = reth_ctx
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(last_block.evm_block_hash))?
         .expect("receipts should be present for epoch block");
@@ -254,7 +251,6 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // Decode the refund tx and verify amount == unpledge_tx.value, target == signer
     let txs_epoch = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(last_block.evm_block_hash))?
         .expect("epoch block should have transactions");
@@ -459,7 +455,6 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
     }
 
     let inclusion_receipts = reth_ctx
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("receipts should exist for inclusion block");
@@ -488,7 +483,6 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
     );
 
     let inclusion_txs = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("transactions should exist for inclusion block");
@@ -524,7 +518,6 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         )
         .await?;
     let epoch_receipts = reth_ctx
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("receipts should exist for epoch block");
@@ -555,7 +548,6 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
     );
 
     let epoch_txs = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("epoch block should have transactions");
@@ -719,7 +711,6 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     }
 
     let inclusion_receipts = reth_ctx
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("receipts present for inclusion block");
@@ -748,7 +739,6 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     );
 
     let inclusion_txs = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("transactions available for inclusion block");
@@ -801,7 +791,6 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         .await?;
 
     let epoch_receipts = reth_ctx
-        .inner
         .provider
         .receipts_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("epoch receipts available");
@@ -830,7 +819,6 @@ async fn heavy3_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     );
 
     let epoch_txs = reth_ctx
-        .inner
         .provider
         .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("epoch transactions available");

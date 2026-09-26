@@ -57,6 +57,19 @@ tables! {
     }
 
 
+    /// Body-migration work still owed for a data_root placement in this submodule.
+    ///
+    /// Written in the same txn as the index (`StorageModule::index_transaction_data`)
+    /// so "indexed" and "bytes still owed" can never disagree; deleted by the body
+    /// worker once every offset in the range is durable or the job is retired.
+    /// Keyed on the partition-relative start of the tx range *clipped to this
+    /// submodule's interval*, so a cursor walk drains in ascending disk order.
+    /// Empty on a healthy, caught-up node — this is an intent log, not an index.
+    table PendingBodyMigrationsByOffset {
+        type Key = PartitionChunkOffset;
+        type Value = PendingBodyMigration;
+    }
+
     /// Table to store various metadata, such as the current db schema version
     table Metadata {
         type Key = MetadataKey;
@@ -90,6 +103,28 @@ pub struct DataRootInfo {
 pub struct TxLeafBinding {
     pub data_root: H256,
     pub prefix_hash: H256,
+}
+
+/// One outstanding body-migration job: the chunk bodies a data_root placement
+/// still owes this submodule. See [`PendingBodyMigrationsByOffset`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
+pub struct PendingBodyMigration {
+    /// Which data_root owes bytes at this placement.
+    pub data_root: H256,
+    /// `data_size` of the paying tx; gives the worker its chunk count without a
+    /// second lookup.
+    pub data_size: u64,
+    /// Mirrors `DataRootInfo::start_offset` — the *unclipped* partition-relative
+    /// tx start (legitimately negative when the data_root begins before this
+    /// module's range). Maps partition offset <-> tx_chunk_offset for the cache
+    /// lookup without re-reading `DataRootInfosByDataRoot`.
+    pub start_offset: RelativeChunkOffset,
+    /// Canonical height whose migration enqueued this job. Matched on settle/bump
+    /// so a late drain cannot delete a replacement at the same offset.
+    pub block_height: u64,
+    /// Drain passes that ended with offsets still outstanding. Drives retirement
+    /// so a job whose bodies are gone from the cache is not retried forever.
+    pub attempts: u32,
 }
 
 impl PartialOrd for DataRootInfo {

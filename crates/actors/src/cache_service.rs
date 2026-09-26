@@ -1,32 +1,37 @@
 use crate::chunk_ingress_service::ChunkIngressServiceInner;
 use crate::chunk_ingress_service::ingress_proofs::{
-    RegenAction, generate_and_store_ingress_proof, reanchor_and_store_ingress_proof,
+    IngressProofGenerationState, RegenAction, generate_and_store_ingress_proof,
+    reanchor_and_store_ingress_proof,
 };
 use crate::metrics;
 use irys_database::{
-    cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than,
-    delete_ingress_proof_if_unchanged, get_data_tx_metadata, tx_header_by_txid,
+    cached_data_root_by_data_root, delete_ingress_proof_if_unchanged,
+    delete_reclaimable_cached_chunks_older_than, get_data_tx_metadata, tx_header_by_txid,
 };
 use irys_database::{
     db::IrysDatabaseExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
-    tables::{CachedChunks, CachedDataRoots, CompactCachedIngressProof, IngressProofs},
+    tables::{
+        CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
+    },
 };
-use irys_domain::{BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
+use irys_domain::{
+    BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot,
+    StorageModulesReadGuard,
+};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof,
-    LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
+    LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, TxChunkOffset, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
@@ -61,17 +66,6 @@ pub enum CacheServiceAction {
     EpochProcessingCompleted(eyre::Result<()>),
     /// Internal signal: txid pruning task completed
     PruneTxidsCompleted(eyre::Result<()>),
-    /// Marks the start of ingress proof generation for the specified data root. Chunks that are
-    /// related to this data root should not be pruned if the ingress proof is still being generated.
-    NotifyProofGenerationStarted(DataRoot),
-    /// Send this when ingress proof generation is completed and the proof has been persisted to the
-    /// db. Chunks related to this data root can now be pruned if needed.
-    NotifyProofGenerationCompleted(DataRoot),
-    /// Requests whether ingress proof generation is currently ongoing for the specified data root.
-    RequestIngressProofGenerationState {
-        data_root: DataRoot,
-        response_sender: Sender<bool>,
-    },
     /// Remove specific txids from `CachedDataRoot.txid_set` entries.
     /// Sent by the mempool when txs are pruned (anchor expired) to prevent stale
     /// txid references from blocking publish candidate selection.
@@ -99,48 +93,6 @@ pub enum CacheServiceAction {
     },
 }
 
-/// Tracks data roots for which ingress proofs are currently being generated
-/// to prevent race conditions with chunk pruning
-#[derive(Clone, Debug)]
-pub struct IngressProofGenerationState {
-    inner: Arc<RwLock<HashSet<DataRoot>>>,
-}
-
-impl Default for IngressProofGenerationState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IngressProofGenerationState {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(HashSet::new())),
-        }
-    }
-
-    pub fn mark_generating(&self, data_root: DataRoot) -> bool {
-        self.inner
-            .write()
-            .expect("expected to acquire a lock for an ingress proof generation state")
-            .insert(data_root)
-    }
-
-    pub fn unmark_generating(&self, data_root: DataRoot) {
-        self.inner
-            .write()
-            .expect("expected to acquire a lock for an ingress proof generation state")
-            .remove(&data_root);
-    }
-
-    pub fn is_generating(&self, data_root: DataRoot) -> bool {
-        self.inner
-            .read()
-            .expect("expected to acquire a lock for an ingress proof generation state")
-            .contains(&data_root)
-    }
-}
-
 /// Context for cache pruning tasks. You can safely clone this struct to spawn pruning tasks on
 /// separate runtimes/threads.
 #[derive(Debug, Clone)]
@@ -152,6 +104,9 @@ pub struct InnerCacheTask {
     pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
     pub ingress_proof_generation_state: IngressProofGenerationState,
     pub cache_sender: CacheServiceSender,
+    /// Read access to local storage modules, used to answer "is this chunk
+    /// body durably stored?" at prune time.
+    pub storage_modules_guard: StorageModulesReadGuard,
 }
 
 /// Outcome of one [`InnerCacheTask::try_prune_txids_once`] attempt.
@@ -281,12 +236,15 @@ impl InnerCacheTask {
             debug!("Cache above target capacity, proceeding with pruning");
             if chunk_cache_size > max_cache_size_bytes {
                 warn!(
-                    "Cache above max capacity! size: {} max: {}",
+                    "Cache above configured soft maximum; unmigrated bodies remain protected: size: {} max: {}",
                     &chunk_cache_size, &max_cache_size_bytes
                 )
             }
-            // Then, prune chunks that no longer have active ingress proofs
-            self.prune_chunks_without_active_ingress_proofs()?;
+            // This is a correctness-constrained soft target: bodies that have
+            // not completed the durable write/leaf handoff may temporarily
+            // keep the cache above its configured maximum. Normal terminal
+            // lifecycle pruning still removes expired or abandoned roots.
+            self.prune_durably_migrated_chunk_bodies()?;
         } else {
             debug!("Cache under target capacity, skipping chunk pruning");
         }
@@ -359,12 +317,17 @@ impl InnerCacheTask {
         })
     }
 
-    /// Prunes cached chunks for data roots that have no ingress proofs.
-    /// Since `prune_ingress_proofs()` runs immediately before this and removes
-    /// expired/invalid proofs, any remaining proof entry is treated as active.
-    /// Data roots currently undergoing proof generation are skipped to avoid races.
+    /// Capacity-prunes cached bodies that are durably stored in a local
+    /// storage module.
+    ///
+    /// Durability is read straight from the storage modules' interval state —
+    /// the same state restart recovery reloads — so the pruner can never
+    /// disagree with what the node will see after a crash. The database delete
+    /// additionally requires the current signer's compact ingress hash. A body
+    /// missing either independent prerequisite is never reclaimed, whatever
+    /// its root's ingress-proof state.
     #[tracing::instrument(level = "trace", skip_all)]
-    fn prune_chunks_without_active_ingress_proofs(&self) -> eyre::Result<()> {
+    fn prune_durably_migrated_chunk_bodies(&self) -> eyre::Result<()> {
         let local_address = self.config.irys_signer().address();
         let min_chunk_age_in_blocks = self
             .config
@@ -384,28 +347,32 @@ impl InnerCacheTask {
         // Scan candidates under a short-lived read txn, then drop it before any
         // gated write (same shape as `prune_ingress_proofs`): holding a RO txn
         // across consensus-writer-gate waits pins MVCC free-page reclamation.
-        let mut candidates: Vec<DataRoot> = Vec::new();
+        let mut candidates: BTreeMap<DataRoot, BTreeSet<TxChunkOffset>> = BTreeMap::new();
         {
             let tx = self.db.tx()?;
-            let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
+            let mut chunk_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
             let seek_key: DataRoot = H256::random();
-            let mut cdr_walk = cdr_cursor.walk(Some(seek_key))?;
+            let mut chunk_walk = chunk_cursor.walk(Some(seek_key))?;
             let mut wrapped = false;
 
-            // Cap is on candidates collected (read-phase), not on roots that
-            // actually prune chunks in the write phase: count is work
-            // attempted, not work applied. The scan therefore starts at a
+            // Cap is on roots with old cached bodies collected in the read
+            // phase, not on roots that ultimately yield a durable deletion.
+            // The scan therefore starts at a
             // random key and wraps (same shape as `prune_data_root_cache`), so
             // a stable set of non-yielding candidates early in hash order
             // cannot consume the budget every run and starve later prunable
             // roots. The wrap stops at `seek_key` so no root is visited twice.
-            // TODO: try to deprioritise data_roots that almost have all their chunks.
             loop {
-                while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
+                while let Some((data_root, entry)) = chunk_walk.next().transpose()? {
                     if wrapped && data_root >= seek_key {
                         break;
                     }
-                    if candidates.len() >= MAX_EVICTIONS_PER_RUN {
+                    if entry.meta.updated_at >= delete_chunks_older_than {
+                        continue;
+                    }
+                    if candidates.len() >= MAX_EVICTIONS_PER_RUN
+                        && !candidates.contains_key(&data_root)
+                    {
                         warn!(
                             chunk.candidates = candidates.len(),
                             "Hit max eviction limit collecting prune candidates, will continue next cycle"
@@ -413,59 +380,78 @@ impl InnerCacheTask {
                         break;
                     }
 
-                    if self.ingress_proof_generation_state.is_generating(data_root) {
-                        debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
-                        continue;
-                    }
-
-                    if !Self::has_local_ingress_proof(&tx, data_root, local_address)? {
-                        candidates.push(data_root);
-                    }
+                    candidates.entry(data_root).or_default().insert(entry.index);
                 }
                 if wrapped || candidates.len() >= MAX_EVICTIONS_PER_RUN {
                     break;
                 }
                 wrapped = true;
-                cdr_walk = cdr_cursor.walk(None)?;
+                chunk_walk = chunk_cursor.walk(None)?;
             }
-            drop(cdr_walk);
-            drop(cdr_cursor);
+            drop(chunk_walk);
+            drop(chunk_cursor);
             drop(tx);
         }
 
-        let mut evictions_performed: usize = 0;
-        for batch in candidates.chunks(256) {
-            self.db
+        // Resolve durability outside the write txn: each root costs one
+        // submodule index read per storage module, and roots with nothing
+        // durable are dropped before the gated write.
+        let storage_modules = self.storage_modules_guard.read().clone();
+        let mut durable_by_root: Vec<(DataRoot, BTreeSet<TxChunkOffset>)> =
+            Vec::with_capacity(candidates.len());
+        for (root, cached_offsets) in candidates {
+            let mut durable = BTreeSet::new();
+            for storage_module in &storage_modules {
+                match storage_module.durable_tx_offsets_for_data_root(root, &cached_offsets) {
+                    Ok(offsets) => durable.extend(offsets),
+                    Err(error) => {
+                        // Unreadable placement metadata is not evidence of
+                        // durability; leave the bodies for a later pass.
+                        warn!(
+                            chunk.data_root = ?root,
+                            storage_module = %storage_module.id,
+                            ?error,
+                            "Skipping chunk prune candidate with unreadable storage metadata"
+                        );
+                    }
+                }
+            }
+            if !durable.is_empty() {
+                durable_by_root.push((root, durable));
+            }
+        }
+
+        let mut pruned_chunks = 0_u64;
+        for batch in durable_by_root.chunks(256) {
+            let batch_pruned = self
+                .db
                 .update_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
-                    for &root in batch {
-                        // Re-validate under the write txn: proof generation may have
-                        // started, or a local proof landed, between the RO scan and
-                        // this gated write.
-                        if self.ingress_proof_generation_state.is_generating(root)
-                            || Self::has_local_ingress_proof(write_tx, root, local_address)?
-                        {
-                            continue;
-                        }
+                    let mut batch_pruned = 0_u64;
+                    for (root, durable_tx_offsets) in batch {
                         trace!(
                             chunk.data_root = ?root,
-                            "Pruning chunks for data root without active proofs"
+                            "Pruning durably stored cached chunk bodies"
                         );
-                        let pruned = delete_cached_chunks_by_data_root_older_than(
+                        let pruned = delete_reclaimable_cached_chunks_older_than(
                             write_tx,
-                            root,
+                            *root,
+                            local_address,
+                            durable_tx_offsets,
                             delete_chunks_older_than,
                         )?;
                         if pruned > 0 {
-                            evictions_performed = evictions_performed.saturating_add(1);
-                            debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned chunks for data root without active proofs");
+                            batch_pruned = batch_pruned.saturating_add(pruned);
+                            debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned durably stored cached chunk bodies");
                         }
                     }
-                    Ok(())
+                    Ok(batch_pruned)
                 })?;
+            // Count only deletes whose enclosing MDBX transaction committed.
+            pruned_chunks = pruned_chunks.saturating_add(batch_pruned);
         }
 
         info!(
-            chunk.eviction_batches = evictions_performed,
+            chunk.pruned_chunks = pruned_chunks,
             "Completed chunk pruning pass"
         );
         Ok(())
@@ -565,6 +551,7 @@ impl InnerCacheTask {
                         batch_chunks = batch_chunks.saturating_add(
                             delete_cached_chunks_by_data_root(write_tx, rec.data_root)?,
                         );
+                        irys_database::delete_ingress_leaves_by_data_root(write_tx, rec.data_root)?;
                         write_tx.delete::<CachedDataRoots>(rec.data_root, None)?;
                         // Fresh values from the write txn, not the scan snapshot,
                         // so post-commit logging reflects what was actually deleted.
@@ -971,7 +958,7 @@ impl InnerCacheTask {
                     &signer,
                     proof,
                     &self.gossip_broadcast,
-                    &self.cache_sender,
+                    &self.ingress_proof_generation_state,
                 ) {
                     if error.is_benign() {
                         debug!(ingress_proof.data_root = ?proof, "Skipped ingress proof reanchoring: {error}");
@@ -1008,7 +995,7 @@ impl InnerCacheTask {
                     proof.data_root,
                     None,
                     &self.gossip_broadcast,
-                    &self.cache_sender,
+                    &self.ingress_proof_generation_state,
                 ) {
                     if error.is_benign() {
                         debug!(ingress_proof.data_root = ?proof.data_root, "Skipped ingress proof regeneration: {error}");
@@ -1188,6 +1175,8 @@ impl ChunkCacheService {
         config: Config,
         gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
         cache_sender: CacheServiceSender,
+        storage_modules_guard: StorageModulesReadGuard,
+        ingress_proof_generation_state: IngressProofGenerationState,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning chunk cache service");
@@ -1204,8 +1193,9 @@ impl ChunkCacheService {
                     block_index_guard,
                     config,
                     gossip_broadcast,
-                    ingress_proof_generation_state: IngressProofGenerationState::new(),
+                    ingress_proof_generation_state,
                     cache_sender,
+                    storage_modules_guard,
                 },
                 pruning_running: false,
                 pruning_queue: VecDeque::new(),
@@ -1315,28 +1305,6 @@ impl ChunkCacheService {
                     self.cache_task.spawn_epoch_processing(e, s);
                 }
             }
-            CacheServiceAction::NotifyProofGenerationStarted(data_root) => {
-                self.cache_task
-                    .ingress_proof_generation_state
-                    .mark_generating(data_root);
-            }
-            CacheServiceAction::NotifyProofGenerationCompleted(data_root) => {
-                self.cache_task
-                    .ingress_proof_generation_state
-                    .unmark_generating(data_root);
-            }
-            CacheServiceAction::RequestIngressProofGenerationState {
-                data_root,
-                response_sender,
-            } => {
-                let is_generating = self
-                    .cache_task
-                    .ingress_proof_generation_state
-                    .is_generating(data_root);
-                if let Err(e) = response_sender.send(is_generating) {
-                    warn!(custom.error = ?e, "Failed to respond to RequestIngressProofGenerationState");
-                }
-            }
             CacheServiceAction::PruneTxidsFromCachedDataRoots(by_data_root) => {
                 // Enqueue txid pruning; start if idle
                 self.txid_prune_queue.push_back(by_data_root);
@@ -1382,6 +1350,88 @@ impl ChunkCacheService {
 
 #[cfg(test)]
 mod tests {
+    /// Cache tests exercise pruning policy, not storage placement; an empty
+    /// module set means "nothing is durably stored locally".
+    fn test_storage_modules_guard() -> StorageModulesReadGuard {
+        StorageModulesReadGuard::new(Arc::new(RwLock::new(Vec::new())))
+    }
+
+    /// A guard holding one storage module that genuinely reports `offsets` of
+    /// `data_root` as fsynced `Data` — indexed, written, and flushed the way the
+    /// real write path does. Needed because reclamation is gated on the storage
+    /// module's own interval state, so an empty guard can never evict.
+    fn storage_modules_guard_with_durable(
+        base_directory: std::path::PathBuf,
+        data_root: DataRoot,
+        data_size: u64,
+        offsets: &[u32],
+    ) -> eyre::Result<StorageModulesReadGuard> {
+        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
+        use irys_types::{
+            ConsensusConfig, PartitionChunkOffset, RelativeChunkOffset,
+            partition::PartitionAssignment, partition_chunk_offset_ie,
+        };
+
+        let num_chunks = 10_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: num_chunks,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory,
+            ..NodeConfig::testing()
+        };
+        let sm_config = Config::new_with_random_peer_id(node_config);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                ledger_id: Some(DataLedger::Submit.into()),
+                slot_index: Some(0),
+                miner_address: IrysAddress::random(),
+                partition_hash: H256::random(),
+            }),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, num_chunks as u32),
+                "chunks".into(),
+            )],
+        };
+        let sm = Arc::new(StorageModule::new(&info, &sm_config)?);
+        let (_, submodule) = sm.get_submodule_for_offset(PartitionChunkOffset::from(0_u32))?;
+        submodule.db.update_eyre(|tx| {
+            add_data_root_info(
+                tx,
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset::from(0_i32),
+                    data_size,
+                },
+            )
+        })?;
+        for offset in offsets {
+            sm.write_chunk(
+                PartitionChunkOffset::from(*offset),
+                vec![9_u8; 32],
+                ChunkType::Data,
+            );
+        }
+        sm.force_sync_pending_chunks()?;
+        for offset in offsets {
+            eyre::ensure!(
+                sm.is_data_chunk_durable_at(PartitionChunkOffset::from(*offset)),
+                "test fixture failed to make offset {offset} durable"
+            );
+        }
+        Ok(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            sm,
+        ]))))
+    }
+
     use super::*;
     use irys_database::{
         IrysDatabaseArgs as _, database,
@@ -1487,6 +1537,7 @@ mod tests {
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
+                storage_modules_guard: test_storage_modules_guard(),
             },
             pruning_running: false,
             pruning_queue: VecDeque::new(),
@@ -1573,6 +1624,7 @@ mod tests {
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
+                storage_modules_guard: test_storage_modules_guard(),
             },
             pruning_running: false,
             pruning_queue: VecDeque::new(),
@@ -1595,106 +1647,9 @@ mod tests {
         Ok(())
     }
 
-    // Chunks should remain when there is an active ingress proof present for the data_root.
+    // A missing proof is not evidence that an individual body was durably migrated.
     #[tokio::test]
-    async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
-        let node_config = NodeConfig::testing();
-        let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
-
-        // Create tx header + data root + chunk
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_size: 64,
-                ..Default::default()
-            },
-            metadata: DataTransactionMetadata::new(),
-        });
-        db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
-            eyre::Ok(())
-        })??;
-        let chunk = UnpackedChunk {
-            data_root: tx_header.data_root,
-            data_size: tx_header.data_size,
-            data_path: Base64(vec![]),
-            bytes: Base64(vec![1_u8; 8]),
-            tx_offset: TxChunkOffset::from(0_u32),
-        };
-        db.update(|wtx| {
-            database::cache_chunk(wtx, &chunk)?;
-            eyre::Ok(())
-        })??;
-
-        // Insert a (non-expired) ingress proof entry for the data root so pruning treats it as active
-        db.update(|wtx| {
-            let mut ingress_proof = IngressProof::default();
-            ingress_proof.data_root = tx_header.data_root;
-            irys_database::store_external_ingress_proof_checked(
-                wtx,
-                &ingress_proof,
-                irys_types::IrysAddress::random(),
-            )?;
-            eyre::Ok(())
-        })??;
-
-        // Setup minimal service context
-        let genesis_block = new_mock_signed_header();
-        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
-        let block_tree_guard =
-            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard =
-            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let service_task = InnerCacheTask {
-            db: db.clone(),
-            block_tree_guard,
-            block_index_guard,
-            config,
-            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
-            ingress_proof_generation_state: IngressProofGenerationState::new(),
-            cache_sender: tx,
-        };
-
-        // Execute chunk-only pruning (proofs present so should skip deletion)
-        service_task.prune_chunks_without_active_ingress_proofs()?;
-
-        // Verify chunk still exists
-        db.view(|rtx| -> eyre::Result<()> {
-            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
-            let has_index = walk.next().transpose()?.is_some();
-            eyre::ensure!(
-                has_index,
-                "CachedChunksIndex entry missing after prune but proof was active"
-            );
-            // Attempt to resolve chunk from index metadata
-            if let Some((_, idx_entry)) = rtx
-                .cursor_dup_read::<CachedChunksIndex>()?
-                .seek_exact(tx_header.data_root)?
-            {
-                let meta: irys_database::db_cache::CachedChunkIndexMetadata = idx_entry.into();
-                let chunk_entry = rtx.get::<CachedChunks>(meta.chunk_path_hash)?;
-                eyre::ensure!(
-                    chunk_entry.is_some(),
-                    "CachedChunks value missing after prune but proof was active"
-                );
-            }
-            Ok(())
-        })??;
-        Ok(())
-    }
-
-    // Chunks should be pruned when there is no ingress proof for the data_root.
-    #[tokio::test]
-    async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
+    async fn does_not_capacity_prune_unmigrated_chunks_without_a_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -1753,19 +1708,20 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
-        // Execute chunk pruning (no proofs -> should delete)
-        service_task.prune_chunks_without_active_ingress_proofs()?;
+        // Execute capacity pruning. No durable storage offset exists, so the body stays.
+        service_task.prune_durably_migrated_chunk_bodies()?;
 
-        // Verify chunk removed
+        // Verify the unmigrated body remains recoverable.
         db.view(|rtx| -> eyre::Result<()> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
             let index_entry = walk.next().transpose()?;
             eyre::ensure!(
-                index_entry.is_none(),
-                "CachedChunksIndex entry still present but should have been pruned"
+                index_entry.is_some(),
+                "unmigrated chunk was pruned merely because its root lacks a proof"
             );
             Ok(())
         })??;
@@ -1774,7 +1730,7 @@ mod tests {
 
     // Chunks older than threshold should be deleted while newer ones should remain.
     #[tokio::test]
-    async fn prunes_only_chunks_older_than_threshold() -> eyre::Result<()> {
+    async fn prunes_only_migrated_chunks_older_than_threshold() -> eyre::Result<()> {
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
             &_temp_dir,
@@ -1800,6 +1756,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
+        let address = IrysAddress::random();
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header_old, None)?;
             database::cache_data_root(wtx, &tx_header_new, None)?;
@@ -1830,7 +1787,13 @@ mod tests {
                 hash_old,
                 irys_database::db_cache::CachedChunk::from(&chunk_old),
             )?;
-
+            irys_database::store_ingress_data_hash(
+                wtx,
+                tx_header_old.data_root,
+                address,
+                chunk_old.tx_offset,
+                irys_types::generate_ingress_data_hash(&chunk_old.bytes.0, address),
+            )?;
             let chunk_new = mk_chunk(tx_header_new.data_root, 0, 11);
             let hash_new = chunk_new.chunk_path_hash();
             let idx_new = irys_database::db_cache::CachedChunkIndexEntry {
@@ -1869,9 +1832,11 @@ mod tests {
         })??;
 
         db.update(|wtx| {
-            let pruned = delete_cached_chunks_by_data_root_older_than(
+            let pruned = delete_reclaimable_cached_chunks_older_than(
                 wtx,
                 tx_header_old.data_root,
+                address,
+                &BTreeSet::from([TxChunkOffset::from(0)]),
                 UnixTimestamp::from_secs(5),
             )?;
             eyre::ensure!(pruned >= 1, "Expected old root chunk to be pruned");
@@ -1915,6 +1880,7 @@ mod tests {
         // First run: below 80% (set to 96B; 64B cache < 76.8B threshold)
         node_config.cache.max_cache_size_bytes = 96;
         let config_below = Config::new_with_random_peer_id(node_config.clone());
+        let ingress_address = config_below.irys_signer().address();
 
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db_env = open_or_create_db(
@@ -1951,6 +1917,20 @@ mod tests {
             };
             database::cache_chunk(wtx, &c0)?;
             database::cache_chunk(wtx, &c1)?;
+            database::store_ingress_data_hash(
+                wtx,
+                tx_header.data_root,
+                ingress_address,
+                c0.tx_offset,
+                irys_types::generate_ingress_data_hash(&c0.bytes.0, ingress_address),
+            )?;
+            database::store_ingress_data_hash(
+                wtx,
+                tx_header.data_root,
+                ingress_address,
+                c1.tx_offset,
+                irys_types::generate_ingress_data_hash(&c1.bytes.0, ingress_address),
+            )?;
 
             // Mark both chunks as very old
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
@@ -1983,6 +1963,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx.clone(),
+            storage_modules_guard: test_storage_modules_guard(),
         };
         task_below.prune_cache(0)?;
 
@@ -2005,7 +1986,9 @@ mod tests {
             Ok(())
         })??;
 
-        // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold
+        // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold.
+        // Both offsets are durably stored, so the pass may reclaim them.
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let mut node_config2 = node_config;
         node_config2.cache.max_cache_size_bytes = 64;
         let config_above = Config::new_with_random_peer_id(node_config2);
@@ -2017,11 +2000,16 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: storage_modules_guard_with_durable(
+                sm_dir.path().to_path_buf(),
+                tx_header.data_root,
+                tx_header.data_size,
+                &[0, 1],
+            )?,
         };
         task_above.prune_cache(0)?;
 
         db.view(|rtx| -> eyre::Result<()> {
-            // Expect indices pruned now that we're above capacity
             let mut cur = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = cur.walk(Some(tx_header.data_root))?;
             eyre::ensure!(
@@ -2031,76 +2019,6 @@ mod tests {
             Ok(())
         })??;
 
-        Ok(())
-    }
-
-    // Chunks should not be pruned when proof generation state marks the data_root active, even with no ingress proof yet.
-    #[tokio::test]
-    async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
-        let node_config = NodeConfig::testing();
-        let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_size: 64,
-                ..Default::default()
-            },
-            metadata: DataTransactionMetadata::new(),
-        });
-        db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
-            eyre::Ok(())
-        })??;
-        let chunk = UnpackedChunk {
-            data_root: tx_header.data_root,
-            data_size: tx_header.data_size,
-            data_path: Base64(vec![]),
-            bytes: Base64(vec![3_u8; 8]),
-            tx_offset: TxChunkOffset::from(0_u32),
-        };
-        db.update(|wtx| {
-            database::cache_chunk(wtx, &chunk)?;
-            eyre::Ok(())
-        })??;
-
-        let genesis_block = new_mock_signed_header();
-        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
-        let block_tree_guard =
-            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard =
-            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let generation_state = IngressProofGenerationState::new();
-        generation_state.mark_generating(tx_header.data_root);
-        let service_task = InnerCacheTask {
-            db: db.clone(),
-            block_tree_guard,
-            block_index_guard,
-            config,
-            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
-            ingress_proof_generation_state: generation_state,
-            cache_sender: tx,
-        };
-
-        service_task.prune_chunks_without_active_ingress_proofs()?;
-
-        db.view(|rtx| -> eyre::Result<()> {
-            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
-            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
-            let still_present = walk.next().transpose()?.is_some();
-            eyre::ensure!(
-                still_present,
-                "CachedChunksIndex entry wrongly pruned during active generation state"
-            );
-            Ok(())
-        })??;
         Ok(())
     }
 
@@ -2171,6 +2089,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         // Prune with prune_height greater than expiry (6 > 5).
@@ -2247,6 +2166,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         service_task.prune_data_root_cache(1)?;
@@ -2335,6 +2255,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         // Without the local-proof exemption the (None, None) state would be
@@ -2418,6 +2339,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         // `prune_height = 100` is well past the confirmed tx's `included_height`
@@ -2497,6 +2419,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         // Spawn the prune task and wait for the background thread to finish.
@@ -2634,6 +2557,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         service_task.prune_ingress_proofs()?;
@@ -2762,6 +2686,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         service_task.prune_ingress_proofs()?;
@@ -2903,6 +2828,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         };
 
         service_task.prune_ingress_proofs()?;
@@ -3010,6 +2936,7 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
         }
     }
 

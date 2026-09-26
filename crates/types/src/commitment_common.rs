@@ -24,10 +24,10 @@ use serde::{Deserialize, Serialize};
     Clone,
     Copy,
     Hash,
-    Compact,
     serde::Serialize,
     serde::Deserialize,
     arbitrary::Arbitrary,
+    Compact,
 )]
 
 // these do NOT start with 0, as RLP does not like "leading zeros"

@@ -2,7 +2,9 @@ use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use reth_codecs::Compact;
+#[cfg(feature = "db")]
 use reth_db::DatabaseError;
+#[cfg(feature = "db")]
 use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -129,6 +131,7 @@ impl From<UnixTimestamp> for u64 {
 
 // Database encoding (reth_db compatibility)
 // Uses big-endian (network byte order) for cross-platform compatibility
+#[cfg(feature = "db")]
 impl Encode for UnixTimestamp {
     type Encoded = [u8; 8];
 
@@ -140,6 +143,7 @@ impl Encode for UnixTimestamp {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decode for UnixTimestamp {
     /// Decodes from big-endian bytes
     #[inline]
@@ -286,6 +290,7 @@ impl<'de> Deserialize<'de> for UnixTimestampMs {
     }
 }
 
+#[cfg(feature = "db")]
 impl Encode for UnixTimestampMs {
     type Encoded = [u8; 16];
 
@@ -295,6 +300,7 @@ impl Encode for UnixTimestampMs {
     }
 }
 
+#[cfg(feature = "db")]
 impl Decode for UnixTimestampMs {
     #[inline]
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {

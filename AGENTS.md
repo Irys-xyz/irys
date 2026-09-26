@@ -27,7 +27,7 @@ cargo test -p irys-actors test_name  # alternative without nextest
 Always run these checks and fix any issues:
 
 1. `cargo fmt --all`
-2. `cargo clippy --workspace --tests --all-targets`
+2. `cargo xtask clippy`
 
 ### Toolchain
 
@@ -37,6 +37,12 @@ Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp
 
 - macOS: Increase open file limit (default 256 is too low for some tests) — see README.md
 - `IRYS_CUSTOM_TMP_DIR` env var overrides the `./.tmp` test temp directory
+- Do not set `RUSTFLAGS`: that replaces `.cargo/config.toml`
+  (`-C target-cpu=native`) and rebuilds the Reth graph. Warnings are denied by
+  `cargo xtask clippy` (`-- -D warnings`), not rustflags. rust-analyzer
+  uses `target/rust-analyzer` (see `rust-analyzer.toml`) so it does not clobber
+  `cargo test`. Clippy uses a different rustc driver and will rebuild Reth versus
+  `cargo test`; that is expected. Local Reth path override: see SETUP.md.
 
 ### Reading Dependency Source Code
 

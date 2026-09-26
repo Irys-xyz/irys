@@ -43,6 +43,7 @@ pub enum DbSyncMode {
     UtterlyNoSync,
 }
 
+#[cfg(feature = "db")]
 impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
     fn from(mode: DbSyncMode) -> Self {
         match mode {
@@ -468,12 +469,20 @@ pub struct StorageSyncConfig {
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
+    /// Ceiling, in bytes, on chunk bodies one storage module may hold in memory
+    /// awaiting flush before background body migration pauses writing to it.
+    /// `None` derives `max(2 × num_writes_before_sync, 256) × chunk_size × submodules`
+    /// per module: one flush batch in flight plus one being filled, per disk,
+    /// floored at 256 chunks so a small `num_writes_before_sync` cannot stall
+    /// the worker on the storage service's idle flush.
+    pub max_pending_write_bytes: Option<u64>,
 }
 
 impl Default for StorageSyncConfig {
     fn default() -> Self {
         Self {
             num_writes_before_sync: 100,
+            max_pending_write_bytes: None,
         }
     }
 }
@@ -635,7 +644,7 @@ pub struct RethNetworkConfig {
     // peer ID
     // WARNING: this gets overridden partway through the startup sequence with the correct value
     #[serde(default)]
-    pub peer_id: reth_transaction_pool::PeerId,
+    pub peer_id: alloy_primitives::B512,
 }
 
 impl_network_config_with_defaults!(RethNetworkConfig);
@@ -1123,6 +1132,14 @@ pub struct MempoolNodeConfig {
     /// Backpressure channel capacity for the async chunk write-behind buffer.
     /// Controls how many chunk writes can be queued before the sender blocks.
     pub chunk_writer_buffer_size: usize,
+
+    /// Max public `POST /v1/chunk` bodies admitted and not yet finished by ingress.
+    pub max_http_chunk_admission: usize,
+    /// Max decoded public POSTs waiting for an admission permit
+    /// (`http_chunk_admission_timeout_millis`).
+    pub max_http_chunk_waiters: usize,
+    /// Monotonic wait for an admission permit, in milliseconds.
+    pub http_chunk_admission_timeout_millis: u64,
 }
 
 impl Default for MempoolNodeConfig {
@@ -1150,6 +1167,9 @@ impl Default for MempoolNodeConfig {
             // override this to a positive value to enable the carve-out.
             max_control_plane_concurrent_tasks: 0,
             chunk_writer_buffer_size: 4096,
+            max_http_chunk_admission: 256,
+            max_http_chunk_waiters: 32,
+            http_chunk_admission_timeout_millis: 5000,
         }
     }
 }
@@ -1259,6 +1279,7 @@ impl NodeConfig {
             reward_address,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1336,6 +1357,9 @@ impl NodeConfig {
                 max_concurrent_chunk_ingress_tasks: 30,
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
+                max_http_chunk_admission: 256,
+                max_http_chunk_waiters: 32,
+                http_chunk_admission_timeout_millis: 5000,
             },
             metrics: MetricsConfig::default(),
 
@@ -1447,6 +1471,7 @@ impl NodeConfig {
             reward_address,
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1527,6 +1552,9 @@ impl NodeConfig {
                 max_concurrent_chunk_ingress_tasks: 30,
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
+                max_http_chunk_admission: 256,
+                max_http_chunk_waiters: 32,
+                http_chunk_admission_timeout_millis: 5000,
             },
             metrics: MetricsConfig::default(),
 

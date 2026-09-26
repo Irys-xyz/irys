@@ -155,7 +155,7 @@ impl Future for ServiceSet {
 pub struct TokioServiceHandle {
     pub name: String,
     pub handle: TokioJoinHandle<()>,
-    pub shutdown_signal: reth::tasks::shutdown::Signal,
+    pub shutdown_signal: reth_tasks::shutdown::Signal,
 }
 
 impl TokioServiceHandle {
@@ -230,7 +230,7 @@ mod tests {
     where
         F: FnOnce() + Send + 'static,
     {
-        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let (shutdown_tx, shutdown_rx) = reth_tasks::shutdown::signal();
         let (exit_tx, exit_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
@@ -262,7 +262,7 @@ mod tests {
     where
         F: FnOnce() + Send + 'static,
     {
-        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let (shutdown_tx, shutdown_rx) = reth_tasks::shutdown::signal();
 
         let handle = tokio::spawn(async move {
             // Wait for shutdown signal
@@ -281,7 +281,7 @@ mod tests {
 
     /// Creates a service that panics when triggered
     fn create_panicking_service(name: String) -> (TokioServiceHandle, oneshot::Sender<()>) {
-        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let (shutdown_tx, shutdown_rx) = reth_tasks::shutdown::signal();
         let (panic_tx, panic_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {

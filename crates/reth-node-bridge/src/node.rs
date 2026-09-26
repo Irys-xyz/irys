@@ -25,7 +25,6 @@ use std::{fmt::Debug, ops::Deref};
 use tracing::{Instrument as _, warn};
 
 use crate::{IrysRethNodeAdapter, unwind::unwind_to};
-pub use reth_e2e_test_utils::node::NodeTestContext;
 
 type NodeTypesAdapter = FullNodeTypesAdapter<IrysEthereumNode, RethDbWrapper, NodeProvider>;
 
@@ -38,9 +37,6 @@ pub type RethNodeAdapter = NodeAdapter<
 >;
 
 pub type NodeProvider = BlockchainProvider<NodeTypesWithDBAdapter<IrysEthereumNode, RethDbWrapper>>;
-
-pub type NodeHelperType =
-    NodeTestContext<RethNodeAdapter, <IrysEthereumNode as Node<NodeTypesAdapter>>::AddOns>;
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
@@ -231,12 +227,10 @@ pub async fn run_node(
         .in_current_span()
         .await?;
 
-    let context = IrysRethNodeAdapter::new(handle.node.clone()).await?;
+    let context = IrysRethNodeAdapter::new(handle.node.clone());
     // check that the latest height lines up with the expected latest height from irys
 
     let latest = context
-        .rpc
-        .inner
         .eth_api()
         .block_by_number(BlockNumberOrTag::Latest, false)
         .await?

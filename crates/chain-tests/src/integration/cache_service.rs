@@ -136,12 +136,15 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
+    let expected_cached = u64::try_from(tx.chunks.len()).expect("chunk count fits u64");
+    node.wait_for_chunk_cache_count(expected_cached, 10).await?;
+
     // confirm that we have the right number of CachedChunks in mdbx table
     let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
         get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
     })?;
 
-    assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
+    assert_eq!(*chunk_cache_count, expected_cached);
 
     // confirm that we have the right number of IngressProofs in mdbx table
     let expected_proofs = 1;

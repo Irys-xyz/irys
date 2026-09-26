@@ -264,9 +264,9 @@ impl Versioned for DataTransactionHeaderV1 {
     Deserialize,
     PartialEq,
     Arbitrary,
-    Compact,
     RlpEncodable,
     RlpDecodable,
+    Compact,
 )]
 #[rlp(trailing)]
 /// Stores deserialized fields from a JSON formatted Irys transaction header.

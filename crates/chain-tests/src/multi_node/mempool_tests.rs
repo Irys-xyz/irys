@@ -5,11 +5,9 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
-use irys_reth_node_bridge::{
-    IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _,
-    reth_e2e_test_utils::transaction::TransactionTestContext,
-};
+use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentTypeV1;
 use irys_types::{
@@ -24,6 +22,7 @@ use reth::rpc::{
 };
 use reth_db::Database as _;
 use reth_db::transaction::DbTx as _;
+use reth_e2e_test_utils::transaction::TransactionTestContext;
 use reth_ethereum_primitives::{Receipt, Transaction};
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -300,7 +299,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Ensure it did not get cached
+    genesis_node.wait_for_http_chunk_idle(10).await?;
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
 
     // Post the tx header and confirm cache still empty
@@ -367,7 +366,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Ensure it did not get cached
+    genesis_node.wait_for_http_chunk_idle(10).await?;
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
 
     // Post the tx header and confirm cache still empty
@@ -437,7 +436,15 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    // Now try to add one more chunk - should be rejected (cache full)
+    genesis_node
+        .wait_until_chunk_accepted(
+            tx.header.data_root,
+            TxChunkOffset::from(preheader_cap.saturating_sub(1)),
+            10,
+        )
+        .await?;
+
+    // Now try to add one more chunk - HTTP admits it; the worker rejects the park.
     let overflow_chunk = UnpackedChunk {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
@@ -455,11 +462,26 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = test::read_body(resp).await;
-    let body_str = String::from_utf8_lossy(&body);
+
+    genesis_node.wait_for_http_chunk_idle(10).await?;
     assert!(
-        body_str.contains("PreHeaderOffsetExceedsCap"),
-        "Expected chunk to be rejected with PreHeaderOffsetExceedsCap, got: {body_str}"
+        !genesis_node
+            .node_ctx
+            .chunk_ingress_state
+            .pending_contains(tx.header.data_root, TxChunkOffset::from(preheader_cap))
+            .await,
+        "overflow pre-header chunk must not remain parked"
+    );
+    let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+        irys_database::cached_chunk_by_chunk_offset(
+            db_tx,
+            tx.header.data_root,
+            TxChunkOffset::from(preheader_cap),
+        )
+    })?;
+    assert!(
+        overflow_cached.is_none(),
+        "overflow pre-header chunk must not be cached"
     );
 
     genesis_node.stop().await;
@@ -1825,11 +1847,9 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // ensure recipients have 0 balance
     let recipient1_init_balance = genesis_reth_context
-        .rpc
         .get_balance(recipient1.address(), None)
         .await?;
     let recipient2_init_balance = genesis_reth_context
-        .rpc
         .get_balance(recipient2.address(), None)
         .await?;
     assert_eq!(recipient1_init_balance, U256::from(0));
@@ -1914,7 +1934,6 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // Inject the shared EVM transaction to genesis node (should gossip to peers)
     genesis_reth_context
-        .rpc
         .inject_tx(shared_signed_tx)
         .await
         .expect("shared tx should be accepted");
@@ -1932,12 +1951,10 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let mut expected_recipient2_balance = U256::from(0);
 
     let recipient1_balance = genesis_reth_context
-        .rpc
         .get_balance(recipient1.address(), Some(BlockId::latest()))
         .await?;
 
     let recipient2_balance = genesis_reth_context
-        .rpc
         .get_balance(recipient2.address(), None)
         .await?;
 
@@ -1951,7 +1968,7 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     let wait_for_evm_tx = async |ctx: &IrysRethNodeAdapter, hash: &B256| -> eyre::Result<()> {
         // wait until the tx shows up
-        let rpc = ctx.rpc_client().unwrap();
+        let rpc = ctx.rpc_server_handle().http_client().unwrap();
         loop {
             match EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header, Bytes>::transaction_by_hash(
                 &rpc, *hash,
@@ -1967,7 +1984,6 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     };
 
     peer1_reth_context
-        .rpc
         .inject_tx(signed_tx1.clone())
         .await
         .expect("peer1 tx should be accepted");
@@ -1977,7 +1993,6 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     expected_recipient1_balance += U256::from(1);
 
     peer2_reth_context
-        .rpc
         .inject_tx(signed_tx2.clone())
         .await
         .expect("peer2 tx should be accepted");
@@ -2000,22 +2015,18 @@ async fn heavy3_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // validate the peer blocks create forks with different EVM transactions
 
     let peer1_recipient1_balance = peer1_reth_context
-        .rpc
         .get_balance(recipient1.address(), None)
         .await?;
 
     let peer1_recipient2_balance = peer1_reth_context
-        .rpc
         .get_balance(recipient2.address(), None)
         .await?;
 
     let peer2_recipient1_balance = peer2_reth_context
-        .rpc
         .get_balance(recipient1.address(), None)
         .await?;
 
     let peer2_recipient2_balance = peer2_reth_context
-        .rpc
         .get_balance(recipient2.address(), None)
         .await?;
 
@@ -2171,11 +2182,9 @@ async fn heavy_test_evm_gossip() -> eyre::Result<()> {
 
     // ensure recipients have 0 balance
     let recipient1_init_balance = genesis_reth_context
-        .rpc
         .get_balance(recipient1.address(), None)
         .await?;
     let recipient2_init_balance = genesis_reth_context
-        .rpc
         .get_balance(recipient2.address(), None)
         .await?;
     assert_eq!(recipient1_init_balance, U256::from(0));
@@ -2231,7 +2240,6 @@ async fn heavy_test_evm_gossip() -> eyre::Result<()> {
 
     // Inject the shared EVM transaction to genesis node (should gossip to peers)
     genesis_reth_context
-        .rpc
         .inject_tx(shared_signed_tx)
         .await
         .expect("shared tx should be accepted");
@@ -2257,7 +2265,6 @@ async fn heavy_test_evm_gossip() -> eyre::Result<()> {
     peer1.wait_for_evm_block(evm_block_hash, 20).await?;
 
     let recipient1_balance = peer1_reth_context
-        .rpc
         .get_balance(
             recipient1.address(),
             Some(BlockId::Hash(evm_block_hash.into())),
@@ -2265,12 +2272,10 @@ async fn heavy_test_evm_gossip() -> eyre::Result<()> {
         .await?;
 
     let recipient1_balance2 = peer1_reth_context
-        .rpc
         .get_balance(recipient1.address(), None)
         .await?;
 
     let recipient1_balance3 = peer2_reth_context
-        .rpc
         .get_balance(recipient1.address(), None)
         .await?;
 
@@ -2831,14 +2836,12 @@ async fn commitment_tx_cumulative_fee_validation_test(
     let tx_env = TransactionTestContext::sign_tx(rich_signer.clone().into(), evm_tx_req).await;
 
     let _evm_tx_hash = reth_context
-        .rpc
         .inject_tx(tx_env.encoded_2718().into())
         .await
         .expect("tx should be accepted");
 
     // check that the users's balance has increased
     let old_balance: irys_types::U256 = reth_context
-        .rpc
         .get_balance(signer.address(), None)
         .await?
         .into();
@@ -2846,7 +2849,6 @@ async fn commitment_tx_cumulative_fee_validation_test(
     let block2 = genesis_node.mine_block().await?;
 
     let new_balance: irys_types::U256 = reth_context
-        .rpc
         .get_balance(signer.address(), None)
         .await?
         .into();

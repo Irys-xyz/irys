@@ -1,6 +1,11 @@
 # NOTE: Assume changes here affect ALL build environments.
 # For environment-specific settings, use `~/.cargo/config.toml` or the `RUSTFLAGS` environment variable.
 # See https://doc.rust-lang.org/cargo/reference/config.html for more details.
+#
+# `-C target-cpu=native` is the only rustc flag that belongs here. `-D warnings`
+# is a clippy-driver argument (`cargo xtask clippy` passes `-- -D warnings`) so
+# it does not fingerprint git deps. Setting `RUSTFLAGS` in the environment
+# *replaces* this list and will rebuild Reth; leave it unset locally.
 [build]
 rustflags = ["-C", "target-cpu=native"]
 incremental = true

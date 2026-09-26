@@ -60,6 +60,12 @@ impl PeerBandwidthManager {
         self.peer_stats.record_request_failed();
     }
 
+    /// Release a request that returned 404 without treating a sparse-ledger
+    /// absence as a transport or peer-health failure.
+    pub fn on_chunk_not_found(&mut self) {
+        self.peer_stats.record_request_not_found();
+    }
+
     /// Get max concurrency (upper bound)
     pub fn max_concurrency(&self) -> usize {
         self.peer_stats.max_concurrency as usize

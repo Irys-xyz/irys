@@ -66,12 +66,12 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();
 
-    while reth_context.inner.pool.pending_transactions().is_empty() {
+    while reth_context.pool.pending_transactions().is_empty() {
         info!("waiting for tx...");
         sleep(Duration::from_millis(1500)).await;
     }
 
-    let txs = reth_context.inner.pool.pending_transactions();
+    let txs = reth_context.pool.pending_transactions();
 
     info!(
         "received pending txs: {:?}",
