@@ -601,6 +601,7 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
         c.chunk_size = chunk_size;
         c.num_chunks_in_partition = num_chunks_in_partition;
         // Cascade intentionally NOT configured yet — activated mid-chain below.
+        c.hardforks.cascade = None;
     });
 
     let signer = config.new_random_signer();
@@ -1347,6 +1348,7 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
         c.num_chunks_in_partition = num_chunks_in_partition;
         // Cascade intentionally NOT configured: this exercises pre-activation
         // behavior, where the last_height touch is gated off.
+        c.hardforks.cascade = None;
     });
 
     let signer = config.new_random_signer();
@@ -1679,6 +1681,7 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
         c.num_chunks_in_partition = num_chunks_in_partition;
         // Cascade intentionally NOT configured yet — activated mid-chain below so
         // the pre-activation blocks carry only Publish+Submit (the regression).
+        c.hardforks.cascade = None;
     });
 
     let signer = config.new_random_signer();
@@ -1833,6 +1836,7 @@ async fn slow_heavy_cascade_midchain_submit_expiry_refunds_across_activation() -
         c.chunk_size = chunk_size;
         c.num_chunks_in_partition = num_chunks_in_partition;
         // Cascade intentionally NOT configured yet — activated mid-chain below.
+        c.hardforks.cascade = None;
     });
 
     let user = config.new_random_signer();

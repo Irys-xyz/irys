@@ -946,7 +946,8 @@ mod tests {
     #[test]
     fn test_ledgers_new_cascade_active_but_no_config() {
         // cascade_active=true but cascade config is None: only 2 ledgers
-        let config = ConsensusConfig::testing(); // cascade is None
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.cascade = None;
         let ledgers = Ledgers::new(&config, ForBlock::active());
         assert_eq!(ledgers.len(), 2);
     }
@@ -979,7 +980,8 @@ mod tests {
 
     #[test]
     fn test_ledgers_activate_cascade_no_config() {
-        let config = ConsensusConfig::testing(); // cascade is None
+        let mut config = ConsensusConfig::testing();
+        config.hardforks.cascade = None;
         let mut ledgers = Ledgers::new(&config, ForBlock::inactive());
         assert_eq!(ledgers.len(), 2);
 

@@ -69,6 +69,7 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
         // One ingress proof from the (staked) genesis signer makes a tx promotable.
         c.hardforks.frontier.number_of_ingress_proofs_total = 1;
         // Cascade intentionally NOT configured yet — activated mid-chain below.
+        c.hardforks.cascade = None;
     });
 
     let user = config.new_random_signer();

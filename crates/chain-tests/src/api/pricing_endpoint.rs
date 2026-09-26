@@ -83,7 +83,12 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             .config
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        // Timestamp-aware, as the API is.
+        let cost_per_chunk_per_epoch = ctx
+            .node_ctx
+            .config
+            .consensus
+            .cost_per_chunk_per_epoch_at(UnixTimestamp::from_secs(0))?;
         // Convert annual decay rate to per-epoch
         let epochs_per_year =
             irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
@@ -197,7 +202,12 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             .config
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        let cost_per_chunk_per_epoch = ctx.node_ctx.config.consensus.cost_per_chunk_per_epoch()?;
+        // Timestamp-aware, as the API is.
+        let cost_per_chunk_per_epoch = ctx
+            .node_ctx
+            .config
+            .consensus
+            .cost_per_chunk_per_epoch_at(UnixTimestamp::from_secs(0))?;
         // Convert annual decay rate to per-epoch
         let epochs_per_year =
             irys_types::U256::from(ctx.node_ctx.config.consensus.epochs_per_year());
