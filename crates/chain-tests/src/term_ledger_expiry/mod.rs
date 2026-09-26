@@ -248,8 +248,7 @@ impl LedgerExpiryTestContext {
         submit_ledger_epoch_length: u64,
         num_blocks_in_epoch: u64,
     ) -> eyre::Result<Self> {
-        // Configure node. These scenarios pin allocation-anchored (pre-Cascade)
-        // Submit expiry: a partly written slot still expires on age alone.
+        // Configure node. Pre-Cascade expiry: a partly written slot expires by age.
         let mut config = NodeConfig::testing();
         config.consensus.get_mut().hardforks.cascade = None;
         config.consensus.get_mut().num_chunks_in_recall_range = 1;

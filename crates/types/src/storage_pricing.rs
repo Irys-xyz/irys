@@ -1388,7 +1388,7 @@ mod tests {
 
             // Golden data calculation for 16TB with testing config:
             // - 16TB = 17,592,186,044,416 bytes = 67,108,864 chunks (at 256KB/chunk)
-            // - Annual cost: $0.028/GB/year (Cascade rate, active from genesis in testing)
+            // - Annual cost: $0.028/GB/year (Cascade rate)
             // - Cost per chunk per epoch: 0.028 / 4096 / 26280 = ~$0.000000000260119
             // - Duration: 5 epochs (submit_ledger_epoch_length)
             // - Replicas: 10 (number_of_ingress_proofs)
@@ -1526,7 +1526,7 @@ mod tests {
             // Golden data: 1TB = 4,194,304 chunks
             // With testing config: 12s blocks, 100 blocks/epoch = 1200s/epoch
             // Epochs per year = 365*24*60*60 / 1200 = 26280
-            // Annual cost = $0.028/GB/year (Cascade rate, active from genesis in testing)
+            // Annual cost = $0.028/GB/year (Cascade rate)
             // Cost per chunk per epoch = 0.028 / 4096 / 26280 = 2.601194e-10
             // Term cost = 4194304 * 2.601194e-10 * 5 * 10 = 0.0545509893455
             let expected_fee = dec!(0.0545509893455);
@@ -1571,7 +1571,7 @@ mod tests {
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
             // Golden data: 1PB = 4,294,967,296 chunks
-            // Annual cost = $0.028/GB/year (Cascade rate, active from genesis in testing)
+            // Annual cost = $0.028/GB/year (Cascade rate)
             // Cost = 4,294,967,296 * $0.000000000260119 * 5 epochs * 10 replicas
             //      = $55.8602130898 USD
             let expected_fee = dec!(55.8602130898);
@@ -1803,8 +1803,8 @@ mod tests {
             config.chunk_size = 262144;
             config.num_chunks_in_partition = 51872000;
 
-            // Use the same annual cost that achieves $0.0753/TB/epoch. The
-            // timestamp-aware fee path reads the Cascade rate, so set it there.
+            // Use the same annual cost that achieves $0.0753/TB/epoch, on Cascade,
+            // whose rate the fee path reads.
             config
                 .hardforks
                 .cascade
@@ -2257,9 +2257,7 @@ mod tests {
             let perm_fee_dec = perm_fee.token_to_decimal()?;
 
             // Golden data: 16TB = 67,108,864 chunks
-            // Annual cost = $0.028/GB/year (Cascade rate, active from genesis in testing).
-            // Base cost and ingress rewards are linear in the annual cost, so each
-            // is 2.8x its value at $0.01/GB/year:
+            // Annual cost = $0.028/GB/year (Cascade rate).
             // Base cost: $396,666.6917804298
             // Ingress rewards: $0.4364079149
             // Total: $396,667.1281883447 USD
@@ -2321,9 +2319,7 @@ mod tests {
             // Golden data: 1TB = 4,194,304 chunks
             // With 200 years and 1% decay, and 26280 epochs/year:
             // Decay factor ≈ 2,272,339
-            // Annual cost = $0.028/GB/year (Cascade rate, active from genesis in testing).
-            // Each component is linear in the annual cost, so it is 2.8x its value
-            // at $0.01/GB/year:
+            // Annual cost = $0.028/GB/year (Cascade rate).
             // Base cost: $24791.6682362768
             // Term fee: $0.0545509894
             // Ingress rewards: $0.0272754947

@@ -31,9 +31,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
         })
         .with_genesis_peer_discovery_timeout(1000);
 
-    // Start the node. 5 storage submodules: one partition each for Publish,
-    // OneYear and ThirtyDay, plus one for each of the two Submit slots the data
-    // spans.
+    // Start the node. 5 submodules: Publish, OneYear, ThirtyDay and two Submit slots.
     let genesis_node = IrysNodeTest::new_genesis(config.clone()).with_time_mode(TimeMode::Real);
     StorageSubmodulesConfig::load_for_test(genesis_node.cfg.base_directory.clone(), 5)?;
     let genesis_node = genesis_node

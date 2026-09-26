@@ -107,9 +107,8 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
             .unwrap_or(false)
     );
 
-    // Epoch 1: Reward address takes effect. This epoch block also records the
-    // Submit write, which starts slot 0's expiry clock: Cascade anchors expiry
-    // on the last write to a slot, not on its allocation.
+    // Epoch 1: Reward address takes effect; this block records the Submit write,
+    // which starts the slot's Cascade expiry clock.
     node.mine_until_next_epoch().await?;
 
     // Epoch 2

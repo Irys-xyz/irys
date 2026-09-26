@@ -37,7 +37,7 @@ async fn heavy_unpledged_minerless_slot_still_refunds_at_expiry() -> eyre::Resul
     let mut config = NodeConfig::testing();
     {
         let c = config.consensus.get_mut();
-        // Pre-Cascade: see the expiry note above.
+        // Pre-Cascade expiry.
         c.hardforks.cascade = None;
         c.block_migration_depth = 1;
         c.chunk_size = CHUNK_SIZE;

@@ -36,8 +36,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
         consensus.block_migration_depth = 1;
     });
 
-    // 5 storage submodules: one partition each for Publish, OneYear and ThirtyDay,
-    // plus one for each of the two Submit slots this test validates PoAs in.
+    // 5 submodules: Publish, OneYear, ThirtyDay and two Submit slots.
     let genesis_node = IrysNodeTest::new_genesis(node_config.clone());
     StorageSubmodulesConfig::load_for_test(genesis_node.cfg.base_directory.clone(), 5)?;
     let genesis_node = genesis_node

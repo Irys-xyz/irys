@@ -68,7 +68,7 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
         c.num_chunks_in_partition = num_chunks_in_partition;
         // One ingress proof from the (staked) genesis signer makes a tx promotable.
         c.hardforks.frontier.number_of_ingress_proofs_total = 1;
-        // Cascade intentionally off at genesis — activated mid-chain below.
+        // Cascade intentionally NOT configured yet — activated mid-chain below.
         c.hardforks.cascade = None;
     });
 

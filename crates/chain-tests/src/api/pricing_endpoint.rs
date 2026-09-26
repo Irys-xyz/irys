@@ -83,7 +83,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             .config
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        // Timestamp-aware, so the rate follows the active hardfork (Cascade) as the API does
+        // Timestamp-aware, as the API is.
         let cost_per_chunk_per_epoch = ctx
             .node_ctx
             .config
@@ -202,7 +202,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             .config
             .consensus
             .years_to_epochs(ctx.node_ctx.config.consensus.safe_minimum_number_of_years);
-        // Timestamp-aware, so the rate follows the active hardfork (Cascade) as the API does
+        // Timestamp-aware, as the API is.
         let cost_per_chunk_per_epoch = ctx
             .node_ctx
             .config

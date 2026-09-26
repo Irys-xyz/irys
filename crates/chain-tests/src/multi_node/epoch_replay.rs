@@ -58,9 +58,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
             consensus.num_partitions_per_slot = 2;
             consensus.epoch.num_blocks_in_epoch = 2;
             consensus.block_migration_depth = 1;
-            // The pinned partition hashes below come from the pre-Cascade ledger
-            // set (Publish and Submit only). Cascade adds the term ledgers, which
-            // take partitions from the same pool and so change the assignments.
+            // The pinned partition hashes assume the pre-Cascade ledger set.
             consensus.hardforks.cascade = None;
             consensus.num_chunks_in_partition = 20;
             consensus.num_chunks_in_recall_range = 5;

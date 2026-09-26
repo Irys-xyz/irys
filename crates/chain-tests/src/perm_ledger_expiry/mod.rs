@@ -24,8 +24,7 @@ async fn heavy_perm_ledger_expiry_basic() -> eyre::Result<()> {
     const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
     let mut config = NodeConfig::testing();
-    // Allocation-anchored (pre-Cascade) expiry: the fixture never fully writes
-    // slot 0, and Cascade expires a slot only once it is fully written.
+    // Pre-Cascade expiry: the fixture never fills slot 0.
     config.consensus.get_mut().hardforks.cascade = None;
     config.consensus.get_mut().block_migration_depth = 1;
     config.consensus.get_mut().chunk_size = CHUNK_SIZE;
@@ -257,8 +256,7 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
     let mut config = NodeConfig::testing();
-    // Allocation-anchored (pre-Cascade) expiry: the fixture never fully writes
-    // slot 0, and Cascade expires a slot only once it is fully written.
+    // Pre-Cascade expiry: the fixture never fills slot 0.
     config.consensus.get_mut().hardforks.cascade = None;
     config.consensus.get_mut().block_migration_depth = 1;
     config.consensus.get_mut().chunk_size = CHUNK_SIZE;
@@ -522,8 +520,7 @@ async fn slow_heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
     let mut config = NodeConfig::testing();
-    // Allocation-anchored (pre-Cascade) expiry: the fixture never fully writes
-    // slot 0, and Cascade expires a slot only once it is fully written.
+    // Pre-Cascade expiry: the fixture never fills slot 0.
     config.consensus.get_mut().hardforks.cascade = None;
     config.consensus.get_mut().block_migration_depth = 1;
     config.consensus.get_mut().chunk_size = CHUNK_SIZE;
@@ -803,8 +800,7 @@ async fn slow_heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
     const INITIAL_BALANCE: u128 = 10_000_000_000_000_000_000;
 
     let mut config = NodeConfig::testing();
-    // Allocation-anchored (pre-Cascade) expiry: the fixture never fully writes
-    // slot 0, and Cascade expires a slot only once it is fully written.
+    // Pre-Cascade expiry: the fixture never fills slot 0.
     config.consensus.get_mut().hardforks.cascade = None;
     config.consensus.get_mut().block_migration_depth = 1;
     config.consensus.get_mut().chunk_size = CHUNK_SIZE;

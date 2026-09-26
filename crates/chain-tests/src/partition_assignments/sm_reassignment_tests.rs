@@ -24,9 +24,8 @@ async fn spiky_heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
 
     let seconds_to_wait = 10;
     let mut config = NodeConfig::testing();
-    // Allocation-anchored (pre-Cascade) expiry: slot 0 is never fully written,
-    // and Cascade expires a slot only once it is fully written. Cascade's term
-    // ledgers would also take the spare capacity partition this test tracks.
+    // Pre-Cascade: slot 0 is never filled, and the term ledgers would take the
+    // capacity partition this test tracks.
     config.consensus.get_mut().hardforks.cascade = None;
 
     let chunk_size: usize = 32;

@@ -977,9 +977,7 @@ impl ConsensusConfig {
                 borealis: Some(Borealis {
                     activation_timestamp: UnixTimestamp::from_secs(0),
                 }),
-                // Cascade hardfork - enabled from genesis for testing. Cascade is
-                // live, so tests run the live rules by default; a test about
-                // pre-Cascade behaviour sets `cascade = None` itself.
+                // Cascade hardfork - enabled from genesis for testing
                 cascade: Some(Cascade {
                     activation_timestamp: UnixTimestamp::from_secs(0),
                     one_year_epoch_length: 365,

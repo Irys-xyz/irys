@@ -48,7 +48,7 @@ async fn heavy_multi_replica_slot_expiry_splits_reward_and_refunds_once() -> eyr
     let mut config = NodeConfig::testing();
     {
         let c = config.consensus.get_mut();
-        // Pre-Cascade: see the expiry note above.
+        // Pre-Cascade expiry.
         c.hardforks.cascade = None;
         c.block_migration_depth = 1;
         c.chunk_size = CHUNK_SIZE;
