@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789723162167,
+  "lastUpdate": 1790602546607,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -15919,6 +15919,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000123,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f99fdd849e02cb9392ed2d22ce4807a165db2e6a",
+          "message": "test: activate Cascade from genesis in the testing consensus config (#1575)\n\n* test: activate Cascade from genesis in the testing consensus config\n\nCascade is live, so ConsensusConfig::testing() now runs the live rules by\ndefault: term ledgers exist from genesis and fees use the Cascade\nannual_cost_per_gb.\n\nTests adjusted:\n- Tests about pre-Cascade behaviour (allocation-anchored slot expiry,\n  two-ledger layouts, mid-chain activation, pinned partition hashes from\n  the Publish/Submit-only layout) now set `cascade = None` themselves.\n- Golden fee values in storage_pricing move to the Cascade rate ($0.028,\n  2.8x the base rate). The pricing endpoint tests use the\n  timestamp-aware cost per chunk, as the API does.\n- The testing consensus hash and the TOML round-trip test include the\n  Cascade section.\n- Multi-slot PoA and overlapping-data-size tests get enough storage\n  submodules for the two term ledgers; the PoA lookup filters by the\n  Submit ledger.\n- The custom reward-address expiry test waits one more epoch, because\n  Cascade starts the expiry clock at the epoch that records the write.\n\n* test: trim the Cascade-default comments",
+          "timestamp": "2026-09-28T14:15:57+01:00",
+          "tree_id": "dcd3ce8803d10908e601f3f50fd6f1b89e9c5f62",
+          "url": "https://github.com/Irys-xyz/irys/commit/f99fdd849e02cb9392ed2d22ce4807a165db2e6a"
+        },
+        "date": 1790602543706,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.013764,
+            "range": "± 0.001329",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.130229,
+            "range": "± 0.008366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.340109,
+            "range": "± 0.059392",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.712532,
+            "range": "± 0.630968",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078788,
+            "range": "± 0.001535",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 776.600621,
+            "range": "± 17.069976",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 999.357787,
+            "range": "± 45.429275",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117913,
+            "range": "± 0.000841",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1180.002607,
+            "range": "± 9.016918",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1547.57292,
+            "range": "± 10.327648",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034013,
+            "range": "± 0.001277",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.246813,
+            "range": "± 2.495965",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.219185,
+            "range": "± 1.675544",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
