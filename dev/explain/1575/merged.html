@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1575 — Activate Cascade from genesis in the testing consensus config</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-2: #1d2130;
+    --text: #e6e8ef;
+    --muted: #9aa3b8;
+    --border: #2a2f3f;
+    --accent: #5fb3ff;
+    --accent-2: #8de08d;
+    --warn: #ffb454;
+    --warn-bg: #2a2317;
+    --info-bg: #16233a;
+    --code-bg: #10131b;
+    --link: #7cc6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+  }
+  header {
+    padding: 28px 24px 18px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, var(--panel-2), var(--bg));
+  }
+  header h1 {
+    margin: 0 0 6px;
+    font-size: 1.5rem;
+  }
+  header .meta {
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .wrap {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 24px 60px;
+  }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin: 24px auto 0;
+    max-width: 900px;
+  }
+  nav.toc h2 {
+    margin: 0 0 8px;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  nav.toc ol {
+    margin: 0;
+    padding-left: 1.2em;
+    columns: 2;
+  }
+  nav.toc a { color: var(--link); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section {
+    margin-top: 38px;
+  }
+  section h2 {
+    font-size: 1.15rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+  }
+  .lede {
+    font-size: 1.05rem;
+  }
+  .theme {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+  }
+  .theme .name {
+    font-weight: 600;
+    color: var(--accent-2);
+  }
+  .theme .files {
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+  }
+  ul.plain { padding-left: 1.3em; }
+  ul.plain li { margin-bottom: 8px; }
+  a.cite {
+    color: var(--link);
+    font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+    font-size: 0.92em;
+    text-decoration: none;
+    border-bottom: 1px dashed rgba(124,198,255,0.4);
+  }
+  a.cite:hover { border-bottom-style: solid; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  .callout {
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 14px 0;
+    border: 1px solid var(--border);
+  }
+  .callout.info { background: var(--info-bg); border-color: #274468; }
+  .callout.warn { background: var(--warn-bg); border-color: #6b4d1f; }
+  .callout .tag {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .watch {
+    border-left: 3px solid var(--warn);
+    background: var(--panel);
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    border-radius: 0 8px 8px 0;
+  }
+  .diagram {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 14px 0;
+  }
+  .box {
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    min-width: 140px;
+  }
+  .box .t { font-weight: 600; color: var(--accent-2); display:block; margin-bottom:4px;}
+  .box .d { color: var(--muted); font-size: 0.78rem; }
+  .arrow { color: var(--muted); font-size: 1.4rem; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    padding: 30px 0;
+  }
+  @media (max-width: 600px) {
+    nav.toc ol { columns: 1; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>test: activate Cascade from genesis in the testing consensus config</h1>
+  <div class="meta">
+    PR #1575 · Irys-xyz/irys · summary mode · CI (merged @ <code>f99fdd8</code>) · citations link to
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a">f99fdd849e02cb9392ed2d22ce4807a165db2e6a</a>
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#what-why">What it does / Why</a></li>
+    <li><a href="#change-map">Change map</a></li>
+    <li><a href="#behavior-changes">Behavior changes</a></li>
+    <li><a href="#watch-out">Watch out for</a></li>
+  </ol>
+</nav>
+
+<div class="wrap">
+
+<section id="what-why">
+  <h2>What it does &amp; Why</h2>
+  <p class="lede">
+    <strong>What it does:</strong> <code>ConsensusConfig::testing()</code> now enables the Cascade hardfork
+    from genesis — <a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/config/consensus.rs#L981">crates/types/src/config/consensus.rs:981</a>
+    sets <code>activation_timestamp: 0</code>, 365/30-day term epoch lengths, and the live
+    <code>annual_cost_per_gb</code> ($0.028/GB/yr), instead of <code>cascade: None</code>. Every test that
+    relied on the old pre-Cascade default (two-ledger layout, allocation-age expiry, base $0.01 pricing)
+    is updated to either opt back out with <code>cascade = None</code> or to assert the new Cascade-era
+    numbers/behavior.
+  </p>
+  <p><strong>Why:</strong> stated intent — the PR description opens with "Cascade is live," i.e. the hardfork
+    has already activated on a real network, so the testing default should match live behavior rather than
+    a stale pre-activation snapshot. Before this change, a testing node "refused term-ledger price quotes
+    and txs" for the OneYear/ThirtyDay ledgers.</p>
+</section>
+
+<section id="change-map">
+  <h2>Change map</h2>
+
+  <div class="theme">
+    <div class="name">Flip the testing default to Cascade-active</div>
+    <div class="files">crates/types/src/config/consensus.rs</div>
+    <p>The core change: <code>ConsensusConfig::testing()</code>'s <code>cascade</code> field switches from
+      <code>None</code> to <code>Some(Cascade { activation_timestamp: 0, one_year_epoch_length: 365,
+      thirty_day_epoch_length: 30, annual_cost_per_gb: Cascade::default_annual_cost_per_gb() })</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/config/consensus.rs#L980">crates/types/src/config/consensus.rs:980</a>-986). The consensus-hash regression golden moves to
+      <code>26uQbM7k…</code> to match (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/config/consensus.rs#L1449">crates/types/src/config/consensus.rs:1449</a>).</p>
+  </div>
+
+  <div class="theme">
+    <div class="name">Pre-Cascade test fixtures opt out explicitly</div>
+    <div class="files">crates/database/src/data_ledger.rs, crates/actors/tests/epoch_snapshot_tests.rs,
+      crates/actors/src/block_producer/ledger_expiry.rs, crates/chain-tests/src/{term_ledger_expiry,perm_ledger_expiry,integration,multi_node,partition_assignments,validation}/*</div>
+    <p>~19 tests across actors, database, and chain-tests that exercise pre-Cascade behavior (allocation-age
+      slot expiry, the two-ledger Publish/Submit-only layout, pinned partition-hash goldens, mid-chain
+      activation scenarios) now set <code>consensus.hardforks.cascade = None</code> themselves, since the
+      testing default no longer does it for them.</p>
+  </div>
+
+  <div class="theme">
+    <div class="name">Storage-pricing goldens move to the Cascade rate</div>
+    <div class="files">crates/types/src/storage_pricing.rs, crates/chain-tests/src/api/pricing_endpoint.rs</div>
+    <p>Fee goldens are linear in <code>annual_cost_per_gb</code>, so the four affected goldens scale by
+      2.8× ($0.028 / $0.01) — e.g. the 16TB term-fee golden moves from <code>0.3117199391</code> to
+      <code>0.8728158295</code> IRYS (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/storage_pricing.rs#L1389">crates/types/src/storage_pricing.rs:1389</a>). The pricing-endpoint tests switch from the base
+      <code>cost_per_chunk_per_epoch()</code> to the timestamp-aware
+      <code>cost_per_chunk_per_epoch_at(UnixTimestamp::from_secs(0))</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/chain-tests/src/api/pricing_endpoint.rs#L91">crates/chain-tests/src/api/pricing_endpoint.rs:91</a>), matching what the live API reads.</p>
+  </div>
+
+  <div class="theme">
+    <div class="name">TOML round-trip and config-hash fixtures gain a Cascade section</div>
+    <div class="files">crates/types/src/config/mod.rs</div>
+    <p>The TOML serialization round-trip test's expected text now includes an
+      <code>[hardforks.cascade]</code> block with the new defaults
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/config/mod.rs#L1210">crates/types/src/config/mod.rs:1210</a>).</p>
+  </div>
+
+  <div class="theme">
+    <div class="name">Multi-slot tests get enough storage submodules for two term ledgers</div>
+    <div class="files">crates/chain-tests/src/validation/poa_cases.rs, crates/chain-tests/src/integration/data_size.rs</div>
+    <p>With OneYear and ThirtyDay ledgers now present from genesis, <code>multi_slot_poa_test</code> and
+      <code>heavy_test_overlapping_data_sizes</code> provision 5 storage submodules (Publish, OneYear,
+      ThirtyDay, two Submit slots) via <code>StorageSubmodulesConfig::load_for_test(...)</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/chain-tests/src/integration/data_size.rs#L34">crates/chain-tests/src/integration/data_size.rs:34</a>). The PoA partition-assignment lookup in
+      <code>multi_slot_poa_test</code> now also filters by <code>ledger_id == Submit</code>, not just
+      <code>slot_index</code>, because slot indices are no longer unique across ledgers
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/chain-tests/src/validation/poa_cases.rs#L149">crates/chain-tests/src/validation/poa_cases.rs:149</a>).</p>
+  </div>
+
+  <div class="theme">
+    <div class="name">Custom-reward-address expiry test waits one more epoch</div>
+    <div class="files">crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs</div>
+    <p>Cascade starts a Submit slot's expiry clock at the epoch block that <em>records the write</em>, not at
+      allocation time, so the test now mines a third epoch boundary before asserting expiry
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs#L110">crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs:110</a>-119).</p>
+  </div>
+</section>
+
+<section id="behavior-changes">
+  <h2>Behavior changes</h2>
+  <div class="diagram">
+    <div class="box"><span class="t">Before</span><span class="d">ConsensusConfig::testing()<br>cascade = None</span></div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><span class="t">Testing node genesis</span><span class="d">Publish + Submit only.<br>OneYear/ThirtyDay quotes<br>and txs rejected.</span></div>
+  </div>
+  <div class="diagram">
+    <div class="box"><span class="t">After</span><span class="d">ConsensusConfig::testing()<br>cascade = Some(...) @ t=0</span></div>
+    <div class="arrow">&#8594;</div>
+    <div class="box"><span class="t">Testing node genesis</span><span class="d">Publish + OneYear +<br>ThirtyDay + Submit.<br>$0.028/GB/yr fees.</span></div>
+  </div>
+  <ul class="plain">
+    <li>Any test or tool built on <code>ConsensusConfig::testing()</code> without overriding
+      <code>hardforks.cascade</code> now starts with term ledgers (OneYear, ThirtyDay) present and the
+      Cascade <code>annual_cost_per_gb</code> ($0.028/GB/yr) in effect, rather than the base rate ($0.01/GB/yr)
+      → term-ledger price quotes and transactions that previously failed with
+      "ThirtyDay ledger not available: Cascade hardfork not active" now succeed by default.</li>
+    <li>The keccak256 hash of the testing consensus config changes (<code>65At1Z…</code> →
+      <code>26uQbM…</code>), since the hardforks section is part of the hashed config
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/config/consensus.rs#L1449">crates/types/src/config/consensus.rs:1449</a>).</li>
+    <li>Storage-fee amounts computed from the default testing config are ~2.8× larger than before, since fees
+      are linear in <code>annual_cost_per_gb</code> and the Cascade rate ($0.028) replaces the base rate
+      ($0.01) whenever Cascade is active at the quoted timestamp.</li>
+  </ul>
+</section>
+
+<section id="watch-out">
+  <h2>Watch out for</h2>
+
+  <div class="watch">
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/config/consensus.rs#L1449">crates/types/src/config/consensus.rs:1449</a>
+    — the testing consensus-config hash changed; any downstream tooling, snapshot, or fixture outside this
+    repo that pins the old hash (<code>65At1ZvKVtUPtR1jLtA8CcFYX2vHf7tT5TbhBEy3u2XE</code>) will now mismatch
+    and needs updating.
+  </div>
+
+  <div class="watch">
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/chain-tests/src/validation/cascade_term_expiry.rs#L601">crates/chain-tests/src/validation/cascade_term_expiry.rs</a> and the other files pinned to
+    <code>cascade = None</code> — the PR description itself flags this: the pre-Cascade allocation-age expiry
+    tests were pinned to the old behavior rather than rewritten for Cascade's write-anchored expiry rule.
+    Cascade-era equivalents exist (<code>cascade_term_expiry</code>, <code>cascade_submit_expiry_promotion</code>,
+    <code>perm_partial_frontier_survives_cascade</code>), but the allocation-age code path itself is now only
+    exercised via the non-default, opted-out configuration — worth a dedicated code-review pass if that
+    coverage gap matters for release sign-off.
+  </div>
+
+  <div class="watch">
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/chain-tests/src/validation/poa_cases.rs#L149">crates/chain-tests/src/validation/poa_cases.rs:149</a>
+    — the partition-assignment lookup added a <code>ledger_id == Submit</code> filter because slot indices
+    now repeat across ledgers (Publish/OneYear/ThirtyDay/Submit). Any future test that adds a bare
+    <code>.find(|pa| pa.slot_index == Some(n))</code> without a ledger filter against the default testing
+    config will silently match the wrong ledger's slot.
+  </div>
+
+  <div class="watch">
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/types/src/storage_pricing.rs#L1750">crates/types/src/storage_pricing.rs:1750</a>
+    — the untouched spreadsheet-golden tests further down this file (~L1736-2400) set the base
+    <code>config.annual_cost_per_gb</code> field directly and call the non-timestamp-aware
+    <code>cost_per_chunk_per_epoch()</code>, bypassing the Cascade override entirely even though Cascade is
+    now active by default on the config they build from <code>ConsensusConfig::testing()</code>. They still
+    pass because they never route through <code>effective_annual_cost_per_gb</code>, but a future edit that
+    switches them to the Cascade-aware path would need to account for the now-active $0.028 override.
+  </div>
+
+  <div class="watch">
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/f99fdd849e02cb9392ed2d22ce4807a165db2e6a/crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs#L110">crates/chain-tests/src/validation/ledger_expiry_with_unstake.rs:110</a>
+    — the fix relies on Cascade's expiry clock starting at the epoch block that records the write, one
+    epoch later than before; per the author's own test notes, <code>irys-multiversion-tests</code> was not
+    run for this PR, so cross-version behavior around this same timing change is unverified (though that
+    crate doesn't reference <code>cascade</code> or <code>ConsensusConfig::testing()</code> directly, so the
+    exposure looks limited).
+  </div>
+</section>
+
+</div>
+
+<footer>
+  Generated by the explain-diff skill · summary mode · CI · repository Irys-xyz/irys @ f99fdd849e02cb9392ed2d22ce4807a165db2e6a
+</footer>
+
+</body>
+</html>
