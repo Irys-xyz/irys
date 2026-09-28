@@ -19,6 +19,8 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     const BLOCKS_PER_EPOCH: u64 = 3;
 
     let mut config = NodeConfig::testing();
+    // Pre-Cascade expiry: the fixture never fills the Submit slots.
+    config.consensus.get_mut().hardforks.cascade = None;
     config.consensus.get_mut().block_migration_depth = 1;
     config.consensus.get_mut().chunk_size = CHUNK_SIZE;
     config.consensus.get_mut().num_chunks_in_partition = 4;

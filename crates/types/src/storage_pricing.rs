@@ -1388,16 +1388,16 @@ mod tests {
 
             // Golden data calculation for 16TB with testing config:
             // - 16TB = 17,592,186,044,416 bytes = 67,108,864 chunks (at 256KB/chunk)
-            // - Annual cost: $0.01/GB/year
-            // - Cost per chunk per epoch: ~$0.0000000000929
+            // - Annual cost: $0.028/GB/year (Cascade rate)
+            // - Cost per chunk per epoch: 0.028 / 4096 / 26280 = ~$0.000000000260119
             // - Duration: 5 epochs (submit_ledger_epoch_length)
             // - Replicas: 10 (number_of_ingress_proofs)
             // - No decay for term storage (0% decay rate)
             //
-            // Expected cost = 67,108,864 chunks * $0.0000000000929 * 5 epochs * 10 replicas
-            //               = $0.3117199391 USD
-            // With IRYS at $1, cost = 0.3117199391 IRYS
-            let expected_fee = dec!(0.3117199391);
+            // Expected cost = 67,108,864 chunks * $0.000000000260119 * 5 epochs * 10 replicas
+            //               = $0.8728158295 USD
+            // With IRYS at $1, cost = 0.8728158295 IRYS
+            let expected_fee = dec!(0.8728158295);
 
             // Allow small tolerance for floating point precision
             let diff = (term_fee_dec - expected_fee).abs();
@@ -1526,9 +1526,10 @@ mod tests {
             // Golden data: 1TB = 4,194,304 chunks
             // With testing config: 12s blocks, 100 blocks/epoch = 1200s/epoch
             // Epochs per year = 365*24*60*60 / 1200 = 26280
-            // Cost per chunk per epoch = 0.01 / 4096 / 26280 = 9.292532e-11
-            // Term cost = 4194304 * 9.292532e-11 * 5 * 10 = 0.0194824961523712
-            let expected_fee = dec!(0.0194824961523712);
+            // Annual cost = $0.028/GB/year (Cascade rate)
+            // Cost per chunk per epoch = 0.028 / 4096 / 26280 = 2.601194e-10
+            // Term cost = 4194304 * 2.601194e-10 * 5 * 10 = 0.0545509893455
+            let expected_fee = dec!(0.0545509893455);
 
             let diff = (term_fee_dec - expected_fee).abs();
             assert!(
@@ -1570,9 +1571,10 @@ mod tests {
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
             // Golden data: 1PB = 4,294,967,296 chunks
-            // Cost = 4,294,967,296 * $0.0000000000929 * 5 epochs * 10 replicas
-            //      = $19.9500761035 USD
-            let expected_fee = dec!(19.9500761035);
+            // Annual cost = $0.028/GB/year (Cascade rate)
+            // Cost = 4,294,967,296 * $0.000000000260119 * 5 epochs * 10 replicas
+            //      = $55.8602130898 USD
+            let expected_fee = dec!(55.8602130898);
 
             let diff = (term_fee_dec - expected_fee).abs();
             assert!(
@@ -1801,8 +1803,14 @@ mod tests {
             config.chunk_size = 262144;
             config.num_chunks_in_partition = 51872000;
 
-            // Use the same annual cost that achieves $0.0753/TB/epoch
-            config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
+            // Use the same annual cost that achieves $0.0753/TB/epoch, on Cascade,
+            // whose rate the fee path reads.
+            config
+                .hardforks
+                .cascade
+                .as_mut()
+                .expect("testing config activates Cascade")
+                .annual_cost_per_gb = Amount::token(dec!(0.193245))?;
 
             // Term storage: 5 epochs, 10 replicas, 0% decay
             let tb_in_bytes = 1024_u64.pow(4); // 1TB
@@ -2249,10 +2257,11 @@ mod tests {
             let perm_fee_dec = perm_fee.token_to_decimal()?;
 
             // Golden data: 16TB = 67,108,864 chunks
-            // Base cost: $141,666.6756358678
-            // Ingress rewards: $0.1558599696
-            // Total: $141,666.8314958374 USD
-            let expected_total = dec!(141666.8314958374);
+            // Annual cost = $0.028/GB/year (Cascade rate).
+            // Base cost: $396,666.6917804298
+            // Ingress rewards: $0.4364079149
+            // Total: $396,667.1281883447 USD
+            let expected_total = dec!(396667.1281883447);
 
             let diff = (perm_fee_dec - expected_total).abs();
             assert!(
@@ -2310,11 +2319,12 @@ mod tests {
             // Golden data: 1TB = 4,194,304 chunks
             // With 200 years and 1% decay, and 26280 epochs/year:
             // Decay factor ≈ 2,272,339
-            // Base cost: $8854.1672272417
-            // Term fee: $0.0194824962
-            // Ingress rewards: $0.0097412481
-            // Total: $8854.1769684898 USD
-            let expected_total = dec!(8854.1769684898);
+            // Annual cost = $0.028/GB/year (Cascade rate).
+            // Base cost: $24791.6682362768
+            // Term fee: $0.0545509894
+            // Ingress rewards: $0.0272754947
+            // Total: $24791.6955117714 USD
+            let expected_total = dec!(24791.6955117714);
 
             let diff = (perm_fee_dec - expected_total).abs();
             assert!(

@@ -129,6 +129,7 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
             initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
         });
         // Cascade intentionally NOT configured yet — activated mid-chain below.
+        c.hardforks.cascade = None;
     });
     let signer = config.new_random_signer();
     config.fund_genesis_accounts(vec![&signer]);

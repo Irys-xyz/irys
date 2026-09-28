@@ -24,6 +24,9 @@ async fn spiky_heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
 
     let seconds_to_wait = 10;
     let mut config = NodeConfig::testing();
+    // Pre-Cascade: slot 0 is never filled, and the term ledgers would take the
+    // capacity partition this test tracks.
+    config.consensus.get_mut().hardforks.cascade = None;
 
     let chunk_size: usize = 32;
     config.consensus.get_mut().chunk_size = chunk_size as u64;
