@@ -1,16 +1,13 @@
 name: PR Explain
 
-# Explains a pull request twice with the vendored explain-diff skill
-# (.agents/skills/explain-diff): once when it is opened, in `expert` mode, so
-# reviewers get a review-focus map before they start; and once when it is
-# merged, in `summary` mode, as the durable one-screen record of what landed.
-# Each run publishes a self-contained HTML page to gh-pages under
-# dev/explain/<pr>/<stage>.html and keeps one bot comment on the PR pointing
-# at both pages. workflow_dispatch re-runs either stage for any PR.
+# Manual only (`workflow_dispatch`). Explains one pull request with the
+# vendored explain-diff skill (.agents/skills/explain-diff). `stage` selects
+# the page: `opened` (default mode `expert`) or `merged` (default mode
+# `summary`, and only after the PR has merged). Each run publishes a
+# self-contained HTML page to gh-pages under dev/explain/<pr>/<stage>.html
+# and keeps one bot comment on the PR pointing at the pages that exist.
 
 on:
-  pull_request:
-    types: [opened, closed]
   workflow_dispatch:
     inputs:
       pr-number:
@@ -39,11 +36,11 @@ on:
 # Restrictive default; the job sets the scopes it actually needs.
 permissions: {}
 
-# Serialise per PR so an `opened` run and a manual re-run cannot interleave
-# their gh-pages pushes or race over the sticky comment. Never cancel: a
-# half-published page is worse than a late one.
+# Serialise per PR so two manual runs cannot interleave their gh-pages
+# pushes or race over the sticky comment. Never cancel: a half-published
+# page is worse than a late one.
 concurrency:
-  group: pr-explain-${{ github.event.pull_request.number || inputs.pr-number }}
+  group: pr-explain-${{ inputs.pr-number }}
   cancel-in-progress: false
 
 env:
@@ -55,17 +52,6 @@ env:
 jobs:
   explain:
     name: explain pull request
-    # Same-repo PRs only: fork PRs cannot read ANTHROPIC_API_KEY and must not
-    # run on self-hosted runners. `closed` only counts when it was a merge.
-    if: >-
-      github.event_name == 'workflow_dispatch'
-      || (
-        github.event.pull_request.head.repo.full_name == github.repository
-        && (
-          github.event.action == 'opened'
-          || (github.event.action == 'closed' && github.event.pull_request.merged == true)
-        )
-      )
     runs-on: [self-hosted, misc-runner]
     timeout-minutes: 45
     permissions:
@@ -78,15 +64,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
           INPUT_PR_NUMBER: ${{ inputs.pr-number }}
           INPUT_STAGE: ${{ inputs.stage }}
           INPUT_MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
-          PR_NUMBER="${EVENT_PR_NUMBER:-$INPUT_PR_NUMBER}"
+          PR_NUMBER="${INPUT_PR_NUMBER}"
           if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
             echo "::error::No valid PR number (got '${PR_NUMBER}')"
             exit 1
@@ -108,14 +91,12 @@ jobs:
             exit 1
           fi
 
-          # Stage: from the event, or the dispatch input. A `merged` page needs
-          # the merge commit, so refuse to build one for an unmerged PR.
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            STAGE="$INPUT_STAGE"
-          elif [ "$EVENT_ACTION" = "closed" ]; then
-            STAGE=merged
-          else
-            STAGE=opened
+          # Stage comes from the dispatch input. A `merged` page needs the
+          # merge commit, so refuse to build one for an unmerged PR.
+          STAGE="$INPUT_STAGE"
+          if [ "$STAGE" != "opened" ] && [ "$STAGE" != "merged" ]; then
+            echo "::error::Unknown stage '${STAGE}' (expected opened or merged)"
+            exit 1
           fi
           if [ "$STAGE" = "merged" ] && { [ "$MERGED" != "true" ] || [ -z "$MERGE_SHA" ]; }; then
             echo "::error::PR #${PR_NUMBER} is not merged; cannot build the merged page"
