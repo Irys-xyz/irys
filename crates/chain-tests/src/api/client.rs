@@ -127,7 +127,7 @@ async fn api_client_all_endpoints_should_work() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     check_transaction_endpoints(&api_client, api_address, &ctx).await;
     check_get_block_endpoint(&api_client, api_address, &ctx).await;
@@ -149,7 +149,7 @@ async fn api_client_wait_for_promotion_errors_for_missing_tx() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // Create a tx but do NOT post it; waiting for promotion should error out
     let tx = ctx
@@ -181,7 +181,7 @@ async fn api_client_wait_for_promotion_happy_path() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // Create a full data tx, upload chunks, and post header
     let tx = ctx
@@ -240,7 +240,7 @@ async fn api_tx_status_lifecycle() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // Create and post a transaction
     let tx = ctx
@@ -346,7 +346,7 @@ async fn api_tx_status_finalized_survives_restart() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // Create and post a transaction
     let tx = ctx
@@ -457,7 +457,7 @@ async fn api_tx_status_reverts_to_pending_after_restart_before_migration() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // Create and post a transaction
     let tx = ctx
@@ -537,7 +537,7 @@ async fn api_tx_status_commitment_tx() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // Create and post a valid pledge commitment transaction.
     // NOTE: stake commitments can legitimately be skipped for inclusion when the signer is already staked,
@@ -625,7 +625,7 @@ async fn api_promotion_reverts_after_restart_before_migration() {
         IpAddr::from_str("127.0.0.1").unwrap(),
         ctx.node_ctx.config.node_config.http.bind_port,
     );
-    let api_client = IrysApiClient::new();
+    let api_client = IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // Create a Publish-eligible data tx (with fees), upload chunks, and post header
     let tx = ctx

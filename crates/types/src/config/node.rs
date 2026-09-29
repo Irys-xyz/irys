@@ -249,6 +249,12 @@ pub struct NodeConfig {
     #[serde(default)]
     pub p2p_pull: P2PPullConfig,
 
+    /// Maximum bytes of one peer HTTP response body, for the gossip client
+    /// and the API client. A body past this is dropped and not parsed.
+    /// `0` is rejected by [`crate::Config::validate`].
+    #[serde(default = "default_max_peer_response_bytes")]
+    pub max_peer_response_bytes: u64,
+
     /// Sync parameters - how many blocks to pull in parallel, timeouts, etc
     #[serde(default)]
     pub sync: SyncConfig,
@@ -892,6 +898,17 @@ fn default_execution_payload_wait_timeout_millis() -> u64 {
     60_000
 }
 
+/// Default ceiling for a single peer HTTP response body.
+///
+/// About twice a 30M-gas execution payload once JSON hex-encodes the
+/// calldata. A gas limit past roughly 60M of zero-byte calldata needs
+/// this constant raised.
+pub const DEFAULT_MAX_PEER_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
+
+fn default_max_peer_response_bytes() -> u64 {
+    DEFAULT_MAX_PEER_RESPONSE_BYTES
+}
+
 /// Default for `peer_filter_mode` when the field is not present in the provided TOML.
 /// This keeps legacy configurations working by defaulting to unrestricted mode.
 fn default_peer_filter_mode() -> PeerFilterMode {
@@ -1377,6 +1394,7 @@ impl NodeConfig {
             p2p_handshake: P2PHandshakeConfig::default(),
             p2p_gossip: P2PGossipConfig::default(),
             p2p_pull: P2PPullConfig::default(),
+            max_peer_response_bytes: DEFAULT_MAX_PEER_RESPONSE_BYTES,
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
             sync: SyncConfig {
@@ -1570,6 +1588,7 @@ impl NodeConfig {
             p2p_handshake: P2PHandshakeConfig::default(),
             p2p_gossip: P2PGossipConfig::default(),
             p2p_pull: P2PPullConfig::default(),
+            max_peer_response_bytes: DEFAULT_MAX_PEER_RESPONSE_BYTES,
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
