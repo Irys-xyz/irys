@@ -178,6 +178,16 @@ pub enum PreValidationError {
     },
     #[error("Missing PoA chunk to be pre validated")]
     PoAChunkMissing,
+    #[error(
+        "PoA chunk length {got} exceeds packing limit {limit} (configured chunk size {chunk_size})"
+    )]
+    PoAChunkTooLong {
+        chunk_size: u64,
+        limit: usize,
+        got: usize,
+    },
+    #[error("PoA chunk length {got} is shorter than the proof span {span}")]
+    PoAChunkTooShort { span: usize, got: usize },
     #[error("PoA chunk offset out of tx's data chunks bounds")]
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
@@ -628,6 +638,8 @@ impl PreValidationError {
             | Self::PoACapacityChunkMismatch { .. }
             | Self::PoAChunkHashMismatch { .. }
             | Self::PoAChunkMissing
+            | Self::PoAChunkTooLong { .. }
+            | Self::PoAChunkTooShort { .. }
             | Self::PoAChunkOffsetOutOfBlockBounds
             | Self::PoAChunkOffsetOutOfDataChunksBounds
             | Self::PoAChunkOffsetOutOfTxBounds
@@ -708,6 +720,8 @@ impl PreValidationError {
             Self::PoACapacityChunkMismatch { .. } => "poa_capacity_chunk_mismatch",
             Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
             Self::PoAChunkMissing => "poa_chunk_missing",
+            Self::PoAChunkTooLong { .. } => "poa_chunk_too_long",
+            Self::PoAChunkTooShort { .. } => "poa_chunk_too_short",
             Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
             Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
             Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
@@ -1659,6 +1673,7 @@ pub async fn prevalidate_block(
         Some(chunk) => chunk.as_ref(),
         None => return Err(PreValidationError::PoAChunkMissing),
     };
+    poa_chunk_within_configured_len(poa_chunk, config.consensus.chunk_size)?;
 
     let block_poa_hash: H256 = sha::sha256(poa_chunk).into();
     if block.chunk_hash != block_poa_hash {
@@ -2837,6 +2852,23 @@ mod prevalidation_error_classification_tests {
         assert!(!PreValidationError::BlockSignatureInvalid.is_node_fault());
         assert!(!PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_node_fault());
         assert!(!PreValidationError::PoALedgerInactive { ledger_id: 99 }.is_node_fault());
+    }
+
+    #[test]
+    fn poa_chunk_length_errors_are_consensus() {
+        let too_long = PreValidationError::PoAChunkTooLong {
+            chunk_size: 32,
+            limit: 32,
+            got: 33,
+        };
+        assert_eq!(too_long.classify(), ErrorClass::Consensus);
+        assert!(!too_long.is_node_fault());
+        assert_eq!(too_long.metric_reason(), "poa_chunk_too_long");
+
+        let too_short = PreValidationError::PoAChunkTooShort { span: 8, got: 7 };
+        assert_eq!(too_short.classify(), ErrorClass::Consensus);
+        assert!(!too_short.is_node_fault());
+        assert_eq!(too_short.metric_reason(), "poa_chunk_too_short");
     }
 
     /// `PoAOffCanonicalAncestor` is raised when the PoA-bounds walk falls off
@@ -4527,6 +4559,44 @@ fn get_data_poa_bounds_with_block_tree_fallback(
     }
 }
 
+fn reject_poa_chunk_longer_than(
+    chunk: &[u8],
+    chunk_size: u64,
+    limit: usize,
+) -> Result<(), PreValidationError> {
+    if chunk.len() > limit {
+        return Err(PreValidationError::PoAChunkTooLong {
+            chunk_size,
+            limit,
+            got: chunk.len(),
+        });
+    }
+    Ok(())
+}
+
+fn poa_chunk_within_configured_len(
+    chunk: &[u8],
+    chunk_size: u64,
+) -> Result<(), PreValidationError> {
+    let Ok(limit) = usize::try_from(chunk_size) else {
+        return Err(PreValidationError::PoAChunkTooLong {
+            chunk_size,
+            limit: 0,
+            got: chunk.len(),
+        });
+    };
+    reject_poa_chunk_longer_than(chunk, chunk_size, limit)
+}
+
+/// Same index as the previous `split_at` expression.
+/// `as u64` kept the low 64 bits of the proof span; the mask does that without a cast.
+fn poa_split_index(chunk_size: u64, max_byte_range: u128, min_byte_range: u128) -> usize {
+    let span = max_byte_range.saturating_sub(min_byte_range);
+    let span_low = u64::try_from(span & u128::from(u64::MAX)).unwrap_or(u64::MAX);
+    let trim = chunk_size.min(span_low);
+    usize::try_from(trim).unwrap_or(usize::MAX)
+}
+
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 #[tracing::instrument(level = "trace", skip_all, fields(
     block.miner_address = ?miner_address,
@@ -4547,10 +4617,12 @@ pub fn poa_is_valid(
     miner_address: &IrysAddress,
 ) -> Result<(), PreValidationError> {
     debug!("PoA validating");
-    let mut poa_chunk: Vec<u8> = match &poa.chunk {
-        Some(chunk) => chunk.clone().into(),
+    let poa_chunk_bytes: &[u8] = match &poa.chunk {
+        Some(chunk) => chunk.as_ref(),
         None => return Err(PreValidationError::PoAChunkMissing),
     };
+    poa_chunk_within_configured_len(poa_chunk_bytes, config.chunk_size)?;
+    let mut poa_chunk: Vec<u8> = poa_chunk_bytes.to_vec();
     // data chunk
     if let (Some(data_path), Some(tx_path), Some(ledger_id)) =
         (poa.data_path.clone(), poa.tx_path.clone(), poa.ledger_id)
@@ -4687,16 +4759,23 @@ pub fn poa_is_valid(
             config.chain_id,
         );
 
+        reject_poa_chunk_longer_than(&poa_chunk, config.chunk_size, entropy_chunk.len())?;
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
 
         // Because all chunks are packed as config.chunk_size, if the proof chunk is
         // smaller we need to trim off the excess padding introduced by packing ?
-        let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(
-            (config
-                .chunk_size
-                .min((data_path_result.max_byte_range - data_path_result.min_byte_range) as u64))
-                as usize,
+        let trim_index = poa_split_index(
+            config.chunk_size,
+            data_path_result.max_byte_range,
+            data_path_result.min_byte_range,
         );
+        if poa_chunk.len() < trim_index {
+            return Err(PreValidationError::PoAChunkTooShort {
+                span: trim_index,
+                got: poa_chunk.len(),
+            });
+        }
+        let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(trim_index);
 
         let poa_chunk_hash = sha::sha256(poa_chunk_pad_trimmed);
 
@@ -8033,7 +8112,7 @@ mod tests {
         for poa_tx_num in 0..3 {
             for poa_chunk_num in 0..3 {
                 let mut poa_chunk: Vec<u8> = data_chunks[poa_tx_num][poa_chunk_num].into();
-                poa_test(
+                let poa_valid = poa_test(
                     &mut context,
                     &txs,
                     &mut poa_chunk,
@@ -8042,6 +8121,7 @@ mod tests {
                     9,
                     chunk_size,
                 );
+                assert!(poa_valid.is_ok(), "PoA should be valid: {poa_valid:?}");
             }
         }
     }
@@ -8069,7 +8149,7 @@ mod tests {
             let mut poa_chunk: Vec<u8> = data[poa_chunk_num * (chunk_size)
                 ..std::cmp::min((poa_chunk_num + 1) * chunk_size, data.len())]
                 .to_vec();
-            poa_test(
+            let poa_valid = poa_test(
                 &mut context,
                 &txs,
                 &mut poa_chunk,
@@ -8078,7 +8158,61 @@ mod tests {
                 2,
                 chunk_size,
             );
+            assert!(poa_valid.is_ok(), "PoA should be valid: {poa_valid:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn poa_truncated_below_proof_span_is_too_short() {
+        let (_tmp, mut context) = init().await;
+        let signer = IrysSigner::random_signer(&context.consensus_config);
+        let data = vec![3_u8; 40];
+        let tx = signer
+            .create_transaction(data.clone(), H256::zero())
+            .expect("create transaction");
+        let tx = signer.sign_transaction(tx).expect("sign transaction");
+        let txs = vec![tx];
+        let chunk_size = usize::try_from(context.consensus_config.chunk_size).unwrap();
+        let poa_chunk_num = 1;
+        let mut poa_chunk = data[poa_chunk_num * chunk_size..].to_vec();
+        assert_eq!(
+            poa_chunk.len(),
+            8,
+            "40-byte tx tail against a 32-byte chunk"
+        );
+        poa_chunk.pop();
+
+        let result = poa_test(
+            &mut context,
+            &txs,
+            &mut poa_chunk,
+            0,
+            poa_chunk_num,
+            2,
+            chunk_size,
+        );
+
+        match result {
+            Err(PreValidationError::PoAChunkTooShort { span, got }) => {
+                assert_eq!(span, 8);
+                assert_eq!(got, 7);
+            }
+            other => panic!("expected PoAChunkTooShort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn poa_chunk_longer_than_entropy_is_too_long() {
+        let chunk = vec![0_u8; 33];
+        let err = super::reject_poa_chunk_longer_than(&chunk, 33, 32).unwrap_err();
+        assert!(matches!(
+            err,
+            PreValidationError::PoAChunkTooLong {
+                chunk_size: 33,
+                limit: 32,
+                got: 33,
+            }
+        ));
     }
 
     fn poa_test(
@@ -8093,7 +8227,7 @@ mod tests {
         poa_chunk_num: usize,
         total_chunks_in_tx: usize,
         chunk_size: usize,
-    ) {
+    ) -> Result<(), PreValidationError> {
         // Initialize genesis block at height 0
         let height = context.block_index.num_blocks();
 
@@ -8236,7 +8370,7 @@ mod tests {
         // unreachable here because `height` is in `block_index`; the dummy
         // guard exists only to satisfy the signature.
         let block_tree_guard = dummy_block_tree_guard(&context.consensus_config);
-        let poa_valid = poa_is_valid(
+        poa_is_valid(
             &poa,
             &block_index_guard,
             &block_tree_guard,
@@ -8246,10 +8380,7 @@ mod tests {
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
-        );
-
-        debug!("PoA validation result: {:?}", poa_valid);
-        assert!(poa_valid.is_ok(), "PoA should be valid");
+        )
     }
 
     #[tokio::test]
