@@ -697,9 +697,14 @@ where
 
         tracing::trace!("executing shadow transaction");
 
-        // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx
+        // Calculate and distribute priority fee to beneficiary BEFORE executing shadow tx.
         // note: gas_priority_fee is `max_priority_fee_per_gas`, remapped in `impl FromRecoveredTx<TxEip1559> for TxEnv` in alloy-revm
         // no idea why the name is different though.
+        //
+        // Fee source is the EIP-1559 *envelope* tip (raw wei, not × gas), not the borsh
+        // packet. CL pins this field to the generator fee (interim). HARD FORK follow-up:
+        // charge the fee from the packet so the validated object is SSOT —
+        // design/docs/shadow-tx-priority-fee-in-packet-hardfork.md
         let priority_fee = tx.gas_priority_fee.unwrap_or(0);
         let total_fee = U256::from(priority_fee);
 
@@ -886,6 +891,11 @@ where
     /// - Target account doesn't exist
     /// - Target has insufficient balance
     /// - Database operation failures
+    ///
+    /// ## Consensus note
+    /// The tip amount is not in the borsh packet today; CL must validate the envelope tip
+    /// (interim soft-fork). Future hardfork should take the fee from the packet —
+    /// `design/docs/shadow-tx-priority-fee-in-packet-hardfork.md`.
     pub fn distribute_priority_fee(
         &mut self,
         total_fee: U256,
