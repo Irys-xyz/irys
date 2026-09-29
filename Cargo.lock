@@ -5236,6 +5236,7 @@ dependencies = [
  "alloy-primitives",
  "arbitrary",
  "bytes",
+ "criterion",
  "eyre",
  "irys-config",
  "irys-testing-utils",
@@ -5285,10 +5286,12 @@ dependencies = [
  "assert_matches",
  "atomic-write-file",
  "base58",
+ "criterion",
  "derive_more",
  "eyre",
  "irys-config",
  "irys-database",
+ "irys-domain",
  "irys-packing",
  "irys-reth-node-bridge",
  "irys-storage",
@@ -5378,6 +5381,7 @@ dependencies = [
  "actix-web",
  "async-trait",
  "bytes",
+ "criterion",
  "dashmap",
  "eyre",
  "futures",
@@ -5419,6 +5423,7 @@ dependencies = [
 name = "irys-packing"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "eyre",
  "irys-c",
  "irys-types",
@@ -5494,6 +5499,7 @@ dependencies = [
  "arbitrary",
  "borsh",
  "bytes",
+ "criterion",
  "either",
  "eyre",
  "futures",
@@ -5578,6 +5584,7 @@ name = "irys-reward-curve"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "criterion",
  "csv",
  "eyre",
  "irys-types",
@@ -5670,6 +5677,7 @@ dependencies = [
  "bytemuck",
  "bytes",
  "chrono",
+ "criterion",
  "derive_more",
  "eyre",
  "fixed-hash",
