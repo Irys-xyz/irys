@@ -271,6 +271,8 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
         VE::CommitmentDedupLookupFailed(_) => "commitment_dedup_lookup_failed",
         VE::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
+        VE::CustodyProofUnavailable(_) => "custody_proof_unavailable",
+        VE::BlobCommitmentStoreFailed(_) => "blob_commitment_store_failed",
         // PreValidation has a sub-classifier — only its SoftInternal inner
         // variants (`ParentNotInCache`) reach here. We delegate to the
         // inner's `metric_reason()` so each one gets a distinct,
@@ -1406,6 +1408,7 @@ impl BlockTreeServiceInner {
             let msg = crate::custody_proof_service::CustodyProofMessage::NewBlock {
                 vdf_output: arc_block.vdf_limiter_info.output,
                 block_height: height,
+                block_hash,
             };
             if let Err(e) = self.service_senders.custody_proof.send(msg) {
                 tracing::warn!(
@@ -2161,6 +2164,14 @@ mod tests {
             block_hash: H256::zero(),
         },
         "parent_ema_snapshot_missing",
+    )]
+    #[case::custody_unavailable(
+        crate::block_validation::ValidationError::CustodyProofUnavailable("missing row".into()),
+        "custody_proof_unavailable",
+    )]
+    #[case::blob_store_failed(
+        crate::block_validation::ValidationError::BlobCommitmentStoreFailed("mdbx".into()),
+        "blob_commitment_store_failed",
     )]
     #[case::cancel_parent_missing(
         crate::block_validation::ValidationError::ValidationCancelled {

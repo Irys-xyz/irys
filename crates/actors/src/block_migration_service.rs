@@ -1147,6 +1147,11 @@ impl BlockMigrationService {
             self.persist_commitment_inclusions(tx, header)?;
 
             irys_database::insert_block_header(tx, &migrated_block)?;
+            irys_database::insert_block_custody_proofs(
+                tx,
+                &migrated_block.block_hash,
+                &transactions.custody_proofs,
+            )?;
 
             BlockIndex::push_block(tx, sealed_block, chunk_size)?;
 

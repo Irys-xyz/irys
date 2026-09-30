@@ -1009,21 +1009,54 @@ impl BlockValidationTask {
             capture_stage_result(&data_txs_captures, result)
         };
 
-        let transactions_for_custody = Arc::clone(self.sealed_block.transactions());
-        let custody_config = self.service_inner.config.clone(); // clone: Config is Arc-wrapped
+        let custody_header = Arc::clone(self.sealed_block.header());
+        // clone: the blocking task needs an owned proof list
+        let custody_proofs = self.sealed_block.transactions().custody_proofs.clone();
+        // clone: ConsensusConfig is moved into the blocking task
+        let custody_consensus = self.service_inner.config.consensus.clone();
+        let custody_index = self.service_inner.block_index_guard.clone();
+        let custody_tree = self.block_tree_guard.clone();
         let custody_db = self.service_inner.db.clone(); // clone: DatabaseProvider is Arc-wrapped
         let custody_captures = Arc::clone(&stage_captures);
         let custody_proofs_task = async move {
-            let result = crate::block_validation::validate_custody_proofs(
-                &transactions_for_custody.custody_proofs,
-                &custody_config.consensus,
-                &custody_db,
-            )
-            .map(|()| ValidationResult::Valid)
-            .unwrap_or_else(|err| {
-                tracing::error!(custom.error = ?err, "custody proofs validation failed");
-                ValidationError::CustodyProofInvalid(err.to_string()).into()
-            });
+            let started = Instant::now();
+            let joined = tokio::task::spawn_blocking(move || {
+                crate::block_validation::validate_custody_proofs(
+                    &custody_header,
+                    &custody_proofs,
+                    &custody_consensus,
+                    &custody_index,
+                    &custody_tree,
+                    &custody_db,
+                )
+            })
+            .await;
+            metrics::record_validation_stage_duration_ms(
+                "custody_proofs",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            let result: ValidationResult = match joined {
+                Ok(Ok(())) => ValidationResult::Valid,
+                Ok(Err(crate::block_validation::CustodyProofFailure::Invalid(reason))) => {
+                    tracing::error!(custom.error = %reason, "custody proofs validation failed");
+                    ValidationError::CustodyProofInvalid(reason).into()
+                }
+                Ok(Err(crate::block_validation::CustodyProofFailure::Unavailable(reason))) => {
+                    tracing::warn!(
+                        custom.error = %reason,
+                        "custody proofs could not be checked"
+                    );
+                    ValidationError::CustodyProofUnavailable(reason).into()
+                }
+                Err(error) => {
+                    tracing::warn!(custom.error = %error, "custody proof task failed");
+                    ValidationError::CustodyProofUnavailable(format!(
+                        "custody proof task failed: {error}"
+                    ))
+                    .into()
+                }
+            };
+            metrics::record_validation_result("custody_proofs", result.granular_metric_label());
             capture_stage_result(&custody_captures, result)
         };
 
@@ -1206,9 +1239,10 @@ impl BlockValidationTask {
                             &self.service_inner.db,
                         ) {
                             tracing::warn!(error = %e, "Failed to store blob ingress commitments");
+                            ValidationError::BlobCommitmentStoreFailed(e.to_string()).into()
+                        } else {
+                            ValidationResult::Valid
                         }
-
-                        ValidationResult::Valid
                     }
                     Err(err) => {
                         tracing::error!(custom.error = ?err, "Reth execution layer validation failed");

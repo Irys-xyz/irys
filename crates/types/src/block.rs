@@ -523,6 +523,12 @@ pub struct IrysBlockHeaderV1 {
 
     /// Treasury balance tracking
     pub treasury: U256,
+
+    /// Commitment to the block body's custody proofs.
+    /// `None` matches an empty proof list. `Some` matches [`crate::custody::custody_proofs_root`].
+    #[serde(default)]
+    #[rlp(default)]
+    pub custody_proofs_root: Option<H256>,
 }
 
 pub type IrysTokenPrice = Amount<(IrysPrice, Usd)>;
@@ -1572,6 +1578,22 @@ impl SealedBlock {
             result_system_txs.insert(ledger_type, ledger_txs);
         }
 
+        match block_header.custody_proofs_root {
+            None => eyre::ensure!(
+                custody_proofs.is_empty(),
+                "Header/body mismatch in block {:?}: custody proofs present without a header commitment",
+                block_header.block_hash
+            ),
+            Some(expected) => {
+                let actual = crate::custody::custody_proofs_root(&custody_proofs);
+                eyre::ensure!(
+                    actual == expected,
+                    "Header/body mismatch in block {:?}: custody proof commitment does not match the body",
+                    block_header.block_hash
+                );
+            }
+        }
+
         if !commitment_tx_map.is_empty() {
             let extra_ids: Vec<_> = commitment_tx_map.keys().collect();
             return Err(eyre::eyre!(
@@ -1896,6 +1918,46 @@ mod tests {
         // assert that changing the block hash changes the validation result to invalid
         header.block_hash = H256::random();
         assert!(!header.is_signature_valid());
+    }
+
+    fn signed_mock_header(custody_proofs_root: Option<H256>) -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::V1(mock_header());
+        header.custody_proofs_root = custody_proofs_root;
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        config
+            .irys_signer()
+            .sign_block_header(&mut header)
+            .expect("mock header signs");
+        header
+    }
+
+    #[test]
+    fn sealed_block_rejects_custody_root_body_mismatch() {
+        let header = signed_mock_header(Some(H256::repeat_byte(1)));
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            ..BlockBody::default()
+        };
+        assert!(SealedBlock::new(header, body).is_err());
+    }
+
+    #[test]
+    fn sealed_block_accepts_matching_custody_commitment() {
+        let proof = crate::custody::CustodyProof {
+            challenged_miner: crate::IrysAddress::from([0xAA_u8; 20]),
+            partition_hash: H256::repeat_byte(2),
+            challenge_seed: H256::repeat_byte(3),
+            openings: Vec::new(),
+        };
+        let root = crate::custody::custody_proofs_root(std::slice::from_ref(&proof));
+        let header = signed_mock_header(Some(root));
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            custody_proofs: vec![proof],
+            ..BlockBody::default()
+        };
+        let sealed = SealedBlock::new(header, body).expect("matching custody commitment seals");
+        assert_eq!(sealed.transactions().custody_proofs.len(), 1);
     }
 
     fn mock_header() -> IrysBlockHeaderV1 {

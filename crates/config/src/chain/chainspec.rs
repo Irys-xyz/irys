@@ -109,6 +109,7 @@ pub fn build_unsigned_irys_genesis_block(
         oracle_irys_price: config.genesis_price,
         ema_irys_price: config.genesis_price,
         treasury: U256::zero(),
+        custody_proofs_root: None,
     }))
 }
 

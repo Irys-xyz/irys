@@ -600,8 +600,12 @@ impl ConsensusConfig {
         let json_value = crate::canonical::to_canonical(self)
             .expect("ConsensusConfig should serialize to canonical JSON");
 
-        // Sort all keys recursively for deterministic ordering
-        let sorted_value = sort_json_keys(json_value);
+        // Sort all keys recursively for deterministic ordering.
+        // `enable_shadow_kzg_logging` is operational and must not move the handshake hash.
+        let mut sorted_value = sort_json_keys(json_value);
+        if let serde_json::Value::Object(map) = &mut sorted_value {
+            map.remove("enableShadowKzgLogging");
+        }
 
         // Serialize to compact JSON string (no extra whitespace)
         let json_string = serde_json::to_string(&sorted_value)
@@ -1291,9 +1295,10 @@ mod tests {
         assert_eq!(config.genesis.vdf_next_seed, None);
 
         // P2P handshake hash — any mainnet() field or canonical encoding change fails CI.
+        // Re-pinned when the KZG flags joined the hash. `enable_shadow_kzg_logging` is excluded.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("8nKbR4h8hfRPAv3Zh7Fp5TKjAF8MgmnNA6nM5nRdUeF2"), // spellchecker:disable-line
+            H256::from_base58("EsjPgeUhhkWSP1zULHhDHojqaBQREQbhUzjYqqpq3q9u"), // spellchecker:disable-line
             "mainnet consensus-config hash is consensus-frozen"
         );
     }
@@ -1311,8 +1316,8 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            // Re-pinned after commitment_anchor_expiry_depth 7200 → 8640 (7f100d7a9).
-            H256::from_base58("4tYzvwZudjEbdWmSNENciFzWeZdhYfst6dWvp23JuzoW"),
+            // Re-pinned when the KZG flags joined the hash. `enable_shadow_kzg_logging` is excluded.
+            H256::from_base58("9RFZikEhUnX6gqLi9NR3YYzPXqSRnQUFLPKxFu3U7ZcM"), // spellchecker:disable-line
             "testnet consensus-config hash is consensus-frozen"
         );
     }

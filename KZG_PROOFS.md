@@ -93,7 +93,7 @@ This is the core property upon which custody proofs depend.
 
 ### The BLS12-381 curve
 
-KZG employs the BLS12-381 elliptic curve. Its scalar field has a modulus beginning with `0x73eda753…`. When converting data bytes into field elements (the "numbers" through which the polynomial passes), each 32-byte element must be numerically less than the field modulus. Since the modulus begins with `0x73` (115), any element whose first byte is ≥ `0x74` (116) is guaranteed to exceed it. Elements beginning with `0x73` may or may not exceed it depending on subsequent bytes. For uniform-fill blobs in tests, the safe upper bound for the fill byte is 114 (`MAX_VALID_SEED` in `kzg.rs`). In practice, the `c-kzg` library handles this encoding internally for blob data.
+KZG employs the BLS12-381 elliptic curve. Its scalar field has a modulus beginning with `0x73eda753…`. When converting data bytes into field elements (the "numbers" through which the polynomial passes), each 32-byte element must be numerically less than the field modulus. Since the modulus begins with `0x73` (115), any element whose first byte is ≥ `0x74` (116) is guaranteed to exceed it. Elements beginning with `0x73` may or may not exceed it depending on subsequent bytes. For uniform-fill blobs in tests, the safe upper bound for the fill byte is 114 (`MAX_VALID_SEED` in `kzg.rs`). Native Irys chunks do not rely on `c-kzg` to make the bytes canonical: `encode_native_chunk_blobs` places 31 payload bytes in each field element and sets the leading byte to zero. An EIP-4844 blob is already a sequence of field elements and is committed as it arrives.
 
 ### Trusted setup
 
@@ -113,25 +113,26 @@ The precomputed ceremony data is loaded once and cached as a static reference (`
 | KZG opening proof | 48 bytes (`PROOF_SIZE`) |
 | Field element / scalar | 32 bytes (`SCALAR_SIZE`) |
 
-An Irys chunk is twice the size of a KZG blob. The solution is to **split each chunk into two blob-sized halves**.
+An Irys chunk is twice the raw size of a KZG blob, but it is not split into two blob-sized halves. Each field element carries 31 payload bytes and a leading zero, so a 256 KB chunk occupies three blobs (`NATIVE_CHUNK_BLOB_COUNT = 3`).
 
 ### How a chunk becomes a commitment
 
 ```
                     256 KB chunk (zero-padded if shorter)
-                    ┌────────────────────────────────────┐
-                    │  first 128 KB   │  second 128 KB   │
-                    └────────┬────────┴────────┬─────────┘
-                             │                 │
-                    blob_to_kzg_commitment     blob_to_kzg_commitment
-                             │                 │
-                             v                 v
-                            C1                C2
-                             │                 │
-                             └──────┬──────────┘
-                                    │
-                           r = SHA256(C1 || C2)
-                           C = C1 + r·C2
+                    ┌──────────────────────────────────────────┐
+                    │ 31 payload bytes │ 0x00 | those 31 bytes │
+                    └──────────────────────────┬───────────────┘
+                                               │
+                              pack into exactly 3 blobs (128 KB each)
+                                               │
+                         ┌─────────────────────┼─────────────────────┐
+                         v                     v                     v
+                        C1                    C2                    C3
+                         │                     │                     │
+                         └──────────┬──────────┴──────────┬──────────┘
+                                    │                     │
+                    pairwise fold: r = SHA256(C_acc || C_next)
+                                   C = C_acc + r·C_next
                                     │
                                     v
                         Single chunk commitment (48 bytes)
@@ -140,11 +141,11 @@ An Irys chunk is twice the size of a KZG blob. The solution is to **split each c
 **Step by step:**
 
 1. **Pad** — If the chunk is shorter than 256 KB, zero-pad it to exactly 256 KB.
-2. **Split** — Divide at the 128 KB boundary into two halves.
-3. **Commit each half** — Each half is treated as an EIP-4844 blob and committed separately using `blob_to_kzg_commitment` from the `c-kzg` library.
-4. **Aggregate** — Combine `C1` and `C2` into a single commitment using a random linear combination: compute `r = SHA256(C1 || C2)`, then `C = C1 + r·C2`.
+2. **Encode** — `encode_native_chunk_blobs` packs each 31 payload bytes into a 32-byte field element with a leading zero. The result is exactly three blobs.
+3. **Commit each blob** — Each blob is committed with `compute_blob_commitment` (`c-kzg`'s `blob_to_kzg_commitment`).
+4. **Aggregate** — `aggregate_all_commitments` folds the three commitments left to right. Each step computes `r = SHA256(C_acc || C_next)`, then `C = C_acc + r·C_next`.
 
-The aggregation derives `r` from the commitments themselves so that no party can craft two different pairs of halves that produce the same aggregated commitment (by the Schwartz–Zippel lemma, the collision probability is negligible over the BLS12-381 scalar field).
+The aggregation derives `r` from the commitments themselves so that no party can craft two different sequences that produce the same aggregated commitment (by the Schwartz–Zippel lemma, the collision probability is negligible over the BLS12-381 scalar field). Ordering matters, and a single commitment is returned unchanged.
 
 ### Multi-chunk transactions
 
@@ -160,9 +161,9 @@ This is left-associative — **ordering matters**.
 
 | Function | File | Purpose |
 |----------|------|---------|
-| `pad_and_split_chunk` (private) | `crates/types/src/kzg.rs` | Zero-pad and split into two halves |
+| `encode_native_chunk_blobs` | `crates/types/src/kzg.rs` | Zero-pad and pack 31-byte payload elements into three blobs |
 | `compute_blob_commitment` | `crates/types/src/kzg.rs` | KZG commitment for one 128 KB blob |
-| `compute_chunk_commitment` | `crates/types/src/kzg.rs` | Full pipeline: pad → split → commit → aggregate |
+| `compute_chunk_commitment` | `crates/types/src/kzg.rs` | Full pipeline: pad → encode → commit → aggregate |
 | `aggregate_commitments` | `crates/types/src/kzg.rs` | C = C1 + r·C2 for two commitments |
 | `aggregate_all_commitments` | `crates/types/src/kzg.rs` | Iterative pairwise aggregation of N commitments |
 | `g1_add_scaled` | `crates/types/src/kzg.rs` | Low-level BLS12-381 G1 point arithmetic via blst FFI |
@@ -196,10 +197,12 @@ pub struct IngressProofV2 {
     pub signature: IrysSignature,
     pub data_root: H256,                    // Merkle root of regular leaves (signer-independent)
     pub kzg_commitment: KzgCommitmentBytes, // aggregated KZG commitment over all chunks (48 bytes)
-    pub composite_commitment: H256,         // SHA256(DOMAIN || kzg || signer_address)
+    pub composite_commitment: H256,         // SHA256(DOMAIN || kzg || signer || data_root || y || proof)
     pub chain_id: u64,                      // replay protection
     pub anchor: H256,                       // block hash for expiry
     pub source_type: DataSourceType,        // NativeData(0) or EvmBlob(1)
+    pub possession_y: [u8; 32],             // evaluation of the signer-bound opening
+    pub possession_proof: KzgCommitmentBytes, // 48-byte opening; array serde stops at 32
 }
 ```
 
@@ -220,10 +223,10 @@ The KZG commitment `C` depends solely on the data, not on who computed it. Two m
 The **composite commitment** prevents this:
 
 ```
-composite = SHA256("IRYS_KZG_INGRESS_V1" || kzg_commitment || signer_address)
+composite = SHA256("IRYS_KZG_INGRESS_V2" || kzg_commitment || signer_address || data_root || y || proof)
 ```
 
-The domain separator (`IRYS_KZG_INGRESS_V1`) prevents cross-protocol confusion. The signer address binds the commitment to a specific miner. Together, they ensure that each miner's proof is unique even for identical data.
+The domain separator (`IRYS_KZG_INGRESS_V2`) prevents cross-protocol confusion. The signer address, data root, and possession opening (`y`, `proof`) are inside the hash the signature covers. A second miner who re-signs a published `(data_root, kzg_commitment)` without holding the chunk bytes cannot produce an opening that verifies at `derive_possession_point(signer, data_root)`. The possession point uses the separate domain `IRYS_KZG_POSSESSION_V1`.
 
 ### Version gating
 
@@ -245,13 +248,13 @@ check_version_accepted(accept_kzg, require_kzg):
 When a miner receives a new data transaction, it generates an ingress proof:
 
 ```
-crates/actors/src/mempool_service/ingress_proofs.rs  (orchestration)
+crates/actors/src/chunk_ingress_service/ingress_proofs.rs  (orchestration)
   │
-  └─> crates/actors/src/mempool_service/chunks.rs     (core logic)
+  └─> crates/actors/src/chunk_ingress_service/chunks.rs     (core logic)
         │
-        └─> crates/types/src/ingress.rs                (proof construction)
+        └─> crates/types/src/ingress.rs                       (proof construction)
               │
-              └─> crates/types/src/kzg.rs              (KZG primitives)
+              └─> crates/types/src/kzg.rs                     (KZG primitives)
 ```
 
 **Detailed flow (`generate_ingress_proof` in `chunks.rs`):**
@@ -259,10 +262,12 @@ crates/actors/src/mempool_service/ingress_proofs.rs  (orchestration)
 1. **Collect chunks** — Read all chunks for the transaction from the cache database (`CachedChunksIndex` table), verifying uniqueness and ordering.
 2. **Branch on configuration** — If `use_kzg_ingress_proofs` is true, generate V2; otherwise V1.
 3. **V2 path**:
+   - Refuse to sign unless the chunk bytes hash to the transaction `data_root`.
    - Compute per-chunk KZG commitments (each chunk → `compute_chunk_commitment`).
+   - Open the chunks at `derive_possession_point(signer, data_root)`.
    - Aggregate all chunk commitments → single `kzg_commitment`.
-   - Compute `composite_commitment` binding to the signer.
-   - Construct `IngressProofV2` and sign it.
+   - Compute `composite_commitment` over the commitment, signer, data root, and that opening.
+   - Construct `IngressProofV2` and sign it. Cached chunks must be exactly indices `0..n`.
 4. **Store** — Write the proof and per-chunk commitments to the database.
 
 ### Storage
@@ -325,20 +330,20 @@ This actor receives `ExtractBlobs` messages containing block hashes and blob tra
 ```
 EIP-4844 Blob (128 KB + KZG commitment from sidecar)
   │
-  ├─ Take the KZG commitment directly from the sidecar (no recomputation)
-  ├─ Zero-pad blob data from 128 KB → 256 KB (Irys chunk size)
-  ├─ Compute data_root from the padded data (regular leaves, not signer-dependent)
-  ├─ Compute composite_commitment binding KZG to the signer
+  ├─ Copy the blob into a BLOB_SIZE buffer, then zero-pad to one Irys chunk
+  ├─ Open those bytes at the signer-bound possession point
+  ├─ Reject the blob unless that opening matches the sidecar commitment
+  ├─ Build a one-chunk Merkle path (data_path) for the padded bytes
   ├─ Construct IngressProofV2 with source_type = EvmBlob
   │
-  └─> Create synthetic DataTransactionHeader
+  └─> Sign a Publish DataTransactionHeader (term fee and perm fee from the API EMA minimum)
       │
-      └─> Send IngestBlobDerivedTx to the mempool
+      └─> IngestBlobDerivedTx → mempool API ingress, then the chunk
 ```
 
-**Key observation:** Following extraction, blob-derived data is indistinguishable from native data within the mempool and storage systems. It possesses a regular transaction header, an ingress proof, and chunk data — the same structures used for native transactions.
+A sidecar whose commitment count does not match its blob count is skipped. One bad blob does not abort the rest of the block. The transaction is a signed Publish header, not an unsigned Submit header, and the chunk carries the Merkle path `validate_path` checks. The mempool admits it on the API path (`handle_data_tx_ingress_message_api`), which checks the signature, the anchor, and the same fees a user-submitted Publish transaction must pay.
 
-**Why not recompute the KZG commitment?** The blob sidecar already contains a KZG commitment computed using the same trusted setup (Ethereum's KZG ceremony). Recomputing it would be redundant and computationally expensive.
+**Why keep the sidecar commitment?** The proof recomputes the opening from the blob bytes and rejects the blob when that opening does not match the sidecar. It does not replace the published commitment with a second, unrelated commitment.
 
 ### Configuration
 
@@ -401,10 +406,9 @@ CustodyChallenge received (via NewBlock self-challenge or peer gossip)
       │    (proof_bytes, y_bytes) = compute_chunk_opening_proof(data, z, settings)
       │
       │   Internally, this:
-      │     1. Pads the chunk to 256 KB and splits into two 128 KB halves
-      │     2. Computes a blob proof for each half: (π1, y1) and (π2, y2)
-      │     3. Aggregates: π = π1 + r·π2, y = y1 + r·y2
-      │        where r = SHA256(C1 || C2)
+      │     1. Encodes the chunk as three canonical blobs (`encode_native_chunk_blobs`)
+      │     2. Computes a blob opening for each: (πi, yi)
+      │     3. Folds them with the same scalars as the commitment aggregation
       │
       └─ Construct CustodyOpening {
            chunk_offset,
@@ -419,7 +423,7 @@ CustodyChallenge received (via NewBlock self-challenge or peer gossip)
      └─ Gossip to network via GossipDataV2::CustodyProof
 ```
 
-The gossip sending and receiving paths are fully wired. On the receiving side, `handle_custody_proof_v2` in `server.rs` caches the proof for deduplication, then forwards it via `CustodyProofMessage::ReceivedProof` to the `CustodyProofService`. The service's `handle_received_proof` method verifies the proof against stored per-chunk commitments and, if valid, adds it to the pending proofs list. The block producer drains pending proofs via `TakePendingProofs` when assembling blocks.
+The gossip sending and receiving paths are fully wired. On the receiving side, `handle_custody_proof_v2` in `server.rs` forwards the proof via `CustodyProofMessage::ReceivedProof` and waits for a verdict. The cache key is `gossip_cache_id` (partition, seed, and miner — not the openings) and is recorded only when the verdict is `Valid`. `Invalid` and `Unavailable` are not cached, so a later honest proof, or a retry after the chunk row arrives, is still accepted. The service's `handle_received_proof` method checks the opening against the parent block's challenge seed, the epoch assignment, and `derive_challenge_point`. A valid proof is added to the pending list. The block producer takes that list with `TakePendingProofs` before it signs the header. It releases the included proofs with `ReleaseIncluded` only after the block is accepted. With `enable_custody_proofs` set, an empty pending list fails block production.
 
 ### Verification
 
@@ -429,6 +433,9 @@ The verification function `validate_custody_proofs` in `block_validation.rs` is 
 // crates/types/src/custody.rs
 pub fn verify_custody_proof(
     proof: &CustodyProof,
+    expected_challenge_seed: H256,
+    expected_miner: IrysAddress,
+    assigned_chunk: impl Fn(u32) -> eyre::Result<Option<AssignedChunk>>,
     get_commitment: impl Fn(H256, u32) -> eyre::Result<Option<KzgCommitmentBytes>>,
     kzg_settings: &KzgSettings,
     expected_challenge_count: u32,
@@ -436,37 +443,24 @@ pub fn verify_custody_proof(
 ) -> eyre::Result<CustodyVerificationResult>
 ```
 
+`validate_custody_proofs` derives `expected_challenge_seed` from the parent block and resolves `assigned_chunk` from the epoch assignment and the ledger chunk counts. The prover does not choose the evaluation point.
+
 Verification proceeds as follows:
 
-1. **Check opening count** — There must be exactly `expected_challenge_count` openings.
-2. **Recompute expected offsets** — Derived from the challenge seed (deterministic, publicly verifiable).
+1. **Check opening count, seed, and miner** — The seed must be the parent seed. The miner must be the assigned miner.
+2. **Recompute expected offsets** — Derived from that seed.
 3. **For each opening:**
-   - Verify that `chunk_offset` matches the expected offset.
-   - Look up the stored per-chunk KZG commitment via `get_commitment(data_root, tx_chunk_index)` — these were stored during ingress proof generation.
-   - Invoke `verify_chunk_opening_proof(commitment, z, y, π)` — the core KZG verification.
-4. **Return a result** — one of:
-
-| Result | Meaning |
-|--------|---------|
-| `Valid` | All openings verified successfully |
-| `InvalidOpeningCount` | Incorrect number of openings |
-| `InvalidOffset` | Opening at an unexpected chunk position |
-| `MissingCommitment` | No stored commitment for this chunk (data was never ingested) |
-| `InvalidProof` | KZG verification failed — the miner does not hold the correct data |
+   - Verify that `chunk_offset` matches the expected offset and the assigned chunk.
+   - Verify that `evaluation_point` equals `derive_challenge_point(seed, offset)`.
+   - Look up the stored per-chunk KZG commitment via `get_commitment(data_root, tx_chunk_index)`.
+   - Invoke `verify_chunk_opening_proof(commitment, z, y, π)`.
+4. **Classify the failure:**
+   - A checked opening that does not match is `CustodyProofInvalid` (consensus).
+   - A database error or a missing local row is `CustodyProofUnavailable` (soft internal). Gossip can retry. It is not an invalid block.
 
 ### Penalties
 
-If verification fails, a **CustodyPenalty** shadow transaction is generated. Shadow transactions are protocol-level actions encoded as EVM transactions:
-
-```
-CustodyPenaltyPacket {
-    amount: U256,              // tokens to deduct
-    target: Address,           // penalised miner
-    partition_hash: FixedBytes<32>,  // which partition failed (alloy_primitives, not irys H256)
-}
-```
-
-The penalty is Borsh-encoded, prefixed with the `IRYS_SHADOW_EXEC` marker (`b"irys-shadow-exec"`), and sent to `SHADOW_TX_DESTINATION_ADDR`. The Irys EVM extension detects this prefix in the transaction input and executes the encoded action (deducting funds from the miner's account).
+`CustodyPenaltyPacket` (discriminant `0x0D`) is defined and the executor can apply it, but block production does not emit the packet. No slash amount is specified, so a failed challenge is not converted into a debit. A failed opening still rejects the block when the proof was checked. A missing row does not.
 
 ### Code references
 
@@ -610,10 +604,11 @@ Data stored in partitions             v
                                       │
                                       v
                               validate_custody_proofs (in validate_block)
-                                ├─ Recompute offsets
+                                ├─ Parent seed, assignment, derived point
                                 ├─ Look up per-chunk commitments
                                 ├─ Verify each opening
-                                └─ Valid → OK  /  Invalid → CustodyPenalty
+                                ├─ Invalid opening → consensus rejection
+                                └─ Missing row or database error → soft internal (retry)
 ```
 
 ### EIP-4844 blob path
@@ -624,17 +619,14 @@ Ethereum blob transaction (128 KB blob + KZG commitment in sidecar)
   v
 BlobExtractionService::process_single_blob()
   │
-  ├─ Take KZG commitment from sidecar (no recomputation)
-  ├─ Zero-pad blob: 128 KB → 256 KB
-  ├─ Compute data_root from padded data
-  ├─ Compute composite_commitment
-  ├─ Create IngressProofV2 (source_type = EvmBlob)
+  ├─ Pad the blob the same way as generate_ingress_proof_v2_from_blob
+  ├─ Possession-open the bytes and require the sidecar commitment
+  ├─ One-chunk Merkle data_path
+  ├─ Sign a Publish header at the API's term and perm fees
   │
-  └─ Create synthetic DataTransactionHeader
+  └─ IngestBlobDerivedTx → handle_data_tx_ingress_message_api
       │
-      └─ IngestBlobDerivedTx → MempoolService
-          │
-          └─ (same flow as native data from this point)
+      └─ then the chunk, on the real Merkle path
 ```
 
 ---
@@ -644,13 +636,13 @@ BlobExtractionService::process_single_blob()
 | Term | Definition |
 |------|-----------|
 | **BLS12-381** | The elliptic curve employed for KZG commitments. Provides approximately 128-bit security. |
-| **Blob** | A 128 KB data payload (EIP-4844). Irys chunks are 256 KB, equivalent to two blobs. |
+| **Blob** | A 128 KB EIP-4844 payload. A native Irys chunk is encoded as three such blobs, because each field element carries 31 payload bytes. |
 | **Chunk** | A 256 KB unit of data in Irys storage. |
 | **Commitment (KZG)** | A 48-byte elliptic curve point that uniquely fingerprints a polynomial (and thus the data it represents). |
-| **Composite commitment** | SHA256(DOMAIN \|\| KZG commitment \|\| signer address). Binds a KZG commitment to a specific miner. |
+| **Composite commitment** | `SHA256(IRYS_KZG_INGRESS_V2 \|\| kzg \|\| signer \|\| data_root \|\| y \|\| proof)`. Binds the signature to the possession opening. |
 | **Custody challenge** | A request for a miner to prove continued storage of specific chunks in a partition. |
 | **Custody proof** | A miner's response: KZG opening proofs at the challenged positions. |
-| **Domain separator** | The bytes `IRYS_KZG_INGRESS_V1` prepended to hashes to prevent cross-protocol confusion. |
+| **Domain separator** | `IRYS_KZG_INGRESS_V2` for the composite, and `IRYS_KZG_POSSESSION_V1` for the possession point. |
 | **Evaluation point (z)** | A 32-byte scalar at which the polynomial is evaluated during a custody challenge. |
 | **Field element** | A 32-byte number in the BLS12-381 scalar field. Must be less than the field modulus (which begins with `0x73`); a first byte ≥ `0x74` is always invalid. |
 | **G1 point** | A point on the BLS12-381 G1 curve (48 bytes compressed). Commitments and proofs are G1 points. |
@@ -659,7 +651,7 @@ BlobExtractionService::process_single_blob()
 | **Opening proof (π)** | A 48-byte proof that a polynomial evaluates to a specific value at a specific point. |
 | **Partition** | A logical storage unit that a miner manages. Contains many chunks. |
 | **Per-chunk commitment** | The KZG commitment for a single chunk, stored in the database for custody verification. |
-| **Shadow transaction** | A protocol-level action (such as custody penalties) encoded as an EVM transaction. |
+| **Shadow transaction** | A protocol-level action encoded as an EVM transaction. `CustodyPenalty` is wired in the executor and is not produced, because no slash amount is specified. |
 | **Sidecar** | Metadata attached to an EIP-4844 blob transaction, including the KZG commitment. |
 | **Trusted setup** | A one-time ceremony that produces the cryptographic parameters (`KzgSettings`) required for KZG. |
 | **VDF** | Verifiable Delay Function. Provides unpredictable timing for custody challenges. |

@@ -24,8 +24,8 @@ use irys_types::TxChunkOffset;
 use irys_types::chunk::UnpackedChunk;
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    BoundedFee, Config, H256, IrysTransactionCommon, IrysTransactionId, NodeConfig, SealedBlock,
-    U256, app_state::DatabaseProvider,
+    Base64, BoundedFee, Config, H256, IrysTransactionCommon, IrysTransactionId, NodeConfig,
+    SealedBlock, U256, app_state::DatabaseProvider,
 };
 use irys_types::{
     CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
@@ -224,6 +224,7 @@ pub enum MempoolServiceMessage {
         tx_header: DataTransactionHeader,
         ingress_proof: IngressProof,
         chunk_data: Vec<u8>,
+        data_path: Base64,
         per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
     },
 }
@@ -360,12 +361,14 @@ impl Inner {
                 tx_header,
                 ingress_proof,
                 chunk_data,
+                data_path,
                 per_chunk_commitments,
             } => {
                 self.handle_ingest_blob_derived_tx(
                     tx_header,
                     ingress_proof,
                     chunk_data,
+                    data_path,
                     per_chunk_commitments,
                 )
                 .await;
@@ -379,6 +382,7 @@ impl Inner {
         tx_header: DataTransactionHeader,
         ingress_proof: IngressProof,
         chunk_data: Vec<u8>,
+        data_path: Base64,
         per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
     ) {
         if let Err(reason) = ingress_proof.check_version_accepted(
@@ -394,6 +398,15 @@ impl Inner {
         }
 
         let data_root = tx_header.data_root;
+        if ingress_proof.data_root() != data_root {
+            warn!(
+                tx.data_root = %data_root,
+                proof.data_root = %ingress_proof.data_root(),
+                "Dropping blob-derived tx: data root does not match the ingress proof"
+            );
+            return;
+        }
+        let data_size = tx_header.data_size;
         let chunk_len = match u64::try_from(chunk_data.len()) {
             Ok(len) => len,
             Err(_) => {
@@ -401,27 +414,36 @@ impl Inner {
                 return;
             }
         };
+        if chunk_len != data_size {
+            warn!(
+                data_root = %data_root,
+                data_size,
+                chunk_data_len = chunk_len,
+                "Dropping blob-derived tx: chunk length does not match the transaction"
+            );
+            return;
+        }
         debug!(
             data_root = %data_root,
-            data_size = tx_header.data_size,
+            data_size,
             chunk_data_len = chunk_len,
             "Ingesting blob-derived data transaction",
         );
 
+        if let Err(e) = self.handle_data_tx_ingress_message_api(tx_header).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to ingest blob-derived data tx");
+            return;
+        }
+
         let chunk = UnpackedChunk {
             data_root,
-            data_size: chunk_len,
-            data_path: Default::default(),
-            bytes: chunk_data.into(),
+            data_size,
+            data_path,
+            bytes: Base64(chunk_data),
             tx_offset: TxChunkOffset(0),
         };
         if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
             warn!(data_root = %data_root, error = ?e, "Failed to cache blob chunk data");
-            return;
-        }
-
-        if let Err(e) = self.handle_data_tx_ingress_message_gossip(tx_header).await {
-            warn!(data_root = %data_root, error = ?e, "Failed to ingest blob-derived data tx");
             return;
         }
 
