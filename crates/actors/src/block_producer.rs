@@ -1410,7 +1410,32 @@ pub trait BlockProdStrategy {
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
             treasury: final_treasury,
+            custody_proofs_root: None,
         });
+
+        let custody_proofs = if self.inner().config.consensus.enable_custody_proofs {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.inner()
+                .service_senders
+                .custody_proof
+                .send(
+                    crate::custody_proof_service::CustodyProofMessage::TakePendingProofs(reply_tx),
+                )
+                .map_err(|e| eyre!("failed to request pending custody proofs: {e}"))?;
+            let proofs = reply_rx
+                .await
+                .map_err(|_| eyre!("custody proof service dropped the pending-proof reply"))?;
+            if proofs.is_empty() {
+                return Err(eyre!("custody proofs are required and none are pending"));
+            }
+            proofs
+        } else {
+            Vec::new()
+        };
+        if !custody_proofs.is_empty() {
+            irys_block.custody_proofs_root =
+                Some(irys_types::custody::custody_proofs_root(&custody_proofs));
+        }
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
@@ -1420,22 +1445,6 @@ pub trait BlockProdStrategy {
         // Clear internal metadata (promoted_height, included_height) so block
         // contents match wire format — metadata is mempool-internal state and
         // must not leak into produced blocks.
-        let custody_proofs = if self.inner().config.consensus.enable_custody_proofs {
-            let (tx, rx) = oneshot::channel();
-            if let Err(e) = self
-                .inner()
-                .service_senders
-                .custody_proof
-                .send(crate::custody_proof_service::CustodyProofMessage::TakePendingProofs(tx))
-            {
-                warn!(error = %e, "Failed to request pending custody proofs");
-                Vec::new()
-            } else {
-                rx.await.unwrap_or_default()
-            }
-        } else {
-            Vec::new()
-        };
 
         let mut all_data_txs = Vec::new();
         all_data_txs.extend(mempool_bundle.submit_txs);
@@ -1527,6 +1536,22 @@ pub trait BlockProdStrategy {
                 ))
             }
         }?;
+
+        if self.inner().config.consensus.enable_custody_proofs {
+            // clone: ReleaseIncluded takes ownership and the sealed block keeps its copy
+            let included = block.transactions().custody_proofs.clone();
+            if let Err(error) =
+                self.inner().service_senders.custody_proof.send(
+                    crate::custody_proof_service::CustodyProofMessage::ReleaseIncluded(included),
+                )
+            {
+                warn!(
+                    block.hash = ?block.header().block_hash,
+                    error = %error,
+                    "failed to release included custody proofs"
+                );
+            }
+        }
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =

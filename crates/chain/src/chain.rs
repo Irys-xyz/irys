@@ -1977,27 +1977,34 @@ impl IrysNode {
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
-        if config.consensus.enable_blobs {
+        let blob_extraction_handle = if config.consensus.enable_blobs {
             let blob_store = reth_node_adapter.pool.blob_store().clone();
-            BlobExtractionService::spawn_service(
+            Some(BlobExtractionService::spawn_service(
                 blob_store,
                 service_senders.mempool.clone(), // clone: UnboundedSender is cheaply cloneable
                 config.clone(),                  // clone: Config is Arc-wrapped internally
+                block_tree_guard.clone(),
                 receivers.blob_extraction,
                 runtime_handle.clone(),
-            );
-        }
+            ))
+        } else {
+            None
+        };
 
-        if config.consensus.enable_custody_proofs {
-            CustodyProofService::spawn_service(
-                config.clone(),                           // clone: Config is Arc-wrapped internally
-                storage_modules_guard.clone(),            // clone: Arc-based read guard
+        let custody_proof_handle = if config.consensus.enable_custody_proofs {
+            Some(CustodyProofService::spawn_service(
+                config.clone(),                // clone: Config is Arc-wrapped internally
+                storage_modules_guard.clone(), // clone: Arc-based read guard
+                block_index_guard.clone(),
+                block_tree_guard.clone(),
                 service_senders.gossip_broadcast.clone(), // clone: UnboundedSender is cheaply cloneable
                 irys_db.clone(),                          // clone: DatabaseProvider is Arc-wrapped
                 receivers.custody_proof,
                 runtime_handle.clone(),
-            );
-        }
+            ))
+        } else {
+            None
+        };
 
         // Get the mempool state to create the pledge provider
         let (tx, rx) = oneshot::channel();
@@ -2333,6 +2340,12 @@ impl IrysNode {
             }
 
             // 7. State management
+            if let Some(blob_extraction_handle) = blob_extraction_handle {
+                services.push(blob_extraction_handle);
+            }
+            if let Some(custody_proof_handle) = custody_proof_handle {
+                services.push(custody_proof_handle);
+            }
             services.push(mempool_handle);
             services.push(chunk_ingress_handle);
 

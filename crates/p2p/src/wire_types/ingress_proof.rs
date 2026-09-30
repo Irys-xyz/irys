@@ -23,6 +23,10 @@ pub struct IngressProofV2Inner {
     pub chain_id: u64,
     pub anchor: H256,
     pub source_type: DataSourceType,
+    #[serde(default)]
+    pub possession_y: [u8; irys_types::kzg::SCALAR_SIZE],
+    #[serde(default)]
+    pub possession_proof: KzgCommitmentBytes,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +52,8 @@ super::impl_mirror_from!(irys_types::ingress::IngressProofV2 => IngressProofV2In
     chain_id,
     anchor,
     source_type,
+    possession_y,
+    possession_proof,
 });
 
 super::impl_mirror_enum_from!(

@@ -289,6 +289,7 @@ pub mod v2 {
             (GossipDataV2::BlockBody(a), GossipDataV2::BlockBody(b)) => crate::cmp_block_body(a, b),
             (GossipDataV2::ExecutionPayload(a), GossipDataV2::ExecutionPayload(b)) => a == b,
             (GossipDataV2::IngressProof(a), GossipDataV2::IngressProof(b)) => a == b,
+            (GossipDataV2::CustodyProof(a), GossipDataV2::CustodyProof(b)) => a == b,
             _ => false,
         }
     }

@@ -1066,10 +1066,6 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "Actix-web handler signature requires handlers to be async"
-    )]
     async fn handle_custody_proof_v2(
         server: Data<Self>,
         proof_json: web::Json<GossipRequestV2<CustodyProof>>,
@@ -1102,11 +1098,11 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        let cache_key = irys_types::GossipCacheKey::CustodyProof(v2_request.data.partition_hash);
+        let cache_id = v2_request.data.gossip_cache_id();
         let already_seen = server
             .data_handler
             .cache
-            .seen_custody_proof_from_any_peer(&v2_request.data.partition_hash);
+            .seen_custody_proof_from_any_peer(&cache_id);
 
         if matches!(already_seen, Ok(true)) {
             debug!(
@@ -1116,26 +1112,41 @@ where
             return HttpResponse::Ok().json(GossipResponse::Accepted(()));
         }
 
-        if let Err(e) = server
-            .data_handler
-            .cache
-            .record_seen(source_peer_id, cache_key)
-        {
-            warn!(error = ?e, "Failed to record custody proof in gossip cache");
-        }
-
         debug!(
             partition.hash = %v2_request.data.partition_hash,
             "Received custody proof via gossip, forwarding to custody service",
         );
 
-        use irys_actors::custody_proof_service::CustodyProofMessage;
-        if let Err(e) = server
-            .data_handler
-            .custody_proof_sender
-            .send(CustodyProofMessage::ReceivedProof(v2_request.data))
+        use irys_actors::custody_proof_service::{CustodyGossipVerdict, CustodyProofMessage};
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        if let Err(e) =
+            server
+                .data_handler
+                .custody_proof_sender
+                .send(CustodyProofMessage::ReceivedProof {
+                    proof: v2_request.data,
+                    outcome: outcome_tx,
+                })
         {
-            warn!(error = %e, "Failed to forward custody proof to service");
+            warn!(%e, "Failed to forward custody proof to service");
+            return HttpResponse::Ok().json(GossipResponse::Accepted(()));
+        }
+
+        match outcome_rx.await {
+            Ok(CustodyGossipVerdict::Valid) => {
+                let cache_key = irys_types::GossipCacheKey::CustodyProof(cache_id);
+                if let Err(e) = server
+                    .data_handler
+                    .cache
+                    .record_seen(source_peer_id, cache_key)
+                {
+                    warn!(error = ?e, "Failed to record custody proof in gossip cache");
+                }
+            }
+            Ok(CustodyGossipVerdict::Invalid | CustodyGossipVerdict::Unavailable) => {}
+            Err(error) => {
+                warn!(%error, "custody proof verdict was dropped");
+            }
         }
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))

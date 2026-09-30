@@ -1122,6 +1122,17 @@ pub enum ValidationError {
     /// proofs do not open the challenged chunks.
     #[error("Custody proof validation failed: {0}")]
     CustodyProofInvalid(String),
+
+    /// The node could not check the custody proof because a parent, epoch
+    /// snapshot, database row, or local read was missing. The block's
+    /// validity is unknown, so it parks for retry.
+    #[error("Custody proof could not be checked: {0}")]
+    CustodyProofUnavailable(String),
+
+    /// Execution accepted the block, then the local write of blob per-chunk
+    /// commitments failed. Gossip can deliver the block again.
+    #[error("Blob commitment store failed: {0}")]
+    BlobCommitmentStoreFailed(String),
 }
 
 impl ValidationError {
@@ -1182,7 +1193,9 @@ impl ValidationError {
             // Local VDF state hasn't caught up to the block's step position.
             // Not peer-attributable — the block may be valid once VDF catches
             // up. Block parks in cache for passive retry.
-            Self::RecallRangeStepsUnavailable(_) => ErrorClass::SoftInternal,
+            Self::RecallRangeStepsUnavailable(_)
+            | Self::CustodyProofUnavailable(_)
+            | Self::BlobCommitmentStoreFailed(_) => ErrorClass::SoftInternal,
 
             // Consensus rejections — peer's block is genuinely bad.
             Self::VdfValidationFailed(_)
@@ -1244,7 +1257,9 @@ impl ValidationError {
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. }
             | Self::CommitmentDedupLookupFailed(_)
-            | Self::RecallRangeStepsUnavailable(_) => "internal_error",
+            | Self::RecallRangeStepsUnavailable(_)
+            | Self::CustodyProofUnavailable(_)
+            | Self::BlobCommitmentStoreFailed(_) => "internal_error",
             // Per-variant snake_case tag — pre-validation may surface
             // node-fault, soft-internal, or peer-attributable rejections;
             // the generic `"invalid"` would undercount local-state corruption
@@ -1539,6 +1554,8 @@ impl ValidationError {
             Self::EpochMissingCommitment { .. } => "epoch_missing_commitment",
             Self::CommitmentWrongOrder { .. } => "commitment_wrong_order",
             Self::CustodyProofInvalid(_) => "custody_proof_invalid",
+            Self::CustodyProofUnavailable(_) => "custody_proof_unavailable",
+            Self::BlobCommitmentStoreFailed(_) => "blob_commitment_store_failed",
             Self::ExecutionLayerTransportFailed(_) => "execution_layer_transport_failed",
             Self::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
             Self::ShadowTxNodeFault(_) => "shadow_tx_node_fault",
@@ -7420,71 +7437,307 @@ fn get_submit_ledger_slot_addresses(
     num_addresses_per_slot
 }
 
-/// Verify custody proofs included in a block.
+/// A custody check either rejected a proof that was actually opened, or could
+/// not open it because local state was missing.
+#[derive(Debug, thiserror::Error)]
+pub enum CustodyProofFailure {
+    /// The openings do not match the canonical challenge.
+    #[error("{0}")]
+    Invalid(String),
+    /// A parent, epoch snapshot, database row, or local read was missing.
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+/// Verify every custody proof in a block against the parent that seeded it.
 ///
-/// Returns `Ok(())` if all proofs are valid or custody proofs are disabled.
+/// An empty list is invalid when custody proofs are enabled. The header
+/// commitment must match the body. Database and missing-row failures are
+/// [`CustodyProofFailure::Unavailable`]; a checked opening that fails is
+/// [`CustodyProofFailure::Invalid`].
 pub fn validate_custody_proofs(
+    header: &IrysBlockHeader,
     custody_proofs: &[irys_types::custody::CustodyProof],
-    consensus_config: &ConsensusConfig,
+    consensus: &ConsensusConfig,
+    block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
-) -> eyre::Result<()> {
-    if !consensus_config.enable_custody_proofs {
+) -> Result<(), CustodyProofFailure> {
+    if !consensus.enable_custody_proofs {
         return Ok(());
     }
-
-    let kzg_settings = irys_types::kzg::default_kzg_settings();
-    let tx = db.tx()?;
-    for proof in custody_proofs {
-        let result = irys_types::custody::verify_custody_proof(
-            proof,
-            |data_root, chunk_index| {
-                irys_database::get_per_chunk_kzg_commitment(&tx, data_root, chunk_index)
-            },
-            kzg_settings,
-            consensus_config.custody_challenge_count,
-            consensus_config.num_chunks_in_partition,
-        )?;
-
-        match result {
-            irys_types::custody::CustodyVerificationResult::Valid => {}
-            irys_types::custody::CustodyVerificationResult::InvalidOpeningCount {
-                expected,
-                got,
-            } => {
-                eyre::bail!(
-                    "custody proof for miner {:?} partition {:?}: expected {expected} openings, got {got}",
-                    proof.challenged_miner,
-                    proof.partition_hash,
-                );
-            }
-            irys_types::custody::CustodyVerificationResult::InvalidOffset {
-                chunk_offset,
-                expected,
-            } => {
-                eyre::bail!(
-                    "custody proof for miner {:?}: offset mismatch at chunk_offset={chunk_offset}, expected={expected}",
-                    proof.challenged_miner,
-                );
-            }
-            irys_types::custody::CustodyVerificationResult::MissingCommitment {
-                data_root,
-                chunk_index,
-            } => {
-                eyre::bail!(
-                    "custody proof for miner {:?}: missing commitment for data_root={data_root:?} chunk_index={chunk_index}",
-                    proof.challenged_miner,
-                );
-            }
-            irys_types::custody::CustodyVerificationResult::InvalidProof { chunk_offset } => {
-                eyre::bail!(
-                    "custody proof for miner {:?}: invalid KZG opening at chunk_offset={chunk_offset}",
-                    proof.challenged_miner,
-                );
-            }
+    if custody_proofs.is_empty() {
+        return Err(CustodyProofFailure::Invalid(
+            "custody proofs are required and the block has none".to_owned(),
+        ));
+    }
+    match header.custody_proofs_root {
+        Some(committed)
+            if committed == irys_types::custody::custody_proofs_root(custody_proofs) => {}
+        Some(_) => {
+            return Err(CustodyProofFailure::Invalid(
+                "custody proof commitment does not match the block header".to_owned(),
+            ));
+        }
+        None => {
+            return Err(CustodyProofFailure::Invalid(
+                "custody proofs are not committed in the block header".to_owned(),
+            ));
         }
     }
 
+    let (parent, epoch) = {
+        let tree = block_tree_guard.read();
+        // clone: the parent header is used after the block-tree lock is released
+        let parent = tree
+            .get_block(&header.previous_block_hash)
+            .cloned()
+            .ok_or_else(|| {
+                CustodyProofFailure::Unavailable(
+                    "parent block missing from the block tree".to_owned(),
+                )
+            })?;
+        let epoch = tree
+            .get_epoch_snapshot(&header.previous_block_hash)
+            .ok_or_else(|| {
+                CustodyProofFailure::Unavailable("parent epoch snapshot missing".to_owned())
+            })?;
+        (parent, epoch)
+    };
+
+    let read_tx = db
+        .tx()
+        .map_err(|err| CustodyProofFailure::Unavailable(format!("database read failed: {err}")))?;
+    let kzg_settings = irys_types::kzg::default_kzg_settings();
+    for proof in custody_proofs {
+        verify_one(
+            proof,
+            &parent,
+            &epoch,
+            consensus,
+            block_index_guard,
+            block_tree_guard,
+            db,
+            &read_tx,
+            kzg_settings,
+        )?;
+    }
     Ok(())
+}
+
+/// Check one gossiped custody proof. Opens its own database transaction.
+pub fn check_custody_proof(
+    proof: &irys_types::custody::CustodyProof,
+    parent: &IrysBlockHeader,
+    epoch: &EpochSnapshot,
+    consensus: &ConsensusConfig,
+    block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> Result<(), CustodyProofFailure> {
+    let read_tx = db
+        .tx()
+        .map_err(|err| CustodyProofFailure::Unavailable(format!("database read failed: {err}")))?;
+    let kzg_settings = irys_types::kzg::default_kzg_settings();
+    verify_one(
+        proof,
+        parent,
+        epoch,
+        consensus,
+        block_index_guard,
+        block_tree_guard,
+        db,
+        &read_tx,
+        kzg_settings,
+    )
+}
+
+fn verify_one<T: reth_db::transaction::DbTx>(
+    proof: &irys_types::custody::CustodyProof,
+    parent: &IrysBlockHeader,
+    epoch: &EpochSnapshot,
+    consensus: &ConsensusConfig,
+    block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    read_tx: &T,
+    kzg_settings: &irys_types::kzg::KzgSettings,
+) -> Result<(), CustodyProofFailure> {
+    let Some(assignment) = epoch.get_data_partition_assignment(proof.partition_hash) else {
+        return Err(CustodyProofFailure::Invalid(format!(
+            "partition {:?} is not assigned",
+            proof.partition_hash
+        )));
+    };
+    if assignment.ledger_id.is_none() || assignment.slot_index.is_none() {
+        return Err(CustodyProofFailure::Invalid(format!(
+            "partition {:?} is not assigned to a data ledger",
+            proof.partition_hash
+        )));
+    }
+
+    let expected_seed = irys_types::custody::derive_challenge_seed(
+        &parent.vdf_limiter_info.output.0,
+        &proof.partition_hash,
+    );
+    let result = irys_types::custody::verify_custody_proof(
+        proof,
+        expected_seed,
+        assignment.miner_address,
+        |offset| {
+            resolve_assigned_chunk(
+                read_tx,
+                block_index_guard,
+                block_tree_guard,
+                db,
+                parent,
+                &assignment,
+                offset,
+                consensus.chunk_size,
+                consensus.num_chunks_in_partition,
+            )
+        },
+        |data_root, chunk_index| {
+            irys_database::get_per_chunk_kzg_commitment(read_tx, data_root, chunk_index)
+        },
+        kzg_settings,
+        consensus.custody_challenge_count,
+        consensus.num_chunks_in_partition,
+    )
+    .map_err(|err| {
+        CustodyProofFailure::Unavailable(format!("custody proof lookup failed: {err}"))
+    })?;
+
+    match result {
+        irys_types::custody::CustodyVerificationResult::Valid => Ok(()),
+        irys_types::custody::CustodyVerificationResult::MissingCommitment {
+            data_root,
+            chunk_index,
+        } => Err(CustodyProofFailure::Unavailable(format!(
+            "missing commitment for data_root {data_root:?} chunk_index {chunk_index}"
+        ))),
+        other => Err(CustodyProofFailure::Invalid(format!(
+            "custody proof rejected: {other:?}"
+        ))),
+    }
+}
+
+/// The chunk the epoch assigns to `chunk_offset` in `assignment`.
+///
+/// `Ok(None)` means the offset is not data. `Err` is a local lookup failure.
+/// The block-tree lock is taken only after bounds resolution returns, so this
+/// does not hold it across [`get_data_poa_bounds_with_block_tree_fallback`].
+fn resolve_assigned_chunk<T: reth_db::transaction::DbTx>(
+    read_tx: &T,
+    block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    parent: &IrysBlockHeader,
+    assignment: &irys_types::partition::PartitionAssignment,
+    chunk_offset: u32,
+    chunk_size: u64,
+    num_chunks_in_partition: u64,
+) -> eyre::Result<Option<irys_types::custody::AssignedChunk>> {
+    let ledger_id = assignment
+        .ledger_id
+        .ok_or_else(|| eyre::eyre!("partition has no ledger"))?;
+    let slot_index = assignment
+        .slot_index
+        .ok_or_else(|| eyre::eyre!("partition has no slot"))?;
+    let slot_index =
+        u64::try_from(slot_index).map_err(|_| eyre::eyre!("partition slot index exceeds u64"))?;
+    let ledger_chunk_offset = slot_index
+        .checked_mul(num_chunks_in_partition)
+        .and_then(|base| base.checked_add(u64::from(chunk_offset)))
+        .ok_or_else(|| eyre::eyre!("ledger chunk offset overflow"))?;
+    let ledger = DataLedger::try_from(ledger_id)
+        .map_err(|_| eyre::eyre!("invalid ledger id {ledger_id}"))?;
+
+    let (bounds, owning_hash) = match get_data_poa_bounds_with_block_tree_fallback(
+        block_index_guard,
+        block_tree_guard,
+        db,
+        parent.block_hash,
+        parent.height,
+        ledger,
+        ledger_chunk_offset,
+    ) {
+        Ok(found) => found,
+        Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds)
+        | Err(PreValidationError::PoALedgerInactive { .. }) => return Ok(None),
+        Err(other) => {
+            return Err(eyre::eyre!("assigned chunk lookup failed: {other}"));
+        }
+    };
+    let chunk_within_block = ledger_chunk_offset
+        .checked_sub(bounds.start_chunk_offset)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "ledger offset {ledger_chunk_offset} is before block start {}",
+                bounds.start_chunk_offset
+            )
+        })?;
+
+    let sealed = block_tree_guard.read().get_sealed_block(&owning_hash);
+    if let Some(sealed) = sealed {
+        return assigned_chunk_in_headers(
+            sealed.transactions().get_ledger_txs(ledger),
+            chunk_within_block,
+            chunk_size,
+        );
+    }
+
+    let header = irys_database::block_header_by_hash(read_tx, &owning_hash, false)?
+        .ok_or_else(|| eyre::eyre!("missing owning block header {owning_hash:?}"))?;
+    let tx_ids = ledger_tx_ids_in(&header, ledger).ok_or_else(|| {
+        eyre::eyre!(
+            "owning block {owning_hash:?} is missing ledger {}",
+            u32::from(ledger)
+        )
+    })?;
+    let mut headers = Vec::with_capacity(tx_ids.len());
+    for txid in &tx_ids {
+        let tx_header = irys_database::tx_header_by_txid(read_tx, txid)?
+            .ok_or_else(|| eyre::eyre!("missing data tx header {txid:?}"))?;
+        headers.push(tx_header);
+    }
+    assigned_chunk_in_headers(&headers, chunk_within_block, chunk_size)
+}
+
+fn assigned_chunk_in_headers(
+    headers: &[DataTransactionHeader],
+    chunk_within_block: u64,
+    chunk_size: u64,
+) -> eyre::Result<Option<irys_types::custody::AssignedChunk>> {
+    let mut cursor = 0_u64;
+    for header in headers {
+        let count = tx_chunk_count(header.data_size, chunk_size)?;
+        let next = cursor
+            .checked_add(count)
+            .ok_or_else(|| eyre::eyre!("chunk cursor overflow"))?;
+        if chunk_within_block < next {
+            let index = u32::try_from(chunk_within_block - cursor)
+                .map_err(|_| eyre::eyre!("tx chunk index exceeds u32"))?;
+            return Ok(Some(irys_types::custody::AssignedChunk {
+                data_root: header.data_root,
+                tx_chunk_index: index,
+            }));
+        }
+        cursor = next;
+    }
+    Err(eyre::eyre!(
+        "ledger chunk {chunk_within_block} is inside the block bounds but not covered by its transactions"
+    ))
+}
+
+fn tx_chunk_count(data_size: u64, chunk_size: u64) -> eyre::Result<u64> {
+    if data_size == 0 {
+        return Err(eyre::eyre!("transaction data_size is zero"));
+    }
+    if chunk_size == 0 {
+        return Err(eyre::eyre!("chunk_size is zero"));
+    }
+    Ok(data_size.div_ceil(chunk_size))
 }
 
 /// Store per-chunk KZG commitments extracted from V2 EvmBlob ingress proofs.

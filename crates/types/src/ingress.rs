@@ -147,12 +147,23 @@ impl IngressProof {
         self.signature().recover_signer(prehash)
     }
 
-    /// Validates that the proof matches the provided data_root and recovers the signer address
+    /// Validates that the proof matches the provided data_root and recovers the signer address.
+    ///
+    /// A V2 proof must also open its KZG commitment at the signer-bound possession
+    /// point. Re-signing a published commitment does not produce that opening.
     pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<IrysAddress> {
         if self.data_root() != *data_root {
             return Err(eyre::eyre!("Ingress proof data_root mismatch"));
         }
-        self.recover_signer()
+        let signer = self.recover_signer()?;
+        if let Self::V2(v2) = self {
+            if !v2.possession_holds(&signer)? {
+                return Err(eyre::eyre!(
+                    "V2 ingress proof does not prove possession of the chunk bytes"
+                ));
+            }
+        }
+        Ok(signer)
     }
 
     pub fn id(&self) -> H256 {
@@ -249,6 +260,46 @@ pub struct IngressProofV2 {
     pub chain_id: ChainId,
     pub anchor: H256,
     pub source_type: DataSourceType,
+    /// Evaluation `y` of the possession opening. The point is derived from the signer.
+    #[serde(default)]
+    pub possession_y: [u8; crate::kzg::SCALAR_SIZE],
+    /// KZG opening at the signer-bound possession point.
+    ///
+    /// Wrapped because `[u8; 48]` does not implement `Default`, `Serialize`, or
+    /// `Deserialize` on this toolchain. The bytes are the proof, not a commitment.
+    #[serde(default)]
+    pub possession_proof: KzgCommitmentBytes,
+}
+
+const INGRESS_V2_CHAIN_ID_BYTES: usize = 8;
+
+impl IngressProofV2 {
+    /// True when `signer` produced this proof's opening at [`derive_possession_point`].
+    pub fn possession_holds(&self, signer: &crate::IrysAddress) -> eyre::Result<bool> {
+        use crate::kzg::{
+            compute_composite_commitment, default_kzg_settings, derive_possession_point,
+            verify_chunk_opening_proof,
+        };
+
+        let expected = compute_composite_commitment(
+            &self.kzg_commitment.0,
+            signer,
+            &self.data_root,
+            &self.possession_y,
+            &self.possession_proof.0,
+        );
+        if expected != self.composite_commitment {
+            return Ok(false);
+        }
+        let z = derive_possession_point(signer, &self.data_root);
+        verify_chunk_opening_proof(
+            &self.kzg_commitment,
+            &z,
+            &self.possession_y,
+            &self.possession_proof.0,
+            default_kzg_settings(),
+        )
+    }
 }
 
 impl Compact for IngressProofV2 {
@@ -258,9 +309,14 @@ impl Compact for IngressProofV2 {
         written += self.data_root.to_compact(buf);
         written += self.kzg_commitment.to_compact(buf);
         written += self.composite_commitment.to_compact(buf);
-        written += self.chain_id.to_compact(buf);
+        buf.put_slice(&self.chain_id.to_be_bytes());
+        written += INGRESS_V2_CHAIN_ID_BYTES;
         written += self.anchor.to_compact(buf);
         written += self.source_type.to_compact(buf);
+        buf.put_slice(&self.possession_y);
+        written += self.possession_y.len();
+        buf.put_slice(&self.possession_proof.0);
+        written += self.possession_proof.len();
         written
     }
 
@@ -269,18 +325,31 @@ impl Compact for IngressProofV2 {
         let (data_root, buf) = H256::from_compact(buf, buf.len());
         let (kzg_commitment, buf) = KzgCommitmentBytes::from_compact(buf, buf.len());
         let (composite_commitment, buf) = H256::from_compact(buf, buf.len());
-        let (chain_id, buf) = ChainId::from_compact(buf, buf.len());
+        let chain_id_bytes: [u8; INGRESS_V2_CHAIN_ID_BYTES] = buf[..INGRESS_V2_CHAIN_ID_BYTES]
+            .try_into()
+            .expect("IngressProofV2 chain id is 8 bytes");
+        let buf = &buf[INGRESS_V2_CHAIN_ID_BYTES..];
         let (anchor, buf) = H256::from_compact(buf, buf.len());
         let (source_type, buf) = DataSourceType::from_compact(buf, buf.len());
+        let y_len = crate::kzg::SCALAR_SIZE;
+        let proof_len = crate::kzg::PROOF_SIZE;
+        let mut possession_y = [0_u8; crate::kzg::SCALAR_SIZE];
+        possession_y.copy_from_slice(&buf[..y_len]);
+        let buf = &buf[y_len..];
+        let mut possession_proof = [0_u8; crate::kzg::PROOF_SIZE];
+        possession_proof.copy_from_slice(&buf[..proof_len]);
+        let buf = &buf[proof_len..];
         (
             Self {
                 signature,
                 data_root,
                 kzg_commitment,
                 composite_commitment,
-                chain_id,
+                chain_id: ChainId::from_be_bytes(chain_id_bytes),
                 anchor,
                 source_type,
+                possession_y,
+                possession_proof: KzgCommitmentBytes(possession_proof),
             },
             buf,
         )
@@ -297,6 +366,8 @@ impl Arbitrary<'_> for IngressProofV2 {
             chain_id: u.arbitrary()?,
             anchor: u.arbitrary()?,
             source_type: u.arbitrary()?,
+            possession_y: u.arbitrary()?,
+            possession_proof: u.arbitrary()?,
         })
     }
 }
@@ -315,7 +386,9 @@ impl alloy_rlp::Encodable for IngressProofV2 {
                 + self.composite_commitment.length()
                 + self.chain_id.length()
                 + self.anchor.length()
-                + u8::from(self.source_type).length(),
+                + u8::from(self.source_type).length()
+                + self.possession_y.length()
+                + self.possession_proof.length(),
         };
         header.encode(out);
         self.data_root.encode(out);
@@ -324,6 +397,8 @@ impl alloy_rlp::Encodable for IngressProofV2 {
         self.chain_id.encode(out);
         self.anchor.encode(out);
         u8::from(self.source_type).encode(out);
+        self.possession_y.encode(out);
+        self.possession_proof.encode(out);
     }
 }
 
@@ -339,6 +414,8 @@ impl alloy_rlp::Decodable for IngressProofV2 {
         let chain_id = alloy_rlp::Decodable::decode(buf)?;
         let anchor = alloy_rlp::Decodable::decode(buf)?;
         let source_type_u8: u8 = alloy_rlp::Decodable::decode(buf)?;
+        let possession_y = alloy_rlp::Decodable::decode(buf)?;
+        let possession_proof = alloy_rlp::Decodable::decode(buf)?;
         Ok(Self {
             signature: Default::default(),
             data_root,
@@ -348,6 +425,8 @@ impl alloy_rlp::Decodable for IngressProofV2 {
             anchor,
             source_type: DataSourceType::try_from(source_type_u8)
                 .map_err(|_| alloy_rlp::Error::Custom("unknown DataSourceType discriminant"))?,
+            possession_y,
+            possession_proof,
         })
     }
 }
@@ -361,6 +440,22 @@ impl Compress for IngressProofV1 {
 }
 #[cfg(feature = "db")]
 impl Decompress for IngressProofV1 {
+    fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
+        let (obj, _) = Compact::from_compact(value, value.len());
+        Ok(obj)
+    }
+}
+
+#[cfg(feature = "db")]
+impl Compress for IngressProof {
+    type Compressed = Vec<u8>;
+    fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+        let _ = Compact::to_compact(self, buf);
+    }
+}
+
+#[cfg(feature = "db")]
+impl Decompress for IngressProof {
     fn decompress(value: &[u8]) -> Result<Self, DatabaseError> {
         let (obj, _) = Compact::from_compact(value, value.len());
         Ok(obj)
@@ -426,7 +521,9 @@ pub fn generate_ingress_proof_from_leaves(
     generate_ingress_proof_from_root(signer, data_root, H256(root.id), chain_id, anchor)
 }
 
-/// Generates KZG commitment over chunks and binds it to signer via composite commitment.
+/// Generates a V2 ingress proof. The signer must hold `chunks`: the possession
+/// opening is computed from those bytes at a point bound to the signer and
+/// `data_root`. Refuses to sign when the chunks do not hash to `data_root`.
 pub fn generate_ingress_proof_v2(
     signer: &IrysSigner,
     data_root: DataRoot,
@@ -436,28 +533,35 @@ pub fn generate_ingress_proof_v2(
     kzg_settings: &c_kzg::KzgSettings,
 ) -> eyre::Result<(IngressProof, Vec<KzgCommitmentBytes>)> {
     use crate::kzg::{
-        KzgCommitmentBytes, aggregate_all_commitments, compute_chunk_commitment,
-        compute_composite_commitment,
+        KzgCommitmentBytes, compute_chunks_possession_opening, compute_composite_commitment,
+        derive_possession_point,
     };
 
-    let chunk_commitments: Vec<c_kzg::KzgCommitment> = chunks
-        .iter()
-        .map(|chunk| compute_chunk_commitment(chunk.as_ref(), kzg_settings))
-        .collect::<eyre::Result<Vec<_>>>()?;
+    let (_, regular_leaves) = generate_ingress_leaves(
+        chunks.iter().map(|chunk| Ok(chunk.as_ref())),
+        signer.address(),
+        true,
+    )?;
+    let computed_root = generate_data_root(
+        regular_leaves
+            .ok_or_eyre("generate_ingress_leaves with and_regular=true must return Some")?,
+    )?;
+    if H256(computed_root.id) != data_root {
+        return Err(eyre::eyre!(
+            "chunk bytes do not hash to the transaction data root"
+        ));
+    }
 
-    let per_chunk_bytes: Vec<KzgCommitmentBytes> = chunk_commitments
-        .iter()
-        .map(|c| {
-            Ok(KzgCommitmentBytes::from(crate::kzg::commitment_to_bytes(
-                c,
-            )?))
-        })
-        .collect::<eyre::Result<Vec<_>>>()?;
-
-    let aggregated = aggregate_all_commitments(&chunk_commitments)?;
-    let kzg_bytes = crate::kzg::commitment_to_bytes(&aggregated)?;
-
-    let composite = compute_composite_commitment(&kzg_bytes, &signer.address());
+    let z = derive_possession_point(&signer.address(), &data_root);
+    let (kzg_bytes, possession_proof, possession_y, per_chunk_bytes) =
+        compute_chunks_possession_opening(chunks, &z, kzg_settings)?;
+    let composite = compute_composite_commitment(
+        &kzg_bytes,
+        &signer.address(),
+        &data_root,
+        &possession_y,
+        &possession_proof,
+    );
 
     let mut proof = IngressProof::V2(IngressProofV2 {
         signature: Default::default(),
@@ -467,6 +571,8 @@ pub fn generate_ingress_proof_v2(
         chain_id,
         anchor,
         source_type: DataSourceType::NativeData,
+        possession_y,
+        possession_proof: KzgCommitmentBytes::from(possession_proof),
     });
 
     signer.sign_ingress_proof(&mut proof)?;
@@ -475,10 +581,10 @@ pub fn generate_ingress_proof_v2(
 
 /// Generate a V2 ingress proof for blob-derived data (EIP-4844).
 ///
-/// The KZG commitment is taken directly from the blob transaction sidecar
-/// rather than recomputed — the sidecar uses the same c-kzg trusted setup.
-/// The blob data (128KB) is zero-padded to a 256KB Irys chunk for data_root
-/// computation.
+/// The commitment is the sidecar commitment. The possession opening is computed
+/// from the raw blob bytes (zero-padded to one blob), not from the native
+/// three-blob encoding. The data root is the regular merkle root of the blob
+/// zero-padded to one Irys chunk.
 pub fn generate_ingress_proof_v2_from_blob(
     signer: &IrysSigner,
     blob_data: &[u8],
@@ -486,11 +592,21 @@ pub fn generate_ingress_proof_v2_from_blob(
     chain_id: u64,
     anchor: H256,
 ) -> eyre::Result<IngressProof> {
-    use crate::kzg::{KzgCommitmentBytes, compute_composite_commitment};
+    use crate::kzg::{
+        BLOB_SIZE, KzgCommitmentBytes, commitment_to_bytes, compute_blob_opening_proof,
+        compute_composite_commitment, default_kzg_settings, derive_possession_point,
+    };
 
-    let padded = crate::kzg::zero_pad_to_chunk_size(blob_data)?;
+    if blob_data.len() > BLOB_SIZE {
+        return Err(eyre::eyre!(
+            "blob data exceeds one EIP-4844 blob: {} > {BLOB_SIZE}",
+            blob_data.len()
+        ));
+    }
+    let mut blob = [0_u8; BLOB_SIZE];
+    blob[..blob_data.len()].copy_from_slice(blob_data);
 
-    // Use regular leaves (without signer) for data_root — consistent with native V2 path
+    let padded = crate::kzg::zero_pad_to_chunk_size(&blob)?;
     let (_, regular_leaves) = generate_ingress_leaves(
         std::iter::once(Ok(padded.as_slice())),
         signer.address(),
@@ -500,17 +616,36 @@ pub fn generate_ingress_proof_v2_from_blob(
         regular_leaves
             .ok_or_eyre("generate_ingress_leaves with and_regular=true must return Some")?,
     )?;
+    let data_root = H256(root.id);
 
-    let composite = compute_composite_commitment(kzg_commitment, &signer.address());
+    let settings = default_kzg_settings();
+    let z = derive_possession_point(&signer.address(), &data_root);
+    let (opened, possession_proof, possession_y) = compute_blob_opening_proof(&blob, &z, settings)?;
+    let opened_bytes = commitment_to_bytes(&opened)?;
+    if opened_bytes != *kzg_commitment {
+        return Err(eyre::eyre!(
+            "blob bytes do not open to the published KZG commitment"
+        ));
+    }
+
+    let composite = compute_composite_commitment(
+        kzg_commitment,
+        &signer.address(),
+        &data_root,
+        &possession_y,
+        &possession_proof,
+    );
 
     let mut proof = IngressProof::V2(IngressProofV2 {
         signature: Default::default(),
-        data_root: root.id.into(),
+        data_root,
         kzg_commitment: KzgCommitmentBytes::from(*kzg_commitment),
         composite_commitment: composite,
         chain_id,
         anchor,
         source_type: DataSourceType::EvmBlob,
+        possession_y,
+        possession_proof: KzgCommitmentBytes::from(possession_proof),
     });
 
     signer.sign_ingress_proof(&mut proof)?;
@@ -554,16 +689,34 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
         IngressProof::V2(v2) => {
             let prehash = proof.signature_hash();
             let recovered_address = proof.signature().recover_signer(prehash)?;
+            if !v2.possession_holds(&recovered_address)? {
+                return Ok(false);
+            }
 
             let settings = crate::kzg::default_kzg_settings();
             let chunks_vec: Vec<_> = chunks.into_iter().collect();
-            let chunk_commitments: Vec<c_kzg::KzgCommitment> = chunks_vec
-                .iter()
-                .map(|c| crate::kzg::compute_chunk_commitment(c.as_ref(), settings))
-                .collect::<eyre::Result<Vec<_>>>()?;
-
-            let aggregated = crate::kzg::aggregate_all_commitments(&chunk_commitments)?;
-            let kzg_bytes = crate::kzg::commitment_to_bytes(&aggregated)?;
+            let kzg_bytes = match v2.source_type {
+                DataSourceType::NativeData => {
+                    let chunk_commitments: Vec<c_kzg::KzgCommitment> = chunks_vec
+                        .iter()
+                        .map(|c| crate::kzg::compute_chunk_commitment(c.as_ref(), settings))
+                        .collect::<eyre::Result<Vec<_>>>()?;
+                    let aggregated = crate::kzg::aggregate_all_commitments(&chunk_commitments)?;
+                    crate::kzg::commitment_to_bytes(&aggregated)?
+                }
+                DataSourceType::EvmBlob => {
+                    let Some(chunk) = chunks_vec.first() else {
+                        return Ok(false);
+                    };
+                    if chunks_vec.len() != 1 || chunk.as_ref().len() < crate::kzg::BLOB_SIZE {
+                        return Ok(false);
+                    }
+                    let mut blob = [0_u8; crate::kzg::BLOB_SIZE];
+                    blob.copy_from_slice(&chunk.as_ref()[..crate::kzg::BLOB_SIZE]);
+                    let commitment = crate::kzg::compute_blob_commitment(&blob, settings)?;
+                    crate::kzg::commitment_to_bytes(&commitment)?
+                }
+            };
 
             if kzg_bytes != v2.kzg_commitment.0 {
                 return Ok(false);
@@ -578,13 +731,7 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
                 regular_leaves
                     .ok_or_eyre("generate_ingress_leaves with and_regular=true must return Some")?,
             )?;
-            if H256(computed_root.id) != v2.data_root {
-                return Ok(false);
-            }
-
-            let expected_composite =
-                crate::kzg::compute_composite_commitment(&kzg_bytes, &recovered_address);
-            Ok(expected_composite == v2.composite_commitment)
+            Ok(H256(computed_root.id) == v2.data_root)
         }
     }
 }
@@ -922,6 +1069,61 @@ mod tests {
     }
 
     #[test]
+    fn v2_resign_of_public_commitment_is_rejected() -> eyre::Result<()> {
+        let s = V2TestSetup::new(test_chunk_size())?;
+        let proof_a = s.generate_proof()?;
+        let IngressProof::V2(published) = &proof_a else {
+            panic!("expected V2");
+        };
+        let signer_b = IrysSigner::random_signer(&ConsensusConfig::testing());
+        let composite = crate::kzg::compute_composite_commitment(
+            &published.kzg_commitment.0,
+            &signer_b.address(),
+            &published.data_root,
+            &published.possession_y,
+            &published.possession_proof.0,
+        );
+        let mut resigned = IngressProof::V2(super::IngressProofV2 {
+            signature: Default::default(),
+            data_root: published.data_root,
+            kzg_commitment: published.kzg_commitment,
+            composite_commitment: composite,
+            chain_id: published.chain_id,
+            anchor: published.anchor,
+            source_type: published.source_type,
+            possession_y: published.possession_y,
+            possession_proof: published.possession_proof,
+        });
+        signer_b.sign_ingress_proof(&mut resigned)?;
+        assert!(resigned.pre_validate(&published.data_root).is_err());
+        assert!(!verify_ingress_proof(
+            &resigned,
+            s.chunks.iter(),
+            s.chain_id
+        )?);
+        Ok(())
+    }
+
+    #[cfg(feature = "db")]
+    #[test]
+    fn v2_compact_chain_id_decompress_roundtrip() -> eyre::Result<()> {
+        use reth_db_api::table::{Compress, Decompress as _};
+
+        let proof = IngressProof::V2(super::IngressProofV2 {
+            chain_id: 3282,
+            anchor: H256::from([7_u8; 32]),
+            data_root: H256::from([3_u8; 32]),
+            ..Default::default()
+        });
+        let mut buf = Vec::new();
+        Compress::compress_to_buf(&proof, &mut buf);
+        let decoded = IngressProof::decompress(&buf)?;
+        assert_eq!(decoded.chain_id(), 3282);
+        assert_eq!(decoded, proof);
+        Ok(())
+    }
+
+    #[test]
     fn v2_rlp_roundtrip() -> eyre::Result<()> {
         use alloy_rlp::Decodable as _;
         use bytes::BytesMut;
@@ -942,6 +1144,8 @@ mod tests {
                 assert_eq!(orig.chain_id, dec.chain_id);
                 assert_eq!(orig.anchor, dec.anchor);
                 assert_eq!(orig.source_type, dec.source_type);
+                assert_eq!(orig.possession_y, dec.possession_y);
+                assert_eq!(orig.possession_proof, dec.possession_proof);
             }
             _ => panic!("expected V2 proofs"),
         }
@@ -969,13 +1173,11 @@ mod tests {
         let chain_id = 1_u64;
         let anchor = H256::random();
 
-        // Simulate a 128KB EIP-4844 blob with KZG-safe data
-        let blob_size = 131_072;
-        let blob_data = kzg_safe_data(blob_size, 42);
-
-        // Compute a real KZG commitment from the blob data (zero-padded to 256KB)
+        let blob_data = kzg_safe_data(crate::kzg::BLOB_SIZE, 42);
+        let mut blob = [0_u8; crate::kzg::BLOB_SIZE];
+        blob.copy_from_slice(&blob_data);
         let kzg_settings = crate::kzg::default_kzg_settings();
-        let kzg_commitment = crate::kzg::compute_chunk_commitment(&blob_data, kzg_settings)?;
+        let kzg_commitment = crate::kzg::compute_blob_commitment(&blob, kzg_settings)?;
         let commitment_bytes: [u8; 48] = kzg_commitment.as_ref().try_into().unwrap();
 
         let proof = generate_ingress_proof_v2_from_blob(
@@ -1008,9 +1210,11 @@ mod tests {
         let signer = IrysSigner::random_signer(&config);
         let chain_id = 1_u64;
 
-        let blob_data = kzg_safe_data(131_072, 42);
+        let blob_data = kzg_safe_data(crate::kzg::BLOB_SIZE, 42);
+        let mut blob = [0_u8; crate::kzg::BLOB_SIZE];
+        blob.copy_from_slice(&blob_data);
         let kzg_settings = crate::kzg::default_kzg_settings();
-        let kzg_commitment = crate::kzg::compute_chunk_commitment(&blob_data, kzg_settings)?;
+        let kzg_commitment = crate::kzg::compute_blob_commitment(&blob, kzg_settings)?;
         let commitment_bytes: [u8; 48] = kzg_commitment.as_ref().try_into().unwrap();
 
         let proof = generate_ingress_proof_v2_from_blob(
@@ -1021,8 +1225,7 @@ mod tests {
             H256::random(),
         )?;
 
-        // Verify with different data (wrong fill value) — should fail
-        let bad_blob = kzg_safe_data(131_072, 7);
+        let bad_blob = kzg_safe_data(crate::kzg::BLOB_SIZE, 7);
         let bad_padded = crate::kzg::zero_pad_to_chunk_size(&bad_blob).unwrap();
 
         assert!(!verify_ingress_proof(
@@ -1039,9 +1242,11 @@ mod tests {
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
 
-        let blob_data = kzg_safe_data(131_072, 42);
+        let blob_data = kzg_safe_data(crate::kzg::BLOB_SIZE, 42);
+        let mut blob = [0_u8; crate::kzg::BLOB_SIZE];
+        blob.copy_from_slice(&blob_data);
         let kzg_settings = crate::kzg::default_kzg_settings();
-        let kzg_commitment = crate::kzg::compute_chunk_commitment(&blob_data, kzg_settings)?;
+        let kzg_commitment = crate::kzg::compute_blob_commitment(&blob, kzg_settings)?;
         let commitment_bytes: [u8; 48] = kzg_commitment.as_ref().try_into().unwrap();
 
         let proof = generate_ingress_proof_v2_from_blob(

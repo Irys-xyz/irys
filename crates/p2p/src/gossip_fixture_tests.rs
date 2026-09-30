@@ -181,6 +181,7 @@ fn fixture_block_header_none() -> wire::IrysBlockHeader {
         oracle_irys_price: irys_types::storage_pricing::Amount::new(U256::from(100_u64)),
         ema_irys_price: irys_types::storage_pricing::Amount::new(U256::from(95_u64)),
         treasury: U256::from(999_999_u64),
+        custody_proofs_root: None,
     });
     header.into()
 }

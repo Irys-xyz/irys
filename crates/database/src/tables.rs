@@ -250,6 +250,13 @@ table PerChunkKzgCommitments {
     type SubKey = u32;
 }
 
+/// RLP bytes of the block's custody proofs, keyed by block hash.
+/// An absent row means the block committed no proofs.
+table IrysBlockCustodyProofs {
+    type Key = H256;
+    type Value = Vec<u8>;
+}
+
 /// Indexes ingress proofs by DataRoot and Address
 table IngressProofs {
     type Key = DataRoot;

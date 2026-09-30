@@ -987,7 +987,9 @@ pub fn generate_ingress_proof(
     use_kzg_ingress_proofs: bool,
 ) -> eyre::Result<IngressProof> {
     let (proof, per_chunk_commitments) = if use_kzg_ingress_proofs {
-        let chunks = load_cached_chunk_bytes(&db, data_root)?;
+        let expected_chunks = u32::try_from(leaves.len())
+            .map_err(|_| eyre::eyre!("ingress leaf count exceeds u32"))?;
+        let chunks = load_cached_chunk_bytes(&db, data_root, expected_chunks)?;
         let (proof, per_chunk) = irys_types::ingress::generate_ingress_proof_v2(
             &signer,
             data_root,
@@ -1066,18 +1068,34 @@ fn store_proof_and_commitments(
 fn load_cached_chunk_bytes(
     db: &DatabaseProvider,
     data_root: DataRoot,
+    expected_chunks: u32,
 ) -> eyre::Result<Vec<Vec<u8>>> {
     use eyre::eyre;
     use irys_database::tables::{CachedChunks, CachedChunksIndex};
     use reth_db::cursor::DbDupCursorRO as _;
     use reth_db::transaction::DbTx as _;
 
+    let count = usize::try_from(expected_chunks)
+        .map_err(|_| eyre!("expected chunk count exceeds usize"))?;
     db.view_eyre(|tx| {
+        let mut slots = Vec::with_capacity(count);
+        slots.resize_with(count, || None);
         let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
         let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
-        let mut chunks = Vec::new();
         for entry in dup_walker {
             let (_root_hash, index_entry) = entry?;
+            let index = usize::try_from(index_entry.index.0)
+                .map_err(|_| eyre!("cached chunk index exceeds usize"))?;
+            if index >= count {
+                return Err(eyre!(
+                    "cached chunk index {index} is outside 0..{expected_chunks} for {data_root}"
+                ));
+            }
+            if slots[index].is_some() {
+                return Err(eyre!(
+                    "duplicate cached chunk index {index} for {data_root}"
+                ));
+            }
             let chunk_path_hash = index_entry.meta.chunk_path_hash;
             let chunk = tx.get::<CachedChunks>(chunk_path_hash)?.ok_or_else(|| {
                 eyre!("missing cached chunk {chunk_path_hash} for data root {data_root}")
@@ -1085,7 +1103,14 @@ fn load_cached_chunk_bytes(
             let chunk_bin = chunk.chunk.ok_or_else(|| {
                 eyre!("missing chunk body {chunk_path_hash} for data root {data_root}")
             })?;
-            chunks.push(chunk_bin.0);
+            slots[index] = Some(chunk_bin.0);
+        }
+        let mut chunks = Vec::with_capacity(count);
+        for (index, slot) in slots.into_iter().enumerate() {
+            let Some(bytes) = slot else {
+                return Err(eyre!("missing cached chunk index {index} for {data_root}"));
+            };
+            chunks.push(bytes);
         }
         Ok(chunks)
     })

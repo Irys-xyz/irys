@@ -70,11 +70,8 @@ impl GossipCache {
         Ok(self.ingress_proofs.contains_key(ingress_proof_hash))
     }
 
-    pub(crate) fn seen_custody_proof_from_any_peer(
-        &self,
-        partition_hash: &H256,
-    ) -> GossipResult<bool> {
-        Ok(self.custody_proofs.contains_key(partition_hash))
+    pub(crate) fn seen_custody_proof_from_any_peer(&self, cache_id: &H256) -> GossipResult<bool> {
+        Ok(self.custody_proofs.contains_key(cache_id))
     }
 
     /// Record that a peer has seen some data

@@ -10,9 +10,9 @@ use crate::db_cache::{
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, CachedIngressLeaves,
     CompactCachedIngressProof, CompactLedgerIndexItem, CompactPerChunkCommitment, IngressProofs,
-    IrysBlockHeaders, IrysBlockIndexItems, IrysBlockStreamEvents, IrysCommitments,
-    IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
-    PerChunkKzgCommitments,
+    IrysBlockCustodyProofs, IrysBlockHeaders, IrysBlockIndexItems, IrysBlockStreamEvents,
+    IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes,
+    PeerListItems, PerChunkKzgCommitments,
 };
 
 use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
@@ -499,6 +499,35 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
     block_without_chunk.poa.chunk = None;
     tx.put::<IrysBlockHeaders>(block.block_hash, block_without_chunk.into())?;
     Ok(())
+}
+
+/// Persists the block body's custody proofs. An empty list writes nothing:
+/// readers treat a missing row as an empty list, which matches a header
+/// whose `custody_proofs_root` is `None`.
+pub fn insert_block_custody_proofs<T: DbTxMut>(
+    tx: &T,
+    block_hash: &BlockHash,
+    proofs: &[irys_types::custody::CustodyProof],
+) -> eyre::Result<()> {
+    if proofs.is_empty() {
+        return Ok(());
+    }
+    tx.put::<IrysBlockCustodyProofs>(
+        *block_hash,
+        irys_types::custody::encode_custody_proofs(proofs),
+    )?;
+    Ok(())
+}
+
+/// Loads custody proofs for a block. A missing row is an empty list.
+pub fn block_custody_proofs_by_hash<T: DbTx>(
+    tx: &T,
+    block_hash: &BlockHash,
+) -> eyre::Result<Vec<irys_types::custody::CustodyProof>> {
+    match tx.get::<IrysBlockCustodyProofs>(*block_hash)? {
+        Some(bytes) => irys_types::custody::decode_custody_proofs(&bytes),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
@@ -2017,14 +2046,19 @@ pub fn store_per_chunk_kzg_commitments<T: DbTxMut>(
     data_root: DataRoot,
     commitments: &[(u32, KzgCommitmentBytes)],
 ) -> eyre::Result<()> {
+    let mut cursor = tx.cursor_dup_write::<PerChunkKzgCommitments>()?;
     for &(chunk_index, commitment) in commitments {
-        tx.put::<PerChunkKzgCommitments>(
-            data_root,
-            CompactPerChunkCommitment(PerChunkCommitment {
-                chunk_index,
-                commitment,
-            }),
-        )?;
+        if cursor
+            .seek_by_key_subkey(data_root, chunk_index)?
+            .is_some_and(|existing| existing.chunk_index == chunk_index)
+        {
+            cursor.delete_current()?;
+        }
+        let value = CompactPerChunkCommitment(PerChunkCommitment {
+            chunk_index,
+            commitment,
+        });
+        cursor.upsert(data_root, &value)?;
     }
     Ok(())
 }
@@ -3329,5 +3363,140 @@ mod tests {
                 "expiry intentionally left untouched"
             );
         }
+    }
+
+    #[test]
+    fn per_chunk_kzg_commitments_roundtrip_replaces_same_index() -> eyre::Result<()> {
+        use irys_types::kzg::KzgCommitmentBytes;
+
+        use super::{get_per_chunk_kzg_commitment, store_per_chunk_kzg_commitments};
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let data_root = H256::random();
+        let first = KzgCommitmentBytes([1_u8; 48]);
+        let second = KzgCommitmentBytes([2_u8; 48]);
+        let replacement = KzgCommitmentBytes([9_u8; 48]);
+
+        db.update_eyre(|tx| {
+            store_per_chunk_kzg_commitments(tx, data_root, &[(0, first), (1, second), (2, first)])
+        })?;
+        db.update_eyre(|tx| store_per_chunk_kzg_commitments(tx, data_root, &[(1, replacement)]))?;
+
+        let loaded = db.view_eyre(|tx| {
+            Ok::<_, eyre::Report>((
+                get_per_chunk_kzg_commitment(tx, data_root, 0)?,
+                get_per_chunk_kzg_commitment(tx, data_root, 1)?,
+                get_per_chunk_kzg_commitment(tx, data_root, 2)?,
+            ))
+        })?;
+        assert_eq!(loaded.0, Some(first));
+        assert_eq!(loaded.1, Some(replacement));
+        assert_eq!(loaded.2, Some(first));
+        Ok(())
+    }
+
+    #[test]
+    fn block_custody_proofs_roundtrip_by_hash() -> eyre::Result<()> {
+        use irys_types::custody::{CustodyProof, decode_custody_proofs};
+        use irys_types::{H256, IrysAddress};
+        use reth_db::transaction::DbTx as _;
+
+        use super::{block_custody_proofs_by_hash, insert_block_custody_proofs};
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let block_hash = H256::random();
+        let proof = CustodyProof {
+            challenged_miner: IrysAddress::from([0x11_u8; 20]),
+            partition_hash: H256::from([0x22_u8; 32]),
+            challenge_seed: H256::from([0x33_u8; 32]),
+            openings: Vec::new(),
+        };
+
+        db.update_eyre(|tx| {
+            insert_block_custody_proofs(tx, &block_hash, std::slice::from_ref(&proof))
+        })?;
+        let loaded = db.view_eyre(|tx| block_custody_proofs_by_hash(tx, &block_hash))?;
+        assert_eq!(loaded, vec![proof]);
+
+        let missing = db.view_eyre(|tx| block_custody_proofs_by_hash(tx, &H256::random()))?;
+        assert!(missing.is_empty());
+
+        db.update_eyre(|tx| insert_block_custody_proofs(tx, &block_hash, &[]))?;
+        let still_present = db.view_eyre(|tx| block_custody_proofs_by_hash(tx, &block_hash))?;
+        assert_eq!(still_present.len(), 1);
+        let raw = db.view_eyre(|tx| {
+            Ok::<_, eyre::Report>(tx.get::<crate::tables::IrysBlockCustodyProofs>(block_hash)?)
+        })?;
+        assert!(decode_custody_proofs(&raw.expect("row written for non-empty proofs")).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn stored_block_reloads_custody_proofs_matching_header_root() -> eyre::Result<()> {
+        use irys_types::custody::{CustodyOpening, CustodyProof, custody_proofs_root};
+        use irys_types::{Config, IrysAddress, IrysBlockHeader, NodeConfig};
+
+        use super::{block_custody_proofs_by_hash, insert_block_custody_proofs};
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let proof = CustodyProof {
+            challenged_miner: IrysAddress::from([0x11_u8; 20]),
+            partition_hash: H256::from([0x22_u8; 32]),
+            challenge_seed: H256::from([0x33_u8; 32]),
+            openings: vec![CustodyOpening {
+                chunk_offset: 7,
+                data_root: H256::from([0x44_u8; 32]),
+                tx_chunk_index: 1,
+                evaluation_point: alloy_primitives::FixedBytes::from([0x55_u8; 32]),
+                evaluation_value: alloy_primitives::FixedBytes::from([0x66_u8; 32]),
+                opening_proof: alloy_primitives::FixedBytes::from([0x77_u8; 48]),
+            }],
+        };
+        let proofs = vec![proof];
+        let root = custody_proofs_root(&proofs);
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.custody_proofs_root = Some(root);
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        config
+            .irys_signer()
+            .sign_block_header(&mut header)
+            .expect("header signs");
+        assert!(header.is_signature_valid());
+
+        let block_hash = header.block_hash;
+        db.update_eyre(|tx| {
+            insert_block_header(tx, &header)?;
+            insert_block_custody_proofs(tx, &block_hash, &proofs)
+        })?;
+
+        let loaded_header = db
+            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))?
+            .expect("header row");
+        let loaded_proofs = db.view_eyre(|tx| block_custody_proofs_by_hash(tx, &block_hash))?;
+        assert_eq!(loaded_proofs, proofs);
+        assert_eq!(
+            loaded_header.custody_proofs_root,
+            Some(custody_proofs_root(&loaded_proofs))
+        );
+        assert!(loaded_header.is_signature_valid());
+        Ok(())
     }
 }
