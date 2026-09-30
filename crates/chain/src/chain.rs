@@ -8,6 +8,7 @@ use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_actors::{
     BlockValidationTracker, DataSyncService, StorageModuleService,
+    blob_extraction_service::BlobExtractionService,
     block_discovery::{
         BlockDiscoveryFacadeImpl, BlockDiscoveryMessage, BlockDiscoveryService,
         BlockDiscoveryServiceInner,
@@ -18,6 +19,7 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
+    custody_proof_service::CustodyProofService,
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
@@ -800,6 +802,7 @@ impl IrysNode {
                 block_hash: genesis_block.block_hash,
                 data_transactions: vec![],
                 commitment_transactions: genesis_commitments.to_vec(),
+                custody_proofs: Vec::new(),
             };
             let genesis_sealed = SealedBlock::new(genesis_block.clone(), genesis_body)?;
             BlockIndex::push_block(write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
@@ -1974,6 +1977,35 @@ impl IrysNode {
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
+        let blob_extraction_handle = if config.consensus.enable_blobs {
+            let blob_store = reth_node_adapter.pool.blob_store().clone();
+            Some(BlobExtractionService::spawn_service(
+                blob_store,
+                service_senders.mempool.clone(), // clone: UnboundedSender is cheaply cloneable
+                config.clone(),                  // clone: Config is Arc-wrapped internally
+                block_tree_guard.clone(),
+                receivers.blob_extraction,
+                runtime_handle.clone(),
+            ))
+        } else {
+            None
+        };
+
+        let custody_proof_handle = if config.consensus.enable_custody_proofs {
+            Some(CustodyProofService::spawn_service(
+                config.clone(),                // clone: Config is Arc-wrapped internally
+                storage_modules_guard.clone(), // clone: Arc-based read guard
+                block_index_guard.clone(),
+                block_tree_guard.clone(),
+                service_senders.gossip_broadcast.clone(), // clone: UnboundedSender is cheaply cloneable
+                irys_db.clone(),                          // clone: DatabaseProvider is Arc-wrapped
+                receivers.custody_proof,
+                runtime_handle.clone(),
+            ))
+        } else {
+            None
+        };
+
         // Get the mempool state to create the pledge provider
         let (tx, rx) = oneshot::channel();
         service_senders
@@ -2308,6 +2340,12 @@ impl IrysNode {
             }
 
             // 7. State management
+            if let Some(blob_extraction_handle) = blob_extraction_handle {
+                services.push(blob_extraction_handle);
+            }
+            if let Some(custody_proof_handle) = custody_proof_handle {
+                services.push(custody_proof_handle);
+            }
             services.push(mempool_handle);
             services.push(chunk_ingress_handle);
 

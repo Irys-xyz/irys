@@ -971,8 +971,10 @@ impl AdvisoryChunkIngressError {
     }
 }
 
-/// Generates an ingress proof for a specific `data_root` from its ordered,
-/// persisted compact leaves. Cached chunk bodies are not read on this path.
+/// Generates an ingress proof for a specific `data_root`.
+///
+/// V1 proofs are signed from the ordered compact leaves. V2 proofs also read
+/// cached chunk bodies to compute the KZG commitment.
 #[must_use = "the generated ingress proof should be used or stored"]
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
@@ -981,18 +983,206 @@ pub fn generate_ingress_proof(
     signer: IrysSigner,
     chain_id: ChainId,
     anchor: H256,
+    enable_shadow_kzg_logging: bool,
+    use_kzg_ingress_proofs: bool,
 ) -> eyre::Result<IngressProof> {
-    let proof = irys_types::ingress::generate_ingress_proof_from_leaves(
-        &signer, data_root, leaves, chain_id, anchor,
-    )?;
+    let (proof, per_chunk_commitments) = if use_kzg_ingress_proofs {
+        let expected_chunks = u32::try_from(leaves.len())
+            .map_err(|_| eyre::eyre!("ingress leaf count exceeds u32"))?;
+        let chunks = load_cached_chunk_bytes(&db, data_root, expected_chunks)?;
+        let (proof, per_chunk) = irys_types::ingress::generate_ingress_proof_v2(
+            &signer,
+            data_root,
+            &chunks,
+            chain_id,
+            anchor,
+            irys_types::kzg::default_kzg_settings(),
+        )?;
+        (proof, Some(per_chunk))
+    } else {
+        let proof = irys_types::ingress::generate_ingress_proof_from_leaves(
+            &signer, data_root, leaves, chain_id, anchor,
+        )?;
+        (proof, None)
+    };
 
     info!(
         "generated ingress proof {} for data root {}",
-        &proof.proof, &data_root
+        &proof.proof_id(),
+        &data_root
     );
-    db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
+    store_proof_and_commitments(
+        &db,
+        &proof,
+        per_chunk_commitments.as_deref(),
+        data_root,
+        &signer,
+        enable_shadow_kzg_logging,
+        use_kzg_ingress_proofs,
+    )?;
 
     Ok(proof)
+}
+
+fn store_proof_and_commitments(
+    db: &DatabaseProvider,
+    proof: &IngressProof,
+    per_chunk_commitments: Option<&[irys_types::kzg::KzgCommitmentBytes]>,
+    data_root: DataRoot,
+    signer: &IrysSigner,
+    enable_shadow_kzg_logging: bool,
+    use_kzg_ingress_proofs: bool,
+) -> eyre::Result<()> {
+    db.update_scoped(|rw_tx| -> eyre::Result<()> {
+        irys_database::store_ingress_proof_checked(rw_tx, proof, signer)?;
+
+        if let Some(per_chunk) = per_chunk_commitments {
+            let indexed: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)> = per_chunk
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let idx =
+                        u32::try_from(i).map_err(|_| eyre::eyre!("chunk index exceeds u32"))?;
+                    Ok((idx, *c))
+                })
+                .collect::<eyre::Result<Vec<_>>>()?;
+            irys_database::store_per_chunk_kzg_commitments(rw_tx, data_root, &indexed)?;
+        }
+
+        Ok(())
+    })??;
+
+    if enable_shadow_kzg_logging && !use_kzg_ingress_proofs {
+        if let Err(e) = shadow_log_kzg_commitments(db, data_root) {
+            warn!(
+                data_root = %data_root,
+                error = %e,
+                "[shadow-kzg] computation failed"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn load_cached_chunk_bytes(
+    db: &DatabaseProvider,
+    data_root: DataRoot,
+    expected_chunks: u32,
+) -> eyre::Result<Vec<Vec<u8>>> {
+    use eyre::eyre;
+    use irys_database::tables::{CachedChunks, CachedChunksIndex};
+    use reth_db::cursor::DbDupCursorRO as _;
+    use reth_db::transaction::DbTx as _;
+
+    let count = usize::try_from(expected_chunks)
+        .map_err(|_| eyre!("expected chunk count exceeds usize"))?;
+    db.view_eyre(|tx| {
+        let mut slots = Vec::with_capacity(count);
+        slots.resize_with(count, || None);
+        let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
+        for entry in dup_walker {
+            let (_root_hash, index_entry) = entry?;
+            let index = usize::try_from(index_entry.index.0)
+                .map_err(|_| eyre!("cached chunk index exceeds usize"))?;
+            if index >= count {
+                return Err(eyre!(
+                    "cached chunk index {index} is outside 0..{expected_chunks} for {data_root}"
+                ));
+            }
+            if slots[index].is_some() {
+                return Err(eyre!(
+                    "duplicate cached chunk index {index} for {data_root}"
+                ));
+            }
+            let chunk_path_hash = index_entry.meta.chunk_path_hash;
+            let chunk = tx.get::<CachedChunks>(chunk_path_hash)?.ok_or_else(|| {
+                eyre!("missing cached chunk {chunk_path_hash} for data root {data_root}")
+            })?;
+            let chunk_bin = chunk.chunk.ok_or_else(|| {
+                eyre!("missing chunk body {chunk_path_hash} for data root {data_root}")
+            })?;
+            slots[index] = Some(chunk_bin.0);
+        }
+        let mut chunks = Vec::with_capacity(count);
+        for (index, slot) in slots.into_iter().enumerate() {
+            let Some(bytes) = slot else {
+                return Err(eyre!("missing cached chunk index {index} for {data_root}"));
+            };
+            chunks.push(bytes);
+        }
+        Ok(chunks)
+    })
+}
+
+/// Compute KZG commitments in shadow mode: re-reads chunks from DB, computes
+/// per-chunk KZG commitments, and logs results. Errors are informational only.
+fn shadow_log_kzg_commitments(db: &DatabaseProvider, data_root: DataRoot) -> eyre::Result<()> {
+    use eyre::eyre;
+    use irys_database::tables::{CachedChunks, CachedChunksIndex};
+    use irys_types::kzg::{compute_chunk_commitment, default_kzg_settings};
+    use reth_db::cursor::DbDupCursorRO as _;
+    use reth_db::transaction::DbTx as _;
+    use std::time::Instant;
+
+    let settings = default_kzg_settings();
+    let start = Instant::now();
+
+    db.view_eyre(|tx| {
+        let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
+
+        for (i, entry) in dup_walker.into_iter().enumerate() {
+            let (_root_hash, index_entry) = entry?;
+            let chunk = tx
+                .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
+                .ok_or(eyre!("missing chunk for shadow KZG"))?;
+            let chunk_bin = chunk
+                .chunk
+                .ok_or(eyre!("missing chunk body for shadow KZG"))?
+                .0;
+
+            let chunk_start = Instant::now();
+            match compute_chunk_commitment(&chunk_bin, settings) {
+                Ok(commitment) => {
+                    let hex =
+                        commitment
+                            .as_ref()
+                            .iter()
+                            .fold(String::with_capacity(96), |mut s, b| {
+                                use std::fmt::Write as _;
+                                // write! to String is infallible
+                                write!(s, "{b:02x}").expect("write to String cannot fail");
+                                s
+                            });
+                    info!(
+                        data_root = %data_root,
+                        chunk_index = i,
+                        commitment = %hex,
+                        chunk_time_ms = chunk_start.elapsed().as_millis(),
+                        "[shadow-kzg] computed chunk commitment"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        data_root = %data_root,
+                        chunk_index = i,
+                        error = %e,
+                        "[shadow-kzg] chunk commitment failed"
+                    );
+                }
+            }
+        }
+
+        info!(
+            data_root = %data_root,
+            total_time_ms = start.elapsed().as_millis(),
+            "[shadow-kzg] completed all chunk commitments"
+        );
+
+        Ok(())
+    })
 }
 
 #[cfg(test)]

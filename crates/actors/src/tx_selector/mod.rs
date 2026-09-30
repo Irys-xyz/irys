@@ -1266,14 +1266,12 @@ async fn get_publish_txs_and_proofs(
             }
 
             // Separate assigned and unassigned proofs
-            let assigned_proof_set: HashSet<_> = assigned_proofs
-                .iter()
-                .map(|p| &p.proof.0) // Use signature as unique identifier
-                .collect();
+            let assigned_proof_set: HashSet<_> =
+                assigned_proofs.iter().map(|p| p.proof_id()).collect();
 
             let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                 .iter()
-                .filter(|c| !assigned_proof_set.contains(&c.proof.proof.0))
+                .filter(|c| !assigned_proof_set.contains(&c.proof.proof_id()))
                 .filter(|c| {
                     // Filter out proofs from unstaked signers
                     epoch_snapshot.is_staked(c.address)

@@ -508,6 +508,7 @@ async fn block_valid_data_tx_after_ema_change_gets_accepted() -> eyre::Result<()
         block_hash: header.block_hash,
         data_transactions: txs.all_data_txs().cloned().collect(),
         commitment_transactions: txs.all_system_txs().cloned().collect(),
+        custody_proofs: txs.custody_proofs.clone(),
     };
     let block = Arc::new(irys_types::SealedBlock::new(Arc::clone(&header), body).unwrap());
 

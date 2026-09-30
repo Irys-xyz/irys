@@ -188,7 +188,7 @@ impl IrysSigner {
     pub fn sign_ingress_proof(&self, proof: &mut IngressProof) -> Result<()> {
         let prehash = proof.signature_hash();
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
-        proof.signature = IrysSignature::new(signature);
+        *proof.signature_mut() = IrysSignature::new(signature);
 
         Ok(())
     }

@@ -8,17 +8,70 @@ use eyre::eyre;
 use irys_database::{db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid};
 use irys_domain::HardforkConfigExt as _;
 
+use irys_domain::BlockTreeReadGuard;
 use irys_types::TxKnownStatus;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _, IrysTransactionId,
-    SendTraced as _, U256,
+    BoundedFee, Config, DataLedger, DataTransactionHeader, H256, IrysTransactionCommon as _,
+    IrysTransactionId, SendTraced as _, U256,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
 };
 use reth_db::transaction::DbTxMut as _;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
+
+/// Publish term and perm fees for `data_size`, using the same EMA minimum the API checks.
+pub(crate) fn publish_fees_for_size(
+    config: &Config,
+    block_tree: &BlockTreeReadGuard,
+    data_size: u64,
+) -> Result<(BoundedFee, BoundedFee), TxIngressError> {
+    let (pricing_ema, latest_block_timestamp_secs, latest_height) = {
+        let tree = block_tree.read();
+        let (canonical, _) = tree.get_canonical_chain();
+        let last_block_entry = canonical
+            .last()
+            .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
+        let ema = tree
+            .get_ema_snapshot(&last_block_entry.block_hash())
+            .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?;
+        (
+            ema.ema_for_public_pricing(),
+            last_block_entry.header().timestamp_secs(),
+            last_block_entry.height(),
+        )
+    };
+    let next_block_height = latest_height + 1;
+    let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+        next_block_height,
+        config.consensus.epoch.num_blocks_in_epoch,
+        config.consensus.epoch.submit_ledger_epoch_length,
+    );
+    let replica_count = config.number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
+    let term_fee = calculate_term_fee(
+        data_size,
+        epochs_for_storage,
+        &config.consensus,
+        replica_count,
+        pricing_ema,
+        latest_block_timestamp_secs,
+    )
+    .map_err(|e| TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {e}")))?;
+    let perm_fee = calculate_perm_fee_from_config(
+        data_size,
+        &config.consensus,
+        replica_count,
+        pricing_ema,
+        term_fee,
+        latest_block_timestamp_secs,
+    )
+    .map_err(|e| TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {e}")))?;
+    Ok((
+        BoundedFee::from(term_fee),
+        BoundedFee::from(perm_fee.amount),
+    ))
+}
 
 impl Inner {
     // Shared pre-checks for both API and Gossip data tx ingress paths.

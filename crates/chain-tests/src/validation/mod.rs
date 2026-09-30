@@ -1161,8 +1161,8 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
     )?;
 
     // Verify both proofs have the same data_root and can recover the same signer
-    assert_eq!(proof1.data_root, data_root);
-    assert_eq!(proof2.data_root, data_root);
+    assert_eq!(proof1.data_root(), data_root);
+    assert_eq!(proof2.data_root(), data_root);
     assert_eq!(proof1.recover_signer()?, test_signer.address());
     assert_eq!(proof2.recover_signer()?, test_signer.address());
 
@@ -1375,6 +1375,7 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
         block_hash: header.block_hash,
         commitment_transactions: txs.all_system_txs().cloned().collect(),
         data_transactions: txs.all_data_txs().cloned().collect(),
+        custody_proofs: txs.custody_proofs.clone(),
     };
     let sealed_block = Arc::new(SealedBlock::new(Arc::clone(&header), body)?);
 

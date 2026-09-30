@@ -968,7 +968,7 @@ impl InnerCacheTask {
                 }
             } else {
                 debug!(
-                    ingress_proof.data_root = ?proof.data_root,
+                    ingress_proof.data_root = ?proof.data_root(),
                     "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
                 );
                 // Content-checked delete, same TOCTOU guard as the `to_delete`
@@ -979,9 +979,9 @@ impl InnerCacheTask {
                     proof: proof.clone(),
                 });
                 if let Err(e) = self.db.update_eyre(|rw_tx| {
-                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root, scanned)
+                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root(), scanned)
                 }) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?proof.data_root(), "Failed to remove ingress proof: {e}");
                 }
             }
         }
@@ -992,20 +992,20 @@ impl InnerCacheTask {
                     &self.block_tree_guard,
                     &self.db,
                     &self.config,
-                    proof.data_root,
+                    proof.data_root(),
                     None,
                     &self.gossip_broadcast,
                     &self.ingress_proof_generation_state,
                 ) {
                     if error.is_benign() {
-                        debug!(ingress_proof.data_root = ?proof.data_root, "Skipped ingress proof regeneration: {error}");
+                        debug!(ingress_proof.data_root = ?proof.data_root(), "Skipped ingress proof regeneration: {error}");
                     } else {
-                        warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {error}");
+                        warn!(ingress_proof.data_root = ?proof.data_root(), "Failed to regenerate ingress proof: {error}");
                     }
                 }
             } else {
                 debug!(
-                    ingress_proof.data_root = ?proof.data_root,
+                    ingress_proof.data_root = ?proof.data_root(),
                     "Regeneration disabled, removing ingress proof for data root"
                 );
                 // Content-checked delete, same TOCTOU guard as the `to_delete`
@@ -1016,9 +1016,9 @@ impl InnerCacheTask {
                     proof: proof.clone(),
                 });
                 if let Err(e) = self.db.update_eyre(|rw_tx| {
-                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root, scanned)
+                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root(), scanned)
                 }) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?proof.data_root(), "Failed to remove ingress proof: {e}");
                 }
             }
         }
@@ -2062,8 +2062,10 @@ mod tests {
         let local_addr = signer.address();
 
         db.update(|wtx| {
-            let mut ingress_proof = IngressProof::default();
-            ingress_proof.data_root = tx_header.data_root;
+            let ingress_proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root: tx_header.data_root,
+                ..Default::default()
+            });
             irys_database::store_external_ingress_proof_checked(
                 wtx,
                 &ingress_proof,
@@ -2232,8 +2234,10 @@ mod tests {
         let signer = config.irys_signer();
         let local_addr = signer.address();
         db.update(|wtx| {
-            let mut ingress_proof = IngressProof::default();
-            ingress_proof.data_root = tx_header.data_root;
+            let ingress_proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root: tx_header.data_root,
+                ..Default::default()
+            });
             irys_database::store_external_ingress_proof_checked(wtx, &ingress_proof, local_addr)?;
             eyre::Ok(())
         })??;
@@ -2510,10 +2514,11 @@ mod tests {
 
             // Two valid proofs (known anchor → not expired).
             let make_proof = |anchor: H256| {
-                let mut p = IngressProof::default();
-                p.data_root = data_root;
-                p.anchor = anchor;
-                p
+                IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                    data_root,
+                    anchor,
+                    ..Default::default()
+                })
             };
             irys_database::store_external_ingress_proof_checked(
                 wtx,
@@ -2651,15 +2656,19 @@ mod tests {
             database::insert_tx_header(wtx, &tx_header)?;
 
             // Local proof with expired anchor → at-capacity branch deletes it.
-            let mut local_proof = IngressProof::default();
-            local_proof.data_root = data_root;
-            local_proof.anchor = expired_anchor;
+            let local_proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root,
+                anchor: expired_anchor,
+                ..Default::default()
+            });
             irys_database::store_external_ingress_proof_checked(wtx, &local_proof, local_addr)?;
 
             // Sibling proof with valid anchor → not expired → survives.
-            let mut sibling_proof = IngressProof::default();
-            sibling_proof.data_root = data_root;
-            sibling_proof.anchor = valid_anchor;
+            let sibling_proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root,
+                anchor: valid_anchor,
+                ..Default::default()
+            });
             irys_database::store_external_ingress_proof_checked(wtx, &sibling_proof, sibling_addr)?;
 
             Ok(())
@@ -2779,10 +2788,11 @@ mod tests {
             database::insert_tx_header(wtx, &tx_header)?;
 
             let make_proof = |anchor: H256| {
-                let mut p = IngressProof::default();
-                p.data_root = data_root;
-                p.anchor = anchor;
-                p
+                IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                    data_root,
+                    anchor,
+                    ..Default::default()
+                })
             };
 
             // addr_a: valid anchor → not expired → survives.
@@ -3019,8 +3029,10 @@ mod tests {
 
         // A local proof lands after the scan; the write-phase re-check must veto.
         db.update(|wtx| -> eyre::Result<()> {
-            let mut proof = IngressProof::default();
-            proof.data_root = data_root;
+            let proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                data_root,
+                ..Default::default()
+            });
             irys_database::store_external_ingress_proof_checked(wtx, &proof, local_addr)?;
             Ok(())
         })??;

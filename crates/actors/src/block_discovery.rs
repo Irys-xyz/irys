@@ -740,13 +740,13 @@ impl BlockDiscoveryServiceInner {
             })?;
             // Validate the anchors (bounded by the ingress-proof window)
             for proof in tx_proofs.iter() {
-                if !anchor_valid_for(&proof.anchor, min_ingress_proof_anchor_height)? {
+                if !anchor_valid_for(&proof.anchor(), min_ingress_proof_anchor_height)? {
                     info!(
                         "valid anchor blocks: {:?},  bt_finished_height {} min_ingress_proof_anchor_height {} anchor {}, ID {}",
                         &valid_anchor_block_heights,
                         &bt_finished_height,
                         &min_ingress_proof_anchor_height,
-                        &proof.anchor,
+                        &proof.anchor(),
                         &proof.id()
                     );
                     return Err(BlockDiscoveryError::InvalidAnchor {
@@ -754,7 +754,7 @@ impl BlockDiscoveryServiceInner {
                             promotion_target_id: tx_header.id,
                             id: proof.id(),
                         },
-                        anchor: proof.anchor,
+                        anchor: proof.anchor(),
                     });
                 }
             }
@@ -1120,6 +1120,7 @@ pub async fn build_block_body_for_processed_block_header(
         block_hash: block_header.block_hash,
         data_transactions: data_txs,
         commitment_transactions: commitment_txs,
+        custody_proofs: Vec::new(),
     };
 
     Ok(block_body)

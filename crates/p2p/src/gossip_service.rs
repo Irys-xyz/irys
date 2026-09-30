@@ -195,6 +195,7 @@ impl P2PService {
                 &service_senders,
             );
 
+        let custody_proof_sender = service_senders.custody_proof.clone(); // clone: extract before move into BlockPool
         let block_pool = BlockPool::new(
             db,
             block_discovery,
@@ -228,6 +229,7 @@ impl P2PService {
             started_at,
             consensus_config_hash,
             runtime_handle: self.runtime_handle.clone(),
+            custody_proof_sender,
         });
         let server = GossipServer::new(
             Arc::clone(&gossip_data_handler),

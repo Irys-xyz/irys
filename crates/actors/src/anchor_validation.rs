@@ -107,7 +107,7 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
     min_anchor_height: u64,
     ingress_proof: &IngressProof,
 ) -> eyre::Result<bool> {
-    let anchor = ingress_proof.anchor;
+    let anchor = ingress_proof.anchor();
     let anchor_height = match get_anchor_height(block_tree, db, anchor, true).map_err(|e| {
         TxIngressError::DatabaseError(format!("Error getting anchor height for {}: {}", anchor, e))
     })? {
@@ -136,7 +136,7 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
         warn!(
             signer,
             "ingress proof data_root {} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}",
-            &ingress_proof.data_root,
+            &ingress_proof.data_root(),
         );
         Ok(false)
     }
