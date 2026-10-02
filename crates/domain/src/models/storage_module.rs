@@ -155,8 +155,9 @@ struct PendingWrites {
     occupancy: HashMap<PartitionChunkOffset, u64>,
     /// Who queued each packed chunk. Equal-length runs break ties with this.
     priorities: HashMap<PartitionChunkOffset, disk_lane::WritePriority>,
-    /// When each packed chunk was queued. A short run may jump a longer one
-    /// after `reorder_grace`.
+    /// When each packed chunk was queued. The oldest short run may jump a
+    /// longer one after `reorder_grace`. Further short runs wait another
+    /// `reorder_grace`.
     queued_at: HashMap<PartitionChunkOffset, Instant>,
     /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
     queued_unpacked_bytes: u64,
@@ -395,6 +396,7 @@ struct CoalescedRun {
 /// Length and age of one packed run. The peek path uses this so it does not
 /// clone chunk bytes.
 struct RunMeta {
+    start: PartitionChunkOffset,
     byte_len: u64,
     oldest: Instant,
 }
@@ -774,9 +776,9 @@ impl StorageModule {
     }
 
     /// A packed run is ready for the disk when one run fills the write cap,
-    /// the pending set has reached the durability count, or the oldest chunk
-    /// has waited `reorder_grace`. A shorter run stays in memory so the lane
-    /// can keep reading entropy beside it.
+    /// the pending set has reached the durability count, or the oldest short
+    /// run has waited `reorder_grace` and no earlier short run still holds
+    /// that grace. Other short runs stay in memory so a neighbor can join.
     fn pending_run_ready(&self) -> bool {
         let pending = self.pending_writes.read().unwrap();
         if pending.is_empty() {
@@ -788,7 +790,8 @@ impl StorageModule {
         }
         let chunk = self.config.consensus.chunk_size.max(1);
         let cap = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
-        self.has_full_write_run(&pending, cap) || self.has_aged_pending(&pending, chunk)
+        self.has_full_write_run(&pending, cap)
+            || (self.has_aged_pending(&pending, chunk) && !self.disk.short_writes_held())
     }
 
     /// True when the oldest chunk in some run has waited out `reorder_grace`.
@@ -801,7 +804,9 @@ impl StorageModule {
     }
 
     /// Bytes of the longest packed run that may hit the disk now. Zero when
-    /// every run is still held for a neighbor.
+    /// every run is still held for a neighbor. A short-run hold leaves every
+    /// short run out of this count, so entropy can use the disk while those
+    /// runs wait for a neighbor.
     fn longest_ready_write_bytes(&self) -> u64 {
         let pending = self.pending_writes.read().unwrap();
         if pending.is_empty() {
@@ -811,12 +816,28 @@ impl StorageModule {
         let cap = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
         let grace = disk_lane::reorder_grace(chunk);
         let due_all = self.short_runs_due(pending.len());
-        self.write_run_metas(&pending, cap)
-            .into_iter()
-            .filter(|run| due_all || run.byte_len >= cap || run.oldest.elapsed() >= grace)
-            .map(|run| run.byte_len)
-            .max()
-            .unwrap_or(0)
+        let held = self.disk.short_writes_held();
+        let mut best_full = 0_u64;
+        let mut best_short: Option<(Instant, PartitionChunkOffset, u64)> = None;
+        for run in self.write_run_metas(&pending, cap) {
+            if due_all || run.byte_len >= cap {
+                best_full = best_full.max(run.byte_len);
+                continue;
+            }
+            if held || run.oldest.elapsed() < grace {
+                continue;
+            }
+            let take = match best_short {
+                None => true,
+                Some((oldest, start, _)) => {
+                    run.oldest < oldest || (run.oldest == oldest && run.start < start)
+                }
+            };
+            if take {
+                best_short = Some((run.oldest, run.start, run.byte_len));
+            }
+        }
+        best_full.max(best_short.map(|(_, _, bytes)| bytes).unwrap_or(0))
     }
 
     /// Durability and an owed recall flush write short runs. The count is
@@ -889,6 +910,7 @@ impl StorageModule {
             }
             if let Some(cursor) = current.take() {
                 runs.push(RunMeta {
+                    start: cursor.start,
                     byte_len: cursor.byte_len,
                     oldest: current_oldest.unwrap_or_else(Instant::now),
                 });
@@ -905,6 +927,7 @@ impl StorageModule {
         }
         if let Some(cursor) = current.take() {
             runs.push(RunMeta {
+                start: cursor.start,
                 byte_len: cursor.byte_len,
                 oldest: current_oldest.unwrap_or_else(Instant::now),
             });
@@ -1304,6 +1327,7 @@ impl StorageModule {
                     limit,
                     disk_lane::WRITE_REORDER_CHUNKS,
                     run_cap,
+                    !self.short_runs_due(pending.len()),
                 )
             } else if let Some(limit) = max_runs {
                 self.select_pending_window(&pending, limit, run_cap)
@@ -1352,18 +1376,54 @@ impl StorageModule {
             runs.truncate(limit);
         }
         // A short run seeks about as much as a full one and moves far less
-        // data. Hold it unless durability, a recall flush, or the grace is due.
+        // data. One pass writes every full run and the oldest aged short
+        // run. The hold keeps the other short runs queued for a neighbor.
+        // Durability and a recall flush still write every run.
+        let mut emitted_short = false;
         if coalesce && !force && !self.short_runs_due(pending_count) {
             let full = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
             let grace = disk_lane::reorder_grace(chunk);
-            runs.retain(|run| {
-                run.bytes.len() as u64 >= full
-                    || run.offsets.iter().any(|offset| {
-                        queued_at
-                            .get(offset)
-                            .is_some_and(|at| at.elapsed() >= grace)
-                    })
-            });
+            let held = self.disk.short_writes_held();
+            let mut oldest_short: Option<(Instant, u32, usize)> = None;
+            if !held {
+                for (index, run) in runs.iter().enumerate() {
+                    if run.bytes.len() as u64 >= full {
+                        continue;
+                    }
+                    let Some(oldest) = run
+                        .offsets
+                        .iter()
+                        .filter_map(|offset| queued_at.get(offset).copied())
+                        .min()
+                    else {
+                        continue;
+                    };
+                    if oldest.elapsed() < grace {
+                        continue;
+                    }
+                    let start = run.start.0;
+                    let take = match oldest_short {
+                        None => true,
+                        Some((prev, prev_start, _)) => {
+                            oldest < prev || (oldest == prev && start < prev_start)
+                        }
+                    };
+                    if take {
+                        oldest_short = Some((oldest, start, index));
+                    }
+                }
+            }
+            let keep_short = oldest_short.map(|(_, _, index)| index);
+            let mut kept = Vec::with_capacity(runs.len());
+            for (index, run) in runs.into_iter().enumerate() {
+                if run.bytes.len() as u64 >= full {
+                    kept.push(run);
+                } else if keep_short == Some(index) {
+                    emitted_short = true;
+                    kept.push(run);
+                }
+            }
+            runs = kept;
         }
         if runs.is_empty() {
             return Ok(());
@@ -1468,6 +1528,10 @@ impl StorageModule {
             &then.elapsed().as_secs_f64(),
             &len
         );
+
+        if emitted_short {
+            self.disk.arm_short_hold(disk_lane::reorder_grace(chunk));
+        }
 
         Ok(())
     }
@@ -2813,12 +2877,15 @@ impl StorageModule {
 
     /// Pending chunks inside a reorder scan, joined into runs of at most `cap`
     /// bytes. An aged run fills an in-flight slot first, then a longer run.
+    /// `one_short` keeps every full run and the oldest aged short run, so a
+    /// pile of short runs cannot fill the window and hide a full run.
     fn select_coalesced_window(
         &self,
         pending: &PendingWrites,
         max_runs: usize,
         scan_chunks: usize,
         cap: u64,
+        one_short: bool,
     ) -> Vec<(
         PartitionChunkOffset,
         (ChunkBytes, ChunkType),
@@ -2925,6 +2992,42 @@ impl StorageModule {
                     left_off.cmp(&right_off)
                 })
         });
+        if one_short {
+            let held = self.disk.short_writes_held();
+            let mut chosen: Option<usize> = None;
+            if !held {
+                for (index, run) in runs.iter().enumerate() {
+                    if !run.aged || run.byte_len >= cap {
+                        continue;
+                    }
+                    let start = run.items.first().map(|(offset, _)| *offset);
+                    let take = match chosen.and_then(|picked| runs.get(picked)) {
+                        None => true,
+                        Some(prev) => {
+                            let prev_start = prev.items.first().map(|(offset, _)| *offset);
+                            run.oldest < prev.oldest
+                                || (run.oldest == prev.oldest && start < prev_start)
+                        }
+                    };
+                    if take {
+                        chosen = Some(index);
+                    }
+                }
+            }
+            let mut kept = Vec::with_capacity(runs.len());
+            let mut short_run = None;
+            for (index, run) in runs.into_iter().enumerate() {
+                if run.byte_len >= cap {
+                    kept.push(run);
+                } else if chosen == Some(index) {
+                    short_run = Some(run);
+                }
+            }
+            if let Some(short_run) = short_run {
+                kept.insert(0, short_run);
+            }
+            runs = kept;
+        }
         runs.truncate(max_runs);
 
         let mut out = Vec::new();
@@ -5840,6 +5943,45 @@ mod tests {
     }
 
     #[test]
+    fn lane_writes_only_the_oldest_short_run() -> eyre::Result<()> {
+        // 256 KiB keeps the post-flush hold far above this sleep.
+        let chunk_size = 256 * 1024;
+        let (_tmp, storage_module) = seek_run_fixture("lane_one_short", chunk_size, 10_000, 8)?;
+        let body = vec![1_u8; chunk_size as usize];
+        storage_module.write_chunk(PartitionChunkOffset::from(0), body.clone(), ChunkType::Data);
+        storage_module.write_chunk(PartitionChunkOffset::from(2), body, ChunkType::Data);
+        let older = Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .expect("test clock");
+        let newer = Instant::now()
+            .checked_sub(Duration::from_secs(20))
+            .expect("test clock");
+        {
+            let mut pending = storage_module.pending_writes.write().unwrap();
+            pending
+                .queued_at
+                .insert(PartitionChunkOffset::from(0), older);
+            pending
+                .queued_at
+                .insert(PartitionChunkOffset::from(2), newer);
+        }
+        let storage_module = Arc::new(storage_module);
+        let lane = LaneGuard::start(Arc::clone(&storage_module))?;
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            lane.module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        assert!(
+            !lane
+                .module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(2))
+        );
+        assert!(lane.module.has_pending_writes());
+        Ok(())
+    }
+
+    #[test]
     fn lane_flushes_short_runs_at_the_sync_threshold() -> eyre::Result<()> {
         let (_tmp, storage_module) = seek_run_fixture("lane_threshold", 32, 4, 8)?;
         for offset in 0..4_u32 {
@@ -5975,7 +6117,7 @@ mod tests {
 
         let cap = chunk_size * 4;
         let pending = storage.pending_writes.read().unwrap();
-        let batch = storage.select_coalesced_window(&pending, 2, 512, cap);
+        let batch = storage.select_coalesced_window(&pending, 2, 512, cap, false);
         let mut chosen: Vec<u32> = batch.iter().map(|(offset, _, _)| offset.0).collect();
         chosen.sort_unstable();
         assert_eq!(chosen, (0..8).collect::<Vec<_>>());
@@ -5983,14 +6125,14 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().all(|run| run.offsets.len() == 4));
 
-        let scanned = storage.select_coalesced_window(&pending, 4, 3, chunk_size * 8);
+        let scanned = storage.select_coalesced_window(&pending, 4, 3, chunk_size * 8, false);
         let scanned_offsets: Vec<u32> = scanned.iter().map(|(offset, _, _)| offset.0).collect();
         assert_eq!(scanned_offsets, vec![0, 1, 2]);
         drop(pending);
 
         storage.write_chunk(PartitionChunkOffset::from(50), body(50), ChunkType::Entropy);
         let pending = storage.pending_writes.read().unwrap();
-        let long_first = storage.select_coalesced_window(&pending, 1, 512, cap);
+        let long_first = storage.select_coalesced_window(&pending, 1, 512, cap, false);
         let long_offsets: Vec<u32> = long_first.iter().map(|(offset, _, _)| offset.0).collect();
         assert_eq!(long_offsets, vec![0, 1, 2, 3]);
         drop(pending);
@@ -6003,7 +6145,7 @@ mod tests {
             pending
                 .queued_at
                 .insert(PartitionChunkOffset::from(50), aged_at);
-            let jumped = storage.select_coalesced_window(&pending, 1, 512, cap);
+            let jumped = storage.select_coalesced_window(&pending, 1, 512, cap, false);
             assert_eq!(jumped.len(), 1);
             assert_eq!(jumped[0].0, PartitionChunkOffset::from(50));
         }
@@ -6018,13 +6160,51 @@ mod tests {
         }
         let pending = holed.pending_writes.read().unwrap();
         let wide = chunk_size * 8;
-        let batch = holed.select_coalesced_window(&pending, 4, 16, wide);
+        let batch = holed.select_coalesced_window(&pending, 4, 16, wide, false);
         let runs = holed.plan_write_runs(&batch, wide);
         let lengths: Vec<usize> = runs.iter().map(|run| run.offsets.len()).collect();
         assert_eq!(lengths, vec![3, 1]);
         Ok(())
     }
 
+    #[test]
+    fn one_short_window_keeps_full_runs_and_the_oldest() -> eyre::Result<()> {
+        let chunk_size = 32_u64;
+        let (_tmp, storage) = coalesce_fixture("one_short_window", chunk_size)?;
+        let body = |offset: u32| vec![offset as u8; chunk_size as usize];
+        for offset in 0..4_u32 {
+            storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body(offset),
+                ChunkType::Data,
+            );
+        }
+        storage.write_chunk(PartitionChunkOffset::from(10), body(10), ChunkType::Data);
+        storage.write_chunk(PartitionChunkOffset::from(20), body(20), ChunkType::Data);
+        let older = Instant::now()
+            .checked_sub(Duration::from_secs(3))
+            .expect("test clock");
+        let newer = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("test clock");
+        let mut pending = storage.pending_writes.write().unwrap();
+        pending
+            .queued_at
+            .insert(PartitionChunkOffset::from(20), older);
+        pending
+            .queued_at
+            .insert(PartitionChunkOffset::from(10), newer);
+        let cap = chunk_size * 4;
+        let batch = storage.select_coalesced_window(&pending, 8, 512, cap, true);
+        let offsets: Vec<u32> = batch.iter().map(|(offset, _, _)| offset.0).collect();
+        assert_eq!(offsets, vec![20, 0, 1, 2, 3]);
+
+        storage.disk.arm_short_hold(Duration::from_secs(30));
+        let held = storage.select_coalesced_window(&pending, 8, 512, cap, true);
+        let held_offsets: Vec<u32> = held.iter().map(|(offset, _, _)| offset.0).collect();
+        assert_eq!(held_offsets, vec![0, 1, 2, 3]);
+        Ok(())
+    }
 
     fn seek_run_fixture(
         prefix: &str,

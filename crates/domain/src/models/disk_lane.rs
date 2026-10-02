@@ -8,9 +8,12 @@
 //! the disk. It sorts a reorder buffer of pending chunks and joins adjacent
 //! chunks into one `pwrite` of at most `WRITE_RUN_MAX_BYTES`. A shorter run
 //! stays queued until it reaches that size, a recall flush is owed, the
-//! pending set reaches `num_writes_before_sync`, or the oldest chunk in the
-//! run has waited `reorder_grace`. Among runs that are due, an aged run goes
-//! first and then the longer run. Entropy reads use that same length rule.
+//! pending set reaches `num_writes_before_sync`, or it is the oldest run
+//! that has waited `reorder_grace`. One pass writes every full run and that
+//! one short run. The next short run waits another `reorder_grace`, so the
+//! others can still gain a neighbor. Among runs that are due, that short
+//! run goes first and then the longer run. Entropy reads use that same
+//! length rule.
 //! New submits stop when another command would put the in-flight set past
 //! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
 //! The file lock is dropped before an index submit.
@@ -221,6 +224,8 @@ pub(super) struct DiskGate {
     lane_stop: AtomicBool,
     /// Index commits wait while a chunk run or a mining recall holds this.
     index_gap: Arc<IndexGap>,
+    /// Further short runs wait until this instant. Full runs ignore it.
+    short_hold_until: Mutex<Option<Instant>>,
     #[cfg(test)]
     pub(super) entropy_preads: AtomicU64,
 }
@@ -308,9 +313,40 @@ impl DiskGate {
             lane_started: AtomicBool::new(false),
             lane_stop: AtomicBool::new(false),
             index_gap,
+            short_hold_until: Mutex::new(None),
             #[cfg(test)]
             entropy_preads: AtomicU64::new(0),
         }
+    }
+
+    /// True while a short run written earlier still owns the grace window.
+    pub(super) fn short_writes_held(&self) -> bool {
+        self.short_hold_remaining().is_some()
+    }
+
+    /// Time until another short run may be written. `None` when the hold
+    /// is unset or already due.
+    pub(super) fn short_hold_remaining(&self) -> Option<Duration> {
+        let guard = self
+            .short_hold_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let until = (*guard)?;
+        let now = Instant::now();
+        if now < until {
+            Some(until.saturating_duration_since(now))
+        } else {
+            None
+        }
+    }
+
+    /// Block further short runs for `grace` after one short run is written.
+    pub(super) fn arm_short_hold(&self, grace: Duration) {
+        let mut guard = self
+            .short_hold_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = Instant::now().checked_add(grace);
     }
 
     /// Returns false when a lane thread is already marked running.
@@ -1834,19 +1870,23 @@ impl StorageModule {
         }
     }
 
-    /// Time until the oldest queued chunk reaches `reorder_grace`.
-    /// `None` when nothing is queued. Zero when that wait has already elapsed.
+    /// Time until the next packed write is allowed.
+    /// `None` when nothing is queued. Zero when a full run, the durability
+    /// count, or an aged short run outside the short-run hold is ready.
+    /// A hold after one short run keeps the other short runs queued.
     fn write_grace_remaining(&self) -> Option<Duration> {
         let pending = self.pending_writes.read().unwrap();
         let oldest = pending.queued_at.values().copied().min()?;
         let chunk = self.config.consensus.chunk_size.max(1);
         let grace = reorder_grace(chunk);
-        let age = oldest.elapsed();
-        if age >= grace {
-            Some(Duration::ZERO)
-        } else {
-            Some(grace.saturating_sub(age))
+        let until_aged = grace.saturating_sub(oldest.elapsed());
+        if self.short_runs_due(pending.len())
+            || self.has_full_write_run(&pending, WRITE_RUN_MAX_BYTES.max(chunk))
+        {
+            return Some(Duration::ZERO);
         }
+        let until_hold = self.disk.short_hold_remaining().unwrap_or(Duration::ZERO);
+        Some(until_aged.max(until_hold))
     }
 
     /// True when the longest ready entropy span is strictly longer than the
@@ -1858,10 +1898,10 @@ impl StorageModule {
 
     /// Ready to run a pass. A recall, a file holder, or a full window is not
     /// ready: the loop waits for the notify. A short packed run is not ready
-    /// by itself until `reorder_grace` elapses. A full run, the durability
-    /// count, an owed recall flush, an aged short run, or a queued entropy
-    /// sweep is ready, so the lane does not spin while a short run waits
-    /// for a neighbor.
+    /// by itself until `reorder_grace` elapses, and after one short run is
+    /// written the others wait another grace. A full run, the durability
+    /// count, an owed recall flush, the one eligible short run, or a queued
+    /// entropy sweep is ready.
     fn lane_work_ready(&self) -> bool {
         if !self.disk.disk_available() {
             return false;
