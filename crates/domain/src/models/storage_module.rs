@@ -1259,7 +1259,30 @@ impl StorageModule {
     }
 
     fn sync_pending_chunks_inner(&self, force: bool) -> eyre::Result<()> {
+        // The lane thread owns the chunk write and the interval files around
+        // it. A non-force caller only wakes that thread. A force caller waits
+        // until the lane has drained the pending runs. With no lane, or on the
+        // lane thread itself, this caller writes.
+        if self.disk.lane_running() && !self.disk.on_lane_thread() {
+            if !force {
+                self.disk.notify();
+                return Ok(());
+            }
+            if Self::lane_request_done(self.disk.request_lane_force())? {
+                return Ok(());
+            }
+        }
         self.commit_pending_runs(force, None, false)
+    }
+
+    /// `Ok(true)` when the lane finished the request. `Ok(false)` when the
+    /// lane stopped and this caller must do the write.
+    fn lane_request_done(result: Result<(), disk_lane::LaneHandoffError>) -> eyre::Result<bool> {
+        match result {
+            Ok(()) => Ok(true),
+            Err(disk_lane::LaneHandoffError::Stopped) => Ok(false),
+            Err(disk_lane::LaneHandoffError::Failed(error)) => Err(eyre!(error)),
+        }
     }
 
     /// `max_runs` commits at most that many pwrites and leaves the rest pending.
@@ -1436,16 +1459,16 @@ impl StorageModule {
             write_batch.retain(|(offset, _, _)| kept.contains(offset));
         }
 
-        let touched_starts = if max_runs.is_some() {
-            let mut starts = BTreeSet::new();
-            for run in &runs {
-                let (interval, _) = self.get_submodule_for_offset(run.start)?;
-                starts.insert(interval.start());
-            }
-            Some(starts)
-        } else {
-            None
-        };
+        // Only the submodules this batch writes. An untouched `intervals.json`
+        // stays as it was, and its `chunks.dat` is not synced again.
+        let mut touched_starts = BTreeSet::new();
+        for run in &runs {
+            let (interval, _) = self.get_submodule_for_offset(run.start)?;
+            touched_starts.insert(interval.start());
+        }
+
+        #[cfg(test)]
+        self.disk.record_commit_thread();
 
         let mut intervals = self
             .intervals
@@ -1464,7 +1487,7 @@ impl StorageModule {
 
         drop(intervals);
 
-        self.write_intervals_to_submodules()
+        self.write_intervals_files(Some(&touched_starts))
             .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
 
         let len = write_batch.len();
@@ -1489,10 +1512,7 @@ impl StorageModule {
         // as fsync can error on us if the underlying storage has issues.
         // A recall window fsyncs only the files it wrote.
         for (interval, submodule) in self.submodules.iter() {
-            if touched_starts
-                .as_ref()
-                .is_some_and(|starts| !starts.contains(&interval.start()))
-            {
+            if !touched_starts.contains(&interval.start()) {
                 continue;
             }
             self.disk.yield_to_recall();
@@ -1508,7 +1528,7 @@ impl StorageModule {
 
         // persist the state from all the write calls
         // save the updated intervals
-        self.write_intervals_to_submodules()
+        self.write_intervals_files(Some(&touched_starts))
             .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
 
         // Remove only the exact values written by this snapshot. A concurrent
@@ -1557,10 +1577,31 @@ impl StorageModule {
     /// If a submodule has no intervals after filtering, a default `Uninitialized` interval
     /// is created spanning the submodule's entire range to ensure consistency.
     pub fn write_intervals_to_submodules(&self) -> eyre::Result<()> {
+        // A running lane writes the files itself, before and after its chunk
+        // writes. This caller waits. A stopped lane, and the lane thread, write
+        // here.
+        if self.disk.lane_running()
+            && !self.disk.on_lane_thread()
+            && Self::lane_request_done(self.disk.request_lane_persist())?
+        {
+            return Ok(());
+        }
+        self.write_intervals_files(None)
+    }
+
+    /// Rewrite `intervals.json`. `only` limits the write to those submodule
+    /// starts. `None` rewrites every submodule.
+    fn write_intervals_files(
+        &self,
+        only: Option<&BTreeSet<PartitionChunkOffset>>,
+    ) -> eyre::Result<()> {
         let intervals = self.intervals.read().unwrap();
 
         // Loop though each of the submodule ranges
         for (submodule_interval, submodule) in self.submodules.iter() {
+            if only.is_some_and(|starts| !starts.contains(&submodule_interval.start())) {
+                continue;
+            }
             // Split out the ChunkType intervals that overlap the submodule interval
             let mut working_copy = intervals.clone();
             let cut_iter = working_copy.cut(*submodule_interval);
@@ -6092,6 +6133,125 @@ mod tests {
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
         );
         assert!(lane.module.has_pending_writes());
+        Ok(())
+    }
+
+    fn submodule_interval_path(module: &StorageModule, nth: usize) -> std::path::PathBuf {
+        module
+            .submodules
+            .iter()
+            .nth(nth)
+            .expect("submodule")
+            .1
+            .intervals_file
+            .lock()
+            .expect("intervals path")
+            .clone()
+    }
+
+    fn two_disk_fixture(
+        prefix: &str,
+        writes_before_sync: u64,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: writes_before_sync,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 60_000,
+                entropy_sweep_max_bytes: 32,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![
+                    (partition_chunk_offset_ii!(0, 4), "hdd0".into()),
+                    (partition_chunk_offset_ii!(5, 9), "hdd1".into()),
+                ],
+            },
+            &config,
+        )?;
+        Ok((tmp_dir, storage))
+    }
+
+    #[test]
+    fn interval_file_follows_the_written_submodule() -> eyre::Result<()> {
+        let (_tmp, storage) = two_disk_fixture("interval_touched", 1)?;
+        let untouched = submodule_interval_path(&storage, 1);
+        std::fs::write(&untouched, b"untouched-marker")?;
+        storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        );
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        assert_eq!(
+            storage.disk.last_commit_thread_id(),
+            Some(std::thread::current().id())
+        );
+        let written = read_intervals_file(&submodule_interval_path(&storage, 0))?;
+        assert_eq!(
+            written.get_at_point(PartitionChunkOffset::from(0)).copied(),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(std::fs::read(&untouched)?, b"untouched-marker");
+        Ok(())
+    }
+
+    #[test]
+    fn lane_persists_intervals_for_an_external_flush() -> eyre::Result<()> {
+        // Above the sync count and younger than `reorder_grace`, so the lane
+        // holds the chunk until the external force flush.
+        let (_tmp, storage) = two_disk_fixture("interval_lane", 10_000)?;
+        let untouched = submodule_interval_path(&storage, 1);
+        std::fs::write(&untouched, b"untouched-marker")?;
+        storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        );
+        let storage = Arc::new(storage);
+        let lane = LaneGuard::start(Arc::clone(&storage))?;
+        lane.module.sync_pending_chunks()?;
+        assert!(lane.module.has_pending_writes());
+        assert!(
+            !lane
+                .module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+
+        let module = Arc::clone(&lane.module);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(module.force_sync_pending_chunks());
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("disk lane did not finish the external flush")?;
+        assert!(
+            lane.module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        let lane_id = lane.module.disk.lane_thread_id().expect("lane thread");
+        assert_eq!(lane.module.disk.last_commit_thread_id(), Some(lane_id));
+        assert_ne!(lane_id, std::thread::current().id());
+        let written = read_intervals_file(&submodule_interval_path(&lane.module, 0))?;
+        assert_eq!(
+            written.get_at_point(PartitionChunkOffset::from(0)).copied(),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(std::fs::read(&untouched)?, b"untouched-marker");
         Ok(())
     }
 

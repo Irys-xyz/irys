@@ -20,14 +20,18 @@
 //! Index commits stay off this drive while a chunk `pread`, `pwrite`,
 //! `fsync`, or mining recall is in progress. They run in the gap before
 //! the next chunk command.
+//! This thread writes `intervals.json` for the submodules in a batch before
+//! those `pwrite`s and again after their `fsync`. Another thread posts that
+//! write here. The index database still commits on its own path.
 //!
 //! `StorageModuleService` starts one thread per module. That thread runs the
 //! sweep and the packed flush. It sleeps on the gate condvar and wakes when
-//! work is queued, a call finishes, a recall hold changes, or an index ack
-//! arrives. Ingress and data sync wait on the group result and do not lock
-//! the file. A mining recall still `pread`s on the mining thread and keeps
-//! two of those calls in the kernel. This thread submits no new write while
-//! the recall count is set. Writes already handed to the kernel run on.
+//! work is queued, a call finishes, a recall hold changes, an index ack
+//! arrives, or another thread posts a flush or an interval write. Ingress
+//! and data sync wait on the group result and do not lock the file. A mining
+//! recall still `pread`s on the mining thread and keeps two of those calls
+//! in the kernel. This thread submits no new write while the recall count
+//! is set. Writes already handed to the kernel run on.
 
 use std::{
     collections::HashMap,
@@ -226,8 +230,154 @@ pub(super) struct DiskGate {
     index_gap: Arc<IndexGap>,
     /// Further short runs wait until this instant. Full runs ignore it.
     short_hold_until: Mutex<Option<Instant>>,
+    /// Set for the life of `run_disk_lane`. External flushes use it to avoid
+    /// waiting for themselves.
+    lane_thread: Mutex<Option<std::thread::ThreadId>>,
+    /// External flush and interval writes wait here. The lane thread runs them.
+    handoff: LaneHandoff,
+    #[cfg(test)]
+    last_commit_thread: Mutex<Option<std::thread::ThreadId>>,
     #[cfg(test)]
     pub(super) entropy_preads: AtomicU64,
+}
+
+/// One posted flush or interval write, and the result the waiter collects.
+struct LaneHandoff {
+    mu: Mutex<LaneHandoffState>,
+    cv: Condvar,
+}
+
+struct LaneHandoffState {
+    next: u64,
+    completed_until: u64,
+    /// Exclusive end. A force flush is owed while this is past `completed_until`.
+    force_through: u64,
+    /// Exclusive end. A full interval rewrite is owed while this is past
+    /// `completed_until`.
+    persist_through: u64,
+    outcome: HashMap<u64, LaneOutcome>,
+}
+
+enum LaneOutcome {
+    Done,
+    Failed(String),
+}
+
+struct LaneRequest {
+    /// Tickets in `completed_until..mark` finish with this request.
+    mark: u64,
+    force: bool,
+    persist: bool,
+}
+
+/// The lane did not run the posted work, or the work failed.
+pub(super) enum LaneHandoffError {
+    /// The lane is stopping or already gone. The caller writes on its own thread.
+    Stopped,
+    Failed(String),
+}
+
+impl LaneHandoff {
+    fn new() -> Self {
+        Self {
+            mu: Mutex::new(LaneHandoffState {
+                next: 0,
+                completed_until: 0,
+                force_through: 0,
+                persist_through: 0,
+                outcome: HashMap::new(),
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, LaneHandoffState> {
+        self.mu.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn post(&self, force: bool, persist: bool) -> u64 {
+        let mut state = self.lock();
+        let ticket = state.next;
+        state.next = state.next.saturating_add(1);
+        if force {
+            state.force_through = state.next;
+        }
+        if persist {
+            state.persist_through = state.next;
+        }
+        self.cv.notify_all();
+        ticket
+    }
+
+    fn pending(&self) -> bool {
+        let state = self.lock();
+        state.completed_until < state.next
+            && (state.force_through > state.completed_until
+                || state.persist_through > state.completed_until)
+    }
+
+    fn take(&self) -> Option<LaneRequest> {
+        let mut state = self.lock();
+        if state.completed_until >= state.next {
+            return None;
+        }
+        let force = state.force_through > state.completed_until;
+        let persist = state.persist_through > state.completed_until;
+        if !force && !persist {
+            return None;
+        }
+        let mark = state.next;
+        // Drop the watermark we are about to run. A post during the work
+        // raises it again and the next take sees that request.
+        if force {
+            state.force_through = state.completed_until;
+        }
+        if persist {
+            state.persist_through = state.completed_until;
+        }
+        Some(LaneRequest {
+            mark,
+            force,
+            persist,
+        })
+    }
+
+    fn finish(&self, mark: u64, error: Option<String>) {
+        let mut state = self.lock();
+        let start = state.completed_until;
+        if mark > start {
+            for ticket in start..mark {
+                let stored = match &error {
+                    Some(error) => LaneOutcome::Failed(error.clone()),
+                    None => LaneOutcome::Done,
+                };
+                state.outcome.insert(ticket, stored);
+            }
+            state.completed_until = mark;
+        }
+        self.cv.notify_all();
+    }
+
+    fn wait(&self, ticket: u64, lane_started: &AtomicBool) -> Result<(), LaneHandoffError> {
+        let mut state = self.lock();
+        loop {
+            if let Some(outcome) = state.outcome.remove(&ticket) {
+                return match outcome {
+                    LaneOutcome::Done => Ok(()),
+                    LaneOutcome::Failed(error) => Err(LaneHandoffError::Failed(error)),
+                };
+            }
+            if !lane_started.load(Ordering::Acquire) {
+                return Err(LaneHandoffError::Stopped);
+            }
+            state = self.cv.wait(state).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn wake(&self) {
+        let _state = self.lock();
+        self.cv.notify_all();
+    }
 }
 
 /// Decrements `disk_ops` and `inflight_bytes` when the kernel call returns.
@@ -314,9 +464,103 @@ impl DiskGate {
             lane_stop: AtomicBool::new(false),
             index_gap,
             short_hold_until: Mutex::new(None),
+            lane_thread: Mutex::new(None),
+            handoff: LaneHandoff::new(),
+            #[cfg(test)]
+            last_commit_thread: Mutex::new(None),
             #[cfg(test)]
             entropy_preads: AtomicU64::new(0),
         }
+    }
+
+    pub(super) fn bind_lane_thread(&self) {
+        let mut guard = self
+            .lane_thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = Some(std::thread::current().id());
+    }
+
+    pub(super) fn unbind_lane_thread(&self) {
+        let mut guard = self
+            .lane_thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = None;
+    }
+
+    /// True on the thread that is inside `run_disk_lane`.
+    pub(super) fn on_lane_thread(&self) -> bool {
+        let guard = self
+            .lane_thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        guard.as_ref() == Some(&std::thread::current().id())
+    }
+
+    #[cfg(test)]
+    pub(super) fn lane_thread_id(&self) -> Option<std::thread::ThreadId> {
+        let guard = self
+            .lane_thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_commit_thread(&self) {
+        let mut guard = self
+            .last_commit_thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = Some(std::thread::current().id());
+    }
+
+    #[cfg(test)]
+    pub(super) fn last_commit_thread_id(&self) -> Option<std::thread::ThreadId> {
+        let guard = self
+            .last_commit_thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard
+    }
+
+    /// Ask the lane to drain every pending run. `Stopped` means this caller
+    /// must drain them itself. The wait does not take the sync lock.
+    pub(super) fn request_lane_force(&self) -> Result<(), LaneHandoffError> {
+        self.request_lane(true, false)
+    }
+
+    /// Ask the lane to rewrite every `intervals.json`. `Stopped` means this
+    /// caller must write the files itself.
+    pub(super) fn request_lane_persist(&self) -> Result<(), LaneHandoffError> {
+        self.request_lane(false, true)
+    }
+
+    fn request_lane(&self, force: bool, persist: bool) -> Result<(), LaneHandoffError> {
+        if self.on_lane_thread() || !self.lane_running() {
+            return Err(LaneHandoffError::Stopped);
+        }
+        let ticket = self.handoff.post(force, persist);
+        self.notify();
+        self.handoff.wait(ticket, &self.lane_started)
+    }
+
+    /// The next pass owes an external flush or a full interval rewrite.
+    pub(super) fn lane_request_pending(&self) -> bool {
+        self.handoff.pending()
+    }
+
+    fn take_lane_request(&self) -> Option<LaneRequest> {
+        self.handoff.take()
+    }
+
+    fn finish_lane_request(&self, mark: u64, error: Option<String>) {
+        self.handoff.finish(mark, error);
+    }
+
+    fn wake_lane_handoff(&self) {
+        self.handoff.wake();
     }
 
     /// True while a short run written earlier still owns the grace window.
@@ -1821,6 +2065,7 @@ impl StorageModule {
     }
 
     fn run_disk_lane(&self) {
+        self.disk.bind_lane_thread();
         let _exit = LaneExit { gate: &self.disk };
         let mut seen = 0;
         loop {
@@ -1900,13 +2145,16 @@ impl StorageModule {
     /// ready: the loop waits for the notify. A short packed run is not ready
     /// by itself until `reorder_grace` elapses, and after one short run is
     /// written the others wait another grace. A full run, the durability
-    /// count, an owed recall flush, the one eligible short run, or a queued
-    /// entropy sweep is ready.
+    /// count, an owed recall flush, the one eligible short run, a queued
+    /// entropy sweep, or an external flush or interval write is ready.
     fn lane_work_ready(&self) -> bool {
         if !self.disk.disk_available() {
             return false;
         }
-        if self.disk.recall_flush_is_owed() || self.pending_run_ready() {
+        if self.disk.lane_request_pending()
+            || self.disk.recall_flush_is_owed()
+            || self.pending_run_ready()
+        {
             return true;
         }
         if !self.disk.has_queued_sweep() {
@@ -1932,6 +2180,10 @@ impl StorageModule {
             drop(chunk_io);
             return;
         }
+        // An external flush or interval rewrite runs here, before this pass
+        // chooses a chunk command. A recall above skips it until the `pread`
+        // returns, so the mining read is not cut by the file update.
+        self.service_lane_handoff();
         // Capture this before the flush clears it. Entropy stays behind an
         // owed recall flush so the waiting recall gets the disk next.
         // Capture the read-vs-write choice once. A sweep removes the span
@@ -1968,16 +2220,52 @@ impl StorageModule {
         }
     }
 
+    /// Run posted flushes and interval rewrites. Each request's chunk write
+    /// still persists intervals before the `pwrite`s and after the `fsync`.
+    fn service_lane_handoff(&self) {
+        loop {
+            let Some(request) = self.disk.take_lane_request() else {
+                return;
+            };
+            let mut error = None;
+            if request.force
+                && let Err(cause) = self.commit_pending_runs(true, None, false)
+            {
+                tracing::error!(
+                    "Couldn't flush packed chunks for storage_module {}: {cause}",
+                    self.id
+                );
+                error = Some(cause.to_string());
+            }
+            if request.persist
+                && let Err(cause) = self.write_intervals_files(None)
+            {
+                tracing::error!(
+                    "Couldn't write intervals for storage_module {}: {cause}",
+                    self.id
+                );
+                if error.is_none() {
+                    error = Some(cause.to_string());
+                }
+            }
+            self.disk.finish_lane_request(request.mark, error);
+        }
+    }
+
     fn finish_disk_lane(&self) {
         // Shutdown still persists every pending chunk. Clear the flag first so
-        // that flush is not skipped as an owed window.
+        // that flush is not skipped as an owed window. Posted waits are
+        // drained on this thread before the lane drops, and a waiter that
+        // arrives after the drop writes on its own thread.
         self.disk.clear_recall_flush();
+        self.service_lane_handoff();
         if let Err(error) = self.force_sync_pending_chunks() {
             tracing::error!(
                 "Couldn't flush storage module {} on disk lane stop: {error}",
                 self.id
             );
         }
+        self.service_lane_handoff();
         self.poll_acks();
     }
 }
@@ -1990,6 +2278,8 @@ impl Drop for LaneExit<'_> {
     fn drop(&mut self) {
         self.gate.clear_recall_flush();
         self.gate.clear_lane();
+        self.gate.unbind_lane_thread();
+        self.gate.wake_lane_handoff();
     }
 }
 
