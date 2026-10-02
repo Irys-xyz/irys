@@ -246,7 +246,7 @@ impl PartitionMiningServiceInner {
             start_chunk_offset + self.config.consensus.num_chunks_in_recall_range as u32
         );
 
-        let chunks = self.storage_module.read_chunks(read_range)?;
+        let chunks = self.storage_module.read_recall_chunks(read_range)?;
         if chunks.is_empty() {
             warn!(
                 "No chunks found - storage_module_id:{} {}-{}",
@@ -457,6 +457,20 @@ impl PartitionMiningService {
         (controller, svc_handle)
     }
 
+    /// `handle_seed` reads `chunks.dat` and then hashes the recall range.
+    /// A multi-thread runtime moves this worker to the blocking pool so
+    /// other tasks still run during that read.
+    fn mine_seed(&mut self, msg: &BroadcastMiningSeed) {
+        let multi_thread = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        });
+        if multi_thread {
+            tokio::task::block_in_place(|| self.state.handle_seed(msg));
+        } else {
+            self.state.handle_seed(msg);
+        }
+    }
+
     async fn start(mut self) {
         info!("Starting partition mining service");
         loop {
@@ -485,7 +499,7 @@ impl PartitionMiningService {
                     match evt {
                         Some(arc_evt) => match arc_evt.as_ref() {
                             MiningBroadcastEvent::Seed(msg) => {
-                                self.state.handle_seed(msg);
+                                self.mine_seed(msg);
                             }
                             MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
                                 self.state.update_difficulty(h.diff);

@@ -521,6 +521,8 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                ..StorageSyncConfig::default()
             },
             packing: irys_types::PackingConfig {
                 local: irys_types::LocalPackingConfig {
@@ -931,6 +933,8 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                ..StorageSyncConfig::default()
             },
             packing: irys_types::PackingConfig {
                 local: irys_types::LocalPackingConfig {

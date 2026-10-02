@@ -25,7 +25,7 @@ tracing.workspace = true
 rand.workspace = true
 reth-db.workspace = true
 rust_decimal.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 lru.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types.workspace = true

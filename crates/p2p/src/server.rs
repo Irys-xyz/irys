@@ -42,6 +42,11 @@ use tracing_actix_web::TracingLogger;
 /// Prevents rapid duplicate requests within this time window.
 const DEFAULT_DUPLICATE_REQUEST_WINDOW: Duration = Duration::from_secs(10);
 
+/// How long a chunk push waits before answering `RateLimited`.
+/// The sender's gossip client times out at 5s and treats that as a dead peer.
+/// Packing can outlive this budget; the write keeps running after the answer.
+const CHUNK_GOSSIP_REPLY_BUDGET: Duration = Duration::from_secs(4);
+
 /// Handshake `peers` payload: unique advertised addresses, then shuffle+cap.
 fn handshake_peer_addresses(peer_list: &PeerList, cap: usize) -> Vec<PeerAddress> {
     let mut peers = peer_list.all_known_peers();
@@ -149,33 +154,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         let v2_request = v1_request.into_v2(peer.peer_id);
-
-        let permit = match server.chunk_semaphore.try_acquire() {
-            Ok(permit) => permit,
-            Err(_) => {
-                return HttpResponse::Ok()
-                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
-            }
-        };
-
-        // Snapshot is_syncing before the await so the anchor-penalty decision
-        // reflects node state at message acceptance, not at error observation.
-        let is_syncing = server.data_handler.sync_state.is_syncing();
-        let result = server.data_handler.handle_chunk(v2_request).await;
-        drop(permit);
-
-        if let Err(error) = result {
-            return Self::rejection_response_for_error(
-                &error,
-                &source_miner_address,
-                &server.peer_list,
-                is_syncing,
-                "send chunk",
-                &server.shutdown_token,
-            );
-        }
-
-        HttpResponse::Ok().json(GossipResponse::Accepted(()))
+        Self::drive_chunk_request(&server, v2_request, source_miner_address).await
     }
 
     /// Core v1 peer check (miner-address based). Returns the
@@ -690,31 +669,65 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        let permit = match server.chunk_semaphore.try_acquire() {
+        Self::drive_chunk_request(&server, v2_request, source_miner_address).await
+    }
+
+    /// Admit one chunk push. The semaphore covers only the reply budget.
+    /// When packing is still running at the deadline, the HTTP answer is
+    /// `RateLimited` and the task keeps the write. Dropping the `JoinHandle`
+    /// detaches that task; it does not cancel it.
+    async fn drive_chunk_request(
+        server: &Data<Self>,
+        v2_request: GossipRequestV2<UnpackedChunk>,
+        source_miner_address: IrysAddress,
+    ) -> HttpResponse {
+        let permit = match server.chunk_semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 return HttpResponse::Ok()
                     .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
             }
         };
-
+        // Snapshot is_syncing before the await so the anchor-penalty decision
+        // reflects node state at message acceptance, not at error observation.
         let is_syncing = server.data_handler.sync_state.is_syncing();
-        let result = server.data_handler.handle_chunk(v2_request).await;
+        let data_handler = server.data_handler.clone();
+        let peer_list = server.peer_list.clone();
+        let shutdown_token = server.shutdown_token.clone();
+        let mut join = tokio::spawn(async move { data_handler.handle_chunk(v2_request).await });
+        let waited = tokio::time::timeout(CHUNK_GOSSIP_REPLY_BUDGET, &mut join).await;
         drop(permit);
-
-        if let Err(error) = result {
-            return Self::rejection_response_for_error(
+        match waited {
+            Ok(Ok(Ok(()))) => {
+                debug!("Gossip data handled");
+                HttpResponse::Ok().json(GossipResponse::Accepted(()))
+            }
+            Ok(Ok(Err(error))) => Self::rejection_response_for_error(
                 &error,
                 &source_miner_address,
-                &server.peer_list,
+                &peer_list,
                 is_syncing,
                 "send chunk",
-                &server.shutdown_token,
-            );
+                &shutdown_token,
+            ),
+            Ok(Err(join_error)) => {
+                let error =
+                    GossipError::Internal(InternalGossipError::Unknown(join_error.to_string()));
+                Self::rejection_response_for_error(
+                    &error,
+                    &source_miner_address,
+                    &peer_list,
+                    is_syncing,
+                    "send chunk",
+                    &shutdown_token,
+                )
+            }
+            Err(_) => {
+                drop(join);
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
+            }
         }
-
-        debug!("Gossip data handled");
-        HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
     #[expect(

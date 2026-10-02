@@ -581,7 +581,7 @@ fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,
     chunk: &UnpackedChunk,
 ) -> Result<(), MigrationError> {
-    storage_module.write_data_chunk(chunk).map_err(|e| match e {
+    storage_module.deposit_data_chunk(chunk).map_err(|e| match e {
         // Recovery holds the module's data writes; the worker defers, so this
         // is expected and not an error worth an error-level log.
         WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,

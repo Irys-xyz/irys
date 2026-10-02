@@ -476,6 +476,17 @@ pub struct StorageSyncConfig {
     /// floored at 256 chunks so a small `num_writes_before_sync` cannot stall
     /// the worker on the storage service's idle flush.
     pub max_pending_write_bytes: Option<u64>,
+    /// Parsed so existing configs keep this key. A queued entropy sweep runs
+    /// when the disk is free. The disk lane does not wait out this interval.
+    #[serde(default = "default_entropy_sweep_interval_millis")]
+    pub entropy_sweep_interval_millis: u64,
+    /// Max bytes of one entropy pread or pwrite. A hold is at least one chunk.
+    #[serde(default = "default_entropy_sweep_max_bytes")]
+    pub entropy_sweep_max_bytes: u64,
+    /// Max unread gap, in bytes, a sweep may read through and discard.
+    /// Zero bridges no hole.
+    #[serde(default = "default_entropy_coalesce_hole_bytes")]
+    pub entropy_coalesce_hole_bytes: u64,
 }
 
 impl Default for StorageSyncConfig {
@@ -483,8 +494,23 @@ impl Default for StorageSyncConfig {
         Self {
             num_writes_before_sync: 100,
             max_pending_write_bytes: None,
+            entropy_sweep_interval_millis: default_entropy_sweep_interval_millis(),
+            entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),
+            entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
         }
     }
+}
+
+fn default_entropy_sweep_interval_millis() -> u64 {
+    1000
+}
+
+fn default_entropy_sweep_max_bytes() -> u64 {
+    256 * 1024
+}
+
+fn default_entropy_coalesce_hole_bytes() -> u64 {
+    256 * 1024
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -979,8 +1005,11 @@ pub struct VdfNodeConfig {
     #[serde(default)]
     pub free_run: VdfFreeRun,
 
-    /// When true, enforce a minimum step duration to prevent VDF from
-    /// outrunning block production when sha_1s_difficulty is low.
+    /// When true, the local step uses a 25ms floor instead of one second.
+    /// Test configs set this so a tiny hash count can still produce many steps
+    /// per second. Production leaves it false: the hash count stays the
+    /// consensus difficulty, and a core that finishes early waits out the rest
+    /// of the second.
     #[serde(default)]
     pub throttle: bool,
 
@@ -1280,6 +1309,9 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                entropy_sweep_max_bytes: 256 * 1024,
+                entropy_coalesce_hole_bytes: 256 * 1024,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1472,6 +1504,9 @@ impl NodeConfig {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 1000,
+                entropy_sweep_max_bytes: 256 * 1024,
+                entropy_coalesce_hole_bytes: 256 * 1024,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
