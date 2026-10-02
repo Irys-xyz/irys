@@ -1819,6 +1819,8 @@ mod write_outcome_tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: num_chunks,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                ..StorageSyncConfig::default()
             },
             base_directory: tmp.path().to_path_buf(),
             ..NodeConfig::testing()

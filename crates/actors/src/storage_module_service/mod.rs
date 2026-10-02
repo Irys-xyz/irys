@@ -28,6 +28,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{Arc, RwLock},
+    thread::JoinHandle,
     time::Duration,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -130,6 +131,27 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
+    fn spawn_disk_lanes(&self) -> DiskLaneSet {
+        let modules = {
+            let guard = self.storage_modules.read().unwrap();
+            guard.clone()
+        };
+        let mut handles = Vec::new();
+        for module in modules {
+            match module.spawn_disk_lane() {
+                Ok(Some(handle)) => handles.push((module, handle)),
+                Ok(None) => {}
+                Err(error) => {
+                    error!(
+                        "Couldn't start disk lane for storage_module {}: {error}",
+                        module.id
+                    );
+                }
+            }
+        }
+        DiskLaneSet { handles }
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     fn tick(&self) {
         let storage_modules = {
@@ -138,6 +160,12 @@ impl StorageModuleServiceInner {
         };
 
         for sm in storage_modules.iter() {
+            if sm.disk_lane_running() {
+                sm.wake_disk_lane();
+                continue;
+            }
+            // The lane thread is the flush and the sweep. This path covers a
+            // module whose thread failed to start.
             if sm.has_pending_writes() {
                 // Check the configured per-submodule batch threshold once per
                 // service tick, not once per ingested chunk.
@@ -159,6 +187,7 @@ impl StorageModuleServiceInner {
                     );
                 }
             }
+            sm.pump_entropy_reads();
         }
     }
 
@@ -542,6 +571,7 @@ impl StorageModuleService {
     #[tracing::instrument(name = "storage_module_service_start", level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting StorageModule Service");
+        let _lanes = self.inner.spawn_disk_lanes();
 
         // Soft-skips per-SM issues; only migration channel closed is fatal.
         // Inner holds a Shutdown clone so migrate bails mid-heal without a cancel param.
@@ -598,5 +628,22 @@ impl StorageModuleService {
 
         tracing::info!("shutting down StorageModule Service gracefully");
         Ok(())
+    }
+}
+
+struct DiskLaneSet {
+    handles: Vec<(Arc<StorageModule>, JoinHandle<()>)>,
+}
+
+impl Drop for DiskLaneSet {
+    fn drop(&mut self) {
+        for (module, _) in &self.handles {
+            module.stop_disk_lane();
+        }
+        for (_, handle) in self.handles.drain(..) {
+            if let Err(payload) = handle.join() {
+                error!("disk lane thread panicked: {payload:?}");
+            }
+        }
     }
 }

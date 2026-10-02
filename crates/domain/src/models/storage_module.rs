@@ -36,6 +36,8 @@
 //! - Invisible to rest of the node
 //! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
 
+use std::os::unix::fs::FileExt as _;
+
 use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
@@ -53,7 +55,7 @@ use irys_database::{
         tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
     },
 };
-use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
+use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
     DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, LedgerChunkOffset,
@@ -70,7 +72,7 @@ use reth_db::Database as _;
 use reth_db::transaction::DbTx;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     ops::{Deref, DerefMut},
@@ -78,7 +80,6 @@ use std::{
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -88,6 +89,9 @@ use crate::{CircularBuffer, StorageModulesReadGuard};
 
 #[path = "index_drain.rs"]
 mod index_drain;
+
+#[path = "disk_lane.rs"]
+mod disk_lane;
 
 type SubmodulePath = PathBuf;
 
@@ -149,6 +153,13 @@ struct PendingWrites {
     chunks: ChunkMap,
     /// Offset → generation that reserved it. Only that generation may release.
     occupancy: HashMap<PartitionChunkOffset, u64>,
+    /// Who queued each packed chunk. Equal-length runs break ties with this.
+    priorities: HashMap<PartitionChunkOffset, disk_lane::WritePriority>,
+    /// When each packed chunk was queued. A short run may jump a longer one
+    /// after `reorder_grace`.
+    queued_at: HashMap<PartitionChunkOffset, Instant>,
+    /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
+    queued_unpacked_bytes: u64,
 }
 
 impl Deref for PendingWrites {
@@ -162,54 +173,6 @@ impl DerefMut for PendingWrites {
     fn deref_mut(&mut self) -> &mut ChunkMap {
         &mut self.chunks
     }
-}
-
-struct PreparedDataWrite {
-    offset: PartitionChunkOffset,
-    packed: Vec<u8>,
-    generation: u64,
-    done: Option<mpsc::Receiver<Result<(), WriteDataChunkError>>>,
-}
-
-impl PreparedDataWrite {
-    fn take_done(&mut self) -> mpsc::Receiver<Result<(), WriteDataChunkError>> {
-        self.done
-            .take()
-            .expect("index ACK receiver is taken at most once")
-    }
-}
-
-fn recv_index_ack(
-    done: mpsc::Receiver<Result<(), WriteDataChunkError>>,
-) -> Result<(), WriteDataChunkError> {
-    done.recv().unwrap_or_else(|_| {
-        Err(WriteDataChunkError::Other(eyre::eyre!(
-            "index drain closed"
-        )))
-    })
-}
-
-fn recv_index_acks(prepared: &[PreparedDataWrite]) -> Vec<Result<(), WriteDataChunkError>> {
-    prepared
-        .iter()
-        .map(|write| {
-            write
-                .done
-                .as_ref()
-                .map(|done| {
-                    done.recv().unwrap_or_else(|_| {
-                        Err(WriteDataChunkError::Other(eyre::eyre!(
-                            "index drain closed"
-                        )))
-                    })
-                })
-                .unwrap_or_else(|| {
-                    Err(WriteDataChunkError::Other(eyre::eyre!(
-                        "index ACK receiver missing"
-                    )))
-                })
-        })
-        .collect()
 }
 
 /// Storage submodules mapped to their chunk ranges
@@ -288,6 +251,9 @@ pub struct StorageModule {
     recent_chunk_times: Arc<RwLock<CircularBuffer<ChunkTimeRecord>>>,
     /// Runtime configuration parameters
     pub config: Config,
+    /// Recall, packed writes, and entropy reads. Callers enqueue; this lane
+    /// takes `chunks.dat`.
+    disk: disk_lane::DiskGate,
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -408,6 +374,122 @@ impl StorageModules {
     }
 }
 
+/// Progress of one packed run while choosing which chunks fill the window.
+struct RunCursor {
+    start: PartitionChunkOffset,
+    last: PartitionChunkOffset,
+    chunk_type: ChunkType,
+    chunk_count: usize,
+    byte_len: u64,
+}
+
+/// One adjacent run gathered from the reorder buffer.
+struct CoalescedRun {
+    priority: disk_lane::WritePriority,
+    byte_len: u64,
+    oldest: Instant,
+    aged: bool,
+    items: Vec<(PartitionChunkOffset, (ChunkBytes, ChunkType))>,
+}
+
+/// Length and age of one packed run. The peek path uses this so it does not
+/// clone chunk bytes.
+struct RunMeta {
+    byte_len: u64,
+    oldest: Instant,
+}
+
+/// One `pwrite` of strictly adjacent chunks: same type, same `chunks.dat`,
+/// no hole, and no mix of priorities. A short chunk is its own run.
+struct WriteRun {
+    start: PartitionChunkOffset,
+    chunk_type: ChunkType,
+    bytes: ChunkBytes,
+    offsets: Vec<PartitionChunkOffset>,
+}
+
+/// Mining-recall `pread`s kept in the kernel together. The lane window is
+/// separate: the lane waits for the whole recall before it submits.
+const RECALL_INFLIGHT: usize = 2;
+
+/// Widths of the `pread`s for one contiguous recall run, as
+/// `(chunks from the run start, chunk count)`.
+/// A run that fits in one `num_chunks_in_recall_range` slice is split in
+/// half so two commands reach the controller. A longer run keeps that
+/// slice width and pairs the slices. A one-chunk tail stays one `pread`.
+fn recall_piece_plan(len: u64, max_chunks: u64) -> Vec<(u64, u64)> {
+    let mut pieces = Vec::new();
+    let mut done = 0u64;
+    let cap = max_chunks.max(1);
+    while done < len {
+        let n = (len - done).min(cap);
+        pieces.push((done, n));
+        done += n;
+    }
+    if pieces.len() % RECALL_INFLIGHT != 0
+        && let Some((off, n)) = pieces.pop()
+    {
+        if n > 1 {
+            let first = n.div_ceil(2);
+            pieces.push((off, first));
+            pieces.push((off + first, n - first));
+        } else {
+            pieces.push((off, n));
+        }
+    }
+    pieces
+}
+
+/// Two `pread`s of one recall run share `file`. `file` is a dup, so these
+/// `pread`s do not wait for packed writes already in the kernel. Chunk bytes
+/// land in `chunk_map` after each wave joins.
+fn read_recall_run(
+    file: &File,
+    start: PartitionChunkOffset,
+    len: u64,
+    chunk_type: ChunkType,
+    interval_start: PartitionChunkOffset,
+    chunk_size: u64,
+    chunk_len: usize,
+    max_chunks: u64,
+    chunk_map: &mut ChunkMap,
+) -> eyre::Result<()> {
+    let pieces = recall_piece_plan(len, max_chunks);
+    let mut next = 0;
+    while next < pieces.len() {
+        let end = (next + RECALL_INFLIGHT).min(pieces.len());
+        let mut batch = Vec::with_capacity(end - next);
+        for &(done, n) in &pieces[next..end] {
+            let piece = PartitionChunkOffset(start.0 + done as u32);
+            let file_offset = *(piece - interval_start) as u64 * chunk_size;
+            batch.push((piece, file_offset, n, vec![0_u8; n as usize * chunk_len]));
+        }
+        let loaded = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(batch.len());
+            for (piece, file_offset, n, mut buf) in batch {
+                handles.push(scope.spawn(move || {
+                    let result = file.read_exact_at(&mut buf, file_offset);
+                    (piece, n, buf, result)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("recall read"))
+                .collect::<Vec<_>>()
+        });
+        for (piece, n, buf, result) in loaded {
+            result.wrap_err_with(|| format!("recall read at offset {piece} count {n}"))?;
+            for step in 0..n {
+                let at = step as usize * chunk_len;
+                let off = PartitionChunkOffset(piece.0 + step as u32);
+                chunk_map.insert(off, (buf[at..at + chunk_len].to_vec(), chunk_type));
+            }
+        }
+        next = end;
+    }
+    Ok(())
+}
+
 impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
@@ -415,6 +497,7 @@ impl StorageModule {
         let mut global_intervals = StorageIntervals::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
+        let index_gap = Arc::new(index_drain::IndexGap::new());
 
         // Initialize the submodules from the StorageModuleInfo
         for (submodule_interval, dir) in storage_module_info.submodules.clone() {
@@ -540,6 +623,7 @@ impl StorageModule {
                             db,
                             Arc::clone(&index_write_generation),
                             Arc::clone(&index_commit_fail_next),
+                            Arc::clone(&index_gap),
                         )?,
                     },
                 )
@@ -623,6 +707,7 @@ impl StorageModule {
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
+            disk: disk_lane::DiskGate::with_index_gap(index_gap),
         })
     }
 
@@ -688,6 +773,145 @@ impl StorageModule {
         !self.pending_writes.read().unwrap().is_empty()
     }
 
+    /// A packed run is ready for the disk when one run fills the write cap,
+    /// the pending set has reached the durability count, or the oldest chunk
+    /// has waited `reorder_grace`. A shorter run stays in memory so the lane
+    /// can keep reading entropy beside it.
+    fn pending_run_ready(&self) -> bool {
+        let pending = self.pending_writes.read().unwrap();
+        if pending.is_empty() {
+            return false;
+        }
+        let threshold = self.config.node_config.storage.num_writes_before_sync;
+        if pending.len() as u64 >= threshold {
+            return true;
+        }
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let cap = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
+        self.has_full_write_run(&pending, cap) || self.has_aged_pending(&pending, chunk)
+    }
+
+    /// True when the oldest chunk in some run has waited out `reorder_grace`.
+    fn has_aged_pending(&self, pending: &PendingWrites, chunk: u64) -> bool {
+        let grace = disk_lane::reorder_grace(chunk);
+        pending
+            .queued_at
+            .values()
+            .any(|queued_at| queued_at.elapsed() >= grace)
+    }
+
+    /// Bytes of the longest packed run that may hit the disk now. Zero when
+    /// every run is still held for a neighbor.
+    fn longest_ready_write_bytes(&self) -> u64 {
+        let pending = self.pending_writes.read().unwrap();
+        if pending.is_empty() {
+            return 0;
+        }
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let cap = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
+        let grace = disk_lane::reorder_grace(chunk);
+        let due_all = self.short_runs_due(pending.len());
+        self.write_run_metas(&pending, cap)
+            .into_iter()
+            .filter(|run| due_all || run.byte_len >= cap || run.oldest.elapsed() >= grace)
+            .map(|run| run.byte_len)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Durability and an owed recall flush write short runs. The count is
+    /// the whole pending set, matching `num_writes_before_sync`.
+    fn short_runs_due(&self, pending_count: usize) -> bool {
+        let threshold = self.config.node_config.storage.num_writes_before_sync;
+        self.disk.recall_flush_is_owed() || pending_count as u64 >= threshold
+    }
+
+    /// True when the reorder scan holds one contiguous run of at least `cap`
+    /// bytes. This mirrors `can_extend_run` and does not copy chunk bytes.
+    fn has_full_write_run(&self, pending: &PendingWrites, cap: u64) -> bool {
+        self.write_run_metas(pending, cap)
+            .iter()
+            .any(|run| run.byte_len >= cap)
+    }
+
+    /// Runs inside one reorder scan, in offset order. The scan is offset
+    /// order so a pile of one-chunk migration writes cannot hide a long
+    /// ingress run once the pending set is wider than the scan.
+    fn write_run_metas(&self, pending: &PendingWrites, cap: u64) -> Vec<RunMeta> {
+        let chunk_size = self.config.consensus.chunk_size.max(1);
+        let mut indexed: Vec<(disk_lane::WritePriority, PartitionChunkOffset)> = pending
+            .iter()
+            .map(|(offset, state)| {
+                let priority = pending
+                    .priorities
+                    .get(offset)
+                    .copied()
+                    .unwrap_or(match state.1 {
+                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
+                        _ => disk_lane::WritePriority::Ingress,
+                    });
+                (priority, *offset)
+            })
+            .collect();
+        indexed.sort_by_key(|(_, offset)| *offset);
+        indexed.truncate(disk_lane::WRITE_REORDER_CHUNKS);
+
+        let mut runs = Vec::new();
+        let mut current: Option<RunCursor> = None;
+        let mut current_priority: Option<disk_lane::WritePriority> = None;
+        let mut current_oldest: Option<Instant> = None;
+        for (priority, offset) in indexed {
+            let Some((bytes, chunk_type)) = pending.get(&offset) else {
+                continue;
+            };
+            let next_len = bytes.len() as u64;
+            let next_type = *chunk_type;
+            let queued_at = pending
+                .queued_at
+                .get(&offset)
+                .copied()
+                .unwrap_or_else(Instant::now);
+            let extend = current_priority == Some(priority)
+                && current.as_ref().is_some_and(|run| {
+                    self.can_extend_run(chunk_size, cap, run, offset, next_type, next_len)
+                });
+            if extend {
+                let run = current.as_mut().expect("extend checks the current run");
+                run.last = offset;
+                run.chunk_count += 1;
+                run.byte_len += next_len;
+                if let Some(oldest) = current_oldest.as_mut()
+                    && queued_at < *oldest
+                {
+                    *oldest = queued_at;
+                }
+                continue;
+            }
+            if let Some(cursor) = current.take() {
+                runs.push(RunMeta {
+                    byte_len: cursor.byte_len,
+                    oldest: current_oldest.unwrap_or_else(Instant::now),
+                });
+            }
+            current_priority = Some(priority);
+            current_oldest = Some(queued_at);
+            current = Some(RunCursor {
+                start: offset,
+                last: offset,
+                chunk_type: next_type,
+                chunk_count: 1,
+                byte_len: next_len,
+            });
+        }
+        if let Some(cursor) = current.take() {
+            runs.push(RunMeta {
+                byte_len: cursor.byte_len,
+                oldest: current_oldest.unwrap_or_else(Instant::now),
+            });
+        }
+        runs
+    }
+
     /// True when a *data* write for `offset` is queued but not yet flushed. A
     /// queued Entropy write does not count: `write_data_chunk` folds data into
     /// that entry itself, so such an offset is still writable.
@@ -703,12 +927,12 @@ impl StorageModule {
     /// migration pauses writing to this module once this reaches its ceiling
     /// (`storage.max_pending_write_bytes`).
     pub fn pending_write_bytes(&self) -> u64 {
-        self.pending_writes
-            .read()
-            .unwrap()
+        let pending = self.pending_writes.read().unwrap();
+        let packed = pending
             .values()
             .map(|(bytes, _)| bytes.len() as u64)
-            .sum()
+            .sum::<u64>();
+        packed.saturating_add(pending.queued_unpacked_bytes)
     }
 
     /// Number of submodules (independent disks) backing this module.
@@ -724,9 +948,13 @@ impl StorageModule {
     /// through [`Self::write_data_chunk`], so this is the one gate for all of
     /// them. Entropy (packing) writes are unaffected.
     pub fn pause_data_writes(&self) {
-        let _pending = self.pending_writes.write().unwrap();
-        self.data_writes_paused.store(true, Ordering::SeqCst);
-        self.index_write_generation.fetch_add(1, Ordering::SeqCst);
+        {
+            let _pending = self.pending_writes.write().unwrap();
+            self.data_writes_paused.store(true, Ordering::SeqCst);
+            self.index_write_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        // Slots already queued must not be packed into a paused module.
+        self.fail_queued_sweeps();
     }
 
     pub fn resume_data_writes(&self) {
@@ -790,6 +1018,7 @@ impl StorageModule {
             offset,
             generation,
             done: done_tx,
+            wake: None,
         });
         done_rx
     }
@@ -922,7 +1151,11 @@ impl StorageModule {
             }
             pending.chunks.clear();
             pending.occupancy.clear();
+            pending.priorities.clear();
+            pending.queued_at.clear();
         }
+        self.fail_queued_sweeps();
+        self.poll_acks();
         let storage_interval = {
             let mut intervals = self.intervals.write().unwrap();
             let start = intervals.first_key_value().unwrap().0.start();
@@ -996,10 +1229,30 @@ impl StorageModule {
     /// 3. Writes chunks to disk and removes them from pending queue
     ///
     pub fn force_sync_pending_chunks(&self) -> eyre::Result<()> {
+        // Deposited bodies are not in the packed map yet. Pack them first so
+        // the flush below persists the bytes the caller asked to finish.
+        self.drain_entropy_queue();
         self.sync_pending_chunks_inner(true)
     }
 
     fn sync_pending_chunks_inner(&self, force: bool) -> eyre::Result<()> {
+        self.commit_pending_runs(force, None, false)
+    }
+
+    /// `max_runs` commits at most that many pwrites and leaves the rest pending.
+    /// `None` commits every run that meets the threshold.
+    /// `coalesce` sorts a reorder buffer and joins adjacent chunks up to the
+    /// write cap. The no-lane path passes false and keeps the entropy cap.
+    ///
+    /// A recall flush holds the owed flag across this call. An unlimited sync
+    /// that observes the flag returns without writing, so the recall waits
+    /// only for the window and not for the rest of the batch.
+    fn commit_pending_runs(
+        &self,
+        force: bool,
+        max_runs: Option<usize>,
+        coalesce: bool,
+    ) -> eyre::Result<()> {
         // TODO: rework this function
         // 1.) use batches for fsync, instead of the all the pending writes (reduces impact of write errors)
         // 2.) pending writes are per-sm, we should delegate flushing to the StorageSubmodule
@@ -1008,49 +1261,131 @@ impl StorageModule {
 
         // Multiple services may request a flush concurrently. Serializing the
         // operation avoids duplicate writes and lets `pending_writes` remain
-        // the single durability fence until the whole batch commits.
+        // the single durability fence until this commit finishes.
         let _sync_guard = self
             .sync_in_progress
             .lock()
             .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
 
+        if max_runs.is_none() && self.disk.recall_flush_is_owed() {
+            return Ok(());
+        }
+
         let then = Instant::now();
-        let threshold = if force {
+        let threshold = if force || max_runs.is_some() {
             0
         } else {
             self.config.node_config.storage.num_writes_before_sync
         };
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let run_cap = if coalesce {
+            disk_lane::WRITE_RUN_MAX_BYTES.max(chunk)
+        } else {
+            self.config
+                .node_config
+                .storage
+                .entropy_sweep_max_bytes
+                .max(chunk)
+        };
 
         // First use read lock to check if we have work to do
-        let write_batch = {
+        let (mut write_batch, pending_count, queued_at) = {
             let pending = self.pending_writes.read().unwrap();
+            let pending_count = pending.len();
+            let queued_at = if coalesce {
+                pending.queued_at.clone()
+            } else {
+                HashMap::new()
+            };
 
-            let pending_writes = self
-                .submodules
-                .iter()
-                .flat_map(|(interval, _submodule)| {
-                    let submodule_writes: Vec<_> = pending
-                        .iter()
-                        .filter(|(offset, _)| interval.contains_point(**offset))
-                        .map(|(offset, state)| (*offset, state.clone()))
-                        .collect();
+            let pending_writes = if coalesce && let Some(limit) = max_runs {
+                self.select_coalesced_window(
+                    &pending,
+                    limit,
+                    disk_lane::WRITE_REORDER_CHUNKS,
+                    run_cap,
+                )
+            } else if let Some(limit) = max_runs {
+                self.select_pending_window(&pending, limit, run_cap)
+            } else {
+                self.submodules
+                    .iter()
+                    .flat_map(|(interval, _submodule)| {
+                        let submodule_writes: Vec<_> = pending
+                            .iter()
+                            .filter(|(offset, _)| interval.contains_point(**offset))
+                            .map(|(offset, state)| {
+                                let priority = pending.priorities.get(offset).copied().unwrap_or(
+                                    match state.1 {
+                                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
+                                        _ => disk_lane::WritePriority::Ingress,
+                                    },
+                                );
+                                (*offset, state.clone(), priority)
+                            })
+                            .collect();
 
-                    // each submodule is it's own "IO domain", so we don't process pending writes for one if it's queue is too small
-                    if submodule_writes.len() as u64 >= threshold {
-                        submodule_writes
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect::<Vec<_>>();
+                        // each submodule is it's own "IO domain", so we don't process pending writes for one if it's queue is too small
+                        if submodule_writes.len() as u64 >= threshold {
+                            submodule_writes
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
 
             drop(pending);
-            pending_writes
+            (pending_writes, pending_count, queued_at)
         };
 
         if write_batch.is_empty() {
             return Ok(());
         }
+
+        let mut runs = if coalesce {
+            self.plan_ranked_runs(&write_batch, run_cap)
+        } else {
+            self.plan_write_runs(&write_batch, run_cap)
+        };
+        if let Some(limit) = max_runs {
+            runs.truncate(limit);
+        }
+        // A short run seeks about as much as a full one and moves far less
+        // data. Hold it unless durability, a recall flush, or the grace is due.
+        if coalesce && !force && !self.short_runs_due(pending_count) {
+            let full = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
+            let grace = disk_lane::reorder_grace(chunk);
+            runs.retain(|run| {
+                run.bytes.len() as u64 >= full
+                    || run.offsets.iter().any(|offset| {
+                        queued_at
+                            .get(offset)
+                            .is_some_and(|at| at.elapsed() >= grace)
+                    })
+            });
+        }
+        if runs.is_empty() {
+            return Ok(());
+        }
+        if max_runs.is_some() {
+            let kept: BTreeSet<PartitionChunkOffset> = runs
+                .iter()
+                .flat_map(|run| run.offsets.iter().copied())
+                .collect();
+            write_batch.retain(|(offset, _, _)| kept.contains(offset));
+        }
+
+        let touched_starts = if max_runs.is_some() {
+            let mut starts = BTreeSet::new();
+            for run in &runs {
+                let (interval, _) = self.get_submodule_for_offset(run.start)?;
+                starts.insert(interval.start());
+            }
+            Some(starts)
+        } else {
+            None
+        };
 
         let mut intervals = self
             .intervals
@@ -1058,8 +1393,8 @@ impl StorageModule {
             .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
 
         // write every offset to the intervals file as Interrupted
-        // we sync the correct intervals state once the entire batch is written
-        for (chunk_offset, _) in write_batch.iter() {
+        // we sync the correct intervals state once this commit is written
+        for (chunk_offset, _, _) in write_batch.iter() {
             Self::cut_then_insert_interval_if_touching(
                 &mut intervals,
                 *chunk_offset,
@@ -1074,22 +1409,35 @@ impl StorageModule {
 
         let len = write_batch.len();
 
-        // Keep every snapshot entry in `pending_writes` while writing. A data
-        // interval is updated optimistically by `write_chunk_internal`, but the
-        // pending entry keeps durability queries false until both persistence
-        // steps below have succeeded. On any error the batch remains queued and
-        // the next service tick can retry it without a restart.
-        for (chunk_offset, (bytes, chunk_type)) in &write_batch {
-            self.write_chunk_internal(*chunk_offset, bytes.clone(), *chunk_type)?;
+        // One capped pwrite per adjacent run. The lane keeps a few of those
+        // calls in flight. A mining recall queued between batches starts
+        // before the next batch. The hold covers the flush so an entropy
+        // read does not cut in, and it ends before this function returns.
+        let _write_hold = self.disk.hold_writes();
+        if self.disk.lane_running() {
+            self.write_runs_window(&runs)?;
+        } else {
+            for run in &runs {
+                self.write_run(run)?;
+            }
         }
 
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::BeforeDataFsync)?;
 
         // fsync this write batch BEFORE committing the interval state
-        // as fsync can error on us if the underlying storage has issues
-        for (_, submodule) in self.submodules.iter() {
-            let file = submodule.file.lock().unwrap();
+        // as fsync can error on us if the underlying storage has issues.
+        // A recall window fsyncs only the files it wrote.
+        for (interval, submodule) in self.submodules.iter() {
+            if touched_starts
+                .as_ref()
+                .is_some_and(|starts| !starts.contains(&interval.start()))
+            {
+                continue;
+            }
+            self.disk.yield_to_recall();
+            let file_arc = Arc::clone(&submodule.file);
+            let file = self.disk.lock_chunks(&file_arc);
             // Ensure data is flushed to disk prior to drop
             file.sync_all()
                 .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
@@ -1107,9 +1455,11 @@ impl StorageModule {
         // producer may have replaced an entry while the disk I/O was running;
         // that newer value must remain queued for the next batch.
         let mut pending = self.pending_writes.write().unwrap();
-        for (chunk_offset, state) in &write_batch {
+        for (chunk_offset, state, _) in &write_batch {
             if pending.get(chunk_offset) == Some(state) {
                 pending.remove(chunk_offset);
+                pending.priorities.remove(chunk_offset);
+                pending.queued_at.remove(chunk_offset);
             }
         }
 
@@ -1264,6 +1614,17 @@ impl StorageModule {
         &self,
         chunk_range: Interval<PartitionChunkOffset>,
     ) -> eyre::Result<ChunkMap> {
+        // Entropy-class read: mining recalls and an in-progress flush go first.
+        self.disk.yield_to_recall();
+        self.disk.yield_to_writes();
+        self.read_chunks_inner(chunk_range, false)
+    }
+
+    fn read_chunks_inner(
+        &self,
+        chunk_range: Interval<PartitionChunkOffset>,
+        recall: bool,
+    ) -> eyre::Result<ChunkMap> {
         let mut chunk_map = ChunkMap::new();
 
         // Snapshot only the relevant interval metadata. Physical reads and
@@ -1276,43 +1637,188 @@ impl StorageModule {
             .map(|(interval, chunk_type)| (*interval, *chunk_type))
             .collect::<Vec<_>>();
 
-        // Process each overlapping interval
+        // Plan disk runs first. Pending and uninitialized offsets split a run
+        // so a hole is not filled from the next chunk. A mining recall dups
+        // each chunks.dat and reads at once. Any other read holds the file
+        // lock across the runs on that file.
+        let mut disk_runs: Vec<(PartitionChunkOffset, u64, ChunkType)> = Vec::new();
+        let mut visited: Vec<PartitionChunkOffset> = Vec::new();
+
         for (interval, interval_chunk_type) in overlapping {
-            // Get intersection with requested range
             let start = *chunk_range.start().max(interval.start());
             let end = *chunk_range.end().min(interval.end());
 
-            // Process each chunk in the clipped range
+            let mut run_start: Option<PartitionChunkOffset> = None;
+            let mut run_len = 0u64;
             for chunk_offset in start..=end {
                 let partition_chunk_offset = PartitionChunkOffset::from(chunk_offset);
+                visited.push(partition_chunk_offset);
 
-                // Check for pending writes first
                 let pending = self.pending_writes.read().unwrap();
                 let pending_chunk = pending
                     .get(&partition_chunk_offset)
                     .map(|(bytes, chunk_type)| (bytes.clone(), *chunk_type));
                 drop(pending);
 
-                // Use pending chunk if available, otherwise use storage based on chunk type
                 match (pending_chunk, interval_chunk_type) {
-                    // Case 1: We have a pending chunk - use it regardless of interval_chunk_type
                     (Some(chunk_data), _) => {
+                        if run_len > 0 {
+                            disk_runs.push((
+                                run_start.take().expect("run length has a start"),
+                                run_len,
+                                interval_chunk_type,
+                            ));
+                            run_len = 0;
+                        }
                         chunk_map.insert(partition_chunk_offset, chunk_data);
                     }
-
-                    // Case 2: No pending chunk, uninitialized interval_chunk_type - skip
-                    (None, ChunkType::Uninitialized) => continue,
-
-                    // Case 3: No pending chunk, Data or Entropy interval_chunk_type - read from storage
+                    (None, ChunkType::Uninitialized) => {
+                        if run_len > 0 {
+                            disk_runs.push((
+                                run_start.take().expect("run length has a start"),
+                                run_len,
+                                interval_chunk_type,
+                            ));
+                            run_len = 0;
+                        }
+                    }
                     (None, _) => {
-                        let bytes = self.read_chunk_internal(partition_chunk_offset)?;
-                        chunk_map.insert(partition_chunk_offset, (bytes, interval_chunk_type));
+                        let crosses_file = run_start.is_some_and(|start| {
+                            !self.same_chunks_file(start, partition_chunk_offset)
+                        });
+                        if crosses_file && run_len > 0 {
+                            disk_runs.push((
+                                run_start.take().expect("run length has a start"),
+                                run_len,
+                                interval_chunk_type,
+                            ));
+                            run_len = 0;
+                        }
+                        if run_len == 0 {
+                            run_start = Some(partition_chunk_offset);
+                        }
+                        run_len += 1;
                     }
                 }
             }
+            if run_len > 0 {
+                disk_runs.push((
+                    run_start.take().expect("run length has a start"),
+                    run_len,
+                    interval_chunk_type,
+                ));
+            }
         }
 
+        self.read_disk_runs(&disk_runs, &mut chunk_map, recall)?;
+
+        // A chunk that landed in pending while the disk read held the file
+        // lock must win over the bytes just read.
+        let pending = self.pending_writes.read().unwrap();
+        for offset in visited {
+            if let Some((bytes, chunk_type)) = pending.get(&offset) {
+                chunk_map.insert(offset, (bytes.clone(), *chunk_type));
+            }
+        }
+        drop(pending);
+
         Ok(chunk_map)
+    }
+
+    /// True when both offsets live in the same `chunks.dat`.
+    fn same_chunks_file(&self, left: PartitionChunkOffset, right: PartitionChunkOffset) -> bool {
+        let Ok((left_span, _)) = self.submodules.get_key_value_at_point(left) else {
+            return false;
+        };
+        let Ok((right_span, _)) = self.submodules.get_key_value_at_point(right) else {
+            return false;
+        };
+        left_span.start() == right_span.start()
+    }
+
+    /// Read every planned run. A mining recall dups `chunks.dat` and starts
+    /// its `pread`s without waiting for inflight writes. Any other read takes
+    /// the file lock, which waits until those writes return, then issues one
+    /// `pread`.
+    fn read_disk_runs(
+        &self,
+        runs: &[(PartitionChunkOffset, u64, ChunkType)],
+        chunk_map: &mut ChunkMap,
+        recall: bool,
+    ) -> eyre::Result<()> {
+        let chunk_size = self.config.consensus.chunk_size;
+        let chunk_len = chunk_size as usize;
+        let max_chunks = self.config.consensus.num_chunks_in_recall_range.max(1);
+        let mut index = 0;
+        while index < runs.len() {
+            let (origin_interval, submodule) = self
+                .submodules
+                .get_key_value_at_point(runs[index].0)
+                .expect("disk run starts at a mapped offset");
+            let origin = *origin_interval.start();
+            let file_arc = Arc::clone(&submodule.file);
+            if recall {
+                let file = {
+                    let guard = file_arc
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard
+                        .try_clone()
+                        .wrap_err("recall could not dup chunks.dat")?
+                };
+                while index < runs.len() {
+                    let (start, len, chunk_type) = runs[index];
+                    let (run_interval, _) = self
+                        .submodules
+                        .get_key_value_at_point(start)
+                        .expect("disk run starts at a mapped offset");
+                    if *run_interval.start() != origin {
+                        break;
+                    }
+                    read_recall_run(
+                        &file,
+                        start,
+                        len,
+                        chunk_type,
+                        run_interval.start(),
+                        chunk_size,
+                        chunk_len,
+                        max_chunks,
+                        chunk_map,
+                    )?;
+                    index += 1;
+                }
+            } else {
+                let file = self.disk.lock_chunks(&file_arc);
+                while index < runs.len() {
+                    let (start, len, chunk_type) = runs[index];
+                    let (run_interval, _) = self
+                        .submodules
+                        .get_key_value_at_point(start)
+                        .expect("disk run starts at a mapped offset");
+                    if *run_interval.start() != origin {
+                        break;
+                    }
+                    let mut done = 0u64;
+                    while done < len {
+                        let n = (len - done).min(max_chunks);
+                        let piece = PartitionChunkOffset(start.0 + done as u32);
+                        let file_offset = *(piece - run_interval.start()) as u64 * chunk_size;
+                        let mut buf = vec![0_u8; n as usize * chunk_len];
+                        file.read_exact_at(&mut buf, file_offset)
+                            .wrap_err_with(|| format!("recall read at offset {piece} count {n}"))?;
+                        for step in 0..n {
+                            let at = step as usize * chunk_len;
+                            let off = PartitionChunkOffset(piece.0 + step as u32);
+                            chunk_map.insert(off, (buf[at..at + chunk_len].to_vec(), chunk_type));
+                        }
+                        done += n;
+                    }
+                    index += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Reads a single chunk from its physical storage location
@@ -1335,10 +1841,12 @@ impl StorageModule {
         let file_offset = *(chunk_offset - interval.start()) as u64 * chunk_size;
         let mut buf = vec![0_u8; chunk_size as usize];
 
-        // Read chunk from file
-        let mut file = submodule.file.lock().unwrap();
-        file.seek(SeekFrom::Start(file_offset))?;
-        file.read_exact(&mut buf)?;
+        // Positional read. A seek on the shared handle would move the cursor
+        // seen by the next reader of this file.
+        let file_arc = Arc::clone(&submodule.file);
+        let file = self.disk.lock_chunks(&file_arc);
+        file.read_exact_at(&mut buf, file_offset)
+            .wrap_err_with(|| format!("chunk read at offset {chunk_offset}"))?;
 
         Ok(buf)
     }
@@ -1425,9 +1933,17 @@ impl StorageModule {
         if chunk_type == ChunkType::Data && self.data_writes_paused() {
             return false;
         }
+        let priority = match chunk_type {
+            ChunkType::Entropy => disk_lane::WritePriority::Packing,
+            _ => disk_lane::WritePriority::Ingress,
+        };
         pending.insert(chunk_offset, (bytes, chunk_type));
+        pending.priorities.insert(chunk_offset, priority);
+        pending.queued_at.insert(chunk_offset, Instant::now());
         *self.last_pending_write.write().unwrap() = Instant::now();
         drop(pending);
+        // The lane writes the next window when it is woken.
+        self.disk.notify();
         true
     }
 
@@ -1454,11 +1970,20 @@ impl StorageModule {
                 submodule.index_drain.wait_idle_in_range(start, end);
             }
         }
-        let mut pending = self.pending_writes.write().unwrap();
-        pending.retain(|offset, _| *offset < start || *offset > end);
-        pending
-            .occupancy
-            .retain(|offset, _| *offset < start || *offset > end);
+        {
+            let mut pending = self.pending_writes.write().unwrap();
+            pending.retain(|offset, _| *offset < start || *offset > end);
+            pending
+                .occupancy
+                .retain(|offset, _| *offset < start || *offset > end);
+            pending
+                .priorities
+                .retain(|offset, _| *offset < start || *offset > end);
+            pending
+                .queued_at
+                .retain(|offset, _| *offset < start || *offset > end);
+        }
+        self.cancel_sweep_range(start, end);
     }
 
     /// Clears the per-offset tx-path and data-path offset-index entries in the
@@ -1812,243 +2337,54 @@ impl StorageModule {
             .any(|offset| pending.occupancy.contains_key(offset))
     }
 
-    /// Writes chunk data and its data_path to relevant storage locations
+    /// Waits until the index ACK has inserted `ChunkType::Data` into the pending map.
+    /// When the disk-lane thread is running, that thread locks `chunks.dat`.
+    /// Otherwise this call drives the sweep itself.
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> Result<(), WriteDataChunkError> {
-        let prepared = self.prepare_data_index_writes(chunk)?;
-        let results = recv_index_acks(&prepared);
-        self.finish_data_index_writes(prepared, results)
+        match self.enqueue_unpacked(chunk, disk_lane::WritePriority::Ingress, true)? {
+            Some(group) if self.disk.lane_running() => self.wait_group(group),
+            Some(group) => self.drive_group(group),
+            None => Ok(()),
+        }
     }
 
-    /// Same as [`Self::write_data_chunk`] but waits for the index ACK on the
-    /// blocking pool so async callers do not `recv` on a tokio worker.
+    /// Same wait as [`Self::write_data_chunk`]. When the disk-lane thread is
+    /// running, this task waits on a oneshot and does not take a blocking
+    /// thread. Otherwise a multi-thread runtime moves the worker aside for
+    /// the wait, and a current-thread runtime drives the wait here.
     pub async fn write_data_chunk_queued(
         &self,
         chunk: &UnpackedChunk,
     ) -> Result<(), WriteDataChunkError> {
-        let mut prepared = self.prepare_data_index_writes(chunk)?;
-        if prepared.is_empty() {
-            return Ok(());
-        }
-        let receivers: Vec<_> = prepared
-            .iter_mut()
-            .map(PreparedDataWrite::take_done)
-            .collect();
-        let results = match tokio::task::spawn_blocking(move || {
-            receivers
-                .into_iter()
-                .map(recv_index_ack)
-                .collect::<Vec<_>>()
-        })
-        .await
-        {
-            Ok(results) => results,
-            Err(error) => {
-                for write in prepared {
-                    self.release_occupancy(write.offset, write.generation);
-                }
-                return Err(WriteDataChunkError::Other(eyre::eyre!("{error}")));
-            }
-        };
-        self.finish_data_index_writes(prepared, results)
-    }
-
-    fn prepare_data_index_writes(
-        &self,
-        chunk: &UnpackedChunk,
-    ) -> Result<Vec<PreparedDataWrite>, WriteDataChunkError> {
-        if self.data_writes_paused() {
-            return Err(WriteDataChunkError::WritesPaused);
-        }
-
-        let Some(partition_offsets) =
-            self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)?
-        else {
-            return Err(WriteDataChunkError::DataRootNotFound);
-        };
-
-        let data_path = chunk.data_path.0.clone();
-        let data_path_hash = UnpackedChunk::hash_data_path(&data_path);
-
-        enum EntropySource {
-            Disk,
-            Pending(Vec<u8>),
-        }
-
-        let disk_entropy: HashSet<PartitionChunkOffset> = {
-            let intervals = self.intervals.read().unwrap();
-            partition_offsets
-                .iter()
-                .copied()
-                .filter(|offset| {
-                    intervals
-                        .get_at_point(*offset)
-                        .is_some_and(|ty| *ty == ChunkType::Entropy)
-                })
-                .collect()
-        };
-
-        let mut occupied = Vec::new();
-        {
-            let mut pending = self.pending_writes.write().unwrap();
-            if self.data_writes_paused() {
-                return Err(WriteDataChunkError::WritesPaused);
-            }
-            let generation = self.index_write_generation.load(Ordering::SeqCst);
-            for partition_offset in partition_offsets.iter().copied() {
-                if pending.occupancy.contains_key(&partition_offset)
-                    || pending
-                        .get(&partition_offset)
-                        .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
-                {
-                    continue;
-                }
-                let pending_entropy = pending
-                    .get(&partition_offset)
-                    .and_then(|(bytes, ty)| (*ty == ChunkType::Entropy).then(|| bytes.clone()));
-                let source = if let Some(entropy) = pending_entropy {
-                    EntropySource::Pending(entropy)
-                } else if disk_entropy.contains(&partition_offset) {
-                    EntropySource::Disk
-                } else {
-                    continue;
-                };
-                pending.occupancy.insert(partition_offset, generation);
-                occupied.push((partition_offset, generation, source));
-            }
-        }
-
-        let mut prepared: Vec<PreparedDataWrite> = Vec::with_capacity(occupied.len());
-        let mut occupied = occupied.into_iter();
-        while let Some((partition_offset, generation, source)) = occupied.next() {
-            let entropy = match source {
-                EntropySource::Pending(bytes) => bytes,
-                EntropySource::Disk => {
-                    if let Some(error) = self.injected_entropy_read_error() {
-                        self.abort_prepare(
-                            prepared,
-                            std::iter::once((partition_offset, generation)).chain(
-                                occupied.map(|(offset, generation, _)| (offset, generation)),
-                            ),
-                        );
-                        return Err(error);
-                    }
-                    match self.read_chunk_internal(partition_offset) {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            self.abort_prepare(
-                                prepared,
-                                std::iter::once((partition_offset, generation)).chain(
-                                    occupied.map(|(offset, generation, _)| (offset, generation)),
-                                ),
-                            );
-                            return Err(WriteDataChunkError::Other(error));
-                        }
-                    }
-                }
-            };
-            let packed_data = packing_xor_vec_u8(entropy, &chunk.bytes.0);
-            let (done_tx, done_rx) = mpsc::channel();
-            let Some((_, submodule)) = self
-                .submodules
-                .get_key_value_at_point(partition_offset)
-                .ok()
+        if self.disk.lane_running() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let Some(group) = self.enqueue_unpacked_with(
+                chunk,
+                disk_lane::WritePriority::Ingress,
+                true,
+                Some(tx),
+            )?
             else {
-                self.abort_prepare(
-                    prepared,
-                    std::iter::once((partition_offset, generation))
-                        .chain(occupied.map(|(offset, generation, _)| (offset, generation))),
-                );
-                return Err(WriteDataChunkError::Other(eyre::eyre!(
-                    "No submodule found for Partition Offset {partition_offset:?}"
-                )));
+                return Ok(());
             };
-            // clone: each IndexOp owns a path copy for the drain txn
-            submodule.index_drain.submit(index_drain::IndexOp {
-                path_hash: data_path_hash,
-                data_path: data_path.clone(),
-                offset: partition_offset,
-                generation,
-                done: done_tx,
+            return self.await_swept_group(group, rx).await;
+        }
+        let Some(group) = self.enqueue_unpacked(chunk, disk_lane::WritePriority::Ingress, true)?
+        else {
+            return Ok(());
+        };
+        // Let the runtime poll other tasks once before this thread blocks on
+        // the index ACK. The drain itself is a std thread.
+        tokio::task::yield_now().await;
+        let multi_thread = tokio::runtime::Handle::try_current()
+            .ok()
+            .is_some_and(|handle| {
+                handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
             });
-            prepared.push(PreparedDataWrite {
-                offset: partition_offset,
-                packed: packed_data,
-                generation,
-                done: Some(done_rx),
-            });
-        }
-        if prepared.is_empty() {
-            let pending = self.pending_writes.read().unwrap();
-            if partition_offsets
-                .iter()
-                .any(|offset| pending.occupancy.contains_key(offset))
-            {
-                return Err(WriteDataChunkError::Other(eyre::eyre!(
-                    "index write already in flight"
-                )));
-            }
-        }
-        Ok(prepared)
-    }
-
-    fn finish_data_index_writes(
-        &self,
-        prepared: Vec<PreparedDataWrite>,
-        results: Vec<Result<(), WriteDataChunkError>>,
-    ) -> Result<(), WriteDataChunkError> {
-        if let Some(error) = results.into_iter().find_map(Result::err) {
-            for write in prepared {
-                self.release_occupancy(write.offset, write.generation);
-            }
-            return Err(error);
-        }
-        let mut paused = false;
-        for write in prepared {
-            paused |= !self.insert_pending_data_if_generation_current(write);
-        }
-        if paused {
-            return Err(WriteDataChunkError::WritesPaused);
-        }
-        Ok(())
-    }
-
-    fn abort_prepare(
-        &self,
-        prepared: Vec<PreparedDataWrite>,
-        remaining: impl IntoIterator<Item = (PartitionChunkOffset, u64)>,
-    ) {
-        for (offset, generation) in remaining {
-            self.release_occupancy(offset, generation);
-        }
-        if prepared.is_empty() {
-            return;
-        }
-        recv_index_acks(&prepared);
-        for write in prepared {
-            self.release_occupancy(write.offset, write.generation);
-        }
-    }
-
-    fn insert_pending_data_if_generation_current(&self, write: PreparedDataWrite) -> bool {
-        let mut pending = self.pending_writes.write().unwrap();
-        if pending.occupancy.get(&write.offset).copied() != Some(write.generation) {
-            return false;
-        }
-        pending.occupancy.remove(&write.offset);
-        if self.data_writes_paused()
-            || self.index_write_generation.load(Ordering::SeqCst) != write.generation
-        {
-            return false;
-        }
-        pending.insert(write.offset, (write.packed, ChunkType::Data));
-        *self.last_pending_write.write().unwrap() = Instant::now();
-        true
-    }
-
-    fn release_occupancy(&self, offset: PartitionChunkOffset, generation: u64) {
-        let mut pending = self.pending_writes.write().unwrap();
-        if pending.occupancy.get(&offset).copied() == Some(generation) {
-            pending.occupancy.remove(&offset);
+        if multi_thread {
+            tokio::task::block_in_place(|| self.drive_group(group))
+        } else {
+            self.drive_group(group)
         }
     }
 
@@ -2396,6 +2732,459 @@ impl StorageModule {
             .map_err(|e| eyre!("Unable to get submodule for offset {:?}", &e))
     }
 
+    /// Chunks already packed, in flush order, that fill at most `max_runs` pwrites.
+    fn select_pending_window(
+        &self,
+        pending: &PendingWrites,
+        max_runs: usize,
+        cap: u64,
+    ) -> Vec<(
+        PartitionChunkOffset,
+        (ChunkBytes, ChunkType),
+        disk_lane::WritePriority,
+    )> {
+        if max_runs == 0 {
+            return Vec::new();
+        }
+        let chunk_size = self.config.consensus.chunk_size.max(1);
+        let mut indexed: Vec<(disk_lane::WritePriority, PartitionChunkOffset)> = pending
+            .iter()
+            .map(|(offset, state)| {
+                let priority = pending
+                    .priorities
+                    .get(offset)
+                    .copied()
+                    .unwrap_or(match state.1 {
+                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
+                        _ => disk_lane::WritePriority::Ingress,
+                    });
+                (priority, *offset)
+            })
+            .collect();
+        indexed.sort_by_key(|(priority, offset)| (*priority, *offset));
+
+        let mut out = Vec::new();
+        let mut completed = 0usize;
+        let mut current: Option<RunCursor> = None;
+        let mut current_priority: Option<disk_lane::WritePriority> = None;
+        for (priority, offset) in indexed {
+            let Some((bytes, chunk_type)) = pending.get(&offset) else {
+                continue;
+            };
+            let next_len = bytes.len() as u64;
+            let next_type = *chunk_type;
+            if current_priority != Some(priority) {
+                if current.take().is_some() {
+                    completed += 1;
+                    if completed >= max_runs {
+                        break;
+                    }
+                }
+                current_priority = Some(priority);
+            }
+            let extend = current.as_ref().is_some_and(|run| {
+                self.can_extend_run(chunk_size, cap, run, offset, next_type, next_len)
+            });
+            let start_new = !extend;
+            if extend {
+                let run = current.as_mut().expect("extend checks the current run");
+                run.last = offset;
+                run.chunk_count += 1;
+                run.byte_len += next_len;
+            } else if current.is_some() {
+                completed += 1;
+                if completed >= max_runs {
+                    break;
+                }
+            }
+            if start_new {
+                current = Some(RunCursor {
+                    start: offset,
+                    last: offset,
+                    chunk_type: next_type,
+                    chunk_count: 1,
+                    byte_len: next_len,
+                });
+            }
+            out.push((offset, (bytes.clone(), next_type), priority));
+        }
+        out
+    }
+
+    /// Pending chunks inside a reorder scan, joined into runs of at most `cap`
+    /// bytes. An aged run fills an in-flight slot first, then a longer run.
+    fn select_coalesced_window(
+        &self,
+        pending: &PendingWrites,
+        max_runs: usize,
+        scan_chunks: usize,
+        cap: u64,
+    ) -> Vec<(
+        PartitionChunkOffset,
+        (ChunkBytes, ChunkType),
+        disk_lane::WritePriority,
+    )> {
+        if max_runs == 0 || scan_chunks == 0 {
+            return Vec::new();
+        }
+        let chunk_size = self.config.consensus.chunk_size.max(1);
+        let mut indexed: Vec<(disk_lane::WritePriority, PartitionChunkOffset)> = pending
+            .iter()
+            .map(|(offset, state)| {
+                let priority = pending
+                    .priorities
+                    .get(offset)
+                    .copied()
+                    .unwrap_or(match state.1 {
+                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
+                        _ => disk_lane::WritePriority::Ingress,
+                    });
+                (priority, *offset)
+            })
+            .collect();
+        indexed.sort_by_key(|(_, offset)| *offset);
+        indexed.truncate(scan_chunks);
+
+        let mut runs: Vec<CoalescedRun> = Vec::new();
+        let mut current: Option<RunCursor> = None;
+        let mut current_priority: Option<disk_lane::WritePriority> = None;
+        let mut current_oldest: Option<Instant> = None;
+        let mut current_items: Vec<(PartitionChunkOffset, (ChunkBytes, ChunkType))> = Vec::new();
+        for (priority, offset) in indexed {
+            let Some((bytes, chunk_type)) = pending.get(&offset) else {
+                continue;
+            };
+            let next_len = bytes.len() as u64;
+            let next_type = *chunk_type;
+            let queued_at = pending
+                .queued_at
+                .get(&offset)
+                .copied()
+                .unwrap_or_else(Instant::now);
+            let extend = current_priority == Some(priority)
+                && current.as_ref().is_some_and(|run| {
+                    self.can_extend_run(chunk_size, cap, run, offset, next_type, next_len)
+                });
+            if extend {
+                let run = current.as_mut().expect("extend checks the current run");
+                run.last = offset;
+                run.chunk_count += 1;
+                run.byte_len += next_len;
+                if let Some(oldest) = current_oldest.as_mut()
+                    && queued_at < *oldest
+                {
+                    *oldest = queued_at;
+                }
+                current_items.push((offset, (bytes.clone(), next_type)));
+                continue;
+            }
+            if let Some(cursor) = current.take() {
+                runs.push(CoalescedRun {
+                    priority: current_priority.expect("a run has a priority"),
+                    byte_len: cursor.byte_len,
+                    oldest: current_oldest.unwrap_or_else(Instant::now),
+                    aged: false,
+                    items: std::mem::take(&mut current_items),
+                });
+            }
+            current_priority = Some(priority);
+            current_oldest = Some(queued_at);
+            current = Some(RunCursor {
+                start: offset,
+                last: offset,
+                chunk_type: next_type,
+                chunk_count: 1,
+                byte_len: next_len,
+            });
+            current_items.push((offset, (bytes.clone(), next_type)));
+        }
+        if let Some(cursor) = current.take() {
+            runs.push(CoalescedRun {
+                priority: current_priority.expect("a run has a priority"),
+                byte_len: cursor.byte_len,
+                oldest: current_oldest.unwrap_or_else(Instant::now),
+                aged: false,
+                items: current_items,
+            });
+        }
+
+        let grace = disk_lane::reorder_grace(chunk_size);
+        for run in &mut runs {
+            run.aged = run.oldest.elapsed() >= grace;
+        }
+        runs.sort_by(|left, right| {
+            right
+                .aged
+                .cmp(&left.aged)
+                .then(right.byte_len.cmp(&left.byte_len))
+                .then(left.oldest.cmp(&right.oldest))
+                .then(left.priority.cmp(&right.priority))
+                .then_with(|| {
+                    let left_off = left.items.first().map(|(offset, _)| *offset);
+                    let right_off = right.items.first().map(|(offset, _)| *offset);
+                    left_off.cmp(&right_off)
+                })
+        });
+        runs.truncate(max_runs);
+
+        let mut out = Vec::new();
+        for run in runs {
+            for (offset, state) in run.items {
+                out.push((offset, state, run.priority));
+            }
+        }
+        out
+    }
+
+    fn can_extend_run(
+        &self,
+        chunk_size: u64,
+        cap: u64,
+        run: &RunCursor,
+        next_offset: PartitionChunkOffset,
+        next_type: ChunkType,
+        next_len: u64,
+    ) -> bool {
+        next_len == chunk_size
+            && run.chunk_count as u64 * chunk_size == run.byte_len
+            && run.chunk_type == next_type
+            && run.last.0.saturating_add(1) == next_offset.0
+            && run.byte_len + next_len <= cap
+            && self.same_chunks_file(run.start, next_offset)
+    }
+
+    /// Runs in the order `batch` already has. The coalesce window ranks that
+    /// order. A new priority or a break in the adjacent range starts a run.
+    fn plan_ranked_runs(
+        &self,
+        batch: &[(
+            PartitionChunkOffset,
+            (ChunkBytes, ChunkType),
+            disk_lane::WritePriority,
+        )],
+        cap: u64,
+    ) -> Vec<WriteRun> {
+        let chunk_size = self.config.consensus.chunk_size.max(1);
+        let mut runs = Vec::new();
+        let mut current: Option<WriteRun> = None;
+        let mut current_priority: Option<disk_lane::WritePriority> = None;
+        for (offset, (bytes, chunk_type), priority) in batch {
+            let can_extend = current_priority == Some(*priority)
+                && current.as_ref().is_some_and(|run| {
+                    let Some(last) = run.offsets.last().copied() else {
+                        return false;
+                    };
+                    self.can_extend_run(
+                        chunk_size,
+                        cap,
+                        &RunCursor {
+                            start: run.start,
+                            last,
+                            chunk_type: run.chunk_type,
+                            chunk_count: run.offsets.len(),
+                            byte_len: run.bytes.len() as u64,
+                        },
+                        *offset,
+                        *chunk_type,
+                        bytes.len() as u64,
+                    )
+                });
+            if can_extend {
+                let run = current.as_mut().expect("extend checks the current run");
+                run.bytes.extend_from_slice(bytes);
+                run.offsets.push(*offset);
+            } else {
+                if let Some(run) = current.take() {
+                    runs.push(run);
+                }
+                current_priority = Some(*priority);
+                current = Some(WriteRun {
+                    start: *offset,
+                    chunk_type: *chunk_type,
+                    bytes: bytes.clone(),
+                    offsets: vec![*offset],
+                });
+            }
+        }
+        if let Some(run) = current.take() {
+            runs.push(run);
+        }
+        runs
+    }
+
+    /// Flush order is priority, then ascending offset. `cap` bounds one
+    /// `pwrite`. A run is always at least one chunk. The coalesce path uses
+    /// `plan_ranked_runs` so this order does not put a short high-priority
+    /// run ahead of a longer one.
+    fn plan_write_runs(
+        &self,
+        batch: &[(
+            PartitionChunkOffset,
+            (ChunkBytes, ChunkType),
+            disk_lane::WritePriority,
+        )],
+        cap: u64,
+    ) -> Vec<WriteRun> {
+        let chunk_size = self.config.consensus.chunk_size.max(1);
+        let mut runs = Vec::new();
+        for priority in [
+            disk_lane::WritePriority::Migration,
+            disk_lane::WritePriority::Packing,
+            disk_lane::WritePriority::Ingress,
+        ] {
+            let mut items: Vec<_> = batch
+                .iter()
+                .filter(|(_, _, item_priority)| *item_priority == priority)
+                .collect();
+            items.sort_by_key(|(offset, _, _)| *offset);
+            let mut current: Option<WriteRun> = None;
+            for (offset, (bytes, chunk_type), _) in items {
+                let can_extend = current.as_ref().is_some_and(|run| {
+                    let Some(last) = run.offsets.last().copied() else {
+                        return false;
+                    };
+                    self.can_extend_run(
+                        chunk_size,
+                        cap,
+                        &RunCursor {
+                            start: run.start,
+                            last,
+                            chunk_type: run.chunk_type,
+                            chunk_count: run.offsets.len(),
+                            byte_len: run.bytes.len() as u64,
+                        },
+                        *offset,
+                        *chunk_type,
+                        bytes.len() as u64,
+                    )
+                });
+                if can_extend {
+                    let run = current.as_mut().expect("extend checks the current run");
+                    run.bytes.extend_from_slice(bytes);
+                    run.offsets.push(*offset);
+                } else {
+                    if let Some(run) = current.take() {
+                        runs.push(run);
+                    }
+                    current = Some(WriteRun {
+                        start: *offset,
+                        chunk_type: *chunk_type,
+                        bytes: bytes.clone(),
+                        offsets: vec![*offset],
+                    });
+                }
+            }
+            if let Some(run) = current.take() {
+                runs.push(run);
+            }
+        }
+        runs
+    }
+
+    /// Caller already holds the write gate. This drops the file lock before it
+    /// waits, so a queued mining recall starts before the next run.
+    fn write_run(&self, run: &WriteRun) -> eyre::Result<()> {
+        let chunk_size = self.config.consensus.chunk_size;
+        let (file_arc, file_offset, submodule_offset) = {
+            let (interval, submodule) = self.get_submodule_for_offset(run.start)?;
+            let submodule_offset = run.start - interval.start();
+            (
+                Arc::clone(&submodule.file),
+                u64::from(submodule_offset) * chunk_size,
+                submodule_offset,
+            )
+        };
+        let start_time = Instant::now();
+
+        let write_result = (|| -> eyre::Result<()> {
+            loop {
+                self.disk.yield_to_recall();
+                let file = self.disk.lock_chunks(&file_arc);
+                if self.disk.recall_pending() {
+                    drop(file);
+                    continue;
+                }
+                file.write_all_at(run.bytes.as_slice(), file_offset)
+                    .map_err(|e| {
+                        error!(
+                            "Failed to write chunk @ chunk_offset {} submodule_offset {}: {}",
+                            run.start, submodule_offset, e
+                        );
+                        eyre::eyre!(
+                            "Failed to write chunk @ chunk_offset {} submodule_offset {}: {}",
+                            run.start,
+                            submodule_offset,
+                            e
+                        )
+                    })?;
+                return Ok(());
+            }
+        })();
+        self.note_write_run(run, start_time, write_result)
+    }
+
+    fn note_write_run(
+        &self,
+        run: &WriteRun,
+        start_time: Instant,
+        write_result: eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        match write_result {
+            Ok(()) => {
+                let mut intervals = self
+                    .intervals
+                    .write()
+                    .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+                for chunk_offset in &run.offsets {
+                    Self::cut_then_insert_interval_if_touching(
+                        &mut intervals,
+                        *chunk_offset,
+                        run.chunk_type,
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Write failed, resetting interval to Uninitialized for chunk_offset {}",
+                    run.start
+                );
+                match self.intervals.write() {
+                    Ok(mut intervals) => {
+                        for chunk_offset in &run.offsets {
+                            Self::cut_then_insert_interval_if_touching(
+                                &mut intervals,
+                                *chunk_offset,
+                                ChunkType::Uninitialized,
+                            );
+                        }
+                    }
+                    Err(write_err) => {
+                        error!(
+                            "CRITICAL: Failed to acquire write lock to reset interval to Uninitialized: {}. \
+                     The interval state may be inconsistent!",
+                            write_err
+                        );
+                    }
+                }
+                return Err(e);
+            }
+        }
+
+        let completion_time = Instant::now();
+        let mut recent_chunk_times = self.recent_chunk_times.write().map_err(|e| {
+            eyre::eyre!("Failed to acquire write lock on recent_chunk_times: {}", e)
+        })?;
+        for chunk_offset in &run.offsets {
+            recent_chunk_times.push(ChunkTimeRecord {
+                chunk_offset: *chunk_offset,
+                start_time,
+                completion_time,
+                duration: completion_time - start_time,
+            });
+        }
+        Ok(())
+    }
+
     /// Writes chunk data to physical storage and updates state tracking
     ///    DO NOT USE THIS FUNCTION STANDALONE
     ///    READ `sync_pending_chunks_inner`
@@ -2426,23 +3215,15 @@ impl StorageModule {
         let submodule_offset = chunk_offset - interval.start();
 
         // Attempt to write the chunk data, handling errors by resetting to Uninitialized
+        let file_arc = Arc::clone(&submodule.file);
         let write_result = (|| -> eyre::Result<()> {
-            // Lock to the submodules internal file handle & write the chunk
-            let mut file = submodule.file.lock().unwrap();
-
-            file.seek(SeekFrom::Start(u64::from(submodule_offset) * chunk_size))?;
-            let bytes_written = file.write(bytes.as_slice()).map_err(|e| {
-                error!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e);
-                eyre::eyre!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e)
-            })?;
-            // Ensure all bytes were written
-            if bytes_written != bytes.len() {
-                return Err(eyre::eyre!(
-                    "Incomplete write: expected {} bytes, wrote {} bytes @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}",
-                    bytes.len(),
-                    bytes_written
-                ));
-            }
+            // Positional write. The shared handle keeps its cursor.
+            let file = self.disk.lock_chunks(&file_arc);
+            file.write_all_at(bytes.as_slice(), u64::from(submodule_offset) * chunk_size)
+                .map_err(|e| {
+                    error!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e);
+                    eyre::eyre!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e)
+                })?;
             // note: we don't fsync here for performance reasons
             Ok(())
         })();
@@ -2662,6 +3443,8 @@ impl StorageModule {
 
 impl Drop for StorageModule {
     fn drop(&mut self) {
+        // Index submits for deposited bodies must finish before the drains stop.
+        self.drain_entropy_queue();
         for (_, submodule) in self.submodules.iter() {
             submodule.index_drain.shutdown();
         }
@@ -2885,6 +3668,25 @@ mod tests {
         TxChunkOffset, irys::IrysSigner, ledger_chunk_offset_ii, partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
+
+    #[test]
+    fn recall_piece_plan_pairs_preads() {
+        assert_eq!(
+            super::recall_piece_plan(400, 400),
+            vec![(0, 200), (200, 200)]
+        );
+        assert_eq!(super::recall_piece_plan(1, 400), vec![(0, 1)]);
+        assert_eq!(super::recall_piece_plan(2, 400), vec![(0, 1), (1, 1)]);
+        assert_eq!(
+            super::recall_piece_plan(800, 400),
+            vec![(0, 400), (400, 400)]
+        );
+        assert_eq!(
+            super::recall_piece_plan(900, 400),
+            vec![(0, 400), (400, 400), (800, 50), (850, 50)]
+        );
+        assert_eq!(super::recall_piece_plan(3, 1), vec![(0, 1), (1, 1), (2, 1)]);
+    }
 
     /// Indexing a tx that starts before this module and straddles all three
     /// submodules must leave one job row per submodule, keyed on that
@@ -3257,7 +4059,7 @@ mod tests {
         UnpackedChunk,
     )> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let node_config = NodeConfig {
+        let mut node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 5,
                 num_chunks_in_partition: 5,
@@ -3266,6 +4068,9 @@ mod tests {
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
+        // A long interval must not delay the sweep. The lane and `drive_group`
+        // run it when the slot is queued.
+        node_config.storage.entropy_sweep_interval_millis = 60_000;
         let config = Config::new_with_random_peer_id(node_config);
         let storage_module = StorageModule::new(
             &StorageModuleInfo {
@@ -3461,11 +4266,158 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn entropy_sweep_reads_through_a_hole() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("entropy_sweep_hole")
+            .with_tracing()
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?;
+        storage_module.pack_with_zeros();
+
+        for (ledger_offset, root_byte, path) in
+            [(0_u64, 1_u8, vec![1_u8, 2, 3, 4]), (2, 2, vec![5, 6, 7, 8])]
+        {
+            let data_root = H256::from([root_byte; 32]);
+            let data_tx =
+                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        data_root,
+                        data_size: 32,
+                        ..Default::default()
+                    },
+                    metadata: irys_types::DataTransactionMetadata::new(),
+                });
+            storage_module.index_transaction_data(
+                &data_tx,
+                &path,
+                LedgerChunkRange(ledger_chunk_offset_ii!(ledger_offset, ledger_offset)),
+                0,
+            )?;
+            storage_module.deposit_data_chunk(&UnpackedChunk {
+                data_root,
+                data_size: 32,
+                data_path: path.into(),
+                bytes: vec![root_byte; 32].into(),
+                tx_offset: TxChunkOffset::from(0),
+            })?;
+        }
+
+        assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(2)));
+        assert!(!storage_module.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Entropy)
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(2)),
+            Some(ChunkType::Entropy)
+        );
+        assert_eq!(storage_module.disk.entropy_preads.load(Ordering::SeqCst), 0);
+
+        storage_module.drive_entropy_queue_for_test();
+
+        assert_eq!(storage_module.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(2)),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(ChunkType::Entropy)
+        );
+        let hole = storage_module.read_chunks(partition_chunk_offset_ii!(1, 1))?;
+        let (hole_bytes, hole_type) = hole
+            .get(&PartitionChunkOffset::from(1))
+            .expect("offset 1 stays on disk");
+        assert_eq!(*hole_type, ChunkType::Entropy);
+        assert_eq!(hole_bytes, &vec![0_u8; 32]);
+        assert_eq!(
+            storage_module
+                .pending_writes
+                .read()
+                .unwrap()
+                .queued_unpacked_bytes,
+            0
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn write_data_chunk_queued_inserts_pending_after_ack() -> eyre::Result<()> {
         let (_tmp, storage_module, chunk) = packed_submit_fixture("queued_after_ack")?;
         storage_module.write_data_chunk_queued(&chunk).await?;
         assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        Ok(())
+    }
+
+    struct LaneGuard {
+        module: std::sync::Arc<StorageModule>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl LaneGuard {
+        fn start(module: std::sync::Arc<StorageModule>) -> eyre::Result<Self> {
+            let handle = module
+                .spawn_disk_lane()?
+                .ok_or_else(|| eyre::eyre!("disk lane thread"))?;
+            Ok(Self {
+                module,
+                handle: Some(handle),
+            })
+        }
+    }
+
+    impl Drop for LaneGuard {
+        fn drop(&mut self) {
+            self.module.stop_disk_lane();
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_lane_thread_acks_queued_write() -> eyre::Result<()> {
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("lane_thread_ack")?;
+        let lane = LaneGuard::start(std::sync::Arc::new(storage_module))?;
+        lane.module.write_data_chunk_queued(&chunk).await?;
+        let offset = PartitionChunkOffset::from(0);
+        let started = Instant::now();
+        while !lane.module.is_data_chunk_durable_at(offset) {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "lane did not write the packed chunk"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         Ok(())
     }
 
@@ -4095,6 +5047,8 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 10,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                ..StorageSyncConfig::default()
             },
             base_directory: base_path,
             ..NodeConfig::testing()
@@ -4646,6 +5600,8 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1000,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                ..StorageSyncConfig::default()
             },
             ..NodeConfig::testing()
         };
@@ -4732,6 +5688,8 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
@@ -4764,5 +5722,375 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    fn recall_flush_fixture(
+        prefix: &str,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 8,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1000,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 60_000,
+                entropy_sweep_max_bytes: chunk_size,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![(partition_chunk_offset_ii!(0, 7), "chunks".into())],
+            },
+            &config,
+        )?;
+        for offset in 0..6_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![offset as u8; chunk_size as usize],
+                ChunkType::Data,
+            );
+        }
+        Ok((tmp_dir, storage_module))
+    }
+
+    fn assert_recall_window(storage_module: &StorageModule, durable_through: u32) {
+        for offset in 0..6_u32 {
+            let point = PartitionChunkOffset::from(offset);
+            if offset < durable_through {
+                assert!(
+                    storage_module.is_data_chunk_durable_at(point),
+                    "offset {offset} should be durable"
+                );
+            } else {
+                assert!(
+                    !storage_module.is_data_chunk_durable_at(point),
+                    "offset {offset} should still be pending"
+                );
+                assert!(
+                    storage_module
+                        .pending_writes
+                        .read()
+                        .unwrap()
+                        .contains_key(&point)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recall_flushes_one_write_window() -> eyre::Result<()> {
+        let (_tmp, storage_module) = recall_flush_fixture("recall_flush_window")?;
+        storage_module.read_recall_chunks(partition_chunk_offset_ii!(0, 0))?;
+        assert_recall_window(&storage_module, 3);
+        // Below the sync threshold the rest stays pending.
+        storage_module.sync_pending_chunks()?;
+        assert_recall_window(&storage_module, 3);
+        storage_module.read_recall_chunks(partition_chunk_offset_ii!(0, 0))?;
+        assert!(!storage_module.has_pending_writes());
+        assert_recall_window(&storage_module, 6);
+        Ok(())
+    }
+
+    fn wait_for_pending_drain(storage_module: &StorageModule) {
+        let started = Instant::now();
+        while storage_module.has_pending_writes() {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "packed chunks stayed pending"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn lane_holds_a_short_run_without_a_recall() -> eyre::Result<()> {
+        // 256 KiB keeps `reorder_grace` above this sleep. A 32-byte chunk
+        // ages after one capped run, which is shorter than the sleep.
+        let chunk_size = 256 * 1024;
+        let (_tmp, storage_module) = seek_run_fixture("lane_hold_short", chunk_size, 10_000, 8)?;
+        let body = vec![1_u8; chunk_size as usize];
+        for offset in 0..6_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body.clone(),
+                ChunkType::Data,
+            );
+        }
+        let storage_module = Arc::new(storage_module);
+        let lane = LaneGuard::start(Arc::clone(&storage_module))?;
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(lane.module.has_pending_writes());
+        assert!(
+            !lane
+                .module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lane_flushes_short_runs_at_the_sync_threshold() -> eyre::Result<()> {
+        let (_tmp, storage_module) = seek_run_fixture("lane_threshold", 32, 4, 8)?;
+        for offset in 0..4_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![offset as u8; 32],
+                ChunkType::Data,
+            );
+        }
+        let storage_module = Arc::new(storage_module);
+        let lane = LaneGuard::start(Arc::clone(&storage_module))?;
+        wait_for_pending_drain(&lane.module);
+        for offset in 0..4_u32 {
+            assert!(
+                lane.module
+                    .is_data_chunk_durable_at(PartitionChunkOffset::from(offset))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lane_flushes_a_full_run() -> eyre::Result<()> {
+        let chunk_size = 256 * 1024;
+        let (_tmp, storage_module) = seek_run_fixture("lane_full_run", chunk_size, 10_000, 80)?;
+        let body = vec![1_u8; chunk_size as usize];
+        for offset in 0..40_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body.clone(),
+                ChunkType::Data,
+            );
+        }
+        let storage_module = Arc::new(storage_module);
+        let lane = LaneGuard::start(Arc::clone(&storage_module))?;
+        let started = Instant::now();
+        while lane.module.has_pending_writes() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "full run stayed pending"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            lane.module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        assert!(
+            lane.module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(39))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lane_holds_a_run_under_the_cap() -> eyre::Result<()> {
+        let chunk_size = 256 * 1024;
+        let (_tmp, storage_module) = seek_run_fixture("lane_under_cap", chunk_size, 10_000, 80)?;
+        let body = vec![1_u8; chunk_size as usize];
+        for offset in 0..39_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body.clone(),
+                ChunkType::Data,
+            );
+        }
+        let storage_module = Arc::new(storage_module);
+        let lane = LaneGuard::start(Arc::clone(&storage_module))?;
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(lane.module.has_pending_writes());
+        assert!(
+            !lane
+                .module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lane_pauses_writes_while_recall_holds_the_disk() -> eyre::Result<()> {
+        // Same chunk size as the short-run hold: the grace is longer than
+        // both sleeps, so a recall ending does not by itself flush the run.
+        let chunk_size = 256 * 1024;
+        let (_tmp, storage_module) =
+            seek_run_fixture("lane_pause_for_recall", chunk_size, 10_000, 8)?;
+        let body = vec![1_u8; chunk_size as usize];
+        for offset in 0..6_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body.clone(),
+                ChunkType::Data,
+            );
+        }
+        let storage_module = Arc::new(storage_module);
+        let hold = storage_module.disk.begin_recall();
+        let lane = LaneGuard::start(Arc::clone(&storage_module))?;
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !lane
+                .module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        drop(hold);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !lane
+                .module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        assert!(lane.module.has_pending_writes());
+        Ok(())
+    }
+
+    #[test]
+    fn coalesced_window_joins_adjacent_chunks_and_keeps_the_long_run() -> eyre::Result<()> {
+        let chunk_size = 32u64;
+        let (_tmp, storage) = coalesce_fixture("coalesce_window", chunk_size)?;
+        let body = |offset: u32| vec![offset as u8; chunk_size as usize];
+        for offset in 0..8_u32 {
+            storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body(offset),
+                ChunkType::Data,
+            );
+        }
+        for offset in [100_u32, 102, 104] {
+            storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body(offset),
+                ChunkType::Data,
+            );
+        }
+
+        let cap = chunk_size * 4;
+        let pending = storage.pending_writes.read().unwrap();
+        let batch = storage.select_coalesced_window(&pending, 2, 512, cap);
+        let mut chosen: Vec<u32> = batch.iter().map(|(offset, _, _)| offset.0).collect();
+        chosen.sort_unstable();
+        assert_eq!(chosen, (0..8).collect::<Vec<_>>());
+        let runs = storage.plan_write_runs(&batch, cap);
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|run| run.offsets.len() == 4));
+
+        let scanned = storage.select_coalesced_window(&pending, 4, 3, chunk_size * 8);
+        let scanned_offsets: Vec<u32> = scanned.iter().map(|(offset, _, _)| offset.0).collect();
+        assert_eq!(scanned_offsets, vec![0, 1, 2]);
+        drop(pending);
+
+        storage.write_chunk(PartitionChunkOffset::from(50), body(50), ChunkType::Entropy);
+        let pending = storage.pending_writes.read().unwrap();
+        let long_first = storage.select_coalesced_window(&pending, 1, 512, cap);
+        let long_offsets: Vec<u32> = long_first.iter().map(|(offset, _, _)| offset.0).collect();
+        assert_eq!(long_offsets, vec![0, 1, 2, 3]);
+        drop(pending);
+
+        let aged_at = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("test clock");
+        {
+            let mut pending = storage.pending_writes.write().unwrap();
+            pending
+                .queued_at
+                .insert(PartitionChunkOffset::from(50), aged_at);
+            let jumped = storage.select_coalesced_window(&pending, 1, 512, cap);
+            assert_eq!(jumped.len(), 1);
+            assert_eq!(jumped[0].0, PartitionChunkOffset::from(50));
+        }
+
+        let (_hole_tmp, holed) = coalesce_fixture("coalesce_hole", chunk_size)?;
+        for offset in [0_u32, 1, 2, 4] {
+            holed.write_chunk(
+                PartitionChunkOffset::from(offset),
+                body(offset),
+                ChunkType::Data,
+            );
+        }
+        let pending = holed.pending_writes.read().unwrap();
+        let wide = chunk_size * 8;
+        let batch = holed.select_coalesced_window(&pending, 4, 16, wide);
+        let runs = holed.plan_write_runs(&batch, wide);
+        let lengths: Vec<usize> = runs.iter().map(|run| run.offsets.len()).collect();
+        assert_eq!(lengths, vec![3, 1]);
+        Ok(())
+    }
+
+
+    fn seek_run_fixture(
+        prefix: &str,
+        chunk_size: u64,
+        writes_before_sync: u64,
+        last_offset: u32,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: u64::from(last_offset) + 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: writes_before_sync,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 60_000,
+                entropy_sweep_max_bytes: chunk_size,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![(partition_chunk_offset_ii!(0, last_offset), "chunks".into())],
+            },
+            &config,
+        )?;
+        Ok((tmp_dir, storage))
+    }
+
+    fn coalesce_fixture(
+        prefix: &str,
+        chunk_size: u64,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 200,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1000,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 60_000,
+                entropy_sweep_max_bytes: chunk_size,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![(partition_chunk_offset_ii!(0, 199), "chunks".into())],
+            },
+            &config,
+        )?;
+        Ok((tmp_dir, storage))
     }
 }

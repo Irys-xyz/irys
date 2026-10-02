@@ -32,6 +32,23 @@ use tracing::{Instrument as _, debug, error, instrument, warn};
 /// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
 const MAX_PROTOCOL_VERSIONS: usize = 20;
 
+/// Extra attempts after a push is rate-limited. The chunk stays unseen, so a
+/// later broadcast can still offer it once these are spent.
+const PUSH_BACKPRESSURE_RETRIES: u32 = 3;
+/// First wait between rate-limited push attempts. Later waits double.
+const PUSH_BACKPRESSURE_BACKOFF: Duration = Duration::from_millis(250);
+
+fn push_response_accepted<T>(result: &GossipResult<GossipResponse<T>>) -> bool {
+    matches!(result, Ok(GossipResponse::Accepted(_)))
+}
+
+fn push_response_rate_limited<T>(result: &GossipResult<GossipResponse<T>>) -> bool {
+    matches!(
+        result,
+        Ok(GossipResponse::Rejected(RejectionReason::RateLimited)) | Err(GossipError::RateLimited)
+    )
+}
+
 /// Borrowing analog of [`wire_types::GossipRequestV2`] for zero-clone serialization.
 #[derive(Serialize)]
 struct GossipRequestV2Ref<'a, T> {
@@ -323,27 +340,6 @@ impl GossipClient {
         }
         tracing::debug!(?peer, "circuit breaker open, skipping request");
         Err(GossipError::CircuitBreakerOpen(*peer))
-    }
-
-    /// Send data to a peer and update their score based on the result
-    ///
-    /// # Errors
-    ///
-    /// If the peer is offline or the request fails, an error is returned.
-    async fn send_data_and_update_score_internal(
-        &self,
-        peer: (&IrysPeerId, &PeerListItem),
-        data: &GossipDataV2,
-        peer_list: &PeerList,
-    ) -> GossipResult<()> {
-        let peer_id = peer.0;
-        let peer = peer.1;
-
-        self.check_circuit_breaker(peer_id)?;
-
-        let res = self.send_data(peer, data).await;
-        Self::handle_score(peer_list, &res, peer_id, &self.circuit_breaker);
-        res.map(|_| ())
     }
 
     /// Request a specific data to be gossiped. Returns true if the peer has the data,
@@ -1194,28 +1190,46 @@ impl GossipClient {
 
         self.runtime_handle.spawn(
             async move {
-                if let Err(e) = client.check_circuit_breaker(&peer_id) {
-                    record_gossip_outbound_error(gossip_error_type(&e));
-                    return;
-                }
                 let result = client
-                    .send_preserialized(&peer.address.gossip, route, body)
+                    .push_preserialized_with_backoff(&peer_id, &peer.address.gossip, route, body)
                     .await;
-                Self::handle_score(&peer_list, &result, &peer_id, &client.circuit_breaker);
-                match result {
-                    Ok(_) => {
-                        if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
-                            error!("Error recording seen data in cache: {:?}", err);
-                        }
-                    }
-                    Err(e) => {
-                        record_gossip_outbound_error(gossip_error_type(&e));
-                        error!("Error sending pre-serialized data to peer: {:?}", e);
-                    }
-                }
+                Self::complete_push(
+                    &peer_list,
+                    &result,
+                    &peer_id,
+                    &client.circuit_breaker,
+                    &cache,
+                    gossip_cache_key,
+                    "pre-serialized push",
+                );
             }
             .instrument(span),
         );
+    }
+
+    /// Send one pre-serialized push, repeating while the peer is rate-limiting.
+    /// The final response is returned uninterpreted so the caller can score it
+    /// and decide whether the peer has the data.
+    async fn push_preserialized_with_backoff(
+        &self,
+        peer_id: &IrysPeerId,
+        address: &SocketAddr,
+        route: GossipRoutes,
+        body: bytes::Bytes,
+    ) -> GossipResult<GossipResponse<()>> {
+        let mut attempt = 0_u32;
+        loop {
+            self.check_circuit_breaker(peer_id)?;
+            let result = self
+                .send_preserialized(address, route, body.clone())
+                .await;
+            if !push_response_rate_limited(&result) || attempt == PUSH_BACKPRESSURE_RETRIES {
+                return result;
+            }
+            let shift = 1_u32.checked_shl(attempt).unwrap_or(u32::MAX);
+            tokio::time::sleep(PUSH_BACKPRESSURE_BACKOFF.saturating_mul(shift)).await;
+            attempt = attempt.saturating_add(1);
+        }
     }
 
     /// Send data to a peer
@@ -1489,12 +1503,27 @@ impl GossipClient {
         peer_id: &IrysPeerId,
         circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
     ) {
-        match &result {
-            Ok(_) => {
+        match result {
+            Ok(GossipResponse::Accepted(_)) => {
                 peer_list.increase_peer_score_by_peer_id(peer_id, ScoreIncreaseReason::DataRequest);
                 peer_list.set_is_online_by_peer_id(peer_id, true);
                 circuit_breaker.record_success(peer_id);
             }
+            // The peer answered. A rate limit is backpressure. A handshake
+            // request stays probeable. Neither reply is a delivery, so the
+            // seen-cache still allows a later offer.
+            Ok(GossipResponse::Rejected(
+                RejectionReason::RateLimited | RejectionReason::HandshakeRequired(_),
+            ))
+            | Err(GossipError::RateLimited) => {}
+            Ok(GossipResponse::Rejected(_)) => {
+                peer_list.decrease_peer_score_by_peer_id(
+                    peer_id,
+                    ScoreDecreaseReason::NetworkError("gossip push rejected".to_string()),
+                );
+                circuit_breaker.record_failure(peer_id);
+            }
+            Err(GossipError::CircuitBreakerOpen(_)) => {}
             Err(err) => {
                 if let GossipError::Network(_message) = err {
                     debug!(
@@ -1509,6 +1538,42 @@ impl GossipClient {
                 );
                 circuit_breaker.record_failure(peer_id);
             }
+        }
+    }
+
+    /// Score the final push once, and record the peer as having the data only
+    /// when it accepted.
+    fn complete_push<T>(
+        peer_list: &PeerList,
+        result: &GossipResult<GossipResponse<T>>,
+        peer_id: &IrysPeerId,
+        circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
+        cache: &GossipCache,
+        key: GossipCacheKey,
+        context: &str,
+    ) {
+        Self::handle_score(peer_list, result, peer_id, circuit_breaker);
+        if push_response_accepted(result) {
+            if let Err(err) = cache.record_seen(*peer_id, key) {
+                error!("Error recording seen data in cache: {:?}", err);
+            }
+            return;
+        }
+        if push_response_rate_limited(result) {
+            record_gossip_outbound_error("rate_limited");
+            debug!(?peer_id, context, "peer rate-limited a gossip push");
+            return;
+        }
+        if let Err(GossipError::CircuitBreakerOpen(_)) = result {
+            record_gossip_outbound_error("circuit_breaker_open");
+            return;
+        }
+        if let Err(error) = result {
+            record_gossip_outbound_error(gossip_error_type(error));
+            error!(?error, ?peer_id, context, "Error sending data to peer");
+        } else {
+            record_gossip_outbound_error("rejected");
+            warn!(?peer_id, context, "peer rejected a gossip push");
         }
     }
 
@@ -1563,16 +1628,38 @@ impl GossipClient {
         let peer = peer.1.clone();
 
         self.runtime_handle.spawn(async move {
-            if let Err(e) = client
-                .send_data_and_update_score_internal((&peer_id, &peer), &data, &peer_list)
-                .await
-            {
-                record_gossip_outbound_error(gossip_error_type(&e));
-                error!("Error sending data to peer: {:?}", e);
-            } else if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
-                error!("Error recording seen data in cache: {:?}", err);
-            }
+            let result = client
+                .push_data_with_backoff(&peer_id, &peer, &data)
+                .await;
+            Self::complete_push(
+                &peer_list,
+                &result,
+                &peer_id,
+                &client.circuit_breaker,
+                &cache,
+                gossip_cache_key,
+                "gossip push",
+            );
         });
+    }
+
+    async fn push_data_with_backoff(
+        &self,
+        peer_id: &IrysPeerId,
+        peer: &PeerListItem,
+        data: &GossipDataV2,
+    ) -> GossipResult<GossipResponse<()>> {
+        let mut attempt = 0_u32;
+        loop {
+            self.check_circuit_breaker(peer_id)?;
+            let result = self.send_data(peer, data).await;
+            if !push_response_rate_limited(&result) || attempt == PUSH_BACKPRESSURE_RETRIES {
+                return result;
+            }
+            let shift = 1_u32.checked_shl(attempt).unwrap_or(u32::MAX);
+            tokio::time::sleep(PUSH_BACKPRESSURE_BACKOFF.saturating_mul(shift)).await;
+            attempt = attempt.saturating_add(1);
+        }
     }
 
     /// Sends data to a peer without updating their score
@@ -3419,6 +3506,162 @@ mod tests {
                     response_time, expected_score
                 );
             }
+        }
+    }
+
+    mod push_delivery_tests {
+        use super::*;
+        use irys_types::{PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn create_test_peer(id: u8) -> (IrysPeerId, IrysAddress, PeerListItem) {
+            let mining_addr = IrysAddress::from([id; 20]);
+            let peer_id = IrysPeerId::from(mining_addr);
+            let peer_address = PeerAddress {
+                gossip: SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)),
+                    8000 + id as u16,
+                ),
+                api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)), 9000 + id as u16),
+                execution: RethPeerInfo::default(),
+            };
+            let peer = PeerListItem {
+                peer_id,
+                mining_address: mining_addr,
+                address: peer_address,
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 100,
+                is_online: true,
+                last_seen: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                protocol_version: Default::default(),
+                ..Default::default()
+            };
+            (peer_id, mining_addr, peer)
+        }
+
+        fn scored_peer() -> (PeerList, IrysPeerId, u16) {
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let (peer_id, _, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(peer, true);
+            let score = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            (peer_list, peer_id, score)
+        }
+
+        fn production_client() -> GossipClient {
+            GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(1),
+                IrysAddress::from([1_u8; 20]),
+                IrysPeerId::from([1_u8; 20]),
+                CircuitBreakerConfig::p2p_defaults(),
+                tokio::runtime::Handle::current(),
+            )
+        }
+
+        fn cache_key() -> GossipCacheKey {
+            GossipCacheKey::Block(H256::zero())
+        }
+
+        fn peer_has_data(cache: &GossipCache, peer_id: IrysPeerId) -> bool {
+            cache
+                .peers_that_have_seen(&cache_key())
+                .expect("cache")
+                .contains(&peer_id)
+        }
+
+        fn finish_push(
+            client: &GossipClient,
+            peer_list: &PeerList,
+            peer_id: &IrysPeerId,
+            result: &GossipResult<GossipResponse<()>>,
+            cache: &GossipCache,
+        ) {
+            GossipClient::complete_push(
+                peer_list,
+                result,
+                peer_id,
+                &client.circuit_breaker,
+                cache,
+                cache_key(),
+                "test push",
+            );
+        }
+
+        #[tokio::test]
+        async fn accepted_push_raises_score_and_counts_as_delivery() {
+            let client = production_client();
+            let (peer_list, peer_id, initial) = scored_peer();
+            let cache = GossipCache::new();
+            let result = Ok(GossipResponse::<()>::Accepted(()));
+
+            finish_push(&client, &peer_list, &peer_id, &result, &cache);
+
+            let updated = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            assert!(updated > initial);
+            assert!(push_response_accepted(&result));
+            assert!(peer_has_data(&cache, peer_id));
+            assert!(client.circuit_breaker.is_available(&peer_id));
+        }
+
+        #[tokio::test]
+        async fn rate_limited_push_does_not_score_or_open_the_breaker() {
+            let cases = [
+                Ok(GossipResponse::<()>::Rejected(RejectionReason::RateLimited)),
+                Err(GossipError::RateLimited),
+            ];
+            for result in cases {
+                let client = production_client();
+                let (peer_list, peer_id, initial) = scored_peer();
+                let cache = GossipCache::new();
+
+                for _ in 0..5 {
+                    finish_push(&client, &peer_list, &peer_id, &result, &cache);
+                }
+
+                let updated = peer_list
+                    .get_peer(&peer_id)
+                    .expect("peer")
+                    .reputation_score
+                    .get();
+                assert_eq!(updated, initial);
+                assert!(!push_response_accepted(&result));
+                assert!(push_response_rate_limited(&result));
+                assert!(!peer_has_data(&cache, peer_id));
+                assert!(client.circuit_breaker.is_available(&peer_id));
+            }
+        }
+
+        #[tokio::test]
+        async fn hard_rejection_is_not_a_delivery_and_trips_the_breaker() {
+            let client = production_client();
+            let (peer_list, peer_id, initial) = scored_peer();
+            let cache = GossipCache::new();
+            let result = Ok(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+
+            for _ in 0..5 {
+                finish_push(&client, &peer_list, &peer_id, &result, &cache);
+            }
+
+            let updated = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            assert!(updated < initial);
+            assert!(!push_response_accepted(&result));
+            assert!(!peer_has_data(&cache, peer_id));
+            assert!(!client.circuit_breaker.is_available(&peer_id));
         }
     }
 

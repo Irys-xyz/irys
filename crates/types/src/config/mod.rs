@@ -85,6 +85,10 @@ impl Config {
             "storage.max_pending_write_bytes must be > 0 (or omitted for the derived default): \
              a zero ceiling stops chunk-body migration from ever writing"
         );
+        ensure!(
+            self.node_config.storage.entropy_sweep_max_bytes > 0,
+            "storage.entropy_sweep_max_bytes must be > 0: a hold is at least one chunk"
+        );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
@@ -721,8 +725,8 @@ pub struct VdfConfig {
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
 
-    /// When true, enforce a minimum step duration to prevent VDF from
-    /// outrunning block production when sha_1s_difficulty is low.
+    /// When true, the local step uses a 25ms floor instead of one second.
+    /// See `VdfNodeConfig::throttle`.
     pub throttle: bool,
 
     /// See `VdfNodeConfig::progress_timeout_secs`.
@@ -1356,6 +1360,10 @@ mod tests {
         // single-lane mode) so a single-permit operator config remains valid
         // on upgrade.
         expected_config.mempool.max_control_plane_concurrent_tasks = 0;
+        // An omitted key takes the production default.
+        expected_config.storage.entropy_sweep_interval_millis = 1000;
+        expected_config.storage.entropy_sweep_max_bytes = 256 * 1024;
+        expected_config.storage.entropy_coalesce_hole_bytes = 256 * 1024;
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
@@ -1676,6 +1684,20 @@ mod tests {
         Config::new_with_random_peer_id(node_config)
             .validate()
             .expect("any positive ceiling is accepted; the worker floors it");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.entropy_sweep_max_bytes = 0;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a zero entropy sweep cap is not a valid pread or pwrite")
+            .to_string();
+        assert!(err.contains("entropy_sweep_max_bytes"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.entropy_sweep_max_bytes = 1;
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive entropy sweep cap is accepted");
     }
 
     #[test]
