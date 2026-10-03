@@ -4503,13 +4503,176 @@ mod tests {
             .expect("offset 1 stays on disk");
         assert_eq!(*hole_type, ChunkType::Entropy);
         assert_eq!(hole_bytes, &vec![0_u8; 32]);
+        {
+            let pending = storage_module.pending_writes.read().unwrap();
+            assert_eq!(pending.queued_unpacked_bytes, 0);
+            let runs =
+                storage_module.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
+            assert_eq!(runs.len(), 2);
+        }
+        Ok(())
+    }
+
+    fn entropy_disk_module(
+        prefix: &str,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?;
+        storage_module.pack_with_zeros();
+        Ok((tmp_dir, storage_module))
+    }
+
+    fn queue_packed_chunk(
+        storage: &StorageModule,
+        ledger_offset: u64,
+        root_byte: u8,
+        path: Vec<u8>,
+        priority: super::disk_lane::WritePriority,
+    ) -> eyre::Result<()> {
+        let data_root = H256::from([root_byte; 32]);
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 32,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        storage.index_transaction_data(
+            &data_tx,
+            &path,
+            LedgerChunkRange(ledger_chunk_offset_ii!(ledger_offset, ledger_offset)),
+            0,
+        )?;
+        storage.enqueue_unpacked(
+            &UnpackedChunk {
+                data_root,
+                data_size: 32,
+                data_path: path.into(),
+                bytes: vec![root_byte; 32].into(),
+                tx_offset: TxChunkOffset::from(0),
+            },
+            priority,
+            false,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn span_island_stays_out_of_the_buffer_until_every_ack() -> eyre::Result<()> {
+        let (_tmp, storage) = entropy_disk_module("span_island_ack")?;
+        queue_packed_chunk(
+            &storage,
+            0,
+            1,
+            vec![1, 2, 3, 4],
+            super::disk_lane::WritePriority::Migration,
+        )?;
+        queue_packed_chunk(
+            &storage,
+            1,
+            2,
+            vec![5, 6, 7, 8],
+            super::disk_lane::WritePriority::Migration,
+        )?;
+        assert!(storage.sweep_one_for_test());
+        assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.inflight_len_for_test(), 2);
+
+        let started = Instant::now();
+        while !storage.finish_one_ready_ack_for_test() {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "index ack did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        {
+            let pending = storage.pending_writes.read().unwrap();
+            assert!(pending.get(&PartitionChunkOffset::from(0)).is_none());
+            assert!(pending.get(&PartitionChunkOffset::from(1)).is_none());
+        }
+
+        let started = Instant::now();
+        loop {
+            storage.poll_acks();
+            let pending = storage.pending_writes.read().unwrap();
+            if pending.len() == 2 {
+                let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
+                assert_eq!(runs.len(), 1);
+                assert_eq!(runs[0].byte_len, 64);
+                let queued_at: Vec<_> = pending.queued_at.values().copied().collect();
+                assert_eq!(queued_at.len(), 2);
+                assert_eq!(queued_at[0], queued_at[1]);
+                break;
+            }
+            drop(pending);
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "island did not enter the buffer"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn span_island_shares_one_priority() -> eyre::Result<()> {
+        let (_tmp, storage) = entropy_disk_module("span_island_priority")?;
+        queue_packed_chunk(
+            &storage,
+            0,
+            1,
+            vec![1, 2, 3, 4],
+            super::disk_lane::WritePriority::Ingress,
+        )?;
+        queue_packed_chunk(
+            &storage,
+            1,
+            2,
+            vec![5, 6, 7, 8],
+            super::disk_lane::WritePriority::Migration,
+        )?;
+        storage.drive_entropy_queue_for_test();
+        let pending = storage.pending_writes.read().unwrap();
+        let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].byte_len, 64);
         assert_eq!(
-            storage_module
-                .pending_writes
-                .read()
-                .unwrap()
-                .queued_unpacked_bytes,
-            0
+            pending
+                .priorities
+                .get(&PartitionChunkOffset::from(0))
+                .copied(),
+            Some(super::disk_lane::WritePriority::Migration)
+        );
+        assert_eq!(
+            pending
+                .priorities
+                .get(&PartitionChunkOffset::from(1))
+                .copied(),
+            Some(super::disk_lane::WritePriority::Migration)
         );
         Ok(())
     }
