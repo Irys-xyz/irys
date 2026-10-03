@@ -155,9 +155,9 @@ struct PendingWrites {
     occupancy: HashMap<PartitionChunkOffset, u64>,
     /// Who queued each packed chunk. Equal-length runs break ties with this.
     priorities: HashMap<PartitionChunkOffset, disk_lane::WritePriority>,
-    /// When each packed chunk was queued. The oldest short run may jump a
-    /// longer one after `reorder_grace`. Further short runs wait another
-    /// `reorder_grace`.
+    /// When each packed chunk was queued. While the disk is busy, the oldest
+    /// short run may jump a longer one after `reorder_grace`. Further short
+    /// runs wait another `reorder_grace`. An idle disk writes them.
     queued_at: HashMap<PartitionChunkOffset, Instant>,
     /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
     queued_unpacked_bytes: u64,
@@ -789,14 +789,18 @@ impl StorageModule {
         !self.pending_writes.read().unwrap().is_empty()
     }
 
-    /// A packed run is ready for the disk when one run fills the write cap,
-    /// the pending set has reached the durability count, or the oldest short
-    /// run has waited `reorder_grace` and no earlier short run still holds
-    /// that grace. Other short runs stay in memory so a neighbor can join.
+    /// A packed run is ready for the disk when the chunk disk is idle, one
+    /// run fills the write cap, the pending set has reached the durability
+    /// count, or the oldest short run has waited `reorder_grace` and no
+    /// earlier short run still holds that grace. Other short runs stay in
+    /// memory so a neighbor can join while the disk stays busy.
     fn pending_run_ready(&self) -> bool {
         let pending = self.pending_writes.read().unwrap();
         if pending.is_empty() {
             return false;
+        }
+        if self.disk.chunk_disk_idle() {
+            return true;
         }
         let threshold = self.config.node_config.storage.num_writes_before_sync;
         if pending.len() as u64 >= threshold {
@@ -818,9 +822,10 @@ impl StorageModule {
     }
 
     /// Bytes of the longest packed run that may hit the disk now. Zero when
-    /// every run is still held for a neighbor. A short-run hold leaves every
-    /// short run out of this count, so entropy can use the disk while those
-    /// runs wait for a neighbor.
+    /// every run is still held for a neighbor. While the disk is busy, a
+    /// short-run hold leaves every short run out of this count, so entropy
+    /// can use the disk while those runs wait for a neighbor. An idle disk
+    /// counts every queued run.
     fn longest_ready_write_bytes(&self) -> u64 {
         let pending = self.pending_writes.read().unwrap();
         if pending.is_empty() {
@@ -828,6 +833,14 @@ impl StorageModule {
         }
         let chunk = self.config.consensus.chunk_size.max(1);
         let cap = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
+        if self.disk.chunk_disk_idle() {
+            return self
+                .write_run_metas(&pending, cap)
+                .into_iter()
+                .map(|run| run.byte_len)
+                .max()
+                .unwrap_or(0);
+        }
         let grace = disk_lane::reorder_grace(chunk);
         let due_all = self.short_runs_due(pending.len());
         let held = self.disk.short_writes_held();
@@ -1337,6 +1350,10 @@ impl StorageModule {
         } else {
             self.config.node_config.storage.num_writes_before_sync
         };
+        // Capture before this commit's own write hold. An idle disk writes
+        // every short run and does not arm the hold. A busy disk keeps one
+        // aged short run so the others can still gain a neighbor.
+        let disk_idle = self.disk.chunk_disk_idle();
         let chunk = self.config.consensus.chunk_size.max(1);
         let run_cap = if coalesce {
             disk_lane::WRITE_RUN_MAX_BYTES.max(chunk)
@@ -1364,7 +1381,7 @@ impl StorageModule {
                     limit,
                     disk_lane::WRITE_REORDER_CHUNKS,
                     run_cap,
-                    !self.short_runs_due(pending.len()),
+                    !disk_idle && !self.short_runs_due(pending.len()),
                 )
             } else if let Some(limit) = max_runs {
                 self.select_pending_window(&pending, limit, run_cap)
@@ -1413,11 +1430,12 @@ impl StorageModule {
             runs.truncate(limit);
         }
         // A short run seeks about as much as a full one and moves far less
-        // data. One pass writes every full run and the oldest aged short
-        // run. The hold keeps the other short runs queued for a neighbor.
-        // Durability and a recall flush still write every run.
+        // data. While the disk is busy, one pass writes every full run and
+        // the oldest aged short run. The hold keeps the other short runs
+        // queued for a neighbor. Durability, a recall flush, and an idle
+        // disk write every run. An idle release does not arm the hold.
         let mut emitted_short = false;
-        if coalesce && !force && !self.short_runs_due(pending_count) {
+        if coalesce && !force && !disk_idle && !self.short_runs_due(pending_count) {
             let full = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
             let grace = disk_lane::reorder_grace(chunk);
             let held = self.disk.short_writes_held();
@@ -2933,7 +2951,8 @@ impl StorageModule {
     /// Pending chunks inside a reorder scan, joined into runs of at most `cap`
     /// bytes. An aged run fills an in-flight slot first, then a longer run.
     /// `one_short` keeps every full run and the oldest aged short run, so a
-    /// pile of short runs cannot fill the window and hide a full run.
+    /// pile of short runs cannot fill the window and hide a full run. The
+    /// caller passes false when the disk is idle, so the short runs go out.
     fn select_coalesced_window(
         &self,
         pending: &PendingWrites,
@@ -6193,11 +6212,9 @@ mod tests {
     }
 
     #[test]
-    fn lane_holds_a_short_run_without_a_recall() -> eyre::Result<()> {
-        // 256 KiB keeps `reorder_grace` above this sleep. A 32-byte chunk
-        // ages after one capped run, which is shorter than the sleep.
+    fn lane_writes_a_short_run_on_an_idle_disk() -> eyre::Result<()> {
         let chunk_size = 256 * 1024;
-        let (_tmp, storage_module) = seek_run_fixture("lane_hold_short", chunk_size, 10_000, 8)?;
+        let (_tmp, storage_module) = seek_run_fixture("lane_idle_short", chunk_size, 10_000, 8)?;
         let body = vec![1_u8; chunk_size as usize];
         for offset in 0..6_u32 {
             storage_module.write_chunk(
@@ -6208,21 +6225,29 @@ mod tests {
         }
         let storage_module = Arc::new(storage_module);
         let lane = LaneGuard::start(Arc::clone(&storage_module))?;
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(lane.module.has_pending_writes());
+        let started = Instant::now();
+        while lane.module.has_pending_writes() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "idle disk left the short run queued"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
-            !lane
-                .module
+            lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        assert!(
+            lane.module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(5))
         );
         Ok(())
     }
 
     #[test]
-    fn lane_writes_only_the_oldest_short_run() -> eyre::Result<()> {
-        // 256 KiB keeps the post-flush hold far above this sleep.
+    fn lane_writes_every_short_run_on_an_idle_disk() -> eyre::Result<()> {
         let chunk_size = 256 * 1024;
-        let (_tmp, storage_module) = seek_run_fixture("lane_one_short", chunk_size, 10_000, 8)?;
+        let (_tmp, storage_module) = seek_run_fixture("lane_idle_shorts", chunk_size, 10_000, 8)?;
         let body = vec![1_u8; chunk_size as usize];
         storage_module.write_chunk(PartitionChunkOffset::from(0), body.clone(), ChunkType::Data);
         storage_module.write_chunk(PartitionChunkOffset::from(2), body, ChunkType::Data);
@@ -6243,17 +6268,79 @@ mod tests {
         }
         let storage_module = Arc::new(storage_module);
         let lane = LaneGuard::start(Arc::clone(&storage_module))?;
-        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        while lane.module.has_pending_writes() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "idle disk left a short run queued"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
         );
         assert!(
-            !lane
-                .module
+            lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(2))
         );
-        assert!(lane.module.has_pending_writes());
+        Ok(())
+    }
+
+    #[test]
+    fn busy_disk_holds_a_young_short_write() -> eyre::Result<()> {
+        let (_tmp, storage) = seek_run_fixture("busy_young_write", 32, 10_000, 8)?;
+        storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; 32],
+            ChunkType::Data,
+        );
+        assert!(storage.pending_run_ready());
+        assert_eq!(storage.longest_ready_write_bytes(), 32);
+        storage.disk.occupy_for_test();
+        assert!(!storage.pending_run_ready());
+        assert_eq!(storage.longest_ready_write_bytes(), 0);
+        storage.disk.arm_short_hold(Duration::from_secs(30));
+        storage.disk.release_for_test();
+        assert!(storage.pending_run_ready());
+        assert_eq!(storage.longest_ready_write_bytes(), 32);
+        Ok(())
+    }
+
+    #[test]
+    fn busy_disk_holds_further_short_writes_after_one_aged_run() -> eyre::Result<()> {
+        let (_tmp, storage) = seek_run_fixture("busy_aged_write", 32, 10_000, 8)?;
+        storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; 32],
+            ChunkType::Data,
+        );
+        storage.write_chunk(
+            PartitionChunkOffset::from(2),
+            vec![2_u8; 32],
+            ChunkType::Data,
+        );
+        let aged = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("test clock");
+        {
+            let mut pending = storage.pending_writes.write().unwrap();
+            pending
+                .queued_at
+                .insert(PartitionChunkOffset::from(0), aged);
+            pending
+                .queued_at
+                .insert(PartitionChunkOffset::from(2), aged);
+        }
+        storage.disk.occupy_for_test();
+        assert!(storage.pending_run_ready());
+        assert_eq!(storage.longest_ready_write_bytes(), 32);
+        storage.disk.arm_short_hold(Duration::from_secs(30));
+        assert!(!storage.pending_run_ready());
+        assert_eq!(storage.longest_ready_write_bytes(), 0);
+        storage.disk.release_for_test();
+        assert!(storage.pending_run_ready());
+        assert_eq!(storage.longest_ready_write_bytes(), 32);
         Ok(())
     }
 
@@ -6313,7 +6400,7 @@ mod tests {
     }
 
     #[test]
-    fn lane_holds_a_run_under_the_cap() -> eyre::Result<()> {
+    fn lane_holds_a_short_run_while_the_disk_is_busy() -> eyre::Result<()> {
         let chunk_size = 256 * 1024;
         let (_tmp, storage_module) = seek_run_fixture("lane_under_cap", chunk_size, 10_000, 80)?;
         let body = vec![1_u8; chunk_size as usize];
@@ -6324,6 +6411,7 @@ mod tests {
                 ChunkType::Data,
             );
         }
+        storage_module.disk.occupy_for_test();
         let storage_module = Arc::new(storage_module);
         let lane = LaneGuard::start(Arc::clone(&storage_module))?;
         std::thread::sleep(Duration::from_millis(200));
@@ -6333,13 +6421,28 @@ mod tests {
                 .module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
         );
+        lane.module.disk.release_for_test();
+        let started = Instant::now();
+        while lane.module.has_pending_writes() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "idle disk left the short run queued"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            lane.module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
+        );
+        assert!(
+            lane.module
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(38))
+        );
         Ok(())
     }
 
     #[test]
     fn lane_pauses_writes_while_recall_holds_the_disk() -> eyre::Result<()> {
-        // Same chunk size as the short-run hold: the grace is longer than
-        // both sleeps, so a recall ending does not by itself flush the run.
         let chunk_size = 256 * 1024;
         let (_tmp, storage_module) =
             seek_run_fixture("lane_pause_for_recall", chunk_size, 10_000, 8)?;
@@ -6361,13 +6464,18 @@ mod tests {
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
         );
         drop(hold);
-        std::thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        while lane.module.has_pending_writes() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "idle disk left the short run queued after recall"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
-            !lane
-                .module
+            lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
         );
-        assert!(lane.module.has_pending_writes());
         Ok(())
     }
 
@@ -6447,8 +6555,9 @@ mod tests {
 
     #[test]
     fn lane_persists_intervals_for_an_external_flush() -> eyre::Result<()> {
-        // Above the sync count and younger than `reorder_grace`, so the lane
-        // holds the chunk until the external force flush.
+        // An idle disk writes the young chunk on the lane thread. The
+        // external force waits on that same thread. The other submodule
+        // file stays as it was.
         let (_tmp, storage) = two_disk_fixture("interval_lane", 10_000)?;
         let untouched = submodule_interval_path(&storage, 1);
         std::fs::write(&untouched, b"untouched-marker")?;
@@ -6459,14 +6568,6 @@ mod tests {
         );
         let storage = Arc::new(storage);
         let lane = LaneGuard::start(Arc::clone(&storage))?;
-        lane.module.sync_pending_chunks()?;
-        assert!(lane.module.has_pending_writes());
-        assert!(
-            !lane
-                .module
-                .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
-        );
-
         let module = Arc::clone(&lane.module);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
