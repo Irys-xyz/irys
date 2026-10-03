@@ -352,6 +352,20 @@ pub enum WriteDataChunkError {
     Other(#[from] eyre::Report),
 }
 
+/// One body from a multi-chunk enqueue.
+///
+/// Every queued body in the slice is published to the sweep queue before the
+/// lane is woken, so a running lane cannot take a prefix of the run.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BatchEnqueueItem {
+    /// Entropy targets that accepted this body.
+    Queued(Vec<PartitionChunkOffset>),
+    /// No entropy target accepted this body.
+    NotQueued,
+    /// No index entry for this data root.
+    DataRootNotFound,
+}
+
 // we can't put this in `types` due to dependency cycles
 #[derive(Debug, Clone, Deref, DerefMut)]
 pub struct StorageModules(pub StorageModuleVec);
@@ -4674,6 +4688,64 @@ mod tests {
                 .copied(),
             Some(super::disk_lane::WritePriority::Migration)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn contiguous_deposit_is_one_sweep_and_one_write_run() -> eyre::Result<()> {
+        let (_tmp, storage) = entropy_disk_module("batch_span")?;
+        let mut chunks = Vec::new();
+        for (ledger_offset, root_byte, path) in [
+            (0_u64, 1_u8, vec![1_u8, 2, 3, 4]),
+            (1, 2, vec![5, 6, 7, 8]),
+            (2, 3, vec![9, 10, 11, 12]),
+        ] {
+            let data_root = H256::from([root_byte; 32]);
+            let data_tx =
+                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        data_root,
+                        data_size: 32,
+                        ..Default::default()
+                    },
+                    metadata: irys_types::DataTransactionMetadata::new(),
+                });
+            storage.index_transaction_data(
+                &data_tx,
+                &path,
+                LedgerChunkRange(ledger_chunk_offset_ii!(ledger_offset, ledger_offset)),
+                0,
+            )?;
+            chunks.push(UnpackedChunk {
+                data_root,
+                data_size: 32,
+                data_path: path.into(),
+                bytes: vec![root_byte; 32].into(),
+                tx_offset: TxChunkOffset::from(0),
+            });
+        }
+
+        let before = storage.disk.enqueue_notifies.load(Ordering::SeqCst);
+        let items = storage.deposit_data_chunks(&chunks)?;
+        assert_eq!(items.len(), 3);
+        assert!(
+            items
+                .iter()
+                .all(|item| matches!(item, BatchEnqueueItem::Queued(_)))
+        );
+        assert_eq!(
+            storage.disk.enqueue_notifies.load(Ordering::SeqCst) - before,
+            1,
+            "one run publishes once"
+        );
+        assert_eq!(storage.sweep_slot_count_for_test(), 3);
+
+        storage.drive_entropy_queue_for_test();
+        assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        let pending = storage.pending_writes.read().unwrap();
+        let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].byte_len, 96);
         Ok(())
     }
 

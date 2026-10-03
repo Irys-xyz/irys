@@ -342,8 +342,10 @@ async fn test_bandwidth_rating_initialization() {
     let low_realistic = PeerStats::new(20, REALISTIC_CHUNK_SIZE, DEFAULT_TIMEOUT);
     let high_realistic = PeerStats::new(100, REALISTIC_CHUNK_SIZE, DEFAULT_TIMEOUT);
 
-    // With realistic chunk sizes, high bandwidth should definitely have higher concurrency
-    assert!(high_realistic.max_concurrency > low_realistic.max_concurrency);
+    // A realistic chunk floors both targets at one 10 MiB sweep.
+    assert!(high_realistic.max_concurrency >= low_realistic.max_concurrency);
+    assert!(low_realistic.baseline_concurrency >= 40);
+    assert!(high_realistic.baseline_concurrency >= 40);
 }
 
 #[test]

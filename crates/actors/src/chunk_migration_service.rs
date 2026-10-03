@@ -6,7 +6,7 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    BlockIndex, StorageModule, StorageModulesReadGuard, WriteDataChunkError,
+    BatchEnqueueItem, BlockIndex, StorageModule, StorageModulesReadGuard, WriteDataChunkError,
     get_overlapped_storage_modules,
 };
 use irys_packing::unpack;
@@ -581,18 +581,35 @@ fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,
     chunk: &UnpackedChunk,
 ) -> Result<(), MigrationError> {
-    storage_module.deposit_data_chunk(chunk).map_err(|e| match e {
-        // Recovery holds the module's data writes; the worker defers, so this
-        // is expected and not an error worth an error-level log.
-        WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,
-        e => {
-            error!(
-                "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
-                chunk.data_root, chunk.tx_offset, chunk.data_size, e
-            );
-            MigrationError::ChunkDataWrite
-        }
-    })
+    storage_module
+        .deposit_data_chunk(chunk)
+        .map_err(|e| match e {
+            // Recovery holds the module's data writes; the worker defers, so this
+            // is expected and not an error worth an error-level log.
+            WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,
+            e => {
+                error!(
+                    "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
+                    chunk.data_root, chunk.tx_offset, chunk.data_size, e
+                );
+                MigrationError::ChunkDataWrite
+            }
+        })
+}
+
+fn write_chunks_to_module(
+    storage_module: &Arc<StorageModule>,
+    chunks: &[UnpackedChunk],
+) -> Result<Vec<BatchEnqueueItem>, MigrationError> {
+    storage_module
+        .deposit_data_chunks(chunks)
+        .map_err(|e| match e {
+            WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,
+            e => {
+                error!("Failed to write {} chunk bodies: {:?}", chunks.len(), e);
+                MigrationError::ChunkDataWrite
+            }
+        })
 }
 
 fn validate_chunk_for_migration(

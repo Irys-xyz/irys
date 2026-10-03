@@ -49,10 +49,23 @@ impl PeerStats {
         // (chunks smaller than 245KiB only used in testing)
         let chunk_multiplier = if chunk_size < 1024 { 1.5 } else { 1.0 };
 
-        let max_concurrency =
-            ((base_concurrency as f64 * chunk_multiplier).round() as u32).clamp(1, 32);
+        // One 10 MiB sweep has to be in flight or a storage module cannot fill
+        // a packed run. The disk lane caps one run at that size. Tiny test
+        // chunks keep the bandwidth-scaled count.
+        const SWEEP_SPAN_BYTES: u64 = 10 * 1024 * 1024;
+        let span_floor = if chunk_size >= 1024 {
+            u32::try_from((SWEEP_SPAN_BYTES / chunk_size.max(1)).clamp(1, 64)).unwrap_or(64)
+        } else {
+            0
+        };
 
-        let baseline_concurrency = (max_concurrency / 2).max(1);
+        let max_concurrency = ((base_concurrency as f64 * chunk_multiplier).round() as u32)
+            .clamp(1, 32)
+            .max(span_floor);
+
+        let baseline_concurrency = (max_concurrency / 2)
+            .max(1)
+            .max(span_floor.min(max_concurrency));
 
         Self {
             chunk_size,
