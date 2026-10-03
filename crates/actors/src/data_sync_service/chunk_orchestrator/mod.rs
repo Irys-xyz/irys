@@ -1011,6 +1011,34 @@ impl ChunkOrchestrator {
         Ok(())
     }
 
+    /// The body is in the sync staging buffer or the sweep queue.
+    ///
+    /// Accepts `Requested` and `Pending`. A peer disconnect can move a staged
+    /// offset back to `Pending` before the contiguous run is published.
+    pub fn note_body_buffered(&mut self, chunk_offset: PartitionChunkOffset) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!("note_body_buffered for unknown offset: {:?}", chunk_offset)
+        })?;
+        if matches!(
+            request.request_state,
+            ChunkRequestState::AwaitingDurability(..) | ChunkRequestState::Completed
+        ) {
+            return Ok(());
+        }
+        if !matches!(
+            request.request_state,
+            ChunkRequestState::Requested(..) | ChunkRequestState::Pending
+        ) {
+            return Err(eyre::eyre!(
+                "note_body_buffered expected an active fetch at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::AwaitingDurability(Instant::now());
+        Ok(())
+    }
+
     /// A concurrent local writer already completed this offset before the
     /// fetched body reached the pending buffer.
     pub fn mark_chunk_already_durable(

@@ -15,7 +15,7 @@ use chunk_fetcher::ChunkFetchFailureKind;
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::ingress_proofs_by_data_root;
-use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule, WriteDataChunkError};
+use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
 use irys_types::{
     ChunkFormat, Config, DataRoot, IrysAddress, PartitionChunkOffset, TokioServiceHandle, Traced,
@@ -24,9 +24,9 @@ use irys_types::{
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{Instrument as _, debug, error, warn};
@@ -38,7 +38,7 @@ const MAX_INGRESS_PROOF_SIGNER_PEERS: usize = 2;
 const MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN: usize = 16;
 
 /// Local write outcome after a successful peer fetch.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DataSyncWriteOutcome {
     /// Another writer already made the requested offset durably `Data`.
     AlreadyDurable,
@@ -52,13 +52,16 @@ enum DataSyncWriteOutcome {
     Other(String),
 }
 
+#[cfg(test)]
 async fn attempt_data_sync_write(
     sm: &StorageModule,
     unpacked: &UnpackedChunk,
     expected_offset: PartitionChunkOffset,
 ) -> DataSyncWriteOutcome {
     match sm.write_data_chunk_queued(unpacked).await {
-        Err(WriteDataChunkError::DataRootNotFound) => DataSyncWriteOutcome::MissingDataRootIndex,
+        Err(irys_domain::WriteDataChunkError::DataRootNotFound) => {
+            DataSyncWriteOutcome::MissingDataRootIndex
+        }
         Err(e) => DataSyncWriteOutcome::Other(e.to_string()),
         Ok(()) => {
             // write_data_chunk only enqueues into pending_writes; get_chunk_type
@@ -151,6 +154,14 @@ pub struct DataSyncServiceInner {
     term_dispatch_cursor: usize,
     /// Rotates which Publish storage module is visited first each tick.
     publish_dispatch_cursor: usize,
+    /// Validated bodies held until a contiguous run can be published together.
+    staged_bodies: HashMap<StorageModuleId, BTreeMap<PartitionChunkOffset, StagedSyncBody>>,
+}
+
+struct StagedSyncBody {
+    unpacked: UnpackedChunk,
+    staged_at: Instant,
+    peer: IrysAddress,
 }
 
 /// Re-arm `Blocked(MissingDataRootIndex)` when the local index looks ready.
@@ -169,6 +180,11 @@ const REARM_BACKOFF_INITIAL_SKIPS: u64 = 1;
 
 /// Cap zero-yield skip budget (~16s at 1s re-arm cadence).
 const REARM_BACKOFF_MAX_SKIPS: u64 = 16;
+
+/// How long one fetched body waits for a neighboring offset. Long enough for
+/// the rest of an in-flight sweep to arrive, and short enough that a finished
+/// range still enters the sweep queue. This is not the write reorder grace.
+const SYNC_STAGE_WAIT: Duration = Duration::from_secs(1);
 
 /// Give every storage module one dispatch opportunity per round, rotating the
 /// first module between ticks. The callback returns whether it consumed work.
@@ -207,6 +223,7 @@ fn dispatch_term_then_publish<T: Copy>(
     publish_ids: &mut [T],
     term_cursor: usize,
     publish_cursor: usize,
+    burst: usize,
     mut dispatch: impl FnMut(T) -> bool,
 ) -> (usize, usize) {
     let next_term = if term_ids.is_empty() {
@@ -224,19 +241,101 @@ fn dispatch_term_then_publish<T: Copy>(
         (publish_cursor + 1) % publish_ids.len()
     };
 
+    let burst = burst.max(1);
     loop {
         let mut dispatched = false;
         for id in term_ids.iter().copied() {
-            dispatched |= dispatch(id);
+            for _ in 0..burst {
+                if !dispatch(id) {
+                    break;
+                }
+                dispatched = true;
+            }
         }
         for id in publish_ids.iter().copied() {
-            dispatched |= dispatch(id);
+            for _ in 0..burst {
+                if !dispatch(id) {
+                    break;
+                }
+                dispatched = true;
+            }
         }
         if !dispatched {
             break;
         }
     }
     (next_term, next_publish)
+}
+
+fn classify_synced_chunk(
+    sm: &StorageModule,
+    unpacked: &UnpackedChunk,
+    expected_offset: PartitionChunkOffset,
+    item: &BatchEnqueueItem,
+) -> DataSyncWriteOutcome {
+    if matches!(item, BatchEnqueueItem::DataRootNotFound) {
+        return DataSyncWriteOutcome::MissingDataRootIndex;
+    }
+    if sm.is_data_chunk_durable_at(expected_offset) {
+        return DataSyncWriteOutcome::AlreadyDurable;
+    }
+    let queued_here = match item {
+        BatchEnqueueItem::Queued(offsets) => offsets.contains(&expected_offset),
+        BatchEnqueueItem::NotQueued | BatchEnqueueItem::DataRootNotFound => false,
+    };
+    if queued_here
+        || sm.is_data_write_pending_at(expected_offset)
+        || matches!(sm.get_chunk_type(&expected_offset), Some(ChunkType::Data))
+    {
+        return DataSyncWriteOutcome::AwaitingDurability;
+    }
+    if matches!(
+        sm.collect_data_root_infos(unpacked.data_root),
+        Ok(infos) if infos.0.is_empty()
+    ) {
+        return DataSyncWriteOutcome::MissingDataRootIndex;
+    }
+    DataSyncWriteOutcome::NoWriteableOffset
+}
+
+struct StagedOffset {
+    offset: u32,
+    staged_at: Instant,
+}
+
+/// Offsets whose contiguous run is full, closed, or older than `wait`.
+fn staged_runs_to_flush(
+    staged: &[StagedOffset],
+    now: Instant,
+    chunk_bytes: u64,
+    cap_bytes: u64,
+    wait: Duration,
+    mut neighbor_open: impl FnMut(u32) -> bool,
+) -> Vec<u32> {
+    let mut flush = Vec::new();
+    let mut index = 0_usize;
+    while index < staged.len() {
+        let mut end = index;
+        while end + 1 < staged.len()
+            && staged[end + 1].offset == staged[end].offset.saturating_add(1)
+        {
+            end += 1;
+        }
+        let run = &staged[index..=end];
+        let bytes = (run.len() as u64).saturating_mul(chunk_bytes.max(1));
+        let oldest = run.iter().map(|slot| slot.staged_at).min().unwrap_or(now);
+        let start = run[0].offset;
+        let last = run[run.len() - 1].offset;
+        let prev_open = start > 0 && neighbor_open(start - 1);
+        let next_open = last < u32::MAX && neighbor_open(last.saturating_add(1));
+        let closed = !prev_open && !next_open;
+        let aged = now.saturating_duration_since(oldest) >= wait;
+        if bytes >= cap_bytes.max(chunk_bytes.max(1)) || closed || aged {
+            flush.extend(run.iter().map(|slot| slot.offset));
+        }
+        index = end + 1;
+    }
+    flush
 }
 
 #[cfg(test)]
@@ -281,7 +380,7 @@ mod scheduler_fairness_tests {
         let mut publish = [0_u8, 2_u8, 3_u8];
         let mut permits = 3_usize;
         let mut order = Vec::new();
-        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 1, |id| {
             if permits == 0 {
                 return false;
             }
@@ -300,7 +399,7 @@ mod scheduler_fairness_tests {
         let mut permits = 3_usize;
         let mut order = Vec::new();
         let (next_term, next_publish) =
-            dispatch_term_then_publish(&mut term, &mut publish, 0, 0, |id| {
+            dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 1, |id| {
                 if permits == 0 {
                     return false;
                 }
@@ -317,7 +416,7 @@ mod scheduler_fairness_tests {
         let mut permits = 3_usize;
         let mut order = Vec::new();
         let _ =
-            dispatch_term_then_publish(&mut term, &mut publish, next_term, next_publish, |id| {
+            dispatch_term_then_publish(&mut term, &mut publish, next_term, next_publish, 1, |id| {
                 if permits == 0 {
                     return false;
                 }
@@ -326,6 +425,81 @@ mod scheduler_fairness_tests {
                 true
             });
         assert_eq!(order, vec![4, 1, 0]);
+    }
+
+    #[test]
+    fn one_storage_module_fills_a_span_before_the_next() {
+        let mut term = [1_u8, 4_u8];
+        let mut publish = [0_u8];
+        let mut permits = 5_usize;
+        let mut order = Vec::new();
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 3, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![1, 1, 1, 4, 4]);
+    }
+}
+
+#[cfg(test)]
+mod staged_sync_tests {
+    use super::{SYNC_STAGE_WAIT, StagedOffset, staged_runs_to_flush};
+    use std::time::Instant;
+
+    fn slots(offsets: &[u32], age: std::time::Duration) -> Vec<StagedOffset> {
+        let staged_at = Instant::now() - age;
+        offsets
+            .iter()
+            .copied()
+            .map(|offset| StagedOffset { offset, staged_at })
+            .collect()
+    }
+
+    #[test]
+    fn a_closed_run_flushes_immediately() {
+        let staged = slots(&[4, 5, 6], std::time::Duration::ZERO);
+        let flush =
+            staged_runs_to_flush(&staged, Instant::now(), 4, 40, SYNC_STAGE_WAIT, |_| false);
+        assert_eq!(flush, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn an_open_neighbor_holds_a_short_run() {
+        let staged = slots(&[4, 5], std::time::Duration::ZERO);
+        let flush =
+            staged_runs_to_flush(&staged, Instant::now(), 4, 40, SYNC_STAGE_WAIT, |offset| {
+                offset == 6
+            });
+        assert!(flush.is_empty());
+    }
+
+    #[test]
+    fn a_full_sweep_flushes_while_the_next_neighbor_is_open() {
+        let staged = slots(&[0, 1, 2], std::time::Duration::ZERO);
+        let flush =
+            staged_runs_to_flush(&staged, Instant::now(), 4, 12, SYNC_STAGE_WAIT, |offset| {
+                offset == 3
+            });
+        assert_eq!(flush, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn an_aged_run_flushes_while_a_neighbor_is_still_open() {
+        let staged = slots(&[8, 9], SYNC_STAGE_WAIT);
+        let flush = staged_runs_to_flush(&staged, Instant::now(), 4, 40, SYNC_STAGE_WAIT, |_| true);
+        assert_eq!(flush, vec![8, 9]);
+    }
+
+    #[test]
+    fn a_hole_splits_the_run() {
+        let staged = slots(&[1, 2, 4], std::time::Duration::ZERO);
+        let flush =
+            staged_runs_to_flush(&staged, Instant::now(), 4, 40, SYNC_STAGE_WAIT, |_| false);
+        assert_eq!(flush, vec![1, 2, 4]);
     }
 }
 
@@ -384,6 +558,7 @@ impl DataSyncServiceInner {
             rearm_backoff_next_skips: 0,
             term_dispatch_cursor: 0,
             publish_dispatch_cursor: 0,
+            staged_bodies: HashMap::new(),
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -449,6 +624,9 @@ impl DataSyncServiceInner {
                 orchestrator.prepare_tick();
             }
         }
+        // Neighbors discovered by this tick are Pending before the hold check,
+        // so a fetched body can wait for them.
+        self.flush_all_staged(Instant::now());
 
         if !orchestrator_ids.is_empty() {
             // Term-ledger SMs (especially Submit) visit first in each pass so
@@ -470,11 +648,20 @@ impl DataSyncServiceInner {
                     publish_ids.push(id);
                 }
             }
+            let chunk = self.config.consensus.chunk_size.max(1);
+            let sweep = self
+                .config
+                .node_config
+                .storage
+                .entropy_sweep_max_bytes
+                .max(chunk);
+            let burst = usize::try_from(sweep / chunk).unwrap_or(1).max(1);
             let (next_term, next_publish) = dispatch_term_then_publish(
                 &mut term_ids,
                 &mut publish_ids,
                 self.term_dispatch_cursor,
                 self.publish_dispatch_cursor,
+                burst,
                 |id| {
                     self.chunk_orchestrators
                         .get_mut(&id)
@@ -735,8 +922,201 @@ impl DataSyncServiceInner {
         let slot_index = pa.and_then(|p| p.slot_index);
         let partition_hash = pa.map(|p| p.partition_hash);
 
-        let write_outcome = attempt_data_sync_write(&sm, &unpacked_chunk, chunk_offset).await;
+        if sm.is_data_chunk_durable_at(chunk_offset) {
+            return self.apply_sync_outcome(
+                storage_module_id,
+                chunk_offset,
+                &unpacked_chunk,
+                peer_addr,
+                ledger_id,
+                slot_index,
+                partition_hash,
+                DataSyncWriteOutcome::AlreadyDurable,
+            );
+        }
+        if sm.is_data_write_pending_at(chunk_offset)
+            || matches!(sm.get_chunk_type(&chunk_offset), Some(ChunkType::Data))
+        {
+            return self.apply_sync_outcome(
+                storage_module_id,
+                chunk_offset,
+                &unpacked_chunk,
+                peer_addr,
+                ledger_id,
+                slot_index,
+                partition_hash,
+                DataSyncWriteOutcome::AwaitingDurability,
+            );
+        }
+        // A second delivery of a body we are already holding does not split the run.
+        if self
+            .staged_bodies
+            .get(&storage_module_id)
+            .is_some_and(|staged| staged.contains_key(&chunk_offset))
+        {
+            return Ok(());
+        }
+        self.staged_bodies
+            .entry(storage_module_id)
+            .or_default()
+            .insert(
+                chunk_offset,
+                StagedSyncBody {
+                    unpacked: unpacked_chunk,
+                    staged_at: Instant::now(),
+                    peer: peer_addr,
+                },
+            );
+        self.flush_staged_module(storage_module_id, Instant::now())
+    }
 
+    fn flush_all_staged(&mut self, now: Instant) {
+        let ids: Vec<_> = self.staged_bodies.keys().copied().collect();
+        for id in ids {
+            if let Err(error) = self.flush_staged_module(id, now) {
+                warn!(
+                    storage_module.id = id,
+                    ?error,
+                    "data_sync failed to publish a staged run"
+                );
+            }
+        }
+    }
+
+    fn flush_staged_module(&mut self, storage_module_id: usize, now: Instant) -> eyre::Result<()> {
+        let Some(staged) = self.staged_bodies.get(&storage_module_id) else {
+            return Ok(());
+        };
+        if staged.is_empty() {
+            self.staged_bodies.remove(&storage_module_id);
+            return Ok(());
+        }
+        let chunk_bytes = self.config.consensus.chunk_size.max(1);
+        let cap_bytes = self
+            .config
+            .node_config
+            .storage
+            .entropy_sweep_max_bytes
+            .max(chunk_bytes);
+        let snapshot: Vec<StagedOffset> = staged
+            .iter()
+            .map(|(offset, body)| StagedOffset {
+                offset: offset.0,
+                staged_at: body.staged_at,
+            })
+            .collect();
+        let mut neighbor_open = HashSet::new();
+        for offset in staged.keys() {
+            neighbor_open.insert(offset.0);
+        }
+        if let Some(orchestrator) = self.chunk_orchestrators.get(&storage_module_id) {
+            for (offset, request) in &orchestrator.chunk_requests {
+                if matches!(
+                    request.request_state,
+                    ChunkRequestState::Pending | ChunkRequestState::Requested(..)
+                ) {
+                    neighbor_open.insert(offset.0);
+                }
+            }
+        }
+        let flush_offsets = staged_runs_to_flush(
+            &snapshot,
+            now,
+            chunk_bytes,
+            cap_bytes,
+            SYNC_STAGE_WAIT,
+            |offset| neighbor_open.contains(&offset),
+        );
+        if flush_offsets.is_empty() {
+            return Ok(());
+        }
+        let Some(sm) =
+            storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)
+        else {
+            return Ok(());
+        };
+        let mut chunks = Vec::with_capacity(flush_offsets.len());
+        let mut kept = Vec::with_capacity(flush_offsets.len());
+        if let Some(staged) = self.staged_bodies.get(&storage_module_id) {
+            for offset in flush_offsets {
+                let key = PartitionChunkOffset::from(offset);
+                if let Some(body) = staged.get(&key) {
+                    chunks.push(body.unpacked.clone());
+                    kept.push(key);
+                }
+            }
+        }
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        let enqueued = match sm.enqueue_ingress_batch(&chunks) {
+            Ok(items) => items,
+            Err(error) => {
+                let message = error.to_string();
+                for offset in kept {
+                    self.finish_staged_offset(
+                        storage_module_id,
+                        offset,
+                        &DataSyncWriteOutcome::Other(message.clone()),
+                    )?;
+                }
+                return Ok(());
+            }
+        };
+        for (index, item) in enqueued.into_iter().enumerate() {
+            let offset = kept[index];
+            let outcome = classify_synced_chunk(&sm, &chunks[index], offset, &item);
+            self.finish_staged_offset(storage_module_id, offset, &outcome)?;
+        }
+        Ok(())
+    }
+
+    fn finish_staged_offset(
+        &mut self,
+        storage_module_id: usize,
+        offset: PartitionChunkOffset,
+        outcome: &DataSyncWriteOutcome,
+    ) -> eyre::Result<()> {
+        let unpacked = self
+            .staged_bodies
+            .get_mut(&storage_module_id)
+            .and_then(|staged| staged.remove(&offset));
+        if self
+            .staged_bodies
+            .get(&storage_module_id)
+            .is_some_and(|staged| staged.is_empty())
+        {
+            self.staged_bodies.remove(&storage_module_id);
+        }
+        let Some(unpacked) = unpacked else {
+            return Ok(());
+        };
+        let peer = unpacked.peer;
+        let sm = storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id);
+        let pa = sm.as_ref().and_then(|module| module.partition_assignment());
+        self.apply_sync_outcome(
+            storage_module_id,
+            offset,
+            &unpacked.unpacked,
+            peer,
+            pa.and_then(|assignment| assignment.ledger_id),
+            pa.and_then(|assignment| assignment.slot_index),
+            pa.map(|assignment| assignment.partition_hash),
+            outcome.clone(),
+        )
+    }
+
+    fn apply_sync_outcome(
+        &mut self,
+        storage_module_id: usize,
+        chunk_offset: PartitionChunkOffset,
+        unpacked_chunk: &UnpackedChunk,
+        peer_addr: IrysAddress,
+        ledger_id: Option<u32>,
+        slot_index: Option<usize>,
+        partition_hash: Option<irys_types::H256>,
+        write_outcome: DataSyncWriteOutcome,
+    ) -> eyre::Result<()> {
         match write_outcome {
             DataSyncWriteOutcome::AlreadyDurable => {
                 metrics::record_data_sync_chunk_stored();
@@ -756,7 +1136,7 @@ impl DataSyncServiceInner {
             }
             DataSyncWriteOutcome::AwaitingDurability => {
                 if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-                    orchestrator.mark_chunk_awaiting_durability(chunk_offset)?;
+                    orchestrator.note_body_buffered(chunk_offset)?;
                 }
                 debug!(
                     storage_module.id = storage_module_id,
@@ -805,9 +1185,7 @@ impl DataSyncServiceInner {
                     reason = "no_writeable_offset",
                     "data_sync write had no Entropy target at expected offsets; re-queueing"
                 );
-                if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-                    orchestrator.requeue_after_local_write_failure(chunk_offset)?;
-                }
+                self.requeue_requested(storage_module_id, chunk_offset)?;
             }
             DataSyncWriteOutcome::Other(err) => {
                 metrics::record_data_sync_chunk_write_failed("other");
@@ -824,12 +1202,30 @@ impl DataSyncServiceInner {
                     error = %err,
                     "data_sync write failed; re-queueing and forwarding to chunk ingress"
                 );
-                if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-                    orchestrator.requeue_after_local_write_failure(chunk_offset)?;
-                }
+                self.requeue_requested(storage_module_id, chunk_offset)?;
             }
         }
+        Ok(())
+    }
 
+    fn requeue_requested(
+        &mut self,
+        storage_module_id: usize,
+        chunk_offset: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) else {
+            return Ok(());
+        };
+        let requested = matches!(
+            orchestrator
+                .chunk_requests
+                .get(&chunk_offset)
+                .map(|request| &request.request_state),
+            Some(ChunkRequestState::Requested(..))
+        );
+        if requested {
+            orchestrator.requeue_after_local_write_failure(chunk_offset)?;
+        }
         Ok(())
     }
 

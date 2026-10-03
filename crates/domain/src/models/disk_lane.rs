@@ -8,7 +8,9 @@
 //! the disk. It sorts a reorder buffer of pending chunks and joins adjacent
 //! chunks into one `pwrite` of at most `WRITE_RUN_MAX_BYTES`. Contiguous
 //! chunks from one entropy span enter that buffer together, after every
-//! index ack for those chunks. A shorter run
+//! index ack for those chunks. A caller that already holds neighboring
+//! chunks publishes that run in one insert, so the lane cannot read a
+//! prefix of it. A shorter run
 //! stays queued until it reaches that size, a recall flush is owed, the
 //! pending set reaches `num_writes_before_sync`, or it is the oldest run
 //! that has waited `reorder_grace`. One pass writes every full run and that
@@ -53,7 +55,7 @@ use nodit::{InclusiveInterval as _, Interval};
 use std::os::unix::fs::FileExt as _;
 
 use super::{
-    ChunkType, StorageModule, WriteDataChunkError, WriteRun,
+    BatchEnqueueItem, ChunkType, StorageModule, WriteDataChunkError, WriteRun,
     index_drain::{ChunkBusy, IndexGap, IndexOp},
 };
 
@@ -190,6 +192,23 @@ struct SweepSlot {
     queued_at: Instant,
 }
 
+/// One body whose entropy targets are reserved and not yet in the sweep queue.
+struct OccupiedChunk {
+    unpacked: Arc<Vec<u8>>,
+    data_path: Arc<Vec<u8>>,
+    path_hash: ChunkPathHash,
+    priority: WritePriority,
+    waited: bool,
+    notify: Option<SweepNotify>,
+    selected: Vec<(PartitionChunkOffset, u64, Option<Vec<u8>>)>,
+}
+
+enum OccupyFailure {
+    Write(WriteDataChunkError),
+    /// The offset already has an index write reserved.
+    InFlight,
+}
+
 struct Inflight {
     group: u64,
     offset: PartitionChunkOffset,
@@ -268,6 +287,9 @@ pub(super) struct DiskGate {
     last_commit_thread: Mutex<Option<std::thread::ThreadId>>,
     #[cfg(test)]
     pub(super) entropy_preads: AtomicU64,
+    /// Sweep-queue publishes. One contiguous run is one publish.
+    #[cfg(test)]
+    pub(super) enqueue_notifies: AtomicU64,
 }
 
 /// One posted flush or interval write, and the result the waiter collects.
@@ -499,6 +521,8 @@ impl DiskGate {
             last_commit_thread: Mutex::new(None),
             #[cfg(test)]
             entropy_preads: AtomicU64::new(0),
+            #[cfg(test)]
+            enqueue_notifies: AtomicU64::new(0),
         }
     }
 
@@ -1026,6 +1050,24 @@ impl StorageModule {
             .map(|_| ())
     }
 
+    /// Publish every body in `chunks` before waking the lane once.
+    /// Migration uses this so a contiguous run is one entropy span.
+    pub fn deposit_data_chunks(
+        &self,
+        chunks: &[UnpackedChunk],
+    ) -> Result<Vec<BatchEnqueueItem>, WriteDataChunkError> {
+        self.enqueue_unpacked_batch(chunks, WritePriority::Migration)
+    }
+
+    /// Same publish as [`Self::deposit_data_chunks`], at ingress priority.
+    /// Data sync uses this for one fetched contiguous run.
+    pub fn enqueue_ingress_batch(
+        &self,
+        chunks: &[UnpackedChunk],
+    ) -> Result<Vec<BatchEnqueueItem>, WriteDataChunkError> {
+        self.enqueue_unpacked_batch(chunks, WritePriority::Ingress)
+    }
+
     pub(super) fn enqueue_unpacked(
         &self,
         chunk: &UnpackedChunk,
@@ -1042,14 +1084,78 @@ impl StorageModule {
         waited: bool,
         notify: Option<SweepNotify>,
     ) -> Result<Option<u64>, WriteDataChunkError> {
-        if self.data_writes_paused() {
-            return Err(WriteDataChunkError::WritesPaused);
+        match self.occupy_unpacked(chunk, priority, waited, notify) {
+            Ok(Some(occupied)) => {
+                let groups = self.push_occupied(vec![occupied])?;
+                Ok(groups.into_iter().next())
+            }
+            Ok(None) => Ok(None),
+            Err(OccupyFailure::InFlight) => Err(WriteDataChunkError::Other(eyre::eyre!(
+                "index write already in flight"
+            ))),
+            Err(OccupyFailure::Write(error)) => Err(error),
         }
-        let Some(partition_offsets) =
-            self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)?
-        else {
-            return Err(WriteDataChunkError::DataRootNotFound);
-        };
+    }
+
+    /// Occupy every body, then publish the occupied slots under one queue lock.
+    fn enqueue_unpacked_batch(
+        &self,
+        chunks: &[UnpackedChunk],
+        priority: WritePriority,
+    ) -> Result<Vec<BatchEnqueueItem>, WriteDataChunkError> {
+        let mut held: Vec<OccupiedChunk> = Vec::new();
+        let mut items = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            match self.occupy_unpacked(chunk, priority, false, None) {
+                Ok(Some(occupied)) => {
+                    let offsets = occupied
+                        .selected
+                        .iter()
+                        .map(|(offset, _, _)| *offset)
+                        .collect();
+                    held.push(occupied);
+                    items.push(BatchEnqueueItem::Queued(offsets));
+                }
+                Ok(None) => items.push(BatchEnqueueItem::NotQueued),
+                Err(OccupyFailure::InFlight) => items.push(BatchEnqueueItem::NotQueued),
+                Err(OccupyFailure::Write(WriteDataChunkError::DataRootNotFound)) => {
+                    items.push(BatchEnqueueItem::DataRootNotFound);
+                }
+                Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused)) => {
+                    self.release_occupied(held);
+                    return Err(WriteDataChunkError::WritesPaused);
+                }
+                Err(OccupyFailure::Write(error)) => {
+                    self.release_occupied(held);
+                    return Err(error);
+                }
+            }
+        }
+        if !held.is_empty() {
+            self.push_occupied(held)?;
+        }
+        Ok(items)
+    }
+
+    /// Reserve entropy targets for one body. The sweep slot is not visible yet.
+    fn occupy_unpacked(
+        &self,
+        chunk: &UnpackedChunk,
+        priority: WritePriority,
+        waited: bool,
+        notify: Option<SweepNotify>,
+    ) -> Result<Option<OccupiedChunk>, OccupyFailure> {
+        if self.data_writes_paused() {
+            return Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused));
+        }
+        let partition_offsets =
+            match self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset) {
+                Ok(Some(offsets)) => offsets,
+                Ok(None) => {
+                    return Err(OccupyFailure::Write(WriteDataChunkError::DataRootNotFound));
+                }
+                Err(error) => return Err(OccupyFailure::Write(error.into())),
+            };
 
         let data_path = Arc::new(chunk.data_path.0.clone());
         let path_hash = UnpackedChunk::hash_data_path(&data_path);
@@ -1072,7 +1178,7 @@ impl StorageModule {
         {
             let mut pending = self.pending_writes.write().unwrap();
             if self.data_writes_paused() {
-                return Err(WriteDataChunkError::WritesPaused);
+                return Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused));
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
             for partition_offset in &partition_offsets {
@@ -1098,9 +1204,7 @@ impl StorageModule {
                     .iter()
                     .any(|offset| pending.occupancy.contains_key(offset))
                 {
-                    return Err(WriteDataChunkError::Other(eyre::eyre!(
-                        "index write already in flight"
-                    )));
+                    return Err(OccupyFailure::InFlight);
                 }
                 return Ok(None);
             }
@@ -1108,46 +1212,84 @@ impl StorageModule {
             pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_add(queued);
         }
 
-        let generation = selected[0].1;
+        Ok(Some(OccupiedChunk {
+            unpacked,
+            data_path,
+            path_hash,
+            priority,
+            waited,
+            notify,
+            selected,
+        }))
+    }
+
+    /// Make every occupied body visible, then wake the lane once.
+    fn push_occupied(&self, occupied: Vec<OccupiedChunk>) -> Result<Vec<u64>, WriteDataChunkError> {
+        if occupied.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut queue = self.disk.queue();
         // A pause can land after occupancy is taken and before the slot is visible.
-        if self.data_writes_paused()
-            || self.index_write_generation.load(Ordering::SeqCst) != generation
-        {
+        let generation_now = self.index_write_generation.load(Ordering::SeqCst);
+        let stale = self.data_writes_paused()
+            || occupied.iter().any(|chunk| {
+                chunk
+                    .selected
+                    .iter()
+                    .any(|(_, generation, _)| *generation != generation_now)
+            });
+        if stale {
             drop(queue);
-            for (offset, generation, _) in &selected {
-                self.release_queued_offset(*offset, *generation, unpacked.len() as u64);
-            }
+            self.release_occupied(occupied);
             return Err(WriteDataChunkError::WritesPaused);
         }
-        let group_id = queue.next_group;
-        queue.next_group = queue.next_group.wrapping_add(1);
-        queue.groups.insert(
-            group_id,
-            SweepGroup {
-                remaining: selected.len(),
-                failed: None,
-                waited,
-                notify,
-            },
-        );
-        for (offset, generation, pending_entropy) in selected {
-            queue.slots.push(SweepSlot {
-                group: group_id,
-                offset,
-                unpacked: Arc::clone(&unpacked),
-                data_path: Arc::clone(&data_path),
-                path_hash,
-                generation,
-                priority,
-                pending_entropy,
-                byte_len: unpacked.len() as u64,
-                queued_at: Instant::now(),
-            });
+        let queued_at = Instant::now();
+        let mut groups = Vec::with_capacity(occupied.len());
+        for chunk in occupied {
+            let group_id = queue.next_group;
+            queue.next_group = queue.next_group.wrapping_add(1);
+            let byte_len = chunk.unpacked.len() as u64;
+            queue.groups.insert(
+                group_id,
+                SweepGroup {
+                    remaining: chunk.selected.len(),
+                    failed: None,
+                    waited: chunk.waited,
+                    notify: chunk.notify,
+                },
+            );
+            for (offset, generation, pending_entropy) in chunk.selected {
+                queue.slots.push(SweepSlot {
+                    group: group_id,
+                    offset,
+                    unpacked: Arc::clone(&chunk.unpacked),
+                    data_path: Arc::clone(&chunk.data_path),
+                    path_hash: chunk.path_hash,
+                    generation,
+                    priority: chunk.priority,
+                    pending_entropy,
+                    byte_len,
+                    queued_at,
+                });
+            }
+            groups.push(group_id);
         }
         drop(queue);
+        #[cfg(test)]
+        {
+            self.disk.enqueue_notifies.fetch_add(1, Ordering::SeqCst);
+        }
         self.disk.notify();
-        Ok(Some(group_id))
+        Ok(groups)
+    }
+
+    fn release_occupied(&self, occupied: impl IntoIterator<Item = OccupiedChunk>) {
+        for chunk in occupied {
+            let byte_len = chunk.unpacked.len() as u64;
+            for (offset, generation, _) in chunk.selected {
+                self.release_queued_offset(offset, generation, byte_len);
+            }
+        }
     }
 
     pub(super) fn drive_group(&self, group: u64) -> Result<(), WriteDataChunkError> {
@@ -2191,6 +2333,11 @@ impl StorageModule {
     #[cfg(test)]
     pub(super) fn sweep_one_for_test(&self) -> bool {
         self.sweep_one()
+    }
+
+    #[cfg(test)]
+    pub(super) fn sweep_slot_count_for_test(&self) -> usize {
+        self.disk.queue().slots.len()
     }
 
     #[cfg(test)]

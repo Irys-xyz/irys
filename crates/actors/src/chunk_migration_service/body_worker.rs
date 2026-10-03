@@ -11,11 +11,12 @@
 //! dropped wake-up. Every submodule is its own MDBX env and its own IO domain,
 //! so a pass fans out one blocking task per submodule with outstanding rows.
 
-use super::{MigrationError, load_chunk_for_migration, write_chunk_to_module};
+use super::{MigrationError, load_chunk_for_migration, write_chunks_to_module};
 use irys_database::submodule::tables::PendingBodyMigration;
-use irys_domain::{ChunkType, StorageModule, StorageModulesReadGuard};
+use irys_domain::{BatchEnqueueItem, ChunkType, StorageModule, StorageModulesReadGuard};
 use irys_types::{
-    Config, DataLedger, PartitionChunkOffset, TxChunkOffset, app_state::DatabaseProvider,
+    Config, DataLedger, PartitionChunkOffset, TxChunkOffset, UnpackedChunk,
+    app_state::DatabaseProvider,
 };
 use nodit::Interval;
 use reth::tasks::shutdown::Shutdown;
@@ -429,9 +430,10 @@ impl SubmoduleDrain {
     }
 
     /// Walk the slice of `job` this submodule owns — `[key, min(tx end,
-    /// submodule end)]` — writing every offset that is neither durable nor
-    /// already queued, within the remaining pass budget and the module's
-    /// pending-write ceiling.
+    /// submodule end)]` — and publish each contiguous writable run in one
+    /// sweep-queue insert. A durable, pending, non-entropy, or unsourced
+    /// offset ends the run. A run also ends at one entropy sweep, and at
+    /// the pass budget or the pending-write ceiling.
     fn drain_job(
         &mut self,
         key: PartitionChunkOffset,
@@ -451,14 +453,23 @@ impl SubmoduleDrain {
             return Ok(JobOutcome::Settled);
         }
 
-        let (mut durable, mut in_flight, mut written) = (0_usize, 0_usize, 0_usize);
-        let (mut unavailable, mut unwritable, mut failed) = (0_usize, 0_usize, 0_usize);
-        let mut last_error = None;
+        let (mut durable, mut in_flight, mut unwritable) = (0_usize, 0_usize, 0_usize);
+        let mut progress = JobProgress {
+            written: 0,
+            // Snapshot the module's pending-write level once and track this
+            // job's own additions locally: exact enough for a ceiling, and it
+            // keeps the `pending_writes` lock out of the per-offset loop.
+            pending_bytes: self.sm.pending_write_bytes(),
+            unavailable: 0,
+            failed: 0,
+            last_error: None,
+        };
         let mut cut_short = false;
-        // Snapshot the module's pending-write level once and track this job's
-        // own additions locally: exact enough for a ceiling, and it keeps the
-        // `pending_writes` lock out of the per-offset loop.
-        let mut pending_bytes = self.sm.pending_write_bytes();
+        let span_limit = span_chunk_limit(
+            chunk_size,
+            self.config.node_config.storage.entropy_sweep_max_bytes,
+        );
+        let mut run: Vec<LoadedBody> = Vec::new();
         for partition_offset in first..=last {
             let offset =
                 PartitionChunkOffset::from(u32::try_from(partition_offset).map_err(|_| {
@@ -467,10 +478,18 @@ impl SubmoduleDrain {
                     ))
                 })?);
             if self.sm.is_data_chunk_durable_at(offset) {
+                if self.flush_run(&mut run, &mut progress)? {
+                    cut_short = true;
+                    break;
+                }
                 durable += 1;
                 continue;
             }
             if self.sm.is_data_write_pending_at(offset) {
+                if self.flush_run(&mut run, &mut progress)? {
+                    cut_short = true;
+                    break;
+                }
                 in_flight += 1;
                 continue;
             }
@@ -479,23 +498,43 @@ impl SubmoduleDrain {
             // (Uninitialized while packing, Interrupted mid-flush). Skip without
             // touching the cache and let the tick retry once packing lands.
             if !matches!(self.sm.get_chunk_type(&offset), Some(ChunkType::Entropy)) {
+                if self.flush_run(&mut run, &mut progress)? {
+                    cut_short = true;
+                    break;
+                }
                 unwritable += 1;
                 continue;
             }
             if self.sm.data_writes_paused() {
                 // Recovery took the module mid-pass: stop here, keep the row.
+                let _ = self.flush_run(&mut run, &mut progress)?;
                 cut_short = true;
                 break;
             }
-            if pending_bytes >= self.ceiling {
+            if !run.is_empty() && (run.len() >= span_limit || run.len() >= self.budget) {
+                if self.flush_run(&mut run, &mut progress)? {
+                    cut_short = true;
+                    break;
+                }
+            }
+            if self.budget == 0 {
+                cut_short = true;
+                break;
+            }
+            let next_level = progress.pending_bytes.saturating_add(
+                (run.len() as u64)
+                    .saturating_add(1)
+                    .saturating_mul(chunk_size),
+            );
+            if next_level > self.ceiling {
                 // Backpressure: the storage service has not flushed what is
                 // already queued. Stop for this pass; the row stays and the
                 // next pass resumes from the first non-durable offset.
+                if self.flush_run(&mut run, &mut progress)? {
+                    cut_short = true;
+                    break;
+                }
                 self.throttled_jobs += 1;
-                cut_short = true;
-                break;
-            }
-            if self.budget == 0 {
                 cut_short = true;
                 break;
             }
@@ -505,24 +544,46 @@ impl SubmoduleDrain {
                         "tx chunk offset for partition offset {partition_offset} is out of range"
                     ))
                 })?);
-            match self.write_offset(job, offset, tx_offset) {
-                Ok(WriteAttempt::Queued) => {
-                    written += 1;
-                    self.budget -= 1;
-                    pending_bytes += chunk_size;
+            match load_chunk_for_migration(
+                &self.storage_modules_guard,
+                &self.db,
+                self.ledger,
+                job.data_root,
+                job.data_size,
+                tx_offset,
+                &self.config,
+            ) {
+                Ok(Some(chunk)) => run.push(LoadedBody { offset, chunk }),
+                Ok(None) => {
+                    if self.flush_run(&mut run, &mut progress)? {
+                        cut_short = true;
+                        break;
+                    }
+                    progress.unavailable += 1;
                 }
-                Ok(WriteAttempt::NoSource) => unavailable += 1,
-                Ok(WriteAttempt::Paused) => {
+                Err(MigrationError::WritesPaused) => {
+                    let _ = self.flush_run(&mut run, &mut progress)?;
                     cut_short = true;
                     break;
                 }
                 Err(error) => {
-                    failed += 1;
-                    last_error = Some(error);
+                    if self.flush_run(&mut run, &mut progress)? {
+                        cut_short = true;
+                        break;
+                    }
+                    progress.failed += 1;
+                    progress.last_error = Some(error);
                 }
             }
         }
+        if self.flush_run(&mut run, &mut progress)? {
+            cut_short = true;
+        }
 
+        let written = progress.written;
+        let unavailable = progress.unavailable;
+        let failed = progress.failed;
+        let last_error = progress.last_error;
         let total = usize::try_from(last - first + 1).unwrap_or(usize::MAX);
         Ok(if durable == total {
             JobOutcome::Settled
@@ -541,52 +602,73 @@ impl SubmoduleDrain {
         })
     }
 
-    /// Source and enqueue one body.
-    fn write_offset(
-        &self,
-        job: &PendingBodyMigration,
-        offset: PartitionChunkOffset,
-        tx_offset: TxChunkOffset,
-    ) -> Result<WriteAttempt, MigrationError> {
-        let Some(chunk) = load_chunk_for_migration(
-            &self.storage_modules_guard,
-            &self.db,
-            self.ledger,
-            job.data_root,
-            job.data_size,
-            tx_offset,
-            &self.config,
-        )?
-        else {
-            return Ok(WriteAttempt::NoSource);
-        };
-        match write_chunk_to_module(&self.sm, &chunk) {
-            Ok(()) => {}
-            // The write itself was refused for recovery, not a later state
-            // read: resume between the two would otherwise count a pause as
-            // a stall.
-            Err(MigrationError::WritesPaused) => return Ok(WriteAttempt::Paused),
-            Err(error) => return Err(error),
+    /// Publish `run` as one sweep-queue insert. `Ok(true)` means recovery
+    /// paused the module and the bodies were not queued.
+    fn flush_run(
+        &mut self,
+        run: &mut Vec<LoadedBody>,
+        progress: &mut JobProgress,
+    ) -> Result<bool, MigrationError> {
+        if run.is_empty() {
+            return Ok(false);
         }
-        // `write_data_chunk` decides per placement whether anything was
-        // queued; confirm this offset took the body before counting it.
-        Ok(
-            if self.sm.is_data_write_pending_at(offset) || self.sm.is_data_chunk_durable_at(offset)
-            {
-                WriteAttempt::Queued
+        let bodies = std::mem::take(run);
+        let chunks: Vec<_> = bodies.iter().map(|body| body.chunk.clone()).collect();
+        let items = match write_chunks_to_module(&self.sm, &chunks) {
+            Ok(items) => items,
+            Err(MigrationError::WritesPaused) => return Ok(true),
+            Err(error) => {
+                progress.failed += bodies.len();
+                progress.last_error = Some(error);
+                return Ok(false);
+            }
+        };
+        let chunk_size = self.config.consensus.chunk_size;
+        for (body, item) in bodies.into_iter().zip(items) {
+            let missing_root = matches!(&item, BatchEnqueueItem::DataRootNotFound);
+            let queued = match &item {
+                BatchEnqueueItem::Queued(offsets) => {
+                    offsets.contains(&body.offset)
+                        || self.sm.is_data_write_pending_at(body.offset)
+                        || self.sm.is_data_chunk_durable_at(body.offset)
+                }
+                BatchEnqueueItem::NotQueued => {
+                    self.sm.is_data_write_pending_at(body.offset)
+                        || self.sm.is_data_chunk_durable_at(body.offset)
+                }
+                BatchEnqueueItem::DataRootNotFound => false,
+            };
+            if queued {
+                progress.written += 1;
+                self.budget = self.budget.saturating_sub(1);
+                progress.pending_bytes = progress.pending_bytes.saturating_add(chunk_size);
+            } else if missing_root {
+                progress.failed += 1;
+                progress.last_error = Some(MigrationError::ChunkDataWrite);
             } else {
-                WriteAttempt::NoSource
-            },
-        )
+                progress.unavailable += 1;
+            }
+        }
+        Ok(false)
     }
 }
 
-/// Result of trying to source and enqueue one chunk body.
-enum WriteAttempt {
-    /// The offset now holds a queued (or already durable) data write.
-    Queued,
-    /// No local source for this body; data sync's problem.
-    NoSource,
-    /// The module's data writes were paused by recovery; retry next pass.
-    Paused,
+struct LoadedBody {
+    offset: PartitionChunkOffset,
+    chunk: UnpackedChunk,
+}
+
+struct JobProgress {
+    written: usize,
+    pending_bytes: u64,
+    unavailable: usize,
+    failed: usize,
+    last_error: Option<MigrationError>,
+}
+
+fn span_chunk_limit(chunk_size: u64, sweep_max_bytes: u64) -> usize {
+    let chunk = chunk_size.max(1);
+    usize::try_from(sweep_max_bytes.max(chunk) / chunk)
+        .unwrap_or(1)
+        .max(1)
 }
