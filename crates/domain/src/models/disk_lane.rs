@@ -10,14 +10,22 @@
 //! chunks from one entropy span enter that buffer together, after every
 //! index ack for those chunks. A caller that already holds neighboring
 //! chunks publishes that run in one insert, so the lane cannot read a
-//! prefix of it. A shorter run
-//! stays queued until it reaches that size, a recall flush is owed, the
-//! pending set reaches `num_writes_before_sync`, or it is the oldest run
-//! that has waited `reorder_grace`. One pass writes every full run and that
-//! one short run. The next short run waits another `reorder_grace`, so the
-//! others can still gain a neighbor. Among runs that are due, that short
-//! run goes first and then the longer run. Entropy reads use that same
-//! length rule.
+//! prefix of it. A short run waits for that size, a recall flush, the
+//! pending set at `num_writes_before_sync`, or `reorder_grace` only while
+//! the chunk disk is busy. One busy pass writes every full run and the
+//! oldest aged short run. That short run goes first. The next short run
+//! waits another `reorder_grace` while the disk stays busy, so the others
+//! can still gain a neighbor. An idle disk issues the short runs already
+//! queued. It ranks them with the full runs and does not arm the hold.
+//! Entropy reads use the same rule on their own queue and their own hold.
+//! A short span waits for the sweep cap, the disk-slot count at
+//! `num_writes_before_sync`, a recall flush, or `reorder_grace` only while
+//! the chunk disk is busy. One busy pass reads every full span and the
+//! oldest aged short span. That short span is read first. Further short
+//! spans wait another grace while the disk stays busy. An idle disk issues
+//! the short spans already queued, ranked with the full spans, and does
+//! not arm the read hold. The write hold and the read hold stay separate,
+//! so a short write does not block a ready read.
 //! New submits stop when another command would put the in-flight set past
 //! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
 //! The file lock is dropped before an index submit.
@@ -188,7 +196,7 @@ struct SweepSlot {
     priority: WritePriority,
     pending_entropy: Option<Vec<u8>>,
     byte_len: u64,
-    /// When this read was queued. An aged slot may jump a longer span.
+    /// When this read was queued. A short span uses the oldest slot as its clock.
     queued_at: Instant,
 }
 
@@ -278,6 +286,8 @@ pub(super) struct DiskGate {
     index_gap: Arc<IndexGap>,
     /// Further short runs wait until this instant. Full runs ignore it.
     short_hold_until: Mutex<Option<Instant>>,
+    /// Further short entropy spans wait until this instant. Full spans ignore it.
+    read_short_hold_until: Mutex<Option<Instant>>,
     /// Set for the life of `run_disk_lane`. External flushes use it to avoid
     /// waiting for themselves.
     lane_thread: Mutex<Option<std::thread::ThreadId>>,
@@ -515,6 +525,7 @@ impl DiskGate {
             lane_stop: AtomicBool::new(false),
             index_gap,
             short_hold_until: Mutex::new(None),
+            read_short_hold_until: Mutex::new(None),
             lane_thread: Mutex::new(None),
             handoff: LaneHandoff::new(),
             #[cfg(test)]
@@ -646,6 +657,36 @@ impl DiskGate {
         *guard = Instant::now().checked_add(grace);
     }
 
+    /// True while a short entropy span read earlier still owns the grace window.
+    pub(super) fn short_reads_held(&self) -> bool {
+        self.read_short_hold_remaining().is_some()
+    }
+
+    /// Time until another short entropy span may be read. `None` when the
+    /// hold is unset or already due.
+    pub(super) fn read_short_hold_remaining(&self) -> Option<Duration> {
+        let guard = self
+            .read_short_hold_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let until = (*guard)?;
+        let now = Instant::now();
+        if now < until {
+            Some(until.saturating_duration_since(now))
+        } else {
+            None
+        }
+    }
+
+    /// Block further short entropy spans for `grace` after one short span is read.
+    pub(super) fn arm_read_short_hold(&self, grace: Duration) {
+        let mut guard = self
+            .read_short_hold_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = Instant::now().checked_add(grace);
+    }
+
     /// Returns false when a lane thread is already marked running.
     pub(super) fn prepare_lane(&self) -> bool {
         self.lane_stop.store(false, Ordering::Release);
@@ -675,19 +716,6 @@ impl DiskGate {
         self.wake.notify();
     }
 
-    pub(super) fn has_queued_sweep(&self) -> bool {
-        !self.queue().slots.is_empty()
-    }
-
-    /// A slot with no buffered entropy needs a `pread`. The lane can issue
-    /// that read without the sweep lock.
-    fn has_disk_sweep_slot(&self) -> bool {
-        self.queue()
-            .slots
-            .iter()
-            .any(|slot| slot.pending_entropy.is_none())
-    }
-
     fn sweep_lock_free(&self) -> bool {
         match self.sweep_busy.try_lock() {
             Ok(guard) => {
@@ -713,6 +741,32 @@ impl DiskGate {
             && self.io_exclusive.load(Ordering::SeqCst) == 0
             && self.disk_ops.load(Ordering::SeqCst) < INFLIGHT_WRITES
             && self.budget_allows(self.disk_ops.load(Ordering::SeqCst), 0)
+    }
+
+    /// True when no chunk command is in the kernel and no recall, write hold,
+    /// or exclusive IO owns the disk. A short command may wait for a neighbor
+    /// only while this is false. Room left in the service budget is still busy:
+    /// the in-flight command keeps the disk active, and the short command can grow.
+    pub(super) fn chunk_disk_idle(&self) -> bool {
+        self.disk_ops.load(Ordering::SeqCst) == 0
+            && self.recall_waiters.load(Ordering::SeqCst) == 0
+            && self.write_holds.load(Ordering::SeqCst) == 0
+            && self.io_exclusive.load(Ordering::SeqCst) == 0
+    }
+
+    /// One tiny in-flight write. Tests use it so a short command stays queued.
+    #[cfg(test)]
+    pub(super) fn occupy_for_test(&self) {
+        assert!(
+            self.try_submit_write(INFLIGHT_WRITES, 1),
+            "occupy the chunk disk for a test"
+        );
+    }
+
+    /// Drops the command from [`Self::occupy_for_test`] and wakes the lane.
+    #[cfg(test)]
+    pub(super) fn release_for_test(&self) {
+        self.finish_op(1);
     }
 
     pub(super) fn begin_recall(&self) -> RecallHold<'_> {
@@ -1326,12 +1380,22 @@ impl StorageModule {
             // The attempt above already woke the condvar when it released the
             // sweep lock. Read the epoch after that, then collect an ack that
             // landed during the attempt, then sleep until a later wake.
+            // A short span waits out `reorder_grace` while the disk is busy.
+            // Wake then, so this caller retries when the span becomes eligible.
+            // An idle disk reads the span on the attempt above. The sweep
+            // give-up still bounds the wait.
             let seen = self.disk.wake.epoch();
             self.poll_acks();
             if let Some(result) = self.take_group_result(group) {
                 return result;
             }
-            self.wait_until_epoch_advances(seen, deadline);
+            let wake_by = self
+                .read_grace_remaining()
+                .filter(|delay| !delay.is_zero())
+                .and_then(|delay| Instant::now().checked_add(delay))
+                .map(|at| at.min(deadline))
+                .unwrap_or(deadline);
+            self.wait_until_epoch_advances(seen, wake_by);
         }
     }
 
@@ -1395,7 +1459,7 @@ impl StorageModule {
             }
             self.disk.yield_to_recall();
             let folded = self.fold_memory_entropy();
-            let swept = self.sweep_one();
+            let swept = self.sweep_one_with(true);
             if folded || swept {
                 idle_deadline = None;
                 continue;
@@ -1550,16 +1614,26 @@ impl StorageModule {
     /// One pread, bounded by the sweep cap. Bytes that cover a hole are discarded.
     /// Index submits happen only after every kept offset in the span has been
     /// rechecked, so one bad offset does not leave a sibling committed.
+    /// A normal call holds a short span. `force` reads it during a drain.
     fn sweep_one(&self) -> bool {
+        self.sweep_one_with(false)
+    }
+
+    fn sweep_one_with(&self, force: bool) -> bool {
         let Some(_busy) = self.disk.try_sweep_busy() else {
             return false;
         };
         if self.disk.recall_pending() || self.disk.writes_active() {
             return false;
         }
-        let Some(span) = self.take_disk_span() else {
+        let chunk_size = self.config.consensus.chunk_size.max(1);
+        // Capture once. An idle disk releases every short span and must not
+        // arm the hold. A later submit in this call must not hide the rest.
+        let due = self.reads_released(self.queued_disk_slots());
+        let Some(span) = self.take_ready_span(force, true, due) else {
             return false;
         };
+        let short = !force && !due && pread_span_bytes(&span, chunk_size) < self.hold_cap_bytes();
         if self.disk.recall_pending() || self.disk.writes_active() {
             self.restore_span(span);
             return false;
@@ -1567,7 +1641,6 @@ impl StorageModule {
 
         let start = span[0].offset;
         let end = span[span.len() - 1].offset;
-        let chunk_size = self.config.consensus.chunk_size.max(1);
         let chunk_len = chunk_size as usize;
         let span_chunks = (end.0 - start.0 + 1) as usize;
         let (file_arc, file_offset) = {
@@ -1610,23 +1683,34 @@ impl StorageModule {
         #[cfg(test)]
         self.disk.entropy_preads.fetch_add(1, Ordering::SeqCst);
         self.finish_span_read(span, start, &buf);
+        if short {
+            self.disk.arm_read_short_hold(reorder_grace(chunk_size));
+        }
         true
     }
 
-    /// Entropy preads up to the service budget. The lane thread XORs and
-    /// submits the index only after those calls return.
+    /// Entropy preads up to the service budget. A busy pass reads every full
+    /// span and one short span, then arms the read hold. An idle pass reads
+    /// every span that fits and does not arm the hold. The lane thread XORs
+    /// and submits the index only after those calls return.
     fn sweep_inflight(&self) {
         if self.disk.recall_pending() || self.disk.writes_active() {
             return;
         }
         let chunk_size = self.config.consensus.chunk_size.max(1);
+        let cap = self.hold_cap_bytes();
+        // Capture once. The first submit makes the disk busy. The rest of
+        // this pass still uses the idle release it started with.
+        let due = self.reads_released(self.queued_disk_slots());
+        let mut allow_short = true;
         let mut spans = Vec::new();
+        let mut short_marks = Vec::new();
         let mut guards = Vec::with_capacity(INFLIGHT_WRITES);
         while spans.len() < INFLIGHT_WRITES {
             if self.disk.recall_pending() || self.disk.writes_active() {
                 break;
             }
-            let Some(span) = self.take_disk_span() else {
+            let Some(span) = self.take_ready_span(false, allow_short, due) else {
                 break;
             };
             let bytes = pread_span_bytes(&span, chunk_size);
@@ -1634,7 +1718,12 @@ impl StorageModule {
                 self.restore_span(span);
                 break;
             }
+            let short = !due && bytes < cap;
+            if short {
+                allow_short = false;
+            }
             spans.push(span);
+            short_marks.push(short);
             guards.push(OpGuard {
                 disk: &self.disk,
                 bytes,
@@ -1656,11 +1745,18 @@ impl StorageModule {
                 .map(|handle| handle.join().expect("entropy pread"))
                 .collect::<Vec<_>>()
         });
-        for (span, result) in spans.into_iter().zip(results) {
+        let mut read_short = false;
+        for ((span, short), result) in spans.into_iter().zip(short_marks).zip(results) {
             match result {
-                Ok(load) => self.finish_span_read(span, load.start, &load.buf),
+                Ok(load) => {
+                    read_short |= short;
+                    self.finish_span_read(span, load.start, &load.buf);
+                }
                 Err(error) => self.fail_span(span, &error),
             }
+        }
+        if read_short {
+            self.disk.arm_read_short_hold(reorder_grace(chunk_size));
         }
     }
 
@@ -1795,8 +1891,18 @@ impl StorageModule {
     }
 
     fn take_disk_span(&self) -> Option<Vec<SweepSlot>> {
+        let due = self.reads_released(self.queued_disk_slots());
+        self.take_ready_span(false, true, due)
+    }
+
+    /// Remove the first span `ready_disk_spans` would issue. `due` is the
+    /// pass-wide count, so taking one span does not hide the rest of a full queue.
+    fn take_ready_span(&self, force: bool, allow_short: bool, due: bool) -> Option<Vec<SweepSlot>> {
         let mut queue = self.disk.queue();
-        let chosen = self.choose_disk_span(&queue.slots)?;
+        let chosen = self
+            .ready_disk_spans(&queue.slots, force, allow_short, due)
+            .into_iter()
+            .next()?;
         let mut indexes = chosen.indexes;
         indexes.sort_unstable();
         indexes.dedup();
@@ -1811,32 +1917,58 @@ impl StorageModule {
         Some(span)
     }
 
-    /// Bytes of the longest entropy `pread` that is ready now. Zero when the
-    /// queue has no disk slot. This does not remove the slots.
+    /// Bytes of the longest entropy `pread` that may hit the disk now.
+    /// While the disk is busy, a young or held short span stays out of this
+    /// count, so a packed write can use the disk while that span waits.
+    /// An idle disk counts the short span, so the longer command still wins.
     fn longest_disk_span_bytes(&self) -> u64 {
         let queue = self.disk.queue();
-        self.choose_disk_span(&queue.slots)
+        let due = self.reads_released(disk_slot_count(&queue.slots));
+        self.ready_disk_spans(&queue.slots, false, true, due)
+            .into_iter()
             .map(|span| span.bytes)
+            .max()
             .unwrap_or(0)
     }
 
-    /// Longest legal entropy span. Slots already in one file, with the
-    /// configured hole and span caps. When any slot is older than
-    /// `reorder_grace`, only spans that contain an aged slot compete, and
-    /// the longest of those wins.
-    fn choose_disk_span(&self, slots: &[SweepSlot]) -> Option<ChosenSpan> {
-        let max_bytes = self.hold_cap_bytes();
+    fn has_ready_disk_span(&self) -> bool {
+        let queue = self.disk.queue();
+        let due = self.reads_released(disk_slot_count(&queue.slots));
+        !self
+            .ready_disk_spans(&queue.slots, false, true, due)
+            .is_empty()
+    }
+
+    /// Disk slots in the sweep queue. Memory entropy does not count.
+    fn queued_disk_slots(&self) -> usize {
+        disk_slot_count(&self.disk.queue().slots)
+    }
+
+    /// The durability count and an owed recall flush read every short span.
+    fn disk_reads_due(&self, disk_slots: usize) -> bool {
+        let threshold = self.config.node_config.storage.num_writes_before_sync;
+        self.disk.recall_flush_is_owed() || disk_slots as u64 >= threshold
+    }
+
+    /// Every short span is eligible. The durability count, an owed recall
+    /// flush, and an idle disk all set this. The caller passes it as `due`,
+    /// so the pass ranks the spans normally and does not arm the read hold.
+    fn reads_released(&self, disk_slots: usize) -> bool {
+        self.disk_reads_due(disk_slots) || self.disk.chunk_disk_idle()
+    }
+
+    /// One span per contiguous neighborhood. The next span starts after the
+    /// previous one ends, so two spans in one file do not share a slot.
+    fn maximal_disk_spans(&self, slots: &[SweepSlot]) -> Vec<DiskSpan> {
+        let cap = self.hold_cap_bytes();
         let hole_bytes = self.config.node_config.storage.entropy_coalesce_hole_bytes;
         let chunk_size = self.config.consensus.chunk_size.max(1);
         let grace = reorder_grace(chunk_size);
         let mut groups: HashMap<i64, Vec<SpanAnchor>> = HashMap::new();
-        let mut any_aged = false;
         for (index, slot) in slots.iter().enumerate() {
             if slot.pending_entropy.is_some() {
                 continue;
             }
-            let aged = slot.queued_at.elapsed() >= grace;
-            any_aged |= aged;
             let lone = i64::try_from(index)
                 .map(|value| value.saturating_add(1))
                 .unwrap_or(i64::MAX);
@@ -1850,27 +1982,67 @@ impl StorageModule {
                 index,
                 offset: slot.offset.0,
                 queued_at: slot.queued_at,
-                aged,
+                priority: slot.priority,
             });
         }
-        if groups.is_empty() {
-            return None;
-        }
-        let mut best: Option<ChosenSpan> = None;
-        let mut best_rank: Option<SpanRank> = None;
+        let mut spans = Vec::new();
         for mut anchors in groups.into_values() {
             anchors.sort_by_key(|anchor| anchor.offset);
-            consider_file_spans(
-                &anchors,
-                chunk_size,
-                hole_bytes,
-                max_bytes,
-                any_aged,
-                &mut best,
-                &mut best_rank,
-            );
+            spans.extend(partition_file_spans(
+                &anchors, chunk_size, hole_bytes, cap, grace,
+            ));
         }
-        best
+        spans
+    }
+
+    /// Spans this pass may read. Every full span is included. While the disk
+    /// is busy, one aged short span is included, the oldest, and it is issued
+    /// first. `force` or `due` includes every short span and does not pull one
+    /// to the front. The caller sets `due` for the durability count, an owed
+    /// recall flush, and an idle disk.
+    fn ready_disk_spans(
+        &self,
+        slots: &[SweepSlot],
+        force: bool,
+        allow_short: bool,
+        due: bool,
+    ) -> Vec<DiskSpan> {
+        let cap = self.hold_cap_bytes();
+        let held = !force && self.disk.short_reads_held();
+        let mut ready = Vec::new();
+        let mut short: Option<DiskSpan> = None;
+        for span in self.maximal_disk_spans(slots) {
+            if force || due || span.bytes >= cap {
+                ready.push(span);
+                continue;
+            }
+            if !allow_short || held || !span.aged {
+                continue;
+            }
+            let take = match &short {
+                None => true,
+                Some(prev) => {
+                    span.oldest < prev.oldest
+                        || (span.oldest == prev.oldest && span.start < prev.start)
+                }
+            };
+            if take {
+                short = Some(span);
+            }
+        }
+        ready.sort_by(|left, right| {
+            right
+                .aged
+                .cmp(&left.aged)
+                .then(right.bytes.cmp(&left.bytes))
+                .then(left.oldest.cmp(&right.oldest))
+                .then(left.priority.cmp(&right.priority))
+                .then(left.start.cmp(&right.start))
+        });
+        if let Some(short) = short {
+            ready.insert(0, short);
+        }
+        ready
     }
 
     fn pack_one(&self, slot: SweepSlot) {
@@ -2542,13 +2714,11 @@ impl StorageModule {
             if self.disk.stop_requested() || self.lane_work_ready() {
                 return self.disk.wake.epoch();
             }
-            // A zero delay means the run is already aged. If the disk is
+            // A zero delay means a command is already due. If the disk is
             // still busy, `lane_work_ready` is false and the next notify
             // (a finished command) is the wake. A positive delay is the
-            // rest of `reorder_grace` for a short run with a free disk.
-            let timeout = self
-                .write_grace_remaining()
-                .filter(|delay| !delay.is_zero());
+            // rest of the write grace or the read grace, whichever is sooner.
+            let timeout = self.lane_grace_remaining().filter(|delay| !delay.is_zero());
             let mut guard = self.disk.lock_wake();
             if self.disk.stop_requested() {
                 return self.disk.wake.epoch();
@@ -2569,12 +2739,16 @@ impl StorageModule {
     }
 
     /// Time until the next packed write is allowed.
-    /// `None` when nothing is queued. Zero when a full run, the durability
-    /// count, or an aged short run outside the short-run hold is ready.
-    /// A hold after one short run keeps the other short runs queued.
+    /// `None` when nothing is queued. Zero when the disk is idle, a full run
+    /// is ready, the durability count is reached, or an aged short run outside
+    /// the short-run hold is ready. A hold after one short run keeps the other
+    /// short runs queued while the disk stays busy.
     fn write_grace_remaining(&self) -> Option<Duration> {
         let pending = self.pending_writes.read().unwrap();
         let oldest = pending.queued_at.values().copied().min()?;
+        if self.disk.chunk_disk_idle() {
+            return Some(Duration::ZERO);
+        }
         let chunk = self.config.consensus.chunk_size.max(1);
         let grace = reorder_grace(chunk);
         let until_aged = grace.saturating_sub(oldest.elapsed());
@@ -2587,6 +2761,49 @@ impl StorageModule {
         Some(until_aged.max(until_hold))
     }
 
+    /// Time until the next entropy read is allowed.
+    /// `None` when no disk slot is queued. Zero when the disk is idle, a full
+    /// span is ready, the durability count is reached, a recall flush is owed,
+    /// or an aged short span outside the read hold is ready. A hold after one
+    /// short span keeps the others queued while the disk stays busy.
+    fn read_grace_remaining(&self) -> Option<Duration> {
+        let queue = self.disk.queue();
+        let spans = self.maximal_disk_spans(&queue.slots);
+        if spans.is_empty() {
+            return None;
+        }
+        if self.disk.chunk_disk_idle() {
+            return Some(Duration::ZERO);
+        }
+        let disk_slots = spans.iter().map(|span| span.indexes.len()).sum::<usize>();
+        let cap = self.hold_cap_bytes();
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let grace = reorder_grace(chunk);
+        if self.disk_reads_due(disk_slots)
+            || spans.iter().any(|span| span.bytes >= cap)
+            || (spans.iter().any(|span| span.aged) && !self.disk.short_reads_held())
+        {
+            return Some(Duration::ZERO);
+        }
+        let oldest = spans.iter().map(|span| span.oldest).min()?;
+        let until_aged = grace.saturating_sub(oldest.elapsed());
+        let until_hold = self
+            .disk
+            .read_short_hold_remaining()
+            .unwrap_or(Duration::ZERO);
+        Some(until_aged.max(until_hold))
+    }
+
+    /// Soonest of the write grace and the read grace. `None` only when both
+    /// queues have nothing waiting on a timer.
+    fn lane_grace_remaining(&self) -> Option<Duration> {
+        match (self.write_grace_remaining(), self.read_grace_remaining()) {
+            (Some(write), Some(read)) => Some(write.min(read)),
+            (Some(delay), None) | (None, Some(delay)) => Some(delay),
+            (None, None) => None,
+        }
+    }
+
     /// True when the longest ready entropy span is strictly longer than the
     /// longest packed run that is allowed to hit the disk now.
     fn entropy_outranks_writes(&self) -> bool {
@@ -2595,11 +2812,14 @@ impl StorageModule {
     }
 
     /// Ready to run a pass. A recall, a file holder, or a full window is not
-    /// ready: the loop waits for the notify. A short packed run is not ready
-    /// by itself until `reorder_grace` elapses, and after one short run is
-    /// written the others wait another grace. A full run, the durability
-    /// count, an owed recall flush, the one eligible short run, a queued
-    /// entropy sweep, or an external flush or interval write is ready.
+    /// ready: the loop waits for the notify. An idle disk with a queued short
+    /// command is ready, so the lane does not sleep on `reorder_grace`. While
+    /// the disk is busy, a short packed run waits for the cap, the durability
+    /// count, or `reorder_grace`, and after one short run the others wait
+    /// another grace. A short entropy span follows the same rule on the read
+    /// hold. A full run, an owed recall flush, the one eligible short run, a
+    /// ready entropy span, memory entropy, or an external flush or interval
+    /// write is ready.
     fn lane_work_ready(&self) -> bool {
         if !self.disk.disk_available() {
             return false;
@@ -2607,15 +2827,26 @@ impl StorageModule {
         if self.disk.lane_request_pending()
             || self.disk.recall_flush_is_owed()
             || self.pending_run_ready()
+            || self.has_ready_disk_span()
         {
             return true;
         }
-        if !self.disk.has_queued_sweep() {
+        // Memory entropy needs the sweep lock. A young short disk span stays
+        // queued, and it does not wake the lane on its own.
+        self.disk.sweep_lock_free() && self.memory_entropy_can_fold()
+    }
+
+    /// Buffered entropy at the best queued priority. A disk slot of that
+    /// priority keeps the file read ahead of the fold.
+    fn memory_entropy_can_fold(&self) -> bool {
+        let queue = self.disk.queue();
+        let Some(best) = queue.slots.iter().map(|slot| slot.priority).min() else {
             return false;
-        }
-        // Memory entropy needs the sweep lock. If another caller holds it,
-        // wait for that caller to release it instead of retrying the pass.
-        self.disk.has_disk_sweep_slot() || self.disk.sweep_lock_free()
+        };
+        queue
+            .slots
+            .iter()
+            .any(|slot| slot.priority == best && slot.pending_entropy.is_some())
     }
 
     fn disk_lane_pass(&self) {
@@ -2744,17 +2975,15 @@ struct SpanAnchor {
     index: usize,
     offset: u32,
     queued_at: Instant,
-    aged: bool,
+    priority: WritePriority,
 }
 
-struct ChosenSpan {
+struct DiskSpan {
     indexes: Vec<usize>,
     bytes: u64,
-}
-
-struct SpanRank {
-    bytes: u64,
     oldest: Instant,
+    aged: bool,
+    priority: WritePriority,
     start: u32,
 }
 
@@ -2778,28 +3007,18 @@ fn span_can_grow(
     gap_bytes <= hole_bytes && bytes <= max_bytes
 }
 
-fn span_beats(bytes: u64, oldest: Instant, start: u32, rank: &SpanRank) -> bool {
-    bytes > rank.bytes
-        || (bytes == rank.bytes && oldest < rank.oldest)
-        || (bytes == rank.bytes && oldest == rank.oldest && start < rank.start)
-}
-
-fn consider_file_spans(
+fn partition_file_spans(
     anchors: &[SpanAnchor],
     chunk_size: u64,
     hole_bytes: u64,
     max_bytes: u64,
-    any_aged: bool,
-    best: &mut Option<ChosenSpan>,
-    best_rank: &mut Option<SpanRank>,
-) {
-    let n = anchors.len();
-    let mut end = 0usize;
-    for start in 0..n {
-        if end < start {
-            end = start;
-        }
-        while end + 1 < n
+    grace: Duration,
+) -> Vec<DiskSpan> {
+    let mut spans = Vec::new();
+    let mut start = 0usize;
+    while start < anchors.len() {
+        let mut end = start;
+        while end + 1 < anchors.len()
             && span_can_grow(
                 &anchors[start],
                 &anchors[end],
@@ -2811,33 +3030,40 @@ fn consider_file_spans(
         {
             end += 1;
         }
-        let window = &anchors[start..=end];
-        if any_aged && !window.iter().any(|anchor| anchor.aged) {
-            continue;
-        }
-        let bytes = span_command_bytes(anchors[start].offset, anchors[end].offset, chunk_size);
-        let oldest = window
-            .iter()
-            .map(|anchor| anchor.queued_at)
-            .min()
-            .unwrap_or(anchors[start].queued_at);
-        let start_off = anchors[start].offset;
-        if best_rank
-            .as_ref()
-            .is_some_and(|rank| !span_beats(bytes, oldest, start_off, rank))
-        {
-            continue;
-        }
-        *best_rank = Some(SpanRank {
-            bytes,
-            oldest,
-            start: start_off,
-        });
-        *best = Some(ChosenSpan {
-            indexes: window.iter().map(|anchor| anchor.index).collect(),
-            bytes,
-        });
+        spans.push(disk_span_from(&anchors[start..=end], chunk_size, grace));
+        start = end + 1;
     }
+    spans
+}
+
+fn disk_span_from(anchors: &[SpanAnchor], chunk_size: u64, grace: Duration) -> DiskSpan {
+    let start = anchors[0].offset;
+    let end = anchors[anchors.len() - 1].offset;
+    let oldest = anchors
+        .iter()
+        .map(|anchor| anchor.queued_at)
+        .min()
+        .unwrap_or(anchors[0].queued_at);
+    let priority = anchors
+        .iter()
+        .map(|anchor| anchor.priority)
+        .min()
+        .unwrap_or(anchors[0].priority);
+    DiskSpan {
+        indexes: anchors.iter().map(|anchor| anchor.index).collect(),
+        bytes: span_command_bytes(start, end, chunk_size),
+        oldest,
+        aged: oldest.elapsed() >= grace,
+        priority,
+        start,
+    }
+}
+
+fn disk_slot_count(slots: &[SweepSlot]) -> usize {
+    slots
+        .iter()
+        .filter(|slot| slot.pending_entropy.is_none())
+        .count()
 }
 
 fn pread_span_bytes(span: &[SweepSlot], chunk_size: u64) -> u64 {
@@ -3023,6 +3249,12 @@ mod tests {
             for offset in queue_order {
                 queue.slots.push(sweep_slot(offset));
             }
+            let queued_at = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("test clock");
+            for slot in &mut queue.slots {
+                slot.queued_at = queued_at;
+            }
         }
         let span = module.take_disk_span().expect("span");
         let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
@@ -3056,7 +3288,7 @@ mod tests {
     }
 
     #[test]
-    fn take_disk_span_picks_the_longer_span() -> eyre::Result<()> {
+    fn due_reads_pick_the_longer_span() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("span_rank", 8, 8, 1)?;
         {
             let mut queue = module.disk.queue();
@@ -3064,9 +3296,123 @@ mod tests {
                 queue.slots.push(sweep_slot(offset));
             }
         }
+        module.disk.arm_recall_flush();
         let span = module.take_disk_span().expect("span");
+        module.disk.clear_recall_flush();
         let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
         assert_eq!(offsets, vec![3, 4, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn young_short_span_stays_queued_while_the_disk_is_busy() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("span_young", 8, 8, 1)?;
+        {
+            let mut queue = module.disk.queue();
+            for offset in [0_u32, 3, 4, 5] {
+                queue.slots.push(sweep_slot(offset));
+            }
+        }
+        module.disk.occupy_for_test();
+        assert!(module.take_disk_span().is_none());
+        assert_eq!(module.sweep_slot_count_for_test(), 4);
+        module.disk.release_for_test();
+        let span = module
+            .take_disk_span()
+            .expect("idle disk reads the longer span");
+        let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
+        assert_eq!(offsets, vec![3, 4, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn full_span_is_read_while_young() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("span_full", 8, 8, 1)?;
+        {
+            let mut queue = module.disk.queue();
+            for offset in 0..8 {
+                queue.slots.push(sweep_slot(offset));
+            }
+        }
+        let span = module.take_disk_span().expect("span");
+        let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
+        assert_eq!(offsets, (0..8).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
+    fn oldest_short_span_is_read_then_the_hold_blocks_the_next() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("span_hold", 8, 8, 1)?;
+        {
+            let mut queue = module.disk.queue();
+            for offset in [0_u32, 3, 4, 5] {
+                queue.slots.push(sweep_slot(offset));
+            }
+            let now = Instant::now();
+            queue.slots[0].queued_at = now.checked_sub(Duration::from_secs(5)).expect("test clock");
+            for slot in queue.slots.iter_mut().skip(1) {
+                slot.queued_at = now.checked_sub(Duration::from_secs(2)).expect("test clock");
+            }
+        }
+        module.disk.occupy_for_test();
+        let span = module.take_disk_span().expect("span");
+        let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
+        assert_eq!(offsets, vec![0]);
+        module.disk.arm_read_short_hold(super::reorder_grace(32));
+        assert!(module.take_disk_span().is_none());
+        assert_eq!(module.sweep_slot_count_for_test(), 3);
+        module.disk.release_for_test();
+        let released = module
+            .take_disk_span()
+            .expect("idle disk reads the held span");
+        let released_offsets: Vec<u32> = released.iter().map(|slot| slot.offset.0).collect();
+        assert_eq!(released_offsets, vec![3, 4, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn aged_short_span_is_read_ahead_of_a_full_span() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("span_short_first", 16, 8, 1)?;
+        {
+            let mut queue = module.disk.queue();
+            for offset in 0..8 {
+                queue.slots.push(sweep_slot(offset));
+            }
+            queue.slots.push(sweep_slot(10));
+            queue.slots[8].queued_at = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("test clock");
+        }
+        // An idle disk ranks the full span first. The short span leads only
+        // while another command keeps the disk busy.
+        module.disk.occupy_for_test();
+        let first = module.take_disk_span().expect("short");
+        assert_eq!(
+            first.iter().map(|slot| slot.offset.0).collect::<Vec<_>>(),
+            vec![10]
+        );
+        module.disk.arm_read_short_hold(super::reorder_grace(32));
+        let full = module.take_disk_span().expect("full");
+        assert_eq!(
+            full.iter().map(|slot| slot.offset.0).collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+        module.disk.release_for_test();
+        Ok(())
+    }
+
+    #[test]
+    fn force_read_takes_a_young_short_span() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("span_force", 8, 8, 1)?;
+        {
+            let mut queue = module.disk.queue();
+            queue.slots.push(sweep_slot(0));
+        }
+        module.disk.occupy_for_test();
+        assert!(module.take_disk_span().is_none());
+        let span = module.take_ready_span(true, true, false).expect("forced");
+        assert_eq!(span[0].offset.0, 0);
+        module.disk.release_for_test();
         Ok(())
     }
 
@@ -3082,9 +3428,11 @@ mod tests {
                 .checked_sub(Duration::from_secs(2))
                 .expect("test clock");
         }
+        module.disk.occupy_for_test();
         let span = module.take_disk_span().expect("span");
         let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
         assert_eq!(offsets, vec![0]);
+        module.disk.release_for_test();
         Ok(())
     }
 
