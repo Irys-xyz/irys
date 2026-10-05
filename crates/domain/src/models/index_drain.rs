@@ -5,10 +5,7 @@
 //! mining recall on this drive have left the gap, and not during them.
 
 use super::{WriteDataChunkError, disk_lane::DiskWake};
-use irys_database::{
-    db::IrysDatabaseExt as _,
-    submodule::{add_data_path_hash_to_offset_index, add_full_data_path},
-};
+use irys_database::{db::IrysDatabaseExt as _, submodule::write_data_path_updates};
 use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset, app_state::DatabaseProvider};
 use std::{
     collections::HashSet,
@@ -503,12 +500,13 @@ impl DrainRunner {
             eyre::bail!("injected index drain commit failure");
         }
         self.db.update_eyre(|tx| {
-            for op in batch {
-                // clone: put consumes the path bytes; the IndexOp is kept for the waiter ACK
-                add_full_data_path(tx, op.path_hash, op.data_path.clone())?;
-                add_data_path_hash_to_offset_index(tx, op.offset, Some(op.path_hash))?;
-            }
-            Ok(())
+            // clone: put consumes the path bytes; the IndexOp is kept for the waiter ACK.
+            // Offset order walks the leaf pages forward inside this one commit.
+            let updates = batch
+                .iter()
+                .map(|op| (op.offset, op.path_hash, op.data_path.clone()))
+                .collect();
+            write_data_path_updates(tx, updates)
         })
     }
 }

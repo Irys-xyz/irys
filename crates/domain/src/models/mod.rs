@@ -5,6 +5,7 @@ pub mod chunk_provider;
 pub mod circular_buffer;
 pub mod execution_payload_cache;
 pub mod forkchoice_markers;
+mod index_read_metrics;
 pub mod node_info;
 pub mod peer_events;
 pub mod peer_list;

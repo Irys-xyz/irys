@@ -45,17 +45,18 @@ use irys_database::{
     db::IrysDatabaseExt as _,
     submodule::{
         add_data_root_info, add_full_tx_path, add_pending_body_migration, add_tx_leaf_binding,
-        add_tx_path_hash_to_offset_index, clear_submodule_database, create_or_open_submodule_db,
+        add_tx_path_hash_to_offset_range, clear_submodule_database, create_or_open_submodule_db,
         del_path_hashes_by_offset, del_pending_body_migration,
-        del_pending_body_migrations_in_range, get_data_path_by_offset,
-        get_data_root_infos_for_data_root, get_full_data_path, get_full_tx_path,
-        get_path_hashes_by_offset, get_pending_body_migration, get_tx_leaf_binding,
-        get_tx_path_by_offset, missing_path_hash_ranges_in_tx, pending_body_migrations_from,
+        del_pending_body_migrations_in_range, get_data_root_infos_for_data_root,
+        get_full_data_path, get_full_tx_path, get_path_hashes_by_offset,
+        get_pending_body_migration, get_tx_leaf_binding, missing_path_hash_ranges_in_tx,
+        path_hashes_in_inclusive_range, pending_body_migrations_from,
         set_data_root_infos_for_data_root,
         tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
     },
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
+use irys_packing::unpack;
 use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
     DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, LedgerChunkOffset,
@@ -85,6 +86,7 @@ use std::{
 };
 use tracing::{debug, error, info, warn};
 
+use super::index_read_metrics::{self, METADATA, MIGRATION, RECALL};
 use crate::{CircularBuffer, StorageModulesReadGuard};
 
 #[path = "index_drain.rs"]
@@ -120,9 +122,25 @@ fn recover_tx_path_data_root<T: DbTx>(
     let Some(tx_path_hash) = path_hashes.tx_path_hash else {
         return Ok(None);
     };
+    let Some(data_root) = data_root_for_tx_path_hash(tx, tx_path_hash)? else {
+        return Ok(None);
+    };
+    Ok(Some((data_root, path_hashes.data_path_hash)))
+}
+
+/// Real `data_root` for a stored tx path, checked against the proof leaf.
+///
+/// `Ok(None)` when the tx-path bytes are absent. A missing binding, or a leaf
+/// that does not match the stored fold, is corruption.
+fn data_root_for_tx_path_hash<T: DbTx>(
+    tx: &T,
+    tx_path_hash: irys_types::TxPathHash,
+) -> eyre::Result<Option<DataRoot>> {
+    index_read_metrics::note("tx_path");
     let Some(tx_path) = get_full_tx_path(tx, tx_path_hash)? else {
         return Ok(None);
     };
+    index_read_metrics::note("tx_leaf");
 
     let leaf = get_leaf_proof(&Base64::from(tx_path))?
         .hash()
@@ -142,7 +160,143 @@ fn recover_tx_path_data_root<T: DbTx>(
         binding.prefix_hash,
     );
 
-    Ok(Some((binding.data_root, path_hashes.data_path_hash)))
+    Ok(Some(binding.data_root))
+}
+
+/// Index rows for `[start, end]` resolved inside the caller's read transaction.
+///
+/// A tx path, a data-root placement list, and a data path that several offsets
+/// share are loaded once. An offset with no tx path, no data path, or no
+/// stored path bytes is omitted.
+fn metas_in_tx<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    chunk_size: u64,
+) -> eyre::Result<BTreeMap<PartitionChunkOffset, (DataRoot, u64, Base64, TxChunkOffset)>> {
+    index_read_metrics::note("offset_walk");
+    let rows = path_hashes_in_inclusive_range(tx, start, end)?;
+    let mut tx_roots: HashMap<irys_types::TxPathHash, Option<DataRoot>> = HashMap::new();
+    let mut infos: HashMap<DataRoot, DataRootInfos> = HashMap::new();
+    let mut data_paths: HashMap<ChunkPathHash, Option<Base64>> = HashMap::new();
+    let mut out = BTreeMap::new();
+    for (offset, hashes) in rows {
+        let Some(tx_path_hash) = hashes.tx_path_hash else {
+            continue;
+        };
+        let data_root = if let Some(cached) = tx_roots.get(&tx_path_hash) {
+            *cached
+        } else {
+            let loaded = data_root_for_tx_path_hash(tx, tx_path_hash)?;
+            tx_roots.insert(tx_path_hash, loaded);
+            loaded
+        };
+        let Some(data_root) = data_root else {
+            continue;
+        };
+        let data_size = data_size_for_offset(tx, data_root, offset, &mut infos)?;
+        let Some(data_path_hash) = hashes.data_path_hash else {
+            continue;
+        };
+        let path_buff = if let Some(cached) = data_paths.get(&data_path_hash) {
+            cached.clone()
+        } else {
+            index_read_metrics::note("data_path");
+            let loaded = get_full_data_path(tx, data_path_hash)?.map(Base64::from);
+            data_paths.insert(data_path_hash, loaded.clone());
+            loaded
+        };
+        let Some(path_buff) = path_buff else {
+            continue;
+        };
+        let proof = get_leaf_proof(&path_buff)?;
+        let chunk_offset = (proof.offset() as u64).div_ceil(chunk_size) - 1;
+        out.insert(
+            offset,
+            (
+                data_root,
+                data_size,
+                path_buff,
+                TxChunkOffset(chunk_offset.try_into().expect("Value exceeds u32::MAX")),
+            ),
+        );
+    }
+    Ok(out)
+}
+
+fn data_size_for_offset<T: DbTx>(
+    tx: &T,
+    data_root: DataRoot,
+    partition_offset: PartitionChunkOffset,
+    cache: &mut HashMap<DataRoot, DataRootInfos>,
+) -> eyre::Result<u64> {
+    if !cache.contains_key(&data_root) {
+        index_read_metrics::note("data_root");
+        let mut loaded = get_data_root_infos_for_data_root(tx, data_root)
+            .expect("Database read should succeed")
+            .expect(
+                "there should be at least one start_offset for any data_root stored in the submodule",
+            );
+        loaded.0.sort_unstable();
+        cache.insert(data_root, loaded);
+    }
+    let infos = cache.get(&data_root).expect("just inserted");
+    let index = infos
+        .0
+        .partition_point(|info| info.start_offset <= partition_offset.into())
+        .saturating_sub(1);
+    if index < infos.0.len() {
+        Ok(infos.0[index].data_size)
+    } else {
+        Err(eyre!("could not find DataRootInfo for partition_offset"))
+    }
+}
+
+fn paths_in_tx<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<BTreeMap<PartitionChunkOffset, (Option<TxPath>, Option<ChunkDataPath>)>> {
+    index_read_metrics::note("offset_walk");
+    let rows = path_hashes_in_inclusive_range(tx, start, end)?;
+    let mut tx_paths: HashMap<irys_types::TxPathHash, Option<TxPath>> = HashMap::new();
+    let mut data_paths: HashMap<ChunkPathHash, Option<ChunkDataPath>> = HashMap::new();
+    let mut out = BTreeMap::new();
+    for (offset, hashes) in rows {
+        let tx_path = match hashes.tx_path_hash {
+            Some(hash) => cached_bytes(&mut tx_paths, hash, || {
+                index_read_metrics::note("tx_path");
+                get_full_tx_path(tx, hash)
+            })?,
+            None => None,
+        };
+        let data_path = match hashes.data_path_hash {
+            Some(hash) => cached_bytes(&mut data_paths, hash, || {
+                index_read_metrics::note("data_path");
+                get_full_data_path(tx, hash)
+            })?,
+            None => None,
+        };
+        out.insert(offset, (tx_path, data_path));
+    }
+    Ok(out)
+}
+
+fn cached_bytes<K, V, E>(
+    cache: &mut HashMap<K, Option<V>>,
+    key: K,
+    load: impl FnOnce() -> Result<Option<V>, E>,
+) -> Result<Option<V>, E>
+where
+    K: Eq + std::hash::Hash + Copy,
+    V: Clone,
+{
+    if let Some(hit) = cache.get(&key) {
+        return Ok(hit.clone());
+    }
+    let loaded = load()?;
+    cache.insert(key, loaded.clone());
+    Ok(loaded)
 }
 
 // In-memory chunk data indexed by offset within partition
@@ -227,6 +381,10 @@ pub struct StorageModule {
     fail_entropy_read_nth: AtomicU64,
     #[cfg(test)]
     entropy_read_seq: AtomicU64,
+    /// Submodule `view`s opened by a range index read. One slice of the range
+    /// is one view, shared by every offset in that slice.
+    #[cfg(test)]
+    index_views: AtomicU64,
     /// Serializes flushes so two callers cannot claim and write the same
     /// pending batch concurrently. Pending entries remain present until the
     /// data fsync and interval commit both succeed, and therefore serve as the
@@ -713,6 +871,8 @@ impl StorageModule {
             fail_entropy_read_nth: AtomicU64::new(0),
             #[cfg(test)]
             entropy_read_seq: AtomicU64::new(0),
+            #[cfg(test)]
+            index_views: AtomicU64::new(0),
             sync_in_progress: Mutex::new(()),
             data_writes_paused: AtomicBool::new(false),
             #[cfg(test)]
@@ -1944,6 +2104,8 @@ impl StorageModule {
                         let mut buf = vec![0_u8; n as usize * chunk_len];
                         file.read_exact_at(&mut buf, file_offset)
                             .wrap_err_with(|| format!("recall read at offset {piece} count {n}"))?;
+                        #[cfg(test)]
+                        self.disk.source_preads.fetch_add(1, Ordering::SeqCst);
                         for step in 0..n {
                             let at = step as usize * chunk_len;
                             let off = PartitionChunkOffset(piece.0 + step as u32);
@@ -2261,11 +2423,14 @@ impl StorageModule {
                     },
                 )?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
-                    // Add the tx_path_hash to every offset in the intersecting range
-                    for offset in *range.start()..=*range.end() {
-                        let part_offset = PartitionChunkOffset::from(offset);
-                        add_tx_path_hash_to_offset_index(tx, part_offset, Some(tx_path_hash))?;
-                    }
+                    // One cursor for the intersecting offsets. A tip range appends;
+                    // an overlap keeps any data path already stored on those keys.
+                    add_tx_path_hash_to_offset_range(
+                        tx,
+                        range.start(),
+                        range.end(),
+                        Some(tx_path_hash),
+                    )?;
                     // Add the DataRootInfo to the Infos for this data_root
                     let info = DataRootInfo {
                         start_offset,
@@ -2552,6 +2717,7 @@ impl StorageModule {
     pub fn collect_data_root_infos(&self, data_root: DataRoot) -> eyre::Result<DataRootInfos> {
         let mut data_root_info_list = DataRootInfos::default();
         for (_, submodule) in self.submodules.iter() {
+            index_read_metrics::note("data_root");
             if let Ok(Some(submodule_index)) = submodule
                 .db
                 .view(|tx| get_data_root_infos_for_data_root(tx, data_root))?
@@ -2560,6 +2726,188 @@ impl StorageModule {
             }
         }
         Ok(data_root_info_list)
+    }
+
+    /// Inclusive partition offsets. One entry per offset: `Some` is the unpacked
+    /// body, `None` is a hole. The disk read is the same planner as
+    /// [`Self::read_chunks`]: one `pread` per contiguous durable run, split on a
+    /// pending write, an uninitialized offset, or a `chunks.dat` boundary.
+    /// A range longer than one entropy sweep is rejected so the file lock stays
+    /// inside that cap.
+    pub fn read_durable_bodies(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> Result<Vec<Option<UnpackedChunk>>> {
+        ensure!(end >= start, "durable body range ends before it starts");
+        let count = u64::from(end.0 - start.0) + 1;
+        let limit = self.sweep_chunk_limit();
+        ensure!(
+            count <= limit,
+            "durable body range of {count} chunks exceeds one sweep of {limit}"
+        );
+        let loaded = self.read_chunks(partition_chunk_offset_ii!(start, end))?;
+        let chunk_size = usize::try_from(self.config.consensus.chunk_size)
+            .wrap_err("configured chunk size does not fit usize")?;
+        // Entropy and pending offsets have no proof row to read. Skip the
+        // view entirely when the range has no durable data.
+        let needs_index = (start.0..=end.0).any(|raw| {
+            let offset = PartitionChunkOffset::from(raw);
+            !self.is_data_write_pending_at(offset)
+                && loaded
+                    .get(&offset)
+                    .is_some_and(|(_, kind)| *kind == ChunkType::Data)
+        });
+        let metas = if needs_index {
+            index_read_metrics::with_caller(MIGRATION, || self.chunk_index_metas(start, end))?
+        } else {
+            BTreeMap::new()
+        };
+        let mut bodies = Vec::with_capacity(count as usize);
+        for raw in start.0..=end.0 {
+            let offset = PartitionChunkOffset::from(raw);
+            bodies.push(self.unpack_durable_body(
+                offset,
+                &loaded,
+                chunk_size,
+                metas.get(&offset),
+            )?);
+        }
+        Ok(bodies)
+    }
+
+    fn sweep_chunk_limit(&self) -> u64 {
+        let chunk = self.config.consensus.chunk_size.max(1);
+        self.config
+            .node_config
+            .storage
+            .entropy_sweep_max_bytes
+            .max(chunk)
+            / chunk
+    }
+
+    /// `None` when the offset is not durable transaction data. A pending write
+    /// is a hole here: the bytes are not on disk yet, and the planner already
+    /// split the `pread` around them.
+    fn unpack_durable_body(
+        &self,
+        offset: PartitionChunkOffset,
+        loaded: &BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>,
+        chunk_size: usize,
+        meta: Option<&(DataRoot, u64, Base64, TxChunkOffset)>,
+    ) -> Result<Option<UnpackedChunk>> {
+        if self.is_data_write_pending_at(offset) {
+            return Ok(None);
+        }
+        let Some((bytes, chunk_type)) = loaded.get(&offset) else {
+            return Ok(None);
+        };
+        if *chunk_type != ChunkType::Data {
+            return Ok(None);
+        }
+        let Some((data_root, data_size, data_path, tx_offset)) = meta.cloned() else {
+            return Ok(None);
+        };
+        let packed = PackedChunk {
+            data_root,
+            data_size,
+            data_path,
+            bytes: Base64::from(bytes.clone()),
+            partition_offset: offset,
+            tx_offset,
+            packing_address: self.config.node_config.miner_address(),
+            partition_hash: self
+                .partition_hash()
+                .ok_or_eyre("storage module has no partition")?,
+        };
+        Ok(Some(unpack(
+            &packed,
+            self.config.consensus.entropy_packing_iterations,
+            chunk_size,
+            self.config.consensus.chain_id,
+        )))
+    }
+
+    /// One `view` per submodule covering `[start, end]`. Shared tx paths, data
+    /// roots, and data paths are read once inside that view.
+    fn chunk_index_metas(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> Result<BTreeMap<PartitionChunkOffset, (DataRoot, u64, Base64, TxChunkOffset)>> {
+        let chunk_size = self.config.consensus.chunk_size;
+        let slices =
+            self.map_submodule_slices(start, end, |submodule, slice_start, slice_end| {
+                submodule
+                    .db
+                    .view_eyre(|tx| metas_in_tx(tx, slice_start, slice_end, chunk_size))
+            })?;
+        let mut out = BTreeMap::new();
+        for slice in slices {
+            out.extend(slice);
+        }
+        Ok(out)
+    }
+
+    /// Tx path and data path for every indexed offset in the inclusive range.
+    ///
+    /// One `view` per submodule. Offsets with no row are absent.
+    pub fn read_tx_data_paths(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<BTreeMap<PartitionChunkOffset, (Option<TxPath>, Option<ChunkDataPath>)>> {
+        let slices = index_read_metrics::with_caller(RECALL, || {
+            self.map_submodule_slices(start, end, |submodule, slice_start, slice_end| {
+                submodule
+                    .db
+                    .view_eyre(|tx| paths_in_tx(tx, slice_start, slice_end))
+            })
+        })?;
+        let mut out = BTreeMap::new();
+        for slice in slices {
+            out.extend(slice);
+        }
+        Ok(out)
+    }
+
+    /// Calls `map_slice` once per submodule that covers `[start, end]`.
+    /// The closure opens that slice's view.
+    fn map_submodule_slices<T>(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        mut map_slice: impl FnMut(
+            &StorageSubmodule,
+            PartitionChunkOffset,
+            PartitionChunkOffset,
+        ) -> eyre::Result<T>,
+    ) -> eyre::Result<Vec<T>> {
+        let mut out = Vec::new();
+        if end < start {
+            return Ok(out);
+        }
+        let mut cursor = start.0;
+        let range_end = end.0;
+        while cursor <= range_end {
+            let (interval, submodule) =
+                self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
+            let slice_end = (*interval.end()).min(range_end);
+            let slice = map_slice(
+                submodule,
+                PartitionChunkOffset::from(cursor),
+                PartitionChunkOffset::from(slice_end),
+            )?;
+            #[cfg(test)]
+            self.index_views.fetch_add(1, Ordering::SeqCst);
+            index_read_metrics::note_view(u64::from(slice_end - cursor) + 1);
+            out.push(slice);
+            if slice_end >= range_end {
+                break;
+            }
+            cursor = slice_end + 1;
+        }
+        Ok(out)
     }
 
     pub fn generate_full_chunk_ledger_offset(
@@ -2587,93 +2935,52 @@ impl StorageModule {
         &self,
         partition_offset: PartitionChunkOffset,
     ) -> Result<Option<PackedChunk>> {
-        // Get paths and process them
-        let Some((data_root, data_size, data_path, chunk_offset)) =
-            self.query_submodule_db_by_offset(partition_offset, |tx| {
-                // Recover the real data_root from the stored tx-leaf binding (verified
-                // against the tx_path leaf via the (data_root, prefix_hash) fold), along
-                // with this offset's data_path hash from the same offset-index read.
-                let Some((data_root, data_path_hash)) =
-                    recover_tx_path_data_root(tx, partition_offset)?
-                else {
-                    return Ok(None);
-                };
+        Ok(self
+            .generate_full_chunks(partition_offset, partition_offset)?
+            .remove(&partition_offset))
+    }
 
-                // Retrieve all DataRootInfo entries for this data_root from the database.
-                // Each entry contains a start_offset and the data_size paid for in the tx that provided the data_root
-                let mut data_root_infos = get_data_root_infos_for_data_root(tx, data_root)
-                    .expect("Database read should succeed")
-                    .expect("there should be at least one start_offset for any data_root stored in the submodule");
+    /// Packed chunks for the inclusive partition span `[start, end]`.
+    ///
+    /// One index view loads every proof. One `read_chunks` loads the bodies.
+    /// An offset with no stored chunk is absent. A one-offset span still errors
+    /// when the index names a chunk the disk does not hold.
+    pub fn generate_full_chunks(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> Result<BTreeMap<PartitionChunkOffset, PackedChunk>> {
+        let metas = self.chunk_index_metas(start, end)?;
+        if metas.is_empty() {
+            return Ok(BTreeMap::new());
+        }
 
-                // Sort DataRootInfo entries by start_offset to enable binary search.
-                // Multiple entries can exist for the same data_root it is posted by multiple transactions
-                // but each will have a unique start_offset in the storage module
-                data_root_infos.0.sort_unstable();
-
-                // Binary search to find the DataRootInfo entry that contains our partition_offset.
-                // partition_point returns the index of the first element where start_offset >= partition_offset
-                // (which we -1 from to find the last element with a start_offset < then partition offset)
-                // which means our target DataRootInfo is at this index (or doesn't exist if index is out of bounds).
-                let index = data_root_infos
-                    .0
-                    .partition_point(|info| info.start_offset <= partition_offset.into()).saturating_sub(1);
-
-                // Extract the data_size from the located DataRootInfo.
-                // If the index is valid, we've found the correct funding transaction's data_size.
-                // If not, the partition_offset doesn't belong to any known DataRootInfo entry.
-                let data_size = if index < data_root_infos.0.len() {
-                    data_root_infos.0[index].data_size
-                } else {
-                    return Err(eyre!("could not find DataRootInfo for partition_offset"));
-                };
-
-                // Storage behavior for multi-chunk transactions:
-                // - First chunk write creates both tx_path and its specific data_path
-                // - Subsequent chunks only create their own data_paths under the existing tx_path
-                // - Reading an unwritten chunk returns None (tx_path exists, but chunk's data_path doesn't)
-                // Fetch the data_path from the hash recovered above — no second offset-index read.
-                let Some(data_path_hash) = data_path_hash else {
-                    return Ok(None);
-                };
-                let Some(data_path) = get_full_data_path(tx, data_path_hash)? else {
-                    return Ok(None);
-                };
-
-                let path_buff = Base64::from(data_path);
-                let proof = get_leaf_proof(&path_buff)?;
-                // -1 as it starts with 0
-                let chunk_offset =
-                    (proof.offset() as u64).div_ceil(self.config.consensus.chunk_size) - 1;
-
-                Ok(Some((
+        let mut bodies = self.read_chunks(partition_chunk_offset_ii!(start, end))?;
+        let packing_address = self.config.node_config.miner_address();
+        let partition_hash = self.partition_hash().unwrap();
+        let mut out = BTreeMap::new();
+        for (offset, (data_root, data_size, data_path, tx_offset)) in metas {
+            let Some((bytes, _)) = bodies.remove(&offset) else {
+                if start == end {
+                    return Err(eyre!("Could not find chunk bytes on disk"));
+                }
+                continue;
+            };
+            out.insert(
+                offset,
+                PackedChunk {
                     data_root,
                     data_size,
-                    path_buff,
-                    TxChunkOffset(chunk_offset.try_into().expect("Value exceeds u32::MAX")),
-                )))
-            })?
-            else {
-                return Ok(None);
-            };
-
-        let mut chunks = self.read_chunks(partition_chunk_offset_ii!(
-            partition_offset,
-            partition_offset
-        ))?;
-        let chunk_info = chunks
-            .remove(&partition_offset)
-            .ok_or_eyre("Could not find chunk bytes on disk")?;
-
-        Ok(Some(PackedChunk {
-            data_root,
-            data_size,
-            data_path,
-            bytes: Base64::from(chunk_info.0),
-            partition_offset,
-            tx_offset: chunk_offset,
-            packing_address: self.config.node_config.miner_address(),
-            partition_hash: self.partition_hash().unwrap(),
-        }))
+                    data_path,
+                    bytes: Base64::from(bytes),
+                    partition_offset: offset,
+                    tx_offset,
+                    packing_address,
+                    partition_hash,
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// Returns chunk metadata (data_root and data_path) without reading chunk bytes.
@@ -2684,6 +2991,16 @@ impl StorageModule {
         &self,
         partition_offset: PartitionChunkOffset,
     ) -> Result<Option<(DataRoot, Base64)>> {
+        index_read_metrics::with_caller(METADATA, || {
+            self.get_chunk_metadata_in_caller(partition_offset)
+        })
+    }
+
+    fn get_chunk_metadata_in_caller(
+        &self,
+        partition_offset: PartitionChunkOffset,
+    ) -> Result<Option<(DataRoot, Base64)>> {
+        index_read_metrics::note_view(1);
         self.query_submodule_db_by_offset(partition_offset, |tx| {
             // Recover the real data_root from the stored tx-leaf binding (verified against
             // the tx_path leaf via the (data_root, prefix_hash) fold) plus this offset's
@@ -2697,6 +3014,7 @@ impl StorageModule {
             let Some(data_path_hash) = data_path_hash else {
                 return Ok(None);
             };
+            index_read_metrics::note("data_path");
             let Some(data_path) = get_full_data_path(tx, data_path_hash)? else {
                 return Ok(None);
             };
@@ -2790,12 +3108,11 @@ impl StorageModule {
         &self,
         chunk_offset: LedgerChunkOffset,
     ) -> eyre::Result<(Option<TxPath>, Option<ChunkDataPath>)> {
-        self.query_submodule_db_by_offset(PartitionChunkOffset::from(chunk_offset), |tx| {
-            Ok((
-                get_tx_path_by_offset(tx, PartitionChunkOffset::from(chunk_offset))?,
-                get_data_path_by_offset(tx, PartitionChunkOffset::from(chunk_offset))?,
-            ))
-        })
+        let offset = PartitionChunkOffset::from(chunk_offset);
+        Ok(self
+            .read_tx_data_paths(offset, offset)?
+            .remove(&offset)
+            .unwrap_or((None, None)))
     }
 
     #[inline]
@@ -3841,8 +4158,9 @@ mod tests {
     use super::*;
     use irys_testing_utils::{chunk_bytes_gen, utils::TempDirBuilder};
     use irys_types::{
-        ConsensusConfig, DataTransactionHeaderV1, H256, NodeConfig, SimpleRNG, StorageSyncConfig,
-        TxChunkOffset, irys::IrysSigner, ledger_chunk_offset_ii, partition_chunk_offset_ii,
+        ConsensusConfig, DataTransactionHeaderV1, DataTransactionLedger, H256, NodeConfig,
+        SimpleRNG, StorageSyncConfig, TxChunkOffset, irys::IrysSigner, ledger_chunk_offset_ii,
+        partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
 
@@ -4765,6 +5083,200 @@ mod tests {
         let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].byte_len, 96);
+        Ok(())
+    }
+
+    fn durable_body_module(
+        prefix: &str,
+        chunks: u64,
+        sweep_bytes: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: chunks,
+                num_chunks_in_recall_range: chunks,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 1000,
+                entropy_sweep_max_bytes: sweep_bytes,
+                entropy_coalesce_hole_bytes: sweep_bytes,
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x11);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: config.node_config.miner_address(),
+                    partition_hash,
+                }),
+                submodules: vec![(
+                    ii(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(chunks - 1),
+                    ),
+                    "hdd0".into(),
+                )],
+            },
+            &config,
+        )?;
+        Ok((tmp_dir, config, storage))
+    }
+
+    fn write_real_entropy(
+        storage: &StorageModule,
+        config: &Config,
+        chunks: u32,
+    ) -> eyre::Result<()> {
+        let chunk_size = config.consensus.chunk_size as usize;
+        let partition_hash = storage.partition_hash().expect("assigned partition");
+        for offset in 0..chunks {
+            let mut entropy = Vec::with_capacity(chunk_size);
+            irys_packing::capacity_single::compute_entropy_chunk(
+                config.node_config.miner_address(),
+                u64::from(offset),
+                partition_hash.0,
+                config.consensus.entropy_packing_iterations,
+                chunk_size,
+                &mut entropy,
+                config.consensus.chain_id,
+            );
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                entropy,
+                ChunkType::Entropy,
+            ));
+        }
+        storage.force_sync_pending_chunks()?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_durable_range_returns_every_body_in_one_pread() -> eyre::Result<()> {
+        let chunks = 8_u64;
+        let (_tmp, config, storage) = durable_body_module("durable_range", chunks, 256)?;
+        write_real_entropy(&storage, &config, chunks as u32)?;
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let data = (0..chunks as u8).flat_map(|byte| vec![byte; 32]).collect();
+        let tx = signer.sign_transaction(signer.create_transaction(data, H256::zero())?)?;
+        let unpacked = tx.data_chunks()?;
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        storage.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, chunks - 1)),
+            0,
+        )?;
+        for chunk in &unpacked {
+            storage.write_data_chunk(chunk)?;
+        }
+        storage.force_sync_pending_chunks()?;
+        storage.disk.source_preads.store(0, Ordering::SeqCst);
+        storage.index_views.store(0, Ordering::SeqCst);
+
+        let bodies = storage.read_durable_bodies(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(chunks as u32 - 1),
+        )?;
+        assert_eq!(bodies.len(), chunks as usize);
+        for (index, body) in bodies.iter().enumerate() {
+            let body = body.as_ref().expect("durable offset has a body");
+            assert_eq!(body.bytes.0, unpacked[index].bytes.0);
+        }
+        assert_eq!(storage.disk.source_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.index_views.load(Ordering::SeqCst), 1);
+
+        storage.index_views.store(0, Ordering::SeqCst);
+        let paths = storage.read_tx_data_paths(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(chunks as u32 - 1),
+        )?;
+        assert_eq!(paths.len(), chunks as usize);
+        assert!(
+            paths
+                .values()
+                .all(|(tx_path, data_path)| tx_path.is_some() && data_path.is_some())
+        );
+        assert_eq!(storage.index_views.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn an_uninitialized_hole_splits_the_durable_read() -> eyre::Result<()> {
+        let chunks = 8_u64;
+        let (_tmp, config, storage) = durable_body_module("durable_hole", chunks, 256)?;
+        write_real_entropy(&storage, &config, chunks as u32)?;
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let data = (0..chunks as u8).flat_map(|byte| vec![byte; 32]).collect();
+        let tx = signer.sign_transaction(signer.create_transaction(data, H256::zero())?)?;
+        let unpacked = tx.data_chunks()?;
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        storage.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, chunks - 1)),
+            0,
+        )?;
+        for chunk in unpacked.iter().filter(|chunk| chunk.tx_offset.0 != 3) {
+            storage.write_data_chunk(chunk)?;
+        }
+        storage.force_sync_pending_chunks()?;
+        // The skipped offset is still the entropy this fixture wrote. Cut it
+        // back to uninitialized so the planner treats it as a hole.
+        {
+            let mut intervals = storage.intervals.write().unwrap();
+            let point = partition_chunk_offset_ii!(3, 3);
+            let _ = intervals.cut(point);
+            let _ =
+                intervals.insert_merge_touching_if_values_equal(point, ChunkType::Uninitialized);
+        }
+        storage.disk.source_preads.store(0, Ordering::SeqCst);
+        storage.index_views.store(0, Ordering::SeqCst);
+
+        let bodies = storage.read_durable_bodies(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(chunks as u32 - 1),
+        )?;
+        assert_eq!(bodies.len(), chunks as usize);
+        assert!(bodies[3].is_none());
+        for (index, body) in bodies.iter().enumerate() {
+            if index == 3 {
+                continue;
+            }
+            let body = body.as_ref().expect("durable offset has a body");
+            assert_eq!(body.bytes.0, unpacked[index].bytes.0);
+        }
+        assert_eq!(storage.disk.source_preads.load(Ordering::SeqCst), 2);
+        assert_eq!(storage.index_views.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_range_past_one_sweep_is_rejected() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = durable_body_module("sweep_cap", 8, 128)?;
+        let error = storage
+            .read_durable_bodies(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4))
+            .expect_err("five chunks are longer than a four-chunk sweep");
+        assert!(
+            error.to_string().contains("sweep"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 

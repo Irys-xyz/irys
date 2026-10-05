@@ -11,7 +11,7 @@
 //! dropped wake-up. Every submodule is its own MDBX env and its own IO domain,
 //! so a pass fans out one blocking task per submodule with outstanding rows.
 
-use super::{MigrationError, load_chunk_for_migration, write_chunks_to_module};
+use super::{MigrationError, load_chunks_for_migration, write_chunks_to_module};
 use irys_database::submodule::tables::PendingBodyMigration;
 use irys_domain::{BatchEnqueueItem, ChunkType, StorageModule, StorageModulesReadGuard};
 use irys_types::{
@@ -432,7 +432,8 @@ impl SubmoduleDrain {
     /// Walk the slice of `job` this submodule owns — `[key, min(tx end,
     /// submodule end)]` — and publish each contiguous writable run in one
     /// sweep-queue insert. A durable, pending, non-entropy, or unsourced
-    /// offset ends the run. A run also ends at one entropy sweep, and at
+    /// offset ends the run. A run of entropy offsets that still need a body
+    /// is one source read. A run also ends at one entropy sweep, and at
     /// the pass budget or the pending-write ceiling.
     fn drain_job(
         &mut self,
@@ -470,7 +471,9 @@ impl SubmoduleDrain {
             self.config.node_config.storage.entropy_sweep_max_bytes,
         );
         let mut run: Vec<LoadedBody> = Vec::new();
-        for partition_offset in first..=last {
+        let mut cursor = first;
+        while cursor <= last {
+            let partition_offset = cursor;
             let offset =
                 PartitionChunkOffset::from(u32::try_from(partition_offset).map_err(|_| {
                     MigrationError::Other(format!(
@@ -483,6 +486,7 @@ impl SubmoduleDrain {
                     break;
                 }
                 durable += 1;
+                cursor += 1;
                 continue;
             }
             if self.sm.is_data_write_pending_at(offset) {
@@ -491,6 +495,7 @@ impl SubmoduleDrain {
                     break;
                 }
                 in_flight += 1;
+                cursor += 1;
                 continue;
             }
             // Only an Entropy offset — on disk, or queued by packing — can take a
@@ -503,6 +508,7 @@ impl SubmoduleDrain {
                     break;
                 }
                 unwritable += 1;
+                cursor += 1;
                 continue;
             }
             if self.sm.data_writes_paused() {
@@ -538,29 +544,56 @@ impl SubmoduleDrain {
                 cut_short = true;
                 break;
             }
+            let mut window_last = partition_offset;
+            let mut look = partition_offset + 1;
+            while look <= last {
+                let ahead = (window_last - partition_offset + 1) as usize;
+                if run.len() + ahead >= span_limit || run.len() + ahead >= self.budget {
+                    break;
+                }
+                let look_offset =
+                    PartitionChunkOffset::from(u32::try_from(look).map_err(|_| {
+                        MigrationError::Other(format!("partition offset {look} exceeds u32"))
+                    })?);
+                if self.sm.is_data_chunk_durable_at(look_offset)
+                    || self.sm.is_data_write_pending_at(look_offset)
+                    || !matches!(
+                        self.sm.get_chunk_type(&look_offset),
+                        Some(ChunkType::Entropy)
+                    )
+                {
+                    break;
+                }
+                let look_level = progress.pending_bytes.saturating_add(
+                    (run.len() as u64)
+                        .saturating_add(ahead as u64)
+                        .saturating_add(1)
+                        .saturating_mul(chunk_size),
+                );
+                if look_level > self.ceiling {
+                    break;
+                }
+                window_last = look;
+                look += 1;
+            }
+            let count = (window_last - partition_offset + 1) as usize;
             let tx_offset =
                 TxChunkOffset::from(u32::try_from(partition_offset - tx_start).map_err(|_| {
                     MigrationError::Other(format!(
                         "tx chunk offset for partition offset {partition_offset} is out of range"
                     ))
                 })?);
-            match load_chunk_for_migration(
+            let bodies = match load_chunks_for_migration(
                 &self.storage_modules_guard,
                 &self.db,
                 self.ledger,
                 job.data_root,
                 job.data_size,
                 tx_offset,
+                count,
                 &self.config,
             ) {
-                Ok(Some(chunk)) => run.push(LoadedBody { offset, chunk }),
-                Ok(None) => {
-                    if self.flush_run(&mut run, &mut progress)? {
-                        cut_short = true;
-                        break;
-                    }
-                    progress.unavailable += 1;
-                }
+                Ok(bodies) => bodies,
                 Err(MigrationError::WritesPaused) => {
                     let _ = self.flush_run(&mut run, &mut progress)?;
                     cut_short = true;
@@ -571,9 +604,61 @@ impl SubmoduleDrain {
                         cut_short = true;
                         break;
                     }
-                    progress.failed += 1;
+                    progress.failed += count;
                     progress.last_error = Some(error);
+                    cursor = window_last + 1;
+                    continue;
                 }
+            };
+            let mut resume = window_last + 1;
+            for (step, body) in bodies.into_iter().enumerate() {
+                if !run.is_empty() && (run.len() >= span_limit || run.len() >= self.budget) {
+                    if self.flush_run(&mut run, &mut progress)? {
+                        cut_short = true;
+                        resume = partition_offset + step as i64;
+                        break;
+                    }
+                }
+                if self.budget == 0 {
+                    cut_short = true;
+                    resume = partition_offset + step as i64;
+                    break;
+                }
+                let step_level = progress.pending_bytes.saturating_add(
+                    (run.len() as u64)
+                        .saturating_add(1)
+                        .saturating_mul(chunk_size),
+                );
+                if step_level > self.ceiling {
+                    let _ = self.flush_run(&mut run, &mut progress)?;
+                    self.throttled_jobs += 1;
+                    cut_short = true;
+                    resume = partition_offset + step as i64;
+                    break;
+                }
+                let at = PartitionChunkOffset::from(
+                    u32::try_from(partition_offset + step as i64).map_err(|_| {
+                        MigrationError::Other(format!(
+                            "partition offset {} exceeds u32",
+                            partition_offset + step as i64
+                        ))
+                    })?,
+                );
+                match body {
+                    Some(chunk) => run.push(LoadedBody { offset: at, chunk }),
+                    None => {
+                        if self.flush_run(&mut run, &mut progress)? {
+                            cut_short = true;
+                            resume = partition_offset + step as i64 + 1;
+                            break;
+                        }
+                        progress.unavailable += 1;
+                    }
+                }
+            }
+            cursor = resume;
+            if cut_short {
+                break;
             }
         }
         if self.flush_run(&mut run, &mut progress)? {

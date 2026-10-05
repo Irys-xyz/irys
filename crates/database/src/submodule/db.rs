@@ -5,7 +5,7 @@ use irys_types::{
 };
 use reth_db::{
     DatabaseEnv,
-    cursor::DbCursorRO as _,
+    cursor::{DbCursorRO as _, DbCursorRW as _},
     mdbx::DatabaseArguments,
     transaction::{DbTx, DbTxMut},
 };
@@ -65,6 +65,25 @@ pub fn get_path_hashes_by_offset<T: DbTx>(
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkPathHashes>> {
     Ok(tx.get::<ChunkPathHashesByOffset>(offset)?)
+}
+
+/// Inclusive `ChunkPathHashesByOffset` rows in `[start, end]`, in offset order.
+///
+/// One cursor walk. Offsets with no row are absent, not `None` placeholders.
+pub fn path_hashes_in_inclusive_range<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
+    if start > end {
+        return Ok(Vec::new());
+    }
+    let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
+    let mut rows = Vec::new();
+    for row in cursor.walk_range(start..=end)? {
+        rows.push(row?);
+    }
+    Ok(rows)
 }
 
 /// First offset in half-open `[start, end)` absent from a fallible sorted key stream.
@@ -312,6 +331,69 @@ pub fn add_tx_path_hash_to_offset_index<T: DbTxMut + DbTx>(
     let mut chunk_hashes = get_path_hashes_by_offset(tx, offset)?.unwrap_or_default();
     chunk_hashes.tx_path_hash = path_hash;
     set_path_hashes_by_offset(tx, offset, chunk_hashes)?;
+    Ok(())
+}
+
+/// Set `tx_path_hash` on every offset in the inclusive range `[start, end]`.
+///
+/// One write transaction, owned by the caller. When the range sits strictly
+/// past the last stored key, the rows are appended: MDBX `APPEND` rejects a
+/// key that is not after every existing key, and an overlapping range must
+/// keep any `data_path_hash` already stored on those offsets.
+pub fn add_tx_path_hash_to_offset_range<T: DbTxMut + DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    path_hash: Option<TxPathHash>,
+) -> eyre::Result<()> {
+    if start > end {
+        return Ok(());
+    }
+    let append = {
+        let mut cursor = tx.cursor_write::<ChunkPathHashesByOffset>()?;
+        match cursor.seek(start)? {
+            None => {
+                let value = ChunkPathHashes {
+                    data_path_hash: None,
+                    tx_path_hash: path_hash,
+                };
+                for raw in start.0..=end.0 {
+                    cursor.append(PartitionChunkOffset::from(raw), &value)?;
+                }
+                true
+            }
+            Some(_) => false,
+        }
+    };
+    if append {
+        return Ok(());
+    }
+    for raw in start.0..=end.0 {
+        add_tx_path_hash_to_offset_index(tx, PartitionChunkOffset::from(raw), path_hash)?;
+    }
+    Ok(())
+}
+
+/// Store each chunk's data path and its offset-index hash in one transaction.
+///
+/// `updates` may arrive in any offset order. They are applied in offset order
+/// so the write cursor moves forward through the leaf pages. An existing
+/// `tx_path_hash` on the same offset is left in place.
+pub fn write_data_path_updates<T: DbTxMut + DbTx>(
+    tx: &T,
+    mut updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
+) -> eyre::Result<()> {
+    updates.sort_by_key(|(offset, _, _)| *offset);
+    let mut cursor = tx.cursor_write::<ChunkPathHashesByOffset>()?;
+    for (offset, path_hash, data_path) in updates {
+        add_full_data_path(tx, path_hash, data_path)?;
+        let mut hashes = cursor
+            .seek_exact(offset)?
+            .map(|(_, hashes)| hashes)
+            .unwrap_or_default();
+        hashes.data_path_hash = Some(path_hash);
+        cursor.upsert(offset, &hashes)?;
+    }
     Ok(())
 }
 
@@ -947,6 +1029,78 @@ mod tests {
         let gap = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(10)))?;
         assert_eq!(gap, Some(o(3)));
 
+        Ok(())
+    }
+
+    /// A tip range is appended. A later write of the same offsets keeps the
+    /// data-path hash, and a batch of data paths lands in one transaction.
+    #[test]
+    fn offset_range_keeps_data_paths_and_batches_updates() -> eyre::Result<()> {
+        use super::{
+            add_tx_path_hash_to_offset_range, get_full_data_path, get_path_hashes_by_offset,
+            path_hashes_in_inclusive_range, write_data_path_updates,
+        };
+        use crate::submodule::tables::SubmoduleTables;
+        use crate::{IrysDatabaseArgs as _, open_or_create_db};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::H256;
+        use reth_db::mdbx::DatabaseArguments;
+
+        let temp_dir = TempDirBuilder::new()
+            .prefix("path_hash_range")
+            .with_tracing()
+            .build();
+        let db = open_or_create_db(
+            temp_dir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+
+        let tx_hash_1 = H256::from([1_u8; 32]);
+        let tx_hash_2 = H256::from([2_u8; 32]);
+        let tx_hash_3 = H256::from([3_u8; 32]);
+        let data_hash_3 = H256::from([4_u8; 32]);
+        let data_hash_2 = H256::from([5_u8; 32]);
+        let data_hash_7 = H256::from([6_u8; 32]);
+
+        db.update_eyre(|tx| add_tx_path_hash_to_offset_range(tx, o(2), o(4), Some(tx_hash_1)))?;
+        db.update_eyre(|tx| write_data_path_updates(tx, vec![(o(3), data_hash_3, vec![3, 3, 3])]))?;
+        db.update_eyre(|tx| add_tx_path_hash_to_offset_range(tx, o(2), o(4), Some(tx_hash_2)))?;
+        db.update_eyre(|tx| add_tx_path_hash_to_offset_range(tx, o(6), o(7), Some(tx_hash_3)))?;
+        db.update_eyre(|tx| {
+            write_data_path_updates(
+                tx,
+                vec![
+                    (o(7), data_hash_7, vec![7, 7]),
+                    (o(2), data_hash_2, vec![2, 2]),
+                ],
+            )
+        })?;
+
+        let rows = db.view_eyre(|tx| path_hashes_in_inclusive_range(tx, o(0), o(7)))?;
+        let offsets: Vec<u32> = rows.iter().map(|(offset, _)| offset.0).collect();
+        assert_eq!(offsets, vec![2, 3, 4, 6, 7]);
+
+        let at = |offset: u32| {
+            db.view_eyre(|tx| get_path_hashes_by_offset(tx, o(offset)))
+                .map(|row| row.unwrap())
+        };
+        assert_eq!(at(2)?.tx_path_hash, Some(tx_hash_2));
+        assert_eq!(at(2)?.data_path_hash, Some(data_hash_2));
+        assert_eq!(at(3)?.tx_path_hash, Some(tx_hash_2));
+        assert_eq!(at(3)?.data_path_hash, Some(data_hash_3));
+        assert_eq!(at(4)?.tx_path_hash, Some(tx_hash_2));
+        assert_eq!(at(4)?.data_path_hash, None);
+        assert_eq!(at(6)?.tx_path_hash, Some(tx_hash_3));
+        assert_eq!(at(7)?.data_path_hash, Some(data_hash_7));
+        assert_eq!(
+            db.view_eyre(|tx| get_full_data_path(tx, data_hash_2))?,
+            Some(vec![2, 2])
+        );
+        assert_eq!(
+            db.view_eyre(|tx| get_full_data_path(tx, data_hash_3))?,
+            Some(vec![3, 3, 3])
+        );
         Ok(())
     }
 }

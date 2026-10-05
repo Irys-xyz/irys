@@ -181,9 +181,10 @@ const REARM_BACKOFF_INITIAL_SKIPS: u64 = 1;
 /// Cap zero-yield skip budget (~16s at 1s re-arm cadence).
 const REARM_BACKOFF_MAX_SKIPS: u64 = 16;
 
-/// How long one fetched body waits for a neighboring offset. Long enough for
-/// the rest of an in-flight sweep to arrive, and short enough that a finished
-/// range still enters the sweep queue. This is not the write reorder grace.
+/// How long an open run waits after its newest body. A chunk that is still
+/// arriving keeps the run in this map. A quiet second, a full sweep, or a
+/// closed neighbor publishes the run into the sweep queue. This wait is not
+/// the write reorder grace, and it does not hold the disk.
 const SYNC_STAGE_WAIT: Duration = Duration::from_secs(1);
 
 /// Give every storage module one dispatch opportunity per round, rotating the
@@ -303,7 +304,8 @@ struct StagedOffset {
     staged_at: Instant,
 }
 
-/// Offsets whose contiguous run is full, closed, or older than `wait`.
+/// Offsets whose contiguous run is full, closed, or quiet for `wait` since
+/// its newest body.
 fn staged_runs_to_flush(
     staged: &[StagedOffset],
     now: Instant,
@@ -323,14 +325,14 @@ fn staged_runs_to_flush(
         }
         let run = &staged[index..=end];
         let bytes = (run.len() as u64).saturating_mul(chunk_bytes.max(1));
-        let oldest = run.iter().map(|slot| slot.staged_at).min().unwrap_or(now);
+        let newest = run.iter().map(|slot| slot.staged_at).max().unwrap_or(now);
         let start = run[0].offset;
         let last = run[run.len() - 1].offset;
         let prev_open = start > 0 && neighbor_open(start - 1);
         let next_open = last < u32::MAX && neighbor_open(last.saturating_add(1));
         let closed = !prev_open && !next_open;
-        let aged = now.saturating_duration_since(oldest) >= wait;
-        if bytes >= cap_bytes.max(chunk_bytes.max(1)) || closed || aged {
+        let quiet = now.saturating_duration_since(newest) >= wait;
+        if bytes >= cap_bytes.max(chunk_bytes.max(1)) || closed || quiet {
             flush.extend(run.iter().map(|slot| slot.offset));
         }
         index = end + 1;
@@ -492,6 +494,23 @@ mod staged_sync_tests {
         let staged = slots(&[8, 9], SYNC_STAGE_WAIT);
         let flush = staged_runs_to_flush(&staged, Instant::now(), 4, 40, SYNC_STAGE_WAIT, |_| true);
         assert_eq!(flush, vec![8, 9]);
+    }
+
+    #[test]
+    fn a_fresh_arrival_holds_an_open_run_past_the_first_chunk() {
+        let now = Instant::now();
+        let staged = vec![
+            StagedOffset {
+                offset: 8,
+                staged_at: now - SYNC_STAGE_WAIT,
+            },
+            StagedOffset {
+                offset: 9,
+                staged_at: now,
+            },
+        ];
+        let flush = staged_runs_to_flush(&staged, now, 4, 40, SYNC_STAGE_WAIT, |_| true);
+        assert!(flush.is_empty());
     }
 
     #[test]

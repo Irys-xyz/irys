@@ -2,12 +2,17 @@ use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_data_root};
 use irys_types::{
-    ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
-    UnpackedChunk, app_state::DatabaseProvider,
+    ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
+    TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
 };
+use nodit::interval::ii;
 use tracing::debug;
 
-use crate::{StorageModulesReadGuard, checked_add_i32_u64, get_storage_module_at_offset};
+use crate::models::index_read_metrics::{self, SERVE_DATA_ROOT, SERVE_LEDGER, SERVE_SPAN};
+use crate::{
+    StorageModulesReadGuard, checked_add_i32_u64, get_overlapped_storage_modules,
+    get_storage_module_at_offset,
+};
 
 /// Provides chunks to `actix::web` front end (mostly)
 #[derive(Debug, Clone)]
@@ -41,10 +46,12 @@ impl ChunkProvider {
         ledger_offset: LedgerChunkOffset,
     ) -> eyre::Result<Option<PackedChunk>> {
         // Get basic chunk info
-        let module =
-            get_storage_module_at_offset(&self.storage_modules_guard, ledger, ledger_offset)
-                .ok_or_eyre("No storage module contains this chunk")?;
-        module.generate_full_chunk_ledger_offset(ledger_offset)
+        index_read_metrics::with_caller(SERVE_LEDGER, || {
+            let module =
+                get_storage_module_at_offset(&self.storage_modules_guard, ledger, ledger_offset)
+                    .ok_or_eyre("No storage module contains this chunk")?;
+            module.generate_full_chunk_ledger_offset(ledger_offset)
+        })
     }
 
     /// Retrieves a chunk from a ledger and unpacks it (entropy recompute + XOR + tail trim).
@@ -67,6 +74,58 @@ impl ChunkProvider {
         )))
     }
 
+    /// Unpacked chunks for the inclusive ledger span `[from, to]`.
+    ///
+    /// Each storage module that overlaps the span is read once. Offsets the
+    /// node does not hold are absent. The result is ordered by ledger offset.
+    pub fn get_unpacked_chunks_by_ledger_span(
+        &self,
+        ledger: DataLedger,
+        from: LedgerChunkOffset,
+        to: LedgerChunkOffset,
+    ) -> eyre::Result<Vec<(LedgerChunkOffset, UnpackedChunk)>> {
+        index_read_metrics::with_caller(SERVE_SPAN, || self.span_in_caller(ledger, from, to))
+    }
+
+    fn span_in_caller(
+        &self,
+        ledger: DataLedger,
+        from: LedgerChunkOffset,
+        to: LedgerChunkOffset,
+    ) -> eyre::Result<Vec<(LedgerChunkOffset, UnpackedChunk)>> {
+        let requested = LedgerChunkRange(ii(from, to));
+        let modules =
+            get_overlapped_storage_modules(&self.storage_modules_guard, ledger, &requested);
+        let consensus = &self.config.consensus;
+        let mut out = Vec::new();
+        for module in modules {
+            let module_range = module.get_storage_module_ledger_offsets()?;
+            let Some(overlap) = nodit::InclusiveInterval::intersection(&module_range, &requested)
+            else {
+                continue;
+            };
+            let partition_range = module.make_range_partition_relative(overlap)?;
+            let packed =
+                module.generate_full_chunks(partition_range.start(), partition_range.end())?;
+            let ledger_start = *module_range.start();
+            for (partition_offset, chunk) in packed {
+                let ledger_offset =
+                    LedgerChunkOffset::from(ledger_start + u64::from(partition_offset.0));
+                out.push((
+                    ledger_offset,
+                    irys_packing::unpack(
+                        &chunk,
+                        consensus.entropy_packing_iterations,
+                        consensus.chunk_size as usize,
+                        consensus.chain_id,
+                    ),
+                ));
+            }
+        }
+        out.sort_by_key(|(offset, _)| *offset);
+        Ok(out)
+    }
+
     /// Retrieves a chunk by [`DataRoot`] + tx-relative offset.
     ///
     /// Lookup order:
@@ -81,6 +140,17 @@ impl ChunkProvider {
     /// Note: ingress-proof gossip is not chunk replication. Cache-backed serve is
     /// best-effort; pruned cache entries yield `Ok(None)` the same as a missing SM.
     pub fn get_chunk_by_data_root(
+        &self,
+        ledger: DataLedger,
+        data_root: DataRoot,
+        data_tx_offset: TxChunkOffset,
+    ) -> eyre::Result<Option<ChunkFormat>> {
+        index_read_metrics::with_caller(SERVE_DATA_ROOT, || {
+            self.data_root_in_caller(ledger, data_root, data_tx_offset)
+        })
+    }
+
+    fn data_root_in_caller(
         &self,
         ledger: DataLedger,
         data_root: DataRoot,
