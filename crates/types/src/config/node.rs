@@ -487,6 +487,13 @@ pub struct StorageSyncConfig {
     /// Zero bridges no hole.
     #[serde(default = "default_entropy_coalesce_hole_bytes")]
     pub entropy_coalesce_hole_bytes: u64,
+    /// After a mining recall has copied `chunks.dat` bytes into memory, drop
+    /// those file pages from the cache. Recall bytes are read once, and
+    /// leaving them cached pushes index pages out. A range that still holds
+    /// a pending packed write is left cached, because dropping it starts
+    /// writeback of dirty pages outside the lane. Default off.
+    #[serde(default)]
+    pub drop_recall_page_cache: bool,
 }
 
 impl Default for StorageSyncConfig {
@@ -497,6 +504,7 @@ impl Default for StorageSyncConfig {
             entropy_sweep_interval_millis: default_entropy_sweep_interval_millis(),
             entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),
             entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
+            drop_recall_page_cache: false,
         }
     }
 }
@@ -1312,6 +1320,7 @@ impl NodeConfig {
                 entropy_sweep_interval_millis: 0,
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
+                drop_recall_page_cache: false,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1507,6 +1516,7 @@ impl NodeConfig {
                 entropy_sweep_interval_millis: 1000,
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
+                drop_recall_page_cache: false,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,

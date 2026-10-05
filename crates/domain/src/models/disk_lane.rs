@@ -297,6 +297,13 @@ pub(super) struct DiskGate {
     last_commit_thread: Mutex<Option<std::thread::ThreadId>>,
     #[cfg(test)]
     pub(super) entropy_preads: AtomicU64,
+    /// Non-recall `pread`s from `read_chunks`. One contiguous disk run is one
+    /// call when the run fits the recall range.
+    #[cfg(test)]
+    pub(super) source_preads: AtomicU64,
+    /// Recall runs whose clean pages were dropped after the bytes were copied.
+    #[cfg(test)]
+    pub(super) recall_cache_drops: AtomicU64,
     /// Sweep-queue publishes. One contiguous run is one publish.
     #[cfg(test)]
     pub(super) enqueue_notifies: AtomicU64,
@@ -532,6 +539,10 @@ impl DiskGate {
             last_commit_thread: Mutex::new(None),
             #[cfg(test)]
             entropy_preads: AtomicU64::new(0),
+            #[cfg(test)]
+            source_preads: AtomicU64::new(0),
+            #[cfg(test)]
+            recall_cache_drops: AtomicU64::new(0),
             #[cfg(test)]
             enqueue_notifies: AtomicU64::new(0),
         }
@@ -3470,6 +3481,7 @@ mod tests {
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: chunk_size * max_chunks,
                 entropy_coalesce_hole_bytes: chunk_size * hole_chunks,
+                drop_recall_page_cache: false,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
