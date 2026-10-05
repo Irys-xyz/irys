@@ -809,7 +809,9 @@ impl ChunkOrchestrator {
                 LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
             FetchMode::LedgerOffset(ledger_chunk_offset)
         } else {
-            match self.storage_module.data_root_and_tx_offset_at(chunk_offset) {
+            match irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
+                self.storage_module.data_root_and_tx_offset_at(chunk_offset)
+            }) {
                 Ok(Some((data_root, tx_offset))) => FetchMode::DataRoot {
                     data_root,
                     tx_offset,

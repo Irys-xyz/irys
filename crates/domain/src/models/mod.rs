@@ -6,6 +6,11 @@ pub mod circular_buffer;
 pub mod execution_payload_cache;
 pub mod forkchoice_markers;
 mod index_read_metrics;
+
+pub use index_read_metrics::{
+    CACHE_RECLAIM, DATA_SYNC, INDEX_HEAL, INGRESS_SIZE, INGRESS_VERIFY, MIGRATION, PLACEMENT,
+    trace_index_read, with_index_caller,
+};
 pub mod node_info;
 pub mod peer_events;
 pub mod peer_list;
