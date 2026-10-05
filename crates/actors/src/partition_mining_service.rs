@@ -11,16 +11,18 @@ use crate::{
 use eyre::WrapErr as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
+use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    Config, H256List, PartitionChunkOffset, PartitionChunkRange, SendTraced as _,
-    TokioServiceHandle, U256,
+    Base64, ChunkDataPath, Config, H256List, PartitionChunkOffset, PartitionChunkRange,
+    ProofDeserialize as _, SendTraced as _, TokioServiceHandle, TxPath, U256,
     block_production::{Seed, SolutionContext},
-    partition_chunk_offset_ie, u256_from_le_bytes,
+    get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
+use openssl::sha;
 use reth::tasks::shutdown::Shutdown;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{Instrument as _, debug, error, info, warn};
 
@@ -256,43 +258,21 @@ impl PartitionMiningServiceInner {
             );
         }
 
-        // One view for the data offsets this recall will actually score.
-        // An entropy recall opens no view. Stop at the first chunk the loop
-        // below rejects, so a failed recall does not read past that chunk.
-        let mut first_data = None;
-        let mut last_data = None;
-        for (&offset, (_, chunk_type)) in chunks.iter() {
-            match chunk_type {
-                ChunkType::Uninitialized | ChunkType::Interrupted => break,
-                ChunkType::Data => {
-                    first_data.get_or_insert(offset);
-                    last_data = Some(offset);
-                }
-                ChunkType::Entropy => {}
-            }
-        }
-        let paths = match first_data.zip(last_data) {
-            Some((start, end)) => self.storage_module.read_tx_data_paths(start, end)?,
-            None => BTreeMap::new(),
-        };
-
+        // Hash the recall before any index read. Only a winning chunk needs
+        // its proof. A data proof must bind these bytes: block production copies
+        // the paths into the PoA and does not check them, and a packed write
+        // between this read and the lookup can pair them with a new path.
         for (&partition_chunk_offset, (chunk_bytes, chunk_type)) in chunks.iter() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
-
-            // Only include the tx_path and data_path for chunks that contain data
-            let (tx_path, data_path) = match chunk_type {
-                ChunkType::Entropy => (None, None),
-                ChunkType::Data => paths
-                    .get(&partition_chunk_offset)
-                    .cloned()
-                    .unwrap_or((None, None)),
+            match *chunk_type {
                 ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"));
                 }
                 ChunkType::Interrupted => {
                     return Err(eyre::eyre!("Cannot mine interrupted chunks"));
                 }
-            };
+                ChunkType::Entropy | ChunkType::Data => {}
+            }
 
             let solution_hash = irys_types::compute_solution_hash(
                 chunk_bytes,
@@ -300,38 +280,133 @@ impl PartitionMiningServiceInner {
                 &mining_seed,
             );
             let test_solution = u256_from_le_bytes(&solution_hash.0);
-
-            if test_solution >= self.difficulty {
-                info!(
-                    "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{} difficulty {}",
-                    self.storage_module.id,
-                    partition_chunk_offset,
-                    self.config.consensus.num_chunks_in_partition,
-                    *partition_chunk_offset - start_chunk_offset,
-                    self.config.consensus.num_chunks_in_recall_range,
-                    self.difficulty
-                );
-                metrics::record_mining_solution_found();
-
-                let solution = SolutionContext {
-                    partition_hash,
-                    chunk_offset: *partition_chunk_offset,
-                    mining_address: self.config.node_config.miner_address(),
-                    tx_path,
-                    data_path,
-                    chunk: chunk_bytes.clone(),
-                    vdf_step,
-                    checkpoints: checkpoints.clone(),
-                    seed: Seed(mining_seed),
-                    solution_hash,
-                };
-
-                // Once solution is sent stop mining and let all other partitions know
-                return Ok(Some(solution));
+            if test_solution < self.difficulty {
+                continue;
             }
+
+            let (tx_path, data_path) = if *chunk_type == ChunkType::Data {
+                let Some((tx_path, data_path)) =
+                    self.paths_for_winning_data_chunk(partition_chunk_offset, chunk_bytes)
+                else {
+                    continue;
+                };
+                (Some(tx_path), Some(data_path))
+            } else {
+                (None, None)
+            };
+
+            info!(
+                "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{} difficulty {}",
+                self.storage_module.id,
+                partition_chunk_offset,
+                self.config.consensus.num_chunks_in_partition,
+                *partition_chunk_offset - start_chunk_offset,
+                self.config.consensus.num_chunks_in_recall_range,
+                self.difficulty
+            );
+            metrics::record_mining_solution_found();
+
+            let solution = SolutionContext {
+                partition_hash,
+                chunk_offset: *partition_chunk_offset,
+                mining_address: self.config.node_config.miner_address(),
+                tx_path,
+                data_path,
+                chunk: chunk_bytes.clone(),
+                vdf_step,
+                checkpoints: checkpoints.clone(),
+                seed: Seed(mining_seed),
+                solution_hash,
+            };
+
+            // Once solution is sent stop mining and let all other partitions know
+            return Ok(Some(solution));
         }
 
         Ok(None)
+    }
+
+    /// One index read for a winning data offset. `None` means do not submit
+    /// this chunk: the lookup failed, a path is missing, or the `data_path`
+    /// leaf does not bind `chunk_bytes`. The caller keeps scanning the range.
+    fn paths_for_winning_data_chunk(
+        &self,
+        offset: PartitionChunkOffset,
+        chunk_bytes: &[u8],
+    ) -> Option<(TxPath, ChunkDataPath)> {
+        let paths = match self.storage_module.read_tx_data_paths(offset, offset) {
+            Ok(paths) => paths,
+            Err(error) => {
+                warn!(
+                    storage_module.id = self.storage_module.id,
+                    chunk_offset = offset.0,
+                    %error,
+                    "winning data chunk path lookup failed"
+                );
+                return None;
+            }
+        };
+        let Some((Some(tx_path), Some(data_path))) = paths.get(&offset).cloned() else {
+            warn!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "winning data chunk has no stored path"
+            );
+            return None;
+        };
+        if !self.data_path_binds_chunk(offset, chunk_bytes, &data_path) {
+            warn!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "winning data chunk path does not bind the recall bytes"
+            );
+            return None;
+        }
+        Some((tx_path, data_path))
+    }
+
+    /// True when `data_path`'s leaf hash equals the sha256 of the unpacked
+    /// recall prefix. The leaf stores the exclusive end offset. A full chunk
+    /// ends on a chunk boundary, so the span is the chunk size; a short final
+    /// chunk ends inside the chunk, and the span is that remainder.
+    fn data_path_binds_chunk(
+        &self,
+        offset: PartitionChunkOffset,
+        chunk_bytes: &[u8],
+        data_path: &ChunkDataPath,
+    ) -> bool {
+        let chunk_size = self.config.consensus.chunk_size as usize;
+        if chunk_bytes.len() != chunk_size {
+            return false;
+        }
+        let Ok(leaf) = get_leaf_proof(&Base64(data_path.clone())) else {
+            return false;
+        };
+        let Some(leaf_hash) = leaf.hash() else {
+            return false;
+        };
+        let end = leaf.offset();
+        let rem = end % chunk_size;
+        let span = if rem == 0 { chunk_size } else { rem };
+        let Some(partition_hash) = self.storage_module.partition_hash() else {
+            return false;
+        };
+        let mut entropy = Vec::with_capacity(chunk_size);
+        compute_entropy_chunk(
+            self.config.node_config.miner_address(),
+            u64::from(offset.0),
+            partition_hash.0,
+            self.config.consensus.entropy_packing_iterations,
+            chunk_size,
+            &mut entropy,
+            self.config.consensus.chain_id,
+        );
+        if entropy.len() != chunk_size {
+            return false;
+        }
+        let mut unpacked = chunk_bytes.to_vec();
+        xor_vec_u8_arrays_in_place(&mut unpacked, &entropy);
+        sha::sha256(&unpacked[..span]) == leaf_hash
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -550,9 +625,12 @@ mod tests {
     use irys_domain::StorageModuleInfo;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        ConsensusConfig, ConsensusOptions, H256, NodeConfig, partition::PartitionAssignment,
+        ConsensusConfig, ConsensusOptions, DataLedger, DataTransactionLedger, H256,
+        LedgerChunkOffset, LedgerChunkRange, NodeConfig, StorageSyncConfig, irys::IrysSigner,
+        ledger_chunk_offset_ii, partition::PartitionAssignment,
     };
     use irys_vdf::state::VdfState;
+    use nodit::interval::ii;
     use std::sync::RwLock;
     use std::sync::atomic::AtomicBool;
 
@@ -776,6 +854,7 @@ mod tests {
         };
         let storage_module =
             Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let views = Arc::clone(&storage_module);
 
         // Pack offsets 1..10 as Entropy, leaving offset 0 Uninitialized (the hole).
         let chunk = vec![0_u8; config.consensus.chunk_size as usize];
@@ -835,5 +914,227 @@ mod tests {
             irys_types::compute_solution_hash(&chunk, solution.chunk_offset, &seed),
             "solution hash must be over the true offset"
         );
+        assert_eq!(
+            views.index_view_count(),
+            0,
+            "an entropy win reads no index view"
+        );
+    }
+
+    const DATA_CHUNKS: u64 = 4;
+
+    /// One recall range covering the whole partition, so step 1 needs no VDF
+    /// reconstruction. `indexed` writes a real transaction. Otherwise the
+    /// chunks are `Data` bytes with no proof rows.
+    fn open_data_miner(
+        difficulty: U256,
+        indexed: bool,
+    ) -> (
+        irys_testing_utils::utils::tempfile::TempDir,
+        Arc<StorageModule>,
+        PartitionMiningServiceInner,
+    ) {
+        let tmp_dir = TempDirBuilder::new().build();
+        let chunks = DATA_CHUNKS;
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: chunks,
+                num_chunks_in_recall_range: chunks,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x11);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: Some(DataLedger::Submit.into()),
+                slot_index: Some(0),
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, chunks), "hdd0".into())],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let chunk_size = config.consensus.chunk_size as usize;
+        if indexed {
+            for offset in 0..chunks {
+                let mut entropy = Vec::with_capacity(chunk_size);
+                irys_packing::capacity_single::compute_entropy_chunk(
+                    config.node_config.miner_address(),
+                    offset,
+                    partition_hash.0,
+                    config.consensus.entropy_packing_iterations,
+                    chunk_size,
+                    &mut entropy,
+                    config.consensus.chain_id,
+                );
+                assert!(storage_module.write_chunk(
+                    PartitionChunkOffset::from(offset),
+                    entropy,
+                    ChunkType::Entropy,
+                ));
+            }
+            storage_module
+                .force_sync_pending_chunks()
+                .expect("sync entropy");
+            let signer = IrysSigner::random_signer(&config.consensus);
+            let data: Vec<u8> = (0..chunks as u8).flat_map(|byte| vec![byte; 32]).collect();
+            let tx = signer
+                .sign_transaction(
+                    signer
+                        .create_transaction(data, H256::zero())
+                        .expect("transaction"),
+                )
+                .expect("signed transaction");
+            let unpacked = tx.data_chunks().expect("data chunks");
+            let (_, proofs) =
+                DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+            storage_module
+                .index_transaction_data(
+                    &tx.header,
+                    &proofs[0].proof,
+                    LedgerChunkRange(ledger_chunk_offset_ii!(0, chunks - 1)),
+                    0,
+                )
+                .expect("index transaction");
+            for chunk in &unpacked {
+                storage_module
+                    .write_data_chunk(chunk)
+                    .expect("write data chunk");
+            }
+        } else {
+            let bytes = vec![0_u8; chunk_size];
+            for offset in 0..chunks {
+                assert!(storage_module.write_chunk(
+                    PartitionChunkOffset::from(offset),
+                    bytes.clone(),
+                    ChunkType::Data,
+                ));
+            }
+        }
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data chunks");
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            difficulty,
+        );
+        (tmp_dir, storage_module, inner)
+    }
+
+    fn mine_once(inner: &mut PartitionMiningServiceInner) -> Option<SolutionContext> {
+        inner.test_mine_partition_with_seed(H256::repeat_byte(0x42), 1, &H256List::default())
+    }
+
+    #[test]
+    fn data_recall_with_no_solution_opens_no_index_view() {
+        let (_tmp, storage, mut inner) = open_data_miner(U256::MAX, true);
+        storage.clear_index_view_count();
+        assert!(
+            mine_once(&mut inner).is_none(),
+            "only an all-0xff hash meets U256::MAX"
+        );
+        assert_eq!(storage.index_view_count(), 0);
+    }
+
+    #[test]
+    fn winning_data_chunk_reads_its_own_paths() {
+        let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), true);
+        let offset = PartitionChunkOffset::from(0);
+        let (expected_tx, expected_data) = storage
+            .read_tx_data_paths(offset, offset)
+            .expect("pre-read paths")
+            .remove(&offset)
+            .expect("offset 0 is indexed");
+        let expected_tx = expected_tx.expect("tx path");
+        let expected_data = expected_data.expect("data path");
+        storage.clear_index_view_count();
+
+        let solution = mine_once(&mut inner).expect("difficulty 0 finds the first chunk");
+        assert_eq!(solution.chunk_offset, 0);
+        assert_eq!(solution.tx_path.as_deref(), Some(expected_tx.as_slice()));
+        assert_eq!(
+            solution.data_path.as_deref(),
+            Some(expected_data.as_slice())
+        );
+        assert_eq!(
+            storage.index_view_count(),
+            1,
+            "one winning offset opens one view"
+        );
+    }
+
+    #[test]
+    fn winning_data_chunk_with_no_stored_path_submits_nothing() {
+        let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), false);
+        storage.clear_index_view_count();
+        assert!(
+            mine_once(&mut inner).is_none(),
+            "a data win with empty paths is not submitted"
+        );
+        assert_eq!(
+            storage.index_view_count(),
+            DATA_CHUNKS,
+            "each data chunk is looked up, then skipped"
+        );
+    }
+
+    #[test]
+    fn winning_data_chunk_whose_leaf_does_not_bind_submits_nothing() {
+        let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), true);
+        let end = PartitionChunkOffset::from(DATA_CHUNKS - 1);
+        let before = storage
+            .read_tx_data_paths(PartitionChunkOffset::from(0), end)
+            .expect("paths before overwrite");
+        assert_eq!(before.len(), DATA_CHUNKS as usize);
+        assert!(
+            before
+                .values()
+                .all(|(tx_path, data_path)| tx_path.is_some() && data_path.is_some())
+        );
+        let garbage = vec![0xA5_u8; 32];
+        for offset in 0..DATA_CHUNKS {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                garbage.clone(),
+                ChunkType::Data,
+            ));
+        }
+        storage
+            .force_sync_pending_chunks()
+            .expect("sync overwritten bytes");
+        let after = storage
+            .read_tx_data_paths(PartitionChunkOffset::from(0), end)
+            .expect("paths after overwrite");
+        assert_eq!(
+            after, before,
+            "overwriting chunk bytes must leave the stored paths in place"
+        );
+        storage.clear_index_view_count();
+        assert!(
+            mine_once(&mut inner).is_none(),
+            "a data win whose leaf does not bind the recall bytes is not submitted"
+        );
+        assert_eq!(storage.index_view_count(), DATA_CHUNKS);
     }
 }
