@@ -20,6 +20,7 @@ irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true
 nodit.workspace = true
 openssl.workspace = true
+opentelemetry.workspace = true
 serde.workspace = true
 tracing.workspace = true
 rand.workspace = true

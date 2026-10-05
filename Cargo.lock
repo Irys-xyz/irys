@@ -5298,6 +5298,7 @@ dependencies = [
  "nodit",
  "num-bigfloat",
  "openssl",
+ "opentelemetry",
  "proptest",
  "rand 0.8.5",
  "reth",

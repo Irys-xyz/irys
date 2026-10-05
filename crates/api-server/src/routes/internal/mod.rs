@@ -23,7 +23,6 @@ use irys_types::{H256, LedgerChunkOffset};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tracing::debug;
 
 pub fn internal_routes() -> impl HttpServiceFactory {
     web::scope("internal")
@@ -262,30 +261,27 @@ async fn chunks_range(
         .await
         .map_err(|e| ApiError::Internal { err: e.to_string() })?;
     let provider = Arc::clone(&state.chunk_provider);
+    let ledger_id = query.ledger;
     let chunks = web::block(move || {
-        let mut out = Vec::new();
-        for offset in from..=to {
-            match provider
-                .get_unpacked_chunk_by_ledger_offset(ledger, LedgerChunkOffset::from(offset))
-            {
-                Ok(Some(unpacked)) => out.push(ChunkRead {
-                    ledger_id: query.ledger,
-                    offset,
-                    bytes: unpacked.bytes.0,
-                    proof: unpacked.data_path.0,
-                }),
-                // Not stored at this offset: omit (the short-read contract).
-                Ok(None) => {}
-                Err(e) => {
-                    debug!(?ledger, offset, "internal chunk read failed: {e:#}");
-                }
-            }
-        }
-        out
+        provider.get_unpacked_chunks_by_ledger_span(
+            ledger,
+            LedgerChunkOffset::from(from),
+            LedgerChunkOffset::from(to),
+        )
     })
     .await
+    .map_err(|e| ApiError::Internal { err: e.to_string() })?
     .map_err(|e| ApiError::Internal { err: e.to_string() })?;
-    Ok(web::Json(chunks))
+    let out = chunks
+        .into_iter()
+        .map(|(offset, unpacked)| ChunkRead {
+            ledger_id,
+            offset: *offset,
+            bytes: unpacked.bytes.0,
+            proof: unpacked.data_path.0,
+        })
+        .collect();
+    Ok(web::Json(out))
 }
 
 enum CanonicalBlockSource {

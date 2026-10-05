@@ -9,7 +9,6 @@ use irys_domain::{
     BatchEnqueueItem, BlockIndex, StorageModule, StorageModulesReadGuard, WriteDataChunkError,
     get_overlapped_storage_modules,
 };
-use irys_packing::unpack;
 use irys_storage::{InclusiveInterval as _, ie, ii};
 use irys_types::{
     Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
@@ -327,61 +326,100 @@ pub fn process_ledger_transactions(
     Ok(())
 }
 
-/// Source the body for `tx_offset` of `data_root`: the chunk cache first, then
-/// (Publish only) the durable Submit replica. `None` means data sync's problem.
-fn load_chunk_for_migration(
+/// Source `count` contiguous transaction offsets starting at `tx_start`.
+/// Cache hits stay per chunk. A run of cache misses on Publish is one
+/// [`StorageModule::read_durable_bodies`] per Submit replica that still has a
+/// hole. Term ledgers do not fall back across ledgers. `None` is a hole.
+fn load_chunks_for_migration(
     storage_modules_guard: &StorageModulesReadGuard,
     db: &DatabaseProvider,
     target_ledger: DataLedger,
     data_root: DataRoot,
     data_size: u64,
-    tx_offset: TxChunkOffset,
+    tx_start: TxChunkOffset,
+    count: usize,
     config: &Config,
-) -> Result<Option<UnpackedChunk>, MigrationError> {
+) -> Result<Vec<Option<UnpackedChunk>>, MigrationError> {
     let chunk_size = usize::try_from(config.consensus.chunk_size).map_err(|_| {
         MigrationError::Other(format!(
             "configured chunk size {} does not fit usize",
             config.consensus.chunk_size
         ))
     })?;
-    match get_cached_chunk(db, data_root, tx_offset) {
-        Ok(Some((_metadata, cached))) if cached.chunk.is_some() => {
-            match validate_chunk_for_migration(cached, data_root, data_size, tx_offset, chunk_size)
-            {
-                Ok(chunk) => return Ok(Some(chunk)),
-                Err(error) => {
-                    tracing::warn!(
-                        data_root = %data_root,
-                        %tx_offset,
-                        ?error,
-                        "Cached chunk failed migration validation; checking durable fallback"
-                    );
+    let mut bodies = vec![None; count];
+    let mut misses = Vec::new();
+    for step in 0..count {
+        let tx_offset = tx_offset_at(tx_start, step)?;
+        match get_cached_chunk(db, data_root, tx_offset) {
+            Ok(Some((_metadata, cached))) if cached.chunk.is_some() => {
+                match validate_chunk_for_migration(
+                    cached, data_root, data_size, tx_offset, chunk_size,
+                ) {
+                    Ok(chunk) => bodies[step] = Some(chunk),
+                    Err(error) => {
+                        tracing::warn!(
+                            data_root = %data_root,
+                            %tx_offset,
+                            ?error,
+                            "Cached chunk failed migration validation; checking durable fallback"
+                        );
+                        misses.push(step);
+                    }
                 }
             }
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(
-                data_root = %data_root,
-                %tx_offset,
-                ?error,
-                "Failed to read cached chunk during migration; checking durable fallback"
-            );
+            Ok(_) => misses.push(step),
+            Err(error) => {
+                tracing::warn!(
+                    data_root = %data_root,
+                    %tx_offset,
+                    ?error,
+                    "Failed to read cached chunk during migration; checking durable fallback"
+                );
+                misses.push(step);
+            }
         }
     }
-
-    // Submit is the only ledger whose transaction is later copied into a
-    // second ledger. Its cached body may be reclaimed after the Submit fsync,
-    // so Publish migration sources that normal cache-miss path from the durable
-    // Submit replica. Term-ledger transactions are written only once and do not
-    // need a cross-ledger fallback. If the Submit replica was reassigned or
-    // reset, the caller leaves a visible hole for data sync instead.
-    if target_ledger != DataLedger::Publish {
-        return Ok(None);
+    if target_ledger == DataLedger::Publish && !misses.is_empty() {
+        fill_submit_misses(
+            storage_modules_guard,
+            data_root,
+            data_size,
+            tx_start,
+            &misses,
+            &mut bodies,
+            chunk_size,
+        )?;
     }
+    Ok(bodies)
+}
 
+fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, MigrationError> {
+    let start = u32::from(*tx_start);
+    let step = u32::try_from(step)
+        .map_err(|_| MigrationError::Other(format!("tx offset step {step} exceeds u32")))?;
+    let raw = start
+        .checked_add(step)
+        .ok_or_else(|| MigrationError::Other(format!("tx offset {start} + {step} exceeds u32")))?;
+    Ok(TxChunkOffset::from(raw))
+}
+
+/// One range read per remaining hole span. The next Submit replica is asked
+/// only for the offsets the previous replica left empty.
+fn fill_submit_misses(
+    storage_modules_guard: &StorageModulesReadGuard,
+    data_root: DataRoot,
+    data_size: u64,
+    tx_start: TxChunkOffset,
+    misses: &[usize],
+    bodies: &mut [Option<UnpackedChunk>],
+    chunk_size: usize,
+) -> Result<(), MigrationError> {
     let storage_modules = storage_modules_guard.read().clone();
+    let mut pending = misses.to_vec();
     for module in &storage_modules {
+        if pending.is_empty() {
+            break;
+        }
         let is_submit = module
             .partition_assignment()
             .and_then(|assignment| assignment.ledger_id)
@@ -389,65 +427,121 @@ fn load_chunk_for_migration(
         if !is_submit {
             continue;
         }
-        let Some(partition_offsets) = module
-            .partition_offsets_for_data_root_chunk(data_root, tx_offset)
-            .map_err(|error| {
-                MigrationError::Other(format!("resolving Submit fallback: {error}"))
-            })?
-        else {
-            continue;
-        };
-        for partition_offset in partition_offsets {
-            if !module.is_data_chunk_durable_at(partition_offset) {
-                continue;
-            }
-            let Some(packed) = module
-                .generate_full_chunk(partition_offset)
+        let mut still = Vec::new();
+        for (start_step, len) in contiguous_index_runs(&pending) {
+            let tx0 = tx_offset_at(tx_start, start_step)?;
+            let placements = module
+                .partition_offsets_for_data_root_chunk(data_root, tx0)
                 .map_err(|error| {
-                    MigrationError::Other(format!("reading durable Submit fallback: {error}"))
-                })?
-            else {
+                    MigrationError::Other(format!("resolving Submit fallback: {error}"))
+                })?;
+            let Some(placements) = placements else {
+                still.extend(start_step..start_step + len);
                 continue;
             };
-            let unpacked = unpack(
-                &packed,
-                config.consensus.entropy_packing_iterations,
-                chunk_size,
-                config.consensus.chain_id,
-            );
-            if unpacked.data_root != data_root || unpacked.tx_offset != tx_offset {
-                tracing::warn!(
-                    data_root = %data_root,
-                    %tx_offset,
-                    storage_module.id = module.id,
-                    partition.offset = %partition_offset,
-                    "Durable Submit chunk identity mismatch; checking another replica"
-                );
+            if placements.is_empty() {
+                still.extend(start_step..start_step + len);
                 continue;
             }
-            match validate_chunk_parts_for_migration(
-                unpacked.data_path,
-                unpacked.bytes,
-                data_root,
-                data_size,
-                tx_offset,
-                chunk_size,
-            ) {
-                Ok(chunk) => return Ok(Some(chunk)),
-                Err(error) => {
-                    tracing::warn!(
-                        data_root = %data_root,
-                        %tx_offset,
-                        storage_module.id = module.id,
-                        partition.offset = %partition_offset,
-                        ?error,
-                        "Durable Submit chunk failed migration validation; checking another replica"
-                    );
+            let mut filled = vec![false; len];
+            for place in placements {
+                let mut index = 0;
+                while index < len {
+                    if filled[index] {
+                        index += 1;
+                        continue;
+                    }
+                    let mut end = index;
+                    while end < len && !filled[end] {
+                        end += 1;
+                    }
+                    let start_offset = place
+                        .0
+                        .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
+                        .map(irys_types::PartitionChunkOffset::from);
+                    let end_offset = place
+                        .0
+                        .checked_add(u32::try_from(end - 1).unwrap_or(u32::MAX))
+                        .map(irys_types::PartitionChunkOffset::from);
+                    let (Some(start_offset), Some(end_offset)) = (start_offset, end_offset) else {
+                        index = end;
+                        continue;
+                    };
+                    let read = module
+                        .read_durable_bodies(start_offset, end_offset)
+                        .map_err(|error| {
+                            MigrationError::Other(format!(
+                                "reading durable Submit fallback: {error}"
+                            ))
+                        })?;
+                    for (step, body) in read.into_iter().enumerate() {
+                        let Some(body) = body else {
+                            continue;
+                        };
+                        let at = start_step + index + step;
+                        let tx_offset = tx_offset_at(tx_start, at)?;
+                        if body.data_root != data_root || body.tx_offset != tx_offset {
+                            tracing::warn!(
+                                data_root = %data_root,
+                                %tx_offset,
+                                storage_module.id = module.id,
+                                partition.offset = %(start_offset.0 + step as u32),
+                                "Durable Submit chunk identity mismatch; checking another replica"
+                            );
+                            continue;
+                        }
+                        match validate_chunk_parts_for_migration(
+                            body.data_path,
+                            body.bytes,
+                            data_root,
+                            data_size,
+                            tx_offset,
+                            chunk_size,
+                        ) {
+                            Ok(chunk) => {
+                                bodies[at] = Some(chunk);
+                                filled[index + step] = true;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    data_root = %data_root,
+                                    %tx_offset,
+                                    storage_module.id = module.id,
+                                    partition.offset = %(start_offset.0 + step as u32),
+                                    ?error,
+                                    "Durable Submit chunk failed migration validation; checking another replica"
+                                );
+                            }
+                        }
+                    }
+                    index = end;
+                }
+            }
+            for (step, was_filled) in filled.iter().enumerate() {
+                if !was_filled {
+                    still.push(start_step + step);
                 }
             }
         }
+        pending = still;
     }
-    Ok(None)
+    Ok(())
+}
+
+fn contiguous_index_runs(indexes: &[usize]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut index = 0;
+    while index < indexes.len() {
+        let start = indexes[index];
+        let mut end = start;
+        index += 1;
+        while index < indexes.len() && indexes[index] == end + 1 {
+            end = indexes[index];
+            index += 1;
+        }
+        runs.push((start, end - start + 1));
+    }
+    runs
 }
 
 /// Computes the range of chunks added to a ledger by the transactions in a block,

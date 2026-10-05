@@ -13,14 +13,14 @@ use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_storage::ii;
 use irys_types::{
-    Config, H256List, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
-    SendTraced as _, TokioServiceHandle, U256,
+    Config, H256List, PartitionChunkOffset, PartitionChunkRange, SendTraced as _,
+    TokioServiceHandle, U256,
     block_production::{Seed, SolutionContext},
     partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{Instrument as _, debug, error, info, warn};
 
@@ -256,15 +256,36 @@ impl PartitionMiningServiceInner {
             );
         }
 
+        // One view for the data offsets this recall will actually score.
+        // An entropy recall opens no view. Stop at the first chunk the loop
+        // below rejects, so a failed recall does not read past that chunk.
+        let mut first_data = None;
+        let mut last_data = None;
+        for (&offset, (_, chunk_type)) in chunks.iter() {
+            match chunk_type {
+                ChunkType::Uninitialized | ChunkType::Interrupted => break,
+                ChunkType::Data => {
+                    first_data.get_or_insert(offset);
+                    last_data = Some(offset);
+                }
+                ChunkType::Entropy => {}
+            }
+        }
+        let paths = match first_data.zip(last_data) {
+            Some((start, end)) => self.storage_module.read_tx_data_paths(start, end)?,
+            None => BTreeMap::new(),
+        };
+
         for (&partition_chunk_offset, (chunk_bytes, chunk_type)) in chunks.iter() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
 
             // Only include the tx_path and data_path for chunks that contain data
             let (tx_path, data_path) = match chunk_type {
                 ChunkType::Entropy => (None, None),
-                ChunkType::Data => self
-                    .storage_module
-                    .read_tx_data_path(LedgerChunkOffset::from(*partition_chunk_offset))?,
+                ChunkType::Data => paths
+                    .get(&partition_chunk_offset)
+                    .cloned()
+                    .unwrap_or((None, None)),
                 ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"));
                 }
