@@ -384,7 +384,7 @@ pub struct StorageModule {
     entropy_read_seq: AtomicU64,
     /// Submodule `view`s opened by a range index read. One slice of the range
     /// is one view, shared by every offset in that slice.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     index_views: AtomicU64,
     /// Serializes flushes so two callers cannot claim and write the same
     /// pending batch concurrently. Pending entries remain present until the
@@ -872,7 +872,7 @@ impl StorageModule {
             fail_entropy_read_nth: AtomicU64::new(0),
             #[cfg(test)]
             entropy_read_seq: AtomicU64::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             index_views: AtomicU64::new(0),
             sync_in_progress: Mutex::new(()),
             data_writes_paused: AtomicBool::new(false),
@@ -1184,6 +1184,18 @@ impl StorageModule {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn fail_next_index_commit(&self) {
         self.index_commit_fail_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Submodule views opened since the last clear. One slice is one view.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn index_view_count(&self) -> u64 {
+        self.index_views.load(Ordering::SeqCst)
+    }
+
+    /// Zero the submodule view counter.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn clear_index_view_count(&self) {
+        self.index_views.store(0, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -2999,7 +3011,7 @@ impl StorageModule {
                 PartitionChunkOffset::from(cursor),
                 PartitionChunkOffset::from(slice_end),
             )?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             self.index_views.fetch_add(1, Ordering::SeqCst);
             index_read_metrics::note_view(u64::from(slice_end - cursor) + 1);
             out.push(slice);
