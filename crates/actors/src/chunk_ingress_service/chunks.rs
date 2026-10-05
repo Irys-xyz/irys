@@ -308,28 +308,38 @@ impl ChunkIngressServiceInner {
                 );
                 let storage_modules_guard = self.storage_modules_guard.read();
 
-                // Collect data_size info from each storage module in parallel
-                let sm_data_sizes: Vec<DataSizeInfo> = storage_modules_guard
-                    .par_iter()
-                    .filter_map(|sm| {
-                        let infos = sm.collect_data_root_infos(chunk.data_root).ok()?;
-                        if infos.0.is_empty() {
-                            return None;
-                        }
+                // One span for the scan. Rayon workers inherit neither the span
+                // nor the caller thread-local, so each worker enters both.
+                let span = info_span!("index_read", caller = irys_domain::INGRESS_SIZE);
+                let sm_data_sizes: Vec<DataSizeInfo> = span.in_scope(|| {
+                    storage_modules_guard
+                        .par_iter()
+                        .filter_map(|sm| {
+                            span.in_scope(|| {
+                                irys_domain::with_index_caller(irys_domain::INGRESS_SIZE, || {
+                                    let infos = sm.collect_data_root_infos(chunk.data_root).ok()?;
+                                    if infos.0.is_empty() {
+                                        return None;
+                                    }
 
-                        let is_from_publish_ledger = sm
-                            .partition_assignment()
-                            .is_some_and(|pa| pa.ledger_id == Some(DataLedger::Publish.get_id()));
+                                    let is_from_publish_ledger =
+                                        sm.partition_assignment().is_some_and(|pa| {
+                                            pa.ledger_id == Some(DataLedger::Publish.get_id())
+                                        });
 
-                        // Find max data_size within this SM's infos
-                        let max_data_size = infos.0.iter().map(|info| info.data_size).max()?;
+                                    // Find max data_size within this SM's infos
+                                    let max_data_size =
+                                        infos.0.iter().map(|info| info.data_size).max()?;
 
-                        Some(DataSizeInfo {
-                            data_size: max_data_size,
-                            is_from_publish_ledger,
+                                    Some(DataSizeInfo {
+                                        data_size: max_data_size,
+                                        is_from_publish_ledger,
+                                    })
+                                })
+                            })
                         })
-                    })
-                    .collect();
+                        .collect()
+                });
 
                 match select_data_size_from_storage_modules(sm_data_sizes) {
                     Some(selected) if selected.is_from_publish_ledger => {
@@ -819,36 +829,45 @@ impl ChunkIngressServiceInner {
         let target_byte_offset = u128::from(claimed_data_size.saturating_sub(1));
 
         // Search storage modules in parallel for a valid rightmost chunk proof.
-        let confirmed_size = storage_modules.par_iter().find_map_any(|sm| {
-            let infos = sm
-                .collect_data_root_infos(data_root)
-                .ok()
-                .filter(|i| !i.0.is_empty())?;
+        // Same span on every worker: one trace for the scan, not one per module.
+        let span = info_span!("index_read", caller = irys_domain::INGRESS_VERIFY);
+        let confirmed_size = span.in_scope(|| {
+            storage_modules.par_iter().find_map_any(|sm| {
+                span.in_scope(|| {
+                    irys_domain::with_index_caller(irys_domain::INGRESS_VERIFY, || {
+                        let infos = sm
+                            .collect_data_root_infos(data_root)
+                            .ok()
+                            .filter(|i| !i.0.is_empty())?;
 
-            for info in &infos.0 {
-                let relative_offset =
-                    (info.start_offset.0 as i64).saturating_add(last_chunk_index as i64);
-                if relative_offset < 0 {
-                    continue;
-                }
+                        for info in &infos.0 {
+                            let relative_offset = (info.start_offset.0 as i64)
+                                .saturating_add(last_chunk_index as i64);
+                            if relative_offset < 0 {
+                                continue;
+                            }
 
-                let partition_offset =
-                    irys_types::PartitionChunkOffset::from(relative_offset as u32);
+                            let partition_offset =
+                                irys_types::PartitionChunkOffset::from(relative_offset as u32);
 
-                // Use get_chunk_metadata to avoid reading chunk bytes - we only need the data_path
-                let (chunk_data_root, data_path) = sm
-                    .get_chunk_metadata(partition_offset)
-                    .ok()
-                    .flatten()
-                    .filter(|(dr, _)| *dr == data_root)?;
+                            // Use get_chunk_metadata to avoid reading chunk bytes - we only need the data_path
+                            let (chunk_data_root, data_path) = sm
+                                .get_chunk_metadata(partition_offset)
+                                .ok()
+                                .flatten()
+                                .filter(|(dr, _)| *dr == data_root)?;
 
-                if let Ok(result) = validate_path(chunk_data_root.0, &data_path, target_byte_offset)
-                    && result.is_rightmost_chunk
-                {
-                    return Some(result.max_byte_range as u64);
-                }
-            }
-            None
+                            if let Ok(result) =
+                                validate_path(chunk_data_root.0, &data_path, target_byte_offset)
+                                && result.is_rightmost_chunk
+                            {
+                                return Some(result.max_byte_range as u64);
+                            }
+                        }
+                        None
+                    })
+                })
+            })
         });
 
         match confirmed_size {

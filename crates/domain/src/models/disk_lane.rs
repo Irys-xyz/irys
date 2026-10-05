@@ -1213,14 +1213,16 @@ impl StorageModule {
         if self.data_writes_paused() {
             return Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused));
         }
-        let partition_offsets =
-            match self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset) {
-                Ok(Some(offsets)) => offsets,
-                Ok(None) => {
-                    return Err(OccupyFailure::Write(WriteDataChunkError::DataRootNotFound));
-                }
-                Err(error) => return Err(OccupyFailure::Write(error.into())),
-            };
+        let partition_offsets = match super::index_read_metrics::trace_index_read(
+            super::index_read_metrics::PLACEMENT,
+            || self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset),
+        ) {
+            Ok(Some(offsets)) => offsets,
+            Ok(None) => {
+                return Err(OccupyFailure::Write(WriteDataChunkError::DataRootNotFound));
+            }
+            Err(error) => return Err(OccupyFailure::Write(error.into())),
+        };
 
         let data_path = Arc::new(chunk.data_path.0.clone());
         let path_hash = UnpackedChunk::hash_data_path(&data_path);

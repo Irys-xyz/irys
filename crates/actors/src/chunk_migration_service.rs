@@ -430,11 +430,12 @@ fn fill_submit_misses(
         let mut still = Vec::new();
         for (start_step, len) in contiguous_index_runs(&pending) {
             let tx0 = tx_offset_at(tx_start, start_step)?;
-            let placements = module
-                .partition_offsets_for_data_root_chunk(data_root, tx0)
-                .map_err(|error| {
-                    MigrationError::Other(format!("resolving Submit fallback: {error}"))
-                })?;
+            let placements = irys_domain::trace_index_read(irys_domain::MIGRATION, || {
+                module.partition_offsets_for_data_root_chunk(data_root, tx0)
+            })
+            .map_err(|error| {
+                MigrationError::Other(format!("resolving Submit fallback: {error}"))
+            })?;
             let Some(placements) = placements else {
                 still.extend(start_step..start_step + len);
                 continue;

@@ -401,21 +401,23 @@ impl InnerCacheTask {
             Vec::with_capacity(candidates.len());
         for (root, cached_offsets) in candidates {
             let mut durable = BTreeSet::new();
-            for storage_module in &storage_modules {
-                match storage_module.durable_tx_offsets_for_data_root(root, &cached_offsets) {
-                    Ok(offsets) => durable.extend(offsets),
-                    Err(error) => {
-                        // Unreadable placement metadata is not evidence of
-                        // durability; leave the bodies for a later pass.
-                        warn!(
-                            chunk.data_root = ?root,
-                            storage_module = %storage_module.id,
-                            ?error,
-                            "Skipping chunk prune candidate with unreadable storage metadata"
-                        );
+            irys_domain::trace_index_read(irys_domain::CACHE_RECLAIM, || {
+                for storage_module in &storage_modules {
+                    match storage_module.durable_tx_offsets_for_data_root(root, &cached_offsets) {
+                        Ok(offsets) => durable.extend(offsets),
+                        Err(error) => {
+                            // Unreadable placement metadata is not evidence of
+                            // durability; leave the bodies for a later pass.
+                            warn!(
+                                chunk.data_root = ?root,
+                                storage_module = %storage_module.id,
+                                ?error,
+                                "Skipping chunk prune candidate with unreadable storage metadata"
+                            );
+                        }
                     }
                 }
-            }
+            });
             if !durable.is_empty() {
                 durable_by_root.push((root, durable));
             }

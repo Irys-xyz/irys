@@ -290,10 +290,12 @@ fn classify_synced_chunk(
     {
         return DataSyncWriteOutcome::AwaitingDurability;
     }
-    if matches!(
-        sm.collect_data_root_infos(unpacked.data_root),
-        Ok(infos) if infos.0.is_empty()
-    ) {
+    if irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
+        matches!(
+            sm.collect_data_root_infos(unpacked.data_root),
+            Ok(infos) if infos.0.is_empty()
+        )
+    }) {
         return DataSyncWriteOutcome::MissingDataRootIndex;
     }
     DataSyncWriteOutcome::NoWriteableOffset
@@ -779,10 +781,11 @@ impl DataSyncServiceInner {
             }
             let max_probes = free_slots.saturating_mul(REARM_PROBE_MULTIPLIER);
             probed_blocked = true;
-            let unblocked =
+            let unblocked = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
                 orchestrator.unblock_missing_data_root_index_where(free_slots, max_probes, |off| {
                     sm.is_data_root_index_ready_at(off)
-                });
+                })
+            });
             if unblocked > 0 {
                 debug!(
                     storage_module.id = id,
@@ -1413,6 +1416,12 @@ impl DataSyncServiceInner {
     /// Sample residual Entropy offsets that already have tx migration
     /// (`data_root_and_tx_offset_at` succeeds) and collect unique data_roots.
     fn residual_data_roots_for_proof_lookup(storage_module: &StorageModule) -> Vec<DataRoot> {
+        irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
+            Self::residual_data_roots_in_caller(storage_module)
+        })
+    }
+
+    fn residual_data_roots_in_caller(storage_module: &StorageModule) -> Vec<DataRoot> {
         let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
         let mut roots = Vec::new();
         let mut seen = HashSet::new();

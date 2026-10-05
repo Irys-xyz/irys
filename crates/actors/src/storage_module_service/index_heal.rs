@@ -226,11 +226,12 @@ fn index_ready_after_heal(target: &RecheckTarget) -> bool {
     } else {
         &target.sample_offsets
     };
-    if let Some(off) = samples
-        .iter()
-        .copied()
-        .find(|off| !target.sm.is_data_root_index_ready_at(*off))
-    {
+    if let Some(off) = irys_domain::trace_index_read(irys_domain::INDEX_HEAL, || {
+        samples
+            .iter()
+            .copied()
+            .find(|off| !target.sm.is_data_root_index_ready_at(*off))
+    }) {
         warn!(
             storage_module.id = target.sm.id,
             index_heal.first_unready = %off,
@@ -429,10 +430,13 @@ fn plan_index_repair(ctx: &IndexHealCtx<'_>, sm: &Arc<StorageModule>) -> IndexRe
         Ok(gaps) if gaps.is_empty() => {
             // Path-hash dense. Completeness still requires data_sync readiness
             // (DataRootInfos residual). Unready samples become single-offset holes.
-            let unready: Vec<PartitionChunkOffset> = readiness_sample_offsets(max_partition_offset)
-                .into_iter()
-                .filter(|off| !sm.is_data_root_index_ready_at(*off))
-                .collect();
+            let unready: Vec<PartitionChunkOffset> =
+                irys_domain::trace_index_read(irys_domain::INDEX_HEAL, || {
+                    readiness_sample_offsets(max_partition_offset)
+                        .into_iter()
+                        .filter(|off| !sm.is_data_root_index_ready_at(*off))
+                        .collect()
+                });
             if unready.is_empty() {
                 return IndexRepairPlan::Complete;
             }

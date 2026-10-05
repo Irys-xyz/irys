@@ -2715,7 +2715,9 @@ impl StorageModule {
         chunk: &UnpackedChunk,
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let Some(offsets) =
-            self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)?
+            index_read_metrics::trace_index_read(index_read_metrics::PLACEMENT, || {
+                self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)
+            })?
         else {
             debug!("Chunks data_root not found in storage module");
             return Ok(Vec::new());
@@ -2742,7 +2744,9 @@ impl StorageModule {
     /// True when this module has an index op in flight for any placement of `chunk`.
     pub fn has_in_flight_index_for(&self, chunk: &UnpackedChunk) -> bool {
         let Ok(Some(offsets)) =
-            self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)
+            index_read_metrics::trace_index_read(index_read_metrics::PLACEMENT, || {
+                self.partition_offsets_for_data_root_chunk(chunk.data_root, chunk.tx_offset)
+            })
         else {
             return false;
         };
