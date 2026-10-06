@@ -2915,7 +2915,7 @@ mod tests {
     /// is also placed by a still-canonical block.
     #[test]
     fn recover_from_network_partition_scopes_data_root_infos_clear() -> eyre::Result<()> {
-        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_types::RelativeChunkOffset;
 
         let (db, _db_tmp) = open_db()?;
@@ -2956,17 +2956,15 @@ mod tests {
         let orphan_txid = H256::random();
         {
             let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
-            submodule.db.update_eyre(|tx| {
-                add_data_root_info(
-                    tx,
+            submodule.db.update(|tx| {
+                tx.add_data_root_info(
                     shared_data_root,
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset(0),
                         data_size: 32,
                     },
                 )?;
-                add_data_root_info(
-                    tx,
+                tx.add_data_root_info(
                     shared_data_root,
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset(3),

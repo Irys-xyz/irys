@@ -42,19 +42,9 @@ use std::os::unix::io::AsRawFd as _;
 use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
-use irys_database::{
-    db::IrysDatabaseExt as _,
-    submodule::{
-        add_data_root_info, add_full_tx_path, add_pending_body_migration, add_tx_leaf_binding,
-        add_tx_path_hash_to_offset_range, clear_submodule_database, create_or_open_submodule_db,
-        del_path_hashes_by_offset, del_pending_body_migration,
-        del_pending_body_migrations_in_range, get_data_root_infos_for_data_root,
-        get_full_data_path, get_full_tx_path, get_path_hashes_by_offset,
-        get_pending_body_migration, get_tx_leaf_binding, missing_path_hash_ranges_in_tx,
-        path_hashes_in_inclusive_range, pending_body_migrations_from,
-        set_data_root_infos_for_data_root,
-        tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
-    },
+use irys_database::submodule::{
+    SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
+    tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -63,15 +53,12 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, LedgerChunkOffset,
     LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
     ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath, UnpackedChunk,
-    app_state::DatabaseProvider,
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii,
 };
 use nodit::{InclusiveInterval as _, Interval, NoditMap, NoditSet, interval::ii};
 use openssl::sha;
-use reth_db::Database as _;
-use reth_db::transaction::DbTx;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -111,13 +98,13 @@ type SubmodulePath = PathBuf;
 /// Returns `Ok(None)` if no tx_path is indexed at this offset. The returned
 /// `data_path_hash` (the chunk's own path hash, `None` if its chunk hasn't been written)
 /// lets the caller fetch the `data_path` directly without re-reading the offset index.
-fn recover_tx_path_data_root<T: DbTx>(
-    tx: &T,
+fn recover_tx_path_data_root(
+    tx: &dyn SubmoduleRead,
     partition_offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<(DataRoot, Option<ChunkPathHash>)>> {
     // Single read of the offset index; both the tx_path_hash (for data_root recovery) and
     // the data_path_hash (returned to the caller) come from this one lookup.
-    let Some(path_hashes) = get_path_hashes_by_offset(tx, partition_offset)? else {
+    let Some(path_hashes) = tx.get_path_hashes_by_offset(partition_offset)? else {
         return Ok(None);
     };
     let Some(tx_path_hash) = path_hashes.tx_path_hash else {
@@ -133,12 +120,12 @@ fn recover_tx_path_data_root<T: DbTx>(
 ///
 /// `Ok(None)` when the tx-path bytes are absent. A missing binding, or a leaf
 /// that does not match the stored fold, is corruption.
-fn data_root_for_tx_path_hash<T: DbTx>(
-    tx: &T,
+fn data_root_for_tx_path_hash(
+    tx: &dyn SubmoduleRead,
     tx_path_hash: irys_types::TxPathHash,
 ) -> eyre::Result<Option<DataRoot>> {
     index_read_metrics::note("tx_path");
-    let Some(tx_path) = get_full_tx_path(tx, tx_path_hash)? else {
+    let Some(tx_path) = tx.get_full_tx_path(tx_path_hash)? else {
         return Ok(None);
     };
     index_read_metrics::note("tx_leaf");
@@ -148,7 +135,8 @@ fn data_root_for_tx_path_hash<T: DbTx>(
         .map(H256::from)
         .ok_or_eyre("Unable to parse tx_path leaf hash")?;
 
-    let binding = get_tx_leaf_binding(tx, tx_path_hash)?
+    let binding = tx
+        .get_tx_leaf_binding(tx_path_hash)?
         .ok_or_eyre("missing tx_path -> (data_root, prefix_hash) binding for stored tx_path")?;
     // Re-verify via the single canonical fold (same formula block production/validation use).
     let expected_leaf =
@@ -169,14 +157,14 @@ fn data_root_for_tx_path_hash<T: DbTx>(
 /// A tx path, a data-root placement list, and a data path that several offsets
 /// share are loaded once. An offset with no tx path, no data path, or no
 /// stored path bytes is omitted.
-fn metas_in_tx<T: DbTx>(
-    tx: &T,
+fn metas_in_tx(
+    tx: &dyn SubmoduleRead,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
     chunk_size: u64,
 ) -> eyre::Result<BTreeMap<PartitionChunkOffset, (DataRoot, u64, Base64, TxChunkOffset)>> {
     index_read_metrics::note("offset_walk");
-    let rows = path_hashes_in_inclusive_range(tx, start, end)?;
+    let rows = tx.path_hashes_in_inclusive_range(start, end)?;
     let mut tx_roots: HashMap<irys_types::TxPathHash, Option<DataRoot>> = HashMap::new();
     let mut infos: HashMap<DataRoot, DataRootInfos> = HashMap::new();
     let mut data_paths: HashMap<ChunkPathHash, Option<Base64>> = HashMap::new();
@@ -203,7 +191,7 @@ fn metas_in_tx<T: DbTx>(
             cached.clone()
         } else {
             index_read_metrics::note("data_path");
-            let loaded = get_full_data_path(tx, data_path_hash)?.map(Base64::from);
+            let loaded = tx.get_full_data_path(data_path_hash)?.map(Base64::from);
             data_paths.insert(data_path_hash, loaded.clone());
             loaded
         };
@@ -225,15 +213,15 @@ fn metas_in_tx<T: DbTx>(
     Ok(out)
 }
 
-fn data_size_for_offset<T: DbTx>(
-    tx: &T,
+fn data_size_for_offset(
+    tx: &dyn SubmoduleRead,
     data_root: DataRoot,
     partition_offset: PartitionChunkOffset,
     cache: &mut HashMap<DataRoot, DataRootInfos>,
 ) -> eyre::Result<u64> {
     if !cache.contains_key(&data_root) {
         index_read_metrics::note("data_root");
-        let mut loaded = get_data_root_infos_for_data_root(tx, data_root)
+        let mut loaded = tx.get_data_root_infos_for_data_root(data_root)
             .expect("Database read should succeed")
             .expect(
                 "there should be at least one start_offset for any data_root stored in the submodule",
@@ -253,13 +241,13 @@ fn data_size_for_offset<T: DbTx>(
     }
 }
 
-fn paths_in_tx<T: DbTx>(
-    tx: &T,
+fn paths_in_tx(
+    tx: &dyn SubmoduleRead,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<BTreeMap<PartitionChunkOffset, (Option<TxPath>, Option<ChunkDataPath>)>> {
     index_read_metrics::note("offset_walk");
-    let rows = path_hashes_in_inclusive_range(tx, start, end)?;
+    let rows = tx.path_hashes_in_inclusive_range(start, end)?;
     let mut tx_paths: HashMap<irys_types::TxPathHash, Option<TxPath>> = HashMap::new();
     let mut data_paths: HashMap<ChunkPathHash, Option<ChunkDataPath>> = HashMap::new();
     let mut out = BTreeMap::new();
@@ -267,14 +255,14 @@ fn paths_in_tx<T: DbTx>(
         let tx_path = match hashes.tx_path_hash {
             Some(hash) => cached_bytes(&mut tx_paths, hash, || {
                 index_read_metrics::note("tx_path");
-                get_full_tx_path(tx, hash)
+                tx.get_full_tx_path(hash)
             })?,
             None => None,
         };
         let data_path = match hashes.data_path_hash {
             Some(hash) => cached_bytes(&mut data_paths, hash, || {
                 index_read_metrics::note("data_path");
-                get_full_data_path(tx, hash)
+                tx.get_full_data_path(hash)
             })?,
             None => None,
         };
@@ -464,8 +452,8 @@ pub static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
 pub struct StorageSubmodule {
-    /// Persistent database env
-    pub db: DatabaseProvider,
+    /// Submodule index. Callers open a read view or a write batch.
+    pub db: SubmoduleIndex,
     /// path to this Submodule
     pub path: PathBuf,
     /// Persistent storage handle
@@ -712,7 +700,7 @@ impl StorageModule {
 
             let submodule_db_path = sub_base_path.join("db");
             debug!("submodule_db_path: {:?}", submodule_db_path);
-            let submodule_db = create_or_open_submodule_db(
+            let submodule_db = SubmoduleIndex::open_mdbx(
                 &submodule_db_path,
                 // Args (incl. the test geometry cap) derived from the DatabaseConfig.
                 irys_database::submodule_db_args(&config.node_config.database)?,
@@ -796,17 +784,16 @@ impl StorageModule {
 
             // The submodule_map maps submodule intervals to specific instance of StorageSubmodule
             // that maintains system resources connected to the files in that submodule
-            let db = DatabaseProvider(Arc::new(submodule_db));
             submodule_map
                 .insert_strict(
                     submodule_interval,
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
-                        db: db.clone(),
+                        db: submodule_db.clone(),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
                         index_drain: index_drain::IndexDrain::spawn(
-                            db,
+                            submodule_db,
                             Arc::clone(&index_write_generation),
                             Arc::clone(&index_commit_fail_next),
                             Arc::clone(&index_gap),
@@ -1405,7 +1392,7 @@ impl StorageModule {
             .wrap_err("Could not update submodule interval files")?;
 
         for (_interval, submodule) in self.submodules.iter() {
-            submodule.db.update_eyre(clear_submodule_database)?;
+            submodule.db.update(|tx| tx.clear())?;
         }
 
         Ok(storage_interval)
@@ -2442,13 +2429,13 @@ impl StorageModule {
                 self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
             let submodule_end = *interval.end();
             let slice_end = submodule_end.min(range_end);
-            submodule.db.update_eyre(|tx| {
+            submodule.db.update(|tx| {
                 for offset in cursor..=slice_end {
                     let part_offset = PartitionChunkOffset::from(offset);
                     // Delete the key entirely so gap scans see a real hole.
                     // Writing `{None,None}` placeholders left "present" keys that
                     // the density check treated as indexed, hiding the gap from heal.
-                    del_path_hashes_by_offset(tx, part_offset)?;
+                    tx.del_path_hashes_by_offset(part_offset)?;
                 }
                 Ok(())
             })?;
@@ -2485,9 +2472,9 @@ impl StorageModule {
             let (interval, submodule) =
                 self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
             let submodule_end = *interval.end();
-            submodule.db.update_eyre(|tx| {
+            submodule.db.update(|tx| {
                 for data_root in data_roots {
-                    let Some(infos) = get_data_root_infos_for_data_root(tx, *data_root)? else {
+                    let Some(infos) = tx.get_data_root_infos_for_data_root(*data_root)? else {
                         continue;
                     };
                     let remaining: Vec<_> = infos
@@ -2508,7 +2495,7 @@ impl StorageModule {
                             extent_end < range_start as i32 || extent_start > range_end as i32
                         })
                         .collect();
-                    set_data_root_infos_for_data_root(tx, *data_root, DataRootInfos(remaining))?;
+                    tx.set_data_root_infos_for_data_root(*data_root, DataRootInfos(remaining))?;
                 }
                 Ok(())
             })?;
@@ -2543,15 +2530,14 @@ impl StorageModule {
         let (partition_overlap, start_offset) = self.partition_overlap_for(chunk_range)?;
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
-            submodule.db.update_eyre(|tx| -> eyre::Result<()> {
+            submodule.db.update(|tx| -> eyre::Result<()> {
                 // Because each submodule index receives a copy of the path, we need to clone it
-                add_full_tx_path(tx, tx_path_hash, tx_path.clone())?;
+                tx.add_full_tx_path(tx_path_hash, tx_path.clone())?;
                 // Record the (data_root, prefix_hash) this tx_path leaf folds from, so the
                 // real data_root can be recovered on read (the leaf now stores the folded
                 // hash_all_sha256([data_root, prefix_hash]), not the raw data_root) and the
                 // proof leaf re-verified against it.
-                add_tx_leaf_binding(
-                    tx,
+                tx.add_tx_leaf_binding(
                     tx_path_hash,
                     &TxLeafBinding {
                         data_root: data_tx.data_root,
@@ -2561,8 +2547,7 @@ impl StorageModule {
                 if let Some(range) = interval.intersection(&partition_overlap) {
                     // One cursor for the intersecting offsets. A tip range appends;
                     // an overlap keeps any data path already stored on those keys.
-                    add_tx_path_hash_to_offset_range(
-                        tx,
+                    tx.add_tx_path_hash_to_offset_range(
                         range.start(),
                         range.end(),
                         Some(tx_path_hash),
@@ -2572,14 +2557,13 @@ impl StorageModule {
                         start_offset,
                         data_size: data_tx.data_size,
                     };
-                    add_data_root_info(tx, data_tx.data_root, &info)?;
+                    tx.add_data_root_info(data_tx.data_root, &info)?;
                     // Same txn as the index, so "indexed" can never be true while
                     // "bodies owed" is unrecorded. The body worker drains and
                     // deletes this row; `range.start()` is the key it uses,
                     // clipped to this submodule (the DataRootInfo above keeps the
                     // unclipped tx start).
-                    add_pending_body_migration(
-                        tx,
+                    tx.add_pending_body_migration(
                         range.start(),
                         &PendingBodyMigration {
                             data_root: data_tx.data_root,
@@ -2638,7 +2622,7 @@ impl StorageModule {
         for (interval, submodule) in self.submodules.iter() {
             let rows = submodule
                 .db
-                .view_eyre(|tx| pending_body_migrations_from(tx, None))?;
+                .view(|tx| tx.pending_body_migrations_from(None))?;
             batches.push((*interval, rows));
         }
         Ok(batches)
@@ -2678,9 +2662,9 @@ impl StorageModule {
             .map_err(|_| eyre::eyre!("No submodule found for Partition Offset {:?}", key))?;
         submodule
             .db
-            .update_eyre(|tx| match get_pending_body_migration(tx, key)? {
+            .update(|tx| match tx.get_pending_body_migration(key)? {
                 Some(job) if job.data_root == data_root && job.block_height == block_height => {
-                    del_pending_body_migration(tx, key)
+                    tx.del_pending_body_migration(key)
                 }
                 _ => Ok(false),
             })
@@ -2700,7 +2684,7 @@ impl StorageModule {
         for (_interval, submodule) in self.submodules.overlapping(ii(start, end)) {
             removed += submodule
                 .db
-                .update_eyre(|tx| del_pending_body_migrations_in_range(tx, start, end))?;
+                .update(|tx| tx.del_pending_body_migrations_in_range(start, end))?;
         }
         Ok(removed)
     }
@@ -2723,10 +2707,10 @@ impl StorageModule {
             .map_err(|_| eyre::eyre!("No submodule found for Partition Offset {:?}", key))?;
         submodule
             .db
-            .update_eyre(|tx| match get_pending_body_migration(tx, key)? {
+            .update(|tx| match tx.get_pending_body_migration(key)? {
                 Some(mut job) if job.data_root == data_root && job.block_height == block_height => {
                     job.attempts = job.attempts.saturating_add(1);
-                    add_pending_body_migration(tx, key, &job)?;
+                    tx.add_pending_body_migration(key, &job)?;
                     Ok(Some(job.attempts))
                 }
                 _ => Ok(None),
@@ -2858,9 +2842,9 @@ impl StorageModule {
         let mut data_root_info_list = DataRootInfos::default();
         for (_, submodule) in self.submodules.iter() {
             index_read_metrics::note("data_root");
-            if let Ok(Some(submodule_index)) = submodule
+            if let Some(submodule_index) = submodule
                 .db
-                .view(|tx| get_data_root_infos_for_data_root(tx, data_root))?
+                .view(|tx| tx.get_data_root_infos_for_data_root(data_root))?
             {
                 data_root_info_list.0.extend(submodule_index.0);
             }
@@ -2980,7 +2964,7 @@ impl StorageModule {
             self.map_submodule_slices(start, end, |submodule, slice_start, slice_end| {
                 submodule
                     .db
-                    .view_eyre(|tx| metas_in_tx(tx, slice_start, slice_end, chunk_size))
+                    .view(|tx| metas_in_tx(tx, slice_start, slice_end, chunk_size))
             })?;
         let mut out = BTreeMap::new();
         for slice in slices {
@@ -3001,7 +2985,7 @@ impl StorageModule {
             self.map_submodule_slices(start, end, |submodule, slice_start, slice_end| {
                 submodule
                     .db
-                    .view_eyre(|tx| paths_in_tx(tx, slice_start, slice_end))
+                    .view(|tx| paths_in_tx(tx, slice_start, slice_end))
             })
         })?;
         let mut out = BTreeMap::new();
@@ -3155,7 +3139,7 @@ impl StorageModule {
                 return Ok(None);
             };
             index_read_metrics::note("data_path");
-            let Some(data_path) = get_full_data_path(tx, data_path_hash)? else {
+            let Some(data_path) = tx.get_full_data_path(data_path_hash)? else {
                 return Ok(None);
             };
 
@@ -3189,8 +3173,7 @@ impl StorageModule {
                 return Ok(None);
             };
 
-            let Some(mut data_root_infos) = get_data_root_infos_for_data_root(tx, data_root)?
-            else {
+            let Some(mut data_root_infos) = tx.get_data_root_infos_for_data_root(data_root)? else {
                 return Ok(None);
             };
             if data_root_infos.0.is_empty() {
@@ -3262,10 +3245,10 @@ impl StorageModule {
         fetch_from_db: S,
     ) -> eyre::Result<R>
     where
-        S: FnOnce(&mut reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>) -> eyre::Result<R>,
+        S: FnOnce(&mut dyn SubmoduleRead) -> eyre::Result<R>,
     {
         let (_, submodule) = self.get_submodule_for_offset(chunk_offset)?;
-        submodule.db.view(fetch_from_db)?
+        submodule.db.view(fetch_from_db)
     }
 
     /// All half-open path-hash holes `[gap_start, gap_end)` in `[start, end)`.
@@ -3295,7 +3278,7 @@ impl StorageModule {
 
             let mut sub_gaps = submodule
                 .db
-                .view(|tx| missing_path_hash_ranges_in_tx(tx, offset, sub_end))??;
+                .view(|tx| tx.missing_path_hash_ranges(offset, sub_end))?;
             ranges.append(&mut sub_gaps);
             offset = sub_end;
         }
@@ -4652,8 +4635,11 @@ mod tests {
             .get_submodule(PartitionChunkOffset::from(1))
             .ok_or_eyre("submodule")?
             .db
-            .view_eyre(|tx| {
-                assert!(get_path_hashes_by_offset(tx, PartitionChunkOffset::from(1))?.is_none());
+            .view(|tx| {
+                assert!(
+                    tx.get_path_hashes_by_offset(PartitionChunkOffset::from(1))?
+                        .is_none()
+                );
                 Ok(())
             })?;
 
@@ -4872,15 +4858,14 @@ mod tests {
 
     #[test]
     fn entropy_read_failure_releases_all_reserved_offsets() -> eyre::Result<()> {
-        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_database::submodule::tables::DataRootInfo;
         use irys_types::RelativeChunkOffset;
 
         let (_tmp, storage_module, chunk) = packed_submit_fixture("entropy_read_releases")?;
         let (_, submodule) =
             storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        submodule.db.update_eyre(|tx| {
-            add_data_root_info(
-                tx,
+        submodule.db.update(|tx| {
+            tx.add_data_root_info(
                 chunk.data_root,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(1),
@@ -5798,7 +5783,7 @@ mod tests {
 
     #[test]
     fn clear_data_root_infos_in_range_drops_placements_overlapping_by_extent() -> eyre::Result<()> {
-        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_database::submodule::tables::DataRootInfo;
         use irys_types::RelativeChunkOffset;
 
         let infos = [StorageModuleInfo {
@@ -5825,10 +5810,9 @@ mod tests {
         let data_root = H256::random();
         let (_, submodule) =
             storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        submodule.db.update_eyre(|tx| {
+        submodule.db.update(|tx| {
             // Canonical: extent [0, 0], entirely below the orphaned range.
-            add_data_root_info(
-                tx,
+            tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(0),
@@ -5838,8 +5822,7 @@ mod tests {
             // Orphaned: starts at offset 2 (below range_start 3) but spans 3
             // chunks → extent [2, 4], reaching into the range. `start_offset`
             // alone (2 < 3) would wrongly keep it; extent overlap drops it.
-            add_data_root_info(
-                tx,
+            tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(2),
@@ -5847,8 +5830,7 @@ mod tests {
                 },
             )?;
             // Orphaned: extent [4, 4], fully inside the range.
-            add_data_root_info(
-                tx,
+            tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(4),
@@ -5859,8 +5841,7 @@ mod tests {
             // negative start_offset whose extent [-2, 3] (ceil(192 / 32) = 6
             // chunks) reaches into the range. start_offset alone (-2 < 3) would
             // wrongly keep it; this exercises the negative-i32 extent path.
-            add_data_root_info(
-                tx,
+            tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(-2),
@@ -6003,7 +5984,7 @@ mod tests {
     /// (and thus index heal) can see the range — not present-with-None tombstones.
     #[test]
     fn clear_offset_index_in_range_leaves_the_range_as_a_gap() -> eyre::Result<()> {
-        use irys_database::submodule::{set_path_hashes_by_offset, tables::ChunkPathHashes};
+        use irys_database::submodule::tables::ChunkPathHashes;
 
         let infos = [StorageModuleInfo {
             id: 0,
@@ -6032,10 +6013,9 @@ mod tests {
         };
         let (_, submodule) =
             storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        submodule.db.update_eyre(|tx| {
+        submodule.db.update(|tx| {
             for offset in 0..10_u32 {
-                set_path_hashes_by_offset(
-                    tx,
+                tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(offset),
                     path_hashes.clone(),
                 )?;

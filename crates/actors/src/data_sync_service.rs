@@ -2153,10 +2153,7 @@ mod ingress_proof_peer_tests {
 #[cfg(test)]
 mod write_outcome_tests {
     use super::{DataSyncWriteOutcome, attempt_data_sync_write};
-    use irys_database::{
-        db::IrysDatabaseExt as _,
-        submodule::{add_data_root_info, tables::DataRootInfo},
-    };
+    use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
     use irys_domain::{StorageModule, StorageModuleInfo, WriteDataChunkError};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
@@ -2273,9 +2270,8 @@ mod write_outcome_tests {
             .expect("submodule for offset");
         submodule
             .db
-            .update_eyre(|tx| {
-                add_data_root_info(
-                    tx,
+            .update(|tx| {
+                tx.add_data_root_info(
                     data_root,
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset::from(0_i32),

@@ -1,6 +1,5 @@
 use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::submodule::db::{get_data_root_infos_for_data_root, get_path_hashes_by_offset};
 use irys_domain::ChunkType;
 use irys_storage::ii;
 use irys_types::{
@@ -500,7 +499,7 @@ fn has_data_root_in_storage_module(
         };
         if pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index) {
             let result = sm.query_submodule_db_by_offset(PartitionChunkOffset::from(0), |tx| {
-                get_data_root_infos_for_data_root(tx, data_root)
+                tx.get_data_root_infos_for_data_root(data_root)
             });
             return matches!(result, Ok(Some(infos)) if !infos.0.is_empty());
         }
@@ -523,7 +522,7 @@ fn has_path_hashes_at_offset(
         if pa.ledger_id == Some(ledger.into()) && pa.slot_index == Some(slot_index) {
             let offset = PartitionChunkOffset::from(partition_offset);
             let result =
-                sm.query_submodule_db_by_offset(offset, |tx| get_path_hashes_by_offset(tx, offset));
+                sm.query_submodule_db_by_offset(offset, |tx| tx.get_path_hashes_by_offset(offset));
             return matches!(result, Ok(Some(hashes))
                 if hashes.tx_path_hash.is_some() || hashes.data_path_hash.is_some());
         }
