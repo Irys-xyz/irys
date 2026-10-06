@@ -13,6 +13,16 @@
 //! Durable means `is_data_chunk_durable_at`, which is true only after the
 //! packed bytes are synced and the interval is `Data`. The queued-write
 //! oneshot fires earlier, at index ack.
+//!
+//! The offer pacer keeps a deadline. Each release moves that deadline forward
+//! by the chunk's interval. It does not start the interval from "now", so a
+//! late generator catches up instead of inserting a fresh gap, and a late
+//! wake does not stretch the schedule.
+//!
+//! `--ingest-index serial` (the default) commits each tx on the generator
+//! before that tx's chunks are paced. `--ingest-index overlap` starts the
+//! next commit while those chunks are paced. Production indexes on the chunk
+//! migration service and writes bodies on another task.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,7 +40,7 @@ use rand::{Rng as _, SeedableRng as _};
 use tokio::sync::{Semaphore, watch};
 
 use crate::schedule::{RECALL_SKIP_LAG_STEPS, Rates, period_ns};
-use crate::stats::{Buckets, DriverBucket, Written};
+use crate::stats::{Buckets, DriverBucket, PermitGauge, Written};
 
 const BLOCK_HEIGHT: u64 = 1;
 const DURABLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -60,6 +70,7 @@ pub(crate) struct BenchIo {
     pub recall_busy: AtomicBool,
     pub serve_busy: AtomicBool,
     pub index_lock: tokio::sync::Mutex<()>,
+    pub permits: PermitGauge,
 }
 
 pub(crate) fn resume_frontier(module: &StorageModule, start: u32, end: u32) -> u32 {
@@ -162,6 +173,7 @@ struct Settle {
     failed: Arc<AtomicBool>,
     module: Arc<StorageModule>,
     io: Arc<BenchIo>,
+    kind: Kind,
     key: PartitionChunkOffset,
     root: H256,
 }
@@ -172,10 +184,12 @@ impl Drop for Settle {
         if previous != 1 || self.failed.load(Ordering::Acquire) {
             return;
         }
-        match self
+        let started = std::time::Instant::now();
+        let settled = self
             .module
-            .settle_pending_body_migration(self.key, self.root, BLOCK_HEIGHT)
-        {
+            .settle_pending_body_migration(self.key, self.root, BLOCK_HEIGHT);
+        record_phase(&self.io, self.kind, PhaseName::Settle, started.elapsed());
+        match settled {
             Ok(true) => {}
             Ok(false) => note_fatal(&self.io, "settle found no matching body-migration row"),
             Err(error) => note_fatal(&self.io, format!("settle failed: {error}")),
@@ -245,12 +259,62 @@ fn record_durable(io: &BenchIo, kind: Kind, bytes: u64, latency: Duration) {
 /// `waited` is monotonic. The generator is one task, so the sum is wall time
 /// spent unable to enqueue, not overlapping worker time.
 fn record_enqueue_blocked(io: &BenchIo, kind: Kind, waited: Duration) {
+    add_us(io, kind, waited, |bucket| &mut bucket.enqueue_blocked_us);
+}
+
+fn record_txreg_wait(io: &BenchIo, kind: Kind, waited: Duration) {
+    add_us(io, kind, waited, |bucket| &mut bucket.txreg_wait_us);
+}
+
+fn record_gen(io: &BenchIo, kind: Kind, waited: Duration) {
+    add_us(io, kind, waited, |bucket| &mut bucket.gen_us);
+}
+
+fn record_permit_wait(io: &BenchIo, kind: Kind, waited: Duration) {
+    add_us(io, kind, waited, |bucket| &mut bucket.permit_wait_us);
+}
+
+fn add_us(
+    io: &BenchIo,
+    kind: Kind,
+    waited: Duration,
+    slot: impl FnOnce(&mut DriverBucket) -> &mut u64,
+) {
     let micros = us(waited);
     if micros == 0 {
         return;
     }
     with_bucket(io, kind, |bucket| {
-        bucket.enqueue_blocked_us = bucket.enqueue_blocked_us.saturating_add(micros);
+        let total = slot(bucket);
+        *total = total.saturating_add(micros);
+    });
+}
+
+enum PhaseName {
+    TxReg,
+    Settle,
+    Enqueue,
+    Durable,
+}
+
+fn record_phase(io: &BenchIo, kind: Kind, phase: PhaseName, took: Duration) {
+    let micros = us(took);
+    with_bucket(io, kind, |bucket| {
+        let slot = match phase {
+            PhaseName::TxReg => &mut bucket.txreg,
+            PhaseName::Settle => &mut bucket.settle,
+            PhaseName::Enqueue => &mut bucket.enqueue_lat,
+            PhaseName::Durable => &mut bucket.durable_wait,
+        };
+        slot.push(micros);
+    });
+}
+
+fn record_pace(io: &BenchIo, kind: Kind, behind: Duration, slept: Duration, released: u64) {
+    with_bucket(io, kind, |bucket| {
+        bucket.pace_behind_us = bucket.pace_behind_us.saturating_add(us(behind));
+        bucket.pace_sleep_us = bucket.pace_sleep_us.saturating_add(us(slept));
+        bucket.pace_released = bucket.pace_released.saturating_add(released);
     });
 }
 
@@ -261,8 +325,49 @@ fn mark_written(io: &BenchIo, offset: u32) {
         .insert(offset);
 }
 
+/// Offer deadline. `due` is when the next release should happen. `last_active`
+/// is when the generator last left this function, so behind-time is wall time
+/// and not the sum of each release's lateness.
+struct Pacer {
+    due: tokio::time::Instant,
+    last_active: tokio::time::Instant,
+}
+
+impl Pacer {
+    fn new() -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            due: now,
+            last_active: now,
+        }
+    }
+
+    fn reset(&mut self) {
+        let now = tokio::time::Instant::now();
+        self.due = now;
+        self.last_active = now;
+    }
+}
+
+/// Time already late, and time to sleep before the deadline.
+/// A second call while still catching up counts only the work since `last_active`,
+/// not the original lateness again.
+fn pace_account(
+    due: tokio::time::Instant,
+    last_active: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> (Duration, Duration) {
+    let behind = now.saturating_duration_since(due.max(last_active));
+    let sleep = due.saturating_duration_since(now);
+    (behind, sleep)
+}
+
+/// Release `bytes` on the deadline. The next deadline is `due + delay`, not
+/// `now + delay`. While `due` is still in the past the caller does not sleep.
 async fn pace_bytes(
-    next_offer: &mut tokio::time::Instant,
+    io: &BenchIo,
+    kind: Kind,
+    pacer: &mut Pacer,
     bytes: u64,
     mib_s: u64,
     stop: &mut watch::Receiver<bool>,
@@ -271,16 +376,33 @@ async fn pace_bytes(
         return false;
     }
     let now = tokio::time::Instant::now();
-    if *next_offer > now {
+    let (behind, sleep_for) = pace_account(pacer.due, pacer.last_active, now);
+    let mut slept = Duration::ZERO;
+    if !sleep_for.is_zero() {
+        let started = tokio::time::Instant::now();
         tokio::select! {
-            _ = tokio::time::sleep_until(*next_offer) => {}
-            _ = stop.changed() => return false,
+            _ = tokio::time::sleep_until(pacer.due) => {}
+            _ = stop.changed() => {
+                record_pace(io, kind, behind, started.elapsed(), 0);
+                pacer.last_active = tokio::time::Instant::now();
+                return false;
+            }
         }
+        slept = started.elapsed();
     }
     if stopped(stop) {
+        record_pace(io, kind, behind, slept, 0);
+        pacer.last_active = tokio::time::Instant::now();
         return false;
     }
-    *next_offer = tokio::time::Instant::now() + offer_delay(bytes, mib_s);
+    let delay = offer_delay(bytes, mib_s);
+    pacer.due = if delay.is_zero() {
+        tokio::time::Instant::now()
+    } else {
+        pacer.due + delay
+    };
+    pacer.last_active = tokio::time::Instant::now();
+    record_pace(io, kind, behind, slept, bytes);
     true
 }
 
@@ -325,7 +447,9 @@ async fn wait_permit(
     let started = std::time::Instant::now();
     tokio::select! {
         permit = permits.clone().acquire_owned() => {
-            record_enqueue_blocked(io, kind, started.elapsed());
+            let waited = started.elapsed();
+            record_enqueue_blocked(io, kind, waited);
+            record_permit_wait(io, kind, waited);
             if stopped(stop) {
                 return Ok(PermitWait::Stopped);
             }
@@ -335,19 +459,22 @@ async fn wait_permit(
             }
         }
         _ = stop.changed() => {
-            record_enqueue_blocked(io, kind, started.elapsed());
+            let waited = started.elapsed();
+            record_enqueue_blocked(io, kind, waited);
+            record_permit_wait(io, kind, waited);
             Ok(PermitWait::Stopped)
         }
     }
 }
 
-fn index_tx(
-    module: &StorageModule,
-    tag: &[u8],
-    start: u32,
-    chunks: u32,
-    chunk_size: u64,
-) -> eyre::Result<H256> {
+struct BuiltTx {
+    root: H256,
+    header: DataTransactionHeader,
+    tx_path: Vec<u8>,
+    range: LedgerChunkRange,
+}
+
+fn build_tx(tag: &[u8], start: u32, chunks: u32, chunk_size: u64) -> BuiltTx {
     let root = keyed(tag, u64::from(start));
     let data_size = u64::from(chunks).saturating_mul(chunk_size);
     let mut header = DataTransactionHeader::default();
@@ -360,8 +487,143 @@ fn index_tx(
     tx_path.extend_from_slice(&path_hash.0);
     let end = start + chunks - 1;
     let range = LedgerChunkRange(ledger_chunk_offset_ii!(u64::from(start), u64::from(end)));
-    module.index_transaction_data(&header, &tx_path, range, BLOCK_HEIGHT)?;
+    BuiltTx {
+        root,
+        header,
+        tx_path,
+        range,
+    }
+}
+
+fn commit_built(module: &StorageModule, built: &BuiltTx) -> eyre::Result<()> {
+    module.index_transaction_data(&built.header, &built.tx_path, built.range, BLOCK_HEIGHT)?;
+    Ok(())
+}
+
+/// Durable per-tx index commit. The call time includes the bench index lock.
+/// Payload build time is `gen`, not this phase.
+async fn index_tx_async(
+    io: &BenchIo,
+    kind: Kind,
+    tag: &[u8],
+    start: u32,
+    chunks: u32,
+) -> eyre::Result<H256> {
+    let gen_started = std::time::Instant::now();
+    let built = build_tx(tag, start, chunks, io.chunk_size);
+    record_gen(io, kind, gen_started.elapsed());
+    let root = built.root;
+    let module = Arc::clone(&io.module);
+    let started = std::time::Instant::now();
+    let _lock = io.index_lock.lock().await;
+    let committed = tokio::task::spawn_blocking(move || commit_built(&module, &built))
+        .await
+        .map_err(|error| eyre!("index task panicked: {error}"))?;
+    record_phase(io, kind, PhaseName::TxReg, started.elapsed());
+    committed?;
     Ok(root)
+}
+
+struct Prepared {
+    start: u32,
+    chunks: u32,
+    root: H256,
+}
+
+/// Keeps `open_txs` elevated from spawn until the commit is visible, so a step
+/// drain cannot pass in the window before the body-migration row exists.
+struct Prefetch {
+    task: Option<tokio::task::JoinHandle<eyre::Result<Prepared>>>,
+    io: Arc<BenchIo>,
+    armed: bool,
+}
+
+impl Prefetch {
+    fn spawn(io: &Arc<BenchIo>, start: u32, chunks: u32) -> Self {
+        io.open_txs.fetch_add(1, Ordering::AcqRel);
+        let task_io = Arc::clone(io);
+        Self {
+            task: Some(tokio::spawn(async move {
+                let root = index_tx_async(&task_io, Kind::Ingest, b"ingest", start, chunks).await?;
+                Ok(Prepared {
+                    start,
+                    chunks,
+                    root,
+                })
+            })),
+            io: Arc::clone(io),
+            armed: true,
+        }
+    }
+
+    async fn join(mut self) -> eyre::Result<Prepared> {
+        let task = self
+            .task
+            .take()
+            .ok_or_else(|| eyre!("prefetch joined twice"))?;
+        task.await
+            .map_err(|error| eyre!("prefetch task panicked: {error}"))?
+    }
+}
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        if self.armed {
+            self.io.open_txs.fetch_sub(1, Ordering::AcqRel);
+            self.armed = false;
+        }
+    }
+}
+
+/// Drop an indexed tx the generator will not write. The body-migration row is
+/// removed. The data-root and tx-path rows from that commit stay.
+async fn undo_prefetch(io: &BenchIo, task: Prefetch) {
+    let prepared = match task.join().await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            note_fatal(io, format!("prefetch index failed: {error}"));
+            return;
+        }
+    };
+    let module = Arc::clone(&io.module);
+    let key = PartitionChunkOffset::from(prepared.start);
+    let root = prepared.root;
+    let started = std::time::Instant::now();
+    let settled = tokio::task::spawn_blocking(move || {
+        module.settle_pending_body_migration(key, root, BLOCK_HEIGHT)
+    })
+    .await;
+    record_phase(io, Kind::Ingest, PhaseName::Settle, started.elapsed());
+    match settled {
+        Ok(Ok(true)) => {
+            tracing::info!(
+                start = prepared.start,
+                chunks = prepared.chunks,
+                "dropped a prefetched ingest tx at a step boundary"
+            );
+        }
+        Ok(Ok(false)) => note_fatal(io, "prefetch settle found no body-migration row"),
+        Ok(Err(error)) => note_fatal(io, format!("prefetch settle failed: {error}")),
+        Err(error) => note_fatal(io, format!("prefetch settle panicked: {error}")),
+    }
+}
+
+/// Holds one ingest permit until the chunk task finishes.
+struct PermitLease {
+    io: Arc<BenchIo>,
+}
+
+impl PermitLease {
+    fn take(io: &Arc<BenchIo>) -> Self {
+        io.permits.acquire();
+        Self { io: Arc::clone(io) }
+    }
+}
+
+impl Drop for PermitLease {
+    fn drop(&mut self) {
+        self.io.permits.release();
+    }
 }
 
 fn unpacked(root: H256, data_size: u64, tx_offset: u32, chunk_size: u64) -> UnpackedChunk {
@@ -505,34 +767,88 @@ pub(crate) async fn ingest_driver(
     mut stop: watch::Receiver<bool>,
     cursor: u32,
     concurrency: usize,
+    overlap_index: bool,
 ) -> eyre::Result<()> {
     let mut rng = StdRng::seed_from_u64(io.seed.wrapping_add(1));
     let mut next = cursor;
-    let mut next_offer = tokio::time::Instant::now();
+    let mut pacer = Pacer::new();
     // Held until durable, so this bounds in-flight bytes. `write_data_chunk_queued`
     // itself has no concurrency cap. Release is later than production HTTP
     // admission, which returns at index ACK.
     let permits = Arc::new(Semaphore::new(concurrency));
+    // At most one tx indexed ahead of the chunk pacer. Serial mode leaves this empty.
+    let mut ahead: Option<Prefetch> = None;
     loop {
         if stopped(&stop) || fatal_reason(&io).is_some() {
+            if let Some(task) = ahead.take() {
+                undo_prefetch(&io, task).await;
+            }
             break;
         }
         let rate = *rates.borrow();
         if !io.accept_new.load(Ordering::Acquire) || rate.ingest_mib_s == 0 {
+            if let Some(task) = ahead.take() {
+                undo_prefetch(&io, task).await;
+            }
             tokio::select! {
                 _ = tokio::time::sleep(IDLE_POLL) => {}
                 _ = stop.changed() => break,
                 _ = rates.changed() => {}
             }
-            next_offer = tokio::time::Instant::now();
+            pacer.reset();
             continue;
         }
-        let room = io.migrate_origin.saturating_sub(next);
-        if room == 0 {
-            note_fatal(&io, "ingest write window is full");
+        let prepared = if let Some(task) = ahead.take() {
+            let started = std::time::Instant::now();
+            let prepared = match task.join().await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    note_fatal(&io, format!("prefetch index failed: {error}"));
+                    break;
+                }
+            };
+            record_txreg_wait(&io, Kind::Ingest, started.elapsed());
+            prepared
+        } else {
+            let room = io.migrate_origin.saturating_sub(next);
+            if room == 0 {
+                note_fatal(&io, "ingest write window is full");
+                break;
+            }
+            let chunks = pick_chunks(&mut rng, &io.mix, io.mix_total).min(room);
+            let started = std::time::Instant::now();
+            let root = match index_tx_async(&io, Kind::Ingest, b"ingest", next, chunks).await {
+                Ok(root) => root,
+                Err(error) => {
+                    note_fatal(&io, format!("ingest tx at {next}: {error}"));
+                    break;
+                }
+            };
+            record_txreg_wait(&io, Kind::Ingest, started.elapsed());
+            Prepared {
+                start: next,
+                chunks,
+                root,
+            }
+        };
+        if prepared.start != next {
+            note_fatal(
+                &io,
+                format!(
+                    "prefetch start {} is not the ingest frontier {next}",
+                    prepared.start
+                ),
+            );
             break;
         }
-        let chunks = pick_chunks(&mut rng, &io.mix, io.mix_total).min(room);
+        if overlap_index && io.accept_new.load(Ordering::Acquire) && !stopped(&stop) {
+            let start = prepared.start.saturating_add(prepared.chunks);
+            let room = io.migrate_origin.saturating_sub(start);
+            if room > 0 {
+                let chunks = pick_chunks(&mut rng, &io.mix, io.mix_total).min(room);
+                ahead = Some(Prefetch::spawn(&io, start, chunks));
+            }
+        }
         let mib_s = rate.ingest_mib_s;
         if let Err(error) = write_tx(
             &io,
@@ -540,18 +856,22 @@ pub(crate) async fn ingest_driver(
             Some(&permits),
             Kind::Ingest,
             b"ingest",
-            next,
-            chunks,
+            prepared.start,
+            prepared.chunks,
             mib_s,
-            &mut next_offer,
+            &mut pacer,
             false,
+            Some(prepared.root),
         )
         .await
         {
             note_fatal(&io, format!("ingest tx at {next}: {error}"));
+            if let Some(task) = ahead.take() {
+                undo_prefetch(&io, task).await;
+            }
             break;
         }
-        next = next.saturating_add(chunks);
+        next = next.saturating_add(prepared.chunks);
     }
     Ok(())
 }
@@ -563,7 +883,7 @@ pub(crate) async fn migration_driver(
     cursor: u32,
 ) -> eyre::Result<()> {
     let mut next = cursor;
-    let mut next_offer = tokio::time::Instant::now();
+    let mut pacer = Pacer::new();
     let span = u32::try_from(io.span_limit).unwrap_or(u32::MAX).max(1);
     loop {
         if stopped(&stop) || fatal_reason(&io).is_some() {
@@ -576,7 +896,7 @@ pub(crate) async fn migration_driver(
                 _ = stop.changed() => break,
                 _ = rates.changed() => {}
             }
-            next_offer = tokio::time::Instant::now();
+            pacer.reset();
             continue;
         }
         let room = io.write_end.saturating_sub(next);
@@ -595,8 +915,9 @@ pub(crate) async fn migration_driver(
             next,
             chunks,
             mib_s,
-            &mut next_offer,
+            &mut pacer,
             true,
+            None,
         )
         .await
         {
@@ -617,18 +938,18 @@ async fn write_tx(
     start: u32,
     chunks: u32,
     mib_s: u64,
-    next_offer: &mut tokio::time::Instant,
+    pacer: &mut Pacer,
     migration: bool,
+    indexed: Option<H256>,
 ) -> eyre::Result<()> {
     let _open = OpenTx::enter(&io.open_txs);
-    let module = Arc::clone(&io.module);
-    let chunk_size = io.chunk_size;
-    let root = {
-        let _index = io.index_lock.lock().await;
-        let tag = tag.to_vec();
-        tokio::task::spawn_blocking(move || index_tx(&module, &tag, start, chunks, chunk_size))
-            .await
-            .map_err(|error| eyre!("index task panicked: {error}"))??
+    let root = if let Some(root) = indexed {
+        root
+    } else {
+        let started = std::time::Instant::now();
+        let root = index_tx_async(io, kind, tag, start, chunks).await?;
+        record_txreg_wait(io, kind, started.elapsed());
+        root
     };
     let failed = Arc::new(AtomicBool::new(false));
     let left = Arc::new(AtomicU32::new(chunks));
@@ -643,7 +964,7 @@ async fn write_tx(
         }
         let n = if migration { span.min(end - offset) } else { 1 };
         let batch_bytes = u64::from(n).saturating_mul(io.chunk_size);
-        if !pace_bytes(next_offer, batch_bytes, mib_s, stop).await {
+        if !pace_bytes(io, kind, pacer, batch_bytes, mib_s, stop).await {
             failed.store(true, Ordering::Release);
             break;
         }
@@ -651,17 +972,21 @@ async fn write_tx(
             failed.store(true, Ordering::Release);
             break;
         }
+        let gen_started = std::time::Instant::now();
         let mut batch = Vec::with_capacity(usize::try_from(n).unwrap_or(1));
         for step in 0..n {
             let tx_offset = offset + step - start;
             batch.push(unpacked(root, data_size, tx_offset, io.chunk_size));
         }
+        record_gen(io, kind, gen_started.elapsed());
         if migration {
             let module = Arc::clone(&io.module);
+            let enqueued_at = std::time::Instant::now();
             let items = tokio::task::spawn_blocking(move || module.deposit_data_chunks(&batch))
                 .await
                 .map_err(|error| eyre!("deposit task panicked: {error}"))?
                 .map_err(|error| eyre!("deposit failed: {error}"))?;
+            record_phase(io, kind, PhaseName::Enqueue, enqueued_at.elapsed());
             if !spawn_migration_waits(io, kind, &failed, &left, start, root, n, items)? {
                 failed.store(true, Ordering::Release);
                 break;
@@ -681,9 +1006,11 @@ async fn write_tx(
             };
             record_enqueued(io, kind, io.chunk_size);
             io.ingest_inflight.fetch_add(1, Ordering::AcqRel);
+            let lease = PermitLease::take(io);
             spawn_ingest_wait(
                 Arc::clone(io),
                 permit,
+                lease,
                 kind,
                 Arc::clone(&failed),
                 Arc::clone(&left),
@@ -753,6 +1080,7 @@ fn spawn_migration_waits(
                 failed: Arc::clone(&failed),
                 module: Arc::clone(&io.module),
                 io: Arc::clone(&io),
+                kind: Kind::Migration,
                 key: PartitionChunkOffset::from(key),
                 root,
             };
@@ -762,6 +1090,7 @@ fn spawn_migration_waits(
                 note_fatal(&io, format!("migration chunk {offset}: {error}"));
                 return;
             }
+            record_phase(&io, Kind::Migration, PhaseName::Durable, started.elapsed());
             record_durable(&io, Kind::Migration, io.chunk_size, started.elapsed());
             mark_written(&io, offset.0);
         });
@@ -772,6 +1101,7 @@ fn spawn_migration_waits(
 fn spawn_ingest_wait(
     io: Arc<BenchIo>,
     permit: tokio::sync::OwnedSemaphorePermit,
+    lease: PermitLease,
     kind: Kind,
     failed: Arc<AtomicBool>,
     left: Arc<AtomicU32>,
@@ -782,12 +1112,14 @@ fn spawn_ingest_wait(
 ) {
     tokio::spawn(async move {
         let _permit = permit;
+        let _lease = lease;
         let _inflight = Inflight(&io.ingest_inflight);
         let _settle = Settle {
             left,
             failed: Arc::clone(&failed),
             module: Arc::clone(&io.module),
             io: Arc::clone(&io),
+            kind,
             key: PartitionChunkOffset::from(key),
             root,
         };
@@ -797,11 +1129,14 @@ fn spawn_ingest_wait(
             note_fatal(&io, format!("ingest chunk {offset}: {error}"));
             return;
         }
+        record_phase(&io, kind, PhaseName::Enqueue, started.elapsed());
+        let durable_at = std::time::Instant::now();
         if let Err(error) = wait_durable(&io.module, offset).await {
             failed.store(true, Ordering::Release);
             note_fatal(&io, format!("ingest chunk {offset}: {error}"));
             return;
         }
+        record_phase(&io, kind, PhaseName::Durable, durable_at.elapsed());
         record_durable(&io, kind, io.chunk_size, started.elapsed());
         mark_written(&io, offset.0);
     });
@@ -910,5 +1245,45 @@ pub(crate) fn driver_error(
         Ok(Ok(())) => None,
         Ok(Err(error)) => Some(format!("{name} driver failed: {error}")),
         Err(error) => Some(format!("{name} driver panicked: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_late_release_keeps_the_deadline_in_the_past() {
+        let start = tokio::time::Instant::now();
+        let due = start;
+        let last_active = start;
+        let now = start + Duration::from_millis(300);
+        let (behind, sleep) = pace_account(due, last_active, now);
+        assert_eq!(behind, Duration::from_millis(300));
+        assert_eq!(sleep, Duration::ZERO);
+        let delay = Duration::from_millis(8);
+        let next_due = due + delay;
+        assert!(next_due < now);
+
+        // The next chunk only counts the work since the previous return.
+        let later = now + Duration::from_millis(1);
+        let (behind, sleep) = pace_account(next_due, now, later);
+        assert_eq!(behind, Duration::from_millis(1));
+        assert_eq!(sleep, Duration::ZERO);
+    }
+
+    #[test]
+    fn an_early_release_sleeps_and_does_not_restart_the_interval_from_now() {
+        let start = tokio::time::Instant::now();
+        let due = start + Duration::from_millis(100);
+        let now = start + Duration::from_millis(40);
+        let (behind, sleep) = pace_account(due, start, now);
+        assert_eq!(behind, Duration::ZERO);
+        assert_eq!(sleep, Duration::from_millis(60));
+        let next_due = due + Duration::from_millis(100);
+        assert_eq!(
+            next_due.saturating_duration_since(start),
+            Duration::from_millis(200)
+        );
     }
 }

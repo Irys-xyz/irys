@@ -12,7 +12,7 @@ use eyre::WrapErr as _;
 use serde::Serialize;
 
 use crate::schedule::{Plan, StepMeasured};
-use crate::stats::{DriverBucket, summarize};
+use crate::stats::{DriverBucket, Phase, permit_avg_milli, summarize};
 
 #[derive(Serialize)]
 pub(crate) struct GitInfo {
@@ -92,6 +92,7 @@ pub(crate) struct SampleLine<'a> {
     pub migration_jobs: u64,
     pub inflight: u64,
     pub overloaded: bool,
+    pub phases: PhasesOut,
 }
 
 pub(crate) fn sample_line<'a>(
@@ -105,6 +106,8 @@ pub(crate) fn sample_line<'a>(
     migration_jobs: u64,
     inflight: u64,
     overloaded: bool,
+    scheduled_bytes: u64,
+    chunk_size: u64,
 ) -> SampleLine<'a> {
     let lat = summarize(&bucket.lats_us);
     let delay = summarize(&bucket.delays_us);
@@ -130,6 +133,13 @@ pub(crate) fn sample_line<'a>(
         migration_jobs,
         inflight,
         overloaded,
+        phases: phases_out(
+            bucket,
+            scheduled_bytes,
+            chunk_size,
+            1_000_000,
+            driver == "migration",
+        ),
     }
 }
 
@@ -192,6 +202,8 @@ struct StepOut {
     ingest: DriverOut,
     migration: DriverOut,
     serve: DriverOut,
+    ingest_phases: PhasesOut,
+    migration_phases: PhasesOut,
 }
 
 pub(crate) struct StepRow {
@@ -263,6 +275,20 @@ fn step_out(row: &StepRow) -> StepOut {
         ingest: driver_out(&row.ingest),
         migration: driver_out(&row.migration),
         serve: driver_out(&row.serve),
+        ingest_phases: phases_out(
+            &row.ingest,
+            row.measured.scheduled_ingest,
+            row.measured.chunk_size,
+            row.measured.secs.saturating_mul(1_000_000),
+            false,
+        ),
+        migration_phases: phases_out(
+            &row.migration,
+            row.measured.scheduled_migration,
+            row.measured.chunk_size,
+            row.measured.secs.saturating_mul(1_000_000),
+            true,
+        ),
     }
 }
 
@@ -272,6 +298,150 @@ pub(crate) fn write_table(path: &Path, rows: &[StepRow]) -> eyre::Result<()> {
     print!("{text}");
     std::io::stdout().flush()?;
     Ok(())
+}
+
+#[derive(Serialize)]
+pub(crate) struct PhasesOut {
+    pub limit: &'static str,
+    pub pace_behind_us: u64,
+    pub pace_sleep_us: u64,
+    pub pace_released_bytes: u64,
+    pub pace_scheduled_bytes: u64,
+    pub txreg_count: u64,
+    pub txreg_total_us: u64,
+    pub txreg_p50_us: u64,
+    pub txreg_p99_us: u64,
+    pub txreg_max_us: u64,
+    pub txreg_wait_us: u64,
+    pub settle_count: u64,
+    pub settle_total_us: u64,
+    pub settle_p50_us: u64,
+    pub settle_p99_us: u64,
+    pub settle_max_us: u64,
+    pub enqueue_count: u64,
+    pub enqueue_total_us: u64,
+    pub enqueue_p50_us: u64,
+    pub enqueue_p99_us: u64,
+    pub enqueue_max_us: u64,
+    pub durable_count: u64,
+    pub durable_total_us: u64,
+    pub durable_p50_us: u64,
+    pub durable_p99_us: u64,
+    pub durable_max_us: u64,
+    pub permit_wait_us: u64,
+    pub permit_max_in_use: u64,
+    pub permit_avg_in_use_milli: u64,
+    pub gen_us: u64,
+}
+
+fn phase_stats(phase: &Phase) -> (u64, u64, u64, u64, u64) {
+    let summary = summarize(&phase.samples_us);
+    (
+        phase.count,
+        phase.total_us,
+        summary.p50,
+        summary.p99,
+        summary.max,
+    )
+}
+
+fn phases_out(
+    bucket: &DriverBucket,
+    scheduled: u64,
+    chunk: u64,
+    step_us: u64,
+    enqueue_blocks: bool,
+) -> PhasesOut {
+    let (txreg_count, txreg_total_us, txreg_p50_us, txreg_p99_us, txreg_max_us) =
+        phase_stats(&bucket.txreg);
+    let (settle_count, settle_total_us, settle_p50_us, settle_p99_us, settle_max_us) =
+        phase_stats(&bucket.settle);
+    let (enqueue_count, enqueue_total_us, enqueue_p50_us, enqueue_p99_us, enqueue_max_us) =
+        phase_stats(&bucket.enqueue_lat);
+    let (durable_count, durable_total_us, durable_p50_us, durable_p99_us, durable_max_us) =
+        phase_stats(&bucket.durable_wait);
+    PhasesOut {
+        limit: phase_limit(bucket, scheduled, chunk, step_us, enqueue_blocks),
+        pace_behind_us: bucket.pace_behind_us,
+        pace_sleep_us: bucket.pace_sleep_us,
+        pace_released_bytes: bucket.pace_released,
+        pace_scheduled_bytes: scheduled,
+        txreg_count,
+        txreg_total_us,
+        txreg_p50_us,
+        txreg_p99_us,
+        txreg_max_us,
+        txreg_wait_us: bucket.txreg_wait_us,
+        settle_count,
+        settle_total_us,
+        settle_p50_us,
+        settle_p99_us,
+        settle_max_us,
+        enqueue_count,
+        enqueue_total_us,
+        enqueue_p50_us,
+        enqueue_p99_us,
+        enqueue_max_us,
+        durable_count,
+        durable_total_us,
+        durable_p50_us,
+        durable_p99_us,
+        durable_max_us,
+        permit_wait_us: bucket.permit_wait_us,
+        permit_max_in_use: bucket.permit_max_in_use,
+        permit_avg_in_use_milli: permit_avg_milli(bucket),
+        gen_us: bucket.gen_us,
+    }
+}
+
+/// Why released or enqueued bytes missed `rate * step`.
+///
+/// `rate` means the schedule was met. A named stall is the largest generator
+/// wait and at least 5% of the step. `pacing` means the bytes were short and
+/// none of those waits explain it. Ingest enqueue overlaps, so it is not a
+/// generator stall. Migration deposit is.
+pub(crate) fn phase_limit(
+    bucket: &DriverBucket,
+    scheduled: u64,
+    chunk: u64,
+    step_us: u64,
+    enqueue_blocks: bool,
+) -> &'static str {
+    if scheduled == 0 {
+        return "off";
+    }
+    let short = bucket.pace_released.saturating_add(chunk) < scheduled
+        || bucket.enqueued.saturating_add(chunk) < scheduled;
+    if !short {
+        return "rate";
+    }
+    let mut stalls = [
+        ("txreg", bucket.txreg_wait_us),
+        ("gen", bucket.gen_us),
+        ("permits", bucket.permit_wait_us),
+        ("backpressure", 0),
+        ("enqueue", 0),
+    ];
+    if bucket.enqueue_blocked_us > bucket.permit_wait_us {
+        stalls[3].1 = bucket.enqueue_blocked_us;
+    }
+    if enqueue_blocks {
+        stalls[4].1 = bucket.enqueue_lat.total_us;
+    }
+    let threshold = step_us / 20;
+    let mut best_name: &'static str = "pacing";
+    let mut best = 0_u64;
+    for (name, cost) in stalls {
+        if cost > best {
+            best = cost;
+            best_name = name;
+        }
+    }
+    if best < threshold {
+        "pacing"
+    } else {
+        best_name
+    }
 }
 
 fn table(rows: &[StepRow]) -> String {
@@ -313,11 +483,80 @@ fn table(rows: &[StepRow]) -> String {
             row.serve.ops,
         );
         out.push_str(&line);
+        out.push_str(&phase_line(
+            "ingest",
+            &row.ingest,
+            row.measured.scheduled_ingest,
+            row.measured.chunk_size,
+            row.measured.secs,
+            false,
+        ));
+        out.push_str(&phase_line(
+            "migration",
+            &row.migration,
+            row.measured.scheduled_migration,
+            row.measured.chunk_size,
+            row.measured.secs,
+            true,
+        ));
         for reason in &row.reasons {
             out.push_str(&format!("  - {reason}\n"));
         }
     }
     out
+}
+
+fn phase_line(
+    label: &str,
+    bucket: &DriverBucket,
+    scheduled: u64,
+    chunk: u64,
+    secs: u64,
+    enqueue_blocks: bool,
+) -> String {
+    let phases = phases_out(
+        bucket,
+        scheduled,
+        chunk,
+        secs.saturating_mul(1_000_000),
+        enqueue_blocks,
+    );
+    format!(
+        "{label} phases: limit={} behind={} sleep={} rel/sched={}/{}MiB txreg n={} p99={} wait={} settle n={} p99={} enqueue n={} p99={} durable p99={} permit_wait={} permits={}/{} gen={}\n",
+        phases.limit,
+        fmt_secs(phases.pace_behind_us),
+        fmt_secs(phases.pace_sleep_us),
+        mib(phases.pace_released_bytes),
+        mib(phases.pace_scheduled_bytes),
+        phases.txreg_count,
+        fmt_ms(phases.txreg_p99_us),
+        fmt_secs(phases.txreg_wait_us),
+        phases.settle_count,
+        fmt_ms(phases.settle_p99_us),
+        phases.enqueue_count,
+        fmt_ms(phases.enqueue_p99_us),
+        fmt_ms(phases.durable_p99_us),
+        fmt_secs(phases.permit_wait_us),
+        phases.permit_max_in_use,
+        fmt_milli(phases.permit_avg_in_use_milli),
+        fmt_secs(phases.gen_us),
+    )
+}
+
+fn fmt_secs(micros: u64) -> String {
+    let whole = micros / 1_000_000;
+    let millis = (micros % 1_000_000) / 1_000;
+    format!("{whole}.{millis:03}s")
+}
+
+fn fmt_ms(micros: u64) -> String {
+    let millis = micros / 1000;
+    let tenths = (micros % 1000) / 100;
+    format!("{millis}.{tenths}ms")
+}
+
+fn fmt_milli(milli: u64) -> String {
+    format!("{}.{:03}", milli / 1000, milli % 1000)
 }
 
 fn mib(bytes: u64) -> u64 {
@@ -344,4 +583,131 @@ pub(crate) fn plan_steps(plan: &Plan) -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schedule::{StepMeasured, percentile};
+
+    fn measured(scheduled: u64) -> StepMeasured {
+        StepMeasured {
+            secs: 600,
+            scheduled_ingest: scheduled,
+            durable_ingest: 0,
+            enqueued_ingest: 0,
+            scheduled_migration: 0,
+            durable_migration: 0,
+            enqueued_migration: 0,
+            chunk_size: 262_144,
+            recall_ops: 0,
+            recall_skips: 0,
+            recall_start_p99_us: 0,
+            recall_lat_p99_us: 0,
+            ingest_enqueue_blocked_us: 0,
+            migration_enqueue_blocked_us: 0,
+            overloaded_secs: 0,
+            pending_samples: Vec::new(),
+            pending_after_drain: 0,
+            migration_jobs_after_drain: 0,
+            ceiling: 1,
+            flush_batch: 1,
+            aborted: None,
+        }
+    }
+
+    #[test]
+    fn phase_limit_names_the_generator_stall() {
+        let mut bucket = DriverBucket::default();
+        assert_eq!(phase_limit(&bucket, 0, 262_144, 600_000_000, false), "off");
+        bucket.pace_released = 1_000_000;
+        bucket.enqueued = 1_000_000;
+        bucket.txreg_wait_us = 400_000_000;
+        assert_eq!(
+            phase_limit(&bucket, 1_000_000, 262_144, 600_000_000, false),
+            "rate"
+        );
+        bucket.pace_released = 0;
+        bucket.enqueued = 0;
+        assert_eq!(
+            phase_limit(&bucket, 1_000_000, 262_144, 600_000_000, false),
+            "txreg"
+        );
+        bucket.txreg_wait_us = 1_000;
+        assert_eq!(
+            phase_limit(&bucket, 1_000_000, 262_144, 600_000_000, false),
+            "pacing"
+        );
+        bucket.permit_wait_us = 100_000_000;
+        bucket.enqueue_blocked_us = 100_000_000;
+        assert_eq!(
+            phase_limit(&bucket, 1_000_000, 262_144, 600_000_000, false),
+            "permits"
+        );
+        bucket.permit_wait_us = 0;
+        bucket.enqueue_blocked_us = 0;
+        bucket.enqueue_lat.push(200_000_000);
+        assert_eq!(
+            phase_limit(&bucket, 1_000_000, 262_144, 600_000_000, true),
+            "enqueue"
+        );
+        assert_eq!(
+            phase_limit(&bucket, 1_000_000, 262_144, 600_000_000, false),
+            "pacing",
+            "ingest enqueue overlaps and is not a generator stall"
+        );
+    }
+
+    #[test]
+    fn the_table_prints_the_phase_limit() {
+        let mut ingest = DriverBucket::default();
+        ingest.txreg.push(80_000);
+        ingest.txreg_wait_us = 400_000_000;
+        ingest.pace_behind_us = 400_000_000;
+        let row = StepRow {
+            name: "ingest-32".to_string(),
+            passed: false,
+            soft_fail: true,
+            reasons: vec!["short".to_string()],
+            measured: measured(19_200 * 1024 * 1024),
+            recall: DriverBucket::default(),
+            ingest,
+            migration: DriverBucket::default(),
+            serve: DriverBucket::default(),
+        };
+        let text = table(&[row]);
+        assert!(text.contains("ingest phases: limit=txreg"));
+        assert!(text.contains("migration phases: limit=off"));
+        assert!(text.contains("txreg n=1 p99=80.0ms"));
+        assert!(text.contains("wait=400.000s"));
+        assert!(percentile(&[80_000], 99) == 80_000);
+    }
+
+    #[test]
+    fn sample_lines_carry_phase_fields() {
+        let mut bucket = DriverBucket::default();
+        bucket.txreg.push(80_000);
+        bucket.txreg_wait_us = 80_000;
+        bucket.pace_released = 100;
+        let line = sample_line(
+            "ingest-4",
+            1,
+            "ingest",
+            &bucket,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            4 * 1024 * 1024,
+            262_144,
+        );
+        let value = serde_json::to_value(&line).expect("sample json");
+        assert_eq!(value["phases"]["limit"], "txreg");
+        assert_eq!(value["phases"]["txreg_p99_us"], 80_000);
+        assert_eq!(value["phases"]["pace_scheduled_bytes"], 4 * 1024 * 1024);
+        assert_eq!(value["phases"]["pace_released_bytes"], 100);
+        assert!(value["phases"]["permit_avg_in_use_milli"].is_u64());
+    }
 }

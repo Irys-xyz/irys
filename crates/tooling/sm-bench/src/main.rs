@@ -39,7 +39,7 @@ use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
     mib_bytes, parse_mix, preset, stop_for_score,
 };
-use crate::stats::StepAccum;
+use crate::stats::{PermitGauge, StepAccum, fold_permit};
 
 /// One 64 MiB tx paced at 2 MiB/s needs about 32s after the clock stops.
 /// The drain waits long enough for that tx to become durable.
@@ -102,6 +102,15 @@ struct Args {
     /// Maximum chunks in one sequential serve read.
     #[arg(long, default_value_t = 8)]
     serve_seq_chunks: u32,
+    /// When the generator commits `index_transaction_data`.
+    ///
+    /// `serial` (default) commits each transaction on the generator before that
+    /// transaction's chunks are paced. Production indexes on the chunk
+    /// migration service and writes bodies on another task, so a later index
+    /// overlaps chunk writes. `overlap` starts the next commit while this
+    /// transaction's chunks are paced. The submodule MDBX still has one writer.
+    #[arg(long, value_enum, default_value_t = IngestIndex::Serial)]
+    ingest_index: IngestIndex,
     /// In-flight ingest chunks. Each permit is held until the chunk is durable.
     ///
     /// 1024 chunks is 256 MiB. At 32 MiB/s the cap binds only when durable
@@ -126,6 +135,23 @@ struct Args {
     /// abort still stops the plan.
     #[arg(long, action = ArgAction::SetTrue, overrides_with = "stop_on_fail")]
     no_stop_on_fail: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum IngestIndex {
+    /// Commit each tx on the generator, then pace its chunks.
+    Serial,
+    /// Commit the next tx while the current tx's chunks are paced.
+    Overlap,
+}
+
+impl std::fmt::Display for IngestIndex {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Serial => "serial",
+            Self::Overlap => "overlap",
+        })
+    }
 }
 
 fn main() {
@@ -288,6 +314,7 @@ fn run() -> eyre::Result<i32> {
         "ingest_mix": args.ingest_mix,
         "serve_seq_chunks": args.serve_seq_chunks,
         "ingest_concurrency": args.ingest_concurrency,
+        "ingest_index": args.ingest_index.to_string(),
         "recall_delay_margin_ms": args.recall_delay_margin_ms,
         "recall_latency_margin_ms": args.recall_latency_margin_ms,
         "recall_start_p99_limit_us": crate::schedule::RECALL_START_P99_LIMIT_US,
@@ -308,6 +335,8 @@ fn run() -> eyre::Result<i32> {
             "Startup deletes leftover body-migration rows in this bench database.",
             "Durable latency ends at is_data_chunk_durable_at, after fsync.",
             "Ingest concurrency is a bench semaphore held until the chunk is durable. It is not a storage-module admission limit.",
+            "The offer deadline advances by the chunk interval from the previous deadline. A late release catches up instead of inserting a fresh gap.",
+            "ingest_index serial commits index_transaction_data on the generator before that tx is paced. overlap starts the next commit during the current tx. Production indexes on the chunk migration service while another task writes bodies.",
             "Migration enqueue waits on the pending-write ceiling. Serve issues one read at a time.",
             "A step named idle is the recall baseline. Other steps use the absolute p99 ceilings when no idle step has completed.",
         ],
@@ -340,12 +369,14 @@ fn run() -> eyre::Result<i32> {
         recall_busy: std::sync::atomic::AtomicBool::new(false),
         serve_busy: std::sync::atomic::AtomicBool::new(false),
         index_lock: tokio::sync::Mutex::new(()),
+        permits: PermitGauge::new(),
     });
     opened.start_lane()?;
 
     let out = args.out;
     let stop_on_fail = plan.stop_on_fail;
     let ingest_concurrency = args.ingest_concurrency;
+    let overlap_index = args.ingest_index == IngestIndex::Overlap;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -362,6 +393,7 @@ fn run() -> eyre::Result<i32> {
         ingest_concurrency,
         delay_margin_us,
         latency_margin_us,
+        overlap_index,
     ))?;
     match opened.stop_lane() {
         Ok(()) => Ok(code),
@@ -514,6 +546,7 @@ async fn execute(
     ingest_concurrency: usize,
     delay_margin_us: u64,
     latency_margin_us: u64,
+    overlap_index: bool,
 ) -> eyre::Result<i32> {
     let (rates_tx, rates_rx) = watch::channel(Rates::idle());
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -539,6 +572,7 @@ async fn execute(
         stop_rx.clone(),
         ingest_cursor,
         ingest_concurrency,
+        overlap_index,
     ));
     let migration = tokio::spawn(migration_driver(
         Arc::clone(&io),
@@ -681,6 +715,7 @@ async fn run_step(
     flush: u64,
     rule: RecallRule,
 ) -> eyre::Result<StepOutcome> {
+    io.permits.reset_window();
     let mut accum = StepAccum::default();
     let started = tokio::time::Instant::now();
     let mut interrupted = false;
@@ -714,6 +749,7 @@ async fn run_step(
         interrupted = true;
     }
     accum.add_quiet(&take_buckets(io));
+    accum.add_permit_sample(&io.permits.sample());
     let pending_after = io.module.pending_write_bytes();
     let jobs_after = io.module.pending_body_migrations()?.len();
     if !drained && !interrupted {
@@ -791,7 +827,8 @@ fn record_second(
     samples: &mut SampleWriter,
     accum: &mut StepAccum,
 ) -> eyre::Result<()> {
-    let buckets = take_buckets(io);
+    let mut buckets = take_buckets(io);
+    fold_permit(&mut buckets.ingest, &io.permits.sample());
     let snap = io.module.bench_queue_snapshot();
     let jobs = io.module.pending_body_migrations()?.len();
     let inflight =
@@ -801,11 +838,19 @@ fn record_second(
     let pending_chunks = u64::try_from(snap.pending_chunks).unwrap_or(u64::MAX);
     let sweep_slots = u64::try_from(snap.sweep_slots).unwrap_or(u64::MAX);
     let inflight_u64 = u64::try_from(inflight).unwrap_or(u64::MAX);
-    for (name, bucket) in [
-        ("recall", &buckets.recall),
-        ("ingest", &buckets.ingest),
-        ("migration", &buckets.migration),
-        ("serve", &buckets.serve),
+    for (name, bucket, scheduled) in [
+        ("recall", &buckets.recall, 0),
+        (
+            "ingest",
+            &buckets.ingest,
+            mib_bytes(step.rates.ingest_mib_s, 1),
+        ),
+        (
+            "migration",
+            &buckets.migration,
+            mib_bytes(step.rates.migration_mib_s, 1),
+        ),
+        ("serve", &buckets.serve, 0),
     ] {
         samples.write_line(&sample_line(
             &step.name,
@@ -818,6 +863,8 @@ fn record_second(
             jobs_u64,
             inflight_u64,
             overloaded,
+            scheduled,
+            CHUNK_SIZE,
         ))?;
     }
     accum.add_second(

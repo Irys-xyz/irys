@@ -134,6 +134,7 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | `--ingest-mix` | `1:40,4:25,16:20,64:10,256:5` | `chunks:weight` list |
 | `--serve-seq-chunks` | 8 | Longest sequential serve read |
 | `--ingest-concurrency` | 1024 | In-flight ingest chunks, held until durable. Not a production admission cap. Migration has no bench cap. Serve is one read at a time |
+| `--ingest-index` | `serial` | `serial` commits `index_transaction_data` on the generator before that tx is paced. `overlap` starts the next commit while the current tx's chunks are paced. The MDBX writer is still one at a time |
 | `--recall-delay-margin-ms` | 200 | Start-delay p99 may exceed the `idle` step by this much |
 | `--recall-latency-margin-ms` | 500 | Recall latency p99 may exceed the `idle` step by this much |
 | `--stop-on-fail` | on, from the schedule | Stop after a hard step failure. Overrides `stop_on_fail` in a schedule file |
@@ -150,7 +151,33 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 
 Exit `0` when every scored step passed. Exit `1` for usage, a safety refusal, a runtime error, or Ctrl-C. Exit `2` when a scored step failed. A scored failure plus Ctrl-C exits `2`. The summary is still written when the run had started.
 
-Each step summary has `offered_bytes`, `enqueued_bytes`, `durable_bytes`, and `enqueue_blocked_us` / `enqueue_blocked_secs` for ingest and for migration. `enqueue_blocked_us` is wall time the single generator waited before it could hand bytes to the module. For ingest that wait is the bench semaphore. For migration it is the pending-write ceiling. It does not include the index-ACK wait inside `write_data_chunk_queued`, which is already counted as enqueued. The table shows recall `lat_p50_us`, `lat_p99_us`, and `start_p99_us`, and ingest and migration as offered/enqueued/durable MiB.
+Each step summary has `offered_bytes`, `enqueued_bytes`, `durable_bytes`, and `enqueue_blocked_us` / `enqueue_blocked_secs` for ingest and for migration. `enqueue_blocked_us` is wall time the single generator waited before it could hand bytes to the module. For ingest that wait is the bench semaphore, and the same waits are `permit_wait_us`. For migration it is the pending-write ceiling. It does not include the index-ACK wait inside `write_data_chunk_queued`. The table shows recall `lat_p50_us`, `lat_p99_us`, and `start_p99_us`, and ingest and migration as offered/enqueued/durable MiB.
+
+Each `samples.jsonl` line has a `phases` object. Recall and serve leave it zero. `summary.json` repeats the step totals as `ingest_phases` and `migration_phases`. The table adds one line per write driver:
+
+```text
+ingest phases: limit=txreg behind=420.000s sleep=90.000s rel/sched=6692/19200MiB txreg n=1100 p99=250.0ms wait=400.000s settle n=1100 p99=5.0ms enqueue n=26000 p99=2.0ms durable p99=700.0ms permit_wait=0.000s permits=31/12.000 gen=1.200s
+```
+
+`limit` is why the driver missed `rate * step`. `off` means the rate is 0. `rate` means released and enqueued bytes are within one chunk of the schedule. `txreg`, `gen`, `permits`, `backpressure`, or `enqueue` is the largest generator stall and at least 5% of the step. `pacing` means the bytes were short and none of those stalls explain it. `enqueue` counts only for migration, because `deposit_data_chunks` is awaited on the generator. Ingest `write_data_chunk_queued` runs on the chunk task.
+
+| Field | Meaning |
+| --- | --- |
+| `pace_behind_us` | Wall time the generator was past its deadline and not asleep. This is part of the step, not a sum of worker lateness |
+| `pace_sleep_us` | Wall time asleep because the next release was not due yet |
+| `pace_released_bytes` | Bytes the pacer released |
+| `pace_scheduled_bytes` | `rate * seconds`. Drain can release more than this |
+| `txreg_*` | `index_transaction_data`, including the wait for the bench index lock. One durable MDBX commit per tx. `p50` / `p99` / `max` are microseconds |
+| `txreg_wait_us` | Time the generator sat waiting for that result. In `serial` mode this is the commit. In `overlap` mode the next commit runs during the previous tx, so this is only the leftover |
+| `settle_*` | `settle_pending_body_migration` after the tx's chunks are durable. Another per-tx MDBX commit. It does not block the generator |
+| `enqueue_*` | Ingest: one sample per `write_data_chunk_queued`, until index ACK. Migration: one sample per `deposit_data_chunks` call. Ingest calls overlap, so the total can exceed the step |
+| `durable_*` | From ACK or deposit return until `is_data_chunk_durable_at`. One sample per chunk. Overlapping |
+| `permit_wait_us` | Generator time waiting for `--ingest-concurrency` |
+| `permit_max_in_use` | Highest semaphore occupancy in the window |
+| `permit_avg_in_use_milli` | Time-weighted average occupancy times 1000. `12000` is 12 permits |
+| `gen_us` | Generator time building the synthetic header, data path, and `0x5A` body |
+
+`behind` and `sleep` are the generator's pacer clock. `txreg_wait_us`, `gen_us`, `permit_wait_us`, migration `enqueue_total_us`, and migration ceiling time are where the non-sleep time went. Do not add them to `behind`. Ingest enqueue and durable totals are overlapping worker time. The step object includes the drain. The per-second lines do not, so step `pace_sleep_us` can exceed the scored seconds while the open transaction is still paced.
 
 A step fails when any of these hold:
 
@@ -200,6 +227,8 @@ These differ from a production storage module. They are deliberate so the bench 
 - Ingest uses the low half of the write window. Migration uses the high half. Production has one append frontier.
 - The write path does not check chunk merkle proofs. Chunk bytes are `0x5A` and data paths are 64-byte synthetic values. Serve uses `read_chunks`, which also does not check proofs.
 - `--prepopulate-index` grows the MDBX file. Recall does not look up paths, so those pages are touched by commits and the freelist.
+- The offer deadline moves forward by one chunk interval from the previous deadline. A late release does not insert a fresh gap, and a late wake does not stretch the schedule. While the deadline is still in the past the generator releases the next chunk immediately.
+- `--ingest-index serial` (the default) commits each `index_transaction_data` on the chunk generator before that tx is paced, then commits the next tx only after those chunks are handed off. Production does not do this. `process_ledger_transactions` indexes every tx in a block on the chunk migration service, and the body worker writes chunks on another task, so a later index overlaps body writes. `overlap` starts the next bench commit while the current tx is paced. A prefetched tx that the step does not write is settled, so its body-migration row does not remain. The data-root and tx-path rows from that commit stay in the bench database. The submodule MDBX still has one writer.
 - Index updates run on the block path, under one mutex, on the same MDBX the lane drains. That split matches production.
 - Startup deletes leftover body-migration rows in this bench database. A resumed run keeps a `Data` prefix and does not finish a transaction a crashed process indexed only in part.
 - The bench does not start the mining service. Recall calls `read_recall_chunks` on this thread's blocking pool.
