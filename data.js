@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790685476620,
+  "lastUpdate": 1791288839326,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -16135,6 +16135,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c30a56be2b5791ff11b80894f9493fbd9fd90932",
+          "message": "perf: keep recall I/O inside its range and off the async workers (#1577)\n\n* perf(vdf): keep the hash loop in the vdf crate\n\n`#[inline]` copies the loop into the caller. A dev build of irys-chain\nthen hashes too slowly to pass the startup VDF check. Non-release\nprofiles already compile irys-vdf at opt-level 3.\n\n* fix(validation): run VDF seed and batch checks on the verification pool\n\nThose checks were `spawn_blocking` jobs on the shared tokio blocking\npool. The 15s stage clock includes the wait for a pool thread, so a\nsaturated pool aborted validation before the check started. The\nverification pool runs the check itself. A panic stays a local fault.\nA returned validation error stays a validation error.\n\n* perf(mining): hash the recall before reading proof paths\n\nA mining seed reads a 100 MiB range on the caller. On a multi-thread\nruntime that call moves to the blocking pool so async workers stay\nfree.\n\nProof paths are read only for a chunk that meets difficulty. A data\nsolution is submitted only when both paths are present and the\ndata_path leaf matches the unpacked recall bytes. Block production\ncopies those paths into the PoA and does not check the pair. A missing\nor unbound path is skipped and the range continues. An entropy win\nstill submits with empty paths.\n\n* perf(storage): disable read-ahead on chunks.dat\n\nEvery chunks.dat read is a pread of a range the caller already sized.\nRead-ahead state belongs to the open file description, so one\nPOSIX_FADV_RANDOM covers recall, entropy, and serve. A large buffered\nread otherwise fetches past its range by the device maximum request\nsize. A failed advise is fatal: the descriptor would keep doing that.\n\n* fix(storage): skip read-ahead advice where posix_fadvise is absent\n\nApple libc does not bind posix_fadvise, so a macOS build could not\nopen chunks.dat. The advise runs only where libc provides both the\nfunction and POSIX_FADV_RANDOM. Every other target logs a warning and\nkeeps the kernel read-ahead.\n\n* test(mining): cover a short final chunk proof\n\nThe leaf hash covers only the short tail. A byte inside that prefix\nmust fail the bind. A byte past the span must still bind.\n\n* perf(vdf): keep vdf_sha in the vdf crate\n\n#[inline] on vdf_sha copies the step into the caller. A dev build of\nirys-chain then hashes too slowly to pass the startup check. The hash\nloop stays #[inline] so it still folds into vdf_sha.",
+          "timestamp": "2026-10-06T12:52:00+01:00",
+          "tree_id": "c01732f1e48217d66eb512076a951c0734250ba3",
+          "url": "https://github.com/Irys-xyz/irys/commit/c30a56be2b5791ff11b80894f9493fbd9fd90932"
+        },
+        "date": 1791288836604,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012079,
+            "range": "± 0.000538",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.127952,
+            "range": "± 0.003909",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.298894,
+            "range": "± 0.050022",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.383738,
+            "range": "± 0.204338",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078767,
+            "range": "± 0.000789",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 781.697568,
+            "range": "± 27.867045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 970.751009,
+            "range": "± 6.957194",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119006,
+            "range": "± 0.004189",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1205.423526,
+            "range": "± 8.880154",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1558.195667,
+            "range": "± 9.278582",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034916,
+            "range": "± 0.001506",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.650487,
+            "range": "± 1.038712",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.588028,
+            "range": "± 1.863392",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
