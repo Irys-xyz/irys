@@ -467,7 +467,8 @@ impl SubmoduleIndex {
 
     /// Bench entry for one named preset. [`Self::open_rocks`] stays on the baseline.
     ///
-    /// This open counts table opens. Production [`Self::open_rocks`] does not.
+    /// This open counts table opens and preloads every table (`max_open_files=-1`).
+    /// Production [`Self::open_rocks`] does neither and stays at 512.
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open_with_stats(
