@@ -26,8 +26,8 @@ use irys_types::{
 };
 use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
 use rocksdb::{
-    BlockBasedOptions, DB, DBCompressionType, Direction, IteratorMode, Options, WriteBatch,
-    WriteOptions,
+    BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction, IteratorMode, Options,
+    WriteBatch, WriteOptions,
 };
 
 use super::tables::{
@@ -46,8 +46,146 @@ const BLOCK_BYTES: usize = 64 * 1024;
 pub const BLOCK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Values at or above this size move into blob files on the path column families.
 pub const BLOB_MIN_BYTES: u64 = 2048;
+/// Compaction threads for one HDD. The bench can select another preset.
+const BACKGROUND_JOBS: i32 = 2;
+/// Leveled SST target. Compaction output preallocation uses this as a cap.
+const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA_FILE: &str = "SCHEMA";
 const SCHEMA_TEXT: &str = "irys-submodule-rocks 1\n";
+
+/// One RocksDB open. Production uses [`RocksTuning::baseline`].
+///
+/// The bench names the other values. Each of those changes one field, so a
+/// sweep can attribute a difference to that field. Options are fixed at
+/// open: a new block size needs an empty directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RocksTuning {
+    pub name: &'static str,
+    pub block_bytes: usize,
+    pub block_cache_bytes: usize,
+    /// `true` is LZ4 on SST and blob files. `false` stores both uncompressed.
+    pub compress: bool,
+    /// Blob files on the data-path and tx-path families.
+    pub blobs: bool,
+    /// Direct I/O for flush and compaction. Reads stay buffered.
+    pub direct_io: bool,
+    pub background_jobs: i32,
+    pub target_file_bytes: u64,
+    /// Universal compaction. `false` is leveled compaction.
+    pub universal: bool,
+}
+
+impl RocksTuning {
+    pub const fn baseline() -> Self {
+        Self {
+            name: "baseline",
+            block_bytes: BLOCK_BYTES,
+            block_cache_bytes: BLOCK_CACHE_BYTES,
+            compress: true,
+            blobs: true,
+            direct_io: false,
+            background_jobs: BACKGROUND_JOBS,
+            target_file_bytes: TARGET_FILE_BYTES,
+            universal: false,
+        }
+    }
+
+    /// Named opens. `baseline` matches [`Self::baseline`].
+    pub const fn presets() -> [Self; 8] {
+        let base = Self::baseline();
+        [
+            base,
+            Self {
+                name: "block-16k",
+                block_bytes: 16 * 1024,
+                ..base
+            },
+            Self {
+                name: "block-256k",
+                block_bytes: 256 * 1024,
+                ..base
+            },
+            Self {
+                name: "cache-1g",
+                block_cache_bytes: 1024 * 1024 * 1024,
+                ..base
+            },
+            Self {
+                name: "no-blob",
+                blobs: false,
+                ..base
+            },
+            Self {
+                name: "no-compress",
+                compress: false,
+                ..base
+            },
+            Self {
+                name: "direct-io",
+                direct_io: true,
+                ..base
+            },
+            Self {
+                name: "universal",
+                universal: true,
+                ..base
+            },
+        ]
+    }
+
+    pub fn preset(name: &str) -> eyre::Result<Self> {
+        Self::presets()
+            .into_iter()
+            .find(|preset| preset.name == name)
+            .ok_or_else(|| eyre::eyre!("unknown rocks preset {name}; use {}", Self::preset_names()))
+    }
+
+    pub fn preset_names() -> String {
+        Self::presets()
+            .iter()
+            .map(|preset| preset.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Replace the cache after a preset is chosen. The name stays.
+    pub fn with_block_cache(mut self, bytes: usize) -> Self {
+        self.block_cache_bytes = bytes;
+        self
+    }
+
+    pub fn describe(self) -> String {
+        let compression = if self.compress { "lz4" } else { "none" };
+        let blob = if self.blobs {
+            format!("on blob_min_bytes={BLOB_MIN_BYTES}")
+        } else {
+            "off".to_string()
+        };
+        let direct_io = if self.direct_io { "on" } else { "off" };
+        let compaction = if self.universal { "universal" } else { "level" };
+        format!(
+            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} jobs={} target_file_bytes={} block_cache_bytes={}",
+            self.name,
+            self.block_bytes,
+            self.background_jobs,
+            self.target_file_bytes,
+            self.block_cache_bytes,
+        )
+    }
+
+    /// Knobs only. The name is not a knob.
+    #[cfg(test)]
+    fn knob_diffs(self, other: Self) -> usize {
+        usize::from(self.block_bytes != other.block_bytes)
+            + usize::from(self.block_cache_bytes != other.block_cache_bytes)
+            + usize::from(self.compress != other.compress)
+            + usize::from(self.blobs != other.blobs)
+            + usize::from(self.direct_io != other.direct_io)
+            + usize::from(self.background_jobs != other.background_jobs)
+            + usize::from(self.target_file_bytes != other.target_file_bytes)
+            + usize::from(self.universal != other.universal)
+    }
+}
 
 const CF_COUNT: usize = 7;
 
@@ -129,7 +267,7 @@ impl std::fmt::Debug for RocksSubmoduleStore {
 
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_with_block_cache(path, BLOCK_CACHE_BYTES)
+        Self::open_with(path, RocksTuning::baseline())
     }
 
     /// Same open as [`Self::open`], with an explicit block cache.
@@ -140,9 +278,17 @@ impl RocksSubmoduleStore {
         path: impl AsRef<Path>,
         block_cache_bytes: usize,
     ) -> eyre::Result<Self> {
+        Self::open_with(
+            path,
+            RocksTuning::baseline().with_block_cache(block_cache_bytes),
+        )
+    }
+
+    /// Open with an explicit preset. [`Self::open`] stays on the baseline.
+    pub fn open_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         check_schema_file(&path)?;
-        let db = open_db(&path, block_cache_bytes)?;
+        let db = open_db(&path, &tuning)?;
         ensure_schema_row(&db)?;
         let marker = path.join(SCHEMA_FILE);
         if !marker.exists() {
@@ -218,13 +364,13 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
     }
 }
 
-fn open_db(path: &Path, block_cache_bytes: usize) -> eyre::Result<DB> {
-    let cache = rocksdb::Cache::new_lru_cache(block_cache_bytes);
+fn open_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<DB> {
+    let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
     // One or two background jobs so compaction does not flood an HDD.
-    db_opts.set_max_background_jobs(2);
+    db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
     db_opts.set_recycle_log_file_num(4);
@@ -232,33 +378,46 @@ fn open_db(path: &Path, block_cache_bytes: usize) -> eyre::Result<DB> {
     db_opts.set_use_fsync(true);
 
     let families = Cf::ALL.into_iter().map(|cf| {
-        rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(&cache, cf.uses_blobs()))
+        rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(&cache, cf, tuning))
     });
     DB::open_cf_descriptors(&db_opts, path, families).wrap_err("open rocksdb submodule index")
 }
 
-fn column_options(cache: &rocksdb::Cache, blobs: bool) -> Options {
+fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
     let mut table = BlockBasedOptions::default();
-    table.set_block_size(BLOCK_BYTES);
+    table.set_block_size(tuning.block_bytes);
     // Full-filter bloom, ~10 bits per key. `false` selects the full filter.
     table.set_bloom_filter(10.0, false);
     table.set_cache_index_and_filter_blocks(true);
     table.set_pin_l0_filter_and_index_blocks_in_cache(true);
     table.set_block_cache(cache);
 
+    let compression = if tuning.compress {
+        DBCompressionType::Lz4
+    } else {
+        DBCompressionType::None
+    };
     let mut opts = Options::default();
     opts.set_block_based_table_factory(&table);
-    opts.set_compression_type(DBCompressionType::Lz4);
+    opts.set_compression_type(compression);
+    // Leveled sizing. Universal compaction ignores this flag.
     opts.set_level_compaction_dynamic_level_bytes(true);
-    opts.set_target_file_size_base(256 * 1024 * 1024);
+    opts.set_compaction_style(if tuning.universal {
+        DBCompactionStyle::Universal
+    } else {
+        DBCompactionStyle::Level
+    });
+    opts.set_target_file_size_base(tuning.target_file_bytes);
     opts.set_compaction_readahead_size(2 * 1024 * 1024);
+    // Reads stay buffered. The bench drops those pages with fadvise.
+    opts.set_use_direct_io_for_flush_and_compaction(tuning.direct_io);
     opts.set_write_buffer_size(64 * 1024 * 1024);
     opts.set_max_write_buffer_number(2);
-    if blobs {
+    if tuning.blobs && cf.uses_blobs() {
         opts.set_enable_blob_files(true);
         opts.set_min_blob_size(BLOB_MIN_BYTES);
         opts.set_blob_file_size(256 * 1024 * 1024);
-        opts.set_blob_compression_type(DBCompressionType::Lz4);
+        opts.set_blob_compression_type(compression);
         opts.set_enable_blob_gc(true);
         opts.set_blob_compaction_readahead_size(2 * 1024 * 1024);
         opts.set_blob_cache(cache);
@@ -960,6 +1119,55 @@ mod tests {
         );
         let marker = fs::read_to_string(path.join(SCHEMA_FILE))?;
         assert_eq!(marker, SCHEMA_TEXT);
+        Ok(())
+    }
+
+    #[test]
+    fn presets_change_one_knob_and_open() -> eyre::Result<()> {
+        let base = RocksTuning::baseline();
+        assert_eq!(base, RocksTuning::preset("baseline")?);
+        assert_eq!(base.block_bytes, BLOCK_BYTES);
+        assert_eq!(base.block_cache_bytes, BLOCK_CACHE_BYTES);
+        assert!(base.compress && base.blobs && !base.direct_io && !base.universal);
+        assert_eq!(base.background_jobs, BACKGROUND_JOBS);
+        assert_eq!(base.target_file_bytes, TARGET_FILE_BYTES);
+
+        let block_16k = RocksTuning::preset("block-16k")?;
+        let block_256k = RocksTuning::preset("block-256k")?;
+        let cache = RocksTuning::preset("cache-1g")?;
+        assert_eq!(block_16k.block_bytes, 16 * 1024);
+        assert_eq!(block_256k.block_bytes, 256 * 1024);
+        assert_eq!(cache.block_cache_bytes, 1 << 30);
+        assert!(!RocksTuning::preset("no-blob")?.blobs);
+        assert!(!RocksTuning::preset("no-compress")?.compress);
+        assert!(RocksTuning::preset("direct-io")?.direct_io);
+        assert!(RocksTuning::preset("universal")?.universal);
+
+        let mut names = Vec::new();
+        for preset in RocksTuning::presets() {
+            assert!(!names.contains(&preset.name), "duplicate {}", preset.name);
+            names.push(preset.name);
+            if preset.name == "baseline" {
+                assert_eq!(preset.knob_diffs(base), 0);
+            } else {
+                assert_eq!(preset.knob_diffs(base), 1, "{}", preset.name);
+            }
+        }
+        assert!(RocksTuning::preset("missing").is_err());
+
+        let overridden = cache.with_block_cache(4096);
+        assert_eq!(overridden.name, "cache-1g");
+        assert_eq!(overridden.block_cache_bytes, 4096);
+        assert_eq!(overridden.knob_diffs(base), 1);
+
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_presets")
+            .build();
+        for preset in RocksTuning::presets() {
+            let path = dir.path().join(preset.name);
+            let store = RocksSubmoduleStore::open_with(&path, preset)?;
+            drop(store);
+        }
         Ok(())
     }
 }

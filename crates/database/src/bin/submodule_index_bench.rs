@@ -12,7 +12,9 @@
 //! `--worst-case` stores a max-size data proof on every chunk. A full
 //! partition is `--chunks 75534400` and needs `IRYS_INDEX_BENCH_LARGE=1`.
 //! `--mid` writes 1_000_000 chunks of 4096-byte paths, past an HDD cache.
-//! It needs the same variable.
+//! It needs the same variable. `--profile filled|mid|worst` selects the
+//! same workloads. `--rocks <preset>` changes one RocksDB setting.
+//! `--engine rocks` skips MDBX.
 //!
 //! After the writes, each engine drops its file cache with `posix_fadvise`
 //! and times random lookups. This does not call `drop_caches`.
@@ -28,9 +30,7 @@ use std::time::{Duration, Instant};
 
 use irys_database::IrysDatabaseArgs as _;
 use irys_database::submodule::tables::{DataRootInfo, PendingBodyMigration, TxLeafBinding};
-use irys_database::submodule::{
-    BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, SubmoduleIndex, SubmoduleStore as _,
-};
+use irys_database::submodule::{RocksTuning, SubmoduleIndex, SubmoduleStore as _};
 use irys_types::{DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset, TERABYTE};
 use reth_db::mdbx::DatabaseArguments;
 
@@ -78,6 +78,58 @@ const DATA_PROOF_BYTES: usize = proof_bytes(DATA_PROOF_LAYERS);
 const TX_PROOF_LAYERS: usize = pairing_layers(MAX_DATA_TXS_PER_BLOCK);
 const TX_PROOF_BYTES: usize = proof_bytes(TX_PROOF_LAYERS);
 
+/// Workload shape. `mid` and `worst` are also the old flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Workload {
+    Filled,
+    Mid,
+    Worst,
+}
+
+impl Workload {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Filled => "filled",
+            Self::Mid => "mid",
+            Self::Worst => "worst",
+        }
+    }
+
+    fn is_mid(self) -> bool {
+        matches!(self, Self::Mid)
+    }
+
+    fn is_worst(self) -> bool {
+        matches!(self, Self::Worst)
+    }
+}
+
+/// Which engines to write. A preset sweep uses `Rocks` so MDBX is not repeated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Engines {
+    Both,
+    Mdbx,
+    Rocks,
+}
+
+impl Engines {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Mdbx => "mdbx",
+            Self::Rocks => "rocks",
+        }
+    }
+
+    fn includes_mdbx(self) -> bool {
+        matches!(self, Self::Both | Self::Mdbx)
+    }
+
+    fn includes_rocks(self) -> bool {
+        matches!(self, Self::Both | Self::Rocks)
+    }
+}
+
 struct Args {
     dir: PathBuf,
     chunks: u32,
@@ -85,16 +137,14 @@ struct Args {
     /// Offsets covered by one transaction commit.
     tx_chunks: u32,
     path_bytes: usize,
-    /// Every chunk stores a max-depth data proof. Transactions are max size.
-    worst_case: bool,
-    /// 1_000_000 chunks of the default 4096-byte path. Larger than an HDD cache.
-    mid: bool,
+    workload: Workload,
+    engines: Engines,
     /// Random samples of each read shape. Zero skips the read phase.
     reads: u32,
     /// Inclusive offset window for one range lookup.
     range_len: u32,
-    /// RocksDB block cache. MDBX ignores this.
-    block_cache: usize,
+    /// RocksDB open. MDBX ignores this. Production open stays on the baseline.
+    rocks: RocksTuning,
 }
 
 fn main() -> eyre::Result<()> {
@@ -102,16 +152,23 @@ fn main() -> eyre::Result<()> {
     refuse_large_payload(&args)?;
     prepare_dir(&args.dir)?;
     println!(
-        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} allocator=system jemalloc=off",
-        args.chunks, args.tx_chunks, args.batch, args.path_bytes, args.reads, args.range_len
+        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} allocator=system jemalloc=off",
+        args.chunks,
+        args.tx_chunks,
+        args.batch,
+        args.path_bytes,
+        args.reads,
+        args.range_len,
+        args.workload.name(),
+        args.engines.name(),
     );
-    if args.worst_case {
+    if args.workload.is_worst() {
         let raw = u64::from(args.chunks) * DATA_PROOF_BYTES as u64;
         let full = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64;
         println!(
             "mode=worst-case data_proof_bytes={DATA_PROOF_BYTES} data_proof_branches={DATA_PROOF_LAYERS} tx_proof_bytes={TX_PROOF_BYTES} tx_group_chunks={MAX_DATA_TX_CHUNKS} raw_data_proof_bytes={raw} full_partition_chunks={PARTITION_CHUNKS} full_partition_raw_data_proof_bytes={full}"
         );
-    } else if args.mid {
+    } else if args.workload.is_mid() {
         let raw = u64::from(args.chunks) * args.path_bytes as u64;
         let mdbx = commits_for(true, args.batch, true);
         println!(
@@ -122,33 +179,39 @@ fn main() -> eyre::Result<()> {
         println!("mode=filled");
     }
 
-    let mdbx_dir = args.dir.join("mdbx");
-    fs::create_dir_all(&mdbx_dir)?;
-    let map_bytes = mdbx_map_bytes(args.chunks, args.path_bytes, args.worst_case);
-    let mdbx_commits = commits_for(args.mid, args.batch, true);
-    println!(
-        "engine=mdbx sync=durable geometry_max_bytes={map_bytes} txs_per_commit={} path_batch={}",
-        mdbx_commits.txs_per_commit, mdbx_commits.path_batch
-    );
-    measure(&mdbx_dir, "mdbx", &args, mdbx_commits, |path| {
-        SubmoduleIndex::open_mdbx(
-            path,
-            DatabaseArguments::irys_default(DbSyncMode::Durable)?
-                .with_geometry_max_size(Some(map_bytes)),
-        )
-    })?;
+    if args.engines.includes_mdbx() {
+        let mdbx_dir = args.dir.join("mdbx");
+        fs::create_dir_all(&mdbx_dir)?;
+        let map_bytes = mdbx_map_bytes(args.chunks, args.path_bytes, args.workload.is_worst());
+        let mdbx_commits = commits_for(args.workload.is_mid(), args.batch, true);
+        println!(
+            "engine=mdbx sync=durable geometry_max_bytes={map_bytes} txs_per_commit={} path_batch={}",
+            mdbx_commits.txs_per_commit, mdbx_commits.path_batch
+        );
+        measure(&mdbx_dir, "mdbx", &args, mdbx_commits, |path| {
+            SubmoduleIndex::open_mdbx(
+                path,
+                DatabaseArguments::irys_default(DbSyncMode::Durable)?
+                    .with_geometry_max_size(Some(map_bytes)),
+            )
+        })?;
+    }
 
-    let rocks_dir = args.dir.join("rocks");
-    fs::create_dir_all(&rocks_dir)?;
-    let rocks_commits = commits_for(args.mid, args.batch, false);
-    println!(
-        "engine=rocks sync=wal_fsync compression=lz4 block_bytes=65536 blob_min_bytes={BLOB_MIN_BYTES} block_cache_bytes={} txs_per_commit={} path_batch={}",
-        args.block_cache, rocks_commits.txs_per_commit, rocks_commits.path_batch
-    );
-    let cache = args.block_cache;
-    measure(&rocks_dir, "rocks", &args, rocks_commits, |path| {
-        SubmoduleIndex::open_rocks_with_block_cache(path, cache)
-    })?;
+    if args.engines.includes_rocks() {
+        let rocks_dir = args.dir.join("rocks");
+        fs::create_dir_all(&rocks_dir)?;
+        let rocks_commits = commits_for(args.workload.is_mid(), args.batch, false);
+        let tuning = args.rocks;
+        println!(
+            "engine=rocks sync=wal_fsync {} txs_per_commit={} path_batch={}",
+            tuning.describe(),
+            rocks_commits.txs_per_commit,
+            rocks_commits.path_batch
+        );
+        measure(&rocks_dir, "rocks", &args, rocks_commits, |path| {
+            SubmoduleIndex::open_rocks_with(path, tuning)
+        })?;
+    }
     Ok(())
 }
 
@@ -812,7 +875,7 @@ fn mdbx_map_bytes(chunks: u32, path_bytes: usize, worst_case: bool) -> usize {
 fn indexed_data_size(args: &Args, count: u32) -> u64 {
     // A short tail is still the start of a max transaction, so the row records
     // the full transaction size. The filled mode records only the chunks written.
-    let chunks = if args.worst_case {
+    let chunks = if args.workload.is_worst() {
         MAX_DATA_TX_CHUNKS
     } else {
         u64::from(count)
@@ -829,7 +892,7 @@ fn rewritten_data_path(args: &Args, offset: u32) -> Vec<u8> {
 }
 
 fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
-    if !args.worst_case {
+    if !args.workload.is_worst() {
         return fill(args.path_bytes, u64::from(offset));
     }
     // Local index inside a max transaction. Depth stays at the max proof even
@@ -844,7 +907,7 @@ fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
 }
 
 fn tx_path_bytes(args: &Args, tx_start: u32) -> Vec<u8> {
-    if !args.worst_case {
+    if !args.workload.is_worst() {
         return fill(args.path_bytes, u64::from(tx_start));
     }
     let ordinal = u64::from(tx_start) / MAX_DATA_TX_CHUNKS;
@@ -907,20 +970,20 @@ fn fill_span(out: &mut [u8], state: &mut u64) {
 
 fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
     let raw = u64::from(args.chunks)
-        * if args.worst_case {
+        * if args.workload.is_worst() {
             DATA_PROOF_BYTES as u64
         } else {
             args.path_bytes as u64
         };
-    let worst_over = args.worst_case && raw > LARGE_RAW_BYTES;
-    if !args.mid && !worst_over {
+    let worst_over = args.workload.is_worst() && raw > LARGE_RAW_BYTES;
+    if !args.workload.is_mid() && !worst_over {
         return Ok(());
     }
     let allowed = std::env::var("IRYS_INDEX_BENCH_LARGE").ok().as_deref() == Some("1");
     if allowed {
         return Ok(());
     }
-    if args.mid {
+    if args.workload.is_mid() {
         eyre::bail!(
             "--mid writes {raw} raw data-path bytes per engine (about 9 GiB on disk, two engines). Set IRYS_INDEX_BENCH_LARGE=1 to run it."
         );
@@ -994,22 +1057,34 @@ fn prepare_dir(path: &Path) -> eyre::Result<()> {
 }
 
 fn parse_args() -> eyre::Result<Args> {
+    parse_arg_list(std::env::args().skip(1))
+}
+
+fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> {
     let mut dir = None;
     let mut chunks = 4096_u32;
     let mut batch = 512_u32;
     let mut tx_chunks: Option<u32> = None;
     let mut path_bytes: Option<usize> = None;
+    let mut profile: Option<Workload> = None;
     let mut worst_case = false;
     let mut mid = false;
     let mut chunks_set = false;
     let mut reads = 1024_u32;
     let mut range_len = 32_u32;
+    let mut engines = Engines::Both;
+    let mut rocks: Option<RocksTuning> = None;
+    let mut rocks_set = false;
     let mut block_cache: Option<usize> = None;
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--help" | "-h" => {
                 print_help();
+                std::process::exit(0);
+            }
+            "--list-rocks" => {
+                print_rocks();
                 std::process::exit(0);
             }
             "--dir" => dir = Some(PathBuf::from(required(&mut it, &flag)?)),
@@ -1023,6 +1098,17 @@ fn parse_args() -> eyre::Result<Args> {
             "--reads" => reads = required(&mut it, &flag)?.parse()?,
             "--range-len" => range_len = required(&mut it, &flag)?.parse()?,
             "--rocks-block-cache" => block_cache = Some(required(&mut it, &flag)?.parse()?),
+            "--profile" => {
+                profile = Some(parse_profile(&required(&mut it, &flag)?)?);
+            }
+            "--engine" => {
+                engines = parse_engines(&required(&mut it, &flag)?)?;
+            }
+            "--rocks" => {
+                let name = required(&mut it, &flag)?;
+                rocks = Some(RocksTuning::preset(&name)?);
+                rocks_set = true;
+            }
             "--worst-case" => worst_case = true,
             "--mid" => mid = true,
             other => eyre::bail!("unknown argument {other}"),
@@ -1032,20 +1118,23 @@ fn parse_args() -> eyre::Result<Args> {
         print_help();
         eyre::bail!("--dir is required");
     };
+    let workload = resolve_workload(profile, mid, worst_case)?;
+    let mid = workload.is_mid();
+    let worst_case = workload.is_worst();
     if worst_case && path_bytes.is_some() {
         eyre::bail!("--path-bytes does not apply to --worst-case");
     }
     if worst_case && tx_chunks.is_some() {
         eyre::bail!("--tx-chunks does not apply to --worst-case");
     }
-    if mid && worst_case {
-        eyre::bail!("--mid does not apply to --worst-case");
-    }
     if mid && path_bytes.is_some() {
         eyre::bail!("--path-bytes does not apply to --mid");
     }
     if mid && chunks_set {
         eyre::bail!("--chunks does not apply to --mid");
+    }
+    if rocks_set && !engines.includes_rocks() {
+        eyre::bail!("--rocks applies only when the rocks engine runs");
     }
     if mid {
         chunks = MID_CHUNKS;
@@ -1060,36 +1149,82 @@ fn parse_args() -> eyre::Result<Args> {
     } else {
         tx_chunks.unwrap_or(32)
     };
-    let block_cache = block_cache.unwrap_or(BLOCK_CACHE_BYTES);
+    let mut rocks = rocks.unwrap_or_else(RocksTuning::baseline);
+    if let Some(bytes) = block_cache {
+        eyre::ensure!(bytes > 0, "--rocks-block-cache must be > 0");
+        rocks = rocks.with_block_cache(bytes);
+    }
     eyre::ensure!(chunks > 0, "--chunks must be > 0");
     eyre::ensure!(batch > 0, "--batch must be > 0");
     eyre::ensure!(tx_chunks > 0, "--tx-chunks must be > 0");
     eyre::ensure!(path_bytes > 0, "--path-bytes must be > 0");
     eyre::ensure!(range_len > 0, "--range-len must be > 0");
-    eyre::ensure!(block_cache > 0, "--rocks-block-cache must be > 0");
     Ok(Args {
         dir,
         chunks,
         batch,
         tx_chunks,
         path_bytes,
-        worst_case,
-        mid,
+        workload,
+        engines,
         reads,
         range_len,
-        block_cache,
+        rocks,
     })
+}
+
+fn parse_profile(value: &str) -> eyre::Result<Workload> {
+    match value {
+        "filled" => Ok(Workload::Filled),
+        "mid" => Ok(Workload::Mid),
+        "worst" => Ok(Workload::Worst),
+        other => eyre::bail!("unknown profile {other}; use filled, mid, or worst"),
+    }
+}
+
+fn parse_engines(value: &str) -> eyre::Result<Engines> {
+    match value {
+        "both" => Ok(Engines::Both),
+        "mdbx" => Ok(Engines::Mdbx),
+        "rocks" => Ok(Engines::Rocks),
+        other => eyre::bail!("unknown engine {other}; use both, mdbx, or rocks"),
+    }
+}
+
+fn resolve_workload(profile: Option<Workload>, mid: bool, worst: bool) -> eyre::Result<Workload> {
+    match (profile, mid, worst) {
+        (None, false, false) => Ok(Workload::Filled),
+        (None, true, false) => Ok(Workload::Mid),
+        (None, false, true) => Ok(Workload::Worst),
+        (Some(profile), false, false) => Ok(profile),
+        (Some(Workload::Mid), true, false) => Ok(Workload::Mid),
+        (Some(Workload::Worst), false, true) => Ok(Workload::Worst),
+        _ => eyre::bail!("--profile, --mid, and --worst-case disagree"),
+    }
 }
 
 fn required(it: &mut impl Iterator<Item = String>, flag: &str) -> eyre::Result<String> {
     it.next().ok_or_else(|| eyre::eyre!("{flag} needs a value"))
 }
 
+fn print_rocks() {
+    for preset in RocksTuning::presets() {
+        eprintln!("{}", preset.describe());
+    }
+}
+
 fn print_help() {
+    let presets = RocksTuning::preset_names();
     eprintln!(
-        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--mid] [--worst-case]\n\
+        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--rocks <preset>] [--mid] [--worst-case] [--list-rocks]\n\
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
+--profile selects the workload. filled is the default. mid is --mid. worst is --worst-case and still takes --chunks.\n\
+--engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
+--rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
+Presets: {presets}. Each preset changes one setting. \
+--rocks-block-cache overrides that preset's cache. A new block size needs an empty directory.\n\
+--list-rocks prints the presets and exits.\n\
 --reads N (default 1024) is the sample count for each shape: data_path_random, data_path_seq, serve, range, rmw_path, rmw_root.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
 rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit.\n\
@@ -1107,12 +1242,15 @@ A full partition is --chunks {PARTITION_CHUNKS} and requires IRYS_INDEX_BENCH_LA
 
 #[cfg(test)]
 mod tests {
+    use irys_database::submodule::BLOCK_CACHE_BYTES;
+
     use super::{
-        Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, FILLED_MAP_CEILING, HASH_SIZE, LEAF_SIZE,
-        MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH, MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE,
-        PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, commits_for, data_path_bytes,
-        mdbx_map_bytes, pairing_layers, parse_diskstats, parse_mount_line, parse_proc_status,
-        percentile, proof_bytes, rewritten_data_path, sample_offset, seq_offset, shaped_proof,
+        Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, Engines, FILLED_MAP_CEILING, HASH_SIZE,
+        LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH, MID_MDBX_TXS_PER_COMMIT,
+        NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, Workload, commits_for,
+        data_path_bytes, mdbx_map_bytes, pairing_layers, parse_arg_list, parse_diskstats,
+        parse_mount_line, parse_proc_status, percentile, proof_bytes, rewritten_data_path,
+        sample_offset, seq_offset, shaped_proof,
     };
 
     #[test]
@@ -1213,11 +1351,11 @@ VmHWM:\t   8600000 kB
             batch: 8,
             tx_chunks: 4,
             path_bytes: 4096,
-            worst_case: false,
-            mid: false,
+            workload: Workload::Filled,
+            engines: Engines::Both,
             reads: 1,
             range_len: 4,
-            block_cache: 1024,
+            rocks: irys_database::submodule::RocksTuning::baseline().with_block_cache(1024),
         };
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
@@ -1227,6 +1365,83 @@ VmHWM:\t   8600000 kB
             &stored[..stored.len() - 1]
         );
         assert_ne!(rewritten.last(), stored.last());
+    }
+
+    fn parse(args: &[&str]) -> eyre::Result<Args> {
+        parse_arg_list(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    #[test]
+    fn profile_selects_one_rocks_preset() {
+        let args = parse(&[
+            "--dir",
+            "/tmp/x/index-bench",
+            "--profile",
+            "mid",
+            "--engine",
+            "rocks",
+            "--rocks",
+            "block-16k",
+        ])
+        .unwrap();
+        assert_eq!(args.chunks, MID_CHUNKS);
+        assert_eq!(args.path_bytes, 4096);
+        assert_eq!(args.workload, Workload::Mid);
+        assert_eq!(args.engines, Engines::Rocks);
+        assert_eq!(args.rocks.name, "block-16k");
+        assert_eq!(args.rocks.block_bytes, 16 * 1024);
+        assert_eq!(args.rocks.block_cache_bytes, BLOCK_CACHE_BYTES);
+
+        let cache = parse(&[
+            "--dir",
+            "index-bench",
+            "--rocks",
+            "cache-1g",
+            "--rocks-block-cache",
+            "4096",
+        ])
+        .unwrap();
+        assert_eq!(cache.rocks.name, "cache-1g");
+        assert_eq!(cache.rocks.block_cache_bytes, 4096);
+        assert_eq!(cache.engines, Engines::Both);
+
+        let defaults = parse(&["--dir", "index-bench"]).unwrap();
+        assert_eq!(defaults.workload, Workload::Filled);
+        assert_eq!(defaults.engines, Engines::Both);
+        assert_eq!(defaults.rocks.name, "baseline");
+        assert_eq!(defaults.rocks.block_cache_bytes, BLOCK_CACHE_BYTES);
+        assert_eq!(defaults.chunks, 4096);
+
+        let mid = parse(&["--dir", "index-bench", "--mid"]).unwrap();
+        assert_eq!(mid.workload, Workload::Mid);
+        let worst = parse(&[
+            "--dir",
+            "index-bench",
+            "--profile",
+            "worst",
+            "--chunks",
+            "8",
+        ])
+        .unwrap();
+        assert_eq!(worst.workload, Workload::Worst);
+        assert_eq!(worst.chunks, 8);
+        assert_eq!(worst.path_bytes, DATA_PROOF_BYTES);
+
+        assert!(parse(&["--dir", "index-bench", "--profile", "filled", "--mid"]).is_err());
+        assert!(parse(&["--dir", "index-bench", "--profile", "mid", "--chunks", "10"]).is_err());
+        assert!(
+            parse(&[
+                "--dir",
+                "index-bench",
+                "--engine",
+                "mdbx",
+                "--rocks",
+                "baseline"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["--dir", "index-bench", "--rocks", "missing"]).is_err());
+        assert!(parse(&["--dir", "index-bench", "--profile", "huge"]).is_err());
     }
 
     #[test]
