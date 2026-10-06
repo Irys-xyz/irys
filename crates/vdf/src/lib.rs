@@ -78,7 +78,10 @@ fn compress_n_rounds(blocks: &mut [[u8; 64]; 2], iterations: u64) {
     }
 }
 
-#[inline]
+// Not `#[inline]`. That copies this function into the caller, and a dev
+// build of irys-chain then hashes too slowly to pass the startup check.
+// Non-release profiles compile this crate at opt-level 3. The hash loop
+// above still inlines into this function.
 pub fn vdf_sha(
     start_salt: U256,
     seed: &mut H256,

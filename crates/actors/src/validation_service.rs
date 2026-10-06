@@ -73,15 +73,14 @@ pub(crate) struct VdfStageBParentMissing {
     pub parent_hash: BlockHash,
 }
 
-/// Sentinel error returned from `ensure_vdf_is_valid` when a `spawn_blocking`
-/// task in Stage B or Stage C/D resolves as a `JoinError` (thread panic or
-/// external `abort()`). Downcast in `PreemptibleVdfTask::execute` to split the
-/// two cases: panics route to a local-fault `panic!` (never-mislabel rule);
-/// external aborts route to `VdfValidationResult::Cancelled` (same requeue
-/// lane as watchdog-triggered aborts). Without this sentinel the `JoinError`
-/// falls through to the `None` arm and becomes `VdfValidationResult::Invalid`,
-/// mislabelling a local infrastructure failure as a peer-attributable consensus
-/// rejection.
+/// Sentinel error returned from `ensure_vdf_is_valid` when a verification-pool
+/// job in Stage B or Stage C/D panics, or is dropped before it reports.
+/// Downcast in `PreemptibleVdfTask::execute` to split the two cases: panics
+/// route to a local-fault `panic!` (never-mislabel rule); a dropped job routes
+/// to `VdfValidationResult::Cancelled` (same requeue lane as watchdog-triggered
+/// aborts). Without this sentinel the failure falls through to the `None` arm
+/// and becomes `VdfValidationResult::Invalid`, mislabelling a local
+/// infrastructure failure as a peer-attributable consensus rejection.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "VDF blocking task failed (stage={stage:?}, is_panic={is_panic}, is_cancelled={is_cancelled})"
@@ -916,6 +915,43 @@ pub(in crate::validation_service) fn vdf_terminal_finalize_via(
     send_validation_result_via(block_tree_sender, block_hash, error.into())
 }
 
+/// Run one watched VDF check on `pool`.
+///
+/// The stage clock starts before this call. The tokio blocking pool also runs
+/// disk and ingress work, so a check queued there trips the watchdog while the
+/// check has not started. `install` from a worker of this same pool runs inline,
+/// so the batch job does not wait for a worker it already occupies.
+async fn run_on_verification_pool<T, F>(
+    pool: &rayon::ThreadPool,
+    stage: VdfTaskStage,
+    job: F,
+) -> eyre::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> eyre::Result<T> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    pool.spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        let _ = tx.send(outcome);
+    });
+    match rx.await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_panic)) => Err(VdfBlockingTaskFailed {
+            is_panic: true,
+            is_cancelled: false,
+            stage,
+        }
+        .into()),
+        Err(_closed) => Err(VdfBlockingTaskFailed {
+            is_panic: false,
+            is_cancelled: true,
+            stage,
+        }
+        .into()),
+    }
+}
+
 impl ValidationServiceInner {
     /// Clamp the configured VDF validation batch size to `[thread_count, 2 * thread_count]`
     /// (and at least 1). Below the floor we leave worker threads idle; above the
@@ -1027,34 +1063,21 @@ impl ValidationServiceInner {
             "ensure_vdf_is_valid: validating seed data against parent"
         );
         {
-            // Lift the parent lookup OUT of the spawn_blocking closure.
+            // Lift the parent lookup out of the verification job.
             // If the parent has been evicted between VDF task queuing and now
             // (depth-prune / reorg eviction race), surface a typed sentinel
-            // error rather than panicking inside the blocking task. The
-            // sentinel is downcast in `PreemptibleVdfTask::execute` and
-            // mapped to `VdfValidationResult::ParentMissing`, which the
-            // dispatch loop routes via `ValidationError::ParentBlockMissing`
-            // → `SoftInternal` (same shape as `seeds_validation_task` in the
-            // concurrent stage).
+            // error rather than panicking inside the job. The sentinel is
+            // downcast in `PreemptibleVdfTask::execute` and mapped to
+            // `VdfValidationResult::ParentMissing`, which the dispatch loop
+            // routes via `ValidationError::ParentBlockMissing` → `SoftInternal`
+            // (same shape as `seeds_validation_task` in the concurrent stage).
             let previous_block = lookup_stage_b_parent(&self.block_tree_guard, block)?;
             let block_header = block.clone();
-            match tokio::task::spawn_blocking(move || {
+            run_on_verification_pool(&self.pool, VdfTaskStage::ValidateSeeds, move || {
                 is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency)?;
-                Ok::<(), eyre::Report>(())
+                Ok(())
             })
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(join_err) => {
-                    return Err(VdfBlockingTaskFailed {
-                        is_panic: join_err.is_panic(),
-                        is_cancelled: join_err.is_cancelled(),
-                        stage: VdfTaskStage::ValidateSeeds,
-                    }
-                    .into());
-                }
-            }
+            .await?;
         }
 
         // Stage C/D: validate VDF steps in bounded batches and fast-forward
@@ -1093,7 +1116,7 @@ impl ValidationServiceInner {
                 let vdf_config_for_batch = vdf_config.clone();
                 let this_inner = Arc::clone(&self);
                 let cancel_for_blocking = Arc::clone(&cancel);
-                match tokio::task::spawn_blocking(move || {
+                run_on_verification_pool(&self.pool, VdfTaskStage::ValidateBatch, move || {
                     vdf_step_batch_is_valid(
                         &this_inner.pool,
                         &vdf_info_for_batch,
@@ -1104,19 +1127,7 @@ impl ValidationServiceInner {
                         cancel_for_blocking,
                     )
                 })
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => return Err(e),
-                    Err(join_err) => {
-                        return Err(VdfBlockingTaskFailed {
-                            is_panic: join_err.is_panic(),
-                            is_cancelled: join_err.is_cancelled(),
-                            stage: VdfTaskStage::ValidateBatch,
-                        }
-                        .into());
-                    }
-                }
+                .await?;
             }
 
             record_vdf_task_progress(
@@ -1218,6 +1229,120 @@ mod tests {
     use irys_types::{H256, H256List, NodeConfig, U256, VDFLimiterInfo};
     use irys_vdf::state::{CancelEnum, test_helpers::mocked_vdf_service};
     use irys_vdf::{VdfStep, step_number_to_salt_number, vdf_sha};
+
+    /// `ValidateSeeds` and `ValidateBatch` are watched by the 15s stage clock.
+    /// That clock must measure the check, so neither stage may wait on the
+    /// shared tokio blocking pool.
+    #[test]
+    fn ensure_vdf_is_valid_does_not_wait_on_the_tokio_blocking_pool() {
+        const SRC: &str = include_str!("validation_service.rs");
+        let start = SRC
+            .find("pub(crate) async fn ensure_vdf_is_valid(")
+            .expect("ensure_vdf_is_valid");
+        let end = SRC[start..]
+            .find("\nmod tests {")
+            .expect("tests module follows ensure_vdf_is_valid");
+        let body = &SRC[start..start + end];
+        assert!(
+            !body.contains("tokio::task::spawn_blocking"),
+            "seed and batch checks must not queue on the tokio blocking pool"
+        );
+        assert_eq!(
+            body.matches("run_on_verification_pool(").count(),
+            2,
+            "seed and batch checks both run on the verification pool"
+        );
+    }
+
+    #[test]
+    fn a_busy_blocking_pool_does_not_delay_the_verification_job() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            let occupied = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&occupied);
+            let occupier = tokio::task::spawn_blocking(move || {
+                flag.store(true, Ordering::SeqCst);
+                let _ = release_rx.blocking_recv();
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !occupied.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "blocking thread did not start"
+                );
+                tokio::task::yield_now().await;
+            }
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .expect("verification pool");
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                run_on_verification_pool(&pool, VdfTaskStage::ValidateBatch, || {
+                    Ok::<u32, eyre::Report>(7)
+                }),
+            )
+            .await;
+            let _ = release_tx.send(());
+            occupier.await.expect("occupier");
+            let value = result.expect("verification job waited on the tokio blocking pool");
+            assert_eq!(value.expect("job result"), 7);
+        });
+    }
+
+    #[test]
+    fn a_panicking_verification_job_is_a_local_fault() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("verification pool");
+            let err = run_on_verification_pool(
+                &pool,
+                VdfTaskStage::ValidateSeeds,
+                || -> eyre::Result<()> { panic!("verifier fault") },
+            )
+            .await
+            .expect_err("panic must be a sentinel");
+            let failed = err
+                .downcast_ref::<VdfBlockingTaskFailed>()
+                .expect("sentinel");
+            assert!(failed.is_panic);
+            assert!(!failed.is_cancelled);
+            assert_eq!(failed.stage, VdfTaskStage::ValidateSeeds);
+        });
+    }
+
+    #[test]
+    fn a_verification_job_error_stays_a_validation_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("verification pool");
+            let err = run_on_verification_pool(&pool, VdfTaskStage::ValidateBatch, || {
+                Err::<(), eyre::Report>(eyre::eyre!("bad step"))
+            })
+            .await
+            .expect_err("validation error");
+            assert!(err.downcast_ref::<VdfBlockingTaskFailed>().is_none());
+            assert!(err.to_string().contains("bad step"));
+        });
+    }
 
     fn build_vdf_info(num_steps: usize) -> (Config, VDFLimiterInfo) {
         let mut node_config = NodeConfig::testing();
