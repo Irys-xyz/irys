@@ -129,9 +129,20 @@ impl std::fmt::Debug for RocksSubmoduleStore {
 
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        Self::open_with_block_cache(path, BLOCK_CACHE_BYTES)
+    }
+
+    /// Same open as [`Self::open`], with an explicit block cache.
+    ///
+    /// The bench uses this to repeat a read test at more than one cache size.
+    /// Production keeps [`BLOCK_CACHE_BYTES`].
+    pub fn open_with_block_cache(
+        path: impl AsRef<Path>,
+        block_cache_bytes: usize,
+    ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         check_schema_file(&path)?;
-        let db = open_db(&path)?;
+        let db = open_db(&path, block_cache_bytes)?;
         ensure_schema_row(&db)?;
         let marker = path.join(SCHEMA_FILE);
         if !marker.exists() {
@@ -207,8 +218,8 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
     }
 }
 
-fn open_db(path: &Path) -> eyre::Result<DB> {
-    let cache = rocksdb::Cache::new_lru_cache(BLOCK_CACHE_BYTES);
+fn open_db(path: &Path, block_cache_bytes: usize) -> eyre::Result<DB> {
+    let cache = rocksdb::Cache::new_lru_cache(block_cache_bytes);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
