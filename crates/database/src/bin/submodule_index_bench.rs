@@ -11,6 +11,8 @@
 //!
 //! `--worst-case` stores a max-size data proof on every chunk. A full
 //! partition is `--chunks 75534400` and needs `IRYS_INDEX_BENCH_LARGE=1`.
+//! `--mid` writes 1_000_000 chunks of 4096-byte paths, past an HDD cache.
+//! It needs the same variable.
 //!
 //! After the writes, each engine drops its file cache with `posix_fadvise`
 //! and times random lookups. This does not call `drop_caches`.
@@ -43,6 +45,10 @@ const BRANCH_SIZE: usize = HASH_SIZE * 2 + NOTE_SIZE;
 const LEAF_SIZE: usize = HASH_SIZE + NOTE_SIZE;
 /// Raw proof bytes above this need `IRYS_INDEX_BENCH_LARGE=1`.
 const LARGE_RAW_BYTES: u64 = 8 << 30;
+/// Filled run past a typical HDD cache. 4096-byte paths, about 4 GiB raw.
+const MID_CHUNKS: u32 = 1_000_000;
+/// Filled runs at or below this stay inside an 8 GiB map. `--mid` is above it.
+const FILLED_MAP_CEILING: u64 = 8 << 30;
 
 /// How many times pairing reduces `n` leaves to one root.
 const fn pairing_layers(mut n: u64) -> usize {
@@ -74,6 +80,8 @@ struct Args {
     path_bytes: usize,
     /// Every chunk stores a max-depth data proof. Transactions are max size.
     worst_case: bool,
+    /// 1_000_000 chunks of the default 4096-byte path. Larger than an HDD cache.
+    mid: bool,
     /// Random samples of each read shape. Zero skips the read phase.
     reads: u32,
     /// Inclusive offset window for one range lookup.
@@ -84,7 +92,7 @@ struct Args {
 
 fn main() -> eyre::Result<()> {
     let args = parse_args()?;
-    refuse_large_worst_case(&args)?;
+    refuse_large_payload(&args)?;
     prepare_dir(&args.dir)?;
     println!(
         "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} allocator=system jemalloc=off",
@@ -96,6 +104,9 @@ fn main() -> eyre::Result<()> {
         println!(
             "mode=worst-case data_proof_bytes={DATA_PROOF_BYTES} data_proof_branches={DATA_PROOF_LAYERS} tx_proof_bytes={TX_PROOF_BYTES} tx_group_chunks={MAX_DATA_TX_CHUNKS} raw_data_proof_bytes={raw} full_partition_chunks={PARTITION_CHUNKS} full_partition_raw_data_proof_bytes={full}"
         );
+    } else if args.mid {
+        let raw = u64::from(args.chunks) * args.path_bytes as u64;
+        println!("mode=mid raw_data_path_bytes={raw}");
     } else {
         println!("mode=filled");
     }
@@ -291,7 +302,9 @@ fn read_phase(
         open,
         |store, i| {
             let at = sample_offset(i.wrapping_add(3), args.chunks);
-            let path = data_path_bytes(args, at);
+            // One changed byte. The same bytes let MDBX skip the flush while
+            // RocksDB still syncs the WAL.
+            let path = rewritten_data_path(args, at);
             store.update(|tx| {
                 tx.write_data_path_updates(vec![(
                     PartitionChunkOffset::from(at),
@@ -311,11 +324,11 @@ fn read_phase(
             let at = sample_offset(i.wrapping_add(4), args.chunks);
             let tx_start = at / args.tx_chunks * args.tx_chunks;
             let root = hash_at(u64::from(tx_start) + 0x1000_0000);
-            // A second placement. The first call appends. Later calls on the same
-            // root read the row and find this info already stored.
+            // Distinct from the indexed row and from every other sample, so
+            // the read-before-write always appends and both engines commit.
             let info = DataRootInfo {
                 start_offset: RelativeChunkOffset(-1),
-                data_size: indexed_data_size(args, 1),
+                data_size: indexed_data_size(args, 1).saturating_add(u64::from(i) + 1),
             };
             store.update(|tx| tx.add_data_root_info(root, &info))
         },
@@ -594,14 +607,15 @@ fn mdbx_map_bytes(chunks: u32, path_bytes: usize, worst_case: bool) -> usize {
         .saturating_mul(path_bytes as u64)
         .saturating_mul(4)
         .saturating_add(512 * 1024 * 1024);
-    // Worst-case uses the production submodule map (2 TiB). The filled mode
-    // stays inside 8 GiB so the small comparison run does not reserve more.
-    let max_map = if worst_case {
+    // The cap is a virtual map. Growth stays at the 10 MiB step. A small
+    // filled run stays inside 8 GiB. `--mid` and `--worst-case` may use the
+    // estimate, up to the production submodule cap of 2 TiB.
+    let ceiling = if worst_case || estimate > FILLED_MAP_CEILING {
         2 * TERABYTE as u64
     } else {
-        8 << 30
+        FILLED_MAP_CEILING
     };
-    let cap = estimate.clamp(1 << 30, max_map);
+    let cap = estimate.clamp(1 << 30, ceiling);
     usize::try_from(cap).unwrap_or(usize::MAX)
 }
 
@@ -614,6 +628,14 @@ fn indexed_data_size(args: &Args, count: u32) -> u64 {
         u64::from(count)
     };
     chunks * CHUNK_SIZE
+}
+
+/// Stored path with the last byte inverted. Same length, different value.
+fn rewritten_data_path(args: &Args, offset: u32) -> Vec<u8> {
+    let mut path = data_path_bytes(args, offset);
+    let last = path.len() - 1;
+    path[last] ^= 0xff;
+    path
 }
 
 fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
@@ -693,19 +715,30 @@ fn fill_span(out: &mut [u8], state: &mut u64) {
     }
 }
 
-fn refuse_large_worst_case(args: &Args) -> eyre::Result<()> {
-    if !args.worst_case {
+fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
+    let raw = u64::from(args.chunks)
+        * if args.worst_case {
+            DATA_PROOF_BYTES as u64
+        } else {
+            args.path_bytes as u64
+        };
+    let worst_over = args.worst_case && raw > LARGE_RAW_BYTES;
+    if !args.mid && !worst_over {
         return Ok(());
     }
-    let raw = u64::from(args.chunks) * DATA_PROOF_BYTES as u64;
     let allowed = std::env::var("IRYS_INDEX_BENCH_LARGE").ok().as_deref() == Some("1");
-    if raw > LARGE_RAW_BYTES && !allowed {
+    if allowed {
+        return Ok(());
+    }
+    if args.mid {
         eyre::bail!(
-            "worst-case raw data proofs are {raw} bytes. Set IRYS_INDEX_BENCH_LARGE=1 to write them. A full partition is --chunks {PARTITION_CHUNKS} ({full} raw bytes per engine).",
-            full = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64
+            "--mid writes {raw} raw data-path bytes per engine (about 9 GiB on disk, two engines). Set IRYS_INDEX_BENCH_LARGE=1 to run it."
         );
     }
-    Ok(())
+    eyre::bail!(
+        "worst-case raw data proofs are {raw} bytes. Set IRYS_INDEX_BENCH_LARGE=1 to write them. A full partition is --chunks {PARTITION_CHUNKS} ({full} raw bytes per engine).",
+        full = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64
+    );
 }
 
 fn dir_usage(path: &Path) -> eyre::Result<(u64, u64)> {
@@ -777,6 +810,8 @@ fn parse_args() -> eyre::Result<Args> {
     let mut tx_chunks: Option<u32> = None;
     let mut path_bytes: Option<usize> = None;
     let mut worst_case = false;
+    let mut mid = false;
+    let mut chunks_set = false;
     let mut reads = 1024_u32;
     let mut range_len = 32_u32;
     let mut block_cache: Option<usize> = None;
@@ -788,7 +823,10 @@ fn parse_args() -> eyre::Result<Args> {
                 std::process::exit(0);
             }
             "--dir" => dir = Some(PathBuf::from(required(&mut it, &flag)?)),
-            "--chunks" => chunks = required(&mut it, &flag)?.parse()?,
+            "--chunks" => {
+                chunks = required(&mut it, &flag)?.parse()?;
+                chunks_set = true;
+            }
             "--batch" => batch = required(&mut it, &flag)?.parse()?,
             "--tx-chunks" => tx_chunks = Some(required(&mut it, &flag)?.parse()?),
             "--path-bytes" => path_bytes = Some(required(&mut it, &flag)?.parse()?),
@@ -796,6 +834,7 @@ fn parse_args() -> eyre::Result<Args> {
             "--range-len" => range_len = required(&mut it, &flag)?.parse()?,
             "--rocks-block-cache" => block_cache = Some(required(&mut it, &flag)?.parse()?),
             "--worst-case" => worst_case = true,
+            "--mid" => mid = true,
             other => eyre::bail!("unknown argument {other}"),
         }
     }
@@ -808,6 +847,18 @@ fn parse_args() -> eyre::Result<Args> {
     }
     if worst_case && tx_chunks.is_some() {
         eyre::bail!("--tx-chunks does not apply to --worst-case");
+    }
+    if mid && worst_case {
+        eyre::bail!("--mid does not apply to --worst-case");
+    }
+    if mid && path_bytes.is_some() {
+        eyre::bail!("--path-bytes does not apply to --mid");
+    }
+    if mid && chunks_set {
+        eyre::bail!("--chunks does not apply to --mid");
+    }
+    if mid {
+        chunks = MID_CHUNKS;
     }
     let path_bytes = if worst_case {
         DATA_PROOF_BYTES
@@ -833,6 +884,7 @@ fn parse_args() -> eyre::Result<Args> {
         tx_chunks,
         path_bytes,
         worst_case,
+        mid,
         reads,
         range_len,
         block_cache,
@@ -845,12 +897,15 @@ fn required(it: &mut impl Iterator<Item = String>, flag: &str) -> eyre::Result<S
 
 fn print_help() {
     eprintln!(
-        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--worst-case]\n\
+        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--mid] [--worst-case]\n\
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
 --reads N (default 1024) is the sample count for each shape: data_path_random, data_path_seq, serve, range, rmw_path, rmw_root.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
+rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit.\n\
 Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache.\n\
+--mid writes {MID_CHUNKS} chunks of 4096-byte paths (about 4 GiB raw per engine). \
+It needs IRYS_INDEX_BENCH_LARGE=1. Do not combine it with --chunks, --path-bytes, or --worst-case.\n\
 --worst-case stores a {DATA_PROOF_BYTES}-byte max data proof on every chunk \
 (a max transaction is {MAX_DATA_TX_CHUNKS} chunks). \
 A full partition is --chunks {PARTITION_CHUNKS} and requires IRYS_INDEX_BENCH_LARGE=1."
@@ -860,9 +915,11 @@ A full partition is --chunks {PARTITION_CHUNKS} and requires IRYS_INDEX_BENCH_LA
 #[cfg(test)]
 mod tests {
     use super::{
-        DATA_PROOF_BYTES, DATA_PROOF_LAYERS, HASH_SIZE, LEAF_SIZE, MAX_DATA_TX_CHUNKS, NOTE_SIZE,
-        PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, pairing_layers, parse_diskstats,
-        parse_mount_line, percentile, proof_bytes, sample_offset, seq_offset, shaped_proof,
+        Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, FILLED_MAP_CEILING, HASH_SIZE, LEAF_SIZE,
+        MAX_DATA_TX_CHUNKS, MID_CHUNKS, NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES,
+        TX_PROOF_LAYERS, data_path_bytes, mdbx_map_bytes, pairing_layers, parse_diskstats,
+        parse_mount_line, percentile, proof_bytes, rewritten_data_path, sample_offset, seq_offset,
+        shaped_proof,
     };
 
     #[test]
@@ -903,6 +960,47 @@ mod tests {
         assert_eq!(partition / max, 3);
         assert_eq!(partition % max, 12_619_840);
         assert_eq!(3 * max + 12_619_840, partition);
+    }
+
+    #[test]
+    fn comparison_map_stays_small_and_mid_uses_the_estimate() {
+        assert_eq!(mdbx_map_bytes(16_384, 4096, false), 1 << 30);
+        let estimate = u64::from(MID_CHUNKS) * 4096 * 4 + 512 * 1024 * 1024;
+        assert!(estimate > FILLED_MAP_CEILING);
+        assert_eq!(
+            mdbx_map_bytes(MID_CHUNKS, 4096, false),
+            usize::try_from(estimate).unwrap()
+        );
+        let worst = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64 * 4 + 512 * 1024 * 1024;
+        let chunks = u32::try_from(PARTITION_CHUNKS).unwrap();
+        assert_eq!(
+            mdbx_map_bytes(chunks, DATA_PROOF_BYTES, true),
+            usize::try_from(worst).unwrap()
+        );
+    }
+
+    #[test]
+    fn rewrite_changes_only_the_last_byte() {
+        let args = Args {
+            dir: std::path::PathBuf::from("index-bench"),
+            chunks: 8,
+            batch: 8,
+            tx_chunks: 4,
+            path_bytes: 4096,
+            worst_case: false,
+            mid: false,
+            reads: 1,
+            range_len: 4,
+            block_cache: 1024,
+        };
+        let stored = data_path_bytes(&args, 3);
+        let rewritten = rewritten_data_path(&args, 3);
+        assert_eq!(rewritten.len(), stored.len());
+        assert_eq!(
+            &rewritten[..rewritten.len() - 1],
+            &stored[..stored.len() - 1]
+        );
+        assert_ne!(rewritten.last(), stored.last());
     }
 
     #[test]
