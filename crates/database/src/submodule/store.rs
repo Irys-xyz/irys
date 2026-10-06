@@ -453,6 +453,18 @@ impl SubmoduleIndex {
         Ok(Self::Rocks(RocksSubmoduleStore::open(path)?))
     }
 
+    /// Bench entry. Production uses [`Self::open_rocks`] and the shared cache size.
+    #[cfg(feature = "rocksdb")]
+    pub fn open_rocks_with_block_cache(
+        path: impl AsRef<Path>,
+        block_cache_bytes: usize,
+    ) -> eyre::Result<Self> {
+        Ok(Self::Rocks(RocksSubmoduleStore::open_with_block_cache(
+            path,
+            block_cache_bytes,
+        )?))
+    }
+
     /// Settle on-disk files before a directory-size measurement.
     ///
     /// MDBX durable commits are already on disk. RocksDB flushes memtables,
