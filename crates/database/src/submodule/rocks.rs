@@ -255,6 +255,26 @@ pub struct RocksSubmoduleStore {
     db: Arc<DB>,
     write: Arc<Mutex<()>>,
     path: PathBuf,
+    /// Statistics object from the `Options` that opened this DB.
+    ///
+    /// The DB copies that shared pointer. Ticker reads have to use this
+    /// object, so the bench keeps it. Production open leaves it empty.
+    /// Dump and persist periods are zero: a periodic stats write would show
+    /// up as disk writes during a read sample.
+    stats: Option<Arc<Options>>,
+}
+
+/// Background work visible around one bench read shape.
+///
+/// Compaction and flush counters do not need statistics. `no_file_opens` is
+/// cumulative since open and is present only when the bench enabled tickers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RocksBackground {
+    pub compactions: u64,
+    pub flushes: u64,
+    pub compaction_pending: u64,
+    pub flush_pending: u64,
+    pub no_file_opens: Option<u64>,
 }
 
 impl std::fmt::Debug for RocksSubmoduleStore {
@@ -286,9 +306,25 @@ impl RocksSubmoduleStore {
 
     /// Open with an explicit preset. [`Self::open`] stays on the baseline.
     pub fn open_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        Self::open_inner(path, tuning, false)
+    }
+
+    /// Bench open. Same options as [`Self::open_with`], plus ticker counters.
+    ///
+    /// Histograms and timers stay off. Production [`Self::open`] does not
+    /// call this.
+    pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        Self::open_inner(path, tuning, true)
+    }
+
+    fn open_inner(
+        path: impl AsRef<Path>,
+        tuning: RocksTuning,
+        collect_stats: bool,
+    ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         check_schema_file(&path)?;
-        let db = open_db(&path, &tuning)?;
+        let (db, stats) = open_db(&path, &tuning, collect_stats)?;
         ensure_schema_row(&db)?;
         let marker = path.join(SCHEMA_FILE);
         if !marker.exists() {
@@ -298,6 +334,21 @@ impl RocksSubmoduleStore {
             db: Arc::new(db),
             write: Arc::new(Mutex::new(())),
             path,
+            stats,
+        })
+    }
+
+    /// Compactions, flushes, and table opens. Safe to call during reads.
+    pub fn background(&self) -> eyre::Result<RocksBackground> {
+        Ok(RocksBackground {
+            compactions: property_u64(&self.db, rocksdb::properties::NUM_RUNNING_COMPACTIONS)?,
+            flushes: property_u64(&self.db, rocksdb::properties::NUM_RUNNING_FLUSHES)?,
+            compaction_pending: property_u64(&self.db, rocksdb::properties::COMPACTION_PENDING)?,
+            flush_pending: property_u64(&self.db, rocksdb::properties::MEM_TABLE_FLUSH_PENDING)?,
+            no_file_opens: self
+                .stats
+                .as_ref()
+                .map(|opts| opts.get_ticker_count(rocksdb::statistics::Ticker::NoFileOpens)),
         })
     }
 
@@ -364,7 +415,11 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
     }
 }
 
-fn open_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<DB> {
+fn open_db(
+    path: &Path,
+    tuning: &RocksTuning,
+    collect_stats: bool,
+) -> eyre::Result<(DB, Option<Arc<Options>>)> {
     let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
@@ -376,11 +431,27 @@ fn open_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<DB> {
     db_opts.set_recycle_log_file_num(4);
     db_opts.set_max_open_files(512);
     db_opts.set_use_fsync(true);
+    if collect_stats {
+        // Tickers only. Timers and histograms stay off.
+        db_opts.enable_statistics();
+        db_opts.set_statistics_level(rocksdb::statistics::StatsLevel::ExceptHistogramOrTimers);
+        db_opts.set_stats_dump_period_sec(0);
+        db_opts.set_stats_persist_period_sec(0);
+    }
 
     let families = Cf::ALL.into_iter().map(|cf| {
         rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(&cache, cf, tuning))
     });
-    DB::open_cf_descriptors(&db_opts, path, families).wrap_err("open rocksdb submodule index")
+    let db = DB::open_cf_descriptors(&db_opts, path, families)
+        .wrap_err("open rocksdb submodule index")?;
+    let stats = collect_stats.then(|| Arc::new(db_opts));
+    Ok((db, stats))
+}
+
+fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {
+    db.property_int_value(name)
+        .wrap_err("read rocksdb property")?
+        .ok_or_else(|| eyre::eyre!("rocksdb property missing"))
 }
 
 fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
@@ -1168,6 +1239,22 @@ mod tests {
             let store = RocksSubmoduleStore::open_with(&path, preset)?;
             drop(store);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn bench_open_counts_file_opens_and_production_open_does_not() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_stats")
+            .build();
+        let bench = RocksSubmoduleStore::open_with_stats(
+            dir.path().join("bench"),
+            RocksTuning::baseline(),
+        )?;
+        let bg = bench.background()?;
+        assert!(bg.no_file_opens.is_some());
+        let plain = RocksSubmoduleStore::open(dir.path().join("plain"))?;
+        assert!(plain.background()?.no_file_opens.is_none());
         Ok(())
     }
 }

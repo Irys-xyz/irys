@@ -52,10 +52,15 @@ const LEAF_SIZE: usize = HASH_SIZE + NOTE_SIZE;
 const LARGE_RAW_BYTES: u64 = 8 << 30;
 /// Filled run past a typical HDD cache. 4096-byte paths, about 4 GiB raw.
 const MID_CHUNKS: u32 = 1_000_000;
-/// `--mid` puts this many transactions in one MDBX commit. Rocks stays at one.
+/// Transactions in one grouped commit. `--mid` uses this for MDBX.
+/// `--group-commit` uses it for both engines.
 const MID_MDBX_TXS_PER_COMMIT: u32 = 8;
-/// `--mid` MDBX data-path commit size. Rocks stays at `--batch` (512).
+/// Data-path rows in one grouped commit. `--mid` uses this for MDBX.
+/// `--group-commit` uses it for both engines. Rocks without the flag stays
+/// at `--batch`.
 const MID_MDBX_PATH_BATCH: u32 = 2048;
+/// First samples reported apart from the rest, in arrival order.
+const HEAD_SAMPLES: usize = 32;
 /// Filled runs at or below this stay inside an 8 GiB map. `--mid` is above it.
 const FILLED_MAP_CEILING: u64 = 8 << 30;
 
@@ -162,6 +167,8 @@ struct Args {
     rocks: RocksTuning,
     /// Databases kept open together. `mem-dbs` only.
     dbs: u32,
+    /// Both engines use the `--mid` MDBX commit sizes.
+    group_commit: bool,
 }
 
 fn main() -> eyre::Result<()> {
@@ -169,7 +176,7 @@ fn main() -> eyre::Result<()> {
     refuse_large_payload(&args)?;
     prepare_dir(&args.dir)?;
     println!(
-        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} dbs={} allocator=system jemalloc=off",
+        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} dbs={} group_commit={} allocator=system jemalloc=off",
         args.chunks,
         args.tx_chunks,
         args.batch,
@@ -179,6 +186,7 @@ fn main() -> eyre::Result<()> {
         args.workload.name(),
         args.engines.name(),
         args.dbs,
+        u8::from(args.group_commit),
     );
     if args.workload.is_worst() {
         let raw = u64::from(args.chunks) * DATA_PROOF_BYTES as u64;
@@ -188,10 +196,11 @@ fn main() -> eyre::Result<()> {
         );
     } else if args.workload.is_mid() {
         let raw = u64::from(args.chunks) * args.path_bytes as u64;
-        let mdbx = commits_for(true, args.batch, true);
+        let mdbx = commits_for(true, args.batch, true, args.group_commit);
+        let rocks = commits_for(true, args.batch, false, args.group_commit);
         println!(
-            "mode=mid raw_data_path_bytes={raw} mdbx_txs_per_commit={} mdbx_path_batch={}",
-            mdbx.txs_per_commit, mdbx.path_batch
+            "mode=mid raw_data_path_bytes={raw} mdbx_txs_per_commit={} mdbx_path_batch={} rocks_txs_per_commit={} rocks_path_batch={}",
+            mdbx.txs_per_commit, mdbx.path_batch, rocks.txs_per_commit, rocks.path_batch
         );
     } else if args.workload.is_memory() {
         println!("mode={} {}", args.workload.name(), memory_predict(&args));
@@ -204,7 +213,7 @@ fn main() -> eyre::Result<()> {
         let mdbx_dir = args.dir.join("mdbx");
         fs::create_dir_all(&mdbx_dir)?;
         let map_bytes = mdbx_map_bytes(args.chunks, args.path_bytes, args.workload.is_worst());
-        let mdbx_commits = commits_for(args.workload.is_mid(), args.batch, true);
+        let mdbx_commits = commits_for(args.workload.is_mid(), args.batch, true, args.group_commit);
         println!(
             "engine=mdbx sync=durable geometry_max_bytes={map_bytes} txs_per_commit={} path_batch={}",
             mdbx_commits.txs_per_commit, mdbx_commits.path_batch
@@ -221,7 +230,8 @@ fn main() -> eyre::Result<()> {
     if args.engines.includes_rocks() {
         let rocks_dir = args.dir.join("rocks");
         fs::create_dir_all(&rocks_dir)?;
-        let rocks_commits = commits_for(args.workload.is_mid(), args.batch, false);
+        let rocks_commits =
+            commits_for(args.workload.is_mid(), args.batch, false, args.group_commit);
         let tuning = args.rocks;
         println!(
             "engine=rocks sync=wal_fsync {} txs_per_commit={} path_batch={}",
@@ -236,8 +246,9 @@ fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-/// One durable `update`. `--mid` groups MDBX only. Rocks keeps one transaction
-/// and the `--batch` data-path size, so its fsync count stays the small-tx shape.
+/// One durable `update`. `--mid` groups MDBX only. `--group-commit` applies
+/// that grouping to both engines. Without it, Rocks keeps one transaction
+/// and the `--batch` data-path size.
 struct CommitGrouping {
     txs_per_commit: u32,
     path_batch: u32,
@@ -373,7 +384,7 @@ fn run_offset_rows(args: &Args) -> eyre::Result<()> {
     if args.reads > 0 {
         let disk = disk_id(&dir)?;
         let open = |path: &Path| SubmoduleIndex::open_rocks_with(path, args.rocks);
-        time_shape(
+        time_reopen(
             &dir,
             disk.as_ref(),
             "offset_random",
@@ -428,8 +439,8 @@ fn read_every_offset(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
     })
 }
 
-fn commits_for(mid: bool, batch: u32, mdbx: bool) -> CommitGrouping {
-    if mid && mdbx {
+fn commits_for(mid: bool, batch: u32, mdbx: bool, group_commit: bool) -> CommitGrouping {
+    if group_commit || (mid && mdbx) {
         CommitGrouping {
             txs_per_commit: MID_MDBX_TXS_PER_COMMIT,
             path_batch: batch.max(MID_MDBX_PATH_BATCH),
@@ -473,7 +484,7 @@ fn measure(
     );
     println!("  logical_bytes={logical} allocated_bytes={allocated}");
     drop(store);
-    read_phase(dir, args, &open)?;
+    read_phase(dir, engine, args, &open)?;
     note_mem(engine, "after_reads", &watch);
     print_mem(engine, "peak", watch.stop());
     Ok(())
@@ -686,8 +697,13 @@ fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyr
 /// Cold lookups. Each shape reopens the engine and drops the OS file cache.
 /// A shared Rocks block cache would turn the sequential scan into hits on the
 /// random sample. `drop_caches` is not used: another bench may share the host.
+///
+/// `data_path_random` then runs again on the same open engine. That pass
+/// still drops the page cache. The Rocks block cache stays warm, and table
+/// files stay open.
 fn read_phase(
     dir: &Path,
+    engine: &str,
     args: &Args,
     open: &impl Fn(&Path) -> eyre::Result<SubmoduleIndex>,
 ) -> eyre::Result<()> {
@@ -699,16 +715,38 @@ fn read_phase(
     let disk_name = disk.as_ref().map(|id| id.name.as_str()).unwrap_or("none");
     println!("  cold=fadvise disk={disk_name}");
     // Scattered chunk reads (recall, single-chunk serve).
+    let mut random = |store: &SubmoduleIndex, i: u32| {
+        read_one_data_path(store, args, sample_offset(i, args.chunks))
+    };
+    let (store, files) = open_for_shape(dir, open)?;
     time_shape(
-        dir,
         disk.as_ref(),
         "data_path_random",
         args.reads,
-        open,
-        |store, i| read_one_data_path(store, args, sample_offset(i, args.chunks)),
+        &store,
+        files,
+        false,
+        &mut random,
     )?;
-    // Consecutive chunk reads (a span serve). Same call, offsets 0, 1, 2, ...
+    // Same engine. Pages are dropped again. Tables stay open.
+    let files = evict_cache(dir)?;
+    if engine == "rocks" {
+        println!("  note shape=data_path_random_open kept_open=1 page_cache=cold block_cache=warm");
+    } else {
+        println!("  note shape=data_path_random_open kept_open=1 page_cache=cold");
+    }
     time_shape(
+        disk.as_ref(),
+        "data_path_random_open",
+        args.reads,
+        &store,
+        files,
+        true,
+        &mut random,
+    )?;
+    drop(store);
+    // Consecutive chunk reads (a span serve). Same call, offsets 0, 1, 2, ...
+    time_reopen(
         dir,
         disk.as_ref(),
         "data_path_seq",
@@ -716,7 +754,7 @@ fn read_phase(
         open,
         |store, i| read_one_data_path(store, args, seq_offset(i, args.chunks)),
     )?;
-    time_shape(dir, disk.as_ref(), "serve", args.reads, open, |store, i| {
+    time_reopen(dir, disk.as_ref(), "serve", args.reads, open, |store, i| {
         let at = sample_offset(i.wrapping_add(1), args.chunks);
         let expected = hash_at(u64::from(at) + 0x2000_0000);
         store.view(|tx| {
@@ -735,7 +773,7 @@ fn read_phase(
         })
     })?;
     let window = args.range_len.min(args.chunks);
-    time_shape(dir, disk.as_ref(), "range", args.reads, open, |store, i| {
+    time_reopen(dir, disk.as_ref(), "range", args.reads, open, |store, i| {
         let start = sample_offset(i.wrapping_add(2), args.chunks - window + 1);
         let end = start + window - 1;
         let rows = store.view(|tx| {
@@ -753,7 +791,7 @@ fn read_phase(
         );
         Ok(())
     })?;
-    time_shape(
+    time_reopen(
         dir,
         disk.as_ref(),
         "rmw_path",
@@ -773,7 +811,7 @@ fn read_phase(
             })
         },
     )?;
-    time_shape(
+    time_reopen(
         dir,
         disk.as_ref(),
         "rmw_root",
@@ -814,7 +852,19 @@ fn seq_offset(i: u32, chunks: u32) -> u32 {
     i % chunks
 }
 
-fn time_shape(
+fn open_for_shape(
+    dir: &Path,
+    open: &impl Fn(&Path) -> eyre::Result<SubmoduleIndex>,
+) -> eyre::Result<(SubmoduleIndex, u32)> {
+    // Drop pages left by the previous shape, then open a new cache.
+    evict_cache(dir)?;
+    let store = open(dir)?;
+    // Open reads metadata. Drop those pages. Rocks keeps filters it copied.
+    let files = evict_cache(dir)?;
+    Ok((store, files))
+}
+
+fn time_reopen(
     dir: &Path,
     disk: Option<&DiskId>,
     shape: &str,
@@ -822,25 +872,49 @@ fn time_shape(
     open: &impl Fn(&Path) -> eyre::Result<SubmoduleIndex>,
     mut one: impl FnMut(&SubmoduleIndex, u32) -> eyre::Result<()>,
 ) -> eyre::Result<()> {
-    // Drop pages left by the previous shape, then open a new cache.
-    evict_cache(dir)?;
-    let store = open(dir)?;
-    // Open reads metadata. Drop those pages. Rocks keeps filters it copied.
-    let files = evict_cache(dir)?;
+    let (store, files) = open_for_shape(dir, open)?;
+    time_shape(disk, shape, reads, &store, files, false, &mut one)?;
+    drop(store);
+    Ok(())
+}
+
+fn time_shape(
+    disk: Option<&DiskId>,
+    shape: &str,
+    reads: u32,
+    store: &SubmoduleIndex,
+    files: u32,
+    kept_open: bool,
+    one: &mut impl FnMut(&SubmoduleIndex, u32) -> eyre::Result<()>,
+) -> eyre::Result<()> {
+    let opens_before = print_rocks_bg(store, shape, false, None)?;
     let before = disk_counters(disk);
     let mut samples = Vec::with_capacity(usize::try_from(reads)?);
     for i in 0..reads {
         let started = Instant::now();
-        one(&store, i)?;
+        one(store, i)?;
         samples.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
     }
-    drop(store);
     let after = disk_counters(disk);
-    samples.sort_unstable();
-    let n = samples.len() as u64;
-    let p50 = percentile(&samples, 50);
-    let p99 = percentile(&samples, 99);
-    let max = samples.last().copied().unwrap_or(0);
+    print_rocks_bg(store, shape, true, opens_before)?;
+    let (head, tail) = head_tail(&samples);
+    let all = ranks(&samples);
+    let kept = u8::from(kept_open);
+    let line = format!(
+        "  read shape={shape} n={} p50_us={} p99_us={} max_us={} head_n={} head_p50_us={} head_p99_us={} head_max_us={} tail_n={} tail_p50_us={} tail_p99_us={} tail_max_us={} evict_files={files} kept_open={kept}",
+        all.n,
+        all.p50,
+        all.p99,
+        all.max,
+        head.n,
+        head.p50,
+        head.p99,
+        head.max,
+        tail.n,
+        tail.p50,
+        tail.p99,
+        tail.max,
+    );
     match (before, after) {
         (Some(before), Some(after)) => {
             let disk_reads = after.reads.saturating_sub(before.reads);
@@ -853,18 +927,71 @@ fn time_shape(
                 .write_sectors
                 .saturating_sub(before.write_sectors)
                 .saturating_mul(512);
+            let n = all.n.max(1);
             println!(
-                "  read shape={shape} n={n} p50_us={p50} p99_us={p99} max_us={max} evict_files={files} disk_reads={disk_reads} disk_read_bytes={disk_read_bytes} disk_writes={disk_writes} disk_write_bytes={disk_write_bytes} per_lookup_read_bytes={}",
+                "{line} disk_reads={disk_reads} disk_read_bytes={disk_read_bytes} disk_writes={disk_writes} disk_write_bytes={disk_write_bytes} per_lookup_read_bytes={}",
                 disk_read_bytes / n
             );
         }
-        _ => {
-            println!(
-                "  read shape={shape} n={n} p50_us={p50} p99_us={p99} max_us={max} evict_files={files} disk=none"
-            );
-        }
+        _ => println!("{line} disk=none"),
     }
     Ok(())
+}
+
+fn print_rocks_bg(
+    store: &SubmoduleIndex,
+    shape: &str,
+    after: bool,
+    opens_before: Option<u64>,
+) -> eyre::Result<Option<u64>> {
+    let Some(bg) = store.rocks_background()? else {
+        return Ok(None);
+    };
+    let when = if after { "after" } else { "before" };
+    match (after, opens_before, bg.no_file_opens) {
+        (true, Some(before), Some(now)) => println!(
+            "  rocks_bg shape={shape} when={when} compactions={} flushes={} compaction_pending={} flush_pending={} no_file_opens={now} no_file_opens_delta={}",
+            bg.compactions,
+            bg.flushes,
+            bg.compaction_pending,
+            bg.flush_pending,
+            now.saturating_sub(before),
+        ),
+        (_, _, Some(now)) => println!(
+            "  rocks_bg shape={shape} when={when} compactions={} flushes={} compaction_pending={} flush_pending={} no_file_opens={now}",
+            bg.compactions, bg.flushes, bg.compaction_pending, bg.flush_pending,
+        ),
+        _ => println!(
+            "  rocks_bg shape={shape} when={when} compactions={} flushes={} compaction_pending={} flush_pending={}",
+            bg.compactions, bg.flushes, bg.compaction_pending, bg.flush_pending,
+        ),
+    }
+    Ok(bg.no_file_opens)
+}
+
+struct Rank {
+    n: u64,
+    p50: u64,
+    p99: u64,
+    max: u64,
+}
+
+/// Percentiles of `samples` in the order given. Sorting is a copy.
+fn ranks(samples: &[u64]) -> Rank {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    Rank {
+        n: sorted.len() as u64,
+        p50: percentile(&sorted, 50),
+        p99: percentile(&sorted, 99),
+        max: sorted.last().copied().unwrap_or(0),
+    }
+}
+
+/// First [`HEAD_SAMPLES`] stay in arrival order. The rest are the tail.
+fn head_tail(samples: &[u64]) -> (Rank, Rank) {
+    let split = HEAD_SAMPLES.min(samples.len());
+    (ranks(&samples[..split]), ranks(&samples[split..]))
 }
 
 /// `i` maps onto `0..span`. The sequence is fixed so two runs hit the same keys.
@@ -1300,6 +1427,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     let mut rocks: Option<RocksTuning> = None;
     let mut rocks_set = false;
     let mut block_cache: Option<usize> = None;
+    let mut group_commit = false;
     let mut it = args.into_iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -1340,6 +1468,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             }
             "--worst-case" => worst_case = true,
             "--mid" => mid = true,
+            "--group-commit" => group_commit = true,
             other => eyre::bail!("unknown argument {other}"),
         }
     }
@@ -1348,6 +1477,12 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         eyre::bail!("--dir is required");
     };
     let workload = resolve_workload(profile, mid, worst_case)?;
+    if group_commit && workload.is_memory() {
+        eyre::bail!(
+            "--group-commit does not apply to --profile {}",
+            workload.name()
+        );
+    }
     if workload.is_memory() {
         if engines_set && engines != Engines::Rocks {
             eyre::bail!("--profile {} runs rocks only", workload.name());
@@ -1416,6 +1551,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         range_len,
         rocks,
         dbs,
+        group_commit,
     })
 }
 
@@ -1467,7 +1603,7 @@ fn print_rocks() {
 fn print_help() {
     let presets = RocksTuning::preset_names();
     eprintln!(
-        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--rocks <preset>] [--mid] [--worst-case] [--list-rocks]\n\
+        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--rocks <preset>] [--mid] [--group-commit] [--worst-case] [--list-rocks]\n\
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
 --profile selects the workload. filled is the default. mid is --mid. worst is --worst-case and still takes --chunks.\n\
@@ -1480,14 +1616,15 @@ offset-rows writes --chunks offset rows and no data paths, then does cold point 
 Presets: {presets}. Each preset changes one setting. \
 --rocks-block-cache overrides that preset's cache. A new block size needs an empty directory.\n\
 --list-rocks prints the presets and exits.\n\
---reads N (default 1024) is the sample count for each shape: data_path_random, data_path_seq, serve, range, rmw_path, rmw_root.\n\
-data_path_random is scattered get_data_path_by_offset. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
+--reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root.\n\
+data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
+Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
+RocksDB prints rocks_bg before and after each shape: running compactions, running flushes, pending flags, and no_file_opens.\n\
 rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit.\n\
-Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache.\n\
+Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache. data_path_random_open keeps the Rocks block cache.\n\
 Each engine prints mem lines. rss_kb is resident. anon_kb is heap. file_kb is mapped file pages. size_kb is virtual.\n\
+--group-commit makes both engines commit {MID_MDBX_TXS_PER_COMMIT} transactions and {MID_MDBX_PATH_BATCH} data-path rows (or --batch, when that is larger). Without it, only --mid MDBX uses those sizes. RocksDB stays at one transaction and --batch rows.\n\
 --mid writes {MID_CHUNKS} chunks of 4096-byte paths (about 4 GiB raw per engine). \
-MDBX commits {MID_MDBX_TXS_PER_COMMIT} transactions at a time and {MID_MDBX_PATH_BATCH} data-path rows at a time. \
-RocksDB stays at one transaction and --batch rows. \
 It needs IRYS_INDEX_BENCH_LARGE=1. Do not combine it with --chunks, --path-bytes, or --worst-case.\n\
 --worst-case stores a {DATA_PROOF_BYTES}-byte max data proof on every chunk \
 (a max transaction is {MAX_DATA_TX_CHUNKS} chunks). \
@@ -1501,11 +1638,12 @@ mod tests {
 
     use super::{
         Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, Engines, FILLED_MAP_CEILING, HASH_SIZE,
-        LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH, MID_MDBX_TXS_PER_COMMIT,
-        NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, Workload, bloom_bytes,
-        commits_for, data_path_bytes, mdbx_map_bytes, pairing_layers, parse_arg_list,
-        parse_diskstats, parse_mount_line, parse_proc_status, percentile, proof_bytes,
-        rewritten_data_path, sample_offset, seq_offset, shaped_proof,
+        HEAD_SAMPLES, LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH,
+        MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS,
+        Workload, bloom_bytes, commits_for, data_path_bytes, head_tail, mdbx_map_bytes,
+        pairing_layers, parse_arg_list, parse_diskstats, parse_mount_line, parse_proc_status,
+        percentile, proof_bytes, ranks, rewritten_data_path, sample_offset, seq_offset,
+        shaped_proof,
     };
 
     #[test]
@@ -1568,17 +1706,31 @@ VmHWM:\t   8600000 kB
 
     #[test]
     fn mid_groups_mdbx_commits_and_leaves_rocks_alone() {
-        let mdbx = commits_for(true, 512, true);
+        let mdbx = commits_for(true, 512, true, false);
         assert_eq!(mdbx.txs_per_commit, MID_MDBX_TXS_PER_COMMIT);
         assert_eq!(mdbx.path_batch, MID_MDBX_PATH_BATCH);
-        let rocks = commits_for(true, 512, false);
+        let rocks = commits_for(true, 512, false, false);
         assert_eq!(rocks.txs_per_commit, 1);
         assert_eq!(rocks.path_batch, 512);
-        let raised = commits_for(true, 4096, true);
+        let raised = commits_for(true, 4096, true, false);
         assert_eq!(raised.path_batch, 4096);
-        let filled = commits_for(false, 512, true);
+        let filled = commits_for(false, 512, true, false);
         assert_eq!(filled.txs_per_commit, 1);
         assert_eq!(filled.path_batch, 512);
+    }
+
+    #[test]
+    fn group_commit_uses_the_same_sizes_on_both_engines() {
+        let rocks = commits_for(true, 512, false, true);
+        let mdbx = commits_for(true, 512, true, true);
+        assert_eq!(rocks.txs_per_commit, MID_MDBX_TXS_PER_COMMIT);
+        assert_eq!(rocks.path_batch, MID_MDBX_PATH_BATCH);
+        assert_eq!(mdbx.txs_per_commit, rocks.txs_per_commit);
+        assert_eq!(mdbx.path_batch, rocks.path_batch);
+        let filled = commits_for(false, 512, false, true);
+        assert_eq!(filled.txs_per_commit, MID_MDBX_TXS_PER_COMMIT);
+        assert_eq!(filled.path_batch, MID_MDBX_PATH_BATCH);
+        assert_eq!(commits_for(false, 4096, true, true).path_batch, 4096);
     }
 
     #[test]
@@ -1612,6 +1764,7 @@ VmHWM:\t   8600000 kB
             range_len: 4,
             rocks: irys_database::submodule::RocksTuning::baseline().with_block_cache(1024),
             dbs: 1,
+            group_commit: false,
         };
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
@@ -1667,6 +1820,21 @@ VmHWM:\t   8600000 kB
         assert_eq!(defaults.rocks.name, "baseline");
         assert_eq!(defaults.rocks.block_cache_bytes, BLOCK_CACHE_BYTES);
         assert_eq!(defaults.chunks, 4096);
+        assert!(!defaults.group_commit);
+
+        let grouped = parse(&["--dir", "index-bench", "--mid", "--group-commit"]).unwrap();
+        assert!(grouped.group_commit);
+        assert_eq!(grouped.workload, Workload::Mid);
+        assert!(
+            parse(&[
+                "--dir",
+                "index-bench",
+                "--profile",
+                "mem-dbs",
+                "--group-commit"
+            ])
+            .is_err()
+        );
 
         let mid = parse(&["--dir", "index-bench", "--mid"]).unwrap();
         assert_eq!(mid.workload, Workload::Mid);
@@ -1754,6 +1922,28 @@ VmHWM:\t   8600000 kB
         assert_eq!(percentile(&samples, 50), 20);
         assert_eq!(percentile(&samples, 99), 40);
         assert_eq!(percentile(&[], 50), 0);
+    }
+
+    #[test]
+    fn head_percentiles_keep_arrival_order() {
+        let mut samples = vec![5_u64; HEAD_SAMPLES];
+        samples.extend([100, 200, 300, 400]);
+        let (head, tail) = head_tail(&samples);
+        assert_eq!(head.n, HEAD_SAMPLES as u64);
+        assert_eq!(head.p50, 5);
+        assert_eq!(head.max, 5);
+        assert_eq!(tail.n, 4);
+        assert_eq!(tail.p50, 200);
+        assert_eq!(tail.p99, 400);
+        assert_eq!(tail.max, 400);
+        let all = ranks(&samples);
+        assert_eq!(all.n, 36);
+        assert_eq!(all.p50, 5);
+        assert_eq!(all.max, 400);
+        let short = head_tail(&[7, 9]);
+        assert_eq!(short.0.n, 2);
+        assert_eq!(short.1.n, 0);
+        assert_eq!(short.1.max, 0);
     }
 
     #[test]
