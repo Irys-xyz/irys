@@ -14,6 +14,8 @@ use irys_types::{
 };
 use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 
+#[cfg(feature = "rocksdb")]
+use super::rocks::RocksSubmoduleStore;
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
@@ -432,15 +434,35 @@ impl SubmoduleStore for MdbxSubmoduleStore {
     }
 }
 
-/// Which engine holds a submodule index. MDBX is the only variant today.
+/// Which engine holds a submodule index. The node opens MDBX.
+/// A RocksDB variant is compiled with the `rocksdb` feature.
 #[derive(Clone, Debug)]
 pub enum SubmoduleIndex {
     Mdbx(MdbxSubmoduleStore),
+    #[cfg(feature = "rocksdb")]
+    Rocks(RocksSubmoduleStore),
 }
 
 impl SubmoduleIndex {
     pub fn open_mdbx(path: impl AsRef<Path>, args: DatabaseArguments) -> eyre::Result<Self> {
         Ok(Self::Mdbx(MdbxSubmoduleStore::open(path, args)?))
+    }
+
+    #[cfg(feature = "rocksdb")]
+    pub fn open_rocks(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        Ok(Self::Rocks(RocksSubmoduleStore::open(path)?))
+    }
+
+    /// Settle on-disk files before a directory-size measurement.
+    ///
+    /// MDBX durable commits are already on disk. RocksDB flushes memtables,
+    /// compacts each column family, and syncs the WAL.
+    pub fn settle_files(&self) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(_) => Ok(()),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.flush_and_compact(),
+        }
     }
 }
 
@@ -451,6 +473,8 @@ impl SubmoduleStore for SubmoduleIndex {
     ) -> eyre::Result<R> {
         match self {
             Self::Mdbx(store) => store.view(f),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.view(f),
         }
     }
 
@@ -460,6 +484,8 @@ impl SubmoduleStore for SubmoduleIndex {
     ) -> eyre::Result<R> {
         match self {
             Self::Mdbx(store) => store.update(f),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.update(f),
         }
     }
 }
@@ -471,102 +497,186 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{H256, RelativeChunkOffset};
 
-    fn open_store(prefix: &str) -> eyre::Result<(impl Drop, SubmoduleIndex)> {
+    fn each_engine(
+        prefix: &str,
+        f: impl Fn(&SubmoduleIndex) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
         let dir = TempDirBuilder::new().prefix(prefix).build();
-        let store =
+        let mdbx =
             SubmoduleIndex::open_mdbx(dir.path().join("db"), DatabaseArguments::irys_testing()?)?;
-        Ok((dir, store))
+        f(&mdbx)?;
+        #[cfg(feature = "rocksdb")]
+        {
+            let rocks = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+            f(&rocks)?;
+        }
+        Ok(())
     }
 
     #[test]
     fn update_commit_is_visible_to_the_next_view() -> eyre::Result<()> {
-        let (_dir, store) = open_store("submodule_store_commit")?;
-        let offset = PartitionChunkOffset::from(3);
-        let hashes = ChunkPathHashes {
-            data_path_hash: Some(H256::repeat_byte(1)),
-            tx_path_hash: Some(H256::repeat_byte(2)),
-        };
-        store.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
-        let got = store.view(|tx| tx.get_path_hashes_by_offset(offset))?;
-        assert_eq!(got, Some(hashes));
-        Ok(())
+        each_engine("submodule_store_commit", |store| {
+            let offset = PartitionChunkOffset::from(3);
+            let hashes = ChunkPathHashes {
+                data_path_hash: Some(H256::repeat_byte(1)),
+                tx_path_hash: Some(H256::repeat_byte(2)),
+            };
+            store.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
+            let got = store.view(|tx| tx.get_path_hashes_by_offset(offset))?;
+            assert_eq!(got, Some(hashes));
+            Ok(())
+        })
     }
 
     #[test]
     fn failed_update_does_not_commit() -> eyre::Result<()> {
-        let (_dir, store) = open_store("submodule_store_abort")?;
-        let offset = PartitionChunkOffset::from(1);
-        let err = store
-            .update(|tx| -> eyre::Result<()> {
-                tx.set_path_hashes_by_offset(
-                    offset,
-                    ChunkPathHashes {
-                        data_path_hash: Some(H256::repeat_byte(9)),
-                        tx_path_hash: None,
-                    },
-                )?;
-                eyre::bail!("reject batch");
-            })
-            .unwrap_err();
-        assert!(err.to_string().contains("reject batch"));
-        let got = store.view(|tx| tx.get_path_hashes_by_offset(offset))?;
-        assert_eq!(got, None);
-        Ok(())
+        each_engine("submodule_store_abort", |store| {
+            let offset = PartitionChunkOffset::from(1);
+            let err = store
+                .update(|tx| -> eyre::Result<()> {
+                    tx.set_path_hashes_by_offset(
+                        offset,
+                        ChunkPathHashes {
+                            data_path_hash: Some(H256::repeat_byte(9)),
+                            tx_path_hash: None,
+                        },
+                    )?;
+                    eyre::bail!("reject batch");
+                })
+                .unwrap_err();
+            assert!(err.to_string().contains("reject batch"));
+            let got = store.view(|tx| tx.get_path_hashes_by_offset(offset))?;
+            assert_eq!(got, None);
+            Ok(())
+        })
     }
 
     #[test]
     fn write_batch_reads_its_own_uncommitted_appends() -> eyre::Result<()> {
-        let (_dir, store) = open_store("submodule_store_ryw")?;
-        let data_root = H256::repeat_byte(4);
-        store.update(|tx| {
-            tx.add_data_root_info(
-                data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(0),
-                    data_size: 32,
-                },
-            )?;
-            tx.add_data_root_info(
-                data_root,
-                &DataRootInfo {
-                    start_offset: RelativeChunkOffset(8),
-                    data_size: 64,
-                },
-            )?;
-            let infos = tx
-                .get_data_root_infos_for_data_root(data_root)?
-                .expect("uncommitted appends are visible in this batch");
-            assert_eq!(infos.0.len(), 2);
+        each_engine("submodule_store_ryw", |store| {
+            let data_root = H256::repeat_byte(4);
+            store.update(|tx| {
+                tx.add_data_root_info(
+                    data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(0),
+                        data_size: 32,
+                    },
+                )?;
+                tx.add_data_root_info(
+                    data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(8),
+                        data_size: 64,
+                    },
+                )?;
+                let infos = tx
+                    .get_data_root_infos_for_data_root(data_root)?
+                    .expect("uncommitted appends are visible in this batch");
+                assert_eq!(infos.0.len(), 2);
+                Ok(())
+            })?;
+            let infos = store.view(|tx| tx.get_data_root_infos_for_data_root(data_root))?;
+            assert_eq!(infos.expect("committed list").0.len(), 2);
             Ok(())
-        })?;
-        let infos = store.view(|tx| tx.get_data_root_infos_for_data_root(data_root))?;
-        assert_eq!(infos.expect("committed list").0.len(), 2);
-        Ok(())
+        })
     }
 
     #[test]
     fn data_path_batch_keeps_an_existing_tx_path_hash() -> eyre::Result<()> {
-        let (_dir, store) = open_store("submodule_store_data_path_batch")?;
-        let offset = PartitionChunkOffset::from(4);
-        let tx_hash = H256::repeat_byte(7);
-        let data_hash = H256::repeat_byte(8);
-        store.update(|tx| {
-            tx.set_path_hashes_by_offset(
-                offset,
-                ChunkPathHashes {
-                    data_path_hash: None,
-                    tx_path_hash: Some(tx_hash),
-                },
-            )
-        })?;
-        store.update(|tx| tx.write_data_path_updates(vec![(offset, data_hash, vec![1, 2, 3])]))?;
-        let hashes = store
-            .view(|tx| tx.get_path_hashes_by_offset(offset))?
-            .expect("offset row");
-        assert_eq!(hashes.tx_path_hash, Some(tx_hash));
-        assert_eq!(hashes.data_path_hash, Some(data_hash));
-        let path = store.view(|tx| tx.get_full_data_path(data_hash))?;
-        assert_eq!(path, Some(vec![1, 2, 3]));
-        Ok(())
+        each_engine("submodule_store_data_path_batch", |store| {
+            let offset = PartitionChunkOffset::from(4);
+            let tx_hash = H256::repeat_byte(7);
+            let data_hash = H256::repeat_byte(8);
+            store.update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    offset,
+                    ChunkPathHashes {
+                        data_path_hash: None,
+                        tx_path_hash: Some(tx_hash),
+                    },
+                )
+            })?;
+            store.update(|tx| {
+                tx.write_data_path_updates(vec![(offset, data_hash, vec![1, 2, 3])])
+            })?;
+            let hashes = store
+                .view(|tx| tx.get_path_hashes_by_offset(offset))?
+                .expect("offset row");
+            assert_eq!(hashes.tx_path_hash, Some(tx_hash));
+            assert_eq!(hashes.data_path_hash, Some(data_hash));
+            let path = store.view(|tx| tx.get_full_data_path(data_hash))?;
+            assert_eq!(path, Some(vec![1, 2, 3]));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn uncommitted_writes_change_gap_scans() -> eyre::Result<()> {
+        each_engine("submodule_store_gaps", |store| {
+            store.update(|tx| {
+                let present = ChunkPathHashes {
+                    data_path_hash: Some(H256::repeat_byte(3)),
+                    tx_path_hash: None,
+                };
+                tx.set_path_hashes_by_offset(PartitionChunkOffset::from(0), present.clone())?;
+                tx.set_path_hashes_by_offset(PartitionChunkOffset::from(2), present)?;
+                let rows = tx.path_hashes_in_inclusive_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(2),
+                )?;
+                assert_eq!(rows.len(), 2);
+                assert_eq!(
+                    tx.missing_path_hash_ranges(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(4),
+                    )?,
+                    vec![
+                        (PartitionChunkOffset::from(1), PartitionChunkOffset::from(2)),
+                        (PartitionChunkOffset::from(3), PartitionChunkOffset::from(4)),
+                    ]
+                );
+                tx.del_path_hashes_by_offset(PartitionChunkOffset::from(0))?;
+                assert_eq!(
+                    tx.first_missing_path_hash_offset(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(4),
+                    )?,
+                    Some(PartitionChunkOffset::from(0))
+                );
+                Ok(())
+            })?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn clear_then_write_in_one_batch_drops_only_the_old_rows() -> eyre::Result<()> {
+        each_engine("submodule_store_clear", |store| {
+            let hashes = ChunkPathHashes {
+                data_path_hash: Some(H256::repeat_byte(5)),
+                tx_path_hash: None,
+            };
+            store.update(|tx| {
+                tx.set_path_hashes_by_offset(PartitionChunkOffset::from(5), hashes.clone())?;
+                tx.clear()?;
+                assert!(
+                    tx.get_path_hashes_by_offset(PartitionChunkOffset::from(5))?
+                        .is_none()
+                );
+                tx.set_path_hashes_by_offset(PartitionChunkOffset::from(6), hashes.clone())?;
+                Ok(())
+            })?;
+            assert!(
+                store
+                    .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(5)))?
+                    .is_none()
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?,
+                Some(hashes)
+            );
+            Ok(())
+        })
     }
 }

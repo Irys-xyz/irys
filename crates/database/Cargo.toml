@@ -6,6 +6,9 @@ rust-version.workspace = true
 
 [features]
 test-utils = []
+# Opt-in native engine for the submodule index. Off in the node build.
+# `cargo xtask check` turns it on via `--all-features`.
+rocksdb = ["dep:rocksdb"]
 
 [dependencies]
 alloy-primitives.workspace = true
@@ -27,6 +30,13 @@ reth-codecs.workspace = true
 reth-primitives-traits.workspace = true
 paste.workspace = true
 strum.workspace = true
+# Same 0.24 line reth pins. Default features include lz4 and leave jemalloc off.
+rocksdb = { version = "0.24.0", optional = true }
+
+[[bin]]
+name = "submodule-index-bench"
+path = "src/bin/submodule_index_bench.rs"
+required-features = ["rocksdb"]
 
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
