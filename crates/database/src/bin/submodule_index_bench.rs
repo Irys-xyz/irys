@@ -144,7 +144,8 @@ fn measure(
         "  index_ms={index_ms} data_path_ms={data_path_ms} settle_ms={settle_ms} open_ms={open_ms}"
     );
     println!("  logical_bytes={logical} allocated_bytes={allocated}");
-    read_phase(dir, &store, args)?;
+    drop(store);
+    read_phase(dir, args, &open)?;
     Ok(())
 }
 
@@ -212,11 +213,14 @@ fn write_data_paths(store: &SubmoduleIndex, args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Cold lookups. Each shape drops the OS file cache first, then takes
-/// `args.reads` samples. `drop_caches` is not used: another bench may share
-/// the host. RocksDB's own block cache is left as opened, so pinned filters
-/// stay hot and data blocks do not.
-fn read_phase(dir: &Path, store: &SubmoduleIndex, args: &Args) -> eyre::Result<()> {
+/// Cold lookups. Each shape reopens the engine and drops the OS file cache.
+/// A shared Rocks block cache would turn the sequential scan into hits on the
+/// random sample. `drop_caches` is not used: another bench may share the host.
+fn read_phase(
+    dir: &Path,
+    args: &Args,
+    open: &impl Fn(&Path) -> eyre::Result<SubmoduleIndex>,
+) -> eyre::Result<()> {
     if args.reads == 0 {
         println!("  reads=0");
         return Ok(());
@@ -224,14 +228,25 @@ fn read_phase(dir: &Path, store: &SubmoduleIndex, args: &Args) -> eyre::Result<(
     let disk = disk_id(dir)?;
     let disk_name = disk.as_ref().map(|id| id.name.as_str()).unwrap_or("none");
     println!("  cold=fadvise disk={disk_name}");
-    time_shape(dir, disk.as_ref(), "offset", args.reads, |i| {
-        let at = sample_offset(i, args.chunks);
-        let path = store.view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(at)))?;
-        let path = path.ok_or_else(|| eyre::eyre!("missing data path at {at}"))?;
-        eyre::ensure!(path.len() == args.path_bytes, "data path len at {at}");
-        Ok(())
-    })?;
-    time_shape(dir, disk.as_ref(), "serve", args.reads, |i| {
+    // Scattered chunk reads (recall, single-chunk serve).
+    time_shape(
+        dir,
+        disk.as_ref(),
+        "data_path_random",
+        args.reads,
+        open,
+        |store, i| read_one_data_path(store, args, sample_offset(i, args.chunks)),
+    )?;
+    // Consecutive chunk reads (a span serve). Same call, offsets 0, 1, 2, ...
+    time_shape(
+        dir,
+        disk.as_ref(),
+        "data_path_seq",
+        args.reads,
+        open,
+        |store, i| read_one_data_path(store, args, seq_offset(i, args.chunks)),
+    )?;
+    time_shape(dir, disk.as_ref(), "serve", args.reads, open, |store, i| {
         let at = sample_offset(i.wrapping_add(1), args.chunks);
         let expected = hash_at(u64::from(at) + 0x2000_0000);
         store.view(|tx| {
@@ -250,7 +265,7 @@ fn read_phase(dir: &Path, store: &SubmoduleIndex, args: &Args) -> eyre::Result<(
         })
     })?;
     let window = args.range_len.min(args.chunks);
-    time_shape(dir, disk.as_ref(), "range", args.reads, |i| {
+    time_shape(dir, disk.as_ref(), "range", args.reads, open, |store, i| {
         let start = sample_offset(i.wrapping_add(2), args.chunks - window + 1);
         let end = start + window - 1;
         let rows = store.view(|tx| {
@@ -268,29 +283,44 @@ fn read_phase(dir: &Path, store: &SubmoduleIndex, args: &Args) -> eyre::Result<(
         );
         Ok(())
     })?;
-    time_shape(dir, disk.as_ref(), "rmw_path", args.reads, |i| {
-        let at = sample_offset(i.wrapping_add(3), args.chunks);
-        let path = data_path_bytes(args, at);
-        store.update(|tx| {
-            tx.write_data_path_updates(vec![(
-                PartitionChunkOffset::from(at),
-                hash_at(u64::from(at) + 0x2000_0000),
-                path,
-            )])
-        })
-    })?;
-    time_shape(dir, disk.as_ref(), "rmw_root", args.reads, |i| {
-        let at = sample_offset(i.wrapping_add(4), args.chunks);
-        let tx_start = at / args.tx_chunks * args.tx_chunks;
-        let root = hash_at(u64::from(tx_start) + 0x1000_0000);
-        // A second placement. The first call appends. Later calls on the same
-        // root read the row and find this info already stored.
-        let info = DataRootInfo {
-            start_offset: RelativeChunkOffset(-1),
-            data_size: indexed_data_size(args, 1),
-        };
-        store.update(|tx| tx.add_data_root_info(root, &info))
-    })?;
+    time_shape(
+        dir,
+        disk.as_ref(),
+        "rmw_path",
+        args.reads,
+        open,
+        |store, i| {
+            let at = sample_offset(i.wrapping_add(3), args.chunks);
+            let path = data_path_bytes(args, at);
+            store.update(|tx| {
+                tx.write_data_path_updates(vec![(
+                    PartitionChunkOffset::from(at),
+                    hash_at(u64::from(at) + 0x2000_0000),
+                    path,
+                )])
+            })
+        },
+    )?;
+    time_shape(
+        dir,
+        disk.as_ref(),
+        "rmw_root",
+        args.reads,
+        open,
+        |store, i| {
+            let at = sample_offset(i.wrapping_add(4), args.chunks);
+            let tx_start = at / args.tx_chunks * args.tx_chunks;
+            let root = hash_at(u64::from(tx_start) + 0x1000_0000);
+            // A second placement. The first call appends. Later calls on the same
+            // root read the row and find this info already stored.
+            let info = DataRootInfo {
+                start_offset: RelativeChunkOffset(-1),
+                data_size: indexed_data_size(args, 1),
+            };
+            store.update(|tx| tx.add_data_root_info(root, &info))
+        },
+    )?;
+    let store = open(dir)?;
     let kept = store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(0)))?;
     let kept = kept.ok_or_else(|| eyre::eyre!("offset 0 missing after rmw"))?;
     eyre::ensure!(
@@ -300,21 +330,39 @@ fn read_phase(dir: &Path, store: &SubmoduleIndex, args: &Args) -> eyre::Result<(
     Ok(())
 }
 
+fn read_one_data_path(store: &SubmoduleIndex, args: &Args, at: u32) -> eyre::Result<()> {
+    let path = store.view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(at)))?;
+    let path = path.ok_or_else(|| eyre::eyre!("missing data path at {at}"))?;
+    eyre::ensure!(path.len() == args.path_bytes, "data path len at {at}");
+    Ok(())
+}
+
+/// Sequential offsets, wrapping after the last chunk.
+fn seq_offset(i: u32, chunks: u32) -> u32 {
+    i % chunks
+}
+
 fn time_shape(
     dir: &Path,
     disk: Option<&DiskId>,
     shape: &str,
     reads: u32,
-    mut one: impl FnMut(u32) -> eyre::Result<()>,
+    open: &impl Fn(&Path) -> eyre::Result<SubmoduleIndex>,
+    mut one: impl FnMut(&SubmoduleIndex, u32) -> eyre::Result<()>,
 ) -> eyre::Result<()> {
+    // Drop pages left by the previous shape, then open a new cache.
+    evict_cache(dir)?;
+    let store = open(dir)?;
+    // Open reads metadata. Drop those pages. Rocks keeps filters it copied.
     let files = evict_cache(dir)?;
     let before = disk_counters(disk);
     let mut samples = Vec::with_capacity(usize::try_from(reads)?);
     for i in 0..reads {
         let started = Instant::now();
-        one(i)?;
+        one(&store, i)?;
         samples.push(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
     }
+    drop(store);
     let after = disk_counters(disk);
     samples.sort_unstable();
     let n = samples.len() as u64;
@@ -800,7 +848,8 @@ fn print_help() {
         "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--worst-case]\n\
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
---reads N (default 1024) is the sample count for each shape: offset, serve, range, rmw_path, rmw_root.\n\
+--reads N (default 1024) is the sample count for each shape: data_path_random, data_path_seq, serve, range, rmw_path, rmw_root.\n\
+data_path_random is scattered get_data_path_by_offset. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
 Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache.\n\
 --worst-case stores a {DATA_PROOF_BYTES}-byte max data proof on every chunk \
 (a max transaction is {MAX_DATA_TX_CHUNKS} chunks). \
@@ -813,7 +862,7 @@ mod tests {
     use super::{
         DATA_PROOF_BYTES, DATA_PROOF_LAYERS, HASH_SIZE, LEAF_SIZE, MAX_DATA_TX_CHUNKS, NOTE_SIZE,
         PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, pairing_layers, parse_diskstats,
-        parse_mount_line, percentile, proof_bytes, sample_offset, shaped_proof,
+        parse_mount_line, percentile, proof_bytes, sample_offset, seq_offset, shaped_proof,
     };
 
     #[test]
@@ -870,6 +919,9 @@ mod tests {
             assert!(sample_offset(i, 7) < 7);
         }
         assert_eq!(sample_offset(0, 1), 0);
+        assert_eq!(seq_offset(0, 10), 0);
+        assert_eq!(seq_offset(3, 10), 3);
+        assert_eq!(seq_offset(10, 10), 0);
     }
 
     #[test]
