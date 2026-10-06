@@ -74,7 +74,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     ops::{Deref, DerefMut},
-    os::unix::io::AsRawFd as _,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
@@ -409,15 +408,54 @@ impl StorageModules {
     }
 }
 
+// libc binds both `posix_fadvise` and `POSIX_FADV_RANDOM` on these targets.
+// Apple and the other BSDs do not. A missing advise must not stop the open.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "emscripten",
+    target_os = "l4re",
+    target_os = "freebsd",
+))]
+use std::os::unix::io::AsRawFd as _;
+
 /// `posix_fadvise(RANDOM)` for the whole file. Length 0 means from
 /// `offset` to the end. A failed advise is fatal: the descriptor would
 /// keep fetching past every large pread.
-fn advise_chunks_random(file: &File) -> eyre::Result<()> {
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "emscripten",
+    target_os = "l4re",
+    target_os = "freebsd",
+))]
+fn advise_chunks_random(file: &File, path: &Path) -> eyre::Result<()> {
     // Safety: `file` owns a live descriptor. The advice does not change bytes.
     let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
     if rc != 0 {
-        return Err(eyre!("posix_fadvise(POSIX_FADV_RANDOM) failed: error {rc}"));
+        return Err(eyre!(
+            "posix_fadvise(POSIX_FADV_RANDOM) failed on {}: error {rc}",
+            path.display()
+        ));
     }
+    Ok(())
+}
+
+/// This target has no `posix_fadvise` binding. The open continues, and
+/// read-ahead stays at the kernel default.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "emscripten",
+    target_os = "l4re",
+    target_os = "freebsd",
+)))]
+fn advise_chunks_random(_file: &File, path: &Path) -> eyre::Result<()> {
+    warn!(
+        path = %path.display(),
+        os = std::env::consts::OS,
+        "posix_fadvise(POSIX_FADV_RANDOM) is not available; chunks.dat keeps the kernel read-ahead"
+    );
     Ok(())
 }
 
@@ -456,12 +494,7 @@ impl StorageModule {
             // state belongs to this open file description, and a dup shares it.
             // A large buffered read otherwise fetches past its range by the
             // device's maximum request size.
-            advise_chunks_random(&chunks_file).wrap_err_with(|| {
-                format!(
-                    "Failed to disable read-ahead on chunks file: {}",
-                    path.display()
-                )
-            })?;
+            advise_chunks_random(&chunks_file, &path)?;
             let chunks_file: Arc<Mutex<File>> = Arc::new(Mutex::new(chunks_file));
 
             let submodule_db_path = sub_base_path.join("db");
