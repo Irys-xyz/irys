@@ -204,6 +204,7 @@ struct StepOut {
     serve: DriverOut,
     ingest_phases: PhasesOut,
     migration_phases: PhasesOut,
+    rocks: Option<RocksStepStats>,
 }
 
 pub(crate) struct StepRow {
@@ -217,6 +218,17 @@ pub(crate) struct StepRow {
     pub ingest: DriverBucket,
     pub migration: DriverBucket,
     pub serve: DriverBucket,
+    pub rocks: Option<RocksStepStats>,
+}
+
+/// RocksDB counters for one step. Stall time and flush count are deltas.
+/// Pending compaction bytes and running flushes are the gauge at step end.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct RocksStepStats {
+    pub write_stall_us: u64,
+    pub pending_compaction_bytes: u64,
+    pub flushes: u64,
+    pub running_flushes: u64,
 }
 
 #[derive(Serialize)]
@@ -289,11 +301,28 @@ fn step_out(row: &StepRow) -> StepOut {
             row.measured.secs.saturating_mul(1_000_000),
             true,
         ),
+        rocks: row.rocks,
     }
 }
 
-pub(crate) fn write_table(path: &Path, rows: &[StepRow]) -> eyre::Result<()> {
-    let text = table(rows);
+pub(crate) fn index_banner(
+    engine: &str,
+    dir: &Path,
+    preset: Option<&str>,
+    tuning: Option<&str>,
+    block_cache_bytes: Option<usize>,
+) -> String {
+    match (preset, tuning, block_cache_bytes) {
+        (Some(preset), Some(tuning), Some(bytes)) => format!(
+            "index_engine={engine} index_dir={} rocks_preset={preset} rocks_block_cache_bytes={bytes} rocks_tuning={tuning}\n",
+            dir.display()
+        ),
+        _ => format!("index_engine={engine} index_dir={}\n", dir.display()),
+    }
+}
+
+pub(crate) fn write_table(path: &Path, rows: &[StepRow], index_line: &str) -> eyre::Result<()> {
+    let text = table(rows, index_line);
     fs::write(path, &text)?;
     print!("{text}");
     std::io::stdout().flush()?;
@@ -444,8 +473,14 @@ pub(crate) fn phase_limit(
     }
 }
 
-fn table(rows: &[StepRow]) -> String {
+fn table(rows: &[StepRow], index_line: &str) -> String {
     let mut out = String::new();
+    if !index_line.is_empty() {
+        out.push_str(index_line);
+        if !index_line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
     out.push_str(&format!(
         "{:<15} {:>4}  {:>15}  {:>11}  {:>11}  {:>12}  {:>22}  {:>19}  {:>9}  result\n",
         "step",
@@ -499,6 +534,15 @@ fn table(rows: &[StepRow]) -> String {
             row.measured.secs,
             true,
         ));
+        if let Some(rocks) = row.rocks {
+            out.push_str(&format!(
+                "rocks: stall={} pending_compaction_bytes={} flushes={} running_flushes={}\n",
+                fmt_ms(rocks.write_stall_us),
+                rocks.pending_compaction_bytes,
+                rocks.flushes,
+                rocks.running_flushes,
+            ));
+        }
         for reason in &row.reasons {
             out.push_str(&format!("  - {reason}\n"));
         }
@@ -674,8 +718,10 @@ mod tests {
             ingest,
             migration: DriverBucket::default(),
             serve: DriverBucket::default(),
+            rocks: None,
         };
-        let text = table(&[row]);
+        let text = table(&[row], "index_engine=mdbx index_dir=/loadtest/db\n");
+        assert!(text.contains("index_engine=mdbx"));
         assert!(text.contains("ingest phases: limit=txreg"));
         assert!(text.contains("migration phases: limit=off"));
         assert!(text.contains("txreg n=1 p99=80.0ms"));

@@ -125,7 +125,10 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | `--recall-chunks` | 400 | Chunks in one recall (100 MiB at 256 KiB) |
 | `--write-origin` | 0 | Partition offset that maps to byte 0 of the write file |
 | `--migrate-origin` | midpoint of the write window | First migration offset |
-| `--prepopulate-index N` | 0 | Synthetic index rows. Resumable via `--dir/bench-prepop.json` |
+| `--prepopulate-index N` | 0 | Synthetic index rows. Resumable via `--dir/bench-prepop.json`. Works for both index engines |
+| `--index-engine` | `mdbx` | `mdbx` opens `--dir/db`. `rocks` opens `--dir/rocks`. A directory that already belongs to the other engine is refused |
+| `--rocks-preset` | `baseline` when the engine is `rocks` | Same names as `RocksTuning::presets`. Refused unless `--index-engine rocks` |
+| `--rocks-block-cache BYTES` | preset size | Replaces the preset block cache. Refused unless `--index-engine rocks`. `0` is an error |
 | `--seed` | 1 | Recall, ingest, and serve RNGs |
 | `--create-small BYTES` | unset | Create both files at this size for a local smoke run. Multiple of 262144. The recall file is mode `0444` |
 | `--num-writes-before-sync` | 100 | Production sync cadence |
@@ -144,10 +147,10 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 
 `--out` receives:
 
-- `header.json` — git commit, dirty flag, rustc version, and the resolved settings. Written before the drivers start. Git data comes from `git` in the current directory. A failed git command records commit `unknown`.
+- `header.json` — git commit, dirty flag, rustc version, and the resolved settings, including `index_engine`, `index_dir`, `rocks_preset`, `rocks_tuning`, and `rocks_block_cache_bytes`. The Rocks fields are null for MDBX. Written before the drivers start. Git data comes from `git` in the current directory. A failed git command records commit `unknown`.
 - `samples.jsonl` — one JSON object per second per driver (`recall`, `ingest`, `migration`, `serve`), including idle drivers. Latency fields are integer microseconds. The line is flushed as it is written.
 - `summary.json` — one object per step, plus `passed`, `exit_code`, and driver notes.
-- `table.txt` — the same table the process prints.
+- `table.txt` — the same table the process prints. The first line is the index engine and directory. A RocksDB step adds a `rocks:` line with stall time, pending compaction bytes, flushes, and running flushes.
 
 Exit `0` when every scored step passed. Exit `1` for usage, a safety refusal, a runtime error, or Ctrl-C. Exit `2` when a scored step failed. A scored failure plus Ctrl-C exits `2`. The summary is still written when the run had started.
 
@@ -167,9 +170,9 @@ ingest phases: limit=txreg behind=420.000s sleep=90.000s rel/sched=6692/19200MiB
 | `pace_sleep_us` | Wall time asleep because the next release was not due yet |
 | `pace_released_bytes` | Bytes the pacer released |
 | `pace_scheduled_bytes` | `rate * seconds`. Drain can release more than this |
-| `txreg_*` | `index_transaction_data`, including the wait for the bench index lock. One durable MDBX commit per tx. `p50` / `p99` / `max` are microseconds |
+| `txreg_*` | `index_transaction_data`, including the wait for the bench index lock. One durable index commit per tx on this one submodule. `p50` / `p99` / `max` are microseconds |
 | `txreg_wait_us` | Time the generator sat waiting for that result. In `serial` mode this is the commit. In `overlap` mode the next commit runs during the previous tx, so this is only the leftover |
-| `settle_*` | `settle_pending_body_migration` after the tx's chunks are durable. Another per-tx MDBX commit. It does not block the generator |
+| `settle_*` | `settle_pending_body_migration` after the tx's chunks are durable. Another per-tx index commit. It does not block the generator |
 | `enqueue_*` | Ingest: one sample per `write_data_chunk_queued`, until index ACK. Migration: one sample per `deposit_data_chunks` call. Ingest calls overlap, so the total can exceed the step |
 | `durable_*` | From ACK or deposit return until `is_data_chunk_durable_at`. One sample per chunk. Overlapping |
 | `permit_wait_us` | Generator time waiting for `--ingest-concurrency` |

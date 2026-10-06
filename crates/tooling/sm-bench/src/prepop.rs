@@ -60,9 +60,7 @@ pub(crate) fn prepopulate(
             }
         }
         let from = done - (done % TX_CHUNKS);
-        submodule
-            .db
-            .update(|tx| write_batch(tx, from, batch_end))?;
+        submodule.db.update(|tx| write_batch(tx, from, batch_end))?;
         done = batch_end;
         write_state(&path, done)?;
         eprintln!("irys-sm-bench: prepopulate index {done} / {target}");

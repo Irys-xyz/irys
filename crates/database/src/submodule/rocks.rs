@@ -319,6 +319,60 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
+    /// Cumulative write-stall time and the current compaction and flush gauges.
+    ///
+    /// Stall time comes from the cumulative line of `rocksdb.dbstats`. That
+    /// string property also resets RocksDB's interval counters. Pending
+    /// compaction bytes and flushed immutable memtables are summed across
+    /// column families. Running flushes is the database-wide gauge.
+    pub fn ingest_stats(&self) -> eyre::Result<RocksIngestStats> {
+        let stats = self
+            .db
+            .property_value("rocksdb.dbstats")
+            .map_err(|error| eyre::eyre!("rocksdb.dbstats: {error}"))?
+            .ok_or_else(|| eyre::eyre!("rocksdb.dbstats returned no value"))?;
+        let write_stall_micros = parse_cumulative_stall_micros(&stats)
+            .ok_or_else(|| eyre::eyre!("rocksdb.dbstats has no cumulative stall line"))?;
+        let mut pending_compaction_bytes = 0_u64;
+        let mut flushes = 0_u64;
+        for cf in Cf::ALL {
+            let handle = cf_handle(&self.db, cf)?;
+            pending_compaction_bytes = pending_compaction_bytes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.estimate-pending-compaction-bytes",
+            )?);
+            flushes = flushes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.num-immutable-mem-table-flushed",
+            )?);
+        }
+        if let Some(handle) = self.db.cf_handle("default") {
+            pending_compaction_bytes = pending_compaction_bytes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.estimate-pending-compaction-bytes",
+            )?);
+            flushes = flushes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.num-immutable-mem-table-flushed",
+            )?);
+        }
+        let running_flushes = self
+            .db
+            .property_int_value("rocksdb.num-running-flushes")
+            .map_err(|error| eyre::eyre!("rocksdb.num-running-flushes: {error}"))?
+            .unwrap_or(0);
+        Ok(RocksIngestStats {
+            write_stall_micros,
+            pending_compaction_bytes,
+            flushes,
+            running_flushes,
+        })
+    }
+
     #[cfg(test)]
     fn schema_payload(&self) -> eyre::Result<Option<Vec<u8>>> {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
@@ -459,6 +513,53 @@ fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
 
 fn schema_value() -> Vec<u8> {
     compress_value(&SCHEMA_TEXT.as_bytes().to_vec())
+}
+
+/// Counters a bench step can subtract. Stall time and flush count are
+/// cumulative. Pending compaction bytes and running flushes are gauges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RocksIngestStats {
+    pub write_stall_micros: u64,
+    pub pending_compaction_bytes: u64,
+    pub flushes: u64,
+    pub running_flushes: u64,
+}
+
+fn int_property_cf(db: &DB, handle: &rocksdb::ColumnFamily, name: &str) -> eyre::Result<u64> {
+    db.property_int_value_cf(handle, name)
+        .map_err(|error| eyre::eyre!("{name}: {error}"))
+        .map(|value| value.unwrap_or(0))
+}
+
+/// `rocksdb.dbstats` prints cumulative stall time as `HH:MM:SS.mmm H:M:S`.
+fn parse_cumulative_stall_micros(stats: &str) -> Option<u64> {
+    let line = stats
+        .lines()
+        .find(|line| line.starts_with("Cumulative stall:"))?;
+    let stamp = line
+        .trim_start_matches("Cumulative stall:")
+        .split_whitespace()
+        .next()?;
+    parse_hms_micros(stamp)
+}
+
+fn parse_hms_micros(stamp: &str) -> Option<u64> {
+    let (hours, rest) = stamp.split_once(':')?;
+    let (mins, secs) = rest.split_once(':')?;
+    let (whole, frac) = secs.split_once('.')?;
+    if frac.len() != 3 {
+        return None;
+    }
+    let hours: u64 = hours.parse().ok()?;
+    let mins: u64 = mins.parse().ok()?;
+    let whole: u64 = whole.parse().ok()?;
+    let millis: u64 = frac.parse().ok()?;
+    Some(
+        hours.saturating_mul(3_600_000_000)
+            + mins.saturating_mul(60_000_000)
+            + whole.saturating_mul(1_000_000)
+            + millis.saturating_mul(1_000),
+    )
 }
 
 fn cf_handle(db: &DB, cf: Cf) -> eyre::Result<&rocksdb::ColumnFamily> {
@@ -1168,6 +1269,36 @@ mod tests {
             let store = RocksSubmoduleStore::open_with(&path, preset)?;
             drop(store);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn ingest_stats_reads_the_stall_line_and_zero_counters() -> eyre::Result<()> {
+        assert_eq!(
+            parse_cumulative_stall_micros("Cumulative stall: 00:00:00.000 H:M:S, 0.0 percent\n"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_cumulative_stall_micros(
+                "Cumulative writes: 1\nCumulative stall: 01:02:03.250 H:M:S, 9.0 percent\n"
+            ),
+            Some(3_723_250_000)
+        );
+        assert!(parse_cumulative_stall_micros("no stall line").is_none());
+
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_stats")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        let stats = store.ingest_stats()?;
+        assert_eq!(stats.write_stall_micros, 0);
+        assert_eq!(stats.pending_compaction_bytes, 0);
+        assert_eq!(stats.flushes, 0);
+        assert_eq!(stats.running_flushes, 0);
+        drop(store);
+        let index = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        let again = index.rocks_ingest_stats()?.expect("rocks counters");
+        assert_eq!(again.write_stall_micros, 0);
         Ok(())
     }
 }

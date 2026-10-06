@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 eyre = { workspace = true }
-irys-database = { workspace = true }
+irys-database = { workspace = true, features = ["rocksdb"] }
 irys-domain = { workspace = true, features = ["bench"] }
 irys-types = { workspace = true, features = ["test-utils"] }
 libc = "0.2"

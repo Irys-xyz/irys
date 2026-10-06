@@ -42,6 +42,8 @@ use std::os::unix::io::AsRawFd as _;
 use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
+#[cfg(feature = "bench")]
+use irys_database::submodule::RocksTuning;
 use irys_database::submodule::{
     SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
     tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
@@ -669,12 +671,84 @@ struct OpenedChunkFile {
     split: Option<Arc<SplitBacking>>,
 }
 
+/// Which submodule index `open_split` opens. Production `new` stays on MDBX.
+#[cfg(feature = "bench")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchIndex {
+    /// `{dir}/db`, the production engine.
+    Mdbx,
+    /// `{dir}/rocks`, opened with this preset.
+    Rocks(RocksTuning),
+}
+
+#[cfg(feature = "bench")]
+impl BenchIndex {
+    pub fn engine_name(self) -> &'static str {
+        match self {
+            Self::Mdbx => "mdbx",
+            Self::Rocks(_) => "rocks",
+        }
+    }
+
+    /// Directory name under the submodule path.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            Self::Mdbx => "db",
+            Self::Rocks(_) => "rocks",
+        }
+    }
+}
+
+/// Refuse an index directory that already belongs to the other engine.
+///
+/// An empty or missing directory is either engine. `mdbx.dat` is MDBX.
+/// `CURRENT` or `SCHEMA` is RocksDB.
+#[cfg(feature = "bench")]
+pub fn refuse_foreign_index(path: &Path, rocks: bool) -> eyre::Result<()> {
+    let mdbx = path.join("mdbx.dat").is_file();
+    let rocks_files = path.join("CURRENT").is_file() || path.join("SCHEMA").is_file();
+    if mdbx && rocks_files {
+        return Err(eyre!(
+            "index directory {} contains both MDBX and RocksDB files",
+            path.display()
+        ));
+    }
+    if rocks && mdbx {
+        return Err(eyre!(
+            "refusing to open MDBX index {} with RocksDB",
+            path.display()
+        ));
+    }
+    if !rocks && rocks_files {
+        return Err(eyre!(
+            "refusing to open RocksDB index {} with MDBX",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn open_mdbx_index(path: &Path, config: &Config) -> eyre::Result<SubmoduleIndex> {
+    SubmoduleIndex::open_mdbx(
+        path,
+        // Args (incl. the test geometry cap) derived from the DatabaseConfig.
+        irys_database::submodule_db_args(&config.node_config.database)?,
+    )
+    .map_err(|error| {
+        eyre!(
+            "Failed to create or open submodule database: {} - {}",
+            path.display(),
+            error
+        )
+    })
+}
+
 impl StorageModule {
-    /// Initializes a new StorageModule
+    /// Initializes a new StorageModule. The index is always MDBX.
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
         #[cfg(feature = "bench")]
         {
-            Self::open(storage_module_info, config, None)
+            Self::open(storage_module_info, config, None, BenchIndex::Mdbx)
         }
         #[cfg(not(feature = "bench"))]
         {
@@ -685,19 +759,25 @@ impl StorageModule {
     /// One submodule, starting at partition offset 0, backed by `split` instead
     /// of `{dir}/chunks.dat`. The bench uses this so recall reads and packed
     /// writes share one disk lane while living in different files.
+    ///
+    /// `index` selects the submodule index under the submodule directory:
+    /// `db` for MDBX, `rocks` for RocksDB. A directory that already belongs
+    /// to the other engine is refused.
     #[cfg(feature = "bench")]
     pub fn open_split(
         storage_module_info: &StorageModuleInfo,
         config: &Config,
         split: Arc<SplitBacking>,
+        index: BenchIndex,
     ) -> eyre::Result<Self> {
-        Self::open(storage_module_info, config, Some(split))
+        Self::open(storage_module_info, config, Some(split), index)
     }
 
     fn open(
         storage_module_info: &StorageModuleInfo,
         config: &Config,
         #[cfg(feature = "bench")] split: Option<Arc<SplitBacking>>,
+        #[cfg(feature = "bench")] index: BenchIndex,
     ) -> eyre::Result<Self> {
         #[cfg(feature = "bench")]
         if split.is_some() {
@@ -731,20 +811,14 @@ impl StorageModule {
             )?;
             let chunks_file = opened.file;
 
-            let submodule_db_path = sub_base_path.join("db");
-            debug!("submodule_db_path: {:?}", submodule_db_path);
-            let submodule_db = SubmoduleIndex::open_mdbx(
-                &submodule_db_path,
-                // Args (incl. the test geometry cap) derived from the DatabaseConfig.
-                irys_database::submodule_db_args(&config.node_config.database)?,
-            )
-            .map_err(|e| {
-                eyre!(
-                    "Failed to create or open submodule database: {} - {}",
-                    submodule_db_path.display(),
-                    e
-                )
-            })?;
+            let submodule_db = Self::open_submodule_index(
+                &sub_base_path,
+                config,
+                #[cfg(feature = "bench")]
+                split.is_some(),
+                #[cfg(feature = "bench")]
+                index,
+            )?;
 
             let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
             // if we don't have an existing packing params file, write it
@@ -919,6 +993,52 @@ impl StorageModule {
             config: config.clone(),
             disk: disk_lane::DiskGate::with_index_gap(index_gap),
         })
+    }
+
+    fn open_submodule_index(
+        sub_base_path: &Path,
+        config: &Config,
+        #[cfg(feature = "bench")] split: bool,
+        #[cfg(feature = "bench")] index: BenchIndex,
+    ) -> eyre::Result<SubmoduleIndex> {
+        #[cfg(feature = "bench")]
+        if split {
+            let path = sub_base_path.join(index.dir_name());
+            // The bench directory is already under a `loadtest` component.
+            // A symlink must not point the index somewhere else.
+            if path.exists() {
+                let base = sub_base_path
+                    .canonicalize()
+                    .wrap_err_with(|| format!("canonicalize {}", sub_base_path.display()))?;
+                let opened = path
+                    .canonicalize()
+                    .wrap_err_with(|| format!("canonicalize {}", path.display()))?;
+                if !opened.starts_with(&base) {
+                    return Err(eyre!(
+                        "index directory {} is outside {}",
+                        opened.display(),
+                        base.display()
+                    ));
+                }
+            }
+            let rocks = matches!(index, BenchIndex::Rocks(_));
+            refuse_foreign_index(&path, rocks)?;
+            debug!("submodule index path: {:?}", path);
+            return match index {
+                BenchIndex::Mdbx => open_mdbx_index(&path, config),
+                BenchIndex::Rocks(tuning) => SubmoduleIndex::open_rocks_with(&path, tuning)
+                    .map_err(|error| {
+                        eyre!(
+                            "Failed to create or open submodule database: {} - {}",
+                            path.display(),
+                            error
+                        )
+                    }),
+            };
+        }
+        let path = sub_base_path.join("db");
+        debug!("submodule_db_path: {:?}", path);
+        open_mdbx_index(&path, config)
     }
 
     fn open_submodule_file(
@@ -4540,6 +4660,91 @@ mod tests {
         partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
+
+    #[cfg(feature = "bench")]
+    #[test]
+    fn refuse_foreign_index_rejects_the_other_engine() {
+        let dir = TempDirBuilder::new().prefix("index_engine_guard").build();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        refuse_foreign_index(&empty, false).unwrap();
+        refuse_foreign_index(&empty, true).unwrap();
+
+        let mdbx = dir.path().join("mdbx");
+        std::fs::create_dir_all(&mdbx).unwrap();
+        std::fs::write(mdbx.join("mdbx.dat"), b"x").unwrap();
+        refuse_foreign_index(&mdbx, false).unwrap();
+        let rocks_on_mdbx = refuse_foreign_index(&mdbx, true).unwrap_err();
+        assert!(
+            rocks_on_mdbx.to_string().contains("MDBX"),
+            "{rocks_on_mdbx}"
+        );
+
+        let rocks = dir.path().join("rocks");
+        std::fs::create_dir_all(&rocks).unwrap();
+        std::fs::write(rocks.join("CURRENT"), b"MANIFEST-000001\n").unwrap();
+        refuse_foreign_index(&rocks, true).unwrap();
+        let mdbx_on_rocks = refuse_foreign_index(&rocks, false).unwrap_err();
+        assert!(
+            mdbx_on_rocks.to_string().contains("RocksDB"),
+            "{mdbx_on_rocks}"
+        );
+
+        let schema = dir.path().join("schema");
+        std::fs::create_dir_all(&schema).unwrap();
+        std::fs::write(schema.join("SCHEMA"), b"irys-submodule-rocks 1\n").unwrap();
+        assert!(refuse_foreign_index(&schema, false).is_err());
+    }
+
+    #[cfg(feature = "bench")]
+    #[test]
+    fn open_split_refuses_a_foreign_index_directory() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("split_index_engine").build();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(sub.join("rocks"))?;
+        std::fs::write(sub.join("rocks").join("mdbx.dat"), b"not-rocks")?;
+        std::fs::create_dir_all(sub.join("db"))?;
+        std::fs::write(sub.join("db").join("CURRENT"), b"MANIFEST-000001\n")?;
+
+        let recall_path = tmp.path().join("recall");
+        let write_path = tmp.path().join("write");
+        std::fs::write(&recall_path, vec![0_u8; 128])?;
+        std::fs::write(&write_path, vec![0_u8; 128])?;
+        let recall = OpenOptions::new().read(true).open(&recall_path)?;
+        let write = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&write_path)?;
+        let split = Arc::new(SplitBacking::open(recall, write, 0, 4)?);
+        let config = Config::new_with_random_peer_id(NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        });
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ii!(0, 3), "sub".into())],
+        };
+
+        let rocks_err = StorageModule::open_split(
+            &info,
+            &config,
+            Arc::clone(&split),
+            BenchIndex::Rocks(RocksTuning::baseline()),
+        )
+        .expect_err("rocks must refuse an mdbx directory");
+        assert!(rocks_err.to_string().contains("MDBX"), "{rocks_err}");
+
+        let mdbx_err = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)
+            .expect_err("mdbx must refuse a rocks directory");
+        assert!(mdbx_err.to_string().contains("RocksDB"), "{mdbx_err}");
+        Ok(())
+    }
 
     #[test]
     fn recall_piece_plan_pairs_preads() {

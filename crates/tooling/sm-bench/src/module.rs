@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use eyre::{WrapErr as _, eyre};
-use irys_domain::{SplitBacking, StorageModule, StorageModuleInfo, write_entropy_intervals};
+use irys_domain::{
+    BenchIndex, SplitBacking, StorageModule, StorageModuleInfo, write_entropy_intervals,
+};
 use irys_types::{
     Config, ConsensusConfig, ConsensusOptions, DataLedger, H256, NodeConfig, PartitionChunkOffset,
     StorageSyncConfig, ii, partition::PartitionAssignment, partition_chunk_offset_ii,
@@ -20,6 +22,7 @@ use crate::guard::CHUNK_SIZE;
 
 pub(crate) struct OpenedModule {
     pub module: Arc<StorageModule>,
+    pub index: BenchIndex,
     lane: Option<JoinHandle<()>>,
 }
 
@@ -34,6 +37,7 @@ pub(crate) struct OpenRequest<'a> {
     pub num_writes_before_sync: u64,
     pub entropy_sweep_max_bytes: u64,
     pub drop_recall_page_cache: bool,
+    pub index: BenchIndex,
 }
 
 pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule> {
@@ -104,8 +108,17 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         .open(request.write_file)
         .wrap_err_with(|| format!("failed to open write file {}", request.write_file.display()))?;
     let split = SplitBacking::open(recall, write, request.write_origin, request.write_chunks)?;
-    let module = Arc::new(StorageModule::open_split(&info, &config, Arc::new(split))?);
-    Ok(OpenedModule { module, lane: None })
+    let module = Arc::new(StorageModule::open_split(
+        &info,
+        &config,
+        Arc::new(split),
+        request.index,
+    )?);
+    Ok(OpenedModule {
+        module,
+        index: request.index,
+        lane: None,
+    })
 }
 
 impl OpenedModule {

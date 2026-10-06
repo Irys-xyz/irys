@@ -20,6 +20,9 @@ use std::time::Duration;
 
 use clap::{ArgAction, Parser};
 use eyre::eyre;
+use irys_database::submodule::{RocksIngestStats, RocksTuning};
+use irys_domain::BenchIndex;
+use irys_types::PartitionChunkOffset;
 use tokio::sync::watch;
 
 use crate::drivers::{
@@ -32,8 +35,8 @@ use crate::guard::{
 use crate::module::{OpenRequest, flush_batch, open_module, pending_ceiling, span_limit};
 use crate::prepop::prepopulate;
 use crate::report::{
-    SampleWriter, StepRow, git_info, plan_steps, sample_line, write_json, write_summary,
-    write_table,
+    RocksStepStats, SampleWriter, StepRow, git_info, index_banner, plan_steps, sample_line,
+    write_json, write_summary, write_table,
 };
 use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
@@ -81,6 +84,16 @@ struct Args {
     /// Synthetic index rows to insert before the run. Idempotent across restarts.
     #[arg(long, default_value_t = 0)]
     prepopulate_index: u64,
+    /// Submodule index engine. `mdbx` is the production engine.
+    #[arg(long, value_enum, default_value_t = IndexEngine::Mdbx)]
+    index_engine: IndexEngine,
+    /// RocksDB preset. Same names as `RocksTuning::presets`. Default `baseline`
+    /// when `--index-engine rocks`.
+    #[arg(long)]
+    rocks_preset: Option<String>,
+    /// Replace the preset block cache, in bytes. Requires `--index-engine rocks`.
+    #[arg(long)]
+    rocks_block_cache: Option<u64>,
     #[arg(long, default_value_t = 1)]
     seed: u64,
     /// Create missing recall and write files at this exact size. A multiple of 256 KiB.
@@ -151,6 +164,51 @@ impl std::fmt::Display for IngestIndex {
             Self::Serial => "serial",
             Self::Overlap => "overlap",
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum IndexEngine {
+    Mdbx,
+    Rocks,
+}
+
+impl std::fmt::Display for IndexEngine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Mdbx => "mdbx",
+            Self::Rocks => "rocks",
+        })
+    }
+}
+
+/// Bench index under `--dir`. Rocks options are refused when the engine is MDBX.
+fn resolve_index(
+    engine: IndexEngine,
+    preset: Option<&str>,
+    block_cache: Option<u64>,
+) -> eyre::Result<BenchIndex> {
+    match engine {
+        IndexEngine::Mdbx => {
+            if preset.is_some() || block_cache.is_some() {
+                return Err(eyre!(
+                    "--rocks-preset and --rocks-block-cache require --index-engine rocks"
+                ));
+            }
+            Ok(BenchIndex::Mdbx)
+        }
+        IndexEngine::Rocks => {
+            let mut tuning = RocksTuning::preset(preset.unwrap_or("baseline"))?;
+            if let Some(bytes) = block_cache {
+                if bytes == 0 {
+                    return Err(eyre!("--rocks-block-cache must be greater than 0"));
+                }
+                let bytes = usize::try_from(bytes)
+                    .map_err(|_| eyre!("--rocks-block-cache does not fit in usize"))?;
+                tuning = tuning.with_block_cache(bytes);
+            }
+            Ok(BenchIndex::Rocks(tuning))
+        }
     }
 }
 
@@ -249,6 +307,11 @@ fn run() -> eyre::Result<i32> {
     }
     let delay_margin_us = args.recall_delay_margin_ms.saturating_mul(1_000);
     let latency_margin_us = args.recall_latency_margin_ms.saturating_mul(1_000);
+    let index = resolve_index(
+        args.index_engine,
+        args.rocks_preset.as_deref(),
+        args.rocks_block_cache,
+    )?;
 
     let mut opened = open_module(OpenRequest {
         dir: &dir,
@@ -261,6 +324,7 @@ fn run() -> eyre::Result<i32> {
         num_writes_before_sync: args.num_writes_before_sync,
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
         drop_recall_page_cache: !args.keep_recall_cache,
+        index,
     })?;
     let prepopulated = prepopulate(
         &opened.module,
@@ -283,6 +347,23 @@ fn run() -> eyre::Result<i32> {
         migration_cursor,
         write_end,
     )?;
+    let index_dir = dir.join(opened.index.dir_name());
+    let (rocks_preset, rocks_tuning, rocks_block_cache_bytes) = match opened.index {
+        BenchIndex::Mdbx => (None, None, None),
+        BenchIndex::Rocks(tuning) => (
+            Some(tuning.name),
+            Some(tuning.describe()),
+            Some(tuning.block_cache_bytes),
+        ),
+    };
+    let index_line = index_banner(
+        opened.index.engine_name(),
+        &index_dir,
+        rocks_preset,
+        rocks_tuning.as_deref(),
+        rocks_block_cache_bytes,
+    );
+    eprintln!("irys-sm-bench: {}", index_line.trim_end());
     eprintln!(
         "irys-sm-bench: partition {partition_chunks} chunks, write window {write_origin}..{write_end}, ingest frontier {ingest_cursor}, migration frontier {migration_cursor}"
     );
@@ -291,7 +372,7 @@ fn run() -> eyre::Result<i32> {
     let flush = flush_batch(args.num_writes_before_sync, CHUNK_SIZE);
     let span = span_limit(args.entropy_sweep_max_bytes, CHUNK_SIZE);
     let git = git_info();
-    let header = serde_json::json!({
+    let mut header = serde_json::json!({
         "git": {"commit": git.commit, "dirty": git.dirty},
         "rustc": rustc_version(),
         "dir": dir,
@@ -341,6 +422,18 @@ fn run() -> eyre::Result<i32> {
             "A step named idle is the recall baseline. Other steps use the absolute p99 ceilings when no idle step has completed.",
         ],
     });
+    header["index_engine"] = serde_json::Value::from(opened.index.engine_name());
+    header["index_dir"] = serde_json::Value::from(index_dir.display().to_string());
+    header["rocks_preset"] = rocks_preset
+        .map(serde_json::Value::from)
+        .unwrap_or(serde_json::Value::Null);
+    header["rocks_tuning"] = rocks_tuning
+        .map(serde_json::Value::from)
+        .unwrap_or(serde_json::Value::Null);
+    header["rocks_block_cache_bytes"] = match rocks_block_cache_bytes {
+        Some(bytes) => serde_json::json!(bytes),
+        None => serde_json::Value::Null,
+    };
     std::fs::create_dir_all(&args.out)?;
     write_json(&args.out.join("header.json"), &header)?;
     let mut samples = SampleWriter::create(&args.out.join("samples.jsonl"))?;
@@ -394,6 +487,7 @@ fn run() -> eyre::Result<i32> {
         delay_margin_us,
         latency_margin_us,
         overlap_index,
+        &index_line,
     ))?;
     match opened.stop_lane() {
         Ok(()) => Ok(code),
@@ -547,6 +641,7 @@ async fn execute(
     delay_margin_us: u64,
     latency_margin_us: u64,
     overlap_index: bool,
+    index_line: &str,
 ) -> eyre::Result<i32> {
     let (rates_tx, rates_rx) = watch::channel(Rates::idle());
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -692,7 +787,7 @@ async fn execute(
         interrupted,
         &driver_notes,
     )?;
-    write_table(&out.join("table.txt"), &rows)?;
+    write_table(&out.join("table.txt"), &rows, index_line)?;
     Ok(code)
 }
 
@@ -716,6 +811,7 @@ async fn run_step(
     rule: RecallRule,
 ) -> eyre::Result<StepOutcome> {
     io.permits.reset_window();
+    let rocks_before = sample_rocks(&io.module);
     let mut accum = StepAccum::default();
     let started = tokio::time::Instant::now();
     let mut interrupted = false;
@@ -801,6 +897,8 @@ async fn run_step(
     }
     let passed = reasons.iter().all(|reason| reason == "interrupted");
     let soft_fail = !passed && !interrupted && findings.iter().all(|finding| finding.soft);
+    let rocks = rocks_before
+        .and_then(|before| sample_rocks(&io.module).map(|after| rocks_delta(before, after)));
     Ok(StepOutcome {
         passed,
         interrupted,
@@ -816,8 +914,34 @@ async fn run_step(
             ingest: accum.ingest,
             migration: accum.migration,
             serve: accum.serve,
+            rocks,
         },
     })
+}
+
+fn sample_rocks(module: &irys_domain::StorageModule) -> Option<RocksIngestStats> {
+    let Some(submodule) = module.get_submodule(PartitionChunkOffset::from(0_u32)) else {
+        eprintln!("irys-sm-bench: no submodule at offset 0; omitting rocks counters");
+        return None;
+    };
+    match submodule.db.rocks_ingest_stats() {
+        Ok(stats) => stats,
+        Err(error) => {
+            eprintln!("irys-sm-bench: rocks property read failed: {error:#}");
+            None
+        }
+    }
+}
+
+fn rocks_delta(before: RocksIngestStats, after: RocksIngestStats) -> RocksStepStats {
+    RocksStepStats {
+        write_stall_us: after
+            .write_stall_micros
+            .saturating_sub(before.write_stall_micros),
+        pending_compaction_bytes: after.pending_compaction_bytes,
+        flushes: after.flushes.saturating_sub(before.flushes),
+        running_flushes: after.running_flushes,
+    }
 }
 
 fn record_second(
@@ -911,5 +1035,136 @@ async fn wait_quiet(
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
             _ = interrupt.changed() => return Ok(false),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(extra: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "irys-sm-bench".to_string(),
+            "--dir".to_string(),
+            "/tmp/sm-bench-local/loadtest/mod".to_string(),
+            "--recall-file".to_string(),
+            "/tmp/sm-bench-local/loadtest/entropy".to_string(),
+            "--write-file".to_string(),
+            "/tmp/sm-bench-local/loadtest/write".to_string(),
+            "--out".to_string(),
+            "/tmp/sm-bench-local/loadtest/out".to_string(),
+        ];
+        args.extend(extra.iter().map(|item| (*item).to_string()));
+        args
+    }
+
+    fn parsed(extra: &[&str]) -> Args {
+        Args::try_parse_from(argv(extra)).expect("flags parse")
+    }
+
+    #[test]
+    fn index_engine_defaults_to_mdbx() {
+        let args = parsed(&[]);
+        assert_eq!(args.index_engine, IndexEngine::Mdbx);
+        assert!(args.rocks_preset.is_none());
+        assert!(args.rocks_block_cache.is_none());
+        assert_eq!(
+            resolve_index(args.index_engine, None, None).unwrap(),
+            BenchIndex::Mdbx
+        );
+    }
+
+    #[test]
+    fn rocks_flags_require_the_rocks_engine() {
+        let preset = parsed(&["--rocks-preset", "baseline"]);
+        let err = resolve_index(
+            preset.index_engine,
+            preset.rocks_preset.as_deref(),
+            preset.rocks_block_cache,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("require --index-engine rocks"),
+            "{err}"
+        );
+
+        let cache = parsed(&["--rocks-block-cache", "4096"]);
+        let err = resolve_index(
+            cache.index_engine,
+            cache.rocks_preset.as_deref(),
+            cache.rocks_block_cache,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("require --index-engine rocks"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rocks_defaults_to_baseline_and_takes_a_cache_override() {
+        let args = parsed(&["--index-engine", "rocks"]);
+        let BenchIndex::Rocks(tuning) = resolve_index(
+            args.index_engine,
+            args.rocks_preset.as_deref(),
+            args.rocks_block_cache,
+        )
+        .unwrap() else {
+            panic!("expected rocks");
+        };
+        assert_eq!(tuning, RocksTuning::baseline());
+
+        let args = parsed(&[
+            "--index-engine",
+            "rocks",
+            "--rocks-preset",
+            "no-blob",
+            "--rocks-block-cache",
+            "1048576",
+        ]);
+        let BenchIndex::Rocks(tuning) = resolve_index(
+            args.index_engine,
+            args.rocks_preset.as_deref(),
+            args.rocks_block_cache,
+        )
+        .unwrap() else {
+            panic!("expected rocks");
+        };
+        assert_eq!(tuning.name, "no-blob");
+        assert!(!tuning.blobs);
+        assert_eq!(tuning.block_cache_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn every_shared_preset_parses_and_bad_values_fail() {
+        for name in RocksTuning::preset_names().split(", ") {
+            let args = parsed(&["--index-engine", "rocks", "--rocks-preset", name]);
+            let BenchIndex::Rocks(tuning) =
+                resolve_index(args.index_engine, args.rocks_preset.as_deref(), None).unwrap()
+            else {
+                panic!("expected rocks");
+            };
+            assert_eq!(tuning.name, name);
+        }
+
+        let args = parsed(&["--index-engine", "rocks", "--rocks-preset", "nope"]);
+        let err = resolve_index(args.index_engine, args.rocks_preset.as_deref(), None).unwrap_err();
+        assert!(err.to_string().contains("unknown rocks preset"), "{err}");
+
+        let args = parsed(&["--index-engine", "rocks", "--rocks-block-cache", "0"]);
+        let err = resolve_index(
+            args.index_engine,
+            args.rocks_preset.as_deref(),
+            args.rocks_block_cache,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("greater than 0"), "{err}");
+    }
+
+    #[test]
+    fn unknown_index_engine_is_rejected_by_the_parser() {
+        let err = Args::try_parse_from(argv(&["--index-engine", "lmdb"])).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("mdbx") && text.contains("rocks"), "{text}");
     }
 }
