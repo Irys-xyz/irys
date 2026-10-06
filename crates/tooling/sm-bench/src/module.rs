@@ -38,6 +38,8 @@ pub(crate) struct OpenRequest<'a> {
     pub entropy_sweep_max_bytes: u64,
     pub drop_recall_page_cache: bool,
     pub index: BenchIndex,
+    /// Registrations per fsync. `0` skips the call; the method rejects 0.
+    pub index_group_commit: u32,
 }
 
 pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule> {
@@ -114,6 +116,9 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         Arc::new(split),
         request.index,
     )?);
+    if request.index_group_commit > 0 {
+        module.enable_index_group_commit(request.index_group_commit)?;
+    }
     Ok(OpenedModule {
         module,
         index: request.index,

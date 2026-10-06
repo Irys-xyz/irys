@@ -94,6 +94,12 @@ struct Args {
     /// Replace the preset block cache, in bytes. Requires `--index-engine rocks`.
     #[arg(long)]
     rocks_block_cache: Option<u64>,
+    /// Index registrations per fsync. Applies to both engines.
+    ///
+    /// `0` does not call `enable_index_group_commit` (that method rejects 0)
+    /// and keeps one durable commit per registration.
+    #[arg(long, default_value_t = 8)]
+    index_group_commit: u32,
     #[arg(long, default_value_t = 1)]
     seed: u64,
     /// Create missing recall and write files at this exact size. A multiple of 256 KiB.
@@ -325,6 +331,7 @@ fn run() -> eyre::Result<i32> {
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
         drop_recall_page_cache: !args.keep_recall_cache,
         index,
+        index_group_commit: args.index_group_commit,
     })?;
     let prepopulated = prepopulate(
         &opened.module,
@@ -362,6 +369,7 @@ fn run() -> eyre::Result<i32> {
         rocks_preset,
         rocks_tuning.as_deref(),
         rocks_block_cache_bytes,
+        args.index_group_commit,
     );
     eprintln!("irys-sm-bench: {}", index_line.trim_end());
     eprintln!(
@@ -423,6 +431,7 @@ fn run() -> eyre::Result<i32> {
         ],
     });
     header["index_engine"] = serde_json::Value::from(opened.index.engine_name());
+    header["index_group_commit"] = serde_json::json!(args.index_group_commit);
     header["index_dir"] = serde_json::Value::from(index_dir.display().to_string());
     header["rocks_preset"] = rocks_preset
         .map(serde_json::Value::from)
@@ -1066,6 +1075,7 @@ mod tests {
     fn index_engine_defaults_to_mdbx() {
         let args = parsed(&[]);
         assert_eq!(args.index_engine, IndexEngine::Mdbx);
+        assert_eq!(args.index_group_commit, 8);
         assert!(args.rocks_preset.is_none());
         assert!(args.rocks_block_cache.is_none());
         assert_eq!(
@@ -1159,6 +1169,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("greater than 0"), "{err}");
+    }
+
+    #[test]
+    fn index_group_commit_accepts_zero_for_both_engines() {
+        assert_eq!(parsed(&["--index-group-commit", "0"]).index_group_commit, 0);
+        let rocks = parsed(&["--index-engine", "rocks", "--index-group-commit", "8"]);
+        assert_eq!(rocks.index_engine, IndexEngine::Rocks);
+        assert_eq!(rocks.index_group_commit, 8);
     }
 
     #[test]

@@ -311,13 +311,17 @@ pub(crate) fn index_banner(
     preset: Option<&str>,
     tuning: Option<&str>,
     block_cache_bytes: Option<usize>,
+    index_group_commit: u32,
 ) -> String {
     match (preset, tuning, block_cache_bytes) {
         (Some(preset), Some(tuning), Some(bytes)) => format!(
-            "index_engine={engine} index_dir={} rocks_preset={preset} rocks_block_cache_bytes={bytes} rocks_tuning={tuning}\n",
+            "index_engine={engine} index_dir={} index_group_commit={index_group_commit} rocks_preset={preset} rocks_block_cache_bytes={bytes} rocks_tuning={tuning}\n",
             dir.display()
         ),
-        _ => format!("index_engine={engine} index_dir={}\n", dir.display()),
+        _ => format!(
+            "index_engine={engine} index_dir={} index_group_commit={index_group_commit}\n",
+            dir.display()
+        ),
     }
 }
 
@@ -700,6 +704,28 @@ mod tests {
             "pacing",
             "ingest enqueue overlaps and is not a generator stall"
         );
+    }
+
+    #[test]
+    fn the_index_banner_records_group_commit_for_both_engines() {
+        let mdbx = index_banner("mdbx", Path::new("/loadtest/db"), None, None, None, 8);
+        assert_eq!(
+            mdbx,
+            "index_engine=mdbx index_dir=/loadtest/db index_group_commit=8\n"
+        );
+        let rocks = index_banner(
+            "rocks",
+            Path::new("/loadtest/rocks"),
+            Some("baseline"),
+            Some("k=v"),
+            Some(64),
+            0,
+        );
+        assert!(
+            rocks.starts_with("index_engine=rocks index_dir=/loadtest/rocks index_group_commit=0 ")
+        );
+        assert!(rocks.contains("rocks_preset=baseline"));
+        assert!(rocks.contains("rocks_block_cache_bytes=64"));
     }
 
     #[test]
