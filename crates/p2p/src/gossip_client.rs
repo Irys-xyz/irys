@@ -1507,11 +1507,15 @@ impl GossipClient {
                 peer_list.set_is_online_by_peer_id(peer_id, true);
                 circuit_breaker.record_success(peer_id);
             }
-            // The peer answered. A rate limit is backpressure. A handshake
-            // request stays probeable. Neither reply is a delivery, so the
-            // seen-cache still allows a later offer.
+            // The peer answered, and the bytes were not stored. A rate limit
+            // is backpressure. A handshake request stays probeable. Gossip
+            // paused on purpose is not a dead peer: opening the breaker would
+            // hide the next push for the whole cooldown. None of these is a
+            // delivery, so the seen-cache still allows a later offer.
             Ok(GossipResponse::Rejected(
-                RejectionReason::RateLimited | RejectionReason::HandshakeRequired(_),
+                RejectionReason::RateLimited
+                | RejectionReason::HandshakeRequired(_)
+                | RejectionReason::GossipDisabled,
             ))
             | Err(GossipError::RateLimited) => {}
             Ok(GossipResponse::Rejected(_)) => {
@@ -3636,6 +3640,30 @@ mod tests {
                 assert!(!peer_has_data(&cache, peer_id));
                 assert!(client.circuit_breaker.is_available(&peer_id));
             }
+        }
+
+        #[tokio::test]
+        async fn gossip_disabled_push_does_not_score_or_open_the_breaker() {
+            let client = production_client();
+            let (peer_list, peer_id, initial) = scored_peer();
+            let cache = GossipCache::new();
+            let result = Ok(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+
+            for _ in 0..5 {
+                finish_push(&client, &peer_list, &peer_id, &result, &cache);
+            }
+
+            let updated = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            assert_eq!(updated, initial);
+            assert!(!push_response_accepted(&result));
+            assert!(!peer_has_data(&cache, peer_id));
+            assert!(client.circuit_breaker.is_available(&peer_id));
         }
 
         #[tokio::test]
