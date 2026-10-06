@@ -68,10 +68,7 @@ fn as_generic_array_slice(blocks: &[[u8; 64]]) -> &[GenericArray<u8, U64>] {
     unsafe { core::slice::from_raw_parts(blocks.as_ptr().cast(), blocks.len()) }
 }
 
-// This loop has to be codegen'd in this crate. `#[inline]` copies it into the
-// caller, and a dev build of irys-chain then hashes too slowly to pass the
-// startup VDF check. Non-release profiles compile irys-vdf at opt-level 3.
-#[inline(never)]
+#[inline]
 fn compress_n_rounds(blocks: &mut [[u8; 64]; 2], iterations: u64) {
     for _ in 0..iterations {
         let ga_blocks = as_generic_array_slice(blocks);
@@ -81,7 +78,10 @@ fn compress_n_rounds(blocks: &mut [[u8; 64]; 2], iterations: u64) {
     }
 }
 
-#[inline]
+// Not `#[inline]`. That copies this function into the caller, and a dev
+// build of irys-chain then hashes too slowly to pass the startup check.
+// Non-release profiles compile this crate at opt-level 3. The hash loop
+// above still inlines into this function.
 pub fn vdf_sha(
     start_salt: U256,
     seed: &mut H256,
