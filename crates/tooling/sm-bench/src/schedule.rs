@@ -1,6 +1,12 @@
 //! Step schedule, presets, and the pass/fail judge.
 //!
 //! Rates are integer ratios. `1.8/s` is `9/5`, which is a 555_555_555 ns period.
+//!
+//! A step named `idle` is the recall baseline. Later steps fail recall when
+//! start-delay or latency p99 rises by more than the configured margin.
+//! A schedule with no `idle` step uses the absolute ceilings instead.
+//! Recall-margin misses and enqueue shortfalls are soft: they fail the step
+//! and do not stop the ladder. A durability backlog is not soft.
 
 use std::path::Path;
 
@@ -8,7 +14,10 @@ use eyre::{WrapErr as _, eyre};
 use serde::Deserialize;
 
 pub(crate) const RECALL_SKIP_LAG_STEPS: u128 = 3;
+/// Absolute start-delay ceiling when the schedule has no `idle` step.
 pub(crate) const RECALL_START_P99_LIMIT_US: u64 = 200_000;
+/// Absolute recall-latency ceiling when the schedule has no `idle` step.
+pub(crate) const RECALL_LAT_P99_LIMIT_US: u64 = 500_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Rates {
@@ -261,6 +270,9 @@ pub(crate) struct StepMeasured {
     pub recall_ops: u64,
     pub recall_skips: u64,
     pub recall_start_p99_us: u64,
+    pub recall_lat_p99_us: u64,
+    pub ingest_enqueue_blocked_us: u64,
+    pub migration_enqueue_blocked_us: u64,
     pub overloaded_secs: u64,
     pub pending_samples: Vec<u64>,
     pub pending_after_drain: u64,
@@ -270,86 +282,203 @@ pub(crate) struct StepMeasured {
     pub aborted: Option<String>,
 }
 
-pub(crate) fn judge(measured: &StepMeasured) -> Vec<String> {
+/// How this step's recall p99 is judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecallBar {
+    /// The step named `idle`. It sets the baseline. Skips still fail it.
+    Baseline,
+    /// Compare with the `idle` step's p99 plus the margins.
+    Relative { start_p99_us: u64, lat_p99_us: u64 },
+    /// No `idle` baseline yet. Use the absolute ceilings.
+    Absolute,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RecallRule {
+    pub bar: RecallBar,
+    pub delay_margin_us: u64,
+    pub latency_margin_us: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Finding {
+    pub message: String,
+    /// Recall-margin and enqueue-shortfall misses. They fail the step and
+    /// do not stop the ladder while `--stop-on-fail` is set.
+    pub soft: bool,
+}
+
+impl Finding {
+    fn hard(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            soft: false,
+        }
+    }
+
+    fn soft(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            soft: true,
+        }
+    }
+}
+
+/// True when a scored miss should end the schedule.
+/// Soft findings do not. An empty list does not.
+pub(crate) fn stop_for_score(findings: &[Finding], stop_on_fail: bool) -> bool {
+    stop_on_fail && findings.iter().any(|finding| !finding.soft)
+}
+
+pub(crate) fn judge(measured: &StepMeasured, rule: &RecallRule) -> Vec<Finding> {
     let mut reasons = Vec::new();
     if let Some(reason) = &measured.aborted {
-        reasons.push(format!("aborted: {reason}"));
+        reasons.push(Finding::hard(format!("aborted: {reason}")));
     }
     if measured.recall_skips > 0 {
-        reasons.push(format!(
+        reasons.push(Finding::hard(format!(
             "skipped {} recall(s) (start lag >= {RECALL_SKIP_LAG_STEPS} steps)",
             measured.recall_skips
-        ));
+        )));
     }
-    if measured.recall_ops > 0 && measured.recall_start_p99_us > RECALL_START_P99_LIMIT_US {
-        reasons.push(format!(
-            "recall start-delay p99 {} us > {RECALL_START_P99_LIMIT_US} us",
-            measured.recall_start_p99_us
-        ));
-    }
-    short_durable(
+    recall_latency(measured, rule, &mut reasons);
+    short_of_offered(
         "ingest",
         measured.scheduled_ingest,
+        measured.enqueued_ingest,
+        measured.chunk_size,
+        measured.ingest_enqueue_blocked_us,
+        &mut reasons,
+    );
+    short_of_offered(
+        "migration",
+        measured.scheduled_migration,
+        measured.enqueued_migration,
+        measured.chunk_size,
+        measured.migration_enqueue_blocked_us,
+        &mut reasons,
+    );
+    short_of_enqueued(
+        "ingest",
         measured.enqueued_ingest,
         measured.durable_ingest,
         measured.chunk_size,
         &mut reasons,
     );
-    short_durable(
+    short_of_enqueued(
         "migration",
-        measured.scheduled_migration,
         measured.enqueued_migration,
         measured.durable_migration,
         measured.chunk_size,
         &mut reasons,
     );
     if measured.secs >= 5 && measured.overloaded_secs.saturating_mul(5) > measured.secs {
-        reasons.push(format!(
+        reasons.push(Finding::hard(format!(
             "overloaded for {}s of {}s",
             measured.overloaded_secs, measured.secs
-        ));
+        )));
     }
     if measured.pending_after_drain > measured.ceiling {
-        reasons.push(format!(
+        reasons.push(Finding::hard(format!(
             "pending {} bytes after drain is above the ceiling {}",
             measured.pending_after_drain, measured.ceiling
-        ));
+        )));
     }
     if backlog_grew(&measured.pending_samples, measured.flush_batch)
         && measured.pending_after_drain > measured.flush_batch
     {
-        reasons.push(
-            "pending-write backlog grew through the step and was still high after drain"
-                .to_string(),
-        );
+        reasons.push(Finding::hard(
+            "pending-write backlog grew through the step and was still high after drain",
+        ));
     }
     if measured.migration_jobs_after_drain > 0 {
-        reasons.push(format!(
+        reasons.push(Finding::hard(format!(
             "{} body-migration row(s) remained after drain",
             measured.migration_jobs_after_drain
-        ));
+        )));
     }
     reasons
 }
 
-fn short_durable(
+fn recall_latency(measured: &StepMeasured, rule: &RecallRule, reasons: &mut Vec<Finding>) {
+    if measured.recall_ops == 0 {
+        return;
+    }
+    match rule.bar {
+        RecallBar::Baseline => {}
+        RecallBar::Relative {
+            start_p99_us,
+            lat_p99_us,
+        } => {
+            let start_limit = start_p99_us.saturating_add(rule.delay_margin_us);
+            if measured.recall_start_p99_us > start_limit {
+                reasons.push(Finding::soft(format!(
+                    "recall start-delay p99 {} us exceeds idle p99 {start_p99_us} us by more than {} us",
+                    measured.recall_start_p99_us, rule.delay_margin_us
+                )));
+            }
+            let lat_limit = lat_p99_us.saturating_add(rule.latency_margin_us);
+            if measured.recall_lat_p99_us > lat_limit {
+                reasons.push(Finding::soft(format!(
+                    "recall latency p99 {} us exceeds idle p99 {lat_p99_us} us by more than {} us",
+                    measured.recall_lat_p99_us, rule.latency_margin_us
+                )));
+            }
+        }
+        RecallBar::Absolute => {
+            if measured.recall_start_p99_us > RECALL_START_P99_LIMIT_US {
+                reasons.push(Finding::soft(format!(
+                    "recall start-delay p99 {} us > {RECALL_START_P99_LIMIT_US} us",
+                    measured.recall_start_p99_us
+                )));
+            }
+            if measured.recall_lat_p99_us > RECALL_LAT_P99_LIMIT_US {
+                reasons.push(Finding::soft(format!(
+                    "recall latency p99 {} us > {RECALL_LAT_P99_LIMIT_US} us",
+                    measured.recall_lat_p99_us
+                )));
+            }
+        }
+    }
+}
+
+/// Offered bytes that never reached `write_data_chunk_queued` or
+/// `deposit_data_chunks`. One chunk of slack covers a partial last offer.
+fn short_of_offered(
     name: &str,
-    scheduled: u64,
+    offered: u64,
+    enqueued: u64,
+    chunk_size: u64,
+    blocked_us: u64,
+    reasons: &mut Vec<Finding>,
+) {
+    if offered > 0 && enqueued.saturating_add(chunk_size) < offered {
+        reasons.push(Finding::soft(format!(
+            "{name} enqueued {enqueued} bytes is short of offered {offered} bytes (enqueue blocked {}s)",
+            blocked_label(blocked_us)
+        )));
+    }
+}
+
+/// Bytes the module accepted that were not durable after the drain.
+fn short_of_enqueued(
+    name: &str,
     enqueued: u64,
     durable: u64,
     chunk_size: u64,
-    reasons: &mut Vec<String>,
+    reasons: &mut Vec<Finding>,
 ) {
-    if scheduled > 0 && durable.saturating_add(chunk_size) < scheduled {
-        reasons.push(format!(
-            "{name} durable {durable} bytes is short of offered {scheduled} bytes"
-        ));
-    }
     if enqueued > durable.saturating_add(chunk_size) {
-        reasons.push(format!(
+        reasons.push(Finding::hard(format!(
             "{name} durable {durable} bytes is short of enqueued {enqueued} bytes"
-        ));
+        )));
     }
+}
+
+fn blocked_label(micros: u64) -> String {
+    let whole = micros / 1_000_000;
+    let millis = (micros % 1_000_000) / 1_000;
+    format!("{whole}.{millis:03}")
 }
 
 fn backlog_grew(samples: &[u64], flush_batch: u64) -> bool {
@@ -397,6 +526,9 @@ mod tests {
             recall_ops: 10,
             recall_skips: 0,
             recall_start_p99_us: 1_000,
+            recall_lat_p99_us: 1_000,
+            ingest_enqueue_blocked_us: 0,
+            migration_enqueue_blocked_us: 0,
             overloaded_secs: 0,
             pending_samples: vec![0; 40],
             pending_after_drain: 0,
@@ -407,26 +539,154 @@ mod tests {
         }
     }
 
+    fn absolute() -> RecallRule {
+        RecallRule {
+            bar: RecallBar::Absolute,
+            delay_margin_us: 200_000,
+            latency_margin_us: 500_000,
+        }
+    }
+
+    fn messages(findings: &[Finding]) -> Vec<&str> {
+        findings
+            .iter()
+            .map(|finding| finding.message.as_str())
+            .collect()
+    }
+
     #[test]
-    fn judge_flags_each_failure() {
-        assert!(judge(&base()).is_empty());
+    fn judge_flags_each_hard_failure() {
+        let rule = absolute();
+        assert!(judge(&base(), &rule).is_empty());
         let mut skipped = base();
         skipped.recall_skips = 1;
-        assert!(!judge(&skipped).is_empty());
-        let mut late = base();
-        late.recall_start_p99_us = 200_001;
-        assert!(!judge(&late).is_empty());
-        let mut short = base();
-        short.scheduled_ingest = 1_000_000;
-        short.durable_ingest = 100;
-        short.enqueued_ingest = 100;
-        assert!(!judge(&short).is_empty());
+        let skipped = judge(&skipped, &rule);
+        assert!(skipped.iter().any(|finding| !finding.soft));
+        assert!(messages(&skipped)[0].contains("skipped"));
         let mut overloaded = base();
         overloaded.secs = 10;
         overloaded.overloaded_secs = 3;
-        assert!(!judge(&overloaded).is_empty());
+        assert!(
+            judge(&overloaded, &rule)
+                .iter()
+                .any(|finding| !finding.soft)
+        );
         let mut held = base();
         held.pending_after_drain = held.ceiling + 1;
-        assert!(!judge(&held).is_empty());
+        assert!(judge(&held, &rule).iter().any(|finding| !finding.soft));
+    }
+
+    #[test]
+    fn absolute_recall_ceilings_apply_without_a_baseline() {
+        let rule = absolute();
+        let mut late = base();
+        late.recall_start_p99_us = 200_000;
+        late.recall_lat_p99_us = 500_000;
+        assert!(judge(&late, &rule).is_empty());
+        late.recall_start_p99_us = 200_001;
+        let start = judge(&late, &rule);
+        assert!(start.iter().all(|finding| finding.soft));
+        assert!(messages(&start)[0].contains("start-delay"));
+        late.recall_start_p99_us = 1_000;
+        late.recall_lat_p99_us = 500_001;
+        let latency = judge(&late, &rule);
+        assert!(latency.iter().all(|finding| finding.soft));
+        assert!(messages(&latency)[0].contains("latency"));
+    }
+
+    #[test]
+    fn idle_baseline_ignores_absolute_recall_ceilings() {
+        let rule = RecallRule {
+            bar: RecallBar::Baseline,
+            delay_margin_us: 200_000,
+            latency_margin_us: 500_000,
+        };
+        let mut idle = base();
+        idle.recall_start_p99_us = 1_000_000;
+        idle.recall_lat_p99_us = 2_000_000;
+        assert!(judge(&idle, &rule).is_empty());
+        idle.recall_skips = 2;
+        assert!(judge(&idle, &rule).iter().any(|finding| !finding.soft));
+    }
+
+    #[test]
+    fn relative_recall_uses_the_idle_margin() {
+        let rule = RecallRule {
+            bar: RecallBar::Relative {
+                start_p99_us: 190_000,
+                lat_p99_us: 1_146_000,
+            },
+            delay_margin_us: 200_000,
+            latency_margin_us: 500_000,
+        };
+        let mut step = base();
+        step.recall_start_p99_us = 390_000;
+        step.recall_lat_p99_us = 1_646_000;
+        assert!(
+            judge(&step, &rule).is_empty(),
+            "equal to idle p99 plus the margin passes"
+        );
+        step.recall_start_p99_us = 390_001;
+        let start = judge(&step, &rule);
+        assert_eq!(start.len(), 1);
+        assert!(start[0].soft);
+        assert!(start[0].message.contains("idle p99 190000"));
+        assert!(start[0].message.contains("200000"));
+        step.recall_start_p99_us = 190_000;
+        step.recall_lat_p99_us = 1_646_001;
+        let latency = judge(&step, &rule);
+        assert_eq!(latency.len(), 1);
+        assert!(latency[0].soft);
+        assert!(latency[0].message.contains("idle p99 1146000"));
+    }
+
+    #[test]
+    fn enqueue_shortfall_is_distinct_from_a_durability_backlog() {
+        let rule = absolute();
+        let mut short = base();
+        short.scheduled_ingest = 1_000_000;
+        short.enqueued_ingest = 100;
+        short.durable_ingest = 100;
+        short.ingest_enqueue_blocked_us = 1_500_000;
+        let findings = judge(&short, &rule);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].soft);
+        assert!(findings[0].message.contains("short of offered"));
+        assert!(findings[0].message.contains("1.500s"));
+        assert!(!stop_for_score(&findings, true));
+
+        let mut backlog = base();
+        backlog.scheduled_ingest = 1_000_000;
+        backlog.enqueued_ingest = 1_000_000;
+        backlog.durable_ingest = 100;
+        let findings = judge(&backlog, &rule);
+        assert_eq!(findings.len(), 1);
+        assert!(!findings[0].soft);
+        assert!(findings[0].message.contains("short of enqueued"));
+        assert!(stop_for_score(&findings, true));
+        assert!(!stop_for_score(&findings, false));
+
+        let mut both = base();
+        both.scheduled_ingest = 1_000_000;
+        both.enqueued_ingest = 400_000;
+        both.durable_ingest = 100;
+        let findings = judge(&both, &rule);
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].soft);
+        assert!(!findings[1].soft);
+        assert!(stop_for_score(&findings, true));
+    }
+
+    #[test]
+    fn one_chunk_of_slack_is_not_a_shortfall() {
+        let rule = absolute();
+        let mut step = base();
+        step.scheduled_ingest = 1_000_000;
+        step.chunk_size = 262_144;
+        step.enqueued_ingest = 1_000_000 - 262_144;
+        step.durable_ingest = step.enqueued_ingest;
+        assert!(judge(&step, &rule).is_empty());
+        step.enqueued_ingest -= 1;
+        assert!(judge(&step, &rule).iter().any(|finding| finding.soft));
     }
 }

@@ -85,6 +85,7 @@ pub(crate) struct SampleLine<'a> {
     pub start_delay_max_us: u64,
     pub enqueued: u64,
     pub durable: u64,
+    pub enqueue_blocked_us: u64,
     pub pending_bytes: u64,
     pub pending_chunks: u64,
     pub sweep_slots: u64,
@@ -122,6 +123,7 @@ pub(crate) fn sample_line<'a>(
         start_delay_max_us: delay.max,
         enqueued: bucket.enqueued,
         durable: bucket.durable,
+        enqueue_blocked_us: bucket.enqueue_blocked_us,
         pending_bytes,
         pending_chunks,
         sweep_slots,
@@ -172,9 +174,20 @@ struct StepOut {
     secs: u64,
     scheduled_ingest: u64,
     scheduled_migration: u64,
+    ingest_offered_bytes: u64,
+    ingest_enqueued_bytes: u64,
+    ingest_durable_bytes: u64,
+    ingest_enqueue_blocked_us: u64,
+    ingest_enqueue_blocked_secs: u64,
+    migration_offered_bytes: u64,
+    migration_enqueued_bytes: u64,
+    migration_durable_bytes: u64,
+    migration_enqueue_blocked_us: u64,
+    migration_enqueue_blocked_secs: u64,
     overloaded_secs: u64,
     pending_after_drain: u64,
     migration_jobs_after_drain: u64,
+    soft_fail: bool,
     recall: DriverOut,
     ingest: DriverOut,
     migration: DriverOut,
@@ -184,6 +197,8 @@ struct StepOut {
 pub(crate) struct StepRow {
     pub name: String,
     pub passed: bool,
+    /// Failed only on a recall margin or an enqueue shortfall.
+    pub soft_fail: bool,
     pub reasons: Vec<String>,
     pub measured: StepMeasured,
     pub recall: DriverBucket,
@@ -230,7 +245,18 @@ fn step_out(row: &StepRow) -> StepOut {
         secs: row.measured.secs,
         scheduled_ingest: row.measured.scheduled_ingest,
         scheduled_migration: row.measured.scheduled_migration,
+        ingest_offered_bytes: row.measured.scheduled_ingest,
+        ingest_enqueued_bytes: row.measured.enqueued_ingest,
+        ingest_durable_bytes: row.measured.durable_ingest,
+        ingest_enqueue_blocked_us: row.measured.ingest_enqueue_blocked_us,
+        ingest_enqueue_blocked_secs: row.measured.ingest_enqueue_blocked_us / 1_000_000,
+        migration_offered_bytes: row.measured.scheduled_migration,
+        migration_enqueued_bytes: row.measured.enqueued_migration,
+        migration_durable_bytes: row.measured.durable_migration,
+        migration_enqueue_blocked_us: row.measured.migration_enqueue_blocked_us,
+        migration_enqueue_blocked_secs: row.measured.migration_enqueue_blocked_us / 1_000_000,
         overloaded_secs: row.measured.overloaded_secs,
+        soft_fail: row.soft_fail,
         pending_after_drain: row.measured.pending_after_drain,
         migration_jobs_after_drain: row.measured.migration_jobs_after_drain,
         recall: driver_out(&row.recall),
@@ -250,22 +276,40 @@ pub(crate) fn write_table(path: &Path, rows: &[StepRow]) -> eyre::Result<()> {
 
 fn table(rows: &[StepRow]) -> String {
     let mut out = String::new();
-    out.push_str(
-        "step            secs  recall ops/skip  start_p99_us  ingest MiB off/dur  mig MiB off/dur  serve ops  result\n",
-    );
+    out.push_str(&format!(
+        "{:<15} {:>4}  {:>15}  {:>11}  {:>11}  {:>12}  {:>22}  {:>19}  {:>9}  result\n",
+        "step",
+        "secs",
+        "recall ops/skip",
+        "lat_p50_us",
+        "lat_p99_us",
+        "start_p99_us",
+        "ingest MiB off/enq/dur",
+        "mig MiB off/enq/dur",
+        "serve ops",
+    ));
     for row in rows {
         let result = if row.passed { "PASS" } else { "FAIL" };
+        let recall_lat = summarize(&row.recall.lats_us);
+        let ingest = mib_triple(
+            row.measured.scheduled_ingest,
+            row.measured.enqueued_ingest,
+            row.measured.durable_ingest,
+        );
+        let migration = mib_triple(
+            row.measured.scheduled_migration,
+            row.measured.enqueued_migration,
+            row.measured.durable_migration,
+        );
         let line = format!(
-            "{:<15} {:>4}  {:>8}/{:<4}  {:>12}  {:>8}/{:<8}  {:>6}/{:<6}  {:>9}  {result}\n",
+            "{:<15} {:>4}  {:>10}/{:<4}  {:>11}  {:>11}  {:>12}  {ingest:>22}  {migration:>19}  {:>9}  {result}\n",
             row.name,
             row.measured.secs,
             row.recall.ops,
             row.recall.skips,
+            recall_lat.p50,
+            recall_lat.p99,
             summarize(&row.recall.delays_us).p99,
-            mib(row.measured.scheduled_ingest),
-            mib(row.ingest.durable),
-            mib(row.measured.scheduled_migration),
-            mib(row.migration.durable),
             row.serve.ops,
         );
         out.push_str(&line);
@@ -278,6 +322,10 @@ fn table(rows: &[StepRow]) -> String {
 
 fn mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
+}
+
+fn mib_triple(offered: u64, enqueued: u64, durable: u64) -> String {
+    format!("{}/{}/{}", mib(offered), mib(enqueued), mib(durable))
 }
 
 pub(crate) fn plan_steps(plan: &Plan) -> Vec<serde_json::Value> {

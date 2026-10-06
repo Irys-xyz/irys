@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use eyre::eyre;
 use tokio::sync::watch;
 
@@ -36,8 +36,8 @@ use crate::report::{
     write_table,
 };
 use crate::schedule::{
-    Plan, Rates, Step, StepMeasured, apply_step_secs, judge, load_schedule, mib_bytes, parse_mix,
-    preset,
+    Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
+    mib_bytes, parse_mix, preset, stop_for_score,
 };
 use crate::stats::StepAccum;
 
@@ -102,6 +102,30 @@ struct Args {
     /// Maximum chunks in one sequential serve read.
     #[arg(long, default_value_t = 8)]
     serve_seq_chunks: u32,
+    /// In-flight ingest chunks. Each permit is held until the chunk is durable.
+    ///
+    /// 1024 chunks is 256 MiB. At 32 MiB/s the cap binds only when durable
+    /// latency exceeds 8 s, so it is not the limit on the preset ladder.
+    /// Production has no such cap: `write_data_chunk_queued` only waits for
+    /// the index ACK. Public HTTP admission is 256 and ingress handlers
+    /// default to 30. Migration has no bench cap; it waits on the
+    /// pending-write ceiling. Serve is one read at a time.
+    #[arg(long, default_value_t = 1024)]
+    ingest_concurrency: usize,
+    /// Recall start-delay p99 may exceed the `idle` step by this many milliseconds.
+    #[arg(long, default_value_t = 200)]
+    recall_delay_margin_ms: u64,
+    /// Recall latency p99 may exceed the `idle` step by this many milliseconds.
+    #[arg(long, default_value_t = 500)]
+    recall_latency_margin_ms: u64,
+    /// Stop after a hard step failure. A recall-margin miss or an enqueue
+    /// shortfall still continues, so the rest of the ladder is measured.
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_stop_on_fail")]
+    stop_on_fail: bool,
+    /// Keep going after a hard scored failure. A drain timeout or a driver
+    /// abort still stops the plan.
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "stop_on_fail")]
+    no_stop_on_fail: bool,
 }
 
 fn main() {
@@ -133,6 +157,13 @@ fn run() -> eyre::Result<i32> {
     }
     if args.serve_seq_chunks == 0 {
         return Err(eyre!("--serve-seq-chunks must be greater than 0"));
+    }
+    if args.ingest_concurrency == 0 || args.ingest_concurrency > tokio::sync::Semaphore::MAX_PERMITS
+    {
+        return Err(eyre!(
+            "--ingest-concurrency must be in 1..={}",
+            tokio::sync::Semaphore::MAX_PERMITS
+        ));
     }
     std::fs::create_dir_all(&args.dir)?;
     let write_created = if let Some(bytes) = args.create_small {
@@ -185,6 +216,13 @@ fn run() -> eyre::Result<i32> {
     if let Some(secs) = args.step_secs {
         apply_step_secs(&mut plan, secs)?;
     }
+    if args.no_stop_on_fail {
+        plan.stop_on_fail = false;
+    } else if args.stop_on_fail {
+        plan.stop_on_fail = true;
+    }
+    let delay_margin_us = args.recall_delay_margin_ms.saturating_mul(1_000);
+    let latency_margin_us = args.recall_latency_margin_ms.saturating_mul(1_000);
 
     let mut opened = open_module(OpenRequest {
         dir: &dir,
@@ -249,6 +287,11 @@ fn run() -> eyre::Result<i32> {
         "drop_recall_page_cache": !args.keep_recall_cache,
         "ingest_mix": args.ingest_mix,
         "serve_seq_chunks": args.serve_seq_chunks,
+        "ingest_concurrency": args.ingest_concurrency,
+        "recall_delay_margin_ms": args.recall_delay_margin_ms,
+        "recall_latency_margin_ms": args.recall_latency_margin_ms,
+        "recall_start_p99_limit_us": crate::schedule::RECALL_START_P99_LIMIT_US,
+        "recall_lat_p99_limit_us": crate::schedule::RECALL_LAT_P99_LIMIT_US,
         "ceiling_bytes": ceiling,
         "flush_batch_bytes": flush,
         "span_limit_chunks": span,
@@ -264,6 +307,9 @@ fn run() -> eyre::Result<i32> {
             "Ingest and migration use separate halves of the write window.",
             "Startup deletes leftover body-migration rows in this bench database.",
             "Durable latency ends at is_data_chunk_durable_at, after fsync.",
+            "Ingest concurrency is a bench semaphore held until the chunk is durable. It is not a storage-module admission limit.",
+            "Migration enqueue waits on the pending-write ceiling. Serve issues one read at a time.",
+            "A step named idle is the recall baseline. Other steps use the absolute p99 ceilings when no idle step has completed.",
         ],
     });
     std::fs::create_dir_all(&args.out)?;
@@ -299,6 +345,7 @@ fn run() -> eyre::Result<i32> {
 
     let out = args.out;
     let stop_on_fail = plan.stop_on_fail;
+    let ingest_concurrency = args.ingest_concurrency;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -312,6 +359,9 @@ fn run() -> eyre::Result<i32> {
         ceiling,
         flush,
         stop_on_fail,
+        ingest_concurrency,
+        delay_margin_us,
+        latency_margin_us,
     ))?;
     match opened.stop_lane() {
         Ok(()) => Ok(code),
@@ -461,6 +511,9 @@ async fn execute(
     ceiling: u64,
     flush: u64,
     stop_on_fail: bool,
+    ingest_concurrency: usize,
+    delay_margin_us: u64,
+    latency_margin_us: u64,
 ) -> eyre::Result<i32> {
     let (rates_tx, rates_rx) = watch::channel(Rates::idle());
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -485,6 +538,7 @@ async fn execute(
         rates_rx.clone(),
         stop_rx.clone(),
         ingest_cursor,
+        ingest_concurrency,
     ));
     let migration = tokio::spawn(migration_driver(
         Arc::clone(&io),
@@ -497,12 +551,10 @@ async fn execute(
     let mut rows = Vec::new();
     let mut scored_fail = false;
     let mut interrupted = false;
+    let mut recall_baseline: Option<(u64, u64)> = None;
     for step in &plan.steps {
         if *interrupt_rx.borrow() {
             interrupted = true;
-            break;
-        }
-        if scored_fail && stop_on_fail {
             break;
         }
         eprintln!(
@@ -525,6 +577,16 @@ async fn execute(
         }
         io.accept_new.store(true, Ordering::Release);
         let _ = rates_tx.send(step.rates);
+        let bar = if step.name == "idle" {
+            RecallBar::Baseline
+        } else if let Some((start_p99_us, lat_p99_us)) = recall_baseline {
+            RecallBar::Relative {
+                start_p99_us,
+                lat_p99_us,
+            }
+        } else {
+            RecallBar::Absolute
+        };
         let outcome = run_step(
             step,
             &io,
@@ -533,18 +595,32 @@ async fn execute(
             &mut interrupt_rx,
             ceiling,
             flush,
+            RecallRule {
+                bar,
+                delay_margin_us,
+                latency_margin_us,
+            },
         )
         .await?;
+        if step.name == "idle" && !outcome.interrupted && outcome.row.measured.recall_ops > 0 {
+            recall_baseline = Some((
+                outcome.row.measured.recall_start_p99_us,
+                outcome.row.measured.recall_lat_p99_us,
+            ));
+        }
         if outcome.interrupted {
             interrupted = true;
         }
         if !outcome.passed && !outcome.interrupted {
             scored_fail = true;
         }
+        let halt = outcome.halt;
+        let stop = stop_for_score(&outcome.findings, stop_on_fail);
         rows.push(outcome.row);
         // A drain timeout or a driver abort stops the plan even when
-        // `stop_on_fail` is false. A scored miss stops only when that flag is set.
-        if interrupted || outcome.halt || (stop_on_fail && !outcome.passed) {
+        // `stop_on_fail` is false. Recall-margin and enqueue-shortfall
+        // misses do not stop it.
+        if interrupted || halt || stop {
             break;
         }
     }
@@ -592,6 +668,7 @@ struct StepOutcome {
     interrupted: bool,
     /// Drain timeout or a driver abort. Later steps must not start.
     halt: bool,
+    findings: Vec<crate::schedule::Finding>,
 }
 
 async fn run_step(
@@ -602,6 +679,7 @@ async fn run_step(
     interrupt: &mut watch::Receiver<bool>,
     ceiling: u64,
     flush: u64,
+    rule: RecallRule,
 ) -> eyre::Result<StepOutcome> {
     let mut accum = StepAccum::default();
     let started = tokio::time::Instant::now();
@@ -648,6 +726,8 @@ async fn run_step(
         );
     }
     let aborted = if interrupted { None } else { take_fatal(io) };
+    let recall_delay = crate::stats::summarize(&accum.recall.delays_us);
+    let recall_lat = crate::stats::summarize(&accum.recall.lats_us);
     let measured = StepMeasured {
         secs: accum.seconds,
         scheduled_ingest: mib_bytes(step.rates.ingest_mib_s, accum.seconds),
@@ -659,7 +739,10 @@ async fn run_step(
         chunk_size: CHUNK_SIZE,
         recall_ops: accum.recall.ops,
         recall_skips: accum.recall.skips,
-        recall_start_p99_us: crate::stats::summarize(&accum.recall.delays_us).p99,
+        recall_start_p99_us: recall_delay.p99,
+        recall_lat_p99_us: recall_lat.p99,
+        ingest_enqueue_blocked_us: accum.ingest.enqueue_blocked_us,
+        migration_enqueue_blocked_us: accum.migration.enqueue_blocked_us,
         overloaded_secs: accum.overloaded_secs,
         pending_samples: accum.pending_samples,
         pending_after_drain: pending_after,
@@ -668,22 +751,29 @@ async fn run_step(
         flush_batch: flush,
         aborted,
     };
-    let mut reasons = if interrupted {
+    let findings = if interrupted {
         Vec::new()
     } else {
-        judge(&measured)
+        judge(&measured, &rule)
     };
+    let mut reasons: Vec<String> = findings
+        .iter()
+        .map(|finding| finding.message.clone())
+        .collect();
     if interrupted {
         reasons.insert(0, "interrupted".to_string());
     }
     let passed = reasons.iter().all(|reason| reason == "interrupted");
+    let soft_fail = !passed && !interrupted && findings.iter().all(|finding| finding.soft);
     Ok(StepOutcome {
         passed,
         interrupted,
         halt: measured.aborted.is_some(),
+        findings,
         row: StepRow {
             name: step.name.clone(),
             passed,
+            soft_fail,
             reasons,
             measured,
             recall: accum.recall,

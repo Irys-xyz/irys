@@ -46,7 +46,7 @@ queue=/sys/block/sdc/queue
 
 The stock values seen on the lab host were `max_sectors_kb=1280`, `read_ahead_kb=128`, `nr_requests=64`, scheduler `mq-deadline`. Use the file you just wrote, not those numbers, if the host differs.
 
-Recall at 1/s, then ingest at 2, 4, 8, 16, and 32 MiB/s. Each step is 600 s. The run stops at the first failing step.
+Recall at 1/s, then ingest at 2, 4, 8, 16, and 32 MiB/s. Each step is 600 s. A hard failure stops the run (`--stop-on-fail`, the default). A recall-margin miss or an enqueue shortfall is recorded and the ladder continues. `--no-stop-on-fail` continues after a hard scored failure too. A drain timeout or a driver abort always stops the plan.
 
 ```sh
 ./target/release/irys-sm-bench \
@@ -133,6 +133,11 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | `--keep-recall-cache` | off | Bench default drops recall pages |
 | `--ingest-mix` | `1:40,4:25,16:20,64:10,256:5` | `chunks:weight` list |
 | `--serve-seq-chunks` | 8 | Longest sequential serve read |
+| `--ingest-concurrency` | 1024 | In-flight ingest chunks, held until durable. Not a production admission cap. Migration has no bench cap. Serve is one read at a time |
+| `--recall-delay-margin-ms` | 200 | Start-delay p99 may exceed the `idle` step by this much |
+| `--recall-latency-margin-ms` | 500 | Recall latency p99 may exceed the `idle` step by this much |
+| `--stop-on-fail` | on, from the schedule | Stop after a hard step failure. Overrides `stop_on_fail` in a schedule file |
+| `--no-stop-on-fail` | off | Run the remaining steps after a hard scored failure |
 
 ## Output
 
@@ -145,14 +150,22 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 
 Exit `0` when every scored step passed. Exit `1` for usage, a safety refusal, a runtime error, or Ctrl-C. Exit `2` when a scored step failed. A scored failure plus Ctrl-C exits `2`. The summary is still written when the run had started.
 
+Each step summary has `offered_bytes`, `enqueued_bytes`, `durable_bytes`, and `enqueue_blocked_us` / `enqueue_blocked_secs` for ingest and for migration. `enqueue_blocked_us` is wall time the single generator waited before it could hand bytes to the module. For ingest that wait is the bench semaphore. For migration it is the pending-write ceiling. It does not include the index-ACK wait inside `write_data_chunk_queued`, which is already counted as enqueued. The table shows recall `lat_p50_us`, `lat_p99_us`, and `start_p99_us`, and ingest and migration as offered/enqueued/durable MiB.
+
 A step fails when any of these hold:
 
-- durable bytes are short of the offered bytes by more than one chunk, or short of the enqueued bytes by more than one chunk
-- recall start-delay p99 is above 200 ms, or any recall was skipped (start lag of 3 steps or more, the mining rule)
+- enqueued bytes are short of the offered bytes by more than one chunk (soft: generator cap or enqueue backpressure)
+- durable bytes are short of the enqueued bytes by more than one chunk (hard: backlog)
+- any recall was skipped (start lag of 3 steps or more, the mining rule)
+- recall start-delay p99 or recall latency p99 is over the bar below (soft)
 - more than 20% of seconds at or above 5 s were at the pending-write ceiling, or pending bytes are still above the ceiling after the drain
 - the pending-write backlog grew by more than one flush batch and is still high after the drain (needs at least 30 samples)
 - a body-migration row remains after the drain
 - a driver or the lane aborts
+
+The recall bar depends on the schedule. A step named `idle` is the baseline: skips fail it, and its own p99 does not. A later step fails when its start-delay p99 exceeds that baseline by more than `--recall-delay-margin-ms` (default 200), or its latency p99 exceeds the baseline by more than `--recall-latency-margin-ms` (default 500). The summary and the table still show the absolute microseconds. If no `idle` step has completed, the absolute ceilings apply: start-delay p99 above 200 ms, or latency p99 above 500 ms.
+
+`soft_fail` on a step means every miss was a recall-margin or enqueue-shortfall miss. Those misses do not stop the ladder. Other misses do, unless `--no-stop-on-fail` is set. The process still exits `2` when any scored step failed.
 
 At the end of a step the bench stops recall and serve, refuses a new transaction, and keeps pacing the open transaction until it is durable. That drain waits up to 45 s so one 64 MiB transaction offered at 2 MiB/s can finish. Completions during the drain count toward durable bytes. They do not add a scored second and they are not extra sample lines.
 
@@ -182,6 +195,8 @@ These differ from a production storage module. They are deliberate so the bench 
 - Entropy-for-XOR preads and packed `pwrite`s use the write file at `(partition_offset - write_origin) * chunk_size`. XOR uses the write file's current bytes. The bench does not check packing.
 - The write file's physical placement versus the entropy file is an XFS fact. The bench does not place extents.
 - `write_data_chunk_queued` completes before `fsync`. Durable latency ends at `is_data_chunk_durable_at`.
+- Ingest holds a bench semaphore permit from the moment the chunk is handed off until that durable check returns. The default is 1024 permits. Production ingress does not take this semaphore. HTTP admission (`mempool.max_http_chunk_admission`, default 256) releases when `write_data_chunk_queued` returns, at index ACK. Ingress handlers default to 30 (`max_concurrent_chunk_ingress_tasks`). Gossip chunk handlers default to 50 (`max_concurrent_gossip_chunks`).
+- Migration does not take a bench semaphore. It waits while `pending_write_bytes` is above the body-worker ceiling (two flush batches, and at least 256 chunks). That is the same ceiling as `pending_write_ceiling_bytes` when `max_pending_write_bytes` is unset. Serve does not overlap its own reads.
 - Ingest uses the low half of the write window. Migration uses the high half. Production has one append frontier.
 - The write path does not check chunk merkle proofs. Chunk bytes are `0x5A` and data paths are 64-byte synthetic values. Serve uses `read_chunks`, which also does not check proofs.
 - `--prepopulate-index` grows the MDBX file. Recall does not look up paths, so those pages are touched by commits and the freelist.

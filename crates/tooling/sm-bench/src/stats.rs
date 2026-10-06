@@ -13,6 +13,8 @@ pub(crate) struct DriverBucket {
     pub delays_us: Vec<u64>,
     pub enqueued: u64,
     pub durable: u64,
+    /// Wall time this driver waited before it could hand bytes to the module.
+    pub enqueue_blocked_us: u64,
 }
 
 impl DriverBucket {
@@ -85,6 +87,9 @@ fn merge(into: &mut DriverBucket, from: &DriverBucket) {
     into.skips = into.skips.saturating_add(from.skips);
     into.enqueued = into.enqueued.saturating_add(from.enqueued);
     into.durable = into.durable.saturating_add(from.durable);
+    into.enqueue_blocked_us = into
+        .enqueue_blocked_us
+        .saturating_add(from.enqueue_blocked_us);
     into.lats_us.extend_from_slice(&from.lats_us);
     into.delays_us.extend_from_slice(&from.delays_us);
 }

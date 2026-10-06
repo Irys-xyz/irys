@@ -35,7 +35,6 @@ use crate::stats::{Buckets, DriverBucket, Written};
 const BLOCK_HEIGHT: u64 = 1;
 const DURABLE_TIMEOUT: Duration = Duration::from_secs(60);
 const IDLE_POLL: Duration = Duration::from_millis(20);
-const INFLIGHT_LIMIT: usize = 16;
 
 pub(crate) struct BenchIo {
     pub module: Arc<StorageModule>,
@@ -243,6 +242,18 @@ fn record_durable(io: &BenchIo, kind: Kind, bytes: u64, latency: Duration) {
     });
 }
 
+/// `waited` is monotonic. The generator is one task, so the sum is wall time
+/// spent unable to enqueue, not overlapping worker time.
+fn record_enqueue_blocked(io: &BenchIo, kind: Kind, waited: Duration) {
+    let micros = us(waited);
+    if micros == 0 {
+        return;
+    }
+    with_bucket(io, kind, |bucket| {
+        bucket.enqueue_blocked_us = bucket.enqueue_blocked_us.saturating_add(micros);
+    });
+}
+
 fn mark_written(io: &BenchIo, offset: u32) {
     io.written
         .lock()
@@ -273,16 +284,60 @@ async fn pace_bytes(
     true
 }
 
+/// Migration pauses while `pending_write_bytes` is above the body-worker ceiling.
+/// That wait is enqueue backpressure. Ingest does not use this gate.
 async fn wait_ceiling(io: &BenchIo, extra: u64, stop: &watch::Receiver<bool>) -> bool {
-    loop {
+    let started = std::time::Instant::now();
+    let mut waited = false;
+    let allowed = loop {
         if stopped(stop) || fatal_reason(io).is_some() {
-            return false;
+            break false;
         }
         let pending = io.module.pending_write_bytes();
         if pending.saturating_add(extra) <= io.ceiling {
-            return true;
+            break true;
         }
+        waited = true;
         tokio::time::sleep(IDLE_POLL).await;
+    };
+    if waited {
+        record_enqueue_blocked(io, Kind::Migration, started.elapsed());
+    }
+    allowed
+}
+
+enum PermitWait {
+    Ready(tokio::sync::OwnedSemaphorePermit),
+    Stopped,
+}
+
+/// The permit is held until the chunk is durable. Time spent here is the
+/// generator waiting on the bench cap, not on `write_data_chunk_queued`.
+async fn wait_permit(
+    io: &BenchIo,
+    kind: Kind,
+    permits: &Arc<Semaphore>,
+    stop: &mut watch::Receiver<bool>,
+) -> eyre::Result<PermitWait> {
+    if stopped(stop) {
+        return Ok(PermitWait::Stopped);
+    }
+    let started = std::time::Instant::now();
+    tokio::select! {
+        permit = permits.clone().acquire_owned() => {
+            record_enqueue_blocked(io, kind, started.elapsed());
+            if stopped(stop) {
+                return Ok(PermitWait::Stopped);
+            }
+            match permit {
+                Ok(permit) => Ok(PermitWait::Ready(permit)),
+                Err(_) => Err(eyre!("ingest semaphore closed")),
+            }
+        }
+        _ = stop.changed() => {
+            record_enqueue_blocked(io, kind, started.elapsed());
+            Ok(PermitWait::Stopped)
+        }
     }
 }
 
@@ -449,11 +504,15 @@ pub(crate) async fn ingest_driver(
     mut rates: watch::Receiver<Rates>,
     mut stop: watch::Receiver<bool>,
     cursor: u32,
+    concurrency: usize,
 ) -> eyre::Result<()> {
     let mut rng = StdRng::seed_from_u64(io.seed.wrapping_add(1));
     let mut next = cursor;
     let mut next_offer = tokio::time::Instant::now();
-    let permits = Arc::new(Semaphore::new(INFLIGHT_LIMIT));
+    // Held until durable, so this bounds in-flight bytes. `write_data_chunk_queued`
+    // itself has no concurrency cap. Release is later than production HTTP
+    // admission, which returns at index ACK.
+    let permits = Arc::new(Semaphore::new(concurrency));
     loop {
         if stopped(&stop) || fatal_reason(&io).is_some() {
             break;
@@ -478,7 +537,7 @@ pub(crate) async fn ingest_driver(
         if let Err(error) = write_tx(
             &io,
             &mut stop,
-            &permits,
+            Some(&permits),
             Kind::Ingest,
             b"ingest",
             next,
@@ -505,7 +564,6 @@ pub(crate) async fn migration_driver(
 ) -> eyre::Result<()> {
     let mut next = cursor;
     let mut next_offer = tokio::time::Instant::now();
-    let permits = Arc::new(Semaphore::new(INFLIGHT_LIMIT));
     let span = u32::try_from(io.span_limit).unwrap_or(u32::MAX).max(1);
     loop {
         if stopped(&stop) || fatal_reason(&io).is_some() {
@@ -531,7 +589,7 @@ pub(crate) async fn migration_driver(
         if let Err(error) = write_tx(
             &io,
             &mut stop,
-            &permits,
+            None,
             Kind::Migration,
             b"migration",
             next,
@@ -553,7 +611,7 @@ pub(crate) async fn migration_driver(
 async fn write_tx(
     io: &Arc<BenchIo>,
     stop: &mut watch::Receiver<bool>,
-    permits: &Arc<Semaphore>,
+    permits: Option<&Arc<Semaphore>>,
     kind: Kind,
     tag: &'static [u8],
     start: u32,
@@ -611,11 +669,16 @@ async fn write_tx(
         } else {
             let chunk = batch.pop().ok_or_else(|| eyre!("empty ingest batch"))?;
             let part = PartitionChunkOffset::from(offset);
-            let permit = permits
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| eyre!("ingest semaphore closed"))?;
+            let Some(permits) = permits else {
+                return Err(eyre!("ingest concurrency cap is missing"));
+            };
+            let permit = match wait_permit(io, kind, permits, stop).await? {
+                PermitWait::Stopped => {
+                    failed.store(true, Ordering::Release);
+                    break;
+                }
+                PermitWait::Ready(permit) => permit,
+            };
             record_enqueued(io, kind, io.chunk_size);
             io.ingest_inflight.fetch_add(1, Ordering::AcqRel);
             spawn_ingest_wait(
