@@ -954,6 +954,20 @@ mod tests {
         Arc<StorageModule>,
         PartitionMiningServiceInner,
     ) {
+        open_data_miner_with_tx_data(difficulty, indexed, None)
+    }
+
+    /// `tx_data` replaces the four full chunks when `indexed` is set. The
+    /// partition stays [`DATA_CHUNKS`] long, so a short tail still has a slot.
+    fn open_data_miner_with_tx_data(
+        difficulty: U256,
+        indexed: bool,
+        tx_data: Option<Vec<u8>>,
+    ) -> (
+        irys_testing_utils::utils::tempfile::TempDir,
+        Arc<StorageModule>,
+        PartitionMiningServiceInner,
+    ) {
         let tmp_dir = TempDirBuilder::new().build();
         let chunks = DATA_CHUNKS;
         let node_config = NodeConfig {
@@ -1008,7 +1022,16 @@ mod tests {
                 .force_sync_pending_chunks()
                 .expect("sync entropy");
             let signer = IrysSigner::random_signer(&config.consensus);
-            let data: Vec<u8> = (0..chunks as u8).flat_map(|byte| vec![byte; 32]).collect();
+            let data = tx_data.unwrap_or_else(|| {
+                (0..chunks as u8)
+                    .flat_map(|byte| vec![byte; chunk_size])
+                    .collect()
+            });
+            let tx_chunks = data.len().div_ceil(chunk_size) as u64;
+            assert!(
+                tx_chunks <= chunks,
+                "transaction chunks must fit the partition"
+            );
             let tx = signer
                 .sign_transaction(
                     signer
@@ -1023,7 +1046,7 @@ mod tests {
                 .index_transaction_data(
                     &tx.header,
                     &proofs[0].proof,
-                    LedgerChunkRange(ledger_chunk_offset_ii!(0, chunks - 1)),
+                    LedgerChunkRange(ledger_chunk_offset_ii!(0, tx_chunks - 1)),
                     0,
                 )
                 .expect("index transaction");
@@ -1160,5 +1183,47 @@ mod tests {
             "a data win whose leaf does not bind the recall bytes is not submitted"
         );
         assert_eq!(inner.data_path_lookup_count(), DATA_CHUNKS);
+    }
+
+    #[test]
+    fn short_final_chunk_binds_its_prefix_only() {
+        let chunk_size = 32_usize;
+        let tail = 10_usize;
+        let mut data = Vec::new();
+        for byte in 0..3_u8 {
+            data.extend(std::iter::repeat_n(byte, chunk_size));
+        }
+        data.extend(std::iter::repeat_n(0x5A, tail));
+        let (_tmp, storage, inner) = open_data_miner_with_tx_data(U256::zero(), true, Some(data));
+        let offset = PartitionChunkOffset::from(3);
+        let read = storage
+            .read_chunks(partition_chunk_offset_ie!(3, 4))
+            .expect("read the short chunk");
+        let (chunk_bytes, chunk_type) = read.get(&offset).expect("offset 3");
+        assert_eq!(*chunk_type, ChunkType::Data);
+        assert_eq!(chunk_bytes.len(), chunk_size);
+        let (_, data_path) = storage
+            .read_tx_data_path(LedgerChunkOffset::from(*offset))
+            .expect("path read");
+        let data_path = data_path.expect("data path");
+
+        assert!(
+            inner.data_path_binds_chunk(offset, chunk_bytes, &data_path),
+            "the stored short chunk matches its leaf"
+        );
+
+        let mut prefix = chunk_bytes.clone();
+        prefix[0] ^= 0x01;
+        assert!(
+            !inner.data_path_binds_chunk(offset, &prefix, &data_path),
+            "a byte inside the hashed prefix must not bind"
+        );
+
+        let mut past_span = chunk_bytes.clone();
+        past_span[tail] ^= 0x01;
+        assert!(
+            inner.data_path_binds_chunk(offset, &past_span, &data_path),
+            "a byte past the short span is not part of the leaf"
+        );
     }
 }
