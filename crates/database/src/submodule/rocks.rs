@@ -306,25 +306,29 @@ impl RocksSubmoduleStore {
 
     /// Open with an explicit preset. [`Self::open`] stays on the baseline.
     pub fn open_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, false)
+        Self::open_inner(path, tuning, false, false)
     }
 
-    /// Bench open. Same options as [`Self::open_with`], plus ticker counters.
+    /// Bench open. Same options as [`Self::open_with`], plus ticker counters
+    /// and a full table preload.
     ///
-    /// Histograms and timers stay off. Production [`Self::open`] does not
-    /// call this.
+    /// Histograms and timers stay off. `max_open_files` is -1, so `DB::Open`
+    /// preloads every table on 16 threads. Production [`Self::open`] does not
+    /// call this and stays at 512 until a rerun shows the read tail moved
+    /// into open time.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, true)
+        Self::open_inner(path, tuning, true, true)
     }
 
     fn open_inner(
         path: impl AsRef<Path>,
         tuning: RocksTuning,
         collect_stats: bool,
+        preload_tables: bool,
     ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         check_schema_file(&path)?;
-        let (db, stats) = open_db(&path, &tuning, collect_stats)?;
+        let (db, stats) = open_db(&path, &tuning, collect_stats, preload_tables)?;
         ensure_schema_row(&db)?;
         let marker = path.join(SCHEMA_FILE);
         if !marker.exists() {
@@ -419,6 +423,7 @@ fn open_db(
     path: &Path,
     tuning: &RocksTuning,
     collect_stats: bool,
+    preload_tables: bool,
 ) -> eyre::Result<(DB, Option<Arc<Options>>)> {
     let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
     let mut db_opts = Options::default();
@@ -429,7 +434,16 @@ fn open_db(
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
     db_opts.set_recycle_log_file_num(4);
-    db_opts.set_max_open_files(512);
+    if preload_tables {
+        // Bench only. -1 keeps every table open and preloads them in DB::Open.
+        // Production stays at 512 until a rerun shows the read tail moved there.
+        db_opts.set_max_open_files(-1);
+        db_opts.set_max_file_opening_threads(16);
+        // Skip table properties that only choose compaction inputs.
+        db_opts.set_skip_stats_update_on_db_open(true);
+    } else {
+        db_opts.set_max_open_files(512);
+    }
     db_opts.set_use_fsync(true);
     if collect_stats {
         // Tickers only. Timers and histograms stay off.
@@ -1253,8 +1267,34 @@ mod tests {
         )?;
         let bg = bench.background()?;
         assert!(bg.no_file_opens.is_some());
+        let bench_opts = persisted_options(&dir.path().join("bench"))?;
+        assert!(bench_opts.contains("max_open_files=-1"), "{bench_opts}");
+        assert!(
+            bench_opts.contains("max_file_opening_threads=16"),
+            "{bench_opts}"
+        );
+        assert!(
+            bench_opts.contains("skip_stats_update_on_db_open=true"),
+            "{bench_opts}"
+        );
         let plain = RocksSubmoduleStore::open(dir.path().join("plain"))?;
         assert!(plain.background()?.no_file_opens.is_none());
+        let plain_opts = persisted_options(&dir.path().join("plain"))?;
+        assert!(plain_opts.contains("max_open_files=512"), "{plain_opts}");
+        assert!(!plain_opts.contains("max_open_files=-1"), "{plain_opts}");
         Ok(())
+    }
+
+    fn persisted_options(path: &Path) -> eyre::Result<String> {
+        let mut found = None;
+        for entry in fs::read_dir(path).wrap_err("read db dir")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("OPTIONS-") {
+                found = Some(fs::read_to_string(entry.path()).wrap_err("read OPTIONS")?);
+            }
+        }
+        found.ok_or_else(|| eyre::eyre!("no OPTIONS file in {}", path.display()))
     }
 }
