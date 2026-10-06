@@ -15,7 +15,7 @@ use irys_types::{
 use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 
 #[cfg(feature = "rocksdb")]
-use super::rocks::{RocksSubmoduleStore, RocksTuning};
+use super::rocks::{RocksBackground, RocksSubmoduleStore, RocksTuning};
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
@@ -466,9 +466,22 @@ impl SubmoduleIndex {
     }
 
     /// Bench entry for one named preset. [`Self::open_rocks`] stays on the baseline.
+    ///
+    /// This open counts table opens. Production [`Self::open_rocks`] does not.
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Ok(Self::Rocks(RocksSubmoduleStore::open_with(path, tuning)?))
+        Ok(Self::Rocks(RocksSubmoduleStore::open_with_stats(
+            path, tuning,
+        )?))
+    }
+
+    /// Compaction and flush state. `None` on MDBX.
+    #[cfg(feature = "rocksdb")]
+    pub fn rocks_background(&self) -> eyre::Result<Option<RocksBackground>> {
+        match self {
+            Self::Mdbx(_) => Ok(None),
+            Self::Rocks(store) => Ok(Some(store.background()?)),
+        }
     }
 
     /// Settle on-disk files before a directory-size measurement.
