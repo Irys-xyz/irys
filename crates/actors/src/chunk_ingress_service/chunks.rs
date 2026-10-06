@@ -160,7 +160,7 @@ async fn write_chunk_to_assigned_modules(
         match sm.write_data_chunk_queued(chunk).await {
             Ok(()) => wrote_any = true,
             Err(WriteDataChunkError::WritesPaused) => {}
-            Err(error) if write_is_backpressure(&error) => {
+            Err(WriteDataChunkError::Backpressure) => {
                 return Err(AdvisoryChunkIngressError::Overloaded.into());
             }
             Err(error) => {
@@ -183,17 +183,6 @@ async fn write_chunk_to_assigned_modules(
         return Err(AdvisoryChunkIngressError::Overloaded.into());
     }
     Ok(())
-}
-
-/// A retry of a chunk that is already queued, or a waiter that gave the disk
-/// back to mining, is backpressure. The sender must try again later.
-fn write_is_backpressure(error: &WriteDataChunkError) -> bool {
-    let WriteDataChunkError::Other(inner) = error else {
-        return false;
-    };
-    let message = inner.to_string();
-    message.contains("index write already in flight")
-        || message.contains("entropy read did not finish")
 }
 
 async fn remember_after_module_writes(

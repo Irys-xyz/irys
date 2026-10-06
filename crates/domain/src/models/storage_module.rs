@@ -380,6 +380,10 @@ pub enum WriteDataChunkError {
     /// was refused and should be retried later.
     #[error("storage module data writes are paused for recovery")]
     WritesPaused,
+    /// A writer already holds this offset. The bytes are not stored yet.
+    /// The caller retries later.
+    #[error("storage write backpressure")]
+    Backpressure,
     /// Any other write failure (IO, index update, packing, etc.).
     #[error(transparent)]
     Other(#[from] eyre::Report),
@@ -1983,9 +1987,7 @@ impl StorageModule {
                 .iter()
                 .any(|offset| pending.occupancy.contains_key(offset))
             {
-                return Err(WriteDataChunkError::Other(eyre::eyre!(
-                    "index write already in flight"
-                )));
+                return Err(WriteDataChunkError::Backpressure);
             }
         }
         Ok(prepared)
@@ -3414,8 +3416,8 @@ mod tests {
             .write_data_chunk(&chunk)
             .expect_err("second writer must not succeed while occupied");
         assert!(
-            err.to_string().contains("index write already in flight"),
-            "expected in-flight error, got {err}"
+            matches!(err, WriteDataChunkError::Backpressure),
+            "expected backpressure, got {err}"
         );
         assert_eq!(
             storage_module.get_chunk_type(&offset),
