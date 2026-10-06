@@ -30,13 +30,15 @@ use rocksdb::{
     WriteBatch, WriteOptions,
 };
 
+use super::group::{EnableStep, EngineLifetime, GroupCommit};
 use super::tables::{
     ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
     DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, TxLeafBinding,
     TxLeafBindingByTxPathHash, TxPathByTxPathHash,
 };
 use super::{
-    SubmoduleRead, SubmoduleWrite, first_gap_with, gaps_with, tables::Metadata as MetadataTable,
+    SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, first_gap_with, gaps_with,
+    tables::Metadata as MetadataTable,
 };
 use crate::metadata::MetadataKey;
 
@@ -252,9 +254,32 @@ impl Cf {
 
 #[derive(Clone)]
 pub struct RocksSubmoduleStore {
+    /// Dropped first so the delay thread joins before `db` closes.
+    lifetime: Arc<EngineLifetime>,
     db: Arc<DB>,
     write: Arc<Mutex<()>>,
+    group: Arc<GroupCommit>,
     path: PathBuf,
+    /// Statistics object from the `Options` that opened this DB.
+    ///
+    /// The DB copies that shared pointer. Ticker reads have to use this
+    /// object, so the bench keeps it. Production open leaves it empty.
+    /// Dump and persist periods are zero: a periodic stats write would show
+    /// up as disk writes during a read sample.
+    stats: Option<Arc<Options>>,
+}
+
+/// Background work visible around one bench read shape.
+///
+/// Compaction and flush counters do not need statistics. `no_file_opens` is
+/// cumulative since open and is present only when the bench enabled tickers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RocksBackground {
+    pub compactions: u64,
+    pub flushes: u64,
+    pub compaction_pending: u64,
+    pub flush_pending: u64,
+    pub no_file_opens: Option<u64>,
 }
 
 impl std::fmt::Debug for RocksSubmoduleStore {
@@ -286,18 +311,146 @@ impl RocksSubmoduleStore {
 
     /// Open with an explicit preset. [`Self::open`] stays on the baseline.
     pub fn open_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        Self::open_inner(path, tuning, false, false)
+    }
+
+    /// Bench open. Same options as [`Self::open_with`], plus ticker counters
+    /// and a full table preload.
+    ///
+    /// Histograms and timers stay off. `max_open_files` is -1, so `DB::Open`
+    /// preloads every table on 16 threads. Production [`Self::open`] does not
+    /// call this and stays at 512 until a rerun shows the read tail moved
+    /// into open time.
+    pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        Self::open_inner(path, tuning, true, true)
+    }
+
+    fn open_inner(
+        path: impl AsRef<Path>,
+        tuning: RocksTuning,
+        collect_stats: bool,
+        preload_tables: bool,
+    ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         check_schema_file(&path)?;
-        let db = open_db(&path, &tuning)?;
+        let (db, stats) = open_db(&path, &tuning, collect_stats, preload_tables)?;
         ensure_schema_row(&db)?;
         let marker = path.join(SCHEMA_FILE);
         if !marker.exists() {
             fs::write(&marker, SCHEMA_TEXT).wrap_err("write schema marker")?;
         }
+        let group = GroupCommit::new();
         Ok(Self {
+            lifetime: EngineLifetime::new(Arc::clone(&group)),
             db: Arc::new(db),
             write: Arc::new(Mutex::new(())),
+            group,
             path,
+            stats,
+        })
+    }
+
+    pub(super) fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
+        match self.group.prepare(txs_per_sync)? {
+            EnableStep::On => Ok(()),
+            EnableStep::Spawn => {
+                if let Err(err) = self.spawn_delay() {
+                    self.group.clear_spawned();
+                    return Err(err);
+                }
+                self.group.finish_enable();
+                Ok(())
+            }
+            EnableStep::Arm => {
+                self.group.finish_enable();
+                Ok(())
+            }
+        }
+    }
+
+    pub(super) fn group_commit_enabled(&self) -> bool {
+        self.group.is_enabled()
+    }
+
+    #[cfg(test)]
+    pub(super) fn group_sync_count(&self) -> u64 {
+        self.group.sync_count()
+    }
+
+    pub(super) fn sync_group(&self) -> eyre::Result<()> {
+        if !self.group.is_enabled() {
+            return Ok(());
+        }
+        let _guard = self.lock_write();
+        sync_wal_locked(&self.db, &self.group)
+    }
+
+    /// Visible registration. The caller holds no write lock.
+    pub(super) fn update_registration<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        if !self.group.is_enabled() {
+            return self.update(f);
+        }
+        let _guard = self.lock_write();
+        let result = self.apply(false, f)?;
+        if self.group.note_visible() {
+            sync_wal_locked(&self.db, &self.group)?;
+        }
+        Ok(result)
+    }
+
+    fn spawn_delay(&self) -> eyre::Result<()> {
+        let db = Arc::downgrade(&self.db);
+        let write = Arc::clone(&self.write);
+        let group = Arc::clone(&self.group);
+        self.lifetime
+            .spawn(Arc::clone(&self.group), move || match db.upgrade() {
+                Some(db) => {
+                    let _guard = write
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    sync_wal_locked(&db, &group)
+                }
+                None => Ok(()),
+            })
+    }
+
+    fn lock_write(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `sync` waits until the WAL is durable. The write lock is held.
+    fn apply<R>(
+        &self,
+        sync: bool,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        let snap = self.db.snapshot();
+        let mut batch = Batch {
+            db: &self.db,
+            snap: &snap,
+            overlay: Overlay::default(),
+        };
+        let result = f(&mut batch)?;
+        batch.commit(sync)?;
+        Ok(result)
+    }
+
+    /// Compactions, flushes, and table opens. Safe to call during reads.
+    pub fn background(&self) -> eyre::Result<RocksBackground> {
+        Ok(RocksBackground {
+            compactions: property_u64(&self.db, rocksdb::properties::NUM_RUNNING_COMPACTIONS)?,
+            flushes: property_u64(&self.db, rocksdb::properties::NUM_RUNNING_FLUSHES)?,
+            compaction_pending: property_u64(&self.db, rocksdb::properties::COMPACTION_PENDING)?,
+            flush_pending: property_u64(&self.db, rocksdb::properties::MEM_TABLE_FLUSH_PENDING)?,
+            no_file_opens: self
+                .stats
+                .as_ref()
+                .map(|opts| opts.get_ticker_count(rocksdb::statistics::Ticker::NoFileOpens)),
         })
     }
 
@@ -316,6 +469,8 @@ impl RocksSubmoduleStore {
                 .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
         }
         self.db.flush_wal(true).wrap_err("sync wal")?;
+        // The synced WAL covers any open registration group.
+        self.group.cover_durable();
         Ok(())
     }
 
@@ -402,23 +557,29 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
-        let _guard = self
-            .write
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snap = self.db.snapshot();
-        let mut batch = Batch {
-            db: &self.db,
-            snap: &snap,
-            overlay: Overlay::default(),
-        };
-        let result = f(&mut batch)?;
-        batch.commit()?;
+        let _guard = self.lock_write();
+        let result = self.apply(true, f)?;
+        // A synced write covers earlier unsynced registrations in this WAL.
+        self.group.cover_durable();
         Ok(result)
     }
 }
 
-fn open_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<DB> {
+fn sync_wal_locked(db: &DB, group: &GroupCommit) -> eyre::Result<()> {
+    let Some(generation) = group.dirty_generation() else {
+        return Ok(());
+    };
+    db.flush_wal(true).wrap_err("sync submodule index wal")?;
+    group.mark_synced(generation, true);
+    Ok(())
+}
+
+fn open_db(
+    path: &Path,
+    tuning: &RocksTuning,
+    collect_stats: bool,
+    preload_tables: bool,
+) -> eyre::Result<(DB, Option<Arc<Options>>)> {
     let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
@@ -428,13 +589,38 @@ fn open_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<DB> {
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
     db_opts.set_recycle_log_file_num(4);
-    db_opts.set_max_open_files(512);
+    if preload_tables {
+        // Bench only. -1 keeps every table open and preloads them in DB::Open.
+        // Production stays at 512 until a rerun shows the read tail moved there.
+        db_opts.set_max_open_files(-1);
+        db_opts.set_max_file_opening_threads(16);
+        // Skip table properties that only choose compaction inputs.
+        db_opts.set_skip_stats_update_on_db_open(true);
+    } else {
+        db_opts.set_max_open_files(512);
+    }
     db_opts.set_use_fsync(true);
+    if collect_stats {
+        // Tickers only. Timers and histograms stay off.
+        db_opts.enable_statistics();
+        db_opts.set_statistics_level(rocksdb::statistics::StatsLevel::ExceptHistogramOrTimers);
+        db_opts.set_stats_dump_period_sec(0);
+        db_opts.set_stats_persist_period_sec(0);
+    }
 
     let families = Cf::ALL.into_iter().map(|cf| {
         rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(&cache, cf, tuning))
     });
-    DB::open_cf_descriptors(&db_opts, path, families).wrap_err("open rocksdb submodule index")
+    let db = DB::open_cf_descriptors(&db_opts, path, families)
+        .wrap_err("open rocksdb submodule index")?;
+    let stats = collect_stats.then(|| Arc::new(db_opts));
+    Ok((db, stats))
+}
+
+fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {
+    db.property_int_value(name)
+        .wrap_err("read rocksdb property")?
+        .ok_or_else(|| eyre::eyre!("rocksdb property missing"))
 }
 
 fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
@@ -612,7 +798,7 @@ impl<'a> Batch<'a> {
         self.overlay.maps[cf.index()].insert(key.to_vec(), None);
     }
 
-    fn commit(&self) -> eyre::Result<()> {
+    fn commit(&self, sync: bool) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
         for cf in Cf::ALL {
             let handle = cf_handle(self.db, cf)?;
@@ -630,7 +816,10 @@ impl<'a> Batch<'a> {
             }
         }
         let mut opts = WriteOptions::default();
-        opts.set_sync(true);
+        // `false` still appends the WAL. A later synced write or `flush_wal`
+        // makes this group durable. `true` syncs the WAL, including earlier
+        // unsynced records.
+        opts.set_sync(sync);
         self.db
             .write_opt(batch, &opts)
             .wrap_err("commit submodule index batch")
@@ -1178,7 +1367,7 @@ impl SubmoduleWrite for Batch<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::submodule::{SubmoduleIndex, SubmoduleStore as _};
+    use crate::submodule::SubmoduleIndex;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::H256;
 
@@ -1300,5 +1489,47 @@ mod tests {
         let again = index.rocks_ingest_stats()?.expect("rocks counters");
         assert_eq!(again.write_stall_micros, 0);
         Ok(())
+    }
+
+    #[test]
+    fn bench_open_counts_file_opens_and_production_open_does_not() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_stats")
+            .build();
+        let bench = RocksSubmoduleStore::open_with_stats(
+            dir.path().join("bench"),
+            RocksTuning::baseline(),
+        )?;
+        let bg = bench.background()?;
+        assert!(bg.no_file_opens.is_some());
+        let bench_opts = persisted_options(&dir.path().join("bench"))?;
+        assert!(bench_opts.contains("max_open_files=-1"), "{bench_opts}");
+        assert!(
+            bench_opts.contains("max_file_opening_threads=16"),
+            "{bench_opts}"
+        );
+        assert!(
+            bench_opts.contains("skip_stats_update_on_db_open=true"),
+            "{bench_opts}"
+        );
+        let plain = RocksSubmoduleStore::open(dir.path().join("plain"))?;
+        assert!(plain.background()?.no_file_opens.is_none());
+        let plain_opts = persisted_options(&dir.path().join("plain"))?;
+        assert!(plain_opts.contains("max_open_files=512"), "{plain_opts}");
+        assert!(!plain_opts.contains("max_open_files=-1"), "{plain_opts}");
+        Ok(())
+    }
+
+    fn persisted_options(path: &Path) -> eyre::Result<String> {
+        let mut found = None;
+        for entry in fs::read_dir(path).wrap_err("read db dir")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("OPTIONS-") {
+                found = Some(fs::read_to_string(entry.path()).wrap_err("read OPTIONS")?);
+            }
+        }
+        found.ok_or_else(|| eyre::eyre!("no OPTIONS file in {}", path.display()))
     }
 }
