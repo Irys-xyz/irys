@@ -5294,6 +5294,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "libc",
  "lru 0.14.0",
  "nodit",
  "num-bigfloat",
