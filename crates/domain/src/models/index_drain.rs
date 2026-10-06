@@ -1,12 +1,12 @@
-//! Batched data-path index commits for one submodule MDBX environment.
+//! Batched data-path index commits for one submodule index.
 //!
 //! MDBX chooses the page writes inside a commit. This module only chooses
 //! when `update_eyre` starts: after the chunk `pread`s, `pwrite`s, and
 //! mining recall on this drive have left the gap, and not during them.
 
 use super::{WriteDataChunkError, disk_lane::DiskWake};
-use irys_database::{db::IrysDatabaseExt as _, submodule::write_data_path_updates};
-use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset, app_state::DatabaseProvider};
+use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
+use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset};
 use std::{
     collections::HashSet,
     sync::{
@@ -182,7 +182,7 @@ pub(super) struct DrainTestHooks {
 
 pub(super) struct DrainRunner {
     rx: mpsc::Receiver<IndexOp>,
-    db: DatabaseProvider,
+    db: SubmoduleIndex,
     current_generation: Arc<AtomicU64>,
     in_flight: Arc<InFlight>,
     fail_next: Arc<AtomicBool>,
@@ -194,7 +194,7 @@ pub(super) struct DrainRunner {
 
 impl IndexDrain {
     pub(super) fn spawn(
-        db: DatabaseProvider,
+        db: SubmoduleIndex,
         generation: Arc<AtomicU64>,
         fail_next: Arc<AtomicBool>,
         gap: Arc<IndexGap>,
@@ -227,7 +227,7 @@ impl IndexDrain {
     }
 
     #[cfg(test)]
-    pub(super) fn unstarted(db: DatabaseProvider, hooks: DrainTestHooks) -> (Self, DrainRunner) {
+    pub(super) fn unstarted(db: SubmoduleIndex, hooks: DrainTestHooks) -> (Self, DrainRunner) {
         let gap = Arc::new(IndexGap::new());
         let (tx, rx) = mpsc::channel();
         let in_flight = Arc::new(InFlight::default());
@@ -499,14 +499,14 @@ impl DrainRunner {
         if self.fail_next.swap(false, Ordering::SeqCst) {
             eyre::bail!("injected index drain commit failure");
         }
-        self.db.update_eyre(|tx| {
+        self.db.update(|tx| {
             // clone: put consumes the path bytes; the IndexOp is kept for the waiter ACK.
             // Offset order walks the leaf pages forward inside this one commit.
             let updates = batch
                 .iter()
                 .map(|op| (op.offset, op.path_hash, op.data_path.clone()))
                 .collect();
-            write_data_path_updates(tx, updates)
+            tx.write_data_path_updates(updates)
         })
     }
 }
@@ -528,11 +528,10 @@ mod tests {
     use crate::WriteDataChunkError;
     use irys_database::{
         IrysDatabaseArgs as _,
-        db::IrysDatabaseExt as _,
-        submodule::{create_or_open_submodule_db, get_path_hashes_by_offset},
+        submodule::{SubmoduleIndex, SubmoduleStore as _},
     };
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::{PartitionChunkOffset, UnpackedChunk, app_state::DatabaseProvider};
+    use irys_types::{PartitionChunkOffset, UnpackedChunk};
     use reth_db::mdbx::DatabaseArguments;
     use std::{
         sync::{
@@ -544,9 +543,8 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    fn open_submodule_db(path: &std::path::Path) -> eyre::Result<DatabaseProvider> {
-        let env = create_or_open_submodule_db(path, DatabaseArguments::irys_testing()?)?;
-        Ok(DatabaseProvider(Arc::new(env)))
+    fn open_submodule_db(path: &std::path::Path) -> eyre::Result<SubmoduleIndex> {
+        SubmoduleIndex::open_mdbx(path, DatabaseArguments::irys_testing()?)
     }
 
     fn submit_op(
@@ -568,14 +566,13 @@ mod tests {
     }
 
     fn path_hash_at(
-        db: &DatabaseProvider,
+        db: &SubmoduleIndex,
         offset: u32,
     ) -> eyre::Result<Option<irys_types::ChunkPathHash>> {
-        db.view_eyre(|tx| {
-            Ok(
-                get_path_hashes_by_offset(tx, PartitionChunkOffset::from(offset))?
-                    .and_then(|hashes| hashes.data_path_hash),
-            )
+        db.view(|tx| {
+            Ok(tx
+                .get_path_hashes_by_offset(PartitionChunkOffset::from(offset))?
+                .and_then(|hashes| hashes.data_path_hash))
         })
     }
 

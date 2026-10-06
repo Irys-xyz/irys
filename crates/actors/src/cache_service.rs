@@ -1368,7 +1368,7 @@ mod tests {
         data_size: u64,
         offsets: &[u32],
     ) -> eyre::Result<StorageModulesReadGuard> {
-        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
         use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
         use irys_types::{
             ConsensusConfig, PartitionChunkOffset, RelativeChunkOffset,
@@ -1405,9 +1405,8 @@ mod tests {
         };
         let sm = Arc::new(StorageModule::new(&info, &sm_config)?);
         let (_, submodule) = sm.get_submodule_for_offset(PartitionChunkOffset::from(0_u32))?;
-        submodule.db.update_eyre(|tx| {
-            add_data_root_info(
-                tx,
+        submodule.db.update(|tx| {
+            tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset::from(0_i32),
