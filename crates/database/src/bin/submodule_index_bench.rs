@@ -47,6 +47,10 @@ const LEAF_SIZE: usize = HASH_SIZE + NOTE_SIZE;
 const LARGE_RAW_BYTES: u64 = 8 << 30;
 /// Filled run past a typical HDD cache. 4096-byte paths, about 4 GiB raw.
 const MID_CHUNKS: u32 = 1_000_000;
+/// `--mid` puts this many transactions in one MDBX commit. Rocks stays at one.
+const MID_MDBX_TXS_PER_COMMIT: u32 = 8;
+/// `--mid` MDBX data-path commit size. Rocks stays at `--batch` (512).
+const MID_MDBX_PATH_BATCH: u32 = 2048;
 /// Filled runs at or below this stay inside an 8 GiB map. `--mid` is above it.
 const FILLED_MAP_CEILING: u64 = 8 << 30;
 
@@ -106,7 +110,11 @@ fn main() -> eyre::Result<()> {
         );
     } else if args.mid {
         let raw = u64::from(args.chunks) * args.path_bytes as u64;
-        println!("mode=mid raw_data_path_bytes={raw}");
+        let mdbx = commits_for(true, args.batch, true);
+        println!(
+            "mode=mid raw_data_path_bytes={raw} mdbx_txs_per_commit={} mdbx_path_batch={}",
+            mdbx.txs_per_commit, mdbx.path_batch
+        );
     } else {
         println!("mode=filled");
     }
@@ -114,8 +122,12 @@ fn main() -> eyre::Result<()> {
     let mdbx_dir = args.dir.join("mdbx");
     fs::create_dir_all(&mdbx_dir)?;
     let map_bytes = mdbx_map_bytes(args.chunks, args.path_bytes, args.worst_case);
-    println!("engine=mdbx sync=durable geometry_max_bytes={map_bytes}");
-    measure(&mdbx_dir, &args, |path| {
+    let mdbx_commits = commits_for(args.mid, args.batch, true);
+    println!(
+        "engine=mdbx sync=durable geometry_max_bytes={map_bytes} txs_per_commit={} path_batch={}",
+        mdbx_commits.txs_per_commit, mdbx_commits.path_batch
+    );
+    measure(&mdbx_dir, &args, mdbx_commits, |path| {
         SubmoduleIndex::open_mdbx(
             path,
             DatabaseArguments::irys_default(DbSyncMode::Durable)?
@@ -125,25 +137,48 @@ fn main() -> eyre::Result<()> {
 
     let rocks_dir = args.dir.join("rocks");
     fs::create_dir_all(&rocks_dir)?;
+    let rocks_commits = commits_for(args.mid, args.batch, false);
     println!(
-        "engine=rocks sync=wal_fsync compression=lz4 block_bytes=65536 blob_min_bytes={BLOB_MIN_BYTES} block_cache_bytes={}",
-        args.block_cache
+        "engine=rocks sync=wal_fsync compression=lz4 block_bytes=65536 blob_min_bytes={BLOB_MIN_BYTES} block_cache_bytes={} txs_per_commit={} path_batch={}",
+        args.block_cache, rocks_commits.txs_per_commit, rocks_commits.path_batch
     );
     let cache = args.block_cache;
-    measure(&rocks_dir, &args, |path| {
+    measure(&rocks_dir, &args, rocks_commits, |path| {
         SubmoduleIndex::open_rocks_with_block_cache(path, cache)
     })?;
     Ok(())
 }
 
+/// One durable `update`. `--mid` groups MDBX only. Rocks keeps one transaction
+/// and the `--batch` data-path size, so its fsync count stays the small-tx shape.
+struct CommitGrouping {
+    txs_per_commit: u32,
+    path_batch: u32,
+}
+
+fn commits_for(mid: bool, batch: u32, mdbx: bool) -> CommitGrouping {
+    if mid && mdbx {
+        CommitGrouping {
+            txs_per_commit: MID_MDBX_TXS_PER_COMMIT,
+            path_batch: batch.max(MID_MDBX_PATH_BATCH),
+        }
+    } else {
+        CommitGrouping {
+            txs_per_commit: 1,
+            path_batch: batch,
+        }
+    }
+}
+
 fn measure(
     dir: &Path,
     args: &Args,
+    commits: CommitGrouping,
     open: impl Fn(&Path) -> eyre::Result<SubmoduleIndex>,
 ) -> eyre::Result<()> {
     let store = open(dir)?;
-    let index_ms = timed(|| write_tx_index(&store, args))?;
-    let data_path_ms = timed(|| write_data_paths(&store, args))?;
+    let index_ms = timed(|| write_tx_index(&store, args, commits.txs_per_commit))?;
+    let data_path_ms = timed(|| write_data_paths(&store, args, commits.path_batch))?;
     let settle_ms = timed(|| store.settle_files())?;
     drop(store);
 
@@ -160,55 +195,77 @@ fn measure(
     Ok(())
 }
 
-fn write_tx_index(store: &SubmoduleIndex, args: &Args) -> eyre::Result<()> {
+struct IndexTx {
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    tx_hash: H256,
+    data_root: H256,
+    tx_path: Vec<u8>,
+    start_offset: RelativeChunkOffset,
+    data_size: u64,
+}
+
+fn write_tx_index(store: &SubmoduleIndex, args: &Args, txs_per_commit: u32) -> eyre::Result<()> {
     let mut offset = 0_u32;
     while offset < args.chunks {
-        let count = args.tx_chunks.min(args.chunks - offset);
-        let start = PartitionChunkOffset::from(offset);
-        let end = PartitionChunkOffset::from(offset + count - 1);
-        let tx_hash = hash_at(u64::from(offset));
-        let data_root = hash_at(u64::from(offset) + 0x1000_0000);
-        let tx_path = tx_path_bytes(args, offset);
-        let start_offset = RelativeChunkOffset(i32::try_from(offset)?);
-        let data_size = indexed_data_size(args, count);
-        store.update(|tx| {
-            tx.add_full_tx_path(tx_hash, tx_path)?;
-            tx.add_tx_leaf_binding(
-                tx_hash,
-                &TxLeafBinding {
-                    data_root,
-                    prefix_hash: H256::zero(),
-                },
-            )?;
-            tx.add_tx_path_hash_to_offset_range(start, end, Some(tx_hash))?;
-            tx.add_data_root_info(
-                data_root,
-                &DataRootInfo {
-                    start_offset,
-                    data_size,
-                },
-            )?;
-            tx.add_pending_body_migration(
+        let mut group = Vec::new();
+        for _ in 0..txs_per_commit {
+            if offset >= args.chunks {
+                break;
+            }
+            let count = args.tx_chunks.min(args.chunks - offset);
+            let start = PartitionChunkOffset::from(offset);
+            let end = PartitionChunkOffset::from(offset + count - 1);
+            group.push(IndexTx {
                 start,
-                &PendingBodyMigration {
-                    data_root,
-                    data_size,
-                    start_offset,
-                    block_height: 1,
-                    attempts: 0,
-                },
-            )?;
+                end,
+                tx_hash: hash_at(u64::from(offset)),
+                data_root: hash_at(u64::from(offset) + 0x1000_0000),
+                tx_path: tx_path_bytes(args, offset),
+                start_offset: RelativeChunkOffset(i32::try_from(offset)?),
+                data_size: indexed_data_size(args, count),
+            });
+            offset += count;
+        }
+        store.update(|tx| {
+            for piece in group {
+                tx.add_full_tx_path(piece.tx_hash, piece.tx_path)?;
+                tx.add_tx_leaf_binding(
+                    piece.tx_hash,
+                    &TxLeafBinding {
+                        data_root: piece.data_root,
+                        prefix_hash: H256::zero(),
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(piece.start, piece.end, Some(piece.tx_hash))?;
+                tx.add_data_root_info(
+                    piece.data_root,
+                    &DataRootInfo {
+                        start_offset: piece.start_offset,
+                        data_size: piece.data_size,
+                    },
+                )?;
+                tx.add_pending_body_migration(
+                    piece.start,
+                    &PendingBodyMigration {
+                        data_root: piece.data_root,
+                        data_size: piece.data_size,
+                        start_offset: piece.start_offset,
+                        block_height: 1,
+                        attempts: 0,
+                    },
+                )?;
+            }
             Ok(())
         })?;
-        offset += count;
     }
     Ok(())
 }
 
-fn write_data_paths(store: &SubmoduleIndex, args: &Args) -> eyre::Result<()> {
+fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyre::Result<()> {
     let mut offset = 0_u32;
     while offset < args.chunks {
-        let count = args.batch.min(args.chunks - offset);
+        let count = path_batch.min(args.chunks - offset);
         let mut updates = Vec::with_capacity(count as usize);
         for step in 0..count {
             let at = offset + step;
@@ -905,6 +962,8 @@ data_path_random is scattered get_data_path_by_offset. data_path_seq is the same
 rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit.\n\
 Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache.\n\
 --mid writes {MID_CHUNKS} chunks of 4096-byte paths (about 4 GiB raw per engine). \
+MDBX commits {MID_MDBX_TXS_PER_COMMIT} transactions at a time and {MID_MDBX_PATH_BATCH} data-path rows at a time. \
+RocksDB stays at one transaction and --batch rows. \
 It needs IRYS_INDEX_BENCH_LARGE=1. Do not combine it with --chunks, --path-bytes, or --worst-case.\n\
 --worst-case stores a {DATA_PROOF_BYTES}-byte max data proof on every chunk \
 (a max transaction is {MAX_DATA_TX_CHUNKS} chunks). \
@@ -916,10 +975,10 @@ A full partition is --chunks {PARTITION_CHUNKS} and requires IRYS_INDEX_BENCH_LA
 mod tests {
     use super::{
         Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, FILLED_MAP_CEILING, HASH_SIZE, LEAF_SIZE,
-        MAX_DATA_TX_CHUNKS, MID_CHUNKS, NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES,
-        TX_PROOF_LAYERS, data_path_bytes, mdbx_map_bytes, pairing_layers, parse_diskstats,
-        parse_mount_line, percentile, proof_bytes, rewritten_data_path, sample_offset, seq_offset,
-        shaped_proof,
+        MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH, MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE,
+        PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, commits_for, data_path_bytes,
+        mdbx_map_bytes, pairing_layers, parse_diskstats, parse_mount_line, percentile, proof_bytes,
+        rewritten_data_path, sample_offset, seq_offset, shaped_proof,
     };
 
     #[test]
@@ -960,6 +1019,21 @@ mod tests {
         assert_eq!(partition / max, 3);
         assert_eq!(partition % max, 12_619_840);
         assert_eq!(3 * max + 12_619_840, partition);
+    }
+
+    #[test]
+    fn mid_groups_mdbx_commits_and_leaves_rocks_alone() {
+        let mdbx = commits_for(true, 512, true);
+        assert_eq!(mdbx.txs_per_commit, MID_MDBX_TXS_PER_COMMIT);
+        assert_eq!(mdbx.path_batch, MID_MDBX_PATH_BATCH);
+        let rocks = commits_for(true, 512, false);
+        assert_eq!(rocks.txs_per_commit, 1);
+        assert_eq!(rocks.path_batch, 512);
+        let raised = commits_for(true, 4096, true);
+        assert_eq!(raised.path_batch, 4096);
+        let filled = commits_for(false, 512, true);
+        assert_eq!(filled.txs_per_commit, 1);
+        assert_eq!(filled.path_batch, 512);
     }
 
     #[test]
