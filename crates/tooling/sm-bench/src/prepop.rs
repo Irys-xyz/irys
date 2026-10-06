@@ -1,4 +1,4 @@
-//! Synthetic index rows so the submodule MDBX is not an empty hot cache.
+//! Synthetic index rows so the submodule index is not an empty hot cache.
 //!
 //! Keys are `sha256("irys-sm-bench-prepop-v1" || index)`. One tx path covers 32
 //! chunk rows. Puts are idempotent. The counter in `bench-prepop.json` advances
@@ -10,12 +10,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 use eyre::{WrapErr as _, eyre};
-use irys_database::db::IrysDatabaseExt as _;
 use irys_database::submodule::tables::{DataRootInfo, TxLeafBinding};
-use irys_database::submodule::{
-    add_data_root_info, add_full_tx_path, add_tx_leaf_binding, add_tx_path_hash_to_offset_range,
-    write_data_path_updates,
-};
+use irys_database::submodule::{SubmoduleStore as _, SubmoduleWrite};
 use irys_domain::StorageModule;
 use irys_types::{H256, PartitionChunkOffset, RelativeChunkOffset, hash_sha256};
 use serde::{Deserialize, Serialize};
@@ -66,7 +62,7 @@ pub(crate) fn prepopulate(
         let from = done - (done % TX_CHUNKS);
         submodule
             .db
-            .update_eyre(|tx| write_batch(tx, from, batch_end))?;
+            .update(|tx| write_batch(tx, from, batch_end))?;
         done = batch_end;
         write_state(&path, done)?;
         eprintln!("irys-sm-bench: prepopulate index {done} / {target}");
@@ -74,10 +70,7 @@ pub(crate) fn prepopulate(
     Ok(done)
 }
 
-fn write_batch<T>(tx: &T, from: u64, to: u64) -> eyre::Result<()>
-where
-    T: irys_database::reth_db::transaction::DbTxMut + irys_database::reth_db::transaction::DbTx,
-{
+fn write_batch(tx: &mut dyn SubmoduleWrite, from: u64, to: u64) -> eyre::Result<()> {
     let mut updates = Vec::new();
     let mut offset = from;
     while offset < to {
@@ -93,9 +86,8 @@ where
             bytes
         };
         let tx_path_hash = H256::from(hash_sha256(&tx_path));
-        add_full_tx_path(tx, tx_path_hash, tx_path)?;
-        add_tx_leaf_binding(
-            tx,
+        tx.add_full_tx_path(tx_path_hash, tx_path)?;
+        tx.add_tx_leaf_binding(
             tx_path_hash,
             &TxLeafBinding {
                 data_root,
@@ -104,8 +96,7 @@ where
         )?;
         let start_i32 = i32::try_from(tx_start).map_err(|_| eyre!("prepop offset exceeds i32"))?;
         let chunk_count = tx_end - tx_start + 1;
-        add_data_root_info(
-            tx,
+        tx.add_data_root_info(
             data_root,
             &DataRootInfo {
                 start_offset: RelativeChunkOffset(start_i32),
@@ -118,7 +109,7 @@ where
         let end = PartitionChunkOffset::from(
             u32::try_from(tx_end).map_err(|_| eyre!("prepop offset exceeds u32"))?,
         );
-        add_tx_path_hash_to_offset_range(tx, start, end, Some(tx_path_hash))?;
+        tx.add_tx_path_hash_to_offset_range(start, end, Some(tx_path_hash))?;
         let mut chunk = tx_start.max(from);
         while chunk <= tx_end {
             let path_hash_bytes = keyed(b"chunk", chunk);
@@ -134,7 +125,7 @@ where
         }
         offset = tx_end + 1;
     }
-    write_data_path_updates(tx, updates)?;
+    tx.write_data_path_updates(updates)?;
     Ok(())
 }
 
