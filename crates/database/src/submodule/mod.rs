@@ -1,4 +1,5 @@
 pub mod db;
+mod group;
 #[cfg(feature = "rocksdb")]
 pub mod rocks;
 pub mod store;

@@ -507,7 +507,11 @@ impl DrainRunner {
                 .map(|op| (op.offset, op.path_hash, op.data_path.clone()))
                 .collect();
             tx.write_data_path_updates(updates)
-        })
+        })?;
+        // No-op unless group commit is on. A durable `update` already synced
+        // this batch and any registration still waiting on the group. The
+        // ack below must not run ahead of that sync.
+        self.db.sync_group()
     }
 }
 

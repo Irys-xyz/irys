@@ -2508,6 +2508,18 @@ impl StorageModule {
         Ok(())
     }
 
+    /// Make index registration commits visible without an fsync on every call.
+    ///
+    /// `txs_per_sync` registrations, the next durable index write, or 50 ms,
+    /// whichever comes first, then one sync. Off by default: each registration
+    /// stays durable before it returns. `txs_per_sync` of 0 is rejected.
+    pub fn enable_index_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
+        for (_, submodule) in self.submodules.iter() {
+            submodule.db.enable_group_commit(txs_per_sync)?;
+        }
+        Ok(())
+    }
+
     /// Indexes transaction data by mapping chunks to transaction paths across storage submodules.
     /// Stores three mappings: tx path hashes -> tx_path, chunk offsets -> tx paths, and data roots -> start offset.
     /// Updates all overlapping submodules within the given chunk range.
@@ -2530,7 +2542,7 @@ impl StorageModule {
         let (partition_overlap, start_offset) = self.partition_overlap_for(chunk_range)?;
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
-            submodule.db.update(|tx| -> eyre::Result<()> {
+            submodule.db.update_registration(|tx| -> eyre::Result<()> {
                 // Because each submodule index receives a copy of the path, we need to clone it
                 tx.add_full_tx_path(tx_path_hash, tx_path.clone())?;
                 // Record the (data_root, prefix_hash) this tx_path leaf folds from, so the
@@ -2660,14 +2672,18 @@ impl StorageModule {
             .submodules
             .get_key_value_at_point(key)
             .map_err(|_| eyre::eyre!("No submodule found for Partition Offset {:?}", key))?;
-        submodule
+        let removed = submodule
             .db
             .update(|tx| match tx.get_pending_body_migration(key)? {
                 Some(job) if job.data_root == data_root && job.block_height == block_height => {
                     tx.del_pending_body_migration(key)
                 }
                 _ => Ok(false),
-            })
+            })?;
+        // No-op unless group commit is on. The delete above is already durable.
+        // This covers a registration that has not reached its sync threshold.
+        submodule.db.sync_group()?;
+        Ok(removed)
     }
 
     /// Delete outstanding body-migration jobs keyed in `[start, end]` (partition
@@ -4064,6 +4080,14 @@ impl Drop for StorageModule {
         self.drain_entropy_queue();
         for (_, submodule) in self.submodules.iter() {
             submodule.index_drain.shutdown();
+        }
+        for (_, submodule) in self.submodules.iter() {
+            if let Err(err) = submodule.db.sync_group() {
+                error!(
+                    "Unable to sync submodule index while dropping SM {} - {:?}",
+                    &self.id, &err
+                );
+            }
         }
         info!("Syncing SM {} to disk...", &self.id);
         if let Err(e) = self.force_sync_pending_chunks() {
