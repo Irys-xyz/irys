@@ -21,7 +21,10 @@ use std::fs::{self, File};
 use std::io::Error;
 use std::os::unix::io::AsRawFd as _;
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use irys_database::IrysDatabaseArgs as _;
 use irys_database::submodule::tables::{DataRootInfo, PendingBodyMigration, TxLeafBinding};
@@ -127,7 +130,7 @@ fn main() -> eyre::Result<()> {
         "engine=mdbx sync=durable geometry_max_bytes={map_bytes} txs_per_commit={} path_batch={}",
         mdbx_commits.txs_per_commit, mdbx_commits.path_batch
     );
-    measure(&mdbx_dir, &args, mdbx_commits, |path| {
+    measure(&mdbx_dir, "mdbx", &args, mdbx_commits, |path| {
         SubmoduleIndex::open_mdbx(
             path,
             DatabaseArguments::irys_default(DbSyncMode::Durable)?
@@ -143,7 +146,7 @@ fn main() -> eyre::Result<()> {
         args.block_cache, rocks_commits.txs_per_commit, rocks_commits.path_batch
     );
     let cache = args.block_cache;
-    measure(&rocks_dir, &args, rocks_commits, |path| {
+    measure(&rocks_dir, "rocks", &args, rocks_commits, |path| {
         SubmoduleIndex::open_rocks_with_block_cache(path, cache)
     })?;
     Ok(())
@@ -172,15 +175,25 @@ fn commits_for(mid: bool, batch: u32, mdbx: bool) -> CommitGrouping {
 
 fn measure(
     dir: &Path,
+    engine: &str,
     args: &Args,
     commits: CommitGrouping,
     open: impl Fn(&Path) -> eyre::Result<SubmoduleIndex>,
 ) -> eyre::Result<()> {
+    // Peak covers this engine only. `before_open` is whatever the previous
+    // engine left resident. `file_kb` is mapped file pages. `anon_kb` is heap.
+    let watch = MemWatch::start();
+    note_mem(engine, "before_open", &watch);
     let store = open(dir)?;
+    note_mem(engine, "after_open", &watch);
     let index_ms = timed(|| write_tx_index(&store, args, commits.txs_per_commit))?;
+    note_mem(engine, "after_index", &watch);
     let data_path_ms = timed(|| write_data_paths(&store, args, commits.path_batch))?;
+    note_mem(engine, "after_data_path", &watch);
     let settle_ms = timed(|| store.settle_files())?;
+    note_mem(engine, "after_settle", &watch);
     drop(store);
+    note_mem(engine, "after_write_drop", &watch);
 
     let (logical, allocated) = dir_usage(dir)?;
     let open_started = Instant::now();
@@ -192,7 +205,127 @@ fn measure(
     println!("  logical_bytes={logical} allocated_bytes={allocated}");
     drop(store);
     read_phase(dir, args, &open)?;
+    note_mem(engine, "after_reads", &watch);
+    print_mem(engine, "peak", watch.stop());
     Ok(())
+}
+
+/// Resident and virtual sizes from `/proc/self/status`, in KiB.
+#[derive(Clone, Copy, Default)]
+struct ProcStatus {
+    rss_kb: u64,
+    anon_kb: u64,
+    file_kb: u64,
+    size_kb: u64,
+}
+
+fn parse_proc_status(text: &str) -> ProcStatus {
+    let mut status = ProcStatus::default();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(key) = fields.next() else {
+            continue;
+        };
+        let Ok(value) = fields.next().unwrap_or("0").parse::<u64>() else {
+            continue;
+        };
+        match key {
+            "VmRSS:" => status.rss_kb = value,
+            "RssAnon:" => status.anon_kb = value,
+            "RssFile:" => status.file_kb = value,
+            "VmSize:" => status.size_kb = value,
+            _ => {}
+        }
+    }
+    status
+}
+
+fn current_mem() -> ProcStatus {
+    fs::read_to_string("/proc/self/status")
+        .map(|text| parse_proc_status(&text))
+        .unwrap_or_default()
+}
+
+fn print_mem(engine: &str, phase: &str, status: ProcStatus) {
+    println!(
+        "  mem engine={engine} phase={phase} rss_kb={} anon_kb={} file_kb={} size_kb={}",
+        status.rss_kb, status.anon_kb, status.file_kb, status.size_kb
+    );
+}
+
+fn note_mem(engine: &str, phase: &str, watch: &MemWatch) {
+    let status = current_mem();
+    watch.observe(status);
+    print_mem(engine, phase, status);
+}
+
+/// Samples RSS while one engine is open. The process high-water mark is not
+/// usable here: it never goes down, so the second engine would hide the first.
+struct MemWatch {
+    stop: Arc<AtomicBool>,
+    peak: Arc<Mutex<ProcStatus>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl MemWatch {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(Mutex::new(ProcStatus::default()));
+        let stop_flag = Arc::clone(&stop);
+        let peak_slot = Arc::clone(&peak);
+        let thread = thread::spawn(move || {
+            loop {
+                let sample = current_mem();
+                let mut best = peak_slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if sample.rss_kb >= best.rss_kb {
+                    *best = sample;
+                }
+                drop(best);
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        Self {
+            stop,
+            peak,
+            thread: Some(thread),
+        }
+    }
+
+    fn observe(&self, sample: ProcStatus) {
+        let mut best = self
+            .peak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sample.rss_kb >= best.rss_kb {
+            *best = sample;
+        }
+    }
+
+    fn stop(mut self) -> ProcStatus {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let peak = self
+            .peak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *peak
+    }
+}
+
+impl Drop for MemWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 struct IndexTx {
@@ -961,6 +1094,7 @@ The directory must be empty and must contain an index-bench path component.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
 rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit.\n\
 Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache.\n\
+Each engine prints mem lines. rss_kb is resident. anon_kb is heap. file_kb is mapped file pages. size_kb is virtual.\n\
 --mid writes {MID_CHUNKS} chunks of 4096-byte paths (about 4 GiB raw per engine). \
 MDBX commits {MID_MDBX_TXS_PER_COMMIT} transactions at a time and {MID_MDBX_PATH_BATCH} data-path rows at a time. \
 RocksDB stays at one transaction and --batch rows. \
@@ -977,8 +1111,8 @@ mod tests {
         Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, FILLED_MAP_CEILING, HASH_SIZE, LEAF_SIZE,
         MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH, MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE,
         PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, commits_for, data_path_bytes,
-        mdbx_map_bytes, pairing_layers, parse_diskstats, parse_mount_line, percentile, proof_bytes,
-        rewritten_data_path, sample_offset, seq_offset, shaped_proof,
+        mdbx_map_bytes, pairing_layers, parse_diskstats, parse_mount_line, parse_proc_status,
+        percentile, proof_bytes, rewritten_data_path, sample_offset, seq_offset, shaped_proof,
     };
 
     #[test]
@@ -1019,6 +1153,24 @@ mod tests {
         assert_eq!(partition / max, 3);
         assert_eq!(partition % max, 12_619_840);
         assert_eq!(3 * max + 12_619_840, partition);
+    }
+
+    #[test]
+    fn proc_status_splits_file_pages_from_anonymous() {
+        let text = "\
+Name:\tbench
+VmSize:\t  17000000 kB
+VmRSS:\t   8600000 kB
+RssAnon:\t    120000 kB
+RssFile:\t   8480000 kB
+VmHWM:\t   8600000 kB
+";
+        let status = parse_proc_status(text);
+        assert_eq!(status.size_kb, 17_000_000);
+        assert_eq!(status.rss_kb, 8_600_000);
+        assert_eq!(status.anon_kb, 120_000);
+        assert_eq!(status.file_kb, 8_480_000);
+        assert_eq!(parse_proc_status("VmRSS:\t 10 kB\n").anon_kb, 0);
     }
 
     #[test]
