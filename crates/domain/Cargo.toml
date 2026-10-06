@@ -6,6 +6,10 @@ rust-version.workspace = true
 
 [features]
 test-utils = ["irys-types/test-utils"]
+# Load-test hook. Production builds leave this off. `cargo check --workspace`
+# turns it on by feature unification with `irys-sm-bench`; the split is `None`
+# unless the bench calls `StorageModule::open_split`.
+bench = []
 
 [dependencies]
 alloy-core.workspace = true

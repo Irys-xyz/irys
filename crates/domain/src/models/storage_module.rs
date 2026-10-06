@@ -96,6 +96,12 @@ mod index_drain;
 #[path = "disk_lane.rs"]
 mod disk_lane;
 
+#[cfg(feature = "bench")]
+#[path = "split_backing.rs"]
+mod split_backing;
+#[cfg(feature = "bench")]
+pub use split_backing::SplitBacking;
+
 type SubmodulePath = PathBuf;
 
 /// Recover the verified real `data_root` and this offset's `data_path` hash in a single
@@ -468,8 +474,12 @@ pub struct StorageSubmodule {
     pub db: DatabaseProvider,
     /// path to this Submodule
     pub path: PathBuf,
-    /// Persistent storage handle
+    /// Persistent storage handle. With a bench split this is the write file,
+    /// so `sync_all` fsyncs that file and never the read-only recall file.
     file: Arc<Mutex<File>>,
+    /// Bench-only second file. `None` on every production open.
+    #[cfg(feature = "bench")]
+    split: Option<Arc<SplitBacking>>,
     /// Mutex containing the interval file path
     /// we create an [`AtomicWriteFile`] for each interval file update, to ensure we are never left with interrupted writes
     intervals_file: Arc<Mutex<PathBuf>>,
@@ -665,9 +675,54 @@ fn read_recall_run(
     Ok(())
 }
 
+struct OpenedChunkFile {
+    file: Arc<Mutex<File>>,
+    #[cfg(feature = "bench")]
+    split: Option<Arc<SplitBacking>>,
+}
+
 impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
+        #[cfg(feature = "bench")]
+        {
+            Self::open(storage_module_info, config, None)
+        }
+        #[cfg(not(feature = "bench"))]
+        {
+            Self::open(storage_module_info, config)
+        }
+    }
+
+    /// One submodule, starting at partition offset 0, backed by `split` instead
+    /// of `{dir}/chunks.dat`. The bench uses this so recall reads and packed
+    /// writes share one disk lane while living in different files.
+    #[cfg(feature = "bench")]
+    pub fn open_split(
+        storage_module_info: &StorageModuleInfo,
+        config: &Config,
+        split: Arc<SplitBacking>,
+    ) -> eyre::Result<Self> {
+        Self::open(storage_module_info, config, Some(split))
+    }
+
+    fn open(
+        storage_module_info: &StorageModuleInfo,
+        config: &Config,
+        #[cfg(feature = "bench")] split: Option<Arc<SplitBacking>>,
+    ) -> eyre::Result<Self> {
+        #[cfg(feature = "bench")]
+        if split.is_some() {
+            ensure!(
+                storage_module_info.submodules.len() == 1,
+                "split backing requires exactly one submodule"
+            );
+            let (interval, _) = &storage_module_info.submodules[0];
+            ensure!(
+                *interval.start() == 0,
+                "split backing requires the submodule interval to start at partition offset 0"
+            );
+        }
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
@@ -681,34 +736,12 @@ impl StorageModule {
             tracing::info!(custom.sub_base_path = ?sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
 
-            // Get a file handle to the chunks.data file in the submodule
-            let path = sub_base_path.join("chunks.dat");
-            let chunks_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true) // Optional: creates file if it doesn't exist
-                .truncate(false)
-                .open(&path)
-                .map_err(|e| {
-                    eyre!(
-                        "Failed to create or open chunks file: {} - {}",
-                        path.display(),
-                        e
-                    )
-                })?;
-            // Every chunks.dat read is a pread of a range the caller already
-            // sized. The next read is not the bytes after that range. Read-ahead
-            // state belongs to this open file description, and a dup shares it,
-            // so one advise covers recall, entropy, and serve. A large buffered
-            // read otherwise fetches past its range by the device's maximum
-            // request size.
-            Self::advise_random(&chunks_file).wrap_err_with(|| {
-                format!(
-                    "Failed to disable read-ahead on chunks file: {}",
-                    path.display()
-                )
-            })?;
-            let chunks_file: Arc<Mutex<File>> = Arc::new(Mutex::new(chunks_file));
+            let opened = Self::open_submodule_file(
+                &sub_base_path,
+                #[cfg(feature = "bench")]
+                split.as_ref(),
+            )?;
+            let chunks_file = opened.file;
 
             let submodule_db_path = sub_base_path.join("db");
             debug!("submodule_db_path: {:?}", submodule_db_path);
@@ -803,6 +836,8 @@ impl StorageModule {
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
+                        #[cfg(feature = "bench")]
+                        split: opened.split,
                         db: db.clone(),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
                         index_drain: index_drain::IndexDrain::spawn(
@@ -897,6 +932,111 @@ impl StorageModule {
             config: config.clone(),
             disk: disk_lane::DiskGate::with_index_gap(index_gap),
         })
+    }
+
+    fn open_submodule_file(
+        sub_base_path: &Path,
+        #[cfg(feature = "bench")] split: Option<&Arc<SplitBacking>>,
+    ) -> eyre::Result<OpenedChunkFile> {
+        #[cfg(feature = "bench")]
+        if let Some(split) = split {
+            let chunks_path = sub_base_path.join("chunks.dat");
+            if chunks_path.exists() {
+                warn!(
+                    "split backing leaves existing chunks.dat closed: {}",
+                    chunks_path.display()
+                );
+            }
+            // Same advise as chunks.dat: a dup shares the open-file description,
+            // and a large pread must not fetch past the range the caller sized.
+            {
+                let recall = split
+                    .recall
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Self::advise_random(&recall)
+                    .wrap_err("Failed to disable read-ahead on the recall file")?;
+            }
+            {
+                let write = split
+                    .write
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Self::advise_random(&write)
+                    .wrap_err("Failed to disable read-ahead on the write file")?;
+            }
+            return Ok(OpenedChunkFile {
+                file: Arc::clone(&split.write),
+                split: Some(Arc::clone(split)),
+            });
+        }
+
+        // Get a file handle to the chunks.data file in the submodule
+        let path = sub_base_path.join("chunks.dat");
+        let chunks_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true) // Optional: creates file if it doesn't exist
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| {
+                eyre!(
+                    "Failed to create or open chunks file: {} - {}",
+                    path.display(),
+                    e
+                )
+            })?;
+        // Every chunks.dat read is a pread of a range the caller already
+        // sized. The next read is not the bytes after that range. Read-ahead
+        // state belongs to this open file description, and a dup shares it,
+        // so one advise covers recall, entropy, and serve. A large buffered
+        // read otherwise fetches past its range by the device's maximum
+        // request size.
+        Self::advise_random(&chunks_file).wrap_err_with(|| {
+            format!(
+                "Failed to disable read-ahead on chunks file: {}",
+                path.display()
+            )
+        })?;
+        Ok(OpenedChunkFile {
+            file: Arc::new(Mutex::new(chunks_file)),
+            #[cfg(feature = "bench")]
+            split: None,
+        })
+    }
+
+    /// File, byte offset, and submodule-relative chunk index for one chunk.
+    ///
+    /// `mapped` is the write-region window (packed writes, the entropy pread
+    /// that those writes XOR, and Data reads). Recall and other reads pass
+    /// `false` and stay at the submodule-relative offset. Without a bench
+    /// split both routes are `chunks.dat` at that offset.
+    fn locate_io(
+        &self,
+        offset: PartitionChunkOffset,
+        mapped: bool,
+    ) -> eyre::Result<(Arc<Mutex<File>>, u64, PartitionChunkOffset)> {
+        let (interval, submodule) = self.get_submodule_for_offset(offset)?;
+        let submodule_offset = offset - interval.start();
+        let chunk_size = self.config.consensus.chunk_size;
+        #[cfg(feature = "bench")]
+        if let Some(split) = submodule.split.as_ref() {
+            if mapped {
+                let file_offset = split.mapped_offset(*submodule_offset, chunk_size)?;
+                return Ok((Arc::clone(&split.write), file_offset, submodule_offset));
+            }
+            return Ok((
+                Arc::clone(&split.recall),
+                u64::from(submodule_offset.0) * chunk_size,
+                submodule_offset,
+            ));
+        }
+        let _ = mapped;
+        Ok((
+            Arc::clone(&submodule.file),
+            u64::from(submodule_offset.0) * chunk_size,
+            submodule_offset,
+        ))
     }
 
     pub fn assign_partition(&self, partition_assignment: PartitionAssignment, update_height: u64) {
@@ -2081,7 +2221,30 @@ impl StorageModule {
                 .get_key_value_at_point(runs[index].0)
                 .expect("disk run starts at a mapped offset");
             let origin = *origin_interval.start();
-            let file_arc = Arc::clone(&submodule.file);
+            let fallback = Arc::clone(&submodule.file);
+            #[cfg(feature = "bench")]
+            let split_files = submodule.split.as_ref().map(|split| {
+                (
+                    Arc::clone(&split.recall),
+                    Arc::clone(&split.write),
+                    split.write_origin,
+                    split.write_chunks,
+                )
+            });
+            #[cfg(feature = "bench")]
+            let file_arc = if let Some((recall_file, write_file, _, _)) = &split_files {
+                if recall || runs[index].2 != ChunkType::Data {
+                    Arc::clone(recall_file)
+                } else {
+                    Arc::clone(write_file)
+                }
+            } else {
+                Arc::clone(&fallback)
+            };
+            #[cfg(not(feature = "bench"))]
+            let file_arc = fallback;
+            #[cfg(feature = "bench")]
+            drop(fallback);
             if recall {
                 let file = {
                     let guard = file_arc
@@ -2124,11 +2287,33 @@ impl StorageModule {
                     if *run_interval.start() != origin {
                         break;
                     }
-                    let mut done = 0u64;
+                    #[cfg(feature = "bench")]
+                    if let Some((recall_file, write_file, _, _)) = &split_files {
+                        let run_write = chunk_type == ChunkType::Data;
+                        let opened_write = Arc::ptr_eq(&file_arc, write_file);
+                        let opened_recall = Arc::ptr_eq(&file_arc, recall_file);
+                        if run_write != opened_write || (!run_write && !opened_recall) {
+                            break;
+                        }
+                    }
+                    let mut done = 0_u64;
                     while done < len {
                         let n = (len - done).min(max_chunks);
                         let piece = PartitionChunkOffset(start.0 + done as u32);
                         let file_offset = *(piece - run_interval.start()) as u64 * chunk_size;
+                        #[cfg(feature = "bench")]
+                        let file_offset = if chunk_type == ChunkType::Data
+                            && let Some((_, _, write_origin, write_chunks)) = split_files.as_ref()
+                        {
+                            split_backing::map_write_offset(
+                                *write_origin,
+                                *write_chunks,
+                                *(piece - run_interval.start()),
+                                chunk_size,
+                            )?
+                        } else {
+                            file_offset
+                        };
                         let mut buf = vec![0_u8; n as usize * chunk_len];
                         file.read_exact_at(&mut buf, file_offset)
                             .wrap_err_with(|| format!("recall read at offset {piece} count {n}"))?;
@@ -2194,7 +2379,14 @@ impl StorageModule {
                 let Some(byte_len) = len.checked_mul(chunk_size) else {
                     continue;
                 };
-                targets.push((Arc::clone(&submodule.file), file_offset, byte_len));
+                let file_arc = Arc::clone(&submodule.file);
+                #[cfg(feature = "bench")]
+                let file_arc = if let Some(split) = &submodule.split {
+                    Arc::clone(&split.recall)
+                } else {
+                    file_arc
+                };
+                targets.push((file_arc, file_offset, byte_len));
             }
         }
 
@@ -2265,20 +2457,15 @@ impl StorageModule {
     ///
     /// Returns the chunk bytes or an error if read fails
     fn read_chunk_internal(&self, chunk_offset: PartitionChunkOffset) -> eyre::Result<ChunkBytes> {
-        // Find submodule containing this chunk
-        let (interval, submodule) = self
-            .submodules
-            .get_key_value_at_point(chunk_offset)
-            .unwrap();
-
-        // Calculate file offset and prepare buffer
-        let chunk_size = self.config.consensus.chunk_size;
-        let file_offset = *(chunk_offset - interval.start()) as u64 * chunk_size;
-        let mut buf = vec![0_u8; chunk_size as usize];
+        // Data lives in the write window when a bench split is installed.
+        // Every other type stays on the entropy file. With no split both are
+        // `chunks.dat` at the submodule-relative offset.
+        let mapped = self.get_chunk_type(&chunk_offset) == Some(ChunkType::Data);
+        let (file_arc, file_offset, _) = self.locate_io(chunk_offset, mapped)?;
+        let mut buf = vec![0_u8; self.config.consensus.chunk_size as usize];
 
         // Positional read. A seek on the shared handle would move the cursor
         // seen by the next reader of this file.
-        let file_arc = Arc::clone(&submodule.file);
         let file = self.disk.lock_chunks(&file_arc);
         file.read_exact_at(&mut buf, file_offset)
             .wrap_err_with(|| format!("chunk read at offset {chunk_offset}"))?;
@@ -3718,16 +3905,7 @@ impl StorageModule {
     /// Caller already holds the write gate. This drops the file lock before it
     /// waits, so a queued mining recall starts before the next run.
     fn write_run(&self, run: &WriteRun) -> eyre::Result<()> {
-        let chunk_size = self.config.consensus.chunk_size;
-        let (file_arc, file_offset, submodule_offset) = {
-            let (interval, submodule) = self.get_submodule_for_offset(run.start)?;
-            let submodule_offset = run.start - interval.start();
-            (
-                Arc::clone(&submodule.file),
-                u64::from(submodule_offset) * chunk_size,
-                submodule_offset,
-            )
-        };
+        let (file_arc, file_offset, submodule_offset) = self.locate_io(run.start, true)?;
         let start_time = Instant::now();
 
         let write_result = (|| -> eyre::Result<()> {
@@ -3838,22 +4016,16 @@ impl StorageModule {
         bytes: Vec<u8>,
         chunk_type: ChunkType,
     ) -> eyre::Result<()> {
-        let chunk_size = self.config.consensus.chunk_size;
-
-        // Get the correct submodule reference based on chunk_offset
-        let (interval, submodule) = self.get_submodule_for_offset(chunk_offset)?;
-
         let start_time = Instant::now();
 
         // Get the submodule relative offset of the chunk
-        let submodule_offset = chunk_offset - interval.start();
+        let (file_arc, file_offset, submodule_offset) = self.locate_io(chunk_offset, true)?;
 
         // Attempt to write the chunk data, handling errors by resetting to Uninitialized
-        let file_arc = Arc::clone(&submodule.file);
         let write_result = (|| -> eyre::Result<()> {
             // Positional write. The shared handle keeps its cursor.
             let file = self.disk.lock_chunks(&file_arc);
-            file.write_all_at(bytes.as_slice(), u64::from(submodule_offset) * chunk_size)
+            file.write_all_at(bytes.as_slice(), file_offset)
                 .map_err(|e| {
                     error!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e);
                     eyre::eyre!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e)
@@ -4061,6 +4233,26 @@ impl StorageModule {
         Ok(local_offset as u32)
     }
 
+    /// Counts the lane keeps for a load-test sample. Production code does not call this.
+    #[cfg(feature = "bench")]
+    pub fn bench_queue_snapshot(&self) -> BenchQueueSnapshot {
+        let pending = self.pending_writes.read().unwrap();
+        let pending_chunks = pending.len();
+        let occupancy = pending.occupancy.len();
+        let packed = pending
+            .values()
+            .map(|(bytes, _)| bytes.len() as u64)
+            .sum::<u64>();
+        let pending_bytes = packed.saturating_add(pending.queued_unpacked_bytes);
+        drop(pending);
+        BenchQueueSnapshot {
+            pending_chunks,
+            occupancy,
+            pending_bytes,
+            sweep_slots: self.disk.bench_sweep_slots(),
+        }
+    }
+
     /// Test utility function to mark a StorageModule as packed
     pub fn pack_with_zeros(&self) {
         let entropy_bytes = vec![0_u8; self.config.consensus.chunk_size as usize];
@@ -4090,6 +4282,68 @@ impl Drop for StorageModule {
             );
         }
     }
+}
+
+/// Pending-queue depth for one bench sample.
+#[cfg(feature = "bench")]
+#[derive(Debug, Clone, Copy)]
+pub struct BenchQueueSnapshot {
+    pub pending_chunks: usize,
+    pub occupancy: usize,
+    pub pending_bytes: u64,
+    pub sweep_slots: usize,
+}
+
+/// Mark `[0, chunks)` as `Entropy` in `intervals.json`.
+///
+/// A file that already holds `Data` or `Entropy` is left in place so a rerun
+/// keeps durable chunks. An empty file, a missing file, or a file that is only
+/// `Uninitialized` / `Interrupted` is replaced. The real packer does not run.
+#[cfg(feature = "bench")]
+pub fn write_entropy_intervals(path: &Path, chunks: u32) -> eyre::Result<()> {
+    if chunks == 0 {
+        return Err(eyre!("partition chunk count is 0"));
+    }
+    if path.exists() {
+        match read_intervals_file(path) {
+            Ok(existing) => {
+                let keep = existing.iter().any(|(_, chunk_type)| {
+                    matches!(chunk_type, ChunkType::Data | ChunkType::Entropy)
+                });
+                if keep {
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                let len = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+                if len > 0 {
+                    return Err(error)
+                        .wrap_err("intervals.json is not empty and could not be read");
+                }
+            }
+        }
+    } else if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .wrap_err_with(|| format!("Failed to create intervals file at {}", path.display()))?;
+
+    let mut intervals = StorageIntervals::new();
+    let end = chunks - 1;
+    intervals
+        .insert_merge_touching_if_values_equal(
+            partition_chunk_offset_ii!(0, end),
+            ChunkType::Entropy,
+        )
+        .map_err(|error| eyre!("failed to build entropy intervals: {error:?}"))?;
+    let mut file = get_atomic_file(path)?;
+    file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
+    file.commit()?;
+    Ok(())
 }
 
 fn ensure_default_intervals(
