@@ -29,7 +29,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use irys_database::IrysDatabaseArgs as _;
-use irys_database::submodule::tables::{DataRootInfo, PendingBodyMigration, TxLeafBinding};
+use irys_database::submodule::tables::{
+    ChunkPathHashes, DataRootInfo, PendingBodyMigration, TxLeafBinding,
+};
 use irys_database::submodule::{RocksTuning, SubmoduleIndex, SubmoduleStore as _};
 use irys_types::{DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset, TERABYTE};
 use reth_db::mdbx::DatabaseArguments;
@@ -84,6 +86,12 @@ enum Workload {
     Filled,
     Mid,
     Worst,
+    /// N Rocks databases left open, so cache RSS can add up.
+    MemDbs,
+    /// One `add_tx_path_hash_to_offset_range` covering every offset.
+    IndexSpan,
+    /// Offset rows only, so the bloom can outgrow the block cache.
+    OffsetRows,
 }
 
 impl Workload {
@@ -92,7 +100,14 @@ impl Workload {
             Self::Filled => "filled",
             Self::Mid => "mid",
             Self::Worst => "worst",
+            Self::MemDbs => "mem-dbs",
+            Self::IndexSpan => "index-span",
+            Self::OffsetRows => "offset-rows",
         }
+    }
+
+    fn is_memory(self) -> bool {
+        matches!(self, Self::MemDbs | Self::IndexSpan | Self::OffsetRows)
     }
 
     fn is_mid(self) -> bool {
@@ -145,6 +160,8 @@ struct Args {
     range_len: u32,
     /// RocksDB open. MDBX ignores this. Production open stays on the baseline.
     rocks: RocksTuning,
+    /// Databases kept open together. `mem-dbs` only.
+    dbs: u32,
 }
 
 fn main() -> eyre::Result<()> {
@@ -152,7 +169,7 @@ fn main() -> eyre::Result<()> {
     refuse_large_payload(&args)?;
     prepare_dir(&args.dir)?;
     println!(
-        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} allocator=system jemalloc=off",
+        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} dbs={} allocator=system jemalloc=off",
         args.chunks,
         args.tx_chunks,
         args.batch,
@@ -161,6 +178,7 @@ fn main() -> eyre::Result<()> {
         args.range_len,
         args.workload.name(),
         args.engines.name(),
+        args.dbs,
     );
     if args.workload.is_worst() {
         let raw = u64::from(args.chunks) * DATA_PROOF_BYTES as u64;
@@ -175,6 +193,9 @@ fn main() -> eyre::Result<()> {
             "mode=mid raw_data_path_bytes={raw} mdbx_txs_per_commit={} mdbx_path_batch={}",
             mdbx.txs_per_commit, mdbx.path_batch
         );
+    } else if args.workload.is_memory() {
+        println!("mode={} {}", args.workload.name(), memory_predict(&args));
+        return run_memory(&args);
     } else {
         println!("mode=filled");
     }
@@ -220,6 +241,191 @@ fn main() -> eyre::Result<()> {
 struct CommitGrouping {
     txs_per_commit: u32,
     path_batch: u32,
+}
+
+/// 10-bit bloom, one byte per 8 bits. One family of offset keys.
+fn bloom_bytes(keys: u64) -> u64 {
+    keys.saturating_mul(10) / 8
+}
+
+fn memory_predict(args: &Args) -> String {
+    let cache = args.rocks.block_cache_bytes as u64;
+    let keys = u64::from(args.chunks);
+    let bloom = bloom_bytes(keys);
+    match args.workload {
+        Workload::MemDbs => {
+            let serving = cache.saturating_mul(u64::from(args.dbs));
+            format!(
+                "rows_per_db={keys} block_cache_bytes={cache} serving_cache_bytes={serving} bloom_bytes_per_db={bloom}"
+            )
+        }
+        Workload::IndexSpan => {
+            format!("one_update=1 rows={keys} bloom_bytes={bloom} block_cache_bytes={cache}")
+        }
+        Workload::OffsetRows => {
+            let fits = if bloom <= cache { "yes" } else { "no" };
+            format!(
+                "rows={keys} batch={} bloom_bytes={bloom} block_cache_bytes={cache} bloom_fits={fits}",
+                args.batch
+            )
+        }
+        Workload::Filled | Workload::Mid | Workload::Worst => String::new(),
+    }
+}
+
+fn run_memory(args: &Args) -> eyre::Result<()> {
+    match args.workload {
+        Workload::MemDbs => run_mem_dbs(args),
+        Workload::IndexSpan => run_index_span(args),
+        Workload::OffsetRows => run_offset_rows(args),
+        Workload::Filled | Workload::Mid | Workload::Worst => {
+            eyre::bail!("not a memory profile")
+        }
+    }
+}
+
+/// Open several Rocks databases and leave them open.
+///
+/// Each one gets `chunks` offset rows, a flush, then a full scan. The scan
+/// fills that database's block cache. RSS after each database is the number
+/// to multiply toward a full host.
+fn run_mem_dbs(args: &Args) -> eyre::Result<()> {
+    let watch = MemWatch::start();
+    note_mem("process", "start", &watch);
+    let mut previous = current_mem();
+    let mut stores = Vec::with_capacity(usize::try_from(args.dbs)?);
+    for i in 0..args.dbs {
+        let dir = args.dir.join(format!("rocks-{i}"));
+        fs::create_dir_all(&dir)?;
+        let store = SubmoduleIndex::open_rocks_with(&dir, args.rocks)?;
+        let write_ms = timed(|| write_offset_rows(&store, args.chunks, args.batch))?;
+        let settle_ms = timed(|| store.settle_files())?;
+        let scan_ms = timed(|| read_every_offset(&store, args.chunks))?;
+        let now = current_mem();
+        watch.observe(now);
+        println!(
+            "  db={i} write_ms={write_ms} settle_ms={settle_ms} scan_ms={scan_ms} rss_kb={} anon_kb={} delta_rss_kb={} delta_anon_kb={}",
+            now.rss_kb,
+            now.anon_kb,
+            now.rss_kb as i64 - previous.rss_kb as i64,
+            now.anon_kb as i64 - previous.anon_kb as i64,
+        );
+        previous = now;
+        stores.push(store);
+    }
+    note_mem("process", "all_open", &watch);
+    for i in (0..stores.len()).rev() {
+        stores.pop();
+        note_mem("process", &format!("after_drop_{i}"), &watch);
+    }
+    print_mem("process", "peak", watch.stop());
+    Ok(())
+}
+
+/// One production-shaped index update: every offset in the span, one commit.
+fn run_index_span(args: &Args) -> eyre::Result<()> {
+    let watch = MemWatch::start();
+    let dir = args.dir.join("rocks");
+    fs::create_dir_all(&dir)?;
+    note_mem("rocks", "before_open", &watch);
+    let store = SubmoduleIndex::open_rocks_with(&dir, args.rocks)?;
+    note_mem("rocks", "after_open", &watch);
+    let end = PartitionChunkOffset::from(args.chunks - 1);
+    let update_ms = timed(|| {
+        store.update(|tx| {
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0),
+                end,
+                Some(hash_at(1)),
+            )
+        })
+    })?;
+    note_mem("rocks", "after_update", &watch);
+    println!("  update_ms={update_ms}");
+    let settle_ms = timed(|| store.settle_files())?;
+    note_mem("rocks", "after_settle", &watch);
+    println!("  settle_ms={settle_ms}");
+    drop(store);
+    note_mem("rocks", "after_drop", &watch);
+    let (logical, allocated) = dir_usage(&dir)?;
+    println!("  logical_bytes={logical} allocated_bytes={allocated}");
+    print_mem("rocks", "peak", watch.stop());
+    Ok(())
+}
+
+/// Offset rows and no data-path blobs. The cold read is one family.
+fn run_offset_rows(args: &Args) -> eyre::Result<()> {
+    let watch = MemWatch::start();
+    let dir = args.dir.join("rocks");
+    fs::create_dir_all(&dir)?;
+    note_mem("rocks", "before_open", &watch);
+    let store = SubmoduleIndex::open_rocks_with(&dir, args.rocks)?;
+    note_mem("rocks", "after_open", &watch);
+    let write_ms = timed(|| write_offset_rows(&store, args.chunks, args.batch))?;
+    note_mem("rocks", "after_write", &watch);
+    println!("  write_ms={write_ms}");
+    let settle_ms = timed(|| store.settle_files())?;
+    note_mem("rocks", "after_settle", &watch);
+    println!("  settle_ms={settle_ms}");
+    drop(store);
+    let (logical, allocated) = dir_usage(&dir)?;
+    println!("  logical_bytes={logical} allocated_bytes={allocated}");
+    if args.reads > 0 {
+        let disk = disk_id(&dir)?;
+        let open = |path: &Path| SubmoduleIndex::open_rocks_with(path, args.rocks);
+        time_shape(
+            &dir,
+            disk.as_ref(),
+            "offset_random",
+            args.reads,
+            &open,
+            |store, i| {
+                let at = sample_offset(i, args.chunks);
+                let row = store
+                    .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(at)))?;
+                eyre::ensure!(row.is_some(), "missing offset {at}");
+                Ok(())
+            },
+        )?;
+    } else {
+        println!("  reads=0");
+    }
+    note_mem("rocks", "after_reads", &watch);
+    print_mem("rocks", "peak", watch.stop());
+    Ok(())
+}
+
+fn write_offset_rows(store: &SubmoduleIndex, chunks: u32, batch: u32) -> eyre::Result<()> {
+    let mut offset = 0_u32;
+    while offset < chunks {
+        let end = offset.saturating_add(batch).min(chunks);
+        store.update(|tx| {
+            for raw in offset..end {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(raw),
+                    ChunkPathHashes {
+                        data_path_hash: Some(hash_at(u64::from(raw).saturating_add(0x2000_0000))),
+                        tx_path_hash: Some(hash_at(1)),
+                    },
+                )?;
+            }
+            Ok(())
+        })?;
+        offset = end;
+    }
+    Ok(())
+}
+
+fn read_every_offset(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
+    store.view(|tx| {
+        for raw in 0..chunks {
+            let row = tx
+                .get_path_hashes_by_offset(PartitionChunkOffset::from(raw))?
+                .ok_or_else(|| eyre::eyre!("missing offset {raw}"))?;
+            eyre::ensure!(row.tx_path_hash.is_some(), "empty tx hash at {raw}");
+        }
+        Ok(())
+    })
 }
 
 fn commits_for(mid: bool, batch: u32, mdbx: bool) -> CommitGrouping {
@@ -976,7 +1182,16 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
             args.path_bytes as u64
         };
     let worst_over = args.workload.is_worst() && raw > LARGE_RAW_BYTES;
-    if !args.workload.is_mid() && !worst_over {
+    let memory_over = match args.workload {
+        // 8 databases of 1_000_000 rows is the default and stays under this.
+        Workload::MemDbs => u64::from(args.chunks).saturating_mul(u64::from(args.dbs)) > 8_000_000,
+        // 1_000_000 offsets is one step. A max transaction is past it.
+        Workload::IndexSpan => args.chunks > 1_000_000,
+        // A bloom that still fits in the 64 MiB cache is under this.
+        Workload::OffsetRows => args.chunks > 2_000_000,
+        Workload::Filled | Workload::Mid | Workload::Worst => false,
+    };
+    if !args.workload.is_mid() && !worst_over && !memory_over {
         return Ok(());
     }
     let allowed = std::env::var("IRYS_INDEX_BENCH_LARGE").ok().as_deref() == Some("1");
@@ -986,6 +1201,12 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
     if args.workload.is_mid() {
         eyre::bail!(
             "--mid writes {raw} raw data-path bytes per engine (about 9 GiB on disk, two engines). Set IRYS_INDEX_BENCH_LARGE=1 to run it."
+        );
+    }
+    if memory_over {
+        eyre::bail!(
+            "--profile {} is past the small memory step. Set IRYS_INDEX_BENCH_LARGE=1 to run it.",
+            args.workload.name()
         );
     }
     eyre::bail!(
@@ -1073,6 +1294,9 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     let mut reads = 1024_u32;
     let mut range_len = 32_u32;
     let mut engines = Engines::Both;
+    let mut engines_set = false;
+    let mut dbs = 1_u32;
+    let mut dbs_set = false;
     let mut rocks: Option<RocksTuning> = None;
     let mut rocks_set = false;
     let mut block_cache: Option<usize> = None;
@@ -1103,6 +1327,11 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             }
             "--engine" => {
                 engines = parse_engines(&required(&mut it, &flag)?)?;
+                engines_set = true;
+            }
+            "--dbs" => {
+                dbs = required(&mut it, &flag)?.parse()?;
+                dbs_set = true;
             }
             "--rocks" => {
                 let name = required(&mut it, &flag)?;
@@ -1119,6 +1348,21 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         eyre::bail!("--dir is required");
     };
     let workload = resolve_workload(profile, mid, worst_case)?;
+    if workload.is_memory() {
+        if engines_set && engines != Engines::Rocks {
+            eyre::bail!("--profile {} runs rocks only", workload.name());
+        }
+        engines = Engines::Rocks;
+        if workload == Workload::MemDbs && !chunks_set {
+            chunks = 1_000_000;
+        }
+        if workload == Workload::MemDbs && !dbs_set {
+            dbs = 8;
+        }
+        if workload != Workload::MemDbs && !chunks_set {
+            eyre::bail!("--chunks is required for --profile {}", workload.name());
+        }
+    }
     let mid = workload.is_mid();
     let worst_case = workload.is_worst();
     if worst_case && path_bytes.is_some() {
@@ -1154,6 +1398,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         eyre::ensure!(bytes > 0, "--rocks-block-cache must be > 0");
         rocks = rocks.with_block_cache(bytes);
     }
+    eyre::ensure!(dbs > 0, "--dbs must be > 0");
     eyre::ensure!(chunks > 0, "--chunks must be > 0");
     eyre::ensure!(batch > 0, "--batch must be > 0");
     eyre::ensure!(tx_chunks > 0, "--tx-chunks must be > 0");
@@ -1170,6 +1415,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         reads,
         range_len,
         rocks,
+        dbs,
     })
 }
 
@@ -1178,7 +1424,12 @@ fn parse_profile(value: &str) -> eyre::Result<Workload> {
         "filled" => Ok(Workload::Filled),
         "mid" => Ok(Workload::Mid),
         "worst" => Ok(Workload::Worst),
-        other => eyre::bail!("unknown profile {other}; use filled, mid, or worst"),
+        "mem-dbs" => Ok(Workload::MemDbs),
+        "index-span" => Ok(Workload::IndexSpan),
+        "offset-rows" => Ok(Workload::OffsetRows),
+        other => eyre::bail!(
+            "unknown profile {other}; use filled, mid, worst, mem-dbs, index-span, or offset-rows"
+        ),
     }
 }
 
@@ -1220,6 +1471,10 @@ fn print_help() {
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
 --profile selects the workload. filled is the default. mid is --mid. worst is --worst-case and still takes --chunks.\n\
+mem-dbs, index-span, and offset-rows measure RocksDB RSS. They run rocks only.\n\
+mem-dbs keeps --dbs databases open (default 8) after writing --chunks offset rows in each (default 1000000) and scanning them.\n\
+index-span writes --chunks offsets in one update. A max transaction is --chunks 20971520.\n\
+offset-rows writes --chunks offset rows and no data paths, then does cold point reads. A full partition is --chunks 75534400.\n\
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
 Presets: {presets}. Each preset changes one setting. \
@@ -1247,10 +1502,10 @@ mod tests {
     use super::{
         Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, Engines, FILLED_MAP_CEILING, HASH_SIZE,
         LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH, MID_MDBX_TXS_PER_COMMIT,
-        NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, Workload, commits_for,
-        data_path_bytes, mdbx_map_bytes, pairing_layers, parse_arg_list, parse_diskstats,
-        parse_mount_line, parse_proc_status, percentile, proof_bytes, rewritten_data_path,
-        sample_offset, seq_offset, shaped_proof,
+        NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS, Workload, bloom_bytes,
+        commits_for, data_path_bytes, mdbx_map_bytes, pairing_layers, parse_arg_list,
+        parse_diskstats, parse_mount_line, parse_proc_status, percentile, proof_bytes,
+        rewritten_data_path, sample_offset, seq_offset, shaped_proof,
     };
 
     #[test]
@@ -1356,6 +1611,7 @@ VmHWM:\t   8600000 kB
             reads: 1,
             range_len: 4,
             rocks: irys_database::submodule::RocksTuning::baseline().with_block_cache(1024),
+            dbs: 1,
         };
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
@@ -1442,6 +1698,54 @@ VmHWM:\t   8600000 kB
         );
         assert!(parse(&["--dir", "index-bench", "--rocks", "missing"]).is_err());
         assert!(parse(&["--dir", "index-bench", "--profile", "huge"]).is_err());
+    }
+
+    #[test]
+    fn memory_profiles_select_rocks_and_the_step() {
+        let dbs = parse(&["--dir", "index-bench", "--profile", "mem-dbs"]).unwrap();
+        assert_eq!(dbs.workload, Workload::MemDbs);
+        assert_eq!(dbs.engines, Engines::Rocks);
+        assert_eq!(dbs.dbs, 8);
+        assert_eq!(dbs.chunks, 1_000_000);
+        assert_eq!(bloom_bytes(u64::from(dbs.chunks)), 1_250_000);
+        assert_eq!(bloom_bytes(PARTITION_CHUNKS), 94_418_000);
+
+        let span = parse(&[
+            "--dir",
+            "index-bench",
+            "--profile",
+            "index-span",
+            "--chunks",
+            "20971520",
+        ])
+        .unwrap();
+        assert_eq!(span.chunks, 20_971_520);
+        assert_eq!(span.dbs, 1);
+
+        let rows = parse(&[
+            "--dir",
+            "index-bench",
+            "--profile",
+            "offset-rows",
+            "--chunks",
+            "75534400",
+        ])
+        .unwrap();
+        assert_eq!(rows.chunks, 75_534_400);
+        assert!(bloom_bytes(u64::from(rows.chunks)) > BLOCK_CACHE_BYTES as u64);
+
+        assert!(parse(&["--dir", "index-bench", "--profile", "index-span"]).is_err());
+        assert!(
+            parse(&[
+                "--dir",
+                "index-bench",
+                "--profile",
+                "mem-dbs",
+                "--engine",
+                "mdbx"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
