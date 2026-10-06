@@ -6,7 +6,7 @@ pub mod tables;
 
 pub use db::*;
 #[cfg(feature = "rocksdb")]
-pub use rocks::{BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, RocksSubmoduleStore};
+pub use rocks::{BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, RocksSubmoduleStore, RocksTuning};
 pub use store::{
     MdbxSubmoduleStore, SubmoduleIndex, SubmoduleRead, SubmoduleStore, SubmoduleWrite,
 };
