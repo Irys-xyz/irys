@@ -30,13 +30,15 @@ use rocksdb::{
     WriteBatch, WriteOptions,
 };
 
+use super::group::{EnableStep, EngineLifetime, GroupCommit};
 use super::tables::{
     ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
     DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, TxLeafBinding,
     TxLeafBindingByTxPathHash, TxPathByTxPathHash,
 };
 use super::{
-    SubmoduleRead, SubmoduleWrite, first_gap_with, gaps_with, tables::Metadata as MetadataTable,
+    SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, first_gap_with, gaps_with,
+    tables::Metadata as MetadataTable,
 };
 use crate::metadata::MetadataKey;
 
@@ -252,8 +254,11 @@ impl Cf {
 
 #[derive(Clone)]
 pub struct RocksSubmoduleStore {
+    /// Dropped first so the delay thread joins before `db` closes.
+    lifetime: Arc<EngineLifetime>,
     db: Arc<DB>,
     write: Arc<Mutex<()>>,
+    group: Arc<GroupCommit>,
     path: PathBuf,
     /// Statistics object from the `Options` that opened this DB.
     ///
@@ -334,12 +339,105 @@ impl RocksSubmoduleStore {
         if !marker.exists() {
             fs::write(&marker, SCHEMA_TEXT).wrap_err("write schema marker")?;
         }
+        let group = GroupCommit::new();
         Ok(Self {
+            lifetime: EngineLifetime::new(Arc::clone(&group)),
             db: Arc::new(db),
             write: Arc::new(Mutex::new(())),
+            group,
             path,
             stats,
         })
+    }
+
+    pub(super) fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
+        match self.group.prepare(txs_per_sync)? {
+            EnableStep::On => Ok(()),
+            EnableStep::Spawn => {
+                if let Err(err) = self.spawn_delay() {
+                    self.group.clear_spawned();
+                    return Err(err);
+                }
+                self.group.finish_enable();
+                Ok(())
+            }
+            EnableStep::Arm => {
+                self.group.finish_enable();
+                Ok(())
+            }
+        }
+    }
+
+    pub(super) fn group_commit_enabled(&self) -> bool {
+        self.group.is_enabled()
+    }
+
+    #[cfg(test)]
+    pub(super) fn group_sync_count(&self) -> u64 {
+        self.group.sync_count()
+    }
+
+    pub(super) fn sync_group(&self) -> eyre::Result<()> {
+        if !self.group.is_enabled() {
+            return Ok(());
+        }
+        let _guard = self.lock_write();
+        sync_wal_locked(&self.db, &self.group)
+    }
+
+    /// Visible registration. The caller holds no write lock.
+    pub(super) fn update_registration<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        if !self.group.is_enabled() {
+            return self.update(f);
+        }
+        let _guard = self.lock_write();
+        let result = self.apply(false, f)?;
+        if self.group.note_visible() {
+            sync_wal_locked(&self.db, &self.group)?;
+        }
+        Ok(result)
+    }
+
+    fn spawn_delay(&self) -> eyre::Result<()> {
+        let db = Arc::downgrade(&self.db);
+        let write = Arc::clone(&self.write);
+        let group = Arc::clone(&self.group);
+        self.lifetime
+            .spawn(Arc::clone(&self.group), move || match db.upgrade() {
+                Some(db) => {
+                    let _guard = write
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    sync_wal_locked(&db, &group)
+                }
+                None => Ok(()),
+            })
+    }
+
+    fn lock_write(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `sync` waits until the WAL is durable. The write lock is held.
+    fn apply<R>(
+        &self,
+        sync: bool,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        let snap = self.db.snapshot();
+        let mut batch = Batch {
+            db: &self.db,
+            snap: &snap,
+            overlay: Overlay::default(),
+        };
+        let result = f(&mut batch)?;
+        batch.commit(sync)?;
+        Ok(result)
     }
 
     /// Compactions, flushes, and table opens. Safe to call during reads.
@@ -371,6 +469,8 @@ impl RocksSubmoduleStore {
                 .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
         }
         self.db.flush_wal(true).wrap_err("sync wal")?;
+        // The synced WAL covers any open registration group.
+        self.group.cover_durable();
         Ok(())
     }
 
@@ -403,20 +503,21 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
-        let _guard = self
-            .write
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snap = self.db.snapshot();
-        let mut batch = Batch {
-            db: &self.db,
-            snap: &snap,
-            overlay: Overlay::default(),
-        };
-        let result = f(&mut batch)?;
-        batch.commit()?;
+        let _guard = self.lock_write();
+        let result = self.apply(true, f)?;
+        // A synced write covers earlier unsynced registrations in this WAL.
+        self.group.cover_durable();
         Ok(result)
     }
+}
+
+fn sync_wal_locked(db: &DB, group: &GroupCommit) -> eyre::Result<()> {
+    let Some(generation) = group.dirty_generation() else {
+        return Ok(());
+    };
+    db.flush_wal(true).wrap_err("sync submodule index wal")?;
+    group.mark_synced(generation, true);
+    Ok(())
 }
 
 fn open_db(
@@ -596,7 +697,7 @@ impl<'a> Batch<'a> {
         self.overlay.maps[cf.index()].insert(key.to_vec(), None);
     }
 
-    fn commit(&self) -> eyre::Result<()> {
+    fn commit(&self, sync: bool) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
         for cf in Cf::ALL {
             let handle = cf_handle(self.db, cf)?;
@@ -614,7 +715,10 @@ impl<'a> Batch<'a> {
             }
         }
         let mut opts = WriteOptions::default();
-        opts.set_sync(true);
+        // `false` still appends the WAL. A later synced write or `flush_wal`
+        // makes this group durable. `true` syncs the WAL, including earlier
+        // unsynced records.
+        opts.set_sync(sync);
         self.db
             .write_opt(batch, &opts)
             .wrap_err("commit submodule index batch")
@@ -1162,7 +1266,7 @@ impl SubmoduleWrite for Batch<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::submodule::{SubmoduleIndex, SubmoduleStore as _};
+    use crate::submodule::SubmoduleIndex;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::H256;
 

@@ -6,13 +6,20 @@
 //! writes, and `update` is exclusive until the closure returns. The batch
 //! commits only when the closure returns `Ok`. A later engine has to keep
 //! those three rules; MDBX gets them from its transaction.
+//!
+//! `update` stays durable. [`SubmoduleIndex::update_registration`] is the
+//! same until group commit is enabled. Then the registration is visible
+//! before it returns, and the fsync waits for the group.
 
 use std::{path::Path, sync::Arc};
 
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
 };
+use reth_db::mdbx::ffi;
 use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
+
+use super::group::{EnableStep, EngineLifetime, GroupCommit};
 
 #[cfg(feature = "rocksdb")]
 use super::rocks::{RocksBackground, RocksSubmoduleStore, RocksTuning};
@@ -189,7 +196,10 @@ pub trait SubmoduleStore: Send + Sync {
 /// MDBX submodule index. One environment, the tables in [`super::tables`].
 #[derive(Clone)]
 pub struct MdbxSubmoduleStore {
+    /// Dropped first so the delay thread joins before `env` closes.
+    lifetime: Arc<EngineLifetime>,
     env: Arc<DatabaseEnv>,
+    group: Arc<GroupCommit>,
 }
 
 impl std::fmt::Debug for MdbxSubmoduleStore {
@@ -203,8 +213,153 @@ impl std::fmt::Debug for MdbxSubmoduleStore {
 impl MdbxSubmoduleStore {
     pub fn open(path: impl AsRef<Path>, args: DatabaseArguments) -> eyre::Result<Self> {
         let env = create_or_open_submodule_db(path, args)?;
-        Ok(Self { env: Arc::new(env) })
+        let group = GroupCommit::new();
+        Ok(Self {
+            lifetime: EngineLifetime::new(Arc::clone(&group)),
+            env: Arc::new(env),
+            group,
+        })
     }
+
+    /// Visible registration commits, one sync per group.
+    ///
+    /// `MDBX_SAFE_NOSYNC` is env-wide, so every later commit on this environment
+    /// skips fsync. `update` syncs itself. A crash rolls back to the last sync
+    /// and does not corrupt the file.
+    pub(super) fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
+        match self.group.prepare(txs_per_sync)? {
+            EnableStep::On => Ok(()),
+            EnableStep::Spawn => {
+                if let Err(err) = self.spawn_delay() {
+                    self.group.clear_spawned();
+                    return Err(err);
+                }
+                self.arm_group()
+            }
+            EnableStep::Arm => self.arm_group(),
+        }
+    }
+
+    pub(super) fn sync_group(&self) -> eyre::Result<()> {
+        if !self.group.is_enabled() {
+            return Ok(());
+        }
+        sync_if_dirty(&self.env, &self.group)
+    }
+
+    pub(super) fn update_registration<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        if !self.group.is_enabled() {
+            return self.update(f);
+        }
+        let result = self.update_unsynced(f)?;
+        if self.group.note_visible() {
+            sync_if_dirty(&self.env, &self.group)?;
+        }
+        Ok(result)
+    }
+
+    fn spawn_delay(&self) -> eyre::Result<()> {
+        let env = Arc::downgrade(&self.env);
+        let group = Arc::clone(&self.group);
+        self.lifetime
+            .spawn(Arc::clone(&self.group), move || match env.upgrade() {
+                Some(env) => sync_if_dirty(&env, &group),
+                None => Ok(()),
+            })
+    }
+
+    fn arm_group(&self) -> eyre::Result<()> {
+        set_safe_nosync(&self.env)?;
+        self.group.finish_enable();
+        Ok(())
+    }
+
+    fn update_unsynced<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        self.env.update_eyre(|tx| {
+            let mut write = MdbxWrite { tx };
+            f(&mut write)
+        })
+    }
+
+    #[cfg(test)]
+    fn safe_nosync(&self) -> eyre::Result<bool> {
+        let flags = env_flags(&self.env)?;
+        Ok(flags & ffi::MDBX_SAFE_NOSYNC != 0)
+    }
+}
+
+fn sync_if_dirty(env: &DatabaseEnv, group: &GroupCommit) -> eyre::Result<()> {
+    let Some(generation) = group.dirty_generation() else {
+        return Ok(());
+    };
+    sync_env(env)?;
+    group.mark_synced(generation, true);
+    Ok(())
+}
+
+fn finish_durable(env: &DatabaseEnv, group: &GroupCommit) -> eyre::Result<()> {
+    if !group.is_enabled() {
+        return Ok(());
+    }
+    // This commit is not a registration generation. Sync it, and cover any
+    // registration that was already visible before the sync.
+    let generation = group.generation();
+    sync_env(env)?;
+    group.mark_synced(generation, false);
+    Ok(())
+}
+
+fn sync_env(env: &DatabaseEnv) -> eyre::Result<()> {
+    let tx = env.tx()?;
+    let environment = tx.inner().env().clone();
+    drop(tx);
+    environment
+        .sync(true)
+        .map_err(|err| eyre::eyre!("mdbx env sync: {err}"))?;
+    Ok(())
+}
+
+fn set_safe_nosync(env: &DatabaseEnv) -> eyre::Result<()> {
+    with_env(env, |ptr| {
+        let rc = unsafe { ffi::mdbx_env_set_flags(ptr, ffi::MDBX_SAFE_NOSYNC, true) };
+        if rc != 0 {
+            eyre::bail!("mdbx_env_set_flags: {}", mdbx_error(rc));
+        }
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+fn env_flags(env: &DatabaseEnv) -> eyre::Result<std::os::raw::c_uint> {
+    with_env(env, |ptr| {
+        let mut flags = 0;
+        let rc = unsafe { ffi::mdbx_env_get_flags(ptr, &mut flags) };
+        if rc != 0 {
+            eyre::bail!("mdbx_env_get_flags: {}", mdbx_error(rc));
+        }
+        Ok(flags)
+    })
+}
+
+fn with_env<T>(
+    env: &DatabaseEnv,
+    f: impl FnOnce(*mut ffi::MDBX_env) -> eyre::Result<T>,
+) -> eyre::Result<T> {
+    let tx = env.tx()?;
+    let environment = tx.inner().env().clone();
+    drop(tx);
+    environment.with_raw_env_ptr(f)
+}
+
+fn mdbx_error(rc: i32) -> String {
+    let msg = unsafe { std::ffi::CStr::from_ptr(ffi::mdbx_strerror(rc)) };
+    format!("rc={rc} {}", msg.to_string_lossy())
 }
 
 struct MdbxRead<'a> {
@@ -427,10 +582,9 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
-        self.env.update_eyre(|tx| {
-            let mut write = MdbxWrite { tx };
-            f(&mut write)
-        })
+        let result = self.update_unsynced(f)?;
+        finish_durable(&self.env, &self.group)?;
+        Ok(result)
     }
 }
 
@@ -496,6 +650,70 @@ impl SubmoduleIndex {
             Self::Rocks(store) => store.flush_and_compact(),
         }
     }
+
+    /// Turn on group commit for this index. `txs_per_sync` of 0 is rejected.
+    ///
+    /// Registration writes stay visible before they return. The fsync runs
+    /// every `txs_per_sync` registrations, on [`Self::sync_group`], on the
+    /// next durable [`SubmoduleStore::update`], or 50 ms after the first
+    /// unsynced registration.
+    pub fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(store) => store.enable_group_commit(txs_per_sync),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.enable_group_commit(txs_per_sync),
+        }
+    }
+
+    pub fn group_commit_enabled(&self) -> bool {
+        match self {
+            Self::Mdbx(store) => store.group.is_enabled(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.group_commit_enabled(),
+        }
+    }
+
+    /// Sync an open group. Does nothing when group commit is off or the group is clean.
+    pub fn sync_group(&self) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(store) => store.sync_group(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.sync_group(),
+        }
+    }
+
+    /// Commit one index registration.
+    ///
+    /// Durable, unless [`Self::enable_group_commit`] is on. Then the rows are
+    /// visible to the next view and the sync waits for the group.
+    pub fn update_registration<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        match self {
+            Self::Mdbx(store) => store.update_registration(f),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.update_registration(f),
+        }
+    }
+
+    #[cfg(test)]
+    fn group_sync_count(&self) -> u64 {
+        match self {
+            Self::Mdbx(store) => store.group.sync_count(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.group_sync_count(),
+        }
+    }
+
+    #[cfg(test)]
+    fn mdbx_safe_nosync(&self) -> eyre::Result<bool> {
+        match self {
+            Self::Mdbx(store) => store.safe_nosync(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(_) => eyre::bail!("not an mdbx index"),
+        }
+    }
 }
 
 impl SubmoduleStore for SubmoduleIndex {
@@ -527,7 +745,25 @@ mod tests {
     use super::*;
     use crate::IrysDatabaseArgs as _;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::{H256, RelativeChunkOffset};
+    use irys_types::{DbSyncMode, H256, RelativeChunkOffset};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn put_registration(store: &SubmoduleIndex, offset: u32, byte: u8) -> eyre::Result<()> {
+        store.update_registration(|tx| {
+            tx.set_path_hashes_by_offset(
+                PartitionChunkOffset::from(offset),
+                ChunkPathHashes {
+                    data_path_hash: Some(H256::repeat_byte(byte)),
+                    tx_path_hash: None,
+                },
+            )
+        })
+    }
+
+    fn path_at(store: &SubmoduleIndex, offset: u32) -> eyre::Result<Option<ChunkPathHashes>> {
+        store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset)))
+    }
 
     fn each_engine(
         prefix: &str,
@@ -710,5 +946,126 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    #[test]
+    fn registration_without_group_commit_stays_durable() -> eyre::Result<()> {
+        each_engine("submodule_store_reg_durable", |store| {
+            assert!(!store.group_commit_enabled());
+            put_registration(store, 1, 1)?;
+            assert_eq!(store.group_sync_count(), 0);
+            assert!(path_at(store, 1)?.is_some());
+            store.sync_group()?;
+            assert_eq!(store.group_sync_count(), 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn group_commit_write_is_visible_before_sync() -> eyre::Result<()> {
+        each_engine("submodule_store_group_visible", |store| {
+            store.enable_group_commit(1_000)?;
+            put_registration(store, 3, 4)?;
+            assert_eq!(store.group_sync_count(), 0);
+            assert_eq!(
+                path_at(store, 3)?
+                    .expect("visible before sync")
+                    .data_path_hash,
+                Some(H256::repeat_byte(4))
+            );
+            store.sync_group()?;
+            assert_eq!(store.group_sync_count(), 1);
+            assert!(path_at(store, 3)?.is_some());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn group_commit_syncs_every_n_registrations() -> eyre::Result<()> {
+        each_engine("submodule_store_group_n", |store| {
+            store.enable_group_commit(2)?;
+            put_registration(store, 1, 1)?;
+            assert_eq!(store.group_sync_count(), 0);
+            put_registration(store, 2, 2)?;
+            assert_eq!(store.group_sync_count(), 1);
+            put_registration(store, 3, 3)?;
+            assert_eq!(store.group_sync_count(), 1);
+            assert!(path_at(store, 3)?.is_some());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn durable_write_covers_an_open_group() -> eyre::Result<()> {
+        each_engine("submodule_store_group_cover", |store| {
+            store.enable_group_commit(8)?;
+            put_registration(store, 1, 1)?;
+            assert_eq!(store.group_sync_count(), 0);
+            store.update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(2),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(2)),
+                        tx_path_hash: None,
+                    },
+                )
+            })?;
+            assert_eq!(store.group_sync_count(), 0);
+            store.sync_group()?;
+            assert_eq!(store.group_sync_count(), 0);
+            assert!(path_at(store, 1)?.is_some());
+            assert!(path_at(store, 2)?.is_some());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn group_commit_rejects_zero() -> eyre::Result<()> {
+        each_engine("submodule_store_group_zero", |store| {
+            let err = store.enable_group_commit(0).unwrap_err();
+            assert!(err.to_string().contains("at least 1"));
+            assert!(!store.group_commit_enabled());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn quiet_registration_syncs_after_the_delay() -> eyre::Result<()> {
+        each_engine("submodule_store_group_delay", |store| {
+            store.enable_group_commit(1_000)?;
+            let started = Instant::now();
+            put_registration(store, 7, 7)?;
+            assert_eq!(store.group_sync_count(), 0);
+            while store.group_sync_count() == 0 {
+                if started.elapsed() > Duration::from_secs(2) {
+                    eyre::bail!("group sync did not run within 2s");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= Duration::from_millis(40),
+                "group sync ran after {elapsed:?}"
+            );
+            assert!(path_at(store, 7)?.is_some());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn mdbx_group_commit_sets_safe_nosync() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_store_safe_nosync")
+            .build();
+        let args = DatabaseArguments::irys_default(DbSyncMode::Durable)?
+            .with_geometry_max_size(Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE));
+        let store = SubmoduleIndex::open_mdbx(dir.path().join("db"), args)?;
+        assert!(!store.mdbx_safe_nosync()?);
+        put_registration(&store, 1, 1)?;
+        assert_eq!(store.group_sync_count(), 0);
+        store.enable_group_commit(8)?;
+        assert!(store.mdbx_safe_nosync()?);
+        assert!(store.group_commit_enabled());
+        Ok(())
     }
 }
