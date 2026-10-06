@@ -1,0 +1,954 @@
+//! RocksDB submodule index.
+//!
+//! One plain database, one column family per table, HDD-oriented options.
+//! `update` holds a mutex for the whole closure and applies a `WriteBatch`
+//! only when the closure returns `Ok`. Reads inside that closure consult an
+//! overlay first, so the batch sees its own uncommitted puts and deletes.
+//! `view` takes a snapshot and does not take the write mutex.
+//!
+//! Gap scans walk keys. RocksDB has no O(1) count that stays correct once
+//! the overlay hides or adds keys, so this engine does not copy the MDBX
+//! density fast path.
+//!
+//! Large data-path and tx-path values go to blob files so compaction does
+//! not rewrite them. Small offset rows stay in SST blocks. rust-rocksdb
+//! 0.24 has no `set_allow_fallocate`; WAL recycle and `wal_bytes_per_sync`
+//! are the durability knobs this binding exposes.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use eyre::WrapErr as _;
+use irys_types::{
+    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+};
+use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
+use rocksdb::{
+    BlockBasedOptions, DB, DBCompressionType, Direction, IteratorMode, Options, WriteBatch,
+    WriteOptions,
+};
+
+use super::tables::{
+    ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
+    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, TxLeafBinding,
+    TxLeafBindingByTxPathHash, TxPathByTxPathHash,
+};
+use super::{
+    SubmoduleRead, SubmoduleWrite, first_gap_with, gaps_with, tables::Metadata as MetadataTable,
+};
+use crate::metadata::MetadataKey;
+
+/// User-data block size. Uncompressed. Reads of the offset index pull this much.
+const BLOCK_BYTES: usize = 64 * 1024;
+/// Shared by every column family of this one database.
+pub const BLOCK_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// Values at or above this size move into blob files on the path column families.
+pub const BLOB_MIN_BYTES: u64 = 2048;
+const SCHEMA_FILE: &str = "SCHEMA";
+const SCHEMA_TEXT: &str = "irys-submodule-rocks 1\n";
+
+const CF_COUNT: usize = 7;
+
+#[derive(Clone, Copy)]
+enum Cf {
+    PathHashes,
+    DataPath,
+    TxPath,
+    DataRoots,
+    TxLeaf,
+    Pending,
+    Metadata,
+}
+
+impl Cf {
+    const ALL: [Self; CF_COUNT] = [
+        Self::PathHashes,
+        Self::DataPath,
+        Self::TxPath,
+        Self::DataRoots,
+        Self::TxLeaf,
+        Self::Pending,
+        Self::Metadata,
+    ];
+
+    /// Index families. `clear` deletes these and leaves the schema row in place.
+    const INDEX: [Self; 6] = [
+        Self::PathHashes,
+        Self::DataPath,
+        Self::TxPath,
+        Self::DataRoots,
+        Self::TxLeaf,
+        Self::Pending,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::PathHashes => 0,
+            Self::DataPath => 1,
+            Self::TxPath => 2,
+            Self::DataRoots => 3,
+            Self::TxLeaf => 4,
+            Self::Pending => 5,
+            Self::Metadata => 6,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::PathHashes => <ChunkPathHashesByOffset as Table>::NAME,
+            Self::DataPath => <ChunkDataPathByPathHash as Table>::NAME,
+            Self::TxPath => <TxPathByTxPathHash as Table>::NAME,
+            Self::DataRoots => <DataRootInfosByDataRoot as Table>::NAME,
+            Self::TxLeaf => <TxLeafBindingByTxPathHash as Table>::NAME,
+            Self::Pending => <PendingBodyMigrationsByOffset as Table>::NAME,
+            Self::Metadata => <MetadataTable as Table>::NAME,
+        }
+    }
+
+    fn uses_blobs(self) -> bool {
+        matches!(self, Self::DataPath | Self::TxPath)
+    }
+}
+
+#[derive(Clone)]
+pub struct RocksSubmoduleStore {
+    db: Arc<DB>,
+    write: Arc<Mutex<()>>,
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for RocksSubmoduleStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RocksSubmoduleStore")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl RocksSubmoduleStore {
+    pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        check_schema_file(&path)?;
+        let db = open_db(&path)?;
+        ensure_schema_row(&db)?;
+        let marker = path.join(SCHEMA_FILE);
+        if !marker.exists() {
+            fs::write(&marker, SCHEMA_TEXT).wrap_err("write schema marker")?;
+        }
+        Ok(Self {
+            db: Arc::new(db),
+            write: Arc::new(Mutex::new(())),
+            path,
+        })
+    }
+
+    /// Flush memtables, compact every column family, and sync the WAL.
+    ///
+    /// Takes the write lock. Do not call it from inside `update`.
+    pub fn flush_and_compact(&self) -> eyre::Result<()> {
+        let _guard = self
+            .write
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for cf in Cf::ALL {
+            let handle = cf_handle(&self.db, cf)?;
+            self.db.flush_cf(&handle).wrap_err("flush column family")?;
+            self.db
+                .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
+        }
+        self.db.flush_wal(true).wrap_err("sync wal")?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn schema_payload(&self) -> eyre::Result<Option<Vec<u8>>> {
+        let handle = cf_handle(&self.db, Cf::Metadata)?;
+        let key = encode_key(MetadataKey::DBSchemaVersion);
+        match self.db.get_cf(&handle, key).wrap_err("read schema row")? {
+            Some(bytes) => Ok(Some(Vec::<u8>::decompress(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+impl super::SubmoduleStore for RocksSubmoduleStore {
+    fn view<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleRead) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        let snap = self.db.snapshot();
+        let mut rows = Rows {
+            db: &self.db,
+            snap: &snap,
+            overlay: None,
+        };
+        f(&mut rows)
+    }
+
+    fn update<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        let _guard = self
+            .write
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snap = self.db.snapshot();
+        let mut batch = Batch {
+            db: &self.db,
+            snap: &snap,
+            overlay: Overlay::default(),
+        };
+        let result = f(&mut batch)?;
+        batch.commit()?;
+        Ok(result)
+    }
+}
+
+fn open_db(path: &Path) -> eyre::Result<DB> {
+    let cache = rocksdb::Cache::new_lru_cache(BLOCK_CACHE_BYTES);
+    let mut db_opts = Options::default();
+    db_opts.create_if_missing(true);
+    db_opts.create_missing_column_families(true);
+    // One or two background jobs so compaction does not flood an HDD.
+    db_opts.set_max_background_jobs(2);
+    db_opts.set_bytes_per_sync(1024 * 1024);
+    db_opts.set_wal_bytes_per_sync(1024 * 1024);
+    db_opts.set_recycle_log_file_num(4);
+    db_opts.set_max_open_files(512);
+    db_opts.set_use_fsync(true);
+
+    let families = Cf::ALL.into_iter().map(|cf| {
+        rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(&cache, cf.uses_blobs()))
+    });
+    DB::open_cf_descriptors(&db_opts, path, families).wrap_err("open rocksdb submodule index")
+}
+
+fn column_options(cache: &rocksdb::Cache, blobs: bool) -> Options {
+    let mut table = BlockBasedOptions::default();
+    table.set_block_size(BLOCK_BYTES);
+    // Full-filter bloom, ~10 bits per key. `false` selects the full filter.
+    table.set_bloom_filter(10.0, false);
+    table.set_cache_index_and_filter_blocks(true);
+    table.set_pin_l0_filter_and_index_blocks_in_cache(true);
+    table.set_block_cache(cache);
+
+    let mut opts = Options::default();
+    opts.set_block_based_table_factory(&table);
+    opts.set_compression_type(DBCompressionType::Lz4);
+    opts.set_level_compaction_dynamic_level_bytes(true);
+    opts.set_target_file_size_base(256 * 1024 * 1024);
+    opts.set_compaction_readahead_size(2 * 1024 * 1024);
+    opts.set_write_buffer_size(64 * 1024 * 1024);
+    opts.set_max_write_buffer_number(2);
+    if blobs {
+        opts.set_enable_blob_files(true);
+        opts.set_min_blob_size(BLOB_MIN_BYTES);
+        opts.set_blob_file_size(256 * 1024 * 1024);
+        opts.set_blob_compression_type(DBCompressionType::Lz4);
+        opts.set_enable_blob_gc(true);
+        opts.set_blob_compaction_readahead_size(2 * 1024 * 1024);
+        opts.set_blob_cache(cache);
+    }
+    opts
+}
+
+fn check_schema_file(path: &Path) -> eyre::Result<()> {
+    let marker = path.join(SCHEMA_FILE);
+    if !marker.exists() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
+    if text != SCHEMA_TEXT {
+        eyre::bail!(
+            "schema file {} does not match this index engine",
+            marker.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::DBSchemaVersion);
+    let expected = schema_value();
+    match db.get_cf(&handle, &key).wrap_err("read schema row")? {
+        Some(found) if found == expected => Ok(()),
+        Some(_) => eyre::bail!("schema row does not match this index engine"),
+        None => {
+            let mut batch = WriteBatch::new();
+            batch.put_cf(&handle, key, expected);
+            let mut opts = WriteOptions::default();
+            opts.set_sync(true);
+            db.write_opt(batch, &opts).wrap_err("write schema row")
+        }
+    }
+}
+
+fn schema_value() -> Vec<u8> {
+    compress_value(&SCHEMA_TEXT.as_bytes().to_vec())
+}
+
+fn cf_handle(db: &DB, cf: Cf) -> eyre::Result<&rocksdb::ColumnFamily> {
+    db.cf_handle(cf.name())
+        .ok_or_else(|| eyre::eyre!("missing column family {}", cf.name()))
+}
+
+fn encode_key<K: Encode>(key: K) -> Vec<u8> {
+    key.encode().as_ref().to_vec()
+}
+
+fn compress_value<V: Compress>(value: &V) -> Vec<u8> {
+    let mut buf = Vec::new();
+    value.compress_to_buf(&mut buf);
+    buf
+}
+
+#[derive(Default)]
+struct Overlay {
+    maps: [BTreeMap<Vec<u8>, Option<Vec<u8>>>; CF_COUNT],
+    cleared: [bool; CF_COUNT],
+}
+
+struct Rows<'a> {
+    db: &'a DB,
+    snap: &'a rocksdb::Snapshot<'a>,
+    overlay: Option<&'a Overlay>,
+}
+
+struct Batch<'a> {
+    db: &'a DB,
+    snap: &'a rocksdb::Snapshot<'a>,
+    overlay: Overlay,
+}
+
+impl<'a> Batch<'a> {
+    fn rows(&self) -> Rows<'_> {
+        Rows {
+            db: self.db,
+            snap: self.snap,
+            overlay: Some(&self.overlay),
+        }
+    }
+
+    fn put<V: Compress>(&mut self, cf: Cf, key: &[u8], value: &V) {
+        self.overlay.maps[cf.index()].insert(key.to_vec(), Some(compress_value(value)));
+    }
+
+    fn delete(&mut self, cf: Cf, key: &[u8]) {
+        self.overlay.maps[cf.index()].insert(key.to_vec(), None);
+    }
+
+    fn commit(&self) -> eyre::Result<()> {
+        let mut batch = WriteBatch::new();
+        for cf in Cf::ALL {
+            let handle = cf_handle(self.db, cf)?;
+            if self.overlay.cleared[cf.index()] {
+                for item in self.snap.iterator_cf(&handle, IteratorMode::Start) {
+                    let (key, _) = item.wrap_err("scan column family for clear")?;
+                    batch.delete_cf(&handle, key);
+                }
+            }
+            for (key, value) in &self.overlay.maps[cf.index()] {
+                match value {
+                    Some(value) => batch.put_cf(&handle, key, value),
+                    None => batch.delete_cf(&handle, key),
+                }
+            }
+        }
+        let mut opts = WriteOptions::default();
+        opts.set_sync(true);
+        self.db
+            .write_opt(batch, &opts)
+            .wrap_err("commit submodule index batch")
+    }
+}
+
+impl Rows<'_> {
+    fn get_raw(&self, cf: Cf, key: &[u8]) -> eyre::Result<Option<Vec<u8>>> {
+        if let Some(overlay) = self.overlay {
+            if let Some(value) = overlay.maps[cf.index()].get(key) {
+                return Ok(value.clone());
+            }
+            if overlay.cleared[cf.index()] {
+                return Ok(None);
+            }
+        }
+        let handle = cf_handle(self.db, cf)?;
+        self.snap
+            .get_cf(&handle, key)
+            .wrap_err("read submodule index")
+    }
+
+    fn get_value<V: Decompress>(&self, cf: Cf, key: &[u8]) -> eyre::Result<Option<V>> {
+        Ok(match self.get_raw(cf, key)? {
+            Some(bytes) => Some(V::decompress(&bytes)?),
+            None => None,
+        })
+    }
+
+    fn cursor(&self, cf: Cf, start: Option<&[u8]>) -> eyre::Result<MergeCursor<'_>> {
+        let handle = cf_handle(self.db, cf)?;
+        let mode = match start {
+            Some(key) => IteratorMode::From(key, Direction::Forward),
+            None => IteratorMode::Start,
+        };
+        let db = self.snap.iterator_cf(&handle, mode).map(|item| {
+            item.map(|(key, value)| (key.into_vec(), value.into_vec()))
+                .map_err(|err| eyre::eyre!("{err}"))
+        });
+        let cleared = self
+            .overlay
+            .is_some_and(|overlay| overlay.cleared[cf.index()]);
+        let overlay = self
+            .overlay
+            .map(|overlay| overlay_pairs(overlay, cf, start))
+            .unwrap_or_default();
+        Ok(MergeCursor::new(Box::new(db), overlay, cleared))
+    }
+
+    fn collect_until<K, V>(
+        &self,
+        cf: Cf,
+        start: Option<&[u8]>,
+        mut stop: impl FnMut(&K) -> bool,
+    ) -> eyre::Result<Vec<(K, V)>>
+    where
+        K: Decode,
+        V: Decompress,
+    {
+        let mut cursor = self.cursor(cf, start)?;
+        let mut rows = Vec::new();
+        while let Some((key, value)) = cursor.next_kv()? {
+            let key = K::decode(&key)?;
+            if stop(&key) {
+                break;
+            }
+            rows.push((key, V::decompress(&value)?));
+        }
+        Ok(rows)
+    }
+}
+
+fn overlay_pairs(
+    overlay: &Overlay,
+    cf: Cf,
+    start: Option<&[u8]>,
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    let map = &overlay.maps[cf.index()];
+    if let Some(start) = start {
+        let start = start.to_vec();
+        map.range(start..)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    } else {
+        map.iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+}
+
+struct MergeCursor<'a> {
+    db: Box<dyn Iterator<Item = eyre::Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+    db_next: Option<(Vec<u8>, Vec<u8>)>,
+    overlay: std::vec::IntoIter<(Vec<u8>, Option<Vec<u8>>)>,
+    ov_next: Option<(Vec<u8>, Option<Vec<u8>>)>,
+    cleared: bool,
+    failed: Option<eyre::Report>,
+}
+
+impl<'a> MergeCursor<'a> {
+    fn new(
+        db: Box<dyn Iterator<Item = eyre::Result<(Vec<u8>, Vec<u8>)>> + 'a>,
+        overlay: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        cleared: bool,
+    ) -> Self {
+        let mut cursor = Self {
+            db,
+            db_next: None,
+            overlay: overlay.into_iter(),
+            ov_next: None,
+            cleared,
+            failed: None,
+        };
+        cursor.pump_db();
+        cursor.pump_overlay();
+        cursor
+    }
+
+    fn pump_db(&mut self) {
+        if self.cleared || self.failed.is_some() {
+            self.db_next = None;
+            return;
+        }
+        match self.db.next() {
+            Some(Ok(kv)) => self.db_next = Some(kv),
+            Some(Err(err)) => {
+                self.failed = Some(err);
+                self.db_next = None;
+            }
+            None => self.db_next = None,
+        }
+    }
+
+    fn pump_overlay(&mut self) {
+        self.ov_next = self.overlay.next();
+    }
+
+    fn next_kv(&mut self) -> eyre::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        loop {
+            if let Some(err) = self.failed.take() {
+                return Err(err);
+            }
+            let side = match (
+                self.db_next.as_ref().map(|(key, _)| key.as_slice()),
+                self.ov_next.as_ref().map(|(key, _)| key.as_slice()),
+            ) {
+                (None, None) => return Ok(None),
+                (Some(_), None) => Side::Db,
+                (None, Some(_)) => Side::Overlay,
+                (Some(db_key), Some(ov_key)) => match ov_key.cmp(db_key) {
+                    std::cmp::Ordering::Less => Side::Overlay,
+                    std::cmp::Ordering::Equal => Side::Both,
+                    std::cmp::Ordering::Greater => Side::Db,
+                },
+            };
+            match side {
+                Side::Db => {
+                    let kv = self.db_next.take().expect("db key is pending");
+                    self.pump_db();
+                    return Ok(Some(kv));
+                }
+                Side::Overlay => {
+                    let (key, value) = self.ov_next.take().expect("overlay key is pending");
+                    self.pump_overlay();
+                    if let Some(value) = value {
+                        return Ok(Some((key, value)));
+                    }
+                }
+                Side::Both => {
+                    self.db_next.take();
+                    self.pump_db();
+                    let (key, value) = self.ov_next.take().expect("overlay key is pending");
+                    self.pump_overlay();
+                    if let Some(value) = value {
+                        return Ok(Some((key, value)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum Side {
+    Db,
+    Overlay,
+    Both,
+}
+
+impl SubmoduleRead for Rows<'_> {
+    fn get_data_path_by_offset(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<ChunkDataPath>> {
+        let Some(hash) = self
+            .get_path_hashes_by_offset(offset)?
+            .and_then(|hashes| hashes.data_path_hash)
+        else {
+            return Ok(None);
+        };
+        self.get_full_data_path(hash)
+    }
+
+    fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
+        let Some(hash) = self
+            .get_path_hashes_by_offset(offset)?
+            .and_then(|hashes| hashes.tx_path_hash)
+        else {
+            return Ok(None);
+        };
+        self.get_full_tx_path(hash)
+    }
+
+    fn get_path_hashes_by_offset(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<ChunkPathHashes>> {
+        self.get_value(Cf::PathHashes, &encode_key(offset))
+    }
+
+    fn path_hashes_in_inclusive_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
+        if start > end {
+            return Ok(Vec::new());
+        }
+        let start_key = encode_key(start);
+        self.collect_until(Cf::PathHashes, Some(&start_key), |offset| *offset > end)
+    }
+
+    fn first_missing_path_hash_offset(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Option<PartitionChunkOffset>> {
+        if start >= end {
+            return Ok(None);
+        }
+        let start_key = encode_key(start);
+        let mut cursor = self.cursor(Cf::PathHashes, Some(&start_key))?;
+        first_gap_with(start, end, || {
+            Ok(match cursor.next_kv()? {
+                Some((key, _)) => Some(PartitionChunkOffset::decode(&key)?),
+                None => None,
+            })
+        })
+    }
+
+    fn missing_path_hash_ranges(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        let start_key = encode_key(start);
+        let mut cursor = self.cursor(Cf::PathHashes, Some(&start_key))?;
+        gaps_with(start, end, || {
+            Ok(match cursor.next_kv()? {
+                Some((key, _)) => Some(PartitionChunkOffset::decode(&key)?),
+                None => None,
+            })
+        })
+    }
+
+    fn get_full_data_path(&self, path_hash: ChunkPathHash) -> eyre::Result<Option<ChunkDataPath>> {
+        self.get_value(Cf::DataPath, &encode_key(path_hash))
+    }
+
+    fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
+        self.get_value(Cf::TxPath, &encode_key(path_hash))
+    }
+
+    fn get_tx_leaf_binding(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>> {
+        self.get_value(Cf::TxLeaf, &encode_key(path_hash))
+    }
+
+    fn get_data_root_infos_for_data_root(
+        &self,
+        data_root: DataRoot,
+    ) -> eyre::Result<Option<DataRootInfos>> {
+        self.get_value(Cf::DataRoots, &encode_key(data_root))
+    }
+
+    fn get_pending_body_migration(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<PendingBodyMigration>> {
+        self.get_value(Cf::Pending, &encode_key(offset))
+    }
+
+    fn pending_body_migrations_from(
+        &self,
+        start: Option<PartitionChunkOffset>,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
+        let start_key = start.map(encode_key);
+        self.collect_until(Cf::Pending, start_key.as_deref(), |_| false)
+    }
+}
+
+impl SubmoduleRead for Batch<'_> {
+    fn get_data_path_by_offset(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<ChunkDataPath>> {
+        self.rows().get_data_path_by_offset(offset)
+    }
+
+    fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
+        self.rows().get_tx_path_by_offset(offset)
+    }
+
+    fn get_path_hashes_by_offset(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<ChunkPathHashes>> {
+        self.rows().get_path_hashes_by_offset(offset)
+    }
+
+    fn path_hashes_in_inclusive_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
+        self.rows().path_hashes_in_inclusive_range(start, end)
+    }
+
+    fn first_missing_path_hash_offset(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Option<PartitionChunkOffset>> {
+        self.rows().first_missing_path_hash_offset(start, end)
+    }
+
+    fn missing_path_hash_ranges(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
+        self.rows().missing_path_hash_ranges(start, end)
+    }
+
+    fn get_full_data_path(&self, path_hash: ChunkPathHash) -> eyre::Result<Option<ChunkDataPath>> {
+        self.rows().get_full_data_path(path_hash)
+    }
+
+    fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
+        self.rows().get_full_tx_path(path_hash)
+    }
+
+    fn get_tx_leaf_binding(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>> {
+        self.rows().get_tx_leaf_binding(path_hash)
+    }
+
+    fn get_data_root_infos_for_data_root(
+        &self,
+        data_root: DataRoot,
+    ) -> eyre::Result<Option<DataRootInfos>> {
+        self.rows().get_data_root_infos_for_data_root(data_root)
+    }
+
+    fn get_pending_body_migration(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<PendingBodyMigration>> {
+        self.rows().get_pending_body_migration(offset)
+    }
+
+    fn pending_body_migrations_from(
+        &self,
+        start: Option<PartitionChunkOffset>,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
+        self.rows().pending_body_migrations_from(start)
+    }
+}
+
+impl SubmoduleWrite for Batch<'_> {
+    fn add_full_data_path(
+        &mut self,
+        path_hash: ChunkPathHash,
+        data_path: ChunkDataPath,
+    ) -> eyre::Result<()> {
+        self.put(Cf::DataPath, &encode_key(path_hash), &data_path);
+        Ok(())
+    }
+
+    fn add_full_tx_path(&mut self, path_hash: TxPathHash, tx_path: TxPath) -> eyre::Result<()> {
+        self.put(Cf::TxPath, &encode_key(path_hash), &tx_path);
+        Ok(())
+    }
+
+    fn add_tx_leaf_binding(
+        &mut self,
+        path_hash: TxPathHash,
+        binding: &TxLeafBinding,
+    ) -> eyre::Result<()> {
+        self.put(Cf::TxLeaf, &encode_key(path_hash), binding);
+        Ok(())
+    }
+
+    fn add_data_path_hash_to_offset_index(
+        &mut self,
+        offset: PartitionChunkOffset,
+        path_hash: Option<ChunkPathHash>,
+    ) -> eyre::Result<()> {
+        let mut hashes = self
+            .rows()
+            .get_path_hashes_by_offset(offset)?
+            .unwrap_or_default();
+        hashes.data_path_hash = path_hash;
+        self.put(Cf::PathHashes, &encode_key(offset), &hashes);
+        Ok(())
+    }
+
+    fn add_tx_path_hash_to_offset_index(
+        &mut self,
+        offset: PartitionChunkOffset,
+        path_hash: Option<TxPathHash>,
+    ) -> eyre::Result<()> {
+        let mut hashes = self
+            .rows()
+            .get_path_hashes_by_offset(offset)?
+            .unwrap_or_default();
+        hashes.tx_path_hash = path_hash;
+        self.put(Cf::PathHashes, &encode_key(offset), &hashes);
+        Ok(())
+    }
+
+    fn add_tx_path_hash_to_offset_range(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        path_hash: Option<TxPathHash>,
+    ) -> eyre::Result<()> {
+        if start > end {
+            return Ok(());
+        }
+        // Point updates. A put does not need MDBX's append cursor, and each
+        // offset keeps a `data_path_hash` that is already stored.
+        for raw in start.0..=end.0 {
+            self.add_tx_path_hash_to_offset_index(PartitionChunkOffset::from(raw), path_hash)?;
+        }
+        Ok(())
+    }
+
+    fn write_data_path_updates(
+        &mut self,
+        mut updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
+    ) -> eyre::Result<()> {
+        updates.sort_by_key(|(offset, _, _)| *offset);
+        for (offset, path_hash, data_path) in updates {
+            self.add_full_data_path(path_hash, data_path)?;
+            let mut hashes = self
+                .rows()
+                .get_path_hashes_by_offset(offset)?
+                .unwrap_or_default();
+            hashes.data_path_hash = Some(path_hash);
+            self.put(Cf::PathHashes, &encode_key(offset), &hashes);
+        }
+        Ok(())
+    }
+
+    fn set_path_hashes_by_offset(
+        &mut self,
+        offset: PartitionChunkOffset,
+        path_hashes: ChunkPathHashes,
+    ) -> eyre::Result<()> {
+        self.put(Cf::PathHashes, &encode_key(offset), &path_hashes);
+        Ok(())
+    }
+
+    fn del_path_hashes_by_offset(&mut self, offset: PartitionChunkOffset) -> eyre::Result<()> {
+        self.delete(Cf::PathHashes, &encode_key(offset));
+        Ok(())
+    }
+
+    fn set_data_root_infos_for_data_root(
+        &mut self,
+        data_root: DataRoot,
+        infos: DataRootInfos,
+    ) -> eyre::Result<()> {
+        self.put(Cf::DataRoots, &encode_key(data_root), &infos);
+        Ok(())
+    }
+
+    fn add_data_root_info(&mut self, data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()> {
+        let mut infos = self
+            .rows()
+            .get_data_root_infos_for_data_root(data_root)?
+            .unwrap_or_default();
+        if !infos.0.contains(info) {
+            infos.0.push(info.clone());
+        }
+        self.set_data_root_infos_for_data_root(data_root, infos)
+    }
+
+    fn add_pending_body_migration(
+        &mut self,
+        offset: PartitionChunkOffset,
+        job: &PendingBodyMigration,
+    ) -> eyre::Result<()> {
+        self.put(Cf::Pending, &encode_key(offset), job);
+        Ok(())
+    }
+
+    fn del_pending_body_migration(&mut self, offset: PartitionChunkOffset) -> eyre::Result<bool> {
+        let existed = self.rows().get_pending_body_migration(offset)?.is_some();
+        if existed {
+            self.delete(Cf::Pending, &encode_key(offset));
+        }
+        Ok(existed)
+    }
+
+    fn del_pending_body_migrations_in_range(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<usize> {
+        let offsets: Vec<PartitionChunkOffset> = self
+            .rows()
+            .pending_body_migrations_from(Some(start))?
+            .into_iter()
+            .map(|(offset, _)| offset)
+            .take_while(|offset| *offset <= end)
+            .collect();
+        let removed = offsets.len();
+        for offset in offsets {
+            self.delete(Cf::Pending, &encode_key(offset));
+        }
+        Ok(removed)
+    }
+
+    fn clear(&mut self) -> eyre::Result<()> {
+        for cf in Cf::INDEX {
+            self.overlay.cleared[cf.index()] = true;
+            self.overlay.maps[cf.index()].clear();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::submodule::{SubmoduleIndex, SubmoduleStore as _};
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::H256;
+
+    #[test]
+    fn reopen_reads_the_row_and_keeps_the_schema_across_clear() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_reopen")
+            .build();
+        let path = dir.path().join("index");
+        let offset = PartitionChunkOffset::from(3);
+        let hashes = ChunkPathHashes {
+            data_path_hash: Some(H256::repeat_byte(1)),
+            tx_path_hash: Some(H256::repeat_byte(2)),
+        };
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            store.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
+        }
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            assert_eq!(
+                store.view(|tx| tx.get_path_hashes_by_offset(offset))?,
+                Some(hashes)
+            );
+            store.update(|tx| tx.clear())?;
+            let payload = store.schema_payload()?.expect("schema row");
+            assert_eq!(payload, SCHEMA_TEXT.as_bytes());
+            assert!(
+                store
+                    .view(|tx| tx.get_path_hashes_by_offset(offset))?
+                    .is_none()
+            );
+        }
+        let store = SubmoduleIndex::open_rocks(&path)?;
+        assert!(
+            store
+                .view(|tx| tx.get_path_hashes_by_offset(offset))?
+                .is_none()
+        );
+        let marker = fs::read_to_string(path.join(SCHEMA_FILE))?;
+        assert_eq!(marker, SCHEMA_TEXT);
+        Ok(())
+    }
+}
