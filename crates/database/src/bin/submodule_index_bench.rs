@@ -1753,7 +1753,7 @@ Default --chunks is 20971520, the first max transaction in the stuck worst-case 
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
 RocksDB prints rocks_bg before and after each shape: running compactions, running flushes, pending flags, and no_file_opens.\n\
-The RocksDB engine line shows max_open_files=-1 file_opening_threads=16. That preload is bench-only. Production open stays at 512.\n\
+The RocksDB engine line shows max_open_files=-1 file_opening_threads=16. Production open uses the same table cache. The bench open also skips the table-property scan.\n\
 rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit.\n\
 Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache. data_path_random_open keeps the Rocks block cache.\n\
 Each engine prints mem lines. rss_kb is resident. anon_kb is heap. file_kb is mapped file pages. size_kb is virtual.\n\

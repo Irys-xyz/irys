@@ -659,8 +659,8 @@ impl SubmoduleIndex {
 
     /// Bench entry for one named preset. [`Self::open_rocks`] stays on the baseline.
     ///
-    /// This open counts table opens and preloads every table (`max_open_files=-1`).
-    /// Production [`Self::open_rocks`] does neither and stays at 512.
+    /// This open skips the table-property scan during `DB::Open`.
+    /// Production [`Self::open_rocks`] keeps every SST open and exports tickers.
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open_with_stats(
@@ -700,6 +700,15 @@ impl SubmoduleIndex {
         match self {
             Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
             Self::Rocks(store) => store.legacy_path_hash_ssts(),
+        }
+    }
+
+    /// Publish RocksDB gauges and ticker counters. MDBX does nothing.
+    pub fn report_metrics(&self) {
+        match self {
+            Self::Mdbx(_) => {}
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.report_metrics(),
         }
     }
 

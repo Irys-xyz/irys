@@ -8,7 +8,7 @@
 //! the disk. It sorts a reorder buffer of pending chunks and joins adjacent
 //! chunks into one `pwrite` of at most `WRITE_RUN_MAX_BYTES`. Contiguous
 //! chunks from one entropy span enter that buffer together, after every
-//! index ack for those chunks. A caller that already holds neighboring
+//! member of that span is packed. A caller that already holds neighboring
 //! chunks publishes that run in one insert, so the lane cannot read a
 //! prefix of it. A short run waits for that size, a recall flush, the
 //! pending set at `num_writes_before_sync`, or `reorder_grace` only while
@@ -28,18 +28,18 @@
 //! so a short write does not block a ready read.
 //! New submits stop when another command would put the in-flight set past
 //! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
-//! The file lock is dropped before an index submit.
-//! Index commits stay off this drive while a chunk `pread`, `pwrite`,
-//! `fsync`, or mining recall is in progress. They run in the gap before
-//! the next chunk command.
-//! This thread writes `intervals.json` for the submodules in a batch before
-//! those `pwrite`s and again after their `fsync`. Another thread posts that
-//! write here. The index database still commits on its own path.
+//! The file lock is dropped before the lane moves on.
+//! A data-path row is written only after this gap's `chunks.dat` fdatasync.
+//! One index batch per submodule covers those rows. A synced RocksDB batch
+//! also covers registrations still waiting on group commit.
+//! This thread marks `intervals.json` interrupted before those `pwrite`s
+//! and replaces it with the durable types only after that index batch.
+//! Another thread posts that interval write here.
 //!
 //! `StorageModuleService` starts one thread per module. That thread runs the
 //! sweep and the packed flush. It sleeps on the gate condvar and wakes when
-//! work is queued, a call finishes, a recall hold changes, an index ack
-//! arrives, or another thread posts a flush or an interval write. Ingress
+//! work is queued, a call finishes, a recall hold changes, or another
+//! thread posts a flush or an interval write. Ingress
 //! and data sync wait on the group result and do not lock the file. A mining
 //! recall still `pread`s on the mining thread and keeps two of those calls
 //! in the kernel. This thread submits no new write while the recall count
@@ -52,19 +52,18 @@ use std::{
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, TryRecvError},
     },
     time::{Duration, Instant},
 };
 
 use irys_packing::packing_xor_vec_u8;
-use irys_types::{ChunkPathHash, PartitionChunkOffset, UnpackedChunk};
+use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset, UnpackedChunk};
 use nodit::Interval;
 use std::os::unix::fs::FileExt as _;
 
 use super::{
     BatchEnqueueItem, ChunkType, StorageModule, WriteDataChunkError, WriteRun,
-    index_drain::{ChunkBusy, IndexGap, IndexOp},
+    index_drain::{ChunkBusy, IndexGap},
 };
 
 /// How long a caller waits for its entropy read before it gives up.
@@ -217,20 +216,7 @@ enum OccupyFailure {
     InFlight,
 }
 
-struct Inflight {
-    group: u64,
-    offset: PartitionChunkOffset,
-    packed: Vec<u8>,
-    generation: u64,
-    priority: WritePriority,
-    byte_len: u64,
-    /// Set when this chunk is part of a contiguous island. The chunk stays
-    /// out of the reorder buffer until every member of that island has an ack.
-    release_id: Option<u64>,
-    done: Receiver<Result<(), WriteDataChunkError>>,
-}
-
-/// One packed chunk held until the rest of its island has an index ack.
+/// One packed chunk held until the rest of its island is packed.
 struct ReleasedChunk {
     group: u64,
     offset: PartitionChunkOffset,
@@ -238,9 +224,10 @@ struct ReleasedChunk {
     generation: u64,
     priority: WritePriority,
     byte_len: u64,
+    proof: (ChunkPathHash, ChunkDataPath),
 }
 
-/// Packed chunks from one contiguous island, waiting for the remaining acks.
+/// Packed chunks from one contiguous island, waiting for the remaining members.
 struct SpanRelease {
     left: usize,
     ready: Vec<ReleasedChunk>,
@@ -257,7 +244,6 @@ struct SweepQueue {
     slots: Vec<SweepSlot>,
     groups: HashMap<u64, SweepGroup>,
     next_group: u64,
-    inflight: Vec<Inflight>,
     next_release: u64,
     releases: HashMap<u64, SpanRelease>,
 }
@@ -1528,7 +1514,7 @@ impl StorageModule {
 
     fn entropy_idle(&self) -> bool {
         let queue = self.disk.queue();
-        queue.slots.is_empty() && queue.inflight.is_empty() && queue.releases.is_empty()
+        queue.slots.is_empty() && queue.releases.is_empty()
     }
 
     /// Drop the waiter. Slots already queued still pack. A group that already
@@ -1843,7 +1829,7 @@ impl StorageModule {
 
     /// Split kept offsets into islands. A hole is not a member: only the next
     /// offset joins. An island longer than one chunk is inserted as one step
-    /// after every index ack, so a write pass cannot see a prefix of it.
+    /// after every member is packed, so a write pass cannot see a prefix of it.
     fn submit_contiguous_islands(&self, accepted: Vec<(SweepSlot, Vec<u8>)>) {
         let mut island: Vec<(SweepSlot, Vec<u8>)> = Vec::new();
         for (slot, entropy) in accepted {
@@ -2080,18 +2066,28 @@ impl StorageModule {
             self.note_release_gap(release_id);
             return;
         }
-        // Recheck immediately before the index submit. A pause or reset that
-        // landed after the read must not commit this offset.
+        // Recheck immediately before the chunk is queued. A pause or reset
+        // that landed after the read must not publish this offset.
         if let Err(error) = self.slot_still_valid(&slot) {
             self.fail_slot(slot, error);
             self.fail_queued_group(group);
             self.note_release_gap(release_id);
             return;
         }
-        let packed = packing_xor_vec_u8(entropy, &slot.unpacked);
-        let (done_tx, done_rx) = mpsc::channel();
+        // The data-path row is written after `chunks.dat` is fdatasync'd.
+        // Failing here leaves no pending bytes and no index row.
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.take_index_commit_failure() {
+            self.fail_slot(
+                slot,
+                WriteDataChunkError::Other(eyre::eyre!("injected index drain commit failure")),
+            );
+            self.fail_queued_group(group);
+            self.note_release_gap(release_id);
+            return;
+        }
         let offset = slot.offset;
-        let Some((_, submodule)) = self.submodules.get_key_value_at_point(offset).ok() else {
+        if self.submodules.get_key_value_at_point(offset).is_err() {
             self.fail_slot(
                 slot,
                 WriteDataChunkError::Other(eyre::eyre!(
@@ -2101,25 +2097,41 @@ impl StorageModule {
             self.fail_queued_group(group);
             self.note_release_gap(release_id);
             return;
-        };
-        submodule.index_drain.submit(IndexOp {
-            path_hash: slot.path_hash,
-            data_path: (*slot.data_path).clone(),
-            offset: slot.offset,
-            generation: slot.generation,
-            done: done_tx,
-            wake: Some(self.disk.wake.clone()),
-        });
-        self.disk.queue().inflight.push(Inflight {
+        }
+        let packed = packing_xor_vec_u8(entropy, &slot.unpacked);
+        let chunk = ReleasedChunk {
             group: slot.group,
             offset: slot.offset,
             packed,
             generation: slot.generation,
             priority: slot.priority,
             byte_len: slot.byte_len,
-            release_id,
-            done: done_rx,
-        });
+            proof: (slot.path_hash, (*slot.data_path).clone()),
+        };
+        let Some(id) = release_id else {
+            let inserted = self.commit_packed(
+                chunk.offset,
+                chunk.packed,
+                chunk.generation,
+                chunk.priority,
+                chunk.byte_len,
+                chunk.proof,
+            );
+            let error = if inserted {
+                None
+            } else {
+                Some(WriteDataChunkError::WritesPaused)
+            };
+            self.mark_group_slot_done(chunk.group, error);
+            return;
+        };
+        let already_failed = self
+            .disk
+            .queue()
+            .groups
+            .get(&group)
+            .is_some_and(|entry| entry.failed.is_some());
+        self.finish_released(id, already_failed, chunk, Ok(()));
     }
 
     fn slot_still_valid(&self, slot: &SweepSlot) -> Result<(), WriteDataChunkError> {
@@ -2230,82 +2242,9 @@ impl StorageModule {
         self.disk.notify();
     }
 
-    pub(super) fn poll_acks(&self) {
-        let inflight = {
-            let mut queue = self.disk.queue();
-            std::mem::take(&mut queue.inflight)
-        };
-        let mut again = Vec::new();
-        for item in inflight {
-            match item.done.try_recv() {
-                Ok(result) => self.finish_inflight(item, result),
-                Err(TryRecvError::Empty) => again.push(item),
-                Err(TryRecvError::Disconnected) => self.finish_inflight(
-                    item,
-                    Err(WriteDataChunkError::Other(eyre::eyre!(
-                        "index drain closed"
-                    ))),
-                ),
-            }
-        }
-        if !again.is_empty() {
-            self.disk.queue().inflight.extend(again);
-        }
-    }
-
-    fn finish_inflight(&self, item: Inflight, result: Result<(), WriteDataChunkError>) {
-        let already_failed = self
-            .disk
-            .queue()
-            .groups
-            .get(&item.group)
-            .is_some_and(|entry| entry.failed.is_some());
-        let Inflight {
-            group,
-            offset,
-            packed,
-            generation,
-            priority,
-            byte_len,
-            release_id,
-            ..
-        } = item;
-        if let Some(id) = release_id {
-            self.finish_released(
-                id,
-                already_failed,
-                ReleasedChunk {
-                    group,
-                    offset,
-                    packed,
-                    generation,
-                    priority,
-                    byte_len,
-                },
-                result,
-            );
-            return;
-        }
-        let error = match result {
-            Ok(()) if already_failed => {
-                self.release_queued_offset(offset, generation, byte_len);
-                None
-            }
-            Ok(()) => {
-                let inserted = self.commit_packed(offset, packed, generation, priority, byte_len);
-                if inserted {
-                    None
-                } else {
-                    Some(WriteDataChunkError::WritesPaused)
-                }
-            }
-            Err(error) => {
-                self.release_queued_offset(offset, generation, byte_len);
-                Some(error)
-            }
-        };
-        self.mark_group_slot_done(group, error);
-    }
+    /// Packed bytes are already in the reorder buffer when the sweep returns.
+    /// The data-path row is written later, after this gap's fdatasync.
+    pub(super) fn poll_acks(&self) {}
 
     /// Count one island member. Insert only when every member has been counted,
     /// and insert each surviving contiguous piece under one lock.
@@ -2339,6 +2278,7 @@ impl StorageModule {
                     chunk.generation,
                     chunk.priority,
                     chunk.byte_len,
+                    chunk.proof,
                 );
                 let error = if inserted {
                     None
@@ -2444,6 +2384,7 @@ impl StorageModule {
                 pending.insert(chunk.offset, (chunk.packed, ChunkType::Data));
                 pending.priorities.insert(chunk.offset, priority);
                 pending.queued_at.insert(chunk.offset, queued_at);
+                pending.proofs.insert(chunk.offset, chunk.proof);
                 wrote = true;
                 outcomes.push((chunk.group, true));
             }
@@ -2471,6 +2412,7 @@ impl StorageModule {
         generation: u64,
         priority: WritePriority,
         unpacked_len: u64,
+        proof: (ChunkPathHash, ChunkDataPath),
     ) -> bool {
         let mut pending = self.pending_writes.write().unwrap();
         pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_sub(unpacked_len);
@@ -2486,6 +2428,7 @@ impl StorageModule {
         pending.insert(offset, (packed, ChunkType::Data));
         pending.priorities.insert(offset, priority);
         pending.queued_at.insert(offset, Instant::now());
+        pending.proofs.insert(offset, proof);
         *self.last_pending_write.write().unwrap() = Instant::now();
         drop(pending);
         self.disk.notify();
@@ -2514,48 +2457,6 @@ impl StorageModule {
     #[cfg(test)]
     pub(super) fn sweep_slot_count_for_test(&self) -> usize {
         self.disk.queue().slots.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn inflight_len_for_test(&self) -> usize {
-        self.disk.queue().inflight.len()
-    }
-
-    /// Finish one index ack and leave any other ready ack in the queue.
-    #[cfg(test)]
-    pub(super) fn finish_one_ready_ack_for_test(&self) -> bool {
-        let inflight = {
-            let mut queue = self.disk.queue();
-            std::mem::take(&mut queue.inflight)
-        };
-        let mut again = Vec::new();
-        let mut finished = false;
-        for item in inflight {
-            if finished {
-                again.push(item);
-                continue;
-            }
-            match item.done.try_recv() {
-                Ok(result) => {
-                    self.finish_inflight(item, result);
-                    finished = true;
-                }
-                Err(TryRecvError::Empty) => again.push(item),
-                Err(TryRecvError::Disconnected) => {
-                    self.finish_inflight(
-                        item,
-                        Err(WriteDataChunkError::Other(eyre::eyre!(
-                            "index drain closed"
-                        ))),
-                    );
-                    finished = true;
-                }
-            }
-        }
-        if !again.is_empty() {
-            self.disk.queue().inflight.extend(again);
-        }
-        finished
     }
 
     /// Lane path. Up to `INFLIGHT_WRITES` pwrites share the module file.
@@ -2860,8 +2761,9 @@ impl StorageModule {
             self.poll_acks();
             return;
         }
-        // Queued index commits finish here, before this pass reads or writes
-        // `chunks.dat`. Commits that this pass queues wait until the guard drops.
+        // The index drain stays paused for this pass. Presence rows commit on
+        // this thread after `chunks.dat` is fdatasync'd. Submitting them to
+        // the drain here would wait on this hold.
         let chunk_io = self.disk.index_gap.hold_for_chunk_io();
         self.poll_acks();
         if self.disk.recall_pending() {

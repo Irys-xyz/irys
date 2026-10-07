@@ -12,8 +12,10 @@
 //!
 //! Large data-path and tx-path values go to blob files so compaction does
 //! not rewrite them. Small offset rows stay in SST blocks. rust-rocksdb
-//! 0.24 has no `set_allow_fallocate`; WAL recycle and `wal_bytes_per_sync`
-//! are the durability knobs this binding exposes.
+//! 0.24 has no `set_allow_fallocate` (the RocksDB default stays on). WAL
+//! recycle and `wal_bytes_per_sync` are the durability knobs this binding
+//! exposes. Every open keeps SST readers (`max_open_files=-1`, 16 opening
+//! threads). Blob readers stay lazy.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -334,10 +336,11 @@ pub struct RocksSubmoduleStore {
     /// Statistics object from the `Options` that opened this DB.
     ///
     /// The DB copies that shared pointer. Ticker reads have to use this
-    /// object, so the bench keeps it. Production open leaves it empty.
-    /// Dump and persist periods are zero: a periodic stats write would show
-    /// up as disk writes during a read sample.
+    /// object. Production open keeps it. Dump and persist periods are zero:
+    /// a periodic stats write would show up as disk writes during a read sample.
     stats: Option<Arc<Options>>,
+    /// Submodule directory name. Metric label. Not an absolute path.
+    submodule: String,
 }
 
 /// Background work visible around one bench read shape.
@@ -363,7 +366,7 @@ impl std::fmt::Debug for RocksSubmoduleStore {
 
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_with(path, RocksTuning::baseline())
+        Self::open_inner(path, RocksTuning::baseline(), true, false)
     }
 
     /// Same open as [`Self::open`], with an explicit block cache.
@@ -385,13 +388,10 @@ impl RocksSubmoduleStore {
         Self::open_inner(path, tuning, false, false)
     }
 
-    /// Bench open. Same options as [`Self::open_with`], plus ticker counters
-    /// and a full table preload.
+    /// Bench open. Same table cache as [`Self::open`], and it skips the
+    /// table-property scan during `DB::Open`.
     ///
-    /// Histograms and timers stay off. `max_open_files` is -1, so `DB::Open`
-    /// preloads every table on 16 threads. Production [`Self::open`] does not
-    /// call this and stays at 512 until a rerun shows the read tail moved
-    /// into open time.
+    /// Histograms and timers stay off.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Self::open_inner(path, tuning, true, true)
     }
@@ -412,6 +412,7 @@ impl RocksSubmoduleStore {
             db: Arc::new(db),
             write: Arc::new(Mutex::new(())),
             group,
+            submodule: submodule_label(&path),
             path,
             stats,
         })
@@ -498,6 +499,7 @@ impl RocksSubmoduleStore {
             db: Arc::new(db),
             write: Arc::new(Mutex::new(())),
             group,
+            submodule: submodule_label(&path),
             path,
             stats,
         })
@@ -589,7 +591,7 @@ impl RocksSubmoduleStore {
             overlay: Overlay::default(),
         };
         let result = f(&mut batch)?;
-        batch.commit(sync)?;
+        batch.commit(sync, &self.submodule)?;
         Ok(result)
     }
 
@@ -605,6 +607,196 @@ impl RocksSubmoduleStore {
                 .as_ref()
                 .map(|opts| opts.get_ticker_count(rocksdb::statistics::Ticker::NoFileOpens)),
         })
+    }
+
+    /// Gauges and ticker counters for one submodule database.
+    ///
+    /// Property reads do not take the write lock. Tickers are cumulative.
+    /// The caller publishes them with `counter.absolute` so a 60 s scrape
+    /// does not double-count. MDBX indexes do not call this.
+    pub fn report_metrics(&self) {
+        use rocksdb::statistics::Ticker::{
+            BlockCacheDataHit, BlockCacheDataMiss, BlockCacheFilterAdd,
+            BlockCacheFilterBytesInsert, BlockCacheFilterHit, BlockCacheFilterMiss,
+            BlockCacheIndexHit, BlockCacheIndexMiss, BytesRead, CompactReadBytes,
+            CompactWriteBytes, FlushWriteBytes, NoFileOpens, NumberKeysRead, StallMicros,
+            WalFileBytes, WalFileSynced,
+        };
+        describe_rocks_metrics();
+        let submodule = self.submodule.as_str();
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::IS_WRITE_STOPPED,
+            "irys.rocksdb.write_stopped",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::ACTUAL_DELAYED_WRITE_RATE,
+            "irys.rocksdb.delayed_write_rate",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::NUM_RUNNING_COMPACTIONS,
+            "irys.rocksdb.running_compactions",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::NUM_RUNNING_FLUSHES,
+            "irys.rocksdb.running_flushes",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::COMPACTION_PENDING,
+            "irys.rocksdb.compaction_pending",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::BLOCK_CACHE_USAGE,
+            "irys.rocksdb.block_cache_usage_bytes",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::BLOCK_CACHE_CAPACITY,
+            "irys.rocksdb.block_cache_capacity_bytes",
+            submodule,
+        );
+        for cf in Cf::ALL {
+            let Ok(handle) = cf_handle(&self.db, cf) else {
+                continue;
+            };
+            let name = cf.name();
+            set_cf_gauge(
+                &self.db,
+                handle,
+                rocksdb::properties::ESTIMATE_NUM_KEYS,
+                "irys.rocksdb.estimate_num_keys",
+                submodule,
+                name,
+            );
+            set_cf_gauge(
+                &self.db,
+                handle,
+                rocksdb::properties::LIVE_SST_FILES_SIZE,
+                "irys.rocksdb.live_sst_files_size_bytes",
+                submodule,
+                name,
+            );
+            set_cf_gauge(
+                &self.db,
+                handle,
+                rocksdb::properties::SIZE_ALL_MEM_TABLES,
+                "irys.rocksdb.memtable_size_bytes",
+                submodule,
+                name,
+            );
+            set_cf_gauge(
+                &self.db,
+                handle,
+                rocksdb::properties::ESTIMATE_PENDING_COMPACTION_BYTES,
+                "irys.rocksdb.pending_compaction_bytes",
+                submodule,
+                name,
+            );
+            set_cf_gauge(
+                &self.db,
+                handle,
+                rocksdb::properties::num_files_at_level(0),
+                "irys.rocksdb.files_at_level0",
+                submodule,
+                name,
+            );
+        }
+        let Some(stats) = &self.stats else {
+            return;
+        };
+        set_ticker(
+            stats,
+            BlockCacheFilterMiss,
+            "irys.rocksdb.block_cache_filter_miss",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            BlockCacheFilterHit,
+            "irys.rocksdb.block_cache_filter_hit",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            BlockCacheFilterAdd,
+            "irys.rocksdb.block_cache_filter_add",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            BlockCacheFilterBytesInsert,
+            "irys.rocksdb.block_cache_filter_bytes_insert",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            BlockCacheIndexMiss,
+            "irys.rocksdb.block_cache_index_miss",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            BlockCacheIndexHit,
+            "irys.rocksdb.block_cache_index_hit",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            BlockCacheDataMiss,
+            "irys.rocksdb.block_cache_data_miss",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            BlockCacheDataHit,
+            "irys.rocksdb.block_cache_data_hit",
+            submodule,
+        );
+        set_ticker(stats, BytesRead, "irys.rocksdb.bytes_read", submodule);
+        set_ticker(stats, NumberKeysRead, "irys.rocksdb.keys_read", submodule);
+        set_ticker(stats, StallMicros, "irys.rocksdb.stall_micros", submodule);
+        set_ticker(stats, NoFileOpens, "irys.rocksdb.no_file_opens", submodule);
+        set_ticker(
+            stats,
+            CompactReadBytes,
+            "irys.rocksdb.compact_read_bytes",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            CompactWriteBytes,
+            "irys.rocksdb.compact_write_bytes",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            FlushWriteBytes,
+            "irys.rocksdb.flush_write_bytes",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            WalFileSynced,
+            "irys.rocksdb.wal_file_synced",
+            submodule,
+        );
+        set_ticker(
+            stats,
+            WalFileBytes,
+            "irys.rocksdb.wal_file_bytes",
+            submodule,
+        );
     }
 
     /// Flush memtables, compact every column family, and sync the WAL.
@@ -685,6 +877,195 @@ fn sync_wal_locked(db: &DB, group: &GroupCommit) -> eyre::Result<()> {
     Ok(())
 }
 
+fn submodule_label(rocks_path: &Path) -> String {
+    rocks_path
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn describe_rocks_metrics() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        metrics::describe_gauge!(
+            "irys.rocksdb.estimate_num_keys",
+            "Estimated live keys in one submodule column family"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.live_sst_files_size_bytes",
+            "Live SST bytes in one submodule column family"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.memtable_size_bytes",
+            "Memtable bytes in one submodule column family"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.pending_compaction_bytes",
+            "Estimated bytes waiting for compaction in one submodule column family"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.files_at_level0",
+            "Level-0 files in one submodule column family"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.write_stopped",
+            "1 when RocksDB has stopped writes on this submodule database"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.delayed_write_rate",
+            "Current delayed write rate for this submodule database, bytes per second"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.running_compactions",
+            "Compactions running on this submodule database"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.running_flushes",
+            "Flushes running on this submodule database"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.compaction_pending",
+            "1 when a compaction is pending on this submodule database"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.block_cache_usage_bytes",
+            "Block cache bytes in use for this submodule database"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.block_cache_capacity_bytes",
+            "Block cache capacity for this submodule database"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_filter_miss",
+            "Block-cache filter misses since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_filter_hit",
+            "Block-cache filter hits since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_filter_add",
+            "Block-cache filter inserts since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_filter_bytes_insert",
+            "Block-cache filter bytes inserted since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_index_miss",
+            "Block-cache index misses since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_index_hit",
+            "Block-cache index hits since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_data_miss",
+            "Block-cache data misses since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.block_cache_data_hit",
+            "Block-cache data hits since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.bytes_read",
+            "Bytes read by Gets since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.keys_read",
+            "Keys read since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.stall_micros",
+            "Microseconds spent in write stalls since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.no_file_opens",
+            "Table and blob file opens since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.compact_read_bytes",
+            "Bytes read by compaction since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.compact_write_bytes",
+            "Bytes written by compaction since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.flush_write_bytes",
+            "Bytes written by flush since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.wal_file_synced",
+            "WAL syncs since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.wal_file_bytes",
+            "WAL bytes written since this submodule database opened"
+        );
+        metrics::describe_histogram!(
+            "irys.rocksdb.write_batch_bytes",
+            metrics::Unit::Bytes,
+            "Serialized WriteBatch size for one submodule index commit"
+        );
+    });
+}
+
+fn read_db_u64(db: &DB, name: impl rocksdb::CStrLike) -> Option<u64> {
+    match db.property_int_value(name) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "rocksdb property read failed");
+            None
+        }
+    }
+}
+
+fn read_cf_u64(db: &DB, cf: &rocksdb::ColumnFamily, name: impl rocksdb::CStrLike) -> Option<u64> {
+    match db.property_int_value_cf(cf, name) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "rocksdb column property read failed");
+            None
+        }
+    }
+}
+
+fn set_db_gauge(db: &DB, name: impl rocksdb::CStrLike, metric: &'static str, submodule: &str) {
+    let Some(value) = read_db_u64(db, name) else {
+        return;
+    };
+    metrics::gauge!(metric, "submodule" => submodule.to_owned()).set(value as f64);
+}
+
+fn set_cf_gauge(
+    db: &DB,
+    cf: &rocksdb::ColumnFamily,
+    name: impl rocksdb::CStrLike,
+    metric: &'static str,
+    submodule: &str,
+    family: &str,
+) {
+    let Some(value) = read_cf_u64(db, cf, name) else {
+        return;
+    };
+    metrics::gauge!(metric, "submodule" => submodule.to_owned(), "cf" => family.to_owned())
+        .set(value as f64);
+}
+
+fn set_ticker(
+    opts: &Options,
+    ticker: rocksdb::statistics::Ticker,
+    metric: &'static str,
+    submodule: &str,
+) {
+    metrics::counter!(metric, "submodule" => submodule.to_owned())
+        .absolute(opts.get_ticker_count(ticker));
+}
+
 fn open_db(
     path: &Path,
     tuning: &RocksTuning,
@@ -699,16 +1080,15 @@ fn open_db(
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
+    // Reuse four fully sized WAL files so a sync does not grow the file.
     db_opts.set_recycle_log_file_num(4);
+    // A 512 cap evicts SST readers. The next Get then reads the footer,
+    // index, and filter. -1 keeps every table open. Blob readers stay lazy.
+    db_opts.set_max_open_files(-1);
+    db_opts.set_max_file_opening_threads(16);
     if preload_tables {
-        // Bench only. -1 keeps every table open and preloads them in DB::Open.
-        // Production stays at 512 until a rerun shows the read tail moved there.
-        db_opts.set_max_open_files(-1);
-        db_opts.set_max_file_opening_threads(16);
-        // Skip table properties that only choose compaction inputs.
+        // Bench only. Skip table properties that only choose compaction inputs.
         db_opts.set_skip_stats_update_on_db_open(true);
-    } else {
-        db_opts.set_max_open_files(512);
     }
     db_opts.set_use_fsync(true);
     if collect_stats {
@@ -1004,7 +1384,7 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
-    fn commit(&self, sync: bool) -> eyre::Result<()> {
+    fn commit(&self, sync: bool, submodule: &str) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
         for cf in Cf::ALL {
             let handle = cf_handle(self.db, cf)?;
@@ -1021,6 +1401,14 @@ impl<'a> Batch<'a> {
                 }
             }
         }
+        describe_rocks_metrics();
+        // Serialized batch size, including the batch header. This is the
+        // application batch, which ticker stats do not record.
+        metrics::histogram!(
+            "irys.rocksdb.write_batch_bytes",
+            "submodule" => submodule.to_owned()
+        )
+        .record(batch.size_in_bytes() as f64);
         let mut opts = WriteOptions::default();
         // `false` still appends the WAL. A later synced write or `flush_wal`
         // makes this group durable. `true` syncs the WAL, including earlier
@@ -1886,7 +2274,7 @@ mod tests {
     }
 
     #[test]
-    fn bench_open_counts_file_opens_and_production_open_does_not() -> eyre::Result<()> {
+    fn production_open_keeps_tables_and_tickers() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
             .prefix("submodule_rocks_stats")
             .build();
@@ -1907,10 +2295,18 @@ mod tests {
             "{bench_opts}"
         );
         let plain = RocksSubmoduleStore::open(dir.path().join("plain"))?;
-        assert!(plain.background()?.no_file_opens.is_none());
+        assert!(plain.background()?.no_file_opens.is_some());
+        plain.report_metrics();
         let plain_opts = persisted_options(&dir.path().join("plain"))?;
-        assert!(plain_opts.contains("max_open_files=512"), "{plain_opts}");
-        assert!(!plain_opts.contains("max_open_files=-1"), "{plain_opts}");
+        assert!(plain_opts.contains("max_open_files=-1"), "{plain_opts}");
+        assert!(
+            plain_opts.contains("max_file_opening_threads=16"),
+            "{plain_opts}"
+        );
+        assert!(
+            !plain_opts.contains("skip_stats_update_on_db_open=true"),
+            "{plain_opts}"
+        );
         for opts in [&bench_opts, &plain_opts] {
             assert!(opts.contains("partition_filters=true"), "{opts}");
             assert!(opts.contains("index_type=kTwoLevelIndexSearch"), "{opts}");
