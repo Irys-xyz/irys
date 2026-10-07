@@ -82,9 +82,9 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// The bench names the other values. Each of those changes one field, so a
 /// sweep can attribute a difference to that field, except `full-filters`.
 /// That preset is the full-filter residency trial: one shard and 128 MiB.
-/// Options are fixed at open. A new block size or a filter change needs an
-/// empty directory. An existing SST keeps the filter it was built with
-/// until a compaction rewrites the file.
+/// `wal-recycle` reuses retired WAL files. Options are fixed at open. A new
+/// block size or a filter change needs an empty directory. An existing SST
+/// keeps the filter it was built with until a compaction rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
@@ -121,6 +121,20 @@ pub struct RocksTuning {
     /// can miss a shard. Interval rows are fewer. This open is provisional
     /// until a measurement at that size shows a full filter stays cached.
     pub partition_filters: bool,
+    /// Retired WAL files to overwrite instead of allocating a new file.
+    ///
+    /// `0` is the baseline: each WAL switch creates a file, and each sync of
+    /// that growing file updates its size. A non-zero count keeps that many
+    /// old files. A later sync writes inside a file that already has blocks.
+    ///
+    /// RocksDB 10.4 keeps a non-zero count for `kPointInTimeRecovery` (this
+    /// open's default; the binding does not set a recovery mode) and for
+    /// `kSkipAnyCorruptedRecords`. Open sets the count back to 0 for
+    /// `kTolerateCorruptedTailRecords` and `kAbsoluteConsistency`. A write
+    /// with `disableWAL` is rejected while the count is non-zero. This store
+    /// does not use `disableWAL`, `WAL_ttl_seconds`, or `WAL_size_limit_MB`.
+    /// Those last two also force the count to 0.
+    pub recycle_log_file_num: usize,
 }
 
 impl RocksTuning {
@@ -137,11 +151,12 @@ impl RocksTuning {
             target_file_bytes: TARGET_FILE_BYTES,
             universal: false,
             partition_filters: true,
+            recycle_log_file_num: 0,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 9] {
+    pub const fn presets() -> [Self; 10] {
         let base = Self::baseline();
         [
             base,
@@ -190,6 +205,17 @@ impl RocksTuning {
                 cache_shard_bits: 0,
                 ..base
             },
+            // Four retired files. RocksDB 10.4 does not scale this count
+            // with `max_write_buffer_number` (2 here) or with the column
+            // family count. One WAL covers every family, so two files
+            // would cover the live WAL and the one a flush retires. Four
+            // leaves sized spares so a switch does not allocate. Recovery
+            // stays `kPointInTimeRecovery`, which keeps the count.
+            Self {
+                name: "wal-recycle",
+                recycle_log_file_num: 4,
+                ..base
+            },
         ]
     }
 
@@ -229,8 +255,9 @@ impl RocksTuning {
             "full"
         };
         format!(
-            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
+            "rocks={} recycle_log_file_num={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
             self.name,
+            self.recycle_log_file_num,
             self.block_bytes,
             self.background_jobs,
             self.target_file_bytes,
@@ -252,6 +279,7 @@ impl RocksTuning {
             + usize::from(self.target_file_bytes != other.target_file_bytes)
             + usize::from(self.universal != other.universal)
             + usize::from(self.partition_filters != other.partition_filters)
+            + usize::from(self.recycle_log_file_num != other.recycle_log_file_num)
     }
 }
 
@@ -753,7 +781,9 @@ fn open_db(
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
-    db_opts.set_recycle_log_file_num(4);
+    // Baseline is 0. `wal-recycle` is 4. Point-in-time recovery, the
+    // default, keeps a non-zero count. See `RocksTuning::recycle_log_file_num`.
+    db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
     if preload_tables {
         // Bench only. -1 keeps every table open and preloads them in DB::Open.
         // Production stays at 512 until a rerun shows the read tail moved there.
@@ -887,7 +917,7 @@ fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Opti
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
-    db_opts.set_recycle_log_file_num(4);
+    db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
     db_opts.set_max_open_files(-1);
     db_opts.set_max_file_opening_threads(16);
     db_opts.set_skip_stats_update_on_db_open(true);
@@ -1207,7 +1237,7 @@ impl Rows<'_> {
             self.snap
                 .iterator_cf(&handle, IteratorMode::From(key, Direction::Reverse))
         });
-        let mut db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+        let mut db_next = match db_iter.as_mut().and_then(Iterator::next) {
             Some(Ok((found_key, value))) => Some((found_key.into_vec(), value.into_vec())),
             Some(Err(err)) => return Err(eyre::eyre!("{err}")),
             None => None,
@@ -1218,7 +1248,7 @@ impl Rows<'_> {
             .map(|overlay| overlay.maps[cf.index()].range(..=bound).rev());
         let mut overlay_next = overlay_iter
             .as_mut()
-            .and_then(|iter| iter.next())
+            .and_then(Iterator::next)
             .map(|(found_key, value)| (found_key.clone(), value.clone()));
 
         loop {
@@ -1236,10 +1266,10 @@ impl Rows<'_> {
                 let (found_key, value) = overlay_next.take().expect("overlay key is pending");
                 overlay_next = overlay_iter
                     .as_mut()
-                    .and_then(|iter| iter.next())
+                    .and_then(Iterator::next)
                     .map(|(next_key, next_value)| (next_key.clone(), next_value.clone()));
                 if db_key.as_deref() == Some(found_key.as_slice()) {
-                    db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+                    db_next = match db_iter.as_mut().and_then(Iterator::next) {
                         Some(Ok((next_key, next_value))) => {
                             Some((next_key.into_vec(), next_value.into_vec()))
                         }
@@ -1937,6 +1967,12 @@ mod tests {
         assert_eq!(full_filters.block_cache_bytes, 128 * 1024 * 1024);
         assert_eq!(full_filters.cache_shard_bits, 0);
         assert_eq!(base.cache_shard_bits, -1);
+        assert_eq!(base.recycle_log_file_num, 0);
+        let wal_recycle = RocksTuning::preset("wal-recycle")?;
+        assert_eq!(wal_recycle.recycle_log_file_num, 4);
+        assert!(base.describe().contains("recycle_log_file_num=0"));
+        assert!(wal_recycle.describe().contains("recycle_log_file_num=4"));
+        assert!(wal_recycle.describe().contains("filters=partitioned"));
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -1967,6 +2003,14 @@ mod tests {
         }
         let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
         assert!(
+            baseline_opts.contains("recycle_log_file_num=0"),
+            "{baseline_opts}"
+        );
+        assert!(
+            baseline_opts.contains("wal_recovery_mode=kPointInTimeRecovery"),
+            "{baseline_opts}"
+        );
+        assert!(
             baseline_opts.contains("partition_filters=true"),
             "{baseline_opts}"
         );
@@ -1983,6 +2027,48 @@ mod tests {
         let full = persisted_options(&dir.path().join("full-filters"))?;
         assert!(full.contains("partition_filters=false"), "{full}");
         assert!(!full.contains("index_type=kTwoLevelIndexSearch"), "{full}");
+        let recycled = persisted_options(&dir.path().join("wal-recycle"))?;
+        assert!(recycled.contains("recycle_log_file_num=4"), "{recycled}");
+        assert!(
+            recycled.contains("wal_recovery_mode=kPointInTimeRecovery"),
+            "{recycled}"
+        );
+        assert!(recycled.contains("partition_filters=true"), "{recycled}");
+        Ok(())
+    }
+
+    /// Writes, flushes until a retired WAL is reused, then reopens.
+    /// The last row is only in that WAL.
+    #[test]
+    fn wal_recycle_reopens_after_a_reused_log() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_wal_recycle")
+            .build();
+        let path = dir.path().join("index");
+        let preset = RocksTuning::preset("wal-recycle")?;
+        let durable = [(1_u32, 11_u8), (2, 22), (3, 33), (4, 44)];
+        let wal_only = (5_u32, 55_u8);
+        {
+            let store = RocksSubmoduleStore::open_with(&path, preset)?;
+            for (offset, byte) in durable {
+                put_offset(&store, offset, byte)?;
+                store.flush_and_compact()?;
+            }
+            put_offset(&store, wal_only.0, wal_only.1)?;
+        }
+        let log = info_log(&path)?;
+        assert!(
+            log.contains("reusing log"),
+            "expected a recycled WAL in the info log: {log}"
+        );
+        let store = RocksSubmoduleStore::open_with(&path, preset)?;
+        for (offset, byte) in durable {
+            assert_eq!(path_hashes_at(&store, offset)?, Some(hashes_for(byte)));
+        }
+        assert_eq!(
+            path_hashes_at(&store, wal_only.0)?,
+            Some(hashes_for(wal_only.1))
+        );
         Ok(())
     }
 
@@ -2051,6 +2137,39 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    fn hashes_for(byte: u8) -> ChunkPathHashes {
+        ChunkPathHashes {
+            data_path_hash: Some(H256::repeat_byte(byte)),
+            tx_path_hash: Some(H256::repeat_byte(byte.wrapping_add(1))),
+        }
+    }
+
+    fn put_offset(store: &RocksSubmoduleStore, offset: u32, byte: u8) -> eyre::Result<()> {
+        store.update(|tx| {
+            tx.set_path_hashes_by_offset(PartitionChunkOffset::from(offset), hashes_for(byte))
+        })
+    }
+
+    fn path_hashes_at(
+        store: &RocksSubmoduleStore,
+        offset: u32,
+    ) -> eyre::Result<Option<ChunkPathHashes>> {
+        store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset)))
+    }
+
+    fn info_log(path: &Path) -> eyre::Result<String> {
+        let mut text = String::new();
+        for entry in fs::read_dir(path).wrap_err("read db dir")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "LOG" || name.starts_with("LOG.old") {
+                text.push_str(&fs::read_to_string(entry.path()).wrap_err("read info log")?);
+            }
+        }
+        Ok(text)
     }
 
     fn persisted_options(path: &Path) -> eyre::Result<String> {
