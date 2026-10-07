@@ -35,8 +35,8 @@ use crate::guard::{
 use crate::module::{OpenRequest, flush_batch, open_module, pending_ceiling, span_limit};
 use crate::prepop::prepopulate;
 use crate::report::{
-    RocksStepStats, SampleWriter, StepRow, git_info, index_banner, plan_steps, sample_line,
-    write_json, write_summary, write_table,
+    RocksStepStats, SampleWriter, StepLog, StepRow, git_info, index_banner, plan_steps,
+    sample_line, write_json, write_summary, write_table,
 };
 use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
@@ -63,7 +63,7 @@ struct Args {
     /// Partition size in chunks. Default: recall file bytes / 256 KiB.
     #[arg(long)]
     chunks: Option<u64>,
-    /// Directory for `header.json`, `samples.jsonl`, and `summary.json`.
+    /// Directory for `header.json`, `samples.jsonl`, `summary.json`, and `steps.jsonl`.
     #[arg(long)]
     out: PathBuf,
     /// Built-in schedule: `recall-1`, `recall-1.8`, or `smoke`.
@@ -446,6 +446,7 @@ fn run() -> eyre::Result<i32> {
     std::fs::create_dir_all(&args.out)?;
     write_json(&args.out.join("header.json"), &header)?;
     let mut samples = SampleWriter::create(&args.out.join("samples.jsonl"))?;
+    let mut step_log = StepLog::create(&args.out.join("steps.jsonl"))?;
 
     let io = Arc::new(BenchIo {
         module: Arc::clone(&opened.module),
@@ -486,6 +487,7 @@ fn run() -> eyre::Result<i32> {
         io,
         plan,
         &mut samples,
+        &mut step_log,
         &out,
         ingest_cursor,
         migration_cursor,
@@ -640,6 +642,7 @@ async fn execute(
     io: Arc<BenchIo>,
     plan: Plan,
     samples: &mut SampleWriter,
+    step_log: &mut StepLog,
     out: &Path,
     ingest_cursor: u32,
     migration_cursor: u32,
@@ -686,11 +689,14 @@ async fn execute(
     ));
     let serve = tokio::spawn(serve_driver(Arc::clone(&io), rates_rx, stop_rx));
 
+    // Drivers are up. The monotonic stamp matches bpftrace `nsecs`.
+    step_log.mark_run()?;
+
     let mut rows = Vec::new();
     let mut scored_fail = false;
     let mut interrupted = false;
     let mut recall_baseline: Option<(u64, u64)> = None;
-    for step in &plan.steps {
+    for (index, step) in plan.steps.iter().enumerate() {
         if *interrupt_rx.borrow() {
             interrupted = true;
             break;
@@ -713,6 +719,8 @@ async fn execute(
             scored_fail = true;
             break;
         }
+        let index = u32::try_from(index).map_err(|_| eyre!("too many steps"))?;
+        step_log.mark(index, &step.name, "start")?;
         io.accept_new.store(true, Ordering::Release);
         let _ = rates_tx.send(step.rates);
         let bar = if step.name == "idle" {
@@ -729,6 +737,8 @@ async fn execute(
             step,
             &io,
             samples,
+            step_log,
+            index,
             &rates_tx,
             &mut interrupt_rx,
             ceiling,
@@ -813,6 +823,8 @@ async fn run_step(
     step: &Step,
     io: &Arc<BenchIo>,
     samples: &mut SampleWriter,
+    step_log: &mut StepLog,
+    index: u32,
     rates_tx: &watch::Sender<Rates>,
     interrupt: &mut watch::Receiver<bool>,
     ceiling: u64,
@@ -846,6 +858,7 @@ async fn run_step(
     drain_rates.recall_num = 0;
     drain_rates.serve_per_sec = 0;
     let _ = rates_tx.send(drain_rates);
+    step_log.mark(index, &step.name, "drain")?;
     if *interrupt.borrow() {
         interrupted = true;
     }
@@ -866,6 +879,8 @@ async fn run_step(
             ),
         );
     }
+    // After the drain's index read, so that I/O stays inside the step window.
+    step_log.mark(index, &step.name, "end")?;
     let aborted = if interrupted { None } else { take_fatal(io) };
     let recall_delay = crate::stats::summarize(&accum.recall.delays_us);
     let recall_lat = crate::stats::summarize(&accum.recall.lats_us);

@@ -8,7 +8,7 @@ use std::io::{BufWriter, Write as _};
 use std::path::Path;
 use std::process::Command;
 
-use eyre::WrapErr as _;
+use eyre::{WrapErr as _, eyre};
 use serde::Serialize;
 
 use crate::schedule::{Plan, StepMeasured};
@@ -67,6 +67,95 @@ impl SampleWriter {
         self.file.flush()?;
         Ok(())
     }
+}
+
+/// Step bounds for the disk-time report.
+///
+/// `CLOCK_MONOTONIC` matches bpftrace `nsecs`. `CLOCK_REALTIME` is the wall
+/// clock the lab notebook uses. Both are nanoseconds. The file is line-buffered
+/// the same way as `samples.jsonl`.
+pub(crate) struct StepLog {
+    file: BufWriter<File>,
+}
+
+#[derive(Serialize)]
+struct RunMark {
+    kind: &'static str,
+    realtime_ns: u64,
+    monotonic_ns: u64,
+}
+
+#[derive(Serialize)]
+struct StepMark<'a> {
+    kind: &'static str,
+    index: u32,
+    name: &'a str,
+    phase: &'a str,
+    realtime_ns: u64,
+    monotonic_ns: u64,
+}
+
+impl StepLog {
+    pub(crate) fn create(path: &Path) -> eyre::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file =
+            File::create(path).wrap_err_with(|| format!("failed to create {}", path.display()))?;
+        Ok(Self {
+            file: BufWriter::new(file),
+        })
+    }
+
+    pub(crate) fn mark_run(&mut self) -> eyre::Result<()> {
+        let (realtime_ns, monotonic_ns) = clock_pair()?;
+        self.write(&RunMark {
+            kind: "run",
+            realtime_ns,
+            monotonic_ns,
+        })
+    }
+
+    pub(crate) fn mark(&mut self, index: u32, name: &str, phase: &str) -> eyre::Result<()> {
+        let (realtime_ns, monotonic_ns) = clock_pair()?;
+        self.write(&StepMark {
+            kind: "step",
+            index,
+            name,
+            phase,
+            realtime_ns,
+            monotonic_ns,
+        })
+    }
+
+    fn write(&mut self, value: &impl Serialize) -> eyre::Result<()> {
+        serde_json::to_writer(&mut self.file, value)?;
+        self.file.write_all(b"\n")?;
+        self.file.flush()?;
+        Ok(())
+    }
+}
+
+fn clock_pair() -> eyre::Result<(u64, u64)> {
+    Ok((
+        read_clock(libc::CLOCK_REALTIME)?,
+        read_clock(libc::CLOCK_MONOTONIC)?,
+    ))
+}
+
+fn read_clock(clock: libc::clockid_t) -> eyre::Result<u64> {
+    let mut spec = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Safety: `spec` is a live timespec. These two clock ids are valid on Linux.
+    let rc = unsafe { libc::clock_gettime(clock, &mut spec) };
+    if rc != 0 {
+        return Err(eyre!("clock_gettime failed ({rc})"));
+    }
+    let sec = u64::try_from(spec.tv_sec).map_err(|_| eyre!("clock second is negative"))?;
+    let nsec = u64::try_from(spec.tv_nsec).map_err(|_| eyre!("clock nanosecond is negative"))?;
+    Ok(sec.saturating_mul(1_000_000_000).saturating_add(nsec))
 }
 
 #[derive(Serialize)]
@@ -781,5 +870,44 @@ mod tests {
         assert_eq!(value["phases"]["pace_scheduled_bytes"], 4 * 1024 * 1024);
         assert_eq!(value["phases"]["pace_released_bytes"], 100);
         assert!(value["phases"]["permit_avg_in_use_milli"].is_u64());
+    }
+
+    #[test]
+    fn step_log_writes_run_and_phase_stamps() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../.tmp/sm-bench-step-log");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("steps.jsonl");
+        let mut log = StepLog::create(&path).unwrap();
+        log.mark_run().unwrap();
+        log.mark(0, "idle", "start").unwrap();
+        log.mark(0, "idle", "drain").unwrap();
+        log.mark(0, "idle", "end").unwrap();
+        drop(log);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines = text.lines();
+        let run: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(run["kind"], "run");
+        assert!(run.get("name").is_none());
+        assert!(run.get("phase").is_none());
+        let realtime = run["realtime_ns"].as_u64().unwrap();
+        let monotonic = run["monotonic_ns"].as_u64().unwrap();
+        // Nanoseconds since the epoch, not microseconds.
+        assert!(realtime > 1_600_000_000_000_000_000, "{realtime}");
+        assert!(monotonic > 0);
+
+        let start: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(start["kind"], "step");
+        assert_eq!(start["index"], 0);
+        assert_eq!(start["name"], "idle");
+        assert_eq!(start["phase"], "start");
+        let drain: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(drain["phase"], "drain");
+        let end: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(end["phase"], "end");
+        assert!(end["monotonic_ns"].as_u64().unwrap() >= start["monotonic_ns"].as_u64().unwrap());
+        assert!(lines.next().is_none());
+        std::fs::remove_file(&path).ok();
     }
 }

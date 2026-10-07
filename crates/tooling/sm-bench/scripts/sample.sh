@@ -7,7 +7,7 @@
 # The script writes <out-dir>/iostat.log and <out-dir>/meminfo-delta.log.
 # It stops when iostat exits. INT and TERM kill iostat.
 #
-# TODO: bpftrace per-file split of the recall file and the write file.
+# Per-file disk time: blk-run.sh and blk-report.py in this directory.
 
 set -eu
 

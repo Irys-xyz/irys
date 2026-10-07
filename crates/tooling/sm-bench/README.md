@@ -74,6 +74,8 @@ In another shell, for the same out directory:
 crates/tooling/sm-bench/scripts/sample.sh sdc /mnt/sm-2/loadtest/out-recall-1
 ```
 
+Per-file disk time uses `scripts/blk-run.sh` next to the bench. See [Disk-time split](#disk-time-split).
+
 After the run:
 
 ```sh
@@ -149,6 +151,7 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 
 - `header.json` — git commit, dirty flag, rustc version, and the resolved settings, including `index_engine`, `index_dir`, `rocks_preset`, `rocks_tuning`, and `rocks_block_cache_bytes`. The Rocks fields are null for MDBX. Written before the drivers start. Git data comes from `git` in the current directory. A failed git command records commit `unknown`.
 - `samples.jsonl` — one JSON object per second per driver (`recall`, `ingest`, `migration`, `serve`), including idle drivers. Latency fields are integer microseconds. The line is flushed as it is written.
+- `steps.jsonl` — one JSON object per line for the disk-time report. The first line is the run start (`kind` = `run`) with `realtime_ns` (`CLOCK_REALTIME`) and `monotonic_ns` (`CLOCK_MONOTONIC`), both nanoseconds. Each step then has `kind` = `step`, `index`, `name`, and `phase` of `start`, `drain`, or `end`, with the same two clocks. `start` is just before the step rate is published. `drain` is the start of the drain. `end` is after the drain, including the drain's index read. The scored sample lines do not include the drain. This file does.
 - `summary.json` — one object per step, plus `passed`, `exit_code`, and driver notes.
 - `table.txt` — the same table the process prints. The first line is the index engine and directory. A RocksDB step adds a `rocks:` line with stall time, pending compaction bytes, flushes, and running flushes.
 
@@ -235,3 +238,74 @@ These differ from a production storage module. They are deliberate so the bench 
 - Index updates run on the block path, under one mutex, on the same MDBX the lane drains. That split matches production.
 - Startup deletes leftover body-migration rows in this bench database. A resumed run keeps a `Data` prefix and does not finish a transaction a crashed process indexed only in part.
 - The bench does not start the mining service. Recall calls `read_recall_chunks` on this thread's blocking pool.
+
+## Disk-time split
+
+Use this when iostat shows a positioning remainder and you need the remainder split by file. The bench writes `steps.jsonl`. `blk-run.sh` records the block trace, the extent maps, and `io_ticks`. `blk-report.py` joins them.
+
+Put the trace directory on a different filesystem from the disk under test. A trace on that disk shows up as `metadata/other`.
+
+`blk-run.sh` blocks until INT or TERM. Start it first, in its own shell. Start the bench after it has attached (it checks bpftrace after one second). Use the same directory for `--out` and the trace so `steps.jsonl` sits next to `trace.log`. If the host starts the bench from a `run.sh`, use that script in place of the binary below and stop the trace after `run.sh` exits.
+
+```sh
+# Shell B. Blocks until Ctrl-C or SIGTERM.
+crates/tooling/sm-bench/scripts/blk-run.sh \
+    sdc \
+    /mnt/sm-2/loadtest \
+    /home/ubuntu/loadtest/runs/blk-1
+
+# Shell A. After shell B is attached.
+./target/release/irys-sm-bench \
+    --dir /mnt/sm-2/loadtest \
+    --recall-file /mnt/sm-2/loadtest/entropy-chunks.dat \
+    --write-file /mnt/sm-2/loadtest/write-region.dat \
+    --out /home/ubuntu/loadtest/runs/blk-1 \
+    --preset recall-1
+
+# After the bench exits, Ctrl-C shell B.
+# Shell B stops bpftrace, takes one last extent snapshot, and exits.
+```
+
+`blk-run.sh` refuses a directory whose path has no `loadtest` component, on the path you pass and again after symlink resolution. It reads extent metadata only. It does not read file bytes.
+
+Then:
+
+```sh
+python3 crates/tooling/sm-bench/scripts/blk-report.py \
+    /home/ubuntu/loadtest/runs/blk-1
+```
+
+If `steps.jsonl` is in another directory, pass `--steps`. The report writes `blk-report.txt`, `blk-report.json`, `blk-report.csv`, and `blk-transitions.csv` in the trace directory.
+
+`<dev>` is the whole disk (`sdc`), the same name iostat uses. Do not pass a partition. The lab disk is XFS on `/dev/sdc` with no partition table. `extent-snap.sh` still adds the sysfs `start` offset (`/sys/dev/block/<major>:<minor>/start`, the same value as `/sys/class/block/<dev>/start`) so a filesystem on a partition lines up with the parent disk's sectors.
+
+Categories:
+
+| Name | Requests |
+| --- | --- |
+| `recall` | reads of `entropy-chunks.dat` |
+| `entropy_read` | reads of `write-region.dat` (entropy for packing) |
+| `packed_write` | writes of `write-region.dat` |
+| `index_wal` | `*.log` WAL files, not RocksDB `LOG` |
+| `index_sst` | `*.sst` |
+| `index_blob` | `*.blob` |
+| `index_other` | `MANIFEST-*`, `OPTIONS-*`, `LOG`, `CURRENT`, `IDENTITY`, `mdbx.dat`, `mdbx.lck` |
+| `flush` | `rwbs` contains `F` and `nr_sector` is 0 |
+| `metadata` | XFS log, inodes, discards, and sectors that match no file. The text table prints this as `metadata/other` |
+
+A request that covers two files takes the file with more of its sectors. A file that disappears from a later snapshot keeps its last extents until a newer snapshot gives those sectors to another file. The snapshot used for a request is the one nearest its issue time.
+
+Service time is `complete - max(issue, previous completion)` in completion order. The disk has one actuator, so this sum is the busy time, not the sum of request latencies. Positioning is that service time minus `bytes / zone_rate(start LBA)`. Seek distance is `|start sector - previous data request's end sector|` and does not move on a zero-length flush.
+
+The zone rate is a straight line by LBA fraction. The default is 266 MiB/s at the first LBA and 130 MiB/s at the last LBA. Sections 103 and 104 of the disk-lane notebook measured about 266 MiB/s on the outer tracks. The write region in allocation group 18 (about nine tenths of the way across groups 0–20) filled at about 146 MiB/s, which is this line at that fraction. `--zone-outer` and `--zone-inner` replace the anchors. `device.txt` supplies the sector count (`/sys/class/block/<dev>/size`).
+
+`busy.log` samples field 10 of `/sys/block/<dev>/stat` (`io_ticks`, the counter behind iostat `%util`). For each step the report prints `service ms - io_ticks ms`.
+
+Caveats:
+
+- NCQ and the scheduler can complete requests in a different order than the head moved. Per-request service and the transition matrix are approximate. The step total is the figure that should match iostat.
+- A flush with `nr_sector` 0 is the drive writing back its cache, not a geometric seek. Its positioning time is the whole service time. A write that completes into the cache looks cheap. The following flush carries the media time. `packed_write -> flush` in the transition matrix is the flush-coalescing cost.
+- The zone line is one segment. A request uses the rate at its start LBA. Positioning is 0 when the transfer estimate is longer than the service time (drive cache, or a rate that is too low).
+- Extent snapshots run about every 30 s and use `FIEMAP` or `xfs_bmap`. That is metadata I/O on the measured disk. New files show up at the next snapshot. `filefrag` block numbers are filesystem blocks. `xfs_bmap -v` numbers are 512-byte sectors.
+- bpftrace is print-only (`block_rq_issue` and `block_rq_complete`) filtered by `dev_t` (`major << 20 | minor`). A merged request is one issue whose `nr_sector` is the merged length. A completion may cover a prefix. There is no in-kernel map.
+- `blk-run.sh` needs `sudo` unless it is already root. `bpftrace` must be installed on the host. This tree does not package it.
