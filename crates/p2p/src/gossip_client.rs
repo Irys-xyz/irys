@@ -1037,8 +1037,11 @@ impl GossipClient {
                     // Backpressure, not a fault. Expires on its own, so unlike
                     // the arm above there is nothing to initiate.
                     RejectionReason::RateLimited => Ok(PeerHealth::AnsweredNotServing),
-                    RejectionReason::GossipDisabled
-                    | RejectionReason::InvalidData
+                    // Gossip is paused on a live peer. The pause ends on its
+                    // own. A breaker failure would skip this probe until the
+                    // cooldown, so the resume would be invisible.
+                    RejectionReason::GossipDisabled => Ok(PeerHealth::Unhealthy),
+                    RejectionReason::InvalidData
                     | RejectionReason::UnableToVerifyOrigin
                     | RejectionReason::InvalidCredentials
                     | RejectionReason::ProtocolMismatch
@@ -1514,6 +1517,16 @@ impl GossipClient {
                 RejectionReason::RateLimited | RejectionReason::HandshakeRequired(_),
             ))
             | Err(GossipError::RateLimited) => {}
+            // A paused peer is still there. Counting the pause as a failure
+            // opens the breaker, and then both this push path and the health
+            // probe skip the peer until the cooldown. Data offered in that
+            // window, including an ingress proof, is dropped and not retried.
+            Ok(GossipResponse::Rejected(RejectionReason::GossipDisabled)) => {
+                peer_list.decrease_peer_score_by_peer_id(
+                    peer_id,
+                    ScoreDecreaseReason::NetworkError("gossip push rejected".to_string()),
+                );
+            }
             Ok(GossipResponse::Rejected(_)) => {
                 peer_list.decrease_peer_score_by_peer_id(
                     peer_id,
@@ -4020,6 +4033,57 @@ mod tests {
             assert!(
                 client.circuit_breaker.is_available(&probed_peer),
                 "a peer asking us to back off must stay probeable"
+            );
+        }
+
+        /// Gossip pauses on its own. An open breaker would hide the resume
+        /// from the next health probe.
+        #[tokio::test]
+        async fn repeated_gossip_disabled_does_not_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([12_u8; 20]));
+
+            probe_repeatedly_with_rejection(
+                &client,
+                &peer_list,
+                &probed_peer,
+                RejectionReason::GossipDisabled,
+                8,
+                PeerHealth::Unhealthy,
+            )
+            .await;
+
+            assert!(
+                client.circuit_breaker.is_available(&probed_peer),
+                "a peer that paused gossip must stay probeable"
+            );
+        }
+
+        /// Broadcast scoring is the path that sees a paused peer reject a push.
+        /// Those rejections must not open the breaker either: the message is
+        /// not retried, so an open breaker drops it for the whole cooldown.
+        #[tokio::test]
+        async fn gossip_disabled_push_does_not_open_the_circuit_breaker() {
+            let client = client_with_production_breaker();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let probed_peer = IrysPeerId::from(IrysAddress::from([13_u8; 20]));
+            let result = Ok(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+
+            for _ in 0..8 {
+                GossipClient::handle_score(
+                    &peer_list,
+                    &result,
+                    &probed_peer,
+                    &client.circuit_breaker,
+                );
+            }
+
+            assert!(
+                client.circuit_breaker.is_available(&probed_peer),
+                "rejected pushes while gossip is paused must not open the breaker"
             );
         }
 
