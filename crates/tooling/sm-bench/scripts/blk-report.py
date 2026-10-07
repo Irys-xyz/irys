@@ -19,8 +19,11 @@ from __future__ import annotations
 import argparse
 import bisect
 import csv
+import hashlib
 import json
+import random
 import sys
+import time
 from pathlib import Path
 
 OUTER_MIB_S = 266.0
@@ -53,6 +56,14 @@ class Extent:
         self.start = start
         self.end = end
         self.path = path
+
+
+class _IndexedExtents(list):
+    """Extents sorted by start, with the start column cached for bisect."""
+
+    def __init__(self, extents: list[Extent]) -> None:
+        super().__init__(extents)
+        self.starts = [ext.start for ext in self]
 
 
 class Issued:
@@ -142,15 +153,20 @@ def category_for_path(path: str, rwbs: str) -> str:
     return "metadata"
 
 
-def parse_trace(text: str) -> tuple[list[tuple], int | None, int]:
+def parse_trace_lines(
+    lines, progress: int = 0
+) -> tuple[list[tuple], int | None, int]:
     """Return (events, dev_t, skipped lines).
 
     An event is (kind, mono, sector, nr, rwbs, comm, pid).
+    `lines` is any iterable of trace lines, so the caller can stream a file.
+    With progress > 0, write one stderr line every that many issued requests.
     """
     events = []
     dev_t = None
     skipped = 0
-    for raw in text.splitlines():
+    issued = 0
+    for raw in lines:
         line = raw.strip()
         if not line:
             continue
@@ -176,14 +192,334 @@ def parse_trace(text: str) -> tuple[list[tuple], int | None, int]:
         rwbs = parts[4]
         comm = ""
         pid = 0
-        if parts[1] == "I" and len(parts) >= 7:
-            comm = parts[5]
-            try:
-                pid = int(parts[6])
-            except ValueError:
-                pid = 0
+        if parts[1] == "I":
+            issued += 1
+            if progress and issued % progress == 0:
+                print(f"progress {issued} issued", file=sys.stderr, flush=True)
+            if len(parts) >= 7:
+                comm = parts[5]
+                try:
+                    pid = int(parts[6])
+                except ValueError:
+                    pid = 0
         events.append((parts[1], mono, sector, nr, rwbs, comm, pid))
     return events, dev_t, skipped
+
+
+def parse_trace(text: str) -> tuple[list[tuple], int | None, int]:
+    """Return (events, dev_t, skipped lines).
+
+    An event is (kind, mono, sector, nr, rwbs, comm, pid).
+    """
+    return parse_trace_lines(text.splitlines())
+
+
+# Sequence numbers leave a gap so a split can put the leftover pieces back
+# where the parent sat without renumbering the whole queue.
+_SEQ_GAP = 1 << 20
+_OP_NAMES = ("", "R", "W", "D")
+
+
+class _TNode:
+    __slots__ = ("key", "end", "prio", "left", "right", "sub")
+
+    def __init__(self, key: int, end: int, prio: int) -> None:
+        self.key = key
+        self.end = end
+        self.prio = prio
+        self.left = None
+        self.right = None
+        self.sub = end
+
+
+def _t_pull(node: _TNode) -> None:
+    best = node.end
+    left = node.left
+    right = node.right
+    if left is not None and left.sub > best:
+        best = left.sub
+    if right is not None and right.sub > best:
+        best = right.sub
+    node.sub = best
+
+
+def _t_rot_right(node: _TNode) -> _TNode:
+    left = node.left
+    node.left = left.right
+    left.right = node
+    _t_pull(node)
+    _t_pull(left)
+    return left
+
+
+def _t_rot_left(node: _TNode) -> _TNode:
+    right = node.right
+    node.right = right.left
+    right.left = node
+    _t_pull(node)
+    _t_pull(right)
+    return right
+
+
+def _t_insert(node: _TNode | None, key: int, end: int, prio: int) -> _TNode:
+    if node is None:
+        return _TNode(key, end, prio)
+    if key == node.key:
+        if end > node.end:
+            node.end = end
+            _t_pull(node)
+        return node
+    if key < node.key:
+        node.left = _t_insert(node.left, key, end, prio)
+        if node.left.prio < node.prio:
+            node = _t_rot_right(node)
+    else:
+        node.right = _t_insert(node.right, key, end, prio)
+        if node.right.prio < node.prio:
+            node = _t_rot_left(node)
+    _t_pull(node)
+    return node
+
+
+def _t_merge(left: _TNode | None, right: _TNode | None) -> _TNode | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    if left.prio < right.prio:
+        left.right = _t_merge(left.right, right)
+        _t_pull(left)
+        return left
+    right.left = _t_merge(left, right.left)
+    _t_pull(right)
+    return right
+
+
+def _t_delete(node: _TNode | None, key: int) -> _TNode | None:
+    if node is None:
+        return None
+    if key < node.key:
+        node.left = _t_delete(node.left, key)
+    elif key > node.key:
+        node.right = _t_delete(node.right, key)
+    else:
+        return _t_merge(node.left, node.right)
+    _t_pull(node)
+    return node
+
+
+def _t_max_end_le(node: _TNode | None, sector: int) -> int:
+    """Max end among intervals whose start is <= sector. 0 when none."""
+    best = 0
+    while node is not None:
+        if node.key <= sector:
+            left = node.left
+            if left is not None and left.sub > best:
+                best = left.sub
+            if node.end > best:
+                best = node.end
+            node = node.right
+        else:
+            node = node.left
+    return best
+
+
+class _QNode:
+    __slots__ = ("iss", "prev", "next", "seq")
+
+    def __init__(self, iss: Issued, seq: int) -> None:
+        self.iss = iss
+        self.prev = None
+        self.next = None
+        self.seq = seq
+
+
+class _Queue:
+    """Outstanding requests in issue order, indexed by span.
+
+    A real trace holds tens of thousands of in-flight requests. Scanning
+    that list per completion is quadratic. Exact matches and merges use
+    the sector indexes. A completion that is only a slice of a larger
+    request is rare; a treap of (start -> max end) says whether any span
+    can contain it before the list is walked.
+    """
+
+    def __init__(self) -> None:
+        self.head = _QNode(Issued(0, 0, 0, "", "", 0), 0)
+        self.tail = _QNode(Issued(0, 0, 0, "", "", 0), 0)
+        self.head.next = self.tail
+        self.tail.prev = self.head
+        self.count = 0
+        self.clock = 0
+        self.rng = random.Random(0)
+        self.exact: dict[tuple[int, int], list[_QNode]] = {}
+        self.zeros: dict[int, list[_QNode]] = {}
+        self.merge: dict[tuple[int, str], list[_QNode]] = {}
+        self.ends: dict[tuple[str, int], list[int]] = {}
+        self.roots: dict[str, _TNode | None] = {op: None for op in _OP_NAMES}
+
+    def append(self, iss: Issued) -> None:
+        self.clock += _SEQ_GAP
+        self._insert_before(self.tail, iss, self.clock)
+
+    def replace(self, node: _QNode, iss: Issued) -> None:
+        self._unindex(node)
+        node.iss = iss
+        self._index(node)
+
+    def unlink(self, node: _QNode) -> Issued:
+        self._unindex(node)
+        node.prev.next = node.next
+        node.next.prev = node.prev
+        self.count -= 1
+        return node.iss
+
+    def replace_with_pieces(self, node: _QNode, pieces: list[Issued]) -> None:
+        nxt = node.next
+        self.unlink(node)
+        if not pieces:
+            return
+        for seq, iss in zip(self._seqs_before(nxt, len(pieces)), pieces):
+            self._insert_before(nxt, iss, seq)
+
+    def find_merge(self, sector: int, rwbs: str, nr: int) -> _QNode | None:
+        bucket = self.merge.get((sector, rwbs))
+        if not bucket:
+            return None
+        for node in bucket:
+            old_nr = node.iss.nr
+            if nr > old_nr > 0:
+                return node
+        return None
+
+    def find_exact(self, sector: int, nr: int, rwbs: str) -> _QNode | None:
+        bucket = self.exact.get((sector, nr))
+        if not bucket:
+            return None
+        for node in bucket:
+            if same_op(node.iss.rwbs, rwbs):
+                return node
+        return None
+
+    def find_zero(self, sector: int, rwbs: str) -> _QNode | None:
+        bucket = self.zeros.get(sector)
+        if not bucket:
+            return None
+        for node in bucket:
+            if same_op(node.iss.rwbs, rwbs):
+                return node
+        return None
+
+    def find_partial(self, sector: int, nr: int, rwbs: str) -> _QNode | None:
+        end = sector + nr
+        if not self._may_contain(sector, end, rwbs):
+            return None
+        node = self.head.next
+        while node is not self.tail:
+            old = node.iss
+            if old.nr > 0 and same_op(old.rwbs, rwbs):
+                if old.sector <= sector and end <= old.sector + old.nr:
+                    return node
+            node = node.next
+        return None
+
+    def _may_contain(self, sector: int, end: int, rwbs: str) -> bool:
+        op = op_letter(rwbs)
+        names = _OP_NAMES if op == "" else (op, "")
+        for name in names:
+            if _t_max_end_le(self.roots[name], sector) >= end:
+                return True
+        return False
+
+    def _insert_before(self, nxt: _QNode, iss: Issued, seq: int) -> None:
+        node = _QNode(iss, seq)
+        prev = nxt.prev
+        prev.next = node
+        node.prev = prev
+        node.next = nxt
+        nxt.prev = node
+        self.count += 1
+        self._index(node)
+
+    def _seqs_before(self, nxt: _QNode, count: int) -> list[int]:
+        prev = nxt.prev
+        left = 0 if prev is self.head else prev.seq
+        right = self.clock + _SEQ_GAP if nxt is self.tail else nxt.seq
+        if right - left <= count:
+            self._reseat()
+            return self._seqs_before(nxt, count)
+        step = (right - left) // (count + 1)
+        return [left + step * (index + 1) for index in range(count)]
+
+    def _reseat(self) -> None:
+        seq = 0
+        node = self.head.next
+        while node is not self.tail:
+            seq += _SEQ_GAP
+            node.seq = seq
+            node = node.next
+        self.clock = seq
+
+    def _index(self, node: _QNode) -> None:
+        iss = node.iss
+        if iss.nr == 0:
+            _bucket_add(self.zeros, iss.sector, node)
+            return
+        _bucket_add(self.exact, (iss.sector, iss.nr), node)
+        _bucket_add(self.merge, (iss.sector, iss.rwbs), node)
+        self._set_end(op_letter(iss.rwbs), iss.sector, iss.sector + iss.nr, add=True)
+
+    def _unindex(self, node: _QNode) -> None:
+        iss = node.iss
+        if iss.nr == 0:
+            _bucket_drop(self.zeros, iss.sector, node)
+            return
+        _bucket_drop(self.exact, (iss.sector, iss.nr), node)
+        _bucket_drop(self.merge, (iss.sector, iss.rwbs), node)
+        self._set_end(op_letter(iss.rwbs), iss.sector, iss.sector + iss.nr, add=False)
+
+    def _set_end(self, op: str, start: int, end: int, add: bool) -> None:
+        key = (op, start)
+        ends = self.ends.get(key)
+        if add:
+            if ends is None:
+                ends = []
+                self.ends[key] = ends
+            ends.append(end)
+        else:
+            ends.remove(end)
+            if not ends:
+                del self.ends[key]
+                ends = None
+        self.roots[op] = _t_delete(self.roots[op], start)
+        if ends:
+            self.roots[op] = _t_insert(self.roots[op], start, max(ends), self.rng.getrandbits(32))
+
+
+def _bucket_add(buckets: dict, key, node: _QNode) -> None:
+    bucket = buckets.get(key)
+    if bucket is None:
+        buckets[key] = [node]
+        return
+    seq = node.seq
+    lo = 0
+    hi = len(bucket)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if bucket[mid].seq < seq:
+            lo = mid + 1
+        else:
+            hi = mid
+    bucket.insert(lo, node)
+
+
+def _bucket_drop(buckets: dict, key, node: _QNode) -> None:
+    bucket = buckets.get(key)
+    if bucket is None:
+        return
+    bucket.remove(node)
+    if not bucket:
+        del buckets[key]
 
 
 def pair_requests(events: list[tuple]) -> tuple[list[Request], int, int]:
@@ -192,75 +528,48 @@ def pair_requests(events: list[tuple]) -> tuple[list[Request], int, int]:
     A completion may be a prefix or a middle slice of the issued span.
     Zero-length requests (flushes) match FIFO at the same sector.
     """
-    outstanding: list[Issued] = []
+    live = _Queue()
     done: list[Request] = []
     unmatched_completes = 0
     seq = 0
     for kind, mono, sector, nr, rwbs, comm, pid in events:
         if kind == "I":
             fresh = Issued(mono, sector, nr, rwbs, comm, pid)
-            replaced = False
             if nr > 0:
-                for index, old in enumerate(outstanding):
-                    if (
-                        old.sector == sector
-                        and old.rwbs == rwbs
-                        and nr > old.nr
-                        and old.nr > 0
-                    ):
-                        outstanding[index] = fresh
-                        replaced = True
-                        break
-            if not replaced:
-                outstanding.append(fresh)
+                node = live.find_merge(sector, rwbs, nr)
+                if node is not None:
+                    live.replace(node, fresh)
+                    continue
+            live.append(fresh)
             continue
         matched: Issued | None = None
         if nr == 0:
-            for index, old in enumerate(outstanding):
-                if old.nr == 0 and old.sector == sector and same_op(old.rwbs, rwbs):
-                    matched = outstanding.pop(index)
-                    break
+            node = live.find_zero(sector, rwbs)
+            if node is not None:
+                matched = live.unlink(node)
         else:
-            for index, old in enumerate(outstanding):
-                if old.nr == nr and old.sector == sector and old.nr > 0 and same_op(old.rwbs, rwbs):
-                    matched = outstanding.pop(index)
-                    break
-            if matched is None:
-                for index, old in enumerate(outstanding):
-                    if old.nr <= 0 or not same_op(old.rwbs, rwbs):
-                        continue
+            node = live.find_exact(sector, nr, rwbs)
+            if node is not None:
+                matched = live.unlink(node)
+            else:
+                node = live.find_partial(sector, nr, rwbs)
+                if node is not None:
+                    old = node.iss
+                    matched = old.clone(sector=sector, nr=nr)
                     end = sector + nr
                     old_end = old.sector + old.nr
-                    if old.sector <= sector and end <= old_end:
-                        matched = old.clone(sector=sector, nr=nr)
-                        pieces: list[Issued] = []
-                        if old.sector < sector:
-                            pieces.append(old.clone(sector=old.sector, nr=sector - old.sector))
-                        if end < old_end:
-                            pieces.append(old.clone(sector=end, nr=old_end - end))
-                        outstanding.pop(index)
-                        for offset, piece in enumerate(pieces):
-                            outstanding.insert(index + offset, piece)
-                        break
+                    pieces: list[Issued] = []
+                    if old.sector < sector:
+                        pieces.append(old.clone(sector=old.sector, nr=sector - old.sector))
+                    if end < old_end:
+                        pieces.append(old.clone(sector=end, nr=old_end - end))
+                    live.replace_with_pieces(node, pieces)
         if matched is None:
             unmatched_completes += 1
             continue
         done.append(Request(matched, mono, seq))
         seq += 1
-    return done, len(outstanding), unmatched_completes
-
-
-def subtract(extents: list[Extent], start: int, end: int) -> list[Extent]:
-    out: list[Extent] = []
-    for ext in extents:
-        if ext.end <= start or ext.start >= end:
-            out.append(Extent(ext.start, ext.end, ext.path))
-            continue
-        if ext.start < start:
-            out.append(Extent(ext.start, start, ext.path))
-        if ext.end > end:
-            out.append(Extent(end, ext.end, ext.path))
-    return out
+    return done, live.count, unmatched_completes
 
 
 def coalesce(extents: list[Extent]) -> list[Extent]:
@@ -278,48 +587,147 @@ def coalesce(extents: list[Extent]) -> list[Extent]:
     return out
 
 
+def _rows_overlap(ordered: list[tuple[int, int, str]]) -> bool:
+    for index in range(len(ordered) - 1):
+        if ordered[index][1] > ordered[index + 1][0]:
+            return True
+    return False
+
+
+def _erase_range(
+    pieces: list[tuple[int, int, str]], starts: list[int], start: int, end: int
+) -> None:
+    """Cut [start, end) out of a sorted, non-overlapping piece list."""
+    index = bisect.bisect_left(starts, start)
+    if index > 0:
+        index -= 1
+    while index < len(pieces):
+        piece_start, piece_end, path = pieces[index]
+        if piece_start >= end:
+            break
+        if piece_end <= start:
+            index += 1
+            continue
+        replacement: list[tuple[int, int, str]] = []
+        if piece_start < start:
+            replacement.append((piece_start, start, path))
+        if piece_end > end:
+            replacement.append((end, piece_end, path))
+        pieces[index : index + 1] = replacement
+        starts[index : index + 1] = [item[0] for item in replacement]
+        if piece_end > end:
+            break
+        if not replacement:
+            continue
+        index += 1
+
+
+def _coverage(rows: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """Sorted, non-overlapping coverage. A later row overwrites an overlap."""
+    fresh = [(start, end, path) for start, end, path in rows if end > start]
+    if not fresh:
+        return []
+    ordered = sorted(fresh, key=lambda item: (item[0], item[1], item[2]))
+    if not _rows_overlap(ordered):
+        return ordered
+    pieces: list[tuple[int, int, str]] = []
+    starts: list[int] = []
+    for start, end, path in fresh:
+        _erase_range(pieces, starts, start, end)
+        index = bisect.bisect_right(starts, start)
+        pieces.insert(index, (start, end, path))
+        starts.insert(index, start)
+    return pieces
+
+
+def _subtract_coverage(
+    kept: list[tuple[int, int, str]], cuts: list[tuple[int, int, str]]
+) -> list[tuple[int, int, str]]:
+    """Drop `cuts` from `kept`. Both lists are sorted and non-overlapping."""
+    out: list[tuple[int, int, str]] = []
+    cut_index = 0
+    cut_count = len(cuts)
+    for start, end, path in kept:
+        while cut_index < cut_count and cuts[cut_index][1] <= start:
+            cut_index += 1
+        cursor = start
+        scan = cut_index
+        while scan < cut_count and cuts[scan][0] < end:
+            cut_start, cut_end, _cut_path = cuts[scan]
+            if cut_start > cursor:
+                out.append((cursor, cut_start, path))
+            if cut_end > cursor:
+                cursor = cut_end
+            if cursor >= end:
+                break
+            scan += 1
+        if cursor < end:
+            out.append((cursor, end, path))
+    return out
+
+
 def evolve(prev: list[Extent], rows: list[tuple[int, int, str]]) -> list[Extent]:
     """Files present in this snapshot replace their old extents.
 
     A file that is absent keeps its last extents until a present file
     takes those sectors.
+
+    Each snapshot is thousands of rows. Cutting those rows out of a copied
+    extent list one row at a time is quadratic, so the rows become one
+    sorted coverage and the kept extents are cut in one pass.
     """
     present = {path for _, _, path in rows}
-    kept = [Extent(ext.start, ext.end, ext.path) for ext in prev if ext.path not in present]
-    for start, end, path in rows:
-        if end <= start:
-            continue
-        kept = subtract(kept, start, end)
-        kept.append(Extent(start, end, path))
-    return coalesce(kept)
+    kept = [(ext.start, ext.end, ext.path) for ext in prev if ext.path not in present]
+    fresh = _coverage(rows)
+    if fresh:
+        kept = _subtract_coverage(kept, fresh)
+    merged = coalesce([Extent(start, end, path) for start, end, path in kept + fresh])
+    return _IndexedExtents(merged)
 
 
 def build_maps(snapshots: list[tuple[int, list[tuple[int, int, str]]]]) -> list[tuple[int, list[Extent]]]:
+    """One extent map per snapshot time.
+
+    Identical consecutive row lists reuse one map. Replaying the same rows
+    does not change the map, and a request still bisects every timestamp.
+    """
     current: list[Extent] = []
     maps = []
+    prev_rows: list[tuple[int, int, str]] | None = None
     for when, rows in snapshots:
+        if prev_rows is not None and (rows is prev_rows or rows == prev_rows):
+            maps.append((when, current))
+            continue
         current = evolve(current, rows)
         maps.append((when, current))
+        prev_rows = rows
     return maps
+
+
+def nearest_index(times: list[int], when: int) -> int:
+    """Index of the snapshot time closest to `when`. Ties take the earlier one."""
+    index = bisect.bisect_left(times, when)
+    if index <= 0:
+        return 0
+    if index >= len(times):
+        return len(times) - 1
+    if when - times[index - 1] <= times[index] - when:
+        return index - 1
+    return index
 
 
 def nearest_map(maps: list[tuple[int, list[Extent]]], when: int) -> list[Extent]:
     if not maps:
         return []
     times = [item[0] for item in maps]
-    index = bisect.bisect_left(times, when)
-    if index <= 0:
-        return maps[0][1]
-    if index >= len(times):
-        return maps[-1][1]
-    if when - times[index - 1] <= times[index] - when:
-        return maps[index - 1][1]
-    return maps[index][1]
+    return maps[nearest_index(times, when)][1]
 
 
 def overlap_counts(extents: list[Extent], start: int, end: int) -> dict[str, int]:
     counts: dict[str, int] = {}
-    starts = [ext.start for ext in extents]
+    starts = extents.starts if isinstance(extents, _IndexedExtents) else [ext.start for ext in extents]
+    if not starts:
+        return counts
     index = bisect.bisect_right(starts, start) - 1
     if index < 0:
         index = 0
@@ -457,9 +865,15 @@ def parse_steps(text: str) -> list[dict]:
     return out
 
 
-def parse_extent_file(text: str) -> tuple[int | None, list[tuple[int, int, str]]]:
+def parse_extent_text(text: str) -> tuple[int | None, list[tuple[int, int, str]], bytes]:
+    """Return (monotonic_ns, rows, sha256 of the parsed rows in file order).
+
+    The header timestamp is not part of the digest. Consecutive snapshots
+    with the same digest are the same map.
+    """
     when = None
     rows = []
+    hasher = hashlib.sha256()
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -482,6 +896,17 @@ def parse_extent_file(text: str) -> tuple[int | None, list[tuple[int, int, str]]
             continue
         path = " ".join(parts[2:])
         rows.append((start, end, path))
+        hasher.update(str(start).encode())
+        hasher.update(b"\t")
+        hasher.update(str(end).encode())
+        hasher.update(b"\t")
+        hasher.update(path.encode())
+        hasher.update(b"\n")
+    return when, rows, hasher.digest()
+
+
+def parse_extent_file(text: str) -> tuple[int | None, list[tuple[int, int, str]]]:
+    when, rows, _digest = parse_extent_text(text)
     return when, rows
 
 
@@ -619,14 +1044,27 @@ def summarize_step(step: dict, requests: list[Request], samples: list[tuple[int,
 
 
 def load_snapshots(out_dir: Path) -> list[tuple[int, list[tuple[int, int, str]]]]:
-    snaps = []
+    """Snapshots sorted by time. Identical consecutive bodies share one row list."""
+    loaded = []
     for path in sorted(out_dir.glob("extents-*.txt")):
-        when, rows = parse_extent_file(path.read_text(encoding="utf-8", errors="replace"))
+        when, rows, digest = parse_extent_text(
+            path.read_text(encoding="utf-8", errors="replace")
+        )
         if when is None:
             continue
-        snaps.append((when, rows, path.name))
-    snaps.sort(key=lambda item: (item[0], item[2]))
-    return [(when, rows) for when, rows, _name in snaps]
+        loaded.append((when, path.name, rows, digest))
+    loaded.sort(key=lambda item: (item[0], item[1]))
+    snaps = []
+    prev_digest = None
+    prev_rows: list[tuple[int, int, str]] | None = None
+    for when, _name, rows, digest in loaded:
+        if digest == prev_digest and prev_rows is not None:
+            snaps.append((when, prev_rows))
+            continue
+        snaps.append((when, rows))
+        prev_digest = digest
+        prev_rows = rows
+    return snaps
 
 
 def outside_step(requests: list[Request], steps: list[dict]) -> dict | None:
@@ -651,13 +1089,13 @@ def build_report(
     zone_outer: float = OUTER_MIB_S,
     zone_inner: float = INNER_MIB_S,
     device_sectors: int | None = None,
+    progress: int = 0,
 ) -> dict:
     trace_file = trace_path or (out_dir / "trace.log")
     if not trace_file.is_file():
         raise SystemExit(f"trace not found: {trace_file}")
-    events, trace_dev, skipped = parse_trace(
-        trace_file.read_text(encoding="utf-8", errors="replace")
-    )
+    with trace_file.open(encoding="utf-8", errors="replace") as handle:
+        events, trace_dev, skipped = parse_trace_lines(handle, progress=progress)
     requests, unmatched_issues, unmatched_completes = pair_requests(events)
     warnings = []
     if skipped:
@@ -689,8 +1127,10 @@ def build_report(
     if not snaps:
         warnings.append("no extent snapshots; file categories fall through to metadata/other")
     maps = build_maps(snaps)
+    times = [item[0] for item in maps]
     for req in requests:
-        req.category = classify(req, nearest_map(maps, req.issue_ns))
+        extents = maps[nearest_index(times, req.issue_ns)][1] if times else []
+        req.category = classify(req, extents)
     attribute(requests, device_sectors, zone_outer, zone_inner)
 
     step_file = steps_path
@@ -910,24 +1350,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--zone-outer", type=float, default=OUTER_MIB_S)
     parser.add_argument("--zone-inner", type=float, default=INNER_MIB_S)
     parser.add_argument("--device-sectors", type=int, default=None)
+    parser.add_argument(
+        "--progress",
+        type=int,
+        metavar="N",
+        help="write a stderr line every N issued requests",
+    )
     args = parser.parse_args(argv)
     if args.zone_outer <= 0 or args.zone_inner <= 0:
         print("zone rates must be greater than 0", file=sys.stderr)
+        return 2
+    if args.progress is not None and args.progress < 1:
+        print("--progress needs a positive interval", file=sys.stderr)
         return 2
     out_dir = args.out_dir
     if not out_dir.is_dir():
         print(f"out dir not found: {out_dir}", file=sys.stderr)
         return 2
-    report = build_report(
-        out_dir,
-        steps_path=args.steps,
-        trace_path=args.trace,
-        zone_outer=args.zone_outer,
-        zone_inner=args.zone_inner,
-        device_sectors=args.device_sectors,
-    )
-    text = write_outputs(report, out_dir)
-    sys.stdout.write(text)
+    started = time.perf_counter()
+    try:
+        report = build_report(
+            out_dir,
+            steps_path=args.steps,
+            trace_path=args.trace,
+            zone_outer=args.zone_outer,
+            zone_inner=args.zone_inner,
+            device_sectors=args.device_sectors,
+            progress=args.progress or 0,
+        )
+        text = write_outputs(report, out_dir)
+        sys.stdout.write(text)
+    finally:
+        elapsed = time.perf_counter() - started
+        print(f"elapsed {elapsed:.3f}s", file=sys.stderr, flush=True)
     return 0
 
 

@@ -7,7 +7,9 @@ Run from the repo or from this directory:
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -114,6 +116,27 @@ class PairAndTimeTests(unittest.TestCase):
         MOD.attribute(requests, 0, 266, 130)
         self.assertEqual(requests[0].service_ns, 90)
 
+    def test_repeated_sector_matches_in_issue_order(self):
+        # The short read must not steal a completion that sits in the earlier
+        # span, and an exact complete must hit that short read rather than a
+        # leftover of the earlier span.
+        requests, unmatched_i, unmatched_c = MOD.pair_requests(
+            [
+                issued(0, 0, 100, "R", pid=1),
+                issued(1, 0, 10, "R", pid=2),
+                issued(2, 0, 10, "W", pid=3),
+                complete(10, 50, 10, "R"),
+                complete(11, 0, 10, "R"),
+                complete(12, 0, 10, "W"),
+                complete(13, 0, 40, "R"),
+            ]
+        )
+        self.assertEqual((unmatched_i, unmatched_c), (2, 0))
+        self.assertEqual([req.pid for req in requests], [1, 2, 3, 1])
+        self.assertEqual((requests[0].sector, requests[0].nr), (50, 10))
+        self.assertEqual((requests[1].sector, requests[1].nr), (0, 10))
+        self.assertEqual((requests[3].sector, requests[3].nr), (0, 40))
+
     def test_two_flushes_match_fifo(self):
         requests, _, _ = MOD.pair_requests(
             [
@@ -183,6 +206,60 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(kept, "index_wal")
         self.assertEqual(reused, "index_sst")
         self.assertEqual(tie, "index_wal")
+
+    def test_duplicate_snapshot_keeps_the_nearer_map(self):
+        # The duplicate at t=5000 is only 500 ns closer than the replacement
+        # at t=5001 for a request at t=4500. Dropping that timestamp would
+        # classify the request as the replacement file.
+        rows = [
+            (0, 100, "rocks/000001.log"),
+            (10_000, 10_100, "rocks/000001.sst"),
+            (50_000, 60_000, "write-region.dat"),
+        ]
+        replacement = [
+            (0, 100, "rocks/000002.sst"),
+            (10_000, 10_100, "rocks/000001.sst"),
+            (50_000, 60_000, "write-region.dat"),
+        ]
+        maps = MOD.build_maps(
+            [
+                (1000, rows),
+                (5000, list(rows)),
+                (5001, replacement),
+            ]
+        )
+        self.assertIs(maps[0][1], maps[1][1])
+        self.assertIsNot(maps[1][1], maps[2][1])
+        kept = MOD.nearest_map(maps, 4500)
+        self.assertEqual(self.classify_one(50, 10, "R", kept), "index_wal")
+        self.assertEqual(self.classify_one(10_050, 8, "R", kept), "index_sst")
+        self.assertEqual(self.classify_one(55_000, 8, "R", kept), "entropy_read")
+        self.assertEqual(self.classify_one(200, 8, "R", kept), "metadata")
+        replaced = MOD.nearest_map(maps, 5001)
+        self.assertEqual(self.classify_one(50, 10, "R", replaced), "index_sst")
+
+    def test_bisect_finds_a_long_extent_behind_later_starts(self):
+        rows = [(0, 1_000_000, "entropy-chunks.dat")]
+        rows.extend(
+            (2_000_000 + index * 100, 2_000_000 + index * 100 + 8, "rocks/000001.sst")
+            for index in range(400)
+        )
+        extents = MOD.nearest_map(MOD.build_maps([(1000, rows)]), 1000)
+        # Sector 500_000 sits inside the first extent. The bisect point is
+        # the first later start, so the lookup has to step back.
+        self.assertEqual(self.classify_one(500_000, 8, "R", extents), "recall")
+        last = 2_000_000 + 399 * 100
+        self.assertEqual(self.classify_one(last, 8, "R", extents), "index_sst")
+        self.assertEqual(self.classify_one(1_500_000, 8, "R", extents), "metadata")
+        self.assertEqual(self.classify_one(last + 8, 8, "R", extents), "metadata")
+
+    def test_later_row_overwrites_an_overlap(self):
+        extents = MOD.build_maps(
+            [(1000, [(0, 100, "rocks/000001.log"), (40, 70, "rocks/000002.sst")])]
+        )[0][1]
+        self.assertEqual(self.classify_one(10, 8, "R", extents), "index_wal")
+        self.assertEqual(self.classify_one(50, 8, "R", extents), "index_sst")
+        self.assertEqual(self.classify_one(80, 8, "R", extents), "index_wal")
 
     def test_outer_zone_positioning_is_exact(self):
         # 100 MiB at 266 MiB/s is 100/266 s. Integer ns:
@@ -311,6 +388,34 @@ class ReportFileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit):
                 MOD.build_report(Path(tmp))
+
+    def test_progress_and_elapsed_go_to_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "trace.log").write_text(
+                "\n".join(
+                    [
+                        "# dev_t=1",
+                        "10 I 0 8 R bench 1",
+                        "20 C 0 8 R",
+                        "30 I 8 8 R bench 1",
+                        "40 C 8 8 R",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = MOD.main([str(out), "--progress", "1"])
+            self.assertEqual(code, 0)
+            text = err.getvalue()
+            self.assertIn("progress 1 issued", text)
+            self.assertIn("progress 2 issued", text)
+            self.assertRegex(text, r"elapsed \d+\.\d{3}s\n")
+            report = (out / "blk-report.txt").read_text(encoding="utf-8")
+            self.assertNotIn("elapsed", report)
+            self.assertNotIn("progress", report)
 
 
 if __name__ == "__main__":
