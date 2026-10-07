@@ -22,7 +22,7 @@ use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 
 #[cfg(feature = "rocksdb")]
-use super::rocks::{RocksBackground, RocksSubmoduleStore, RocksTuning};
+use super::rocks::{LegacySstSpan, RocksBackground, RocksSubmoduleStore, RocksTuning};
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
@@ -667,6 +667,15 @@ impl SubmoduleIndex {
         match self {
             Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
             Self::Rocks(store) => store.compact_legacy_path_hashes(),
+        }
+    }
+
+    /// Live SST files in the v1 path-hash family.
+    #[cfg(feature = "rocksdb")]
+    pub fn legacy_path_hash_ssts(&self) -> eyre::Result<Vec<LegacySstSpan>> {
+        match self {
+            Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
+            Self::Rocks(store) => store.legacy_path_hash_ssts(),
         }
     }
 

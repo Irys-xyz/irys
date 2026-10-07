@@ -60,6 +60,23 @@ const SCHEMA_TEXT: &str = SUBMODULE_SCHEMA;
 const SCHEMA_V1_TEXT: &str = "irys-submodule-rocks 1\n";
 const LEGACY_PATH_HASH_CF: &str = "ChunkPathHashesByOffset";
 
+/// One SST in the v1 path-hash family. Keys are partition offsets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacySstSpan {
+    pub name: String,
+    pub level: i32,
+    pub bytes: u64,
+    pub entries: u64,
+    pub start: Option<u32>,
+    pub end: Option<u32>,
+}
+
+fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
+    let bytes = bytes?;
+    let raw: [u8; 4] = bytes.try_into().ok()?;
+    Some(u32::from_be_bytes(raw))
+}
+
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
 /// The bench names the other values. Each of those changes one field, so a
@@ -373,10 +390,7 @@ impl RocksSubmoduleStore {
 
     /// True when this offset has a path-hash row in the v1 column family.
     pub fn legacy_path_hash_present(&self, offset: PartitionChunkOffset) -> eyre::Result<bool> {
-        let handle = self
-            .db
-            .cf_handle(LEGACY_PATH_HASH_CF)
-            .ok_or_else(|| eyre::eyre!("missing column family {LEGACY_PATH_HASH_CF}"))?;
+        let handle = self.legacy_path_hash_cf()?;
         Ok(self
             .db
             .get_cf(&handle, encode_key(offset))
@@ -386,17 +400,53 @@ impl RocksSubmoduleStore {
 
     /// Rewrite `ChunkPathHashesByOffset` with the table options of this open.
     ///
-    /// That is what makes `partition-filters` apply to an SST flushed with one
-    /// full filter. The schema marker stays v1.
+    /// A plain `compact_range` trivial-moves one SST and leaves its filter
+    /// in place. Forcing the bottom level rewrites that file. The schema
+    /// marker stays v1.
     pub fn compact_legacy_path_hashes(&self) -> eyre::Result<()> {
         let _guard = self.lock_write();
-        let handle = self
-            .db
-            .cf_handle(LEGACY_PATH_HASH_CF)
-            .ok_or_else(|| eyre::eyre!("missing column family {LEGACY_PATH_HASH_CF}"))?;
+        let handle = self.legacy_path_hash_cf()?;
+        let mut opts = rocksdb::CompactOptions::default();
+        opts.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::Force);
+        opts.set_exclusive_manual_compaction(true);
         self.db
-            .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
+            .compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
         Ok(())
+    }
+
+    /// Live SST files in the v1 path-hash family, oldest level first.
+    pub fn legacy_path_hash_ssts(&self) -> eyre::Result<Vec<LegacySstSpan>> {
+        let mut files = Vec::new();
+        for file in self.db.live_files().wrap_err("list live sst files")? {
+            if file.column_family_name != LEGACY_PATH_HASH_CF {
+                continue;
+            }
+            files.push(LegacySstSpan {
+                name: file
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(file.name.as_str())
+                    .to_string(),
+                level: file.level,
+                bytes: u64::try_from(file.size).unwrap_or(u64::MAX),
+                entries: file.num_entries,
+                start: u32_user_key(file.start_key.as_deref()),
+                end: u32_user_key(file.end_key.as_deref()),
+            });
+        }
+        files.sort_by(|left, right| {
+            left.level
+                .cmp(&right.level)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(files)
+    }
+
+    fn legacy_path_hash_cf(&self) -> eyre::Result<&rocksdb::ColumnFamily> {
+        self.db
+            .cf_handle(LEGACY_PATH_HASH_CF)
+            .ok_or_else(|| eyre::eyre!("missing column family {LEGACY_PATH_HASH_CF}"))
     }
 
     fn open_inner(
@@ -1666,6 +1716,7 @@ mod tests {
             let handle = db.cf_handle(LEGACY_PATH_HASH_CF).expect("path hash family");
             db.put_cf(&handle, encode_key(PartitionChunkOffset::from(4)), b"row")
                 .wrap_err("put v1 row")?;
+            db.flush_cf(&handle).wrap_err("flush v1 fixture")?;
         }
         fs::write(path.join(SCHEMA_FILE), SCHEMA_V1_TEXT)?;
 
@@ -1680,7 +1731,23 @@ mod tests {
 
         let probe =
             RocksSubmoduleStore::open_v1_probe(&path, RocksTuning::preset("partition-filters")?)?;
+        let before: Vec<_> = probe
+            .legacy_path_hash_ssts()?
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+        assert!(!before.is_empty(), "fixture produced no sst");
         probe.compact_legacy_path_hashes()?;
+        let after = probe.legacy_path_hash_ssts()?;
+        let after_names: Vec<_> = after.iter().map(|file| file.name.clone()).collect();
+        assert_ne!(before, after_names, "compaction did not replace the sst");
+        assert!(
+            after
+                .iter()
+                .any(|file| file.start.is_some_and(|start| start <= 4)
+                    && file.end.is_some_and(|end| end >= 4)),
+            "{after:?}"
+        );
         assert!(probe.legacy_path_hash_present(PartitionChunkOffset::from(4))?);
         drop(probe);
         assert_eq!(fs::read_to_string(path.join(SCHEMA_FILE))?, SCHEMA_V1_TEXT);
