@@ -80,15 +80,24 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
 /// The bench names the other values. Each of those changes one field, so a
-/// sweep can attribute a difference to that field. Options are fixed at
-/// open. A new block size or a filter change needs an empty directory. An
-/// existing SST keeps the filter it was built with until a compaction
-/// rewrites the file.
+/// sweep can attribute a difference to that field, except `full-filters`.
+/// That preset is the full-filter residency trial: one shard and 128 MiB.
+/// Options are fixed at open. A new block size or a filter change needs an
+/// empty directory. An existing SST keeps the filter it was built with
+/// until a compaction rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
     pub block_bytes: usize,
     pub block_cache_bytes: usize,
+    /// `2^bits` block-cache shards. `-1` lets RocksDB choose, and that choice
+    /// caps at 6 (64 shards). `0` is one shard.
+    ///
+    /// A filter block has to fit in one shard. The default 64 MiB cache is
+    /// 1 MiB per shard, so a full filter of tens of millions of keys is
+    /// inserted and dropped. `full-filters` uses one shard and 128 MiB so
+    /// that block can stay.
+    pub cache_shard_bits: i32,
     /// `true` is LZ4 on SST and blob files. `false` stores both uncompressed.
     pub compress: bool,
     /// Blob files on the data-path and tx-path families.
@@ -120,6 +129,7 @@ impl RocksTuning {
             name: "baseline",
             block_bytes: BLOCK_BYTES,
             block_cache_bytes: BLOCK_CACHE_BYTES,
+            cache_shard_bits: -1,
             compress: true,
             blobs: true,
             direct_io: false,
@@ -170,9 +180,14 @@ impl RocksTuning {
                 universal: true,
                 ..base
             },
+            // One full filter. One shard so the filter can use the whole
+            // cache. 64 shards would turn 128 MiB into 2 MiB shards and
+            // drop the block on insert.
             Self {
                 name: "full-filters",
                 partition_filters: false,
+                block_cache_bytes: 128 * 1024 * 1024,
+                cache_shard_bits: 0,
                 ..base
             },
         ]
@@ -214,12 +229,13 @@ impl RocksTuning {
             "full"
         };
         format!(
-            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={}",
+            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
             self.name,
             self.block_bytes,
             self.background_jobs,
             self.target_file_bytes,
             self.block_cache_bytes,
+            self.cache_shard_bits,
         )
     }
 
@@ -228,6 +244,7 @@ impl RocksTuning {
     fn knob_diffs(self, other: Self) -> usize {
         usize::from(self.block_bytes != other.block_bytes)
             + usize::from(self.block_cache_bytes != other.block_cache_bytes)
+            + usize::from(self.cache_shard_bits != other.cache_shard_bits)
             + usize::from(self.compress != other.compress)
             + usize::from(self.blobs != other.blobs)
             + usize::from(self.direct_io != other.direct_io)
@@ -674,7 +691,7 @@ fn open_db(
     collect_stats: bool,
     preload_tables: bool,
 ) -> eyre::Result<(DB, Option<Arc<Options>>)> {
-    let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
+    let cache = block_cache(tuning);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
@@ -715,6 +732,14 @@ fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {
     db.property_int_value(name)
         .wrap_err("read rocksdb property")?
         .ok_or_else(|| eyre::eyre!("rocksdb property missing"))
+}
+
+fn block_cache(tuning: &RocksTuning) -> rocksdb::Cache {
+    let mut opts = rocksdb::LruCacheOptions::default();
+    opts.set_capacity(tuning.block_cache_bytes);
+    // `-1` is the RocksDB default: at most 64 shards. `0` is one shard.
+    opts.set_num_shard_bits(tuning.cache_shard_bits);
+    rocksdb::Cache::new_lru_cache_opts(&opts)
 }
 
 fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
@@ -801,7 +826,7 @@ fn legacy_cf_kind(name: &str) -> Cf {
 }
 
 fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Option<Arc<Options>>)> {
-    let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
+    let cache = block_cache(tuning);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(false);
     db_opts.create_missing_column_families(false);
@@ -1806,7 +1831,11 @@ mod tests {
         assert!(!RocksTuning::preset("no-compress")?.compress);
         assert!(RocksTuning::preset("direct-io")?.direct_io);
         assert!(RocksTuning::preset("universal")?.universal);
-        assert!(!RocksTuning::preset("full-filters")?.partition_filters);
+        let full_filters = RocksTuning::preset("full-filters")?;
+        assert!(!full_filters.partition_filters);
+        assert_eq!(full_filters.block_cache_bytes, 128 * 1024 * 1024);
+        assert_eq!(full_filters.cache_shard_bits, 0);
+        assert_eq!(base.cache_shard_bits, -1);
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -1814,6 +1843,8 @@ mod tests {
             names.push(preset.name);
             if preset.name == "baseline" {
                 assert_eq!(preset.knob_diffs(base), 0);
+            } else if preset.name == "full-filters" {
+                assert_eq!(preset.knob_diffs(base), 3, "{}", preset.name);
             } else {
                 assert_eq!(preset.knob_diffs(base), 1, "{}", preset.name);
             }
@@ -1846,6 +1877,8 @@ mod tests {
             baseline_opts.contains("pin_top_level_index_and_filter=true"),
             "{baseline_opts}"
         );
+        // An external block cache is not written to the OPTIONS file.
+        // `cache_shard_bits` is checked on the preset above.
         let full = persisted_options(&dir.path().join("full-filters"))?;
         assert!(full.contains("partition_filters=false"), "{full}");
         assert!(!full.contains("index_type=kTwoLevelIndexSearch"), "{full}");
