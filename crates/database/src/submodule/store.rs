@@ -239,7 +239,7 @@ impl MdbxSubmoduleStore {
         use reth_db::transaction::DbTx as _;
 
         self.env
-            .view(|tx| Ok(tx.entries::<super::tables::TxPathIntervalByStart>()? as usize))?
+            .view(|tx| Ok(tx.entries::<super::tables::TxPathIntervalByStart>()?))?
     }
 
     /// Visible registration commits, one sync per group.

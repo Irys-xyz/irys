@@ -455,7 +455,7 @@ mod staged_sync_tests {
     use std::time::Instant;
 
     fn slots(offsets: &[u32], age: std::time::Duration) -> Vec<StagedOffset> {
-        let staged_at = Instant::now() - age;
+        let staged_at = Instant::now().checked_sub(age).unwrap();
         offsets
             .iter()
             .copied()
@@ -504,7 +504,7 @@ mod staged_sync_tests {
         let staged = vec![
             StagedOffset {
                 offset: 8,
-                staged_at: now - SYNC_STAGE_WAIT,
+                staged_at: now.checked_sub(SYNC_STAGE_WAIT).unwrap(),
             },
             StagedOffset {
                 offset: 9,
@@ -1106,7 +1106,7 @@ impl DataSyncServiceInner {
         if self
             .staged_bodies
             .get(&storage_module_id)
-            .is_some_and(|staged| staged.is_empty())
+            .is_some_and(BTreeMap::is_empty)
         {
             self.staged_bodies.remove(&storage_module_id);
         }

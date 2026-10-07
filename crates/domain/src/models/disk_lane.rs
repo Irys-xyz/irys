@@ -59,7 +59,7 @@ use std::{
 
 use irys_packing::packing_xor_vec_u8;
 use irys_types::{ChunkPathHash, PartitionChunkOffset, UnpackedChunk};
-use nodit::{InclusiveInterval as _, Interval};
+use nodit::Interval;
 use std::os::unix::fs::FileExt as _;
 
 use super::{
@@ -513,6 +513,7 @@ impl Drop for ClearExclusive<'_> {
 }
 
 impl DiskGate {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
         Self::with_index_gap(Arc::new(IndexGap::new()))
     }
@@ -814,14 +815,6 @@ impl DiskGate {
 
     pub(super) fn recall_flush_is_owed(&self) -> bool {
         self.recall_flush_owed.load(Ordering::SeqCst)
-    }
-
-    /// Wait until the owed packed-write window has committed.
-    pub(super) fn wait_recall_flush(&self) {
-        let mut guard = self.lock_wake();
-        while self.recall_flush_owed.load(Ordering::SeqCst) {
-            guard = self.wake.wait(guard);
-        }
     }
 
     /// Reserve one kernel call of `next_bytes`. Fails when a recall is waiting,
@@ -1417,10 +1410,7 @@ impl StorageModule {
     /// land in the gap before the wait. The bound is the sweep give-up.
     pub(super) fn wait_group(&self, group: u64) -> Result<(), WriteDataChunkError> {
         let deadline = Instant::now() + SWEEP_WAIT;
-        loop {
-            let Some(remain) = deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
+        while let Some(remain) = deadline.checked_duration_since(Instant::now()) {
             if remain.is_zero() {
                 break;
             }
@@ -1903,6 +1893,7 @@ impl StorageModule {
         }
     }
 
+    #[cfg(test)]
     fn take_disk_span(&self) -> Option<Vec<SweepSlot>> {
         let due = self.reads_released(self.queued_disk_slots());
         self.take_ready_span(false, true, due)
@@ -3028,7 +3019,7 @@ fn partition_file_spans(
     grace: Duration,
 ) -> Vec<DiskSpan> {
     let mut spans = Vec::new();
-    let mut start = 0usize;
+    let mut start = 0_usize;
     while start < anchors.len() {
         let mut end = start;
         while end + 1 < anchors.len()
