@@ -55,6 +55,10 @@ const BACKGROUND_JOBS: i32 = 2;
 const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA_FILE: &str = "SCHEMA";
 const SCHEMA_TEXT: &str = SUBMODULE_SCHEMA;
+/// Marker written by the per-offset index. The on-disk worst-case directory
+/// still has this text. A normal open refuses it.
+const SCHEMA_V1_TEXT: &str = "irys-submodule-rocks 1\n";
+const LEGACY_PATH_HASH_CF: &str = "ChunkPathHashesByOffset";
 
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
@@ -344,6 +348,55 @@ impl RocksSubmoduleStore {
     /// into open time.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Self::open_inner(path, tuning, true, true)
+    }
+
+    /// Open a schema-v1 directory for point reads of `ChunkPathHashesByOffset`.
+    ///
+    /// The column families already on disk are opened. Missing v2 families are
+    /// not created, and the schema marker is not rewritten. `tuning` applies
+    /// to this open. An existing SST keeps the filter it was flushed with
+    /// until [`Self::compact_legacy_path_hashes`].
+    pub fn open_v1_probe(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        check_schema_text(&path, SCHEMA_V1_TEXT)?;
+        let (db, stats) = open_existing_db(&path, &tuning)?;
+        let group = GroupCommit::new();
+        Ok(Self {
+            lifetime: EngineLifetime::new(Arc::clone(&group)),
+            db: Arc::new(db),
+            write: Arc::new(Mutex::new(())),
+            group,
+            path,
+            stats,
+        })
+    }
+
+    /// True when this offset has a path-hash row in the v1 column family.
+    pub fn legacy_path_hash_present(&self, offset: PartitionChunkOffset) -> eyre::Result<bool> {
+        let handle = self
+            .db
+            .cf_handle(LEGACY_PATH_HASH_CF)
+            .ok_or_else(|| eyre::eyre!("missing column family {LEGACY_PATH_HASH_CF}"))?;
+        Ok(self
+            .db
+            .get_cf(&handle, encode_key(offset))
+            .wrap_err("read legacy path-hash row")?
+            .is_some())
+    }
+
+    /// Rewrite `ChunkPathHashesByOffset` with the table options of this open.
+    ///
+    /// That is what makes `partition-filters` apply to an SST flushed with one
+    /// full filter. The schema marker stays v1.
+    pub fn compact_legacy_path_hashes(&self) -> eyre::Result<()> {
+        let _guard = self.lock_write();
+        let handle = self
+            .db
+            .cf_handle(LEGACY_PATH_HASH_CF)
+            .ok_or_else(|| eyre::eyre!("missing column family {LEGACY_PATH_HASH_CF}"))?;
+        self.db
+            .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
+        Ok(())
     }
 
     fn open_inner(
@@ -656,14 +709,69 @@ fn check_schema_file(path: &Path) -> eyre::Result<()> {
     if !marker.exists() {
         return Ok(());
     }
+    check_schema_text(path, SCHEMA_TEXT)
+}
+
+fn check_schema_text(path: &Path, expected: &str) -> eyre::Result<()> {
+    let marker = path.join(SCHEMA_FILE);
     let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
-    if text != SCHEMA_TEXT {
+    if text != expected {
         eyre::bail!(
             "schema file {} does not match this index engine",
             marker.display()
         );
     }
     Ok(())
+}
+
+/// Table options for a column family name already stored in a v1 directory.
+fn legacy_cf_kind(name: &str) -> Cf {
+    match name {
+        LEGACY_PATH_HASH_CF => Cf::PathHashes,
+        "ChunkDataPathByPathHash" | "ChunkDataPathByOffset" => Cf::DataPath,
+        "TxPathByTxPathHash" => Cf::TxPath,
+        "DataRootInfosByDataRoot" => Cf::DataRoots,
+        "TxLeafBindingByTxPathHash" => Cf::TxLeaf,
+        "PendingBodyMigrationsByOffset" => Cf::Pending,
+        "TxPathIntervalByStart" => Cf::Interval,
+        _ => Cf::Metadata,
+    }
+}
+
+fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Option<Arc<Options>>)> {
+    let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
+    let mut db_opts = Options::default();
+    db_opts.create_if_missing(false);
+    db_opts.create_missing_column_families(false);
+    db_opts.set_max_background_jobs(tuning.background_jobs);
+    db_opts.set_bytes_per_sync(1024 * 1024);
+    db_opts.set_wal_bytes_per_sync(1024 * 1024);
+    db_opts.set_recycle_log_file_num(4);
+    db_opts.set_max_open_files(-1);
+    db_opts.set_max_file_opening_threads(16);
+    db_opts.set_skip_stats_update_on_db_open(true);
+    db_opts.set_use_fsync(true);
+    db_opts.enable_statistics();
+    db_opts.set_statistics_level(rocksdb::statistics::StatsLevel::ExceptHistogramOrTimers);
+    db_opts.set_stats_dump_period_sec(0);
+    db_opts.set_stats_persist_period_sec(0);
+
+    let listed = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
+    let names: Vec<String> = listed
+        .into_iter()
+        .filter(|name| name != "default")
+        .collect();
+    eyre::ensure!(
+        names.iter().any(|name| name == LEGACY_PATH_HASH_CF),
+        "missing column family {LEGACY_PATH_HASH_CF}"
+    );
+    let families = names.into_iter().map(|name| {
+        let opts = column_options(&cache, legacy_cf_kind(&name), tuning);
+        rocksdb::ColumnFamilyDescriptor::new(name, opts)
+    });
+    let db = DB::open_cf_descriptors(&db_opts, path, families)
+        .wrap_err("open existing rocksdb submodule index")?;
+    Ok((db, Some(Arc::new(db_opts))))
 }
 
 fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
@@ -1538,6 +1646,54 @@ mod tests {
         );
         let marker = fs::read_to_string(path.join(SCHEMA_FILE))?;
         assert_eq!(marker, SCHEMA_TEXT);
+        Ok(())
+    }
+
+    #[test]
+    fn v1_probe_reads_the_old_sst_and_leaves_the_schema() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().prefix("submodule_rocks_v1").build();
+        let path = dir.path().join("index");
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        let families = [
+            rocksdb::ColumnFamilyDescriptor::new(LEGACY_PATH_HASH_CF, Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new("ChunkDataPathByPathHash", Options::default()),
+        ];
+        {
+            let db =
+                DB::open_cf_descriptors(&db_opts, &path, families).wrap_err("open v1 fixture")?;
+            let handle = db.cf_handle(LEGACY_PATH_HASH_CF).expect("path hash family");
+            db.put_cf(&handle, encode_key(PartitionChunkOffset::from(4)), b"row")
+                .wrap_err("put v1 row")?;
+        }
+        fs::write(path.join(SCHEMA_FILE), SCHEMA_V1_TEXT)?;
+
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        let probe = RocksSubmoduleStore::open_v1_probe(&path, RocksTuning::baseline())?;
+        assert!(probe.legacy_path_hash_present(PartitionChunkOffset::from(4))?);
+        assert!(!probe.legacy_path_hash_present(PartitionChunkOffset::from(5))?);
+        drop(probe);
+        assert_eq!(fs::read_to_string(path.join(SCHEMA_FILE))?, SCHEMA_V1_TEXT);
+
+        let probe =
+            RocksSubmoduleStore::open_v1_probe(&path, RocksTuning::preset("partition-filters")?)?;
+        probe.compact_legacy_path_hashes()?;
+        assert!(probe.legacy_path_hash_present(PartitionChunkOffset::from(4))?);
+        drop(probe);
+        assert_eq!(fs::read_to_string(path.join(SCHEMA_FILE))?, SCHEMA_V1_TEXT);
+        let mut opts = String::new();
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("OPTIONS-") {
+                opts.push_str(&fs::read_to_string(entry.path())?);
+            }
+        }
+        assert!(opts.contains("partition_filters=true"), "{opts}");
         Ok(())
     }
 

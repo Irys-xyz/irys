@@ -644,6 +644,32 @@ impl SubmoduleIndex {
         )?))
     }
 
+    /// Bench entry for a schema-v1 Rocks directory. Does not rewrite the marker.
+    #[cfg(feature = "rocksdb")]
+    pub fn open_rocks_v1_probe(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        Ok(Self::Rocks(RocksSubmoduleStore::open_v1_probe(
+            path, tuning,
+        )?))
+    }
+
+    /// Point read of one v1 path-hash row. `Ok(false)` is a missing key.
+    #[cfg(feature = "rocksdb")]
+    pub fn legacy_path_hash_present(&self, offset: PartitionChunkOffset) -> eyre::Result<bool> {
+        match self {
+            Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
+            Self::Rocks(store) => store.legacy_path_hash_present(offset),
+        }
+    }
+
+    /// Rewrite the v1 path-hash SST with this open's table options.
+    #[cfg(feature = "rocksdb")]
+    pub fn compact_legacy_path_hashes(&self) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
+            Self::Rocks(store) => store.compact_legacy_path_hashes(),
+        }
+    }
+
     /// Compaction and flush state. `None` on MDBX.
     #[cfg(feature = "rocksdb")]
     pub fn rocks_background(&self) -> eyre::Result<Option<RocksBackground>> {
