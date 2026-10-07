@@ -957,6 +957,11 @@ impl DiskGate {
         self.queue.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    #[cfg(feature = "bench")]
+    pub(super) fn bench_sweep_slots(&self) -> usize {
+        self.queue().slots.len()
+    }
+
     fn try_sweep_busy(&self) -> Option<SweepBusy<'_>> {
         let wake = self.wake.clone();
         let guard = match self.sweep_busy.try_lock() {
@@ -1632,19 +1637,13 @@ impl StorageModule {
         let end = span[span.len() - 1].offset;
         let chunk_len = chunk_size as usize;
         let span_chunks = (end.0 - start.0 + 1) as usize;
-        let (file_arc, file_offset) = {
-            let Ok((interval, submodule)) = self.submodules.get_key_value_at_point(start) else {
-                let error = WriteDataChunkError::Other(eyre::eyre!(
-                    "No submodule found for Partition Offset {start:?}"
-                ));
+        let (file_arc, file_offset) = match self.locate_io(start, true) {
+            Ok((file, offset, _)) => (file, offset),
+            Err(error) => {
+                let error = WriteDataChunkError::Other(error);
                 self.fail_span(span, &error);
                 return true;
-            };
-            let submodule_offset = start - interval.start();
-            (
-                Arc::clone(&submodule.file),
-                u64::from(submodule_offset) * chunk_size,
-            )
+            }
         };
         let mut buf = vec![0_u8; span_chunks.saturating_mul(chunk_len)];
         // A recall or flush that arrived after the span was taken goes
@@ -1755,18 +1754,10 @@ impl StorageModule {
         let chunk_size = self.config.consensus.chunk_size.max(1);
         let chunk_len = chunk_size as usize;
         let span_chunks = (end.0 - start.0 + 1) as usize;
-        let (file, file_offset) = {
-            let Ok((interval, submodule)) = self.submodules.get_key_value_at_point(start) else {
-                return Err(WriteDataChunkError::Other(eyre::eyre!(
-                    "No submodule found for Partition Offset {start:?}"
-                )));
-            };
-            let submodule_offset = start - interval.start();
-            (
-                Arc::clone(&submodule.file),
-                u64::from(submodule_offset) * chunk_size,
-            )
-        };
+        let (file, file_offset) = self
+            .locate_io(start, true)
+            .map_err(WriteDataChunkError::Other)
+            .map(|(file, offset, _)| (file, offset))?;
         let mut buf = vec![0_u8; span_chunks.saturating_mul(chunk_len)];
         let cloned = {
             let guard = file.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2511,16 +2502,7 @@ impl StorageModule {
     /// exclusive lock or wait for a recall. The count drops before the
     /// interval update, which does not touch the chunk file.
     fn pwrite_run_inflight(&self, run: &WriteRun, guard: OpGuard<'_>) -> eyre::Result<()> {
-        let chunk_size = self.config.consensus.chunk_size;
-        let (file_arc, file_offset, submodule_offset) = {
-            let (interval, submodule) = self.get_submodule_for_offset(run.start)?;
-            let submodule_offset = run.start - interval.start();
-            (
-                Arc::clone(&submodule.file),
-                u64::from(submodule_offset) * chunk_size,
-                submodule_offset,
-            )
-        };
+        let (file_arc, file_offset, submodule_offset) = self.locate_io(run.start, true)?;
         let start_time = Instant::now();
         let write_result = {
             let _guard = guard;

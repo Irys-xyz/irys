@@ -23,7 +23,9 @@ use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 
 #[cfg(feature = "rocksdb")]
-use super::rocks::{LegacySstSpan, RocksBackground, RocksSubmoduleStore, RocksTuning};
+use super::rocks::{
+    LegacySstSpan, RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning,
+};
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
@@ -730,6 +732,17 @@ impl SubmoduleIndex {
             Self::Mdbx(_) => Ok(()),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.flush_and_compact(),
+        }
+    }
+
+    /// RocksDB write-stall, compaction, and flush counters.
+    ///
+    /// `None` for MDBX. The counters are property reads on the open database.
+    #[cfg(feature = "rocksdb")]
+    pub fn rocks_ingest_stats(&self) -> eyre::Result<Option<RocksIngestStats>> {
+        match self {
+            Self::Mdbx(_) => Ok(None),
+            Self::Rocks(store) => Ok(Some(store.ingest_stats()?)),
         }
     }
 

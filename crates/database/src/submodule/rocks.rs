@@ -84,9 +84,9 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// The bench names the other values. Each of those changes one field, so a
 /// sweep can attribute a difference to that field, except `full-filters`.
 /// That preset is the full-filter residency trial: one shard and 128 MiB.
-/// Options are fixed at open. A new block size or a filter change needs an
-/// empty directory. An existing SST keeps the filter it was built with
-/// until a compaction rewrites the file.
+/// `no-wal-recycle` turns WAL file reuse off (baseline reuses 4). Options are fixed at open. A new
+/// block size or a filter change needs an empty directory. An existing SST
+/// keeps the filter it was built with until a compaction rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
@@ -123,6 +123,21 @@ pub struct RocksTuning {
     /// can miss a shard. Interval rows are fewer. This open is provisional
     /// until a measurement at that size shows a full filter stays cached.
     pub partition_filters: bool,
+    /// Retired WAL files to overwrite instead of allocating a new file.
+    ///
+    /// The baseline (production open) is `4`: that many retired files are kept
+    /// and overwritten, so a later sync writes inside a file that already has
+    /// blocks. `0` (`no-wal-recycle`): each WAL switch creates a file, and each
+    /// sync of that growing file updates its size.
+    ///
+    /// RocksDB 10.4 keeps a non-zero count for `kPointInTimeRecovery` (this
+    /// open's default; the binding does not set a recovery mode) and for
+    /// `kSkipAnyCorruptedRecords`. Open sets the count back to 0 for
+    /// `kTolerateCorruptedTailRecords` and `kAbsoluteConsistency`. A write
+    /// with `disableWAL` is rejected while the count is non-zero. This store
+    /// does not use `disableWAL`, `WAL_ttl_seconds`, or `WAL_size_limit_MB`.
+    /// Those last two also force the count to 0.
+    pub recycle_log_file_num: usize,
 }
 
 impl RocksTuning {
@@ -139,11 +154,12 @@ impl RocksTuning {
             target_file_bytes: TARGET_FILE_BYTES,
             universal: false,
             partition_filters: true,
+            recycle_log_file_num: 4,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 9] {
+    pub const fn presets() -> [Self; 10] {
         let base = Self::baseline();
         [
             base,
@@ -192,6 +208,16 @@ impl RocksTuning {
                 cache_shard_bits: 0,
                 ..base
             },
+            // WAL file reuse off, for an A/B against the baseline's 4.
+            // Baseline keeps four retired files: RocksDB 10.4 does not scale
+            // the count with `max_write_buffer_number` (2 here) or the column
+            // family count, and one WAL covers every family. Recovery stays
+            // `kPointInTimeRecovery`, which keeps a non-zero count.
+            Self {
+                name: "no-wal-recycle",
+                recycle_log_file_num: 0,
+                ..base
+            },
         ]
     }
 
@@ -231,8 +257,9 @@ impl RocksTuning {
             "full"
         };
         format!(
-            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
+            "rocks={} recycle_log_file_num={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
             self.name,
+            self.recycle_log_file_num,
             self.block_bytes,
             self.background_jobs,
             self.target_file_bytes,
@@ -254,6 +281,7 @@ impl RocksTuning {
             + usize::from(self.target_file_bytes != other.target_file_bytes)
             + usize::from(self.universal != other.universal)
             + usize::from(self.partition_filters != other.partition_filters)
+            + usize::from(self.recycle_log_file_num != other.recycle_log_file_num)
     }
 }
 
@@ -819,6 +847,60 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
+    /// Cumulative write-stall time and the current compaction and flush gauges.
+    ///
+    /// Stall time comes from the cumulative line of `rocksdb.dbstats`. That
+    /// string property also resets RocksDB's interval counters. Pending
+    /// compaction bytes and flushed immutable memtables are summed across
+    /// column families. Running flushes is the database-wide gauge.
+    pub fn ingest_stats(&self) -> eyre::Result<RocksIngestStats> {
+        let stats = self
+            .db
+            .property_value("rocksdb.dbstats")
+            .map_err(|error| eyre::eyre!("rocksdb.dbstats: {error}"))?
+            .ok_or_else(|| eyre::eyre!("rocksdb.dbstats returned no value"))?;
+        let write_stall_micros = parse_cumulative_stall_micros(&stats)
+            .ok_or_else(|| eyre::eyre!("rocksdb.dbstats has no cumulative stall line"))?;
+        let mut pending_compaction_bytes = 0_u64;
+        let mut flushes = 0_u64;
+        for cf in Cf::ALL {
+            let handle = cf_handle(&self.db, cf)?;
+            pending_compaction_bytes = pending_compaction_bytes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.estimate-pending-compaction-bytes",
+            )?);
+            flushes = flushes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.num-immutable-mem-table-flushed",
+            )?);
+        }
+        if let Some(handle) = self.db.cf_handle("default") {
+            pending_compaction_bytes = pending_compaction_bytes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.estimate-pending-compaction-bytes",
+            )?);
+            flushes = flushes.saturating_add(int_property_cf(
+                &self.db,
+                handle,
+                "rocksdb.num-immutable-mem-table-flushed",
+            )?);
+        }
+        let running_flushes = self
+            .db
+            .property_int_value("rocksdb.num-running-flushes")
+            .map_err(|error| eyre::eyre!("rocksdb.num-running-flushes: {error}"))?
+            .unwrap_or(0);
+        Ok(RocksIngestStats {
+            write_stall_micros,
+            pending_compaction_bytes,
+            flushes,
+            running_flushes,
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn interval_row_count(&self) -> eyre::Result<usize> {
         let handle = cf_handle(&self.db, Cf::Interval)?;
@@ -1080,8 +1162,10 @@ fn open_db(
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
-    // Reuse four fully sized WAL files so a sync does not grow the file.
-    db_opts.set_recycle_log_file_num(4);
+    // Baseline (production) is 4; `no-wal-recycle` is 0.
+    // Point-in-time recovery, the default, keeps a non-zero count.
+    // See `RocksTuning::recycle_log_file_num`.
+    db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
     // A 512 cap evicts SST readers. The next Get then reads the footer,
     // index, and filter. -1 keeps every table open. Blob readers stay lazy.
     db_opts.set_max_open_files(-1);
@@ -1213,7 +1297,7 @@ fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Opti
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
-    db_opts.set_recycle_log_file_num(4);
+    db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
     db_opts.set_max_open_files(-1);
     db_opts.set_max_file_opening_threads(16);
     db_opts.set_skip_stats_update_on_db_open(true);
@@ -1260,6 +1344,53 @@ fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
 
 fn schema_value() -> Vec<u8> {
     compress_value(&SCHEMA_TEXT.as_bytes().to_vec())
+}
+
+/// Counters a bench step can subtract. Stall time and flush count are
+/// cumulative. Pending compaction bytes and running flushes are gauges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RocksIngestStats {
+    pub write_stall_micros: u64,
+    pub pending_compaction_bytes: u64,
+    pub flushes: u64,
+    pub running_flushes: u64,
+}
+
+fn int_property_cf(db: &DB, handle: &rocksdb::ColumnFamily, name: &str) -> eyre::Result<u64> {
+    db.property_int_value_cf(handle, name)
+        .map_err(|error| eyre::eyre!("{name}: {error}"))
+        .map(|value| value.unwrap_or(0))
+}
+
+/// `rocksdb.dbstats` prints cumulative stall time as `HH:MM:SS.mmm H:M:S`.
+fn parse_cumulative_stall_micros(stats: &str) -> Option<u64> {
+    let line = stats
+        .lines()
+        .find(|line| line.starts_with("Cumulative stall:"))?;
+    let stamp = line
+        .trim_start_matches("Cumulative stall:")
+        .split_whitespace()
+        .next()?;
+    parse_hms_micros(stamp)
+}
+
+fn parse_hms_micros(stamp: &str) -> Option<u64> {
+    let (hours, rest) = stamp.split_once(':')?;
+    let (mins, secs) = rest.split_once(':')?;
+    let (whole, frac) = secs.split_once('.')?;
+    if frac.len() != 3 {
+        return None;
+    }
+    let hours: u64 = hours.parse().ok()?;
+    let mins: u64 = mins.parse().ok()?;
+    let whole: u64 = whole.parse().ok()?;
+    let millis: u64 = frac.parse().ok()?;
+    Some(
+        hours.saturating_mul(3_600_000_000)
+            + mins.saturating_mul(60_000_000)
+            + whole.saturating_mul(1_000_000)
+            + millis.saturating_mul(1_000),
+    )
 }
 
 fn cf_handle(db: &DB, cf: Cf) -> eyre::Result<&rocksdb::ColumnFamily> {
@@ -2224,6 +2355,12 @@ mod tests {
         assert_eq!(full_filters.block_cache_bytes, 128 * 1024 * 1024);
         assert_eq!(full_filters.cache_shard_bits, 0);
         assert_eq!(base.cache_shard_bits, -1);
+        assert_eq!(base.recycle_log_file_num, 4);
+        let no_recycle = RocksTuning::preset("no-wal-recycle")?;
+        assert_eq!(no_recycle.recycle_log_file_num, 0);
+        assert!(base.describe().contains("recycle_log_file_num=4"));
+        assert!(no_recycle.describe().contains("recycle_log_file_num=0"));
+        assert!(no_recycle.describe().contains("filters=partitioned"));
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -2254,6 +2391,14 @@ mod tests {
         }
         let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
         assert!(
+            baseline_opts.contains("recycle_log_file_num=4"),
+            "{baseline_opts}"
+        );
+        assert!(
+            baseline_opts.contains("wal_recovery_mode=kPointInTimeRecovery"),
+            "{baseline_opts}"
+        );
+        assert!(
             baseline_opts.contains("partition_filters=true"),
             "{baseline_opts}"
         );
@@ -2270,6 +2415,84 @@ mod tests {
         let full = persisted_options(&dir.path().join("full-filters"))?;
         assert!(full.contains("partition_filters=false"), "{full}");
         assert!(!full.contains("index_type=kTwoLevelIndexSearch"), "{full}");
+        let no_recycle_opts = persisted_options(&dir.path().join("no-wal-recycle"))?;
+        assert!(
+            no_recycle_opts.contains("recycle_log_file_num=0"),
+            "{no_recycle_opts}"
+        );
+        assert!(
+            no_recycle_opts.contains("wal_recovery_mode=kPointInTimeRecovery"),
+            "{no_recycle_opts}"
+        );
+        assert!(
+            no_recycle_opts.contains("partition_filters=true"),
+            "{no_recycle_opts}"
+        );
+        Ok(())
+    }
+
+    /// Writes, flushes until a retired WAL is reused, then reopens.
+    /// The last row is only in that WAL.
+    #[test]
+    fn wal_recycle_reopens_after_a_reused_log() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_wal_recycle")
+            .build();
+        let path = dir.path().join("index");
+        let preset = RocksTuning::baseline();
+        let durable = [(1_u32, 11_u8), (2, 22), (3, 33), (4, 44)];
+        let wal_only = (5_u32, 55_u8);
+        {
+            let store = RocksSubmoduleStore::open_with(&path, preset)?;
+            for (offset, byte) in durable {
+                put_offset(&store, offset, byte)?;
+                store.flush_and_compact()?;
+            }
+            put_offset(&store, wal_only.0, wal_only.1)?;
+        }
+        let log = info_log(&path)?;
+        assert!(
+            log.contains("reusing log"),
+            "expected a recycled WAL in the info log: {log}"
+        );
+        let store = RocksSubmoduleStore::open_with(&path, preset)?;
+        for (offset, byte) in durable {
+            assert_eq!(path_hashes_at(&store, offset)?, Some(hashes_for(byte)));
+        }
+        assert_eq!(
+            path_hashes_at(&store, wal_only.0)?,
+            Some(hashes_for(wal_only.1))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ingest_stats_reads_the_stall_line_and_zero_counters() -> eyre::Result<()> {
+        assert_eq!(
+            parse_cumulative_stall_micros("Cumulative stall: 00:00:00.000 H:M:S, 0.0 percent\n"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_cumulative_stall_micros(
+                "Cumulative writes: 1\nCumulative stall: 01:02:03.250 H:M:S, 9.0 percent\n"
+            ),
+            Some(3_723_250_000)
+        );
+        assert!(parse_cumulative_stall_micros("no stall line").is_none());
+
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_stats")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        let stats = store.ingest_stats()?;
+        assert_eq!(stats.write_stall_micros, 0);
+        assert_eq!(stats.pending_compaction_bytes, 0);
+        assert_eq!(stats.flushes, 0);
+        assert_eq!(stats.running_flushes, 0);
+        drop(store);
+        let index = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        let again = index.rocks_ingest_stats()?.expect("rocks counters");
+        assert_eq!(again.write_stall_micros, 0);
         Ok(())
     }
 
@@ -2316,6 +2539,39 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    fn hashes_for(byte: u8) -> ChunkPathHashes {
+        ChunkPathHashes {
+            data_path_hash: Some(H256::repeat_byte(byte)),
+            tx_path_hash: Some(H256::repeat_byte(byte.wrapping_add(1))),
+        }
+    }
+
+    fn put_offset(store: &RocksSubmoduleStore, offset: u32, byte: u8) -> eyre::Result<()> {
+        store.update(|tx| {
+            tx.set_path_hashes_by_offset(PartitionChunkOffset::from(offset), hashes_for(byte))
+        })
+    }
+
+    fn path_hashes_at(
+        store: &RocksSubmoduleStore,
+        offset: u32,
+    ) -> eyre::Result<Option<ChunkPathHashes>> {
+        store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset)))
+    }
+
+    fn info_log(path: &Path) -> eyre::Result<String> {
+        let mut text = String::new();
+        for entry in fs::read_dir(path).wrap_err("read db dir")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "LOG" || name.starts_with("LOG.old") {
+                text.push_str(&fs::read_to_string(entry.path()).wrap_err("read info log")?);
+            }
+        }
+        Ok(text)
     }
 
     fn persisted_options(path: &Path) -> eyre::Result<String> {

@@ -1,0 +1,38 @@
+#!/usr/bin/env bpftrace
+// Block-layer trace for one disk. Print only. No maps.
+//
+// usage: sudo bpftrace blk-trace.bt <dev_t>
+//
+// <dev_t> is the Linux device number: (major << 20) | minor.
+// blk-run.sh computes it. Example for major 8, minor 32 (sdc): 8388640.
+//
+// One line per event. nsecs is CLOCK_MONOTONIC, the same clock as
+// steps.jsonl monotonic_ns.
+//
+//   <monotonic_ns> I <sector> <nr_sector> <rwbs> <comm> <pid>
+//   <monotonic_ns> C <sector> <nr_sector> <rwbs>
+//
+// comm and pid are the issuing task. The complete probe runs in interrupt
+// context, so it does not print them.
+//
+// nr_sector is 0 for a flush that carries no data. rwbs still contains F
+// (REQ_PREFLUSH, REQ_OP_FLUSH, or REQ_FUA). A merged request is one issue:
+// nr_sector is the merged length. A later complete may cover only a prefix
+// of that range. The report pairs them. This script does not store state.
+
+BEGIN
+{
+	printf("# dev_t=%llu\n", (uint64)$1);
+}
+
+tracepoint:block:block_rq_issue
+/args->dev == (uint64)$1/
+{
+	printf("%llu I %llu %u %s %s %d\n", nsecs, args->sector, args->nr_sector, args->rwbs, comm, pid);
+}
+
+tracepoint:block:block_rq_complete
+/args->dev == (uint64)$1/
+{
+	printf("%llu C %llu %u %s\n", nsecs, args->sector, args->nr_sector, args->rwbs);
+}
