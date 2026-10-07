@@ -26,8 +26,8 @@ use irys_types::{
 };
 use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
 use rocksdb::{
-    BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction, IteratorMode, Options,
-    WriteBatch, WriteOptions,
+    BlockBasedIndexType, BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction,
+    IteratorMode, Options, WriteBatch, WriteOptions,
 };
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
@@ -75,6 +75,9 @@ pub struct RocksTuning {
     pub target_file_bytes: u64,
     /// Universal compaction. `false` is leveled compaction.
     pub universal: bool,
+    /// Partitioned full filters plus a two-level index. The top level stays
+    /// pinned. `false` is one full filter per SST.
+    pub partition_filters: bool,
 }
 
 impl RocksTuning {
@@ -89,11 +92,12 @@ impl RocksTuning {
             background_jobs: BACKGROUND_JOBS,
             target_file_bytes: TARGET_FILE_BYTES,
             universal: false,
+            partition_filters: false,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 8] {
+    pub const fn presets() -> [Self; 9] {
         let base = Self::baseline();
         [
             base,
@@ -132,6 +136,11 @@ impl RocksTuning {
                 universal: true,
                 ..base
             },
+            Self {
+                name: "partition-filters",
+                partition_filters: true,
+                ..base
+            },
         ]
     }
 
@@ -165,8 +174,13 @@ impl RocksTuning {
         };
         let direct_io = if self.direct_io { "on" } else { "off" };
         let compaction = if self.universal { "universal" } else { "level" };
+        let filters = if self.partition_filters {
+            "partitioned"
+        } else {
+            "full"
+        };
         format!(
-            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} jobs={} target_file_bytes={} block_cache_bytes={}",
+            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={}",
             self.name,
             self.block_bytes,
             self.background_jobs,
@@ -186,6 +200,7 @@ impl RocksTuning {
             + usize::from(self.background_jobs != other.background_jobs)
             + usize::from(self.target_file_bytes != other.target_file_bytes)
             + usize::from(self.universal != other.universal)
+            + usize::from(self.partition_filters != other.partition_filters)
     }
 }
 
@@ -572,8 +587,15 @@ fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {
 fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
     let mut table = BlockBasedOptions::default();
     table.set_block_size(tuning.block_bytes);
-    // Full-filter bloom, ~10 bits per key. `false` selects the full filter.
+    // Full filter, ~10 bits per key. `false` is not a block-based filter.
+    // Baseline stores one filter per SST. `partition-filters` splits it so a
+    // lookup reads one partition, and pins the top level in the block cache.
     table.set_bloom_filter(10.0, false);
+    if tuning.partition_filters {
+        table.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
+        table.set_partition_filters(true);
+        table.set_pin_top_level_index_and_filter(true);
+    }
     table.set_cache_index_and_filter_blocks(true);
     table.set_pin_l0_filter_and_index_blocks_in_cache(true);
     table.set_block_cache(cache);
@@ -695,6 +717,19 @@ impl<'a> Batch<'a> {
 
     fn delete(&mut self, cf: Cf, key: &[u8]) {
         self.overlay.maps[cf.index()].insert(key.to_vec(), None);
+    }
+
+    fn path_hash_row_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        let rows = self.rows();
+        let mut cursor = rows.cursor(Cf::PathHashes, Some(&encode_key(start)))?;
+        let Some((key, _)) = cursor.next_kv()? else {
+            return Ok(false);
+        };
+        Ok(PartitionChunkOffset::decode(&key)? <= end)
     }
 
     fn commit(&self, sync: bool) -> eyre::Result<()> {
@@ -1159,8 +1194,23 @@ impl SubmoduleWrite for Batch<'_> {
         if start > end {
             return Ok(());
         }
-        // Point updates. A put does not need MDBX's append cursor, and each
-        // offset keeps a `data_path_hash` that is already stored.
+        // No stored offset in this span. A blind put skips a filter read per
+        // missing key. A span that already has a row still reads that row so
+        // its data-path hash stays.
+        if !self.path_hash_row_in_range(start, end)? {
+            let hashes = ChunkPathHashes {
+                data_path_hash: None,
+                tx_path_hash: path_hash,
+            };
+            for raw in start.0..=end.0 {
+                self.put(
+                    Cf::PathHashes,
+                    &encode_key(PartitionChunkOffset::from(raw)),
+                    &hashes,
+                );
+            }
+            return Ok(());
+        }
         for raw in start.0..=end.0 {
             self.add_tx_path_hash_to_offset_index(PartitionChunkOffset::from(raw), path_hash)?;
         }
@@ -1317,7 +1367,13 @@ mod tests {
         assert_eq!(base, RocksTuning::preset("baseline")?);
         assert_eq!(base.block_bytes, BLOCK_BYTES);
         assert_eq!(base.block_cache_bytes, BLOCK_CACHE_BYTES);
-        assert!(base.compress && base.blobs && !base.direct_io && !base.universal);
+        assert!(
+            base.compress
+                && base.blobs
+                && !base.direct_io
+                && !base.universal
+                && !base.partition_filters
+        );
         assert_eq!(base.background_jobs, BACKGROUND_JOBS);
         assert_eq!(base.target_file_bytes, TARGET_FILE_BYTES);
 
@@ -1331,6 +1387,7 @@ mod tests {
         assert!(!RocksTuning::preset("no-compress")?.compress);
         assert!(RocksTuning::preset("direct-io")?.direct_io);
         assert!(RocksTuning::preset("universal")?.universal);
+        assert!(RocksTuning::preset("partition-filters")?.partition_filters);
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -1357,6 +1414,24 @@ mod tests {
             let store = RocksSubmoduleStore::open_with(&path, preset)?;
             drop(store);
         }
+        let partitioned = persisted_options(&dir.path().join("partition-filters"))?;
+        assert!(
+            partitioned.contains("partition_filters=true"),
+            "{partitioned}"
+        );
+        assert!(
+            partitioned.contains("index_type=kTwoLevelIndexSearch"),
+            "{partitioned}"
+        );
+        assert!(
+            partitioned.contains("pin_top_level_index_and_filter=true"),
+            "{partitioned}"
+        );
+        let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
+        assert!(
+            baseline_opts.contains("partition_filters=false"),
+            "{baseline_opts}"
+        );
         Ok(())
     }
 
