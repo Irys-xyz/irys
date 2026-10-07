@@ -304,6 +304,9 @@ struct PendingWrites {
     queued_at: HashMap<PartitionChunkOffset, Instant>,
     /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
     queued_unpacked_bytes: u64,
+    /// Data-path proof for a packed data chunk. The index row is written only
+    /// after `chunks.dat` is fdatasync'd. Entropy has no proof.
+    proofs: HashMap<PartitionChunkOffset, (ChunkPathHash, ChunkDataPath)>,
 }
 
 impl Deref for PendingWrites {
@@ -899,6 +902,18 @@ impl StorageModule {
             ));
         }
 
+        // A RocksDB registration returns once its rows are visible. One sync
+        // covers 8 registrations, the next durable index write, or 50 ms.
+        // MDBX keeps one durable commit per registration: its group-commit
+        // path aborts inside libmdbx.
+        if config.node_config.database.submodule_index == SubmoduleIndexEngine::Rocksdb {
+            for (_, submodule) in submodule_map.iter() {
+                submodule
+                    .db
+                    .enable_group_commit(Self::ROCKS_INDEX_TXS_PER_SYNC)?;
+            }
+        }
+
         #[cfg(not(any(test, feature = "test-utils")))]
         drop(index_commit_fail_next);
 
@@ -1226,6 +1241,12 @@ impl StorageModule {
         self.index_commit_fail_next.store(true, Ordering::SeqCst);
     }
 
+    /// `true` once. The packed chunk is not queued, and no index row is written.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn take_index_commit_failure(&self) -> bool {
+        self.index_commit_fail_next.swap(false, Ordering::SeqCst)
+    }
+
     /// Submodule views opened since the last clear. One slice is one view.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn index_view_count(&self) -> u64 {
@@ -1416,6 +1437,7 @@ impl StorageModule {
             pending.occupancy.clear();
             pending.priorities.clear();
             pending.queued_at.clear();
+            pending.proofs.clear();
         }
         self.fail_queued_sweeps();
         self.poll_acks();
@@ -1753,9 +1775,10 @@ impl StorageModule {
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::BeforeDataFsync)?;
 
-        // fsync this write batch BEFORE committing the interval state
-        // as fsync can error on us if the underlying storage has issues.
-        // A recall window fsyncs only the files it wrote.
+        // fdatasync this write batch before any row that says the chunk is
+        // present. A crash after the bytes land and before that row is safe:
+        // intervals and the index still say the chunk is absent.
+        // A recall window syncs only the files it wrote.
         for (interval, submodule) in self.submodules.iter() {
             if !touched_starts.contains(&interval.start()) {
                 continue;
@@ -1763,10 +1786,14 @@ impl StorageModule {
             self.disk.yield_to_recall();
             let file_arc = Arc::clone(&submodule.file);
             let file = self.disk.lock_chunks(&file_arc);
-            // Ensure data is flushed to disk prior to drop
-            file.sync_all()
+            file.sync_data()
                 .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
         }
+
+        // One durable index batch per submodule in this gap. It holds the
+        // data-path rows for the chunks just synced. A synced RocksDB write
+        // also covers registrations still waiting on group commit.
+        self.commit_presence_rows(&write_batch)?;
 
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::BeforeIntervalCommit)?;
@@ -1785,6 +1812,7 @@ impl StorageModule {
                 pending.remove(chunk_offset);
                 pending.priorities.remove(chunk_offset);
                 pending.queued_at.remove(chunk_offset);
+                pending.proofs.remove(chunk_offset);
             }
         }
 
@@ -1798,6 +1826,48 @@ impl StorageModule {
             self.disk.arm_short_hold(disk_lane::reorder_grace(chunk));
         }
 
+        Ok(())
+    }
+
+    /// Write the data-path rows for data chunks in `write_batch`.
+    ///
+    /// Call this only after `chunks.dat` has been fdatasync'd. A chunk with no
+    /// stored proof (an entropy or raw write) has no presence row.
+    fn commit_presence_rows(
+        &self,
+        write_batch: &[(
+            PartitionChunkOffset,
+            (ChunkBytes, ChunkType),
+            disk_lane::WritePriority,
+        )],
+    ) -> eyre::Result<()> {
+        let mut by_start: BTreeMap<
+            PartitionChunkOffset,
+            Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
+        > = BTreeMap::new();
+        {
+            let pending = self.pending_writes.read().unwrap();
+            for (offset, (_, chunk_type), _) in write_batch {
+                if *chunk_type != ChunkType::Data {
+                    continue;
+                }
+                let Some((path_hash, data_path)) = pending.proofs.get(offset) else {
+                    continue;
+                };
+                let (interval, _) = self.get_submodule_for_offset(*offset)?;
+                by_start.entry(interval.start()).or_default().push((
+                    *offset,
+                    *path_hash,
+                    data_path.clone(),
+                ));
+            }
+        }
+        for (start, updates) in by_start {
+            let (_, submodule) = self.get_submodule_for_offset(start)?;
+            submodule
+                .db
+                .update(|tx| tx.write_data_path_updates(updates))?;
+        }
         Ok(())
     }
 
@@ -2406,6 +2476,9 @@ impl StorageModule {
         pending.insert(chunk_offset, (bytes, chunk_type));
         pending.priorities.insert(chunk_offset, priority);
         pending.queued_at.insert(chunk_offset, Instant::now());
+        // A raw write has no data-path proof. Drop a proof left by a packed
+        // chunk this write replaced, so the fsync cannot publish that path.
+        pending.proofs.remove(&chunk_offset);
         *self.last_pending_write.write().unwrap() = Instant::now();
         drop(pending);
         // The lane writes the next window when it is woken.
@@ -2447,6 +2520,9 @@ impl StorageModule {
                 .retain(|offset, _| *offset < start || *offset > end);
             pending
                 .queued_at
+                .retain(|offset, _| *offset < start || *offset > end);
+            pending
+                .proofs
                 .retain(|offset, _| *offset < start || *offset > end);
         }
         self.cancel_sweep_range(start, end);
@@ -2550,11 +2626,23 @@ impl StorageModule {
         Ok(())
     }
 
+    /// Publish RocksDB index gauges for every submodule. MDBX indexes do nothing.
+    pub fn report_index_metrics(&self) {
+        for (_, submodule) in self.submodules.iter() {
+            submodule.db.report_metrics();
+        }
+    }
+
+    /// Registrations folded into one RocksDB sync. The 50 ms cap still applies.
+    const ROCKS_INDEX_TXS_PER_SYNC: u32 = 8;
+
     /// Make index registration commits visible without an fsync on every call.
     ///
     /// `txs_per_sync` registrations, the next durable index write, or 50 ms,
-    /// whichever comes first, then one sync. Off by default: each registration
-    /// stays durable before it returns. `txs_per_sync` of 0 is rejected.
+    /// whichever comes first, then one sync. [`Self::new`] turns this on for a
+    /// RocksDB index at [`Self::ROCKS_INDEX_TXS_PER_SYNC`]. An MDBX index does
+    /// not call it, so each of its registrations is durable before it returns.
+    /// `txs_per_sync` of 0 is rejected.
     pub fn enable_index_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
         for (_, submodule) in self.submodules.iter() {
             submodule.db.enable_group_commit(txs_per_sync)?;
@@ -2821,7 +2909,7 @@ impl StorageModule {
             .any(|offset| pending.occupancy.contains_key(offset))
     }
 
-    /// Waits until the index ACK has inserted `ChunkType::Data` into the pending map.
+    /// Waits until the packed bytes are in the pending map as `ChunkType::Data`.
     /// When the disk-lane thread is running, that thread locks `chunks.dat`.
     /// Otherwise this call drives the sweep itself.
     pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> Result<(), WriteDataChunkError> {
@@ -4491,6 +4579,44 @@ mod tests {
     }
 
     #[test]
+    fn rocks_module_enables_group_commit_and_mdbx_does_not() -> eyre::Result<()> {
+        fn open(
+            prefix: &str,
+            engine: SubmoduleIndexEngine,
+        ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
+            let tmp = TempDirBuilder::new().prefix(prefix).build();
+            let node_config = NodeConfig {
+                consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                    chunk_size: 32,
+                    num_chunks_in_partition: 5,
+                    ..ConsensusConfig::testing()
+                }),
+                base_directory: tmp.path().to_path_buf(),
+                database: index_database(engine),
+                ..NodeConfig::testing()
+            };
+            let config = Config::new_with_random_peer_id(node_config);
+            let storage = StorageModule::new(
+                &StorageModuleInfo {
+                    id: 0,
+                    partition_assignment: None,
+                    submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+                },
+                &config,
+            )?;
+            Ok((tmp, storage))
+        }
+
+        let (_rocks_tmp, rocks) = open("rocks_group_commit", SubmoduleIndexEngine::Rocksdb)?;
+        let (_mdbx_tmp, mdbx) = open("mdbx_group_commit", SubmoduleIndexEngine::Mdbx)?;
+        let (_, rocks_sub) = rocks.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(rocks_sub.db.group_commit_enabled());
+        let (_, mdbx_sub) = mdbx.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(!mdbx_sub.db.group_commit_enabled());
+        Ok(())
+    }
+
+    #[test]
     fn recall_piece_plan_pairs_preads() {
         assert_eq!(
             super::recall_piece_plan(400, 400),
@@ -5260,8 +5386,8 @@ mod tests {
     }
 
     #[test]
-    fn span_island_stays_out_of_the_buffer_until_every_ack() -> eyre::Result<()> {
-        let (_tmp, storage) = entropy_disk_module("span_island_ack")?;
+    fn span_island_enters_the_buffer_as_one_run() -> eyre::Result<()> {
+        let (_tmp, storage) = entropy_disk_module("span_island_one_run")?;
         queue_packed_chunk(
             &storage,
             0,
@@ -5278,42 +5404,15 @@ mod tests {
         )?;
         assert!(storage.sweep_one_for_test());
         assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 1);
-        assert_eq!(storage.inflight_len_for_test(), 2);
 
-        let started = Instant::now();
-        while !storage.finish_one_ready_ack_for_test() {
-            assert!(
-                started.elapsed() < Duration::from_secs(2),
-                "index ack did not arrive"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        {
-            let pending = storage.pending_writes.read().unwrap();
-            assert!(pending.get(&PartitionChunkOffset::from(0)).is_none());
-            assert!(pending.get(&PartitionChunkOffset::from(1)).is_none());
-        }
-
-        let started = Instant::now();
-        loop {
-            storage.poll_acks();
-            let pending = storage.pending_writes.read().unwrap();
-            if pending.len() == 2 {
-                let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
-                assert_eq!(runs.len(), 1);
-                assert_eq!(runs[0].byte_len, 64);
-                let queued_at: Vec<_> = pending.queued_at.values().copied().collect();
-                assert_eq!(queued_at.len(), 2);
-                assert_eq!(queued_at[0], queued_at[1]);
-                break;
-            }
-            drop(pending);
-            assert!(
-                started.elapsed() < Duration::from_secs(2),
-                "island did not enter the buffer"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let pending = storage.pending_writes.read().unwrap();
+        assert_eq!(pending.len(), 2);
+        let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].byte_len, 64);
+        let queued_at: Vec<_> = pending.queued_at.values().copied().collect();
+        assert_eq!(queued_at.len(), 2);
+        assert_eq!(queued_at[0], queued_at[1]);
         Ok(())
     }
 
@@ -6558,6 +6657,11 @@ mod tests {
         };
 
         storage_module.write_data_chunk(&chunk)?;
+
+        let (_, ret_path) = storage_module.read_tx_data_path(LedgerChunkOffset::from(0))?;
+        assert!(ret_path.is_none());
+
+        storage_module.force_sync_pending_chunks()?;
 
         let (_, ret_path) = storage_module.read_tx_data_path(LedgerChunkOffset::from(0))?;
 

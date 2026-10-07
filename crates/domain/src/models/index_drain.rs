@@ -1,5 +1,9 @@
 //! Batched data-path index commits for one submodule index.
 //!
+//! Production packed writes do not submit here. The disk lane keeps the
+//! proof beside the packed bytes and commits those rows after `chunks.dat`
+//! is fdatasync'd. This drain still commits ops that a test submits directly.
+//!
 //! MDBX chooses the page writes inside a commit. This module only chooses
 //! when `update_eyre` starts: after the chunk `pread`s, `pwrite`s, and
 //! mining recall on this drive have left the gap, and not during them.
@@ -253,6 +257,7 @@ impl IndexDrain {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn submit(&self, op: IndexOp) {
         // Track before the send. `wait_idle` must see an op that is queued
         // behind a chunk run and not yet inside `update_eyre`.
@@ -279,6 +284,7 @@ impl IndexDrain {
         }
     }
 
+    #[cfg(test)]
     fn track(&self, offset: PartitionChunkOffset) {
         self.in_flight
             .offsets
@@ -287,6 +293,7 @@ impl IndexDrain {
             .insert(offset);
     }
 
+    #[cfg(test)]
     fn untrack(&self, offset: PartitionChunkOffset) {
         let mut offsets = self
             .in_flight
