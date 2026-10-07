@@ -50,10 +50,10 @@ use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
-    DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, LedgerChunkOffset,
-    LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
-    ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath, UnpackedChunk,
-    get_leaf_proof, ledger_chunk_offset_ie,
+    DataTransactionHeader, DataTransactionLedger, DatabaseConfig, H256, IrysAddress,
+    LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
+    ProofDeserialize as _, RelativeChunkOffset, SubmoduleIndexEngine, TxChunkOffset, TxPath,
+    UnpackedChunk, get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii,
 };
@@ -653,6 +653,50 @@ fn read_recall_run(
     Ok(())
 }
 
+fn rocks_index_present(rocks_dir: &Path) -> bool {
+    rocks_dir.join("SCHEMA").is_file() || rocks_dir.join("CURRENT").is_file()
+}
+
+fn open_submodule_index(
+    module_dir: &Path,
+    database: &DatabaseConfig,
+) -> eyre::Result<SubmoduleIndex> {
+    let path = match database.submodule_index {
+        SubmoduleIndexEngine::Mdbx => module_dir.join("db"),
+        SubmoduleIndexEngine::Rocksdb => module_dir.join("rocks"),
+    };
+    debug!("submodule_db_path: {:?}", path);
+
+    let opened = match database.submodule_index {
+        SubmoduleIndexEngine::Mdbx => {
+            // Args (incl. the test geometry cap) derived from the DatabaseConfig.
+            let args = irys_database::submodule_db_args(database)?;
+            SubmoduleIndex::open_mdbx(&path, args)
+        }
+        SubmoduleIndexEngine::Rocksdb => {
+            let mdbx_dat = module_dir.join("db").join("mdbx.dat");
+            // An empty Rocks index would hide the live MDBX rows.
+            if mdbx_dat.is_file() && !rocks_index_present(&path) {
+                Err(eyre!(
+                    "refusing to open {}: {} exists and the MDBX index was not copied",
+                    path.display(),
+                    mdbx_dat.display()
+                ))
+            } else {
+                SubmoduleIndex::open_rocks(&path)
+            }
+        }
+    };
+
+    opened.map_err(|error| {
+        eyre!(
+            "Failed to create or open submodule database: {} - {}",
+            path.display(),
+            error
+        )
+    })
+}
+
 impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
@@ -698,20 +742,7 @@ impl StorageModule {
             })?;
             let chunks_file: Arc<Mutex<File>> = Arc::new(Mutex::new(chunks_file));
 
-            let submodule_db_path = sub_base_path.join("db");
-            debug!("submodule_db_path: {:?}", submodule_db_path);
-            let submodule_db = SubmoduleIndex::open_mdbx(
-                &submodule_db_path,
-                // Args (incl. the test geometry cap) derived from the DatabaseConfig.
-                irys_database::submodule_db_args(&config.node_config.database)?,
-            )
-            .map_err(|e| {
-                eyre!(
-                    "Failed to create or open submodule database: {} - {}",
-                    submodule_db_path.display(),
-                    e
-                )
-            })?;
+            let submodule_db = open_submodule_index(&sub_base_path, &config.node_config.database)?;
 
             let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
             // if we don't have an existing packing params file, write it
@@ -4301,13 +4332,96 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::submodule::tables::ChunkPathHashes;
     use irys_testing_utils::{chunk_bytes_gen, utils::TempDirBuilder};
     use irys_types::{
-        ConsensusConfig, DataTransactionHeaderV1, DataTransactionLedger, H256, NodeConfig,
-        SimpleRNG, StorageSyncConfig, TxChunkOffset, irys::IrysSigner, ledger_chunk_offset_ii,
-        partition_chunk_offset_ii,
+        ConsensusConfig, DataTransactionHeaderV1, DataTransactionLedger, DbSyncMode, H256,
+        NodeConfig, SimpleRNG, StorageSyncConfig, TxChunkOffset, irys::IrysSigner,
+        ledger_chunk_offset_ii, partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
+
+    fn index_database(engine: SubmoduleIndexEngine) -> DatabaseConfig {
+        DatabaseConfig {
+            sync_mode: DbSyncMode::UtterlyNoSync,
+            cache_sync_mode: DbSyncMode::UtterlyNoSync,
+            geometry_max_size: Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE),
+            submodule_index: engine,
+        }
+    }
+
+    #[test]
+    fn submodule_index_engine_mdbx_fresh_does_not_create_rocks() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("submodule_index_engine_mdbx")
+            .build();
+        let module_dir = tmp_dir.path().join("module");
+        fs::create_dir_all(&module_dir)?;
+
+        let index = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))?;
+        drop(index);
+
+        assert!(module_dir.join("db").join("mdbx.dat").is_file());
+        assert!(!module_dir.join("rocks").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn submodule_index_engine_rocksdb_fresh_reads_back_a_row() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("submodule_index_engine_rocks")
+            .build();
+        let module_dir = tmp_dir.path().join("module");
+        fs::create_dir_all(&module_dir)?;
+
+        let index =
+            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
+        let schema = fs::read_to_string(module_dir.join("rocks").join("SCHEMA"))?;
+        assert_eq!(schema, "irys-submodule-index 2\n");
+        assert!(!module_dir.join("db").join("mdbx.dat").exists());
+
+        let offset = PartitionChunkOffset::from(7);
+        let hashes = ChunkPathHashes {
+            data_path_hash: Some(H256::repeat_byte(3)),
+            tx_path_hash: None,
+        };
+        index.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
+        let got = index.view(|tx| tx.get_path_hashes_by_offset(offset))?;
+        assert_eq!(got, Some(hashes));
+        Ok(())
+    }
+
+    #[test]
+    fn submodule_index_engine_rocksdb_refuses_uncopied_mdbx() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("submodule_index_engine_refuse")
+            .build();
+        let module_dir = tmp_dir.path().join("module");
+        let mdbx_dat = module_dir.join("db").join("mdbx.dat");
+        let rocks_dir = module_dir.join("rocks");
+        fs::create_dir_all(mdbx_dat.parent().expect("db parent"))?;
+        fs::write(&mdbx_dat, b"live")?;
+
+        let error =
+            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))
+                .expect_err("live MDBX data must not open an empty Rocks index");
+        let message = error.to_string();
+        assert!(
+            message.contains(&rocks_dir.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&mdbx_dat.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("the MDBX index was not copied"),
+            "{message}"
+        );
+        assert!(!rocks_dir.join("SCHEMA").exists());
+        assert!(!rocks_dir.join("CURRENT").exists());
+        Ok(())
+    }
 
     #[test]
     fn recall_piece_plan_pairs_preads() {

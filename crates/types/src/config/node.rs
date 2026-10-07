@@ -54,6 +54,15 @@ impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
     }
 }
 
+/// Per-chunk submodule index engine. The default stays MDBX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmoduleIndexEngine {
+    #[default]
+    Mdbx,
+    Rocksdb,
+}
+
 /// Database durability and sync settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +84,11 @@ pub struct DatabaseConfig {
     /// address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_max_size: Option<usize>,
+
+    /// Engine for each storage submodule's per-chunk index.
+    /// `mdbx` opens `db/`. `rocksdb` opens a sibling `rocks/` directory.
+    #[serde(default)]
+    pub submodule_index: SubmoduleIndexEngine,
 }
 
 fn default_db_sync_mode() -> DbSyncMode {
@@ -90,6 +104,7 @@ impl Default for DatabaseConfig {
             sync_mode: default_db_sync_mode(),
             cache_sync_mode: default_cache_db_sync_mode(),
             geometry_max_size: None,
+            submodule_index: SubmoduleIndexEngine::Mdbx,
         }
     }
 }
@@ -1447,6 +1462,7 @@ impl NodeConfig {
                 // Small MDBX geometry so many concurrent test node databases don't
                 // exhaust virtual address space (see TEST_DB_GEOMETRY_MAX_SIZE).
                 geometry_max_size: Some(crate::TEST_DB_GEOMETRY_MAX_SIZE),
+                submodule_index: SubmoduleIndexEngine::Mdbx,
             },
         }
     }
@@ -1820,6 +1836,50 @@ mod run_mode_tests {
         let config = DatabaseConfig::default();
         assert_eq!(config.sync_mode, DbSyncMode::Durable);
         assert_eq!(config.cache_sync_mode, DbSyncMode::SafeNoSync);
+        assert_eq!(config.submodule_index, SubmoduleIndexEngine::Mdbx);
+    }
+
+    /// A config with no `submodule_index` stays on MDBX. `rocksdb` selects the
+    /// sibling engine. Any other string is rejected.
+    #[test]
+    fn submodule_index_engine_serde() {
+        let missing_toml: DatabaseConfig = toml::from_str(
+            r#"
+            sync_mode = "Durable"
+            cache_sync_mode = "SafeNoSync"
+            "#,
+        )
+        .expect("toml without submodule_index");
+        assert_eq!(missing_toml.submodule_index, SubmoduleIndexEngine::Mdbx);
+
+        let missing_json: DatabaseConfig =
+            serde_json::from_str("{}").expect("json without submodule_index");
+        assert_eq!(missing_json.submodule_index, SubmoduleIndexEngine::Mdbx);
+
+        let mdbx: DatabaseConfig = toml::from_str("submodule_index = \"mdbx\"").expect("mdbx toml");
+        assert_eq!(mdbx.submodule_index, SubmoduleIndexEngine::Mdbx);
+
+        let rocks_toml: DatabaseConfig =
+            toml::from_str("submodule_index = \"rocksdb\"").expect("rocksdb toml");
+        assert_eq!(rocks_toml.submodule_index, SubmoduleIndexEngine::Rocksdb);
+
+        let rocks_json: DatabaseConfig =
+            serde_json::from_str(r#"{"submodule_index":"rocksdb"}"#).expect("rocksdb json");
+        assert_eq!(rocks_json.submodule_index, SubmoduleIndexEngine::Rocksdb);
+
+        assert!(
+            toml::from_str::<DatabaseConfig>("submodule_index = \"lmdb\"").is_err(),
+            "unknown toml engine must fail"
+        );
+        assert!(
+            serde_json::from_str::<DatabaseConfig>(r#"{"submodule_index":"other"}"#).is_err(),
+            "unknown json engine must fail"
+        );
+
+        assert_eq!(
+            NodeConfig::testing().database.submodule_index,
+            SubmoduleIndexEngine::Mdbx
+        );
     }
 
     /// Regression test: a legacy TOML config that predates the `run_mode`,
