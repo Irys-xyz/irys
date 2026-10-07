@@ -502,6 +502,18 @@ pub struct StorageSyncConfig {
     /// Zero bridges no hole.
     #[serde(default = "default_entropy_coalesce_hole_bytes")]
     pub entropy_coalesce_hole_bytes: u64,
+    /// Seconds between completion rewrites of each submodule's `intervals.json`.
+    ///
+    /// A write-ahead transition is still stored immediately: `Interrupted`
+    /// before chunk bytes change, and `Uninitialized` on reset or rollback.
+    /// Each of those rewrites is atomic (`fsync` of the temp file, then
+    /// `fsync` of the directory). A completion (`Data` or `Entropy` after the
+    /// chunk `fdatasync` and the presence commit) stays in memory and shares
+    /// one rewrite at most this often, or sooner when a write-ahead rewrite
+    /// already has to hit the disk. Clean shutdown writes the live map.
+    /// `0` rewrites completions on every sync.
+    #[serde(default = "default_intervals_persist_secs")]
+    pub intervals_persist_secs: u64,
     /// After a mining recall has copied `chunks.dat` bytes into memory, drop
     /// those file pages from the cache. Recall bytes are read once, and
     /// leaving them cached pushes index pages out. A range that still holds
@@ -520,8 +532,16 @@ impl Default for StorageSyncConfig {
             entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),
             entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
             drop_recall_page_cache: false,
+            intervals_persist_secs: default_intervals_persist_secs(),
         }
     }
+}
+
+/// Default gap between completion rewrites of `intervals.json`.
+pub const DEFAULT_INTERVALS_PERSIST_SECS: u64 = 30;
+
+fn default_intervals_persist_secs() -> u64 {
+    DEFAULT_INTERVALS_PERSIST_SECS
 }
 
 fn default_entropy_sweep_interval_millis() -> u64 {
@@ -1336,6 +1356,8 @@ impl NodeConfig {
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
                 drop_recall_page_cache: false,
+                // Tests read `intervals.json` as soon as `sync` returns.
+                intervals_persist_secs: 0,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1533,6 +1555,7 @@ impl NodeConfig {
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
                 drop_recall_page_cache: false,
+                intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1736,6 +1759,18 @@ fn default_irys_path() -> PathBuf {
 mod run_mode_tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    fn omitted_intervals_persist_secs_uses_the_node_default() {
+        let parsed: StorageSyncConfig = toml::from_str("num_writes_before_sync = 7").unwrap();
+        assert_eq!(parsed.num_writes_before_sync, 7);
+        assert_eq!(
+            parsed.intervals_persist_secs,
+            DEFAULT_INTERVALS_PERSIST_SECS
+        );
+        let immediate: StorageSyncConfig = toml::from_str("intervals_persist_secs = 0").unwrap();
+        assert_eq!(immediate.intervals_persist_secs, 0);
+    }
 
     #[test]
     fn run_mode_defaults_to_production() {

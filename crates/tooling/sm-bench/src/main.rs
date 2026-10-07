@@ -107,6 +107,10 @@ struct Args {
     create_small: Option<u64>,
     #[arg(long, default_value_t = 100)]
     num_writes_before_sync: u64,
+    /// Seconds between completion rewrites of `intervals.json`.
+    /// Write-ahead `Interrupted` marks stay immediate. `0` rewrites on every sync.
+    #[arg(long, default_value_t = irys_types::DEFAULT_INTERVALS_PERSIST_SECS)]
+    intervals_persist_secs: u64,
     #[arg(long, default_value_t = 262_144)]
     entropy_sweep_max_bytes: u64,
     /// Leave recall pages cached. The bench default drops them.
@@ -337,6 +341,7 @@ fn run() -> eyre::Result<i32> {
         write_chunks: u64::from(write_chunks),
         num_writes_before_sync: args.num_writes_before_sync,
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
+        intervals_persist_secs: args.intervals_persist_secs,
         drop_recall_page_cache: !args.keep_recall_cache,
         index,
         index_group_commit: args.index_group_commit,
@@ -406,6 +411,7 @@ fn run() -> eyre::Result<i32> {
         "prepopulate_index": prepopulated,
         "seed": args.seed,
         "num_writes_before_sync": args.num_writes_before_sync,
+        "intervals_persist_secs": args.intervals_persist_secs,
         "entropy_sweep_max_bytes": args.entropy_sweep_max_bytes,
         "drop_recall_page_cache": !args.keep_recall_cache,
         "ingest_mix": args.ingest_mix,
@@ -431,6 +437,7 @@ fn run() -> eyre::Result<i32> {
             "Ingest and migration use separate halves of the write window.",
             "Startup deletes leftover body-migration rows in this bench database.",
             "Durable latency ends at is_data_chunk_durable_at, after fsync.",
+            "intervals.json write-ahead Interrupted marks are immediate. Completions rewrite at most every intervals_persist_secs, or sooner on the next write-ahead.",
             "Ingest concurrency is a bench semaphore held until the chunk is durable. It is not a storage-module admission limit.",
             "The offer deadline advances by the chunk interval from the previous deadline. A late release catches up instead of inserting a fresh gap.",
             "ingest_index serial commits index_transaction_data on the generator before that tx is paced. overlap starts the next commit during the current tx. Production indexes on the chunk migration service while another task writes bodies.",
@@ -1124,6 +1131,14 @@ mod tests {
         let args = parsed(&[]);
         assert_eq!(args.index_engine, IndexEngine::Mdbx);
         assert_eq!(args.index_group_commit, 8);
+        assert_eq!(
+            args.intervals_persist_secs,
+            irys_types::DEFAULT_INTERVALS_PERSIST_SECS
+        );
+        assert_eq!(
+            parsed(&["--intervals-persist-secs", "0"]).intervals_persist_secs,
+            0
+        );
         assert!(args.rocks_preset.is_none());
         assert!(args.rocks_block_cache.is_none());
         assert_eq!(

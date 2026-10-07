@@ -59,7 +59,9 @@ use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii,
 };
-use nodit::{InclusiveInterval as _, Interval, NoditMap, NoditSet, interval::ii};
+use nodit::{
+    DiscreteFinite as _, InclusiveInterval as _, Interval, NoditMap, NoditSet, interval::ii,
+};
 use openssl::sha;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -337,6 +339,51 @@ type SubmoduleMap =
 /// Tracks storage state of chunk ranges across all submodules
 type StorageIntervals = NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, ChunkType>;
 
+/// Offsets whose on-disk label must stay `Interrupted` until the completion is
+/// stored, or until a clean shutdown writes the live map.
+type IntervalMask = NoditSet<PartitionChunkOffset, Interval<PartitionChunkOffset>>;
+
+/// Bytes of `Entropy` or `Uninitialized` marked `Interrupted` ahead of one
+/// write, per submodule. A crash reloads that span as `Uninitialized`. The
+/// node packs or syncs those chunks again. The run just written is extra.
+const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Last `intervals.json` image and the completions that are not in it yet.
+///
+/// `written` is the raw file, including `Interrupted`. The live interval map
+/// is not that image: load turns `Interrupted` into `Uninitialized`, and an
+/// ahead mark lives only in `mask`. `get_chunk_type` keeps reading the live
+/// map, so mining and migration still see `Entropy` under an ahead mark.
+///
+/// # State machine
+///
+/// | Transition | When it is stored | Class | Under 16 MiB/s ingest |
+/// | --- | --- | --- | --- |
+/// | `Entropy` / `Uninitialized` / `Data` → `Interrupted` for offsets about to be written | Before the `pwrite`, atomic replace | Write-ahead | Was once per durable gap (~0.96/s). A covered span does not write again |
+/// | Ahead `Entropy` / `Uninitialized` → `Interrupted` on disk only | Same rewrite, up to 512 MiB forward inside the submodule | Write-ahead coalesce | About one rewrite per 512 MiB (~0.03/s) while the frontier is contiguous |
+/// | `Interrupted` → `Data` or `Entropy` | After `fdatasync` and the presence commit. At most every `intervals_persist_secs`, sooner on the next write-ahead rewrite, on `force_sync`, or on clean shutdown | Completion | Was ~0.96/s. Now rides the write-ahead or the 30 s timer |
+/// | Failed `pwrite` → live `Uninitialized`, file stays `Interrupted` | No extra rewrite. Load maps both to `Uninitialized` | Completion lag is safe | Rare |
+/// | Any → `Uninitialized` on reset or rollback | Immediately, then the index clear / repack | Write-ahead | Rare |
+/// | `index_transaction_data`, group commit, chunk `fdatasync` | Not an interval rewrite | Durable point is the chunk `fdatasync` plus the presence commit | `fdatasync` stays ~0.96/s |
+///
+/// `intervals_persist_secs = 0` does both file rewrites on every sync and
+/// does not mark ahead. That is the previous behaviour.
+///
+/// A completion is never stored before its chunk `fdatasync` and presence
+/// commit. A write-ahead mark is never dropped or delayed. Clean shutdown
+/// writes the live map and drops the ahead mask, so a restart does not turn
+/// valid entropy into `Uninitialized`. A crash leaves the mask on disk.
+#[derive(Debug)]
+struct IntervalDisk {
+    written: StorageIntervals,
+    mask: IntervalMask,
+    /// Submodule starts whose live types are ahead of `written`.
+    dirty: BTreeSet<PartitionChunkOffset>,
+    /// Monotonic time of the last completion rewrite. The first wait starts
+    /// at load, so opening a module does not rewrite the file.
+    last_completion: BTreeMap<PartitionChunkOffset, Instant>,
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SyncFailurePoint {
@@ -401,6 +448,11 @@ pub struct StorageModule {
     last_pending_write: RwLock<Instant>,
     /// Tracks the storage state of each chunk across all submodules
     intervals: Arc<RwLock<StorageIntervals>>,
+    /// `intervals.json` image, write-ahead mask, and completion timers.
+    interval_disk: Mutex<IntervalDisk>,
+    /// Crash tests drop the module without storing batched completions.
+    #[cfg(test)]
+    suppress_interval_flush: AtomicBool,
     /// Shared with every submodule drain. `pause_data_writes` / `reset` bump it
     /// so queued index ops with a stale generation are cancelled.
     index_write_generation: Arc<AtomicU64>,
@@ -1068,6 +1120,9 @@ impl StorageModule {
             sync_failure: Mutex::new(None),
             last_pending_write: RwLock::new(Instant::now()),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
+            interval_disk: Mutex::new(Self::load_interval_disk(&submodule_map)),
+            #[cfg(test)]
+            suppress_interval_flush: AtomicBool::new(false),
             index_write_generation,
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
@@ -1668,9 +1723,12 @@ impl StorageModule {
     /// Candidate transaction-relative offsets of `data_root` whose bodies are
     /// fsynced in this module as `ChunkType::Data`.
     ///
-    /// This is the durability signal cached-body reclamation is gated on. It is
-    /// derived from the same interval state the node reloads after a restart, so
-    /// it cannot disagree with what recovery will see. Resolves the submodule
+    /// This is the durability signal cached-body reclamation is gated on. It
+    /// follows the in-memory intervals, which flip to `Data` after the chunk
+    /// `fdatasync` and the presence commit. `intervals.json` can lag that flip
+    /// by `storage.intervals_persist_secs`. A crash in the lag reloads the
+    /// chunk as `Uninitialized`, and a body reclaimed in the lag is synced
+    /// again. Resolves the submodule
     /// index once per root and checks only bodies the cache can actually
     /// reclaim, rather than walking the transaction's entire funded range.
     pub fn durable_tx_offsets_for_data_root(
@@ -1941,7 +1999,7 @@ impl StorageModule {
         };
 
         if write_batch.is_empty() {
-            return Ok(());
+            return self.flush_forced_interval_completions(force);
         }
 
         let mut runs = if coalesce {
@@ -2004,7 +2062,7 @@ impl StorageModule {
             runs = kept;
         }
         if runs.is_empty() {
-            return Ok(());
+            return self.flush_forced_interval_completions(force);
         }
         if max_runs.is_some() {
             let kept: BTreeSet<PartitionChunkOffset> = runs
@@ -2030,8 +2088,9 @@ impl StorageModule {
             .write()
             .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
 
-        // write every offset to the intervals file as Interrupted
-        // we sync the correct intervals state once this commit is written
+        // The live map records this batch as Interrupted before the bytes
+        // change. An ahead span stays out of the live map: it is only an
+        // on-disk mask, so mining and migration still see Entropy.
         for (chunk_offset, _, _) in write_batch.iter() {
             Self::cut_then_insert_interval_if_touching(
                 &mut intervals,
@@ -2042,7 +2101,7 @@ impl StorageModule {
 
         drop(intervals);
 
-        self.write_intervals_files(Some(&touched_starts))
+        self.persist_write_ahead(&runs, &touched_starts)
             .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
 
         let len = write_batch.len();
@@ -2086,9 +2145,10 @@ impl StorageModule {
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::BeforeIntervalCommit)?;
 
-        // persist the state from all the write calls
-        // save the updated intervals
-        self.write_intervals_files(Some(&touched_starts))
+        // Completions are true only after the fdatasync and the presence
+        // commit above. A batched completion waits for the persist period
+        // unless this sync was forced. Period 0 writes the live map now.
+        self.persist_interval_completion(force, &runs, &touched_starts)
             .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
 
         // Remove only the exact values written by this snapshot. A concurrent
@@ -2180,60 +2240,446 @@ impl StorageModule {
     /// If a submodule has no intervals after filtering, a default `Uninitialized` interval
     /// is created spanning the submodule's entire range to ensure consistency.
     pub fn write_intervals_to_submodules(&self) -> eyre::Result<()> {
-        // A running lane writes the files itself, before and after its chunk
-        // writes. This caller waits. A stopped lane, and the lane thread, write
-        // here.
+        // A running lane writes the files itself. This caller waits. A stopped
+        // lane, and the lane thread, write here. Reset and rollback use this
+        // path, so the file matches the live map before the index changes.
         if self.disk.lane_running()
             && !self.disk.on_lane_thread()
             && Self::lane_request_done(self.disk.request_lane_persist())?
         {
             return Ok(());
         }
-        self.write_intervals_files(None)
+        self.persist_intervals_authoritative()
     }
 
-    /// Rewrite `intervals.json`. `only` limits the write to those submodule
-    /// starts. `None` rewrites every submodule.
+    fn intervals_persist_period(&self) -> Duration {
+        Duration::from_secs(self.config.node_config.storage.intervals_persist_secs)
+    }
+
+    /// `0` keeps both `intervals.json` rewrites on every sync.
+    fn intervals_batched(&self) -> bool {
+        self.config.node_config.storage.intervals_persist_secs > 0
+    }
+
+    fn interval_flush_suppressed(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.suppress_interval_flush.load(Ordering::Relaxed)
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    fn suppress_interval_flush_for_test(&self) {
+        self.suppress_interval_flush.store(true, Ordering::Relaxed);
+    }
+
+    fn lock_interval_disk(&self) -> std::sync::MutexGuard<'_, IntervalDisk> {
+        self.interval_disk
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Time until a dirty completion may be rewritten. `None` when batching
+    /// is off, the flush is suppressed, or nothing is waiting.
+    fn interval_flush_remaining(&self) -> Option<Duration> {
+        if !self.intervals_batched() || self.interval_flush_suppressed() {
+            return None;
+        }
+        let period = self.intervals_persist_period();
+        let disk = self.lock_interval_disk();
+        if disk.dirty.is_empty() {
+            return None;
+        }
+        let mut soonest: Option<Duration> = None;
+        for start in &disk.dirty {
+            let elapsed = disk
+                .last_completion
+                .get(start)
+                .map(Instant::elapsed)
+                .unwrap_or(period);
+            let remain = period.saturating_sub(elapsed);
+            soonest = Some(match soonest {
+                Some(current) => current.min(remain),
+                None => remain,
+            });
+        }
+        soonest
+    }
+
+    fn flush_forced_interval_completions(&self, force: bool) -> eyre::Result<()> {
+        if force {
+            self.flush_interval_completions_locked(true)?;
+        }
+        Ok(())
+    }
+
+    /// Store `Interrupted` for this batch before chunk bytes change.
+    ///
+    /// Period `0` rewrites the live map, which is already `Interrupted` for
+    /// the batch. A positive period also marks up to
+    /// [`INTERVAL_WRITE_AHEAD_BYTES`] of following `Entropy` or
+    /// `Uninitialized` in the same submodule. That ahead range is not written
+    /// into the live map. The mask is updated only after the file replace
+    /// succeeds, or immediately when the file already has those labels.
+    fn persist_write_ahead(
+        &self,
+        runs: &[WriteRun],
+        touched: &BTreeSet<PartitionChunkOffset>,
+    ) -> eyre::Result<()> {
+        if !self.intervals_batched() {
+            return self.write_intervals_files(Some(touched));
+        }
+        let memory = self
+            .intervals
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let budget = INTERVAL_WRITE_AHEAD_BYTES / chunk;
+        let mut disk = self.lock_interval_disk();
+        let covered = Self::runs_covered(&disk.mask, runs);
+        // The file already says Interrupted for this batch. A rewrite here
+        // would only publish retired completions, and those wait for the
+        // persist period so a contiguous frontier does not rewrite every gap.
+        if covered {
+            return Ok(());
+        }
+        let mut mask = disk.mask.clone();
+        for run in runs {
+            let submodule = *self.get_submodule_for_offset(run.start)?.0;
+            Self::extend_write_ahead(&mut mask, &memory, run, submodule, budget);
+        }
+        let projection = Self::project_interval_file(&memory, &mask)?;
+        let needs_write = self.projection_differs(&disk.written, &projection, touched);
+        if !needs_write {
+            // The file already has these Interrupted labels. Remember them so
+            // the next batch inside the span does not rewrite.
+            disk.mask = mask;
+            return Ok(());
+        }
+        drop(disk);
+        self.write_interval_image(&projection, Some(touched))?;
+        self.lock_interval_disk().mask = mask;
+        Ok(())
+    }
+
+    /// Drop the write-ahead mask for runs whose bytes and presence rows are
+    /// durable. The file still says `Interrupted` until a completion rewrite.
+    fn retire_write_ahead(&self, runs: &[WriteRun]) -> eyre::Result<()> {
+        if !self.intervals_batched() {
+            return Ok(());
+        }
+        let mut cuts = Vec::with_capacity(runs.len());
+        for run in runs {
+            let (start, end) = Self::run_bounds(run);
+            let submodule_start = self.get_submodule_for_offset(run.start)?.0.start();
+            cuts.push((start, end, submodule_start));
+        }
+        let mut disk = self.lock_interval_disk();
+        for (start, end, submodule_start) in cuts {
+            let _ = disk.mask.cut(ii(start, end));
+            disk.dirty.insert(submodule_start);
+        }
+        Ok(())
+    }
+
+    fn persist_interval_completion(
+        &self,
+        force: bool,
+        runs: &[WriteRun],
+        touched: &BTreeSet<PartitionChunkOffset>,
+    ) -> eyre::Result<()> {
+        if self.intervals_batched() {
+            self.retire_write_ahead(runs)?;
+            self.flush_interval_completions_locked(force)?;
+        } else {
+            self.write_intervals_files(Some(touched))?;
+        }
+        Ok(())
+    }
+
+    /// Rewrite dirty completions. `force` ignores the persist period. The
+    /// ahead mask stays, so this does not publish `Entropy` over a span that
+    /// a crash must still treat as `Uninitialized`.
+    fn flush_interval_completions_locked(&self, force: bool) -> eyre::Result<()> {
+        if self.interval_flush_suppressed() || !self.intervals_batched() {
+            return Ok(());
+        }
+        let period = self.intervals_persist_period();
+        let memory = self
+            .intervals
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let disk = self.lock_interval_disk();
+        let mut touched = BTreeSet::new();
+        for (interval, _) in self.submodules.iter() {
+            let start = interval.start();
+            if !disk.dirty.contains(&start) {
+                continue;
+            }
+            let due = disk
+                .last_completion
+                .get(&start)
+                .is_none_or(|then| then.elapsed() >= period);
+            if force || due {
+                touched.insert(start);
+            }
+        }
+        if touched.is_empty() {
+            return Ok(());
+        }
+        let projection = Self::project_interval_file(&memory, &disk.mask)?;
+        drop(disk);
+        self.write_interval_image(&projection, Some(&touched))
+    }
+
+    /// Write the live map and drop the ahead mask. Call this only when no
+    /// chunk is sitting in memory as `Data` before its `fdatasync`: shutdown
+    /// does that by running it after a successful `force_sync`. Reset and
+    /// rollback set the live map to `Uninitialized` first.
+    fn persist_intervals_authoritative(&self) -> eyre::Result<()> {
+        if self.interval_flush_suppressed() {
+            return Ok(());
+        }
+        let memory = self
+            .intervals
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        {
+            let mut disk = self.lock_interval_disk();
+            disk.mask = IntervalMask::new();
+            disk.dirty.clear();
+            if disk.written == memory {
+                return Ok(());
+            }
+        }
+        self.write_interval_image(&memory, None)
+    }
+
+    /// Rewrite `intervals.json` from the live map. `only` limits the write to
+    /// those submodule starts. `None` rewrites every submodule. Period `0`
+    /// uses this. Batching uses [`Self::write_interval_image`] on a projection.
     fn write_intervals_files(
         &self,
         only: Option<&BTreeSet<PartitionChunkOffset>>,
     ) -> eyre::Result<()> {
-        let intervals = self.intervals.read().unwrap();
+        let memory = self
+            .intervals
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.write_interval_image(&memory, only)
+    }
 
-        // Loop though each of the submodule ranges
+    /// Atomic replace of each selected submodule file. Temp names stay
+    /// `.intervals.json.*` / `intervals.json.*`. An unchanged slice is not
+    /// rewritten. A successful replace updates `written` and the completion
+    /// timer for that submodule.
+    fn write_interval_image(
+        &self,
+        image: &StorageIntervals,
+        only: Option<&BTreeSet<PartitionChunkOffset>>,
+    ) -> eyre::Result<()> {
         for (submodule_interval, submodule) in self.submodules.iter() {
-            if only.is_some_and(|starts| !starts.contains(&submodule_interval.start())) {
+            let start = submodule_interval.start();
+            if only.is_some_and(|starts| !starts.contains(&start)) {
                 continue;
             }
-            // Split out the ChunkType intervals that overlap the submodule interval
-            let mut working_copy = intervals.clone();
-            let cut_iter = working_copy.cut(*submodule_interval);
-            drop(working_copy);
-            // Write them to the submodules disk
-            if let Ok(mut submodule_intervals) = NoditMap::from_iter_strict(cut_iter) {
-                // Make sure the there is at least one interval spanning the submodule range
-                if submodule_intervals.is_empty() {
-                    submodule_intervals
-                        .insert_merge_touching_if_values_equal(
-                            *submodule_interval,
-                            ChunkType::Uninitialized,
-                        )
-                        .expect("to insert a default range to the submodule intervals");
-                }
+            let Some(slice) = Self::interval_slice(image, *submodule_interval) else {
+                continue;
+            };
+            let unchanged = {
+                let disk = self.lock_interval_disk();
+                Self::interval_slice(&disk.written, *submodule_interval).as_ref() == Some(&slice)
+            };
+            if unchanged {
+                self.lock_interval_disk().dirty.remove(&start);
+                continue;
+            }
+            let path = submodule
+                .intervals_file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut file = get_atomic_file(path.clone())?;
+            // `file` is a temporary file. `commit` renames it over the
+            // original after fsync, then fsyncs the directory.
+            file.write_all(serde_json::to_string(&slice)?.as_bytes())?;
+            file.commit()?;
+            drop(path);
+            let mut disk = self.lock_interval_disk();
+            Self::splice_interval_slice(&mut disk.written, *submodule_interval, &slice);
+            disk.dirty.remove(&start);
+            disk.last_completion.insert(start, Instant::now());
+        }
+        Ok(())
+    }
 
-                let path = submodule.intervals_file.lock().unwrap();
-
-                let mut file = get_atomic_file(path.clone())?;
-                // this `file` is actually a temporary file that will get renamed over the original, once we commit
-                file.write_all(serde_json::to_string(&submodule_intervals)?.as_bytes())?;
-                file.commit()?;
-
-                drop(path);
+    fn projection_differs(
+        &self,
+        written: &StorageIntervals,
+        projection: &StorageIntervals,
+        touched: &BTreeSet<PartitionChunkOffset>,
+    ) -> bool {
+        for (interval, _) in self.submodules.iter() {
+            if !touched.contains(&interval.start()) {
+                continue;
+            }
+            let file_slice = Self::interval_slice(written, *interval);
+            let next_slice = Self::interval_slice(projection, *interval);
+            if file_slice != next_slice {
+                return true;
             }
         }
-        drop(intervals);
+        false
+    }
 
-        Ok(())
+    fn project_interval_file(
+        memory: &StorageIntervals,
+        mask: &IntervalMask,
+    ) -> eyre::Result<StorageIntervals> {
+        let mut projected = memory.clone();
+        for interval in mask.iter().copied() {
+            let _ = projected.cut(interval);
+            projected
+                .insert_merge_touching_if_values_equal(interval, ChunkType::Interrupted)
+                .map_err(|error| eyre!("failed to overlay interrupted interval: {error:?}"))?;
+        }
+        Ok(projected)
+    }
+
+    /// Insert `run`, then walk forward. Stop at `Data`, at the submodule
+    /// boundary, when the budget is spent, or when the next point is already
+    /// masked. Do not jump the mask: that would add another 512 MiB on every
+    /// later commit and rewrite every gap.
+    fn extend_write_ahead(
+        mask: &mut IntervalMask,
+        memory: &StorageIntervals,
+        run: &WriteRun,
+        submodule: Interval<PartitionChunkOffset>,
+        budget_chunks: u64,
+    ) {
+        let (start, end) = Self::run_bounds(run);
+        mask.insert_merge_touching_or_overlapping(ii(start, end));
+        let Some(mut cursor) = end.up() else {
+            return;
+        };
+        let mut remaining = budget_chunks;
+        while remaining > 0 && cursor <= submodule.end() {
+            if mask.contains_point(cursor) {
+                break;
+            }
+            let Ok((interval, chunk_type)) = memory.get_key_value_at_point(cursor) else {
+                break;
+            };
+            // Data not in this run stays labelled Data. Marking it Interrupted
+            // would make a crash reload durable bytes as Uninitialized.
+            if *chunk_type == ChunkType::Data {
+                break;
+            }
+            let mut span_end = interval.end().min(submodule.end());
+            if let Some(hit) = mask.overlapping(ii(cursor, span_end)).next().copied() {
+                if hit.start() <= cursor {
+                    break;
+                }
+                let Some(before) = hit.start().down() else {
+                    break;
+                };
+                span_end = before;
+            }
+            if span_end < cursor {
+                break;
+            }
+            let span = u64::from(span_end.0 - cursor.0) + 1;
+            let take = span.min(remaining);
+            let extra = u32::try_from(take - 1).unwrap_or(u32::MAX);
+            let taken_end = PartitionChunkOffset(cursor.0.saturating_add(extra).min(span_end.0));
+            let actual = u64::from(taken_end.0 - cursor.0) + 1;
+            mask.insert_merge_touching_or_overlapping(ii(cursor, taken_end));
+            remaining -= actual;
+            let Some(next) = taken_end.up() else {
+                break;
+            };
+            cursor = next;
+        }
+    }
+
+    fn runs_covered(mask: &IntervalMask, runs: &[WriteRun]) -> bool {
+        runs.iter().all(|run| {
+            let (start, end) = Self::run_bounds(run);
+            mask.contains_interval(ii(start, end))
+        })
+    }
+
+    fn run_bounds(run: &WriteRun) -> (PartitionChunkOffset, PartitionChunkOffset) {
+        let start = run.offsets.iter().copied().min().unwrap_or(run.start);
+        let end = run.offsets.iter().copied().max().unwrap_or(run.start);
+        (start, end)
+    }
+
+    /// The submodule's slice of `image`. Empty input becomes one
+    /// `Uninitialized` range so the file always spans the submodule.
+    /// `None` when the cut intervals overlap, matching the old skip.
+    fn interval_slice(
+        image: &StorageIntervals,
+        range: Interval<PartitionChunkOffset>,
+    ) -> Option<StorageIntervals> {
+        let mut working = image.clone();
+        let cut: Vec<_> = working.cut(range).collect();
+        let mut slice = NoditMap::from_iter_strict(cut.into_iter()).ok()?;
+        if slice.is_empty() {
+            slice
+                .insert_merge_touching_if_values_equal(range, ChunkType::Uninitialized)
+                .expect("empty slice accepts the submodule range");
+        }
+        Some(slice)
+    }
+
+    fn splice_interval_slice(
+        written: &mut StorageIntervals,
+        range: Interval<PartitionChunkOffset>,
+        slice: &StorageIntervals,
+    ) {
+        let _ = written.cut(range);
+        for (interval, chunk_type) in slice.iter() {
+            let _ = written.insert_merge_touching_if_values_equal(*interval, *chunk_type);
+        }
+    }
+
+    /// Raw file image. `Interrupted` stays `Interrupted` and seeds the mask.
+    /// The live map is built separately and normalizes those ranges.
+    fn load_interval_disk(submodules: &SubmoduleMap) -> IntervalDisk {
+        let mut written = StorageIntervals::new();
+        let mut mask = IntervalMask::new();
+        let mut last_completion = BTreeMap::new();
+        let now = Instant::now();
+        for (submodule_interval, submodule) in submodules.iter() {
+            last_completion.insert(submodule_interval.start(), now);
+            let path = submodule
+                .intervals_file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Ok(raw) = read_intervals_file(&path) else {
+                continue;
+            };
+            for (interval, chunk_type) in raw {
+                if chunk_type == ChunkType::Interrupted {
+                    mask.insert_merge_touching_or_overlapping(interval);
+                }
+                let _ = written.insert_merge_touching_if_values_equal(interval, chunk_type);
+            }
+        }
+        IntervalDisk {
+            written,
+            mask,
+            dirty: BTreeSet::new(),
+            last_completion,
+        }
     }
 
     /// Reconstructs the global StorageIntervals by loading and merging interval data from all submodules.
@@ -4561,11 +5007,23 @@ impl Drop for StorageModule {
             }
         }
         info!("Syncing SM {} to disk...", &self.id);
-        if let Err(e) = self.force_sync_pending_chunks() {
-            error!(
-                "Unable to sync writes while dropping SM {} - {:?}",
-                &self.id, &e
-            );
+        // Authoritative interval rewrite only after the chunk fsync. A failed
+        // flush can leave live `Data` for bytes that are not durable yet.
+        match self.force_sync_pending_chunks() {
+            Ok(()) => {
+                if let Err(e) = self.persist_intervals_authoritative() {
+                    error!(
+                        "Unable to persist intervals while dropping SM {} - {:?}",
+                        &self.id, &e
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Unable to sync writes while dropping SM {} - {:?}",
+                    &self.id, &e
+                );
+            }
         }
     }
 }
@@ -6026,6 +6484,7 @@ mod tests {
                 entropy_sweep_max_bytes: sweep_bytes,
                 entropy_coalesce_hole_bytes: sweep_bytes,
                 drop_recall_page_cache: false,
+                intervals_persist_secs: 0,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
@@ -7399,6 +7858,251 @@ mod tests {
         Ok(())
     }
 
+    fn interval_batch_module(
+        prefix: &str,
+        persist_secs: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 11,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: persist_secs,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
+            },
+            &config,
+        )?;
+        Ok((tmp_dir, config, storage))
+    }
+
+    fn file_intervals(module: &StorageModule) -> eyre::Result<StorageIntervals> {
+        read_intervals_file(&submodule_interval_path(module, 0))
+    }
+
+    #[test]
+    fn period_zero_writes_the_completion_immediately() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = interval_batch_module("intervals_period_0", 0)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        let file = file_intervals(&storage)?;
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(0)).copied(),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(1)).copied(),
+            Some(ChunkType::Uninitialized)
+        );
+        assert!(
+            file.iter()
+                .all(|(_, chunk_type)| *chunk_type != ChunkType::Interrupted)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn batched_completion_lags_the_file_until_shutdown() -> eyre::Result<()> {
+        let (tmp, config, storage) = interval_batch_module("intervals_batch_crash", 30)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        let path = submodule_interval_path(&storage, 0);
+        let before = fs::read(&path)?;
+        let file = file_intervals(&storage)?;
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(0)).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        assert!(
+            file.iter()
+                .all(|(_, chunk_type)| *chunk_type != ChunkType::Data)
+        );
+        // The ahead mark covers the rest of this small submodule. A second
+        // sync inside it must not rewrite the file.
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![8_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert_eq!(fs::read(&path)?, before);
+        assert_eq!(
+            storage.get_chunk_type(&PartitionChunkOffset::from(2)),
+            Some(ChunkType::Uninitialized)
+        );
+
+        storage.suppress_interval_flush_for_test();
+        drop(storage);
+
+        let reloaded = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
+            },
+            &config,
+        )?;
+        assert_eq!(
+            reloaded.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            reloaded.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert!(reloaded.get_intervals(ChunkType::Data).is_empty());
+        drop(reloaded);
+        drop(tmp);
+        Ok(())
+    }
+
+    #[test]
+    fn clean_shutdown_persists_completions_and_keeps_entropy() -> eyre::Result<()> {
+        let (tmp, config, storage) = interval_batch_module("intervals_batch_shutdown", 30)?;
+        {
+            let mut intervals = storage.intervals.write().unwrap();
+            *intervals = StorageIntervals::new();
+            intervals
+                .insert_merge_touching_if_values_equal(
+                    partition_chunk_offset_ii!(0, 10),
+                    ChunkType::Entropy,
+                )
+                .expect("entropy span");
+        }
+        storage.write_intervals_to_submodules()?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert_eq!(
+            storage.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(ChunkType::Entropy)
+        );
+        let file = file_intervals(&storage)?;
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(0)).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(1)).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        drop(storage);
+
+        let reloaded = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
+            },
+            &config,
+        )?;
+        assert_eq!(
+            reloaded.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(
+            reloaded.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(ChunkType::Entropy)
+        );
+        drop(reloaded);
+        drop(tmp);
+        Ok(())
+    }
+
+    #[test]
+    fn write_ahead_stops_before_durable_data() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = interval_batch_module("intervals_stop_at_data", 30)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(5),
+            vec![5_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(5)));
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        let file = file_intervals(&storage)?;
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(0)).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(4)).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(5)).copied(),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(
+            storage.get_chunk_type(&PartitionChunkOffset::from(6)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(6)).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_fsync_does_not_publish_data_intervals() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = interval_batch_module("intervals_before_fsync", 30)?;
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeDataFsync);
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        assert!(storage.force_sync_pending_chunks().is_err());
+        assert!(storage.has_pending_writes());
+        assert!(!storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        let file = file_intervals(&storage)?;
+        assert_eq!(
+            file.get_at_point(PartitionChunkOffset::from(0)).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        assert!(
+            file.iter()
+                .all(|(_, chunk_type)| *chunk_type != ChunkType::Data)
+        );
+        Ok(())
+    }
+
     #[ignore]
     #[test]
     // note: this requires you to change the submodule database args to set the growth and shrink step to 1 and 2 respectively to produce accurate results
@@ -8006,6 +8710,8 @@ mod tests {
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: 32,
+                // These tests read intervals.json as soon as sync returns.
+                intervals_persist_secs: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),

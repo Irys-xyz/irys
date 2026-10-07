@@ -32,9 +32,10 @@
 //! A data-path row is written only after this gap's `chunks.dat` fdatasync.
 //! One index batch per submodule covers those rows. A synced RocksDB batch
 //! also covers registrations still waiting on group commit.
-//! This thread marks `intervals.json` interrupted before those `pwrite`s
-//! and replaces it with the durable types only after that index batch.
-//! Another thread posts that interval write here.
+//! This thread stores a write-ahead `Interrupted` mark in `intervals.json`
+//! before those `pwrite`s. A completion (`Data` or `Entropy`) is rewritten
+//! with the next write-ahead, on the persist interval, or on shutdown.
+//! Another thread posts a full interval rewrite here.
 //!
 //! `StorageModuleService` starts one thread per module. That thread runs the
 //! sweep and the packed flush. It sleeps on the gate condvar and wakes when
@@ -593,7 +594,7 @@ impl DiskGate {
         self.request_lane(true, false)
     }
 
-    /// Ask the lane to rewrite every `intervals.json`. `Stopped` means this
+    /// Ask the lane to write the live interval map. `Stopped` means this
     /// caller must write the files itself.
     pub(super) fn request_lane_persist(&self) -> Result<(), LaneHandoffError> {
         self.request_lane(false, true)
@@ -2681,14 +2682,17 @@ impl StorageModule {
         Some(until_aged.max(until_hold))
     }
 
-    /// Soonest of the write grace and the read grace. `None` only when both
-    /// queues have nothing waiting on a timer.
+    /// Soonest of the write grace, the read grace, and a due interval
+    /// completion. `None` only when nothing is waiting on a timer.
     fn lane_grace_remaining(&self) -> Option<Duration> {
-        match (self.write_grace_remaining(), self.read_grace_remaining()) {
-            (Some(write), Some(read)) => Some(write.min(read)),
-            (Some(delay), None) | (None, Some(delay)) => Some(delay),
-            (None, None) => None,
-        }
+        [
+            self.write_grace_remaining(),
+            self.read_grace_remaining(),
+            self.interval_flush_remaining(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// True when the longest ready entropy span is strictly longer than the
@@ -2718,6 +2722,12 @@ impl StorageModule {
         {
             return true;
         }
+        // A due interval completion rewrites even when no chunk is queued.
+        // Zero remaining must count as ready: `wait_until_lane_event` treats
+        // a zero grace as "wait for a notify".
+        if self.interval_flush_remaining() == Some(Duration::ZERO) {
+            return true;
+        }
         // Memory entropy needs the sweep lock. A young short disk span stays
         // queued, and it does not wake the lane on its own.
         self.disk.sweep_lock_free() && self.memory_entropy_can_fold()
@@ -2742,6 +2752,15 @@ impl StorageModule {
         if self.disk.recall_pending() {
             self.poll_acks();
             return;
+        }
+        // Completion rewrites wait out an active recall. They do not take the
+        // chunk-io hold, so a recall queued behind them is not blocked on the
+        // interval file.
+        if let Err(error) = self.flush_interval_completions_locked(false) {
+            tracing::error!(
+                "Couldn't rewrite intervals for storage_module {}: {error}",
+                self.id
+            );
         }
         // The index drain stays paused for this pass. Presence rows commit on
         // this thread after `chunks.dat` is fdatasync'd. Submitting them to
@@ -2810,7 +2829,7 @@ impl StorageModule {
                 error = Some(cause.to_string());
             }
             if request.persist
-                && let Err(cause) = self.write_intervals_files(None)
+                && let Err(cause) = self.persist_intervals_authoritative()
             {
                 tracing::error!(
                     "Couldn't write intervals for storage_module {}: {cause}",
@@ -2831,11 +2850,21 @@ impl StorageModule {
         // arrives after the drop writes on its own thread.
         self.disk.clear_recall_flush();
         self.service_lane_handoff();
-        if let Err(error) = self.force_sync_pending_chunks() {
-            tracing::error!(
-                "Couldn't flush storage module {} on disk lane stop: {error}",
-                self.id
-            );
+        match self.force_sync_pending_chunks() {
+            Ok(()) => {
+                if let Err(error) = self.persist_intervals_authoritative() {
+                    tracing::error!(
+                        "Couldn't persist intervals for storage module {} on disk lane stop: {error}",
+                        self.id
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    "Couldn't flush storage module {} on disk lane stop: {error}",
+                    self.id
+                );
+            }
         }
         self.service_lane_handoff();
         self.poll_acks();
@@ -3359,6 +3388,7 @@ mod tests {
                 entropy_sweep_max_bytes: chunk_size * max_chunks,
                 entropy_coalesce_hole_bytes: chunk_size * hole_chunks,
                 drop_recall_page_cache: false,
+                intervals_persist_secs: 0,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
