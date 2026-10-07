@@ -455,7 +455,7 @@ mod staged_sync_tests {
     use std::time::Instant;
 
     fn slots(offsets: &[u32], age: std::time::Duration) -> Vec<StagedOffset> {
-        let staged_at = Instant::now() - age;
+        let staged_at = Instant::now().checked_sub(age).unwrap();
         offsets
             .iter()
             .copied()
@@ -504,7 +504,7 @@ mod staged_sync_tests {
         let staged = vec![
             StagedOffset {
                 offset: 8,
-                staged_at: now - SYNC_STAGE_WAIT,
+                staged_at: now.checked_sub(SYNC_STAGE_WAIT).unwrap(),
             },
             StagedOffset {
                 offset: 9,
@@ -1106,7 +1106,7 @@ impl DataSyncServiceInner {
         if self
             .staged_bodies
             .get(&storage_module_id)
-            .is_some_and(|staged| staged.is_empty())
+            .is_some_and(BTreeMap::is_empty)
         {
             self.staged_bodies.remove(&storage_module_id);
         }
@@ -2153,10 +2153,7 @@ mod ingress_proof_peer_tests {
 #[cfg(test)]
 mod write_outcome_tests {
     use super::{DataSyncWriteOutcome, attempt_data_sync_write};
-    use irys_database::{
-        db::IrysDatabaseExt as _,
-        submodule::{add_data_root_info, tables::DataRootInfo},
-    };
+    use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
     use irys_domain::{StorageModule, StorageModuleInfo, WriteDataChunkError};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
@@ -2273,9 +2270,8 @@ mod write_outcome_tests {
             .expect("submodule for offset");
         submodule
             .db
-            .update_eyre(|tx| {
-                add_data_root_info(
-                    tx,
+            .update(|tx| {
+                tx.add_data_root_info(
                     data_root,
                     &DataRootInfo {
                         start_offset: RelativeChunkOffset::from(0_i32),

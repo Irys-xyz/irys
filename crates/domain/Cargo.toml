@@ -15,7 +15,7 @@ eyre.workspace = true
 libc = "0.2"
 irys-types.workspace = true
 irys-config.workspace = true
-irys-database.workspace = true
+irys-database = { workspace = true, features = ["rocksdb"] }
 irys-packing.workspace = true
 irys-storage.workspace = true
 irys-reth-node-bridge.workspace = true

@@ -1310,6 +1310,9 @@ impl IrysNode {
                         .iter()
                         .filter(|sm| sm.partition_assignment().is_some())
                         .count() as u64;
+                    for module in modules.iter() {
+                        module.report_index_metrics();
+                    }
                     drop(modules);
                     metrics::record_storage_modules_total(total);
                     metrics::record_partitions_assigned(assigned);

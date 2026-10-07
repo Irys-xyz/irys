@@ -1,24 +1,28 @@
 use std::path::Path;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::{
-    DatabaseEnv,
-    cursor::{DbCursorRO as _, DbCursorRW as _},
+    Database as _, DatabaseEnv,
+    cursor::DbCursorRO as _,
     mdbx::DatabaseArguments,
+    table::Table,
     transaction::{DbTx, DbTxMut},
 };
 
 use crate::{
+    metadata::MetadataKey,
     open_or_create_db,
     submodule::tables::{DataRootInfo, DataRootInfosByDataRoot},
 };
 
+use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
 use super::tables::{
-    ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos,
-    PendingBodyMigration, PendingBodyMigrationsByOffset, SubmoduleTables, TxLeafBinding,
-    TxLeafBindingByTxPathHash, TxPathByTxPathHash,
+    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos, Metadata,
+    PendingBodyMigration, PendingBodyMigrationsByOffset, SUBMODULE_SCHEMA, SubmoduleTables,
+    TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
+    TxPathIntervalByStart,
 };
 
 /// Creates or opens a *submodule* MDBX database with the given [`DatabaseArguments`].
@@ -30,21 +34,36 @@ pub fn create_or_open_submodule_db<P: AsRef<Path>>(
     path: P,
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    open_or_create_db(path, SubmoduleTables::ALL, args)
+    let env = open_or_create_db(path, SubmoduleTables::ALL, args)?;
+    ensure_mdbx_schema(&env)?;
+    Ok(env)
 }
 
-/// gets the full data path for the chunk with the provided offset
+fn ensure_mdbx_schema(env: &DatabaseEnv) -> eyre::Result<()> {
+    let expected = SUBMODULE_SCHEMA.as_bytes().to_vec();
+    let read = env.tx()?;
+    let current = read.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
+    let occupied = read.entries::<ChunkPathHashesByOffset>()? > 0;
+    drop(read);
+    match current {
+        Some(found) if found == expected => Ok(()),
+        Some(_) => eyre::bail!("submodule index schema row does not match this binary"),
+        None if occupied => eyre::bail!("submodule index has rows from an older schema"),
+        None => {
+            let write = env.tx_mut()?;
+            write.put::<Metadata>(MetadataKey::DBSchemaVersion, expected)?;
+            write.commit()?;
+            Ok(())
+        }
+    }
+}
+
+/// Full data path stored at `offset`.
 pub fn get_data_path_by_offset<T: DbTx>(
     tx: &T,
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkDataPath>> {
-    if let Some(data_path_hash) =
-        get_path_hashes_by_offset(tx, offset)?.and_then(|h| h.data_path_hash)
-    {
-        Ok(get_full_data_path(tx, data_path_hash)?)
-    } else {
-        Ok(None)
-    }
+    Ok(tx.get::<ChunkDataPathByOffset>(offset)?)
 }
 
 /// gets the full tx path for the chunk with the provided offset
@@ -52,24 +71,25 @@ pub fn get_tx_path_by_offset<T: DbTx>(
     tx: &T,
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<TxPath>> {
-    if let Some(tx_path_hash) = get_path_hashes_by_offset(tx, offset)?.and_then(|h| h.tx_path_hash)
-    {
-        Ok(get_full_tx_path(tx, tx_path_hash)?)
-    } else {
-        Ok(None)
-    }
+    let Some(tx_path_hash) = tx_hash_at(tx, offset)? else {
+        return Ok(None);
+    };
+    get_full_tx_path(tx, tx_path_hash)
 }
 
 pub fn get_path_hashes_by_offset<T: DbTx>(
     tx: &T,
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkPathHashes>> {
-    Ok(tx.get::<ChunkPathHashesByOffset>(offset)?)
+    let stored = tx.get::<ChunkPathHashesByOffset>(offset)?;
+    let tx_path_hash = tx_hash_at(tx, offset)?;
+    Ok(combine_hashes(stored, tx_path_hash))
 }
 
-/// Inclusive `ChunkPathHashesByOffset` rows in `[start, end]`, in offset order.
+/// Data-path rows in `[start, end]`, in offset order, with the covering tx hash.
 ///
-/// One cursor walk. Offsets with no row are absent, not `None` placeholders.
+/// An offset with no data-path hash is absent. Tx coverage without a data path
+/// is not a row here. Point reads still see that coverage.
 pub fn path_hashes_in_inclusive_range<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
@@ -78,10 +98,28 @@ pub fn path_hashes_in_inclusive_range<T: DbTx>(
     if start > end {
         return Ok(Vec::new());
     }
+    let intervals = intervals_touching(tx, start, end)?;
     let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
     let mut rows = Vec::new();
+    let mut index = 0;
     for row in cursor.walk_range(start..=end)? {
-        rows.push(row?);
+        let (offset, hashes) = row?;
+        let Some(data_path_hash) = hashes.data_path_hash else {
+            continue;
+        };
+        while index < intervals.len() && intervals[index].end < offset {
+            index += 1;
+        }
+        let tx_path_hash = intervals.get(index).and_then(|interval| {
+            (interval.start <= offset && interval.end >= offset).then_some(interval.tx_path_hash)
+        });
+        rows.push((
+            offset,
+            ChunkPathHashes {
+                data_path_hash: Some(data_path_hash),
+                tx_path_hash,
+            },
+        ));
     }
     Ok(rows)
 }
@@ -181,64 +219,24 @@ pub fn gaps_in_sorted_keys(
     gaps_with(start, end, || Ok(iter.next())).expect("infallible key stream")
 }
 
-/// Returns true when the table is exactly the dense range `[start, end)`.
-fn path_hash_table_is_dense_range<T: DbTx>(
-    tx: &T,
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-) -> eyre::Result<bool> {
-    let expected_len = (*end as u64).saturating_sub(*start as u64);
-    if expected_len == 0 {
-        return Ok(true);
-    }
-    let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
-    let first = cursor.first()?;
-    let last = cursor.last()?;
-    let count = tx.entries::<ChunkPathHashesByOffset>()? as u64;
-    Ok(match (first, last) {
-        (Some((first_key, _)), Some((last_key, _))) => {
-            // Compare last == end-1 without wrapping u32::MAX + 1.
-            let last_is_range_end = *end > 0 && last_key == PartitionChunkOffset(*end - 1);
-            first_key == start && last_is_range_end && count == expected_len
-        }
-        _ => false,
-    })
-}
-
-/// First offset in half-open `[start, end)` with no `ChunkPathHashesByOffset` key.
+/// First offset in half-open `[start, end)` with no tx-path interval.
 ///
-/// Healthy full indexes take an O(1) density check (`first` + `last` + `entries`).
-/// Otherwise walks the sorted keyspace until the first hole (one RO tx), not a
-/// full multi-hole collect — use [`missing_path_hash_ranges_in_tx`] for that.
-///
-/// Key-presence only. Legacy `{tx_path_hash: None, data_path_hash: None}`
-/// tombstones written by pre-fix clears (before clears switched to deleting the
-/// key) read as present → dense → invisible to heal, while their `DataRootInfos`
-/// are gone. A one-shot upgrade scrub deleting all entries whose both hashes are
-/// `None` converts them to real, healable gaps.
+/// A covered offset with no data-path row is indexed. Heal uses this coverage,
+/// not the presence of a per-chunk key.
 pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<Option<PartitionChunkOffset>> {
-    if start >= end {
-        return Ok(None);
-    }
-    if path_hash_table_is_dense_range(tx, start, end)? {
-        return Ok(None);
-    }
-
-    let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
-    let mut walker = cursor.walk(Some(start))?;
-    first_gap_with(start, end, || {
-        Ok(walker.next().transpose()?.map(|(key, _)| key))
-    })
+    Ok(missing_path_hash_ranges_in_tx(tx, start, end)?
+        .into_iter()
+        .next()
+        .map(|(gap_start, _)| gap_start))
 }
 
-/// All half-open path-hash holes `[gap_start, gap_end)` in `[start, end)`.
+/// Half-open spans inside `[start, end)` that no tx-path interval covers.
 ///
-/// Used by index heal to re-migrate **only** blocks overlapping holes, not the
-/// entire tail after the first gap.
+/// Index heal re-migrates blocks that overlap these spans.
 pub fn missing_path_hash_ranges_in_tx<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
@@ -247,35 +245,16 @@ pub fn missing_path_hash_ranges_in_tx<T: DbTx>(
     if start >= end {
         return Ok(Vec::new());
     }
-
-    // Density fast path: prove the *entire table* is exactly the dense range
-    // [start, end). Anchors on `cursor.first()` (table minimum), not `seek(start)`:
-    // keys below `start` must not be allowed to pad `entries()` while holes sit
-    // inside the range (e.g. keys {0,5,6,7,9} over [5,10) must not report dense).
-    if path_hash_table_is_dense_range(tx, start, end)? {
-        return Ok(Vec::new());
-    }
-
-    let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
-    let mut walker = cursor.walk(Some(start))?;
-    gaps_with(start, end, || {
-        Ok(walker.next().transpose()?.map(|(key, _)| key))
-    })
-}
-
-pub fn get_full_data_path<T: DbTx>(
-    tx: &T,
-    path_hash: ChunkPathHash,
-) -> eyre::Result<Option<ChunkDataPath>> {
-    Ok(tx.get::<ChunkDataPathByPathHash>(path_hash)?)
+    let intervals = intervals_touching(tx, start, PartitionChunkOffset(end.0 - 1))?;
+    Ok(coverage_gaps(start, end, &intervals))
 }
 
 pub fn add_full_data_path<T: DbTxMut>(
     tx: &T,
-    path_hash: ChunkPathHash,
+    offset: PartitionChunkOffset,
     data_path: ChunkDataPath,
 ) -> eyre::Result<()> {
-    tx.put::<ChunkDataPathByPathHash>(path_hash, data_path)?;
+    tx.put::<ChunkDataPathByOffset>(offset, data_path)?;
     Ok(())
 }
 
@@ -317,10 +296,7 @@ pub fn add_data_path_hash_to_offset_index<T: DbTxMut + DbTx>(
     offset: PartitionChunkOffset,
     path_hash: Option<ChunkPathHash>,
 ) -> eyre::Result<()> {
-    let mut chunk_hashes = get_path_hashes_by_offset(tx, offset)?.unwrap_or_default();
-    chunk_hashes.data_path_hash = path_hash;
-    set_path_hashes_by_offset(tx, offset, chunk_hashes)?;
-    Ok(())
+    put_data_path_hash(tx, offset, path_hash)
 }
 
 pub fn add_tx_path_hash_to_offset_index<T: DbTxMut + DbTx>(
@@ -328,90 +304,66 @@ pub fn add_tx_path_hash_to_offset_index<T: DbTxMut + DbTx>(
     offset: PartitionChunkOffset,
     path_hash: Option<TxPathHash>,
 ) -> eyre::Result<()> {
-    let mut chunk_hashes = get_path_hashes_by_offset(tx, offset)?.unwrap_or_default();
-    chunk_hashes.tx_path_hash = path_hash;
-    set_path_hashes_by_offset(tx, offset, chunk_hashes)?;
-    Ok(())
+    assign_tx_interval(tx, offset, offset, path_hash)
 }
 
-/// Set `tx_path_hash` on every offset in the inclusive range `[start, end]`.
+/// Record one tx-path interval for the inclusive range `[start, end]`.
 ///
-/// One write transaction, owned by the caller. When the range sits strictly
-/// past the last stored key, the rows are appended: MDBX `APPEND` rejects a
-/// key that is not after every existing key, and an overlapping range must
-/// keep any `data_path_hash` already stored on those offsets.
+/// Overlapping intervals are split. `None` removes coverage. Data-path hashes
+/// already stored on those offsets stay.
 pub fn add_tx_path_hash_to_offset_range<T: DbTxMut + DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
     path_hash: Option<TxPathHash>,
 ) -> eyre::Result<()> {
-    if start > end {
-        return Ok(());
-    }
-    let append = {
-        let mut cursor = tx.cursor_write::<ChunkPathHashesByOffset>()?;
-        match cursor.seek(start)? {
-            None => {
-                let value = ChunkPathHashes {
-                    data_path_hash: None,
-                    tx_path_hash: path_hash,
-                };
-                for raw in start.0..=end.0 {
-                    cursor.append(PartitionChunkOffset::from(raw), &value)?;
-                }
-                true
-            }
-            Some(_) => false,
-        }
-    };
-    if append {
-        return Ok(());
-    }
-    for raw in start.0..=end.0 {
-        add_tx_path_hash_to_offset_index(tx, PartitionChunkOffset::from(raw), path_hash)?;
-    }
-    Ok(())
+    assign_tx_interval(tx, start, end, path_hash)
 }
 
-/// Store each chunk's data path and its offset-index hash in one transaction.
+/// Store each chunk's data path under its offset, and the hash on the offset row.
 ///
-/// `updates` may arrive in any offset order. They are applied in offset order
-/// so the write cursor moves forward through the leaf pages. An existing
-/// `tx_path_hash` on the same offset is left in place.
+/// `updates` may arrive in any offset order. The tx-path interval is unchanged.
 pub fn write_data_path_updates<T: DbTxMut + DbTx>(
     tx: &T,
     mut updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
 ) -> eyre::Result<()> {
     updates.sort_by_key(|(offset, _, _)| *offset);
-    let mut cursor = tx.cursor_write::<ChunkPathHashesByOffset>()?;
     for (offset, path_hash, data_path) in updates {
-        add_full_data_path(tx, path_hash, data_path)?;
-        let mut hashes = cursor
-            .seek_exact(offset)?
-            .map(|(_, hashes)| hashes)
-            .unwrap_or_default();
-        hashes.data_path_hash = Some(path_hash);
-        cursor.upsert(offset, &hashes)?;
+        add_full_data_path(tx, offset, data_path)?;
+        put_data_path_hash(tx, offset, Some(path_hash))?;
     }
     Ok(())
 }
 
-pub fn set_path_hashes_by_offset<T: DbTxMut>(
+pub fn set_path_hashes_by_offset<T: DbTxMut + DbTx>(
     tx: &T,
     offset: PartitionChunkOffset,
     path_hashes: ChunkPathHashes,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<ChunkPathHashesByOffset>(offset, path_hashes)?)
+    put_data_path_hash(tx, offset, path_hashes.data_path_hash)?;
+    assign_tx_interval(tx, offset, offset, path_hashes.tx_path_hash)
 }
 
-/// Delete the entire `ChunkPathHashesByOffset` entry for `offset` (un-index it),
-/// so a gap scan sees the offset as missing rather than present-with-None.
-pub fn del_path_hashes_by_offset<T: DbTxMut>(
+/// Remove this offset's data-path hash, data-path bytes, and tx coverage.
+pub fn del_path_hashes_by_offset<T: DbTxMut + DbTx>(
     tx: &T,
     offset: PartitionChunkOffset,
 ) -> eyre::Result<()> {
-    tx.delete::<ChunkPathHashesByOffset>(offset, None)?;
+    clear_paths_in_inclusive_range(tx, offset, offset)
+}
+
+/// Drop tx coverage and per-chunk path rows in the inclusive range.
+pub fn clear_paths_in_inclusive_range<T: DbTxMut + DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<()> {
+    if start > end {
+        return Ok(());
+    }
+    assign_tx_interval(tx, start, end, None)?;
+    delete_offset_rows::<ChunkPathHashesByOffset, T>(tx, start, end)?;
+    delete_offset_rows::<ChunkDataPathByOffset, T>(tx, start, end)?;
     Ok(())
 }
 
@@ -511,11 +463,146 @@ pub fn del_pending_body_migrations_in_range<T: DbTxMut + DbTx>(
 /// clear db
 pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<ChunkPathHashesByOffset>()?;
-    tx.clear::<ChunkDataPathByPathHash>()?;
+    tx.clear::<ChunkDataPathByOffset>()?;
+    tx.clear::<TxPathIntervalByStart>()?;
     tx.clear::<TxPathByTxPathHash>()?;
     tx.clear::<DataRootInfosByDataRoot>()?;
     tx.clear::<TxLeafBindingByTxPathHash>()?;
     tx.clear::<PendingBodyMigrationsByOffset>()?;
+    Ok(())
+}
+
+fn put_data_path_hash<T: DbTxMut>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+    path_hash: Option<ChunkPathHash>,
+) -> eyre::Result<()> {
+    match path_hash {
+        Some(data_path_hash) => {
+            tx.put::<ChunkPathHashesByOffset>(
+                offset,
+                ChunkPathHashes {
+                    data_path_hash: Some(data_path_hash),
+                    tx_path_hash: None,
+                },
+            )?;
+        }
+        None => {
+            tx.delete::<ChunkPathHashesByOffset>(offset, None)?;
+        }
+    }
+    Ok(())
+}
+
+fn tx_hash_at<T: DbTx>(tx: &T, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
+    let Some(row) = floor_interval(tx, offset)? else {
+        return Ok(None);
+    };
+    Ok((row.start <= offset && row.end >= offset).then_some(row.tx_path_hash))
+}
+
+fn floor_interval<T: DbTx>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+) -> eyre::Result<Option<IntervalRow>> {
+    let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
+    let positioned = match cursor.seek(offset)? {
+        Some((key, _)) if key > offset => cursor.prev()?,
+        Some(pair) => Some(pair),
+        None => cursor.last()?,
+    };
+    Ok(positioned.map(|(start, value)| IntervalRow {
+        start,
+        end: value.end,
+        tx_path_hash: value.tx_path_hash,
+    }))
+}
+
+fn intervals_touching<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<Vec<IntervalRow>> {
+    let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
+    // `seek` lands on the first start >= the edit. That row's left neighbor
+    // is one key lower, including when the hit is exact.
+    let mut current = match cursor.seek(start)? {
+        Some(_) => match cursor.prev()? {
+            Some(previous) => Some(previous),
+            None => cursor.seek(start)?,
+        },
+        None => cursor.last()?,
+    };
+    let left_limit = start.0.saturating_sub(1);
+    let right_limit = end.0.saturating_add(1);
+    let mut rows = Vec::new();
+    while let Some((key, value)) = current {
+        if value.end.0 < left_limit && key < start {
+            current = cursor.next()?;
+            continue;
+        }
+        if key.0 > right_limit {
+            break;
+        }
+        rows.push(IntervalRow {
+            start: key,
+            end: value.end,
+            tx_path_hash: value.tx_path_hash,
+        });
+        if key.0 >= right_limit {
+            break;
+        }
+        current = cursor.next()?;
+    }
+    Ok(rows)
+}
+
+fn assign_tx_interval<T: DbTxMut + DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    tx_path_hash: Option<H256>,
+) -> eyre::Result<()> {
+    if start > end {
+        return Ok(());
+    }
+    let existing = intervals_touching(tx, start, end)?;
+    let edit = plan_coverage(&existing, start, end, tx_path_hash);
+    for key in edit.delete {
+        tx.delete::<TxPathIntervalByStart>(key, None)?;
+    }
+    for row in edit.put {
+        tx.put::<TxPathIntervalByStart>(
+            row.start,
+            TxPathInterval {
+                end: row.end,
+                tx_path_hash: row.tx_path_hash,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn delete_offset_rows<OffsetTable, T>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<()>
+where
+    OffsetTable: Table<Key = PartitionChunkOffset>,
+    T: DbTxMut + DbTx,
+{
+    let keys = {
+        let mut cursor = tx.cursor_write::<OffsetTable>()?;
+        let mut keys = Vec::new();
+        for row in cursor.walk_range(start..=end)? {
+            keys.push(row?.0);
+        }
+        keys
+    };
+    for key in keys {
+        tx.delete::<OffsetTable>(key, None)?;
+    }
     Ok(())
 }
 
@@ -1037,7 +1124,7 @@ mod tests {
     #[test]
     fn offset_range_keeps_data_paths_and_batches_updates() -> eyre::Result<()> {
         use super::{
-            add_tx_path_hash_to_offset_range, get_full_data_path, get_path_hashes_by_offset,
+            add_tx_path_hash_to_offset_range, get_data_path_by_offset, get_path_hashes_by_offset,
             path_hashes_in_inclusive_range, write_data_path_updates,
         };
         use crate::submodule::tables::SubmoduleTables;
@@ -1079,7 +1166,7 @@ mod tests {
 
         let rows = db.view_eyre(|tx| path_hashes_in_inclusive_range(tx, o(0), o(7)))?;
         let offsets: Vec<u32> = rows.iter().map(|(offset, _)| offset.0).collect();
-        assert_eq!(offsets, vec![2, 3, 4, 6, 7]);
+        assert_eq!(offsets, vec![2, 3, 7]);
 
         let at = |offset: u32| {
             db.view_eyre(|tx| get_path_hashes_by_offset(tx, o(offset)))
@@ -1094,11 +1181,11 @@ mod tests {
         assert_eq!(at(6)?.tx_path_hash, Some(tx_hash_3));
         assert_eq!(at(7)?.data_path_hash, Some(data_hash_7));
         assert_eq!(
-            db.view_eyre(|tx| get_full_data_path(tx, data_hash_2))?,
+            db.view_eyre(|tx| get_data_path_by_offset(tx, o(2)))?,
             Some(vec![2, 2])
         );
         assert_eq!(
-            db.view_eyre(|tx| get_full_data_path(tx, data_hash_3))?,
+            db.view_eyre(|tx| get_data_path_by_offset(tx, o(3)))?,
             Some(vec![3, 3, 3])
         );
         Ok(())
