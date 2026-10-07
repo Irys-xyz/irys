@@ -1,7 +1,6 @@
 use crate::metadata::MetadataKey;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, RelativeChunkOffset,
-    TxPath, TxPathHash,
+    ChunkDataPath, DataRoot, H256, PartitionChunkOffset, RelativeChunkOffset, TxPath, TxPathHash,
 };
 use paste::paste;
 use reth_codecs::Compact;
@@ -12,23 +11,40 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
+/// Bytes stored in the submodule `Metadata` schema row.
+///
+/// A directory written by an older index refuses to open.
+pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
+
 // Per-submodule database tables
 tables! {
     SubmoduleTables;
-    /// Maps a partition relative offset to a chunk's path hashes
-    /// note: mdbx keys are always sorted, so range queries work :)
-    /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
-    /// Also change/split this to leverage key-sorting to only store a single tx_path_hash entry/data_root
+    /// Maps a partition offset to that chunk's data-path hash.
+    ///
+    /// The tx hash lives in [`TxPathIntervalByStart`], one row per placement.
+    /// `tx_path_hash` on the value stays so an older row still decodes. New
+    /// writes store `None` there.
     table ChunkPathHashesByOffset {
         type Key = PartitionChunkOffset;
         type Value = ChunkPathHashes;
     }
 
-    /// Maps a chunk's data path hash to the full data path
-    /// TODO: change how we store these to reduce duplication (use dupsort + tree traversal indices)
-    table ChunkDataPathByPathHash {
-        type Key = ChunkPathHash;
+    /// Full data path for one chunk, keyed by partition offset.
+    ///
+    /// Offset order keeps compaction on sequential keys. The 32-byte hash
+    /// stays on [`ChunkPathHashesByOffset`] because callers return it.
+    table ChunkDataPathByOffset {
+        type Key = PartitionChunkOffset;
         type Value = ChunkDataPath;
+    }
+
+    /// One inclusive placement: key is `start`, value is `(end, tx_path_hash)`.
+    ///
+    /// Intervals in one submodule do not overlap. A floor seek finds the tx
+    /// hash for an offset. A covered offset with no data-path row is indexed.
+    table TxPathIntervalByStart {
+        type Key = PartitionChunkOffset;
+        type Value = TxPathInterval;
     }
 
     /// Maps a tx path hash to the full tx path
@@ -76,6 +92,13 @@ tables! {
         type Value = Vec<u8>;
     }
 
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
+/// Inclusive end offset and the tx-path hash for the placement that starts at the key.
+pub struct TxPathInterval {
+    pub end: PartitionChunkOffset,
+    pub tx_path_hash: H256,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]

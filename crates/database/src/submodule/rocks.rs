@@ -6,9 +6,9 @@
 //! overlay first, so the batch sees its own uncommitted puts and deletes.
 //! `view` takes a snapshot and does not take the write mutex.
 //!
-//! Gap scans walk keys. RocksDB has no O(1) count that stays correct once
-//! the overlay hides or adds keys, so this engine does not copy the MDBX
-//! density fast path.
+//! Gap scans walk tx-path intervals. A covered offset with no data-path row
+//! is indexed. RocksDB has no O(1) count once the overlay hides keys, so a
+//! heal scan reads the intervals that touch the window.
 //!
 //! Large data-path and tx-path values go to blob files so compaction does
 //! not rewrite them. Small offset rows stay in SST blocks. rust-rocksdb
@@ -22,23 +22,24 @@ use std::sync::{Arc, Mutex};
 
 use eyre::WrapErr as _;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
 use rocksdb::{
-    BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction, IteratorMode, Options,
-    WriteBatch, WriteOptions,
+    BlockBasedIndexType, BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction,
+    IteratorMode, Options, WriteBatch, WriteOptions,
 };
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
+use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
 use super::tables::{
-    ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
-    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, TxLeafBinding,
-    TxLeafBindingByTxPathHash, TxPathByTxPathHash,
+    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
+    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, SUBMODULE_SCHEMA,
+    TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
+    TxPathIntervalByStart,
 };
 use super::{
-    SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, first_gap_with, gaps_with,
-    tables::Metadata as MetadataTable,
+    SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, tables::Metadata as MetadataTable,
 };
 use crate::metadata::MetadataKey;
 
@@ -53,18 +54,50 @@ const BACKGROUND_JOBS: i32 = 2;
 /// Leveled SST target. Compaction output preallocation uses this as a cap.
 const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA_FILE: &str = "SCHEMA";
-const SCHEMA_TEXT: &str = "irys-submodule-rocks 1\n";
+const SCHEMA_TEXT: &str = SUBMODULE_SCHEMA;
+/// Marker written by the per-offset index. The on-disk worst-case directory
+/// still has this text. A normal open refuses it.
+const SCHEMA_V1_TEXT: &str = "irys-submodule-rocks 1\n";
+const LEGACY_PATH_HASH_CF: &str = "ChunkPathHashesByOffset";
+
+/// One SST in the v1 path-hash family. Keys are partition offsets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacySstSpan {
+    pub name: String,
+    pub level: i32,
+    pub bytes: u64,
+    pub entries: u64,
+    pub start: Option<u32>,
+    pub end: Option<u32>,
+}
+
+fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
+    let bytes = bytes?;
+    let raw: [u8; 4] = bytes.try_into().ok()?;
+    Some(u32::from_be_bytes(raw))
+}
 
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
 /// The bench names the other values. Each of those changes one field, so a
-/// sweep can attribute a difference to that field. Options are fixed at
-/// open: a new block size needs an empty directory.
+/// sweep can attribute a difference to that field, except `full-filters`.
+/// That preset is the full-filter residency trial: one shard and 128 MiB.
+/// Options are fixed at open. A new block size or a filter change needs an
+/// empty directory. An existing SST keeps the filter it was built with
+/// until a compaction rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
     pub block_bytes: usize,
     pub block_cache_bytes: usize,
+    /// `2^bits` block-cache shards. `-1` lets RocksDB choose, and that choice
+    /// caps at 6 (64 shards). `0` is one shard.
+    ///
+    /// A filter block has to fit in one shard. The default 64 MiB cache is
+    /// 1 MiB per shard, so a full filter of tens of millions of keys is
+    /// inserted and dropped. `full-filters` uses one shard and 128 MiB so
+    /// that block can stay.
+    pub cache_shard_bits: i32,
     /// `true` is LZ4 on SST and blob files. `false` stores both uncompressed.
     pub compress: bool,
     /// Blob files on the data-path and tx-path families.
@@ -75,6 +108,19 @@ pub struct RocksTuning {
     pub target_file_bytes: u64,
     /// Universal compaction. `false` is leveled compaction.
     pub universal: bool,
+    /// Partitioned full filters and a two-level index. The top index and
+    /// filter stay pinned. `false` is one full filter per SST.
+    ///
+    /// Production open is `true`. A full filter for tens of millions of keys
+    /// is larger than one shard of the 64 MiB block cache. Once that SST
+    /// leaves level 0, every lookup reads the filter, checksums it, and
+    /// drops it.
+    ///
+    /// A planned 4 TB partition is about 15-17 million chunks. Data-path
+    /// keys stay one per chunk, so a full filter is still about 20 MB and
+    /// can miss a shard. Interval rows are fewer. This open is provisional
+    /// until a measurement at that size shows a full filter stays cached.
+    pub partition_filters: bool,
 }
 
 impl RocksTuning {
@@ -83,17 +129,19 @@ impl RocksTuning {
             name: "baseline",
             block_bytes: BLOCK_BYTES,
             block_cache_bytes: BLOCK_CACHE_BYTES,
+            cache_shard_bits: -1,
             compress: true,
             blobs: true,
             direct_io: false,
             background_jobs: BACKGROUND_JOBS,
             target_file_bytes: TARGET_FILE_BYTES,
             universal: false,
+            partition_filters: true,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 8] {
+    pub const fn presets() -> [Self; 9] {
         let base = Self::baseline();
         [
             base,
@@ -132,6 +180,16 @@ impl RocksTuning {
                 universal: true,
                 ..base
             },
+            // One full filter. One shard so the filter can use the whole
+            // cache. 64 shards would turn 128 MiB into 2 MiB shards and
+            // drop the block on insert.
+            Self {
+                name: "full-filters",
+                partition_filters: false,
+                block_cache_bytes: 128 * 1024 * 1024,
+                cache_shard_bits: 0,
+                ..base
+            },
         ]
     }
 
@@ -165,13 +223,19 @@ impl RocksTuning {
         };
         let direct_io = if self.direct_io { "on" } else { "off" };
         let compaction = if self.universal { "universal" } else { "level" };
+        let filters = if self.partition_filters {
+            "partitioned"
+        } else {
+            "full"
+        };
         format!(
-            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} jobs={} target_file_bytes={} block_cache_bytes={}",
+            "rocks={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
             self.name,
             self.block_bytes,
             self.background_jobs,
             self.target_file_bytes,
             self.block_cache_bytes,
+            self.cache_shard_bits,
         )
     }
 
@@ -180,16 +244,18 @@ impl RocksTuning {
     fn knob_diffs(self, other: Self) -> usize {
         usize::from(self.block_bytes != other.block_bytes)
             + usize::from(self.block_cache_bytes != other.block_cache_bytes)
+            + usize::from(self.cache_shard_bits != other.cache_shard_bits)
             + usize::from(self.compress != other.compress)
             + usize::from(self.blobs != other.blobs)
             + usize::from(self.direct_io != other.direct_io)
             + usize::from(self.background_jobs != other.background_jobs)
             + usize::from(self.target_file_bytes != other.target_file_bytes)
             + usize::from(self.universal != other.universal)
+            + usize::from(self.partition_filters != other.partition_filters)
     }
 }
 
-const CF_COUNT: usize = 7;
+const CF_COUNT: usize = 8;
 
 #[derive(Clone, Copy)]
 enum Cf {
@@ -199,6 +265,7 @@ enum Cf {
     DataRoots,
     TxLeaf,
     Pending,
+    Interval,
     Metadata,
 }
 
@@ -210,17 +277,19 @@ impl Cf {
         Self::DataRoots,
         Self::TxLeaf,
         Self::Pending,
+        Self::Interval,
         Self::Metadata,
     ];
 
     /// Index families. `clear` deletes these and leaves the schema row in place.
-    const INDEX: [Self; 6] = [
+    const INDEX: [Self; 7] = [
         Self::PathHashes,
         Self::DataPath,
         Self::TxPath,
         Self::DataRoots,
         Self::TxLeaf,
         Self::Pending,
+        Self::Interval,
     ];
 
     fn index(self) -> usize {
@@ -231,18 +300,20 @@ impl Cf {
             Self::DataRoots => 3,
             Self::TxLeaf => 4,
             Self::Pending => 5,
-            Self::Metadata => 6,
+            Self::Interval => 6,
+            Self::Metadata => 7,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             Self::PathHashes => <ChunkPathHashesByOffset as Table>::NAME,
-            Self::DataPath => <ChunkDataPathByPathHash as Table>::NAME,
+            Self::DataPath => <ChunkDataPathByOffset as Table>::NAME,
             Self::TxPath => <TxPathByTxPathHash as Table>::NAME,
             Self::DataRoots => <DataRootInfosByDataRoot as Table>::NAME,
             Self::TxLeaf => <TxLeafBindingByTxPathHash as Table>::NAME,
             Self::Pending => <PendingBodyMigrationsByOffset as Table>::NAME,
+            Self::Interval => <TxPathIntervalByStart as Table>::NAME,
             Self::Metadata => <MetadataTable as Table>::NAME,
         }
     }
@@ -323,6 +394,88 @@ impl RocksSubmoduleStore {
     /// into open time.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Self::open_inner(path, tuning, true, true)
+    }
+
+    /// Open a schema-v1 directory for point reads of `ChunkPathHashesByOffset`.
+    ///
+    /// The column families already on disk are opened. Missing v2 families are
+    /// not created, and the schema marker is not rewritten. `tuning` applies
+    /// to this open. An existing SST keeps the filter it was flushed with
+    /// until [`Self::compact_legacy_path_hashes`].
+    pub fn open_v1_probe(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        check_schema_text(&path, SCHEMA_V1_TEXT)?;
+        let (db, stats) = open_existing_db(&path, &tuning)?;
+        let group = GroupCommit::new();
+        Ok(Self {
+            lifetime: EngineLifetime::new(Arc::clone(&group)),
+            db: Arc::new(db),
+            write: Arc::new(Mutex::new(())),
+            group,
+            path,
+            stats,
+        })
+    }
+
+    /// True when this offset has a path-hash row in the v1 column family.
+    pub fn legacy_path_hash_present(&self, offset: PartitionChunkOffset) -> eyre::Result<bool> {
+        let handle = self.legacy_path_hash_cf()?;
+        Ok(self
+            .db
+            .get_cf(&handle, encode_key(offset))
+            .wrap_err("read legacy path-hash row")?
+            .is_some())
+    }
+
+    /// Rewrite `ChunkPathHashesByOffset` with the table options of this open.
+    ///
+    /// A plain `compact_range` trivial-moves one SST and leaves its filter
+    /// in place. Forcing the bottom level rewrites that file. The schema
+    /// marker stays v1.
+    pub fn compact_legacy_path_hashes(&self) -> eyre::Result<()> {
+        let _guard = self.lock_write();
+        let handle = self.legacy_path_hash_cf()?;
+        let mut opts = rocksdb::CompactOptions::default();
+        opts.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::Force);
+        opts.set_exclusive_manual_compaction(true);
+        self.db
+            .compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
+        Ok(())
+    }
+
+    /// Live SST files in the v1 path-hash family, oldest level first.
+    pub fn legacy_path_hash_ssts(&self) -> eyre::Result<Vec<LegacySstSpan>> {
+        let mut files = Vec::new();
+        for file in self.db.live_files().wrap_err("list live sst files")? {
+            if file.column_family_name != LEGACY_PATH_HASH_CF {
+                continue;
+            }
+            files.push(LegacySstSpan {
+                name: file
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(file.name.as_str())
+                    .to_string(),
+                level: file.level,
+                bytes: u64::try_from(file.size).unwrap_or(u64::MAX),
+                entries: file.num_entries,
+                start: u32_user_key(file.start_key.as_deref()),
+                end: u32_user_key(file.end_key.as_deref()),
+            });
+        }
+        files.sort_by(|left, right| {
+            left.level
+                .cmp(&right.level)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(files)
+    }
+
+    fn legacy_path_hash_cf(&self) -> eyre::Result<&rocksdb::ColumnFamily> {
+        self.db
+            .cf_handle(LEGACY_PATH_HASH_CF)
+            .ok_or_else(|| eyre::eyre!("missing column family {LEGACY_PATH_HASH_CF}"))
     }
 
     fn open_inner(
@@ -529,6 +682,18 @@ impl RocksSubmoduleStore {
     }
 
     #[cfg(test)]
+    pub(super) fn interval_row_count(&self) -> eyre::Result<usize> {
+        let handle = cf_handle(&self.db, Cf::Interval)?;
+        let snap = self.db.snapshot();
+        let mut count = 0;
+        for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+            item.wrap_err("scan tx intervals")?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    #[cfg(test)]
     fn schema_payload(&self) -> eyre::Result<Option<Vec<u8>>> {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let key = encode_key(MetadataKey::DBSchemaVersion);
@@ -580,7 +745,7 @@ fn open_db(
     collect_stats: bool,
     preload_tables: bool,
 ) -> eyre::Result<(DB, Option<Arc<Options>>)> {
-    let cache = rocksdb::Cache::new_lru_cache(tuning.block_cache_bytes);
+    let cache = block_cache(tuning);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
@@ -623,11 +788,26 @@ fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {
         .ok_or_else(|| eyre::eyre!("rocksdb property missing"))
 }
 
+fn block_cache(tuning: &RocksTuning) -> rocksdb::Cache {
+    let mut opts = rocksdb::LruCacheOptions::default();
+    opts.set_capacity(tuning.block_cache_bytes);
+    // `-1` is the RocksDB default: at most 64 shards. `0` is one shard.
+    opts.set_num_shard_bits(tuning.cache_shard_bits);
+    rocksdb::Cache::new_lru_cache_opts(&opts)
+}
+
 fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
     let mut table = BlockBasedOptions::default();
     table.set_block_size(tuning.block_bytes);
-    // Full-filter bloom, ~10 bits per key. `false` selects the full filter.
+    // Full filter, 10 bits per key. `false` is not a block-based filter.
+    // Partitioned filters are the production open. One filter for a large
+    // SST does not fit a cache shard. See `RocksTuning::partition_filters`.
     table.set_bloom_filter(10.0, false);
+    if tuning.partition_filters {
+        table.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
+        table.set_partition_filters(true);
+        table.set_pin_top_level_index_and_filter(true);
+    }
     table.set_cache_index_and_filter_blocks(true);
     table.set_pin_l0_filter_and_index_blocks_in_cache(true);
     table.set_block_cache(cache);
@@ -670,14 +850,69 @@ fn check_schema_file(path: &Path) -> eyre::Result<()> {
     if !marker.exists() {
         return Ok(());
     }
+    check_schema_text(path, SCHEMA_TEXT)
+}
+
+fn check_schema_text(path: &Path, expected: &str) -> eyre::Result<()> {
+    let marker = path.join(SCHEMA_FILE);
     let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
-    if text != SCHEMA_TEXT {
+    if text != expected {
         eyre::bail!(
             "schema file {} does not match this index engine",
             marker.display()
         );
     }
     Ok(())
+}
+
+/// Table options for a column family name already stored in a v1 directory.
+fn legacy_cf_kind(name: &str) -> Cf {
+    match name {
+        LEGACY_PATH_HASH_CF => Cf::PathHashes,
+        "ChunkDataPathByPathHash" | "ChunkDataPathByOffset" => Cf::DataPath,
+        "TxPathByTxPathHash" => Cf::TxPath,
+        "DataRootInfosByDataRoot" => Cf::DataRoots,
+        "TxLeafBindingByTxPathHash" => Cf::TxLeaf,
+        "PendingBodyMigrationsByOffset" => Cf::Pending,
+        "TxPathIntervalByStart" => Cf::Interval,
+        _ => Cf::Metadata,
+    }
+}
+
+fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Option<Arc<Options>>)> {
+    let cache = block_cache(tuning);
+    let mut db_opts = Options::default();
+    db_opts.create_if_missing(false);
+    db_opts.create_missing_column_families(false);
+    db_opts.set_max_background_jobs(tuning.background_jobs);
+    db_opts.set_bytes_per_sync(1024 * 1024);
+    db_opts.set_wal_bytes_per_sync(1024 * 1024);
+    db_opts.set_recycle_log_file_num(4);
+    db_opts.set_max_open_files(-1);
+    db_opts.set_max_file_opening_threads(16);
+    db_opts.set_skip_stats_update_on_db_open(true);
+    db_opts.set_use_fsync(true);
+    db_opts.enable_statistics();
+    db_opts.set_statistics_level(rocksdb::statistics::StatsLevel::ExceptHistogramOrTimers);
+    db_opts.set_stats_dump_period_sec(0);
+    db_opts.set_stats_persist_period_sec(0);
+
+    let listed = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
+    let names: Vec<String> = listed
+        .into_iter()
+        .filter(|name| name != "default")
+        .collect();
+    eyre::ensure!(
+        names.iter().any(|name| name == LEGACY_PATH_HASH_CF),
+        "missing column family {LEGACY_PATH_HASH_CF}"
+    );
+    let families = names.into_iter().map(|name| {
+        let opts = column_options(&cache, legacy_cf_kind(&name), tuning);
+        rocksdb::ColumnFamilyDescriptor::new(name, opts)
+    });
+    let db = DB::open_cf_descriptors(&db_opts, path, families)
+        .wrap_err("open existing rocksdb submodule index")?;
+    Ok((db, Some(Arc::new(db_opts))))
 }
 
 fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
@@ -798,6 +1033,78 @@ impl<'a> Batch<'a> {
         self.overlay.maps[cf.index()].insert(key.to_vec(), None);
     }
 
+    fn put_data_path_hash(
+        &mut self,
+        offset: PartitionChunkOffset,
+        path_hash: Option<ChunkPathHash>,
+    ) {
+        let key = encode_key(offset);
+        match path_hash {
+            Some(data_path_hash) => self.put(
+                Cf::PathHashes,
+                &key,
+                &ChunkPathHashes {
+                    data_path_hash: Some(data_path_hash),
+                    tx_path_hash: None,
+                },
+            ),
+            None => self.delete(Cf::PathHashes, &key),
+        }
+    }
+
+    fn assign_tx_interval(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        tx_path_hash: Option<H256>,
+    ) -> eyre::Result<()> {
+        if start > end {
+            return Ok(());
+        }
+        let existing = self.rows().intervals_touching(start, end)?;
+        let edit = plan_coverage(&existing, start, end, tx_path_hash);
+        for key in edit.delete {
+            self.delete(Cf::Interval, &encode_key(key));
+        }
+        for row in edit.put {
+            self.put(
+                Cf::Interval,
+                &encode_key(row.start),
+                &TxPathInterval {
+                    end: row.end,
+                    tx_path_hash: row.tx_path_hash,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn delete_offset_range(
+        &mut self,
+        cf: Cf,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let start_key = encode_key(start);
+        let keys = {
+            let rows = self.rows();
+            let mut cursor = rows.cursor(cf, Some(&start_key))?;
+            let mut keys = Vec::new();
+            while let Some((key, _)) = cursor.next_kv()? {
+                let offset = PartitionChunkOffset::decode(&key)?;
+                if offset > end {
+                    break;
+                }
+                keys.push(key);
+            }
+            keys
+        };
+        for key in keys {
+            self.delete(cf, &key);
+        }
+        Ok(())
+    }
+
     fn commit(&self, sync: bool) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
         for cf in Cf::ALL {
@@ -887,6 +1194,132 @@ impl Rows<'_> {
                 break;
             }
             rows.push((key, V::decompress(&value)?));
+        }
+        Ok(rows)
+    }
+
+    fn floor_raw(&self, cf: Cf, key: &[u8]) -> eyre::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let cleared = self
+            .overlay
+            .is_some_and(|overlay| overlay.cleared[cf.index()]);
+        let handle = cf_handle(self.db, cf)?;
+        let mut db_iter = (!cleared).then(|| {
+            self.snap
+                .iterator_cf(&handle, IteratorMode::From(key, Direction::Reverse))
+        });
+        let mut db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+            Some(Ok((found_key, value))) => Some((found_key.into_vec(), value.into_vec())),
+            Some(Err(err)) => return Err(eyre::eyre!("{err}")),
+            None => None,
+        };
+        let bound = key.to_vec();
+        let mut overlay_iter = self
+            .overlay
+            .map(|overlay| overlay.maps[cf.index()].range(..=bound).rev());
+        let mut overlay_next = overlay_iter
+            .as_mut()
+            .and_then(|iter| iter.next())
+            .map(|(found_key, value)| (found_key.clone(), value.clone()));
+
+        loop {
+            let db_key = db_next.as_ref().map(|(found_key, _)| found_key.clone());
+            let overlay_key = overlay_next
+                .as_ref()
+                .map(|(found_key, _)| found_key.clone());
+            let take_overlay = match (db_key.as_deref(), overlay_key.as_deref()) {
+                (None, None) => return Ok(None),
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (Some(db_key), Some(overlay_key)) => overlay_key >= db_key,
+            };
+            if take_overlay {
+                let (found_key, value) = overlay_next.take().expect("overlay key is pending");
+                overlay_next = overlay_iter
+                    .as_mut()
+                    .and_then(|iter| iter.next())
+                    .map(|(next_key, next_value)| (next_key.clone(), next_value.clone()));
+                if db_key.as_deref() == Some(found_key.as_slice()) {
+                    db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+                        Some(Ok((next_key, next_value))) => {
+                            Some((next_key.into_vec(), next_value.into_vec()))
+                        }
+                        Some(Err(err)) => return Err(eyre::eyre!("{err}")),
+                        None => None,
+                    };
+                }
+                if let Some(value) = value {
+                    return Ok(Some((found_key, value)));
+                }
+            } else {
+                return Ok(db_next);
+            }
+        }
+    }
+
+    fn tx_hash_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
+        let Some(row) = self.floor_interval(offset)? else {
+            return Ok(None);
+        };
+        Ok((row.start <= offset && row.end >= offset).then_some(row.tx_path_hash))
+    }
+
+    fn floor_interval(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
+        let Some((key, value)) = self.floor_raw(Cf::Interval, &encode_key(offset))? else {
+            return Ok(None);
+        };
+        let start = PartitionChunkOffset::decode(&key)?;
+        let value = TxPathInterval::decompress(&value)?;
+        Ok(Some(IntervalRow {
+            start,
+            end: value.end,
+            tx_path_hash: value.tx_path_hash,
+        }))
+    }
+
+    fn intervals_touching(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<IntervalRow>> {
+        let start_key = encode_key(start);
+        let floor = self.floor_raw(Cf::Interval, &start_key)?;
+        // An exact hit is the row being edited. The previous key is the left
+        // neighbor a same-hash assign has to merge with.
+        let from_owned = if floor
+            .as_ref()
+            .is_some_and(|(key, _)| key.as_slice() == start_key.as_slice())
+            && start.0 > 0
+        {
+            let left_key = encode_key(PartitionChunkOffset(start.0 - 1));
+            self.floor_raw(Cf::Interval, &left_key)?
+                .map(|(key, _)| key)
+                .unwrap_or(start_key)
+        } else if let Some((key, _)) = floor {
+            key
+        } else {
+            start_key
+        };
+        let mut cursor = self.cursor(Cf::Interval, Some(&from_owned))?;
+        let left_limit = start.0.saturating_sub(1);
+        let right_limit = end.0.saturating_add(1);
+        let mut rows = Vec::new();
+        while let Some((key, value)) = cursor.next_kv()? {
+            let offset = PartitionChunkOffset::decode(&key)?;
+            let interval = TxPathInterval::decompress(&value)?;
+            if interval.end.0 < left_limit && offset < start {
+                continue;
+            }
+            if offset.0 > right_limit {
+                break;
+            }
+            rows.push(IntervalRow {
+                start: offset,
+                end: interval.end,
+                tx_path_hash: interval.tx_path_hash,
+            });
+            if offset.0 >= right_limit {
+                break;
+            }
         }
         Ok(rows)
     }
@@ -1013,13 +1446,7 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkDataPath>> {
-        let Some(hash) = self
-            .get_path_hashes_by_offset(offset)?
-            .and_then(|hashes| hashes.data_path_hash)
-        else {
-            return Ok(None);
-        };
-        self.get_full_data_path(hash)
+        self.get_value(Cf::DataPath, &encode_key(offset))
     }
 
     fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
@@ -1036,7 +1463,9 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkPathHashes>> {
-        self.get_value(Cf::PathHashes, &encode_key(offset))
+        let stored = self.get_value(Cf::PathHashes, &encode_key(offset))?;
+        let tx_path_hash = self.tx_hash_at(offset)?;
+        Ok(combine_hashes(stored, tx_path_hash))
     }
 
     fn path_hashes_in_inclusive_range(
@@ -1047,8 +1476,35 @@ impl SubmoduleRead for Rows<'_> {
         if start > end {
             return Ok(Vec::new());
         }
+        let intervals = self.intervals_touching(start, end)?;
         let start_key = encode_key(start);
-        self.collect_until(Cf::PathHashes, Some(&start_key), |offset| *offset > end)
+        let stored = self.collect_until::<PartitionChunkOffset, ChunkPathHashes>(
+            Cf::PathHashes,
+            Some(&start_key),
+            |offset| *offset > end,
+        )?;
+        let mut index = 0;
+        let mut rows = Vec::new();
+        for (offset, hashes) in stored {
+            let Some(data_path_hash) = hashes.data_path_hash else {
+                continue;
+            };
+            while index < intervals.len() && intervals[index].end < offset {
+                index += 1;
+            }
+            let tx_path_hash = intervals.get(index).and_then(|interval| {
+                (interval.start <= offset && interval.end >= offset)
+                    .then_some(interval.tx_path_hash)
+            });
+            rows.push((
+                offset,
+                ChunkPathHashes {
+                    data_path_hash: Some(data_path_hash),
+                    tx_path_hash,
+                },
+            ));
+        }
+        Ok(rows)
     }
 
     fn first_missing_path_hash_offset(
@@ -1056,17 +1512,11 @@ impl SubmoduleRead for Rows<'_> {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<Option<PartitionChunkOffset>> {
-        if start >= end {
-            return Ok(None);
-        }
-        let start_key = encode_key(start);
-        let mut cursor = self.cursor(Cf::PathHashes, Some(&start_key))?;
-        first_gap_with(start, end, || {
-            Ok(match cursor.next_kv()? {
-                Some((key, _)) => Some(PartitionChunkOffset::decode(&key)?),
-                None => None,
-            })
-        })
+        Ok(self
+            .missing_path_hash_ranges(start, end)?
+            .into_iter()
+            .next()
+            .map(|(gap_start, _)| gap_start))
     }
 
     fn missing_path_hash_ranges(
@@ -1077,18 +1527,8 @@ impl SubmoduleRead for Rows<'_> {
         if start >= end {
             return Ok(Vec::new());
         }
-        let start_key = encode_key(start);
-        let mut cursor = self.cursor(Cf::PathHashes, Some(&start_key))?;
-        gaps_with(start, end, || {
-            Ok(match cursor.next_kv()? {
-                Some((key, _)) => Some(PartitionChunkOffset::decode(&key)?),
-                None => None,
-            })
-        })
-    }
-
-    fn get_full_data_path(&self, path_hash: ChunkPathHash) -> eyre::Result<Option<ChunkDataPath>> {
-        self.get_value(Cf::DataPath, &encode_key(path_hash))
+        let intervals = self.intervals_touching(start, PartitionChunkOffset(end.0 - 1))?;
+        Ok(coverage_gaps(start, end, &intervals))
     }
 
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
@@ -1165,10 +1605,6 @@ impl SubmoduleRead for Batch<'_> {
         self.rows().missing_path_hash_ranges(start, end)
     }
 
-    fn get_full_data_path(&self, path_hash: ChunkPathHash) -> eyre::Result<Option<ChunkDataPath>> {
-        self.rows().get_full_data_path(path_hash)
-    }
-
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
         self.rows().get_full_tx_path(path_hash)
     }
@@ -1202,10 +1638,10 @@ impl SubmoduleRead for Batch<'_> {
 impl SubmoduleWrite for Batch<'_> {
     fn add_full_data_path(
         &mut self,
-        path_hash: ChunkPathHash,
+        offset: PartitionChunkOffset,
         data_path: ChunkDataPath,
     ) -> eyre::Result<()> {
-        self.put(Cf::DataPath, &encode_key(path_hash), &data_path);
+        self.put(Cf::DataPath, &encode_key(offset), &data_path);
         Ok(())
     }
 
@@ -1228,12 +1664,7 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hash: Option<ChunkPathHash>,
     ) -> eyre::Result<()> {
-        let mut hashes = self
-            .rows()
-            .get_path_hashes_by_offset(offset)?
-            .unwrap_or_default();
-        hashes.data_path_hash = path_hash;
-        self.put(Cf::PathHashes, &encode_key(offset), &hashes);
+        self.put_data_path_hash(offset, path_hash);
         Ok(())
     }
 
@@ -1242,13 +1673,7 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()> {
-        let mut hashes = self
-            .rows()
-            .get_path_hashes_by_offset(offset)?
-            .unwrap_or_default();
-        hashes.tx_path_hash = path_hash;
-        self.put(Cf::PathHashes, &encode_key(offset), &hashes);
-        Ok(())
+        self.assign_tx_interval(offset, offset, path_hash)
     }
 
     fn add_tx_path_hash_to_offset_range(
@@ -1257,15 +1682,7 @@ impl SubmoduleWrite for Batch<'_> {
         end: PartitionChunkOffset,
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()> {
-        if start > end {
-            return Ok(());
-        }
-        // Point updates. A put does not need MDBX's append cursor, and each
-        // offset keeps a `data_path_hash` that is already stored.
-        for raw in start.0..=end.0 {
-            self.add_tx_path_hash_to_offset_index(PartitionChunkOffset::from(raw), path_hash)?;
-        }
-        Ok(())
+        self.assign_tx_interval(start, end, path_hash)
     }
 
     fn write_data_path_updates(
@@ -1274,13 +1691,8 @@ impl SubmoduleWrite for Batch<'_> {
     ) -> eyre::Result<()> {
         updates.sort_by_key(|(offset, _, _)| *offset);
         for (offset, path_hash, data_path) in updates {
-            self.add_full_data_path(path_hash, data_path)?;
-            let mut hashes = self
-                .rows()
-                .get_path_hashes_by_offset(offset)?
-                .unwrap_or_default();
-            hashes.data_path_hash = Some(path_hash);
-            self.put(Cf::PathHashes, &encode_key(offset), &hashes);
+            self.add_full_data_path(offset, data_path)?;
+            self.put_data_path_hash(offset, Some(path_hash));
         }
         Ok(())
     }
@@ -1290,12 +1702,25 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hashes: ChunkPathHashes,
     ) -> eyre::Result<()> {
-        self.put(Cf::PathHashes, &encode_key(offset), &path_hashes);
-        Ok(())
+        self.put_data_path_hash(offset, path_hashes.data_path_hash);
+        self.assign_tx_interval(offset, offset, path_hashes.tx_path_hash)
     }
 
     fn del_path_hashes_by_offset(&mut self, offset: PartitionChunkOffset) -> eyre::Result<()> {
-        self.delete(Cf::PathHashes, &encode_key(offset));
+        self.clear_paths_in_inclusive_range(offset, offset)
+    }
+
+    fn clear_paths_in_inclusive_range(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        if start > end {
+            return Ok(());
+        }
+        self.assign_tx_interval(start, end, None)?;
+        self.delete_offset_range(Cf::PathHashes, start, end)?;
+        self.delete_offset_range(Cf::DataPath, start, end)?;
         Ok(())
     }
 
@@ -1413,12 +1838,87 @@ mod tests {
     }
 
     #[test]
+    fn v1_probe_reads_the_old_sst_and_leaves_the_schema() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().prefix("submodule_rocks_v1").build();
+        let path = dir.path().join("index");
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        let families = [
+            rocksdb::ColumnFamilyDescriptor::new(LEGACY_PATH_HASH_CF, Options::default()),
+            rocksdb::ColumnFamilyDescriptor::new("ChunkDataPathByPathHash", Options::default()),
+        ];
+        {
+            let db =
+                DB::open_cf_descriptors(&db_opts, &path, families).wrap_err("open v1 fixture")?;
+            let handle = db.cf_handle(LEGACY_PATH_HASH_CF).expect("path hash family");
+            db.put_cf(&handle, encode_key(PartitionChunkOffset::from(4)), b"row")
+                .wrap_err("put v1 row")?;
+            db.flush_cf(&handle).wrap_err("flush v1 fixture")?;
+        }
+        fs::write(path.join(SCHEMA_FILE), SCHEMA_V1_TEXT)?;
+
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        let probe = RocksSubmoduleStore::open_v1_probe(&path, RocksTuning::baseline())?;
+        assert!(probe.legacy_path_hash_present(PartitionChunkOffset::from(4))?);
+        assert!(!probe.legacy_path_hash_present(PartitionChunkOffset::from(5))?);
+        drop(probe);
+        assert_eq!(fs::read_to_string(path.join(SCHEMA_FILE))?, SCHEMA_V1_TEXT);
+
+        let probe = RocksSubmoduleStore::open_v1_probe(&path, RocksTuning::baseline())?;
+        let before: Vec<_> = probe
+            .legacy_path_hash_ssts()?
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+        assert!(!before.is_empty(), "fixture produced no sst");
+        probe.compact_legacy_path_hashes()?;
+        let after = probe.legacy_path_hash_ssts()?;
+        let after_names: Vec<_> = after.iter().map(|file| file.name.clone()).collect();
+        assert_ne!(before, after_names, "compaction did not replace the sst");
+        assert!(
+            after
+                .iter()
+                .any(|file| file.start.is_some_and(|start| start <= 4)
+                    && file.end.is_some_and(|end| end >= 4)),
+            "{after:?}"
+        );
+        assert!(probe.legacy_path_hash_present(PartitionChunkOffset::from(4))?);
+        drop(probe);
+        assert_eq!(fs::read_to_string(path.join(SCHEMA_FILE))?, SCHEMA_V1_TEXT);
+        let mut opts = String::new();
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("OPTIONS-") {
+                opts.push_str(&fs::read_to_string(entry.path())?);
+            }
+        }
+        assert!(opts.contains("partition_filters=true"), "{opts}");
+        assert!(opts.contains("index_type=kTwoLevelIndexSearch"), "{opts}");
+        assert!(
+            opts.contains("pin_top_level_index_and_filter=true"),
+            "{opts}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn presets_change_one_knob_and_open() -> eyre::Result<()> {
         let base = RocksTuning::baseline();
         assert_eq!(base, RocksTuning::preset("baseline")?);
         assert_eq!(base.block_bytes, BLOCK_BYTES);
         assert_eq!(base.block_cache_bytes, BLOCK_CACHE_BYTES);
-        assert!(base.compress && base.blobs && !base.direct_io && !base.universal);
+        assert!(
+            base.compress
+                && base.blobs
+                && !base.direct_io
+                && !base.universal
+                && base.partition_filters
+        );
         assert_eq!(base.background_jobs, BACKGROUND_JOBS);
         assert_eq!(base.target_file_bytes, TARGET_FILE_BYTES);
 
@@ -1432,6 +1932,11 @@ mod tests {
         assert!(!RocksTuning::preset("no-compress")?.compress);
         assert!(RocksTuning::preset("direct-io")?.direct_io);
         assert!(RocksTuning::preset("universal")?.universal);
+        let full_filters = RocksTuning::preset("full-filters")?;
+        assert!(!full_filters.partition_filters);
+        assert_eq!(full_filters.block_cache_bytes, 128 * 1024 * 1024);
+        assert_eq!(full_filters.cache_shard_bits, 0);
+        assert_eq!(base.cache_shard_bits, -1);
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -1439,6 +1944,8 @@ mod tests {
             names.push(preset.name);
             if preset.name == "baseline" {
                 assert_eq!(preset.knob_diffs(base), 0);
+            } else if preset.name == "full-filters" {
+                assert_eq!(preset.knob_diffs(base), 3, "{}", preset.name);
             } else {
                 assert_eq!(preset.knob_diffs(base), 1, "{}", preset.name);
             }
@@ -1458,6 +1965,24 @@ mod tests {
             let store = RocksSubmoduleStore::open_with(&path, preset)?;
             drop(store);
         }
+        let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
+        assert!(
+            baseline_opts.contains("partition_filters=true"),
+            "{baseline_opts}"
+        );
+        assert!(
+            baseline_opts.contains("index_type=kTwoLevelIndexSearch"),
+            "{baseline_opts}"
+        );
+        assert!(
+            baseline_opts.contains("pin_top_level_index_and_filter=true"),
+            "{baseline_opts}"
+        );
+        // An external block cache is not written to the OPTIONS file.
+        // `cache_shard_bits` is checked on the preset above.
+        let full = persisted_options(&dir.path().join("full-filters"))?;
+        assert!(full.contains("partition_filters=false"), "{full}");
+        assert!(!full.contains("index_type=kTwoLevelIndexSearch"), "{full}");
         Ok(())
     }
 
@@ -1517,6 +2042,14 @@ mod tests {
         let plain_opts = persisted_options(&dir.path().join("plain"))?;
         assert!(plain_opts.contains("max_open_files=512"), "{plain_opts}");
         assert!(!plain_opts.contains("max_open_files=-1"), "{plain_opts}");
+        for opts in [&bench_opts, &plain_opts] {
+            assert!(opts.contains("partition_filters=true"), "{opts}");
+            assert!(opts.contains("index_type=kTwoLevelIndexSearch"), "{opts}");
+            assert!(
+                opts.contains("pin_top_level_index_and_filter=true"),
+                "{opts}"
+            );
+        }
         Ok(())
     }
 

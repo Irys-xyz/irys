@@ -1,8 +1,10 @@
 //! Write one synthetic submodule index on MDBX and on RocksDB.
 //!
 //! Prints wall time and directory bytes. The path must contain an
-//! `index-bench` component and must be empty. This binary does not open
-//! a live node database.
+//! `index-bench` component and must be empty. `--profile filter-reuse` is
+//! the exception: it opens an existing `rocks/` directory and refuses the
+//! path when `mdbx/` is also present. This binary does not open a live
+//! node database.
 //!
 //! ```text
 //! cargo run -p irys-database --features rocksdb --bin submodule-index-bench -- \
@@ -32,7 +34,7 @@ use irys_database::IrysDatabaseArgs as _;
 use irys_database::submodule::tables::{
     ChunkPathHashes, DataRootInfo, PendingBodyMigration, TxLeafBinding,
 };
-use irys_database::submodule::{RocksTuning, SubmoduleIndex, SubmoduleStore as _};
+use irys_database::submodule::{LegacySstSpan, RocksTuning, SubmoduleIndex, SubmoduleStore as _};
 use irys_types::{DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset, TERABYTE};
 use reth_db::mdbx::DatabaseArguments;
 
@@ -97,6 +99,8 @@ enum Workload {
     IndexSpan,
     /// Offset rows only, so the bloom can outgrow the block cache.
     OffsetRows,
+    /// Point reads of a schema-v1 `ChunkPathHashesByOffset` SST.
+    FilterReuse,
 }
 
 impl Workload {
@@ -108,7 +112,12 @@ impl Workload {
             Self::MemDbs => "mem-dbs",
             Self::IndexSpan => "index-span",
             Self::OffsetRows => "offset-rows",
+            Self::FilterReuse => "filter-reuse",
         }
+    }
+
+    fn is_filter_reuse(self) -> bool {
+        matches!(self, Self::FilterReuse)
     }
 
     fn is_memory(self) -> bool {
@@ -169,12 +178,14 @@ struct Args {
     dbs: u32,
     /// Both engines use the `--mid` MDBX commit sizes.
     group_commit: bool,
+    /// Compact the v1 path-hash family before the timed reads.
+    rewrite_filters: bool,
 }
 
 fn main() -> eyre::Result<()> {
     let args = parse_args()?;
     refuse_large_payload(&args)?;
-    prepare_dir(&args.dir)?;
+    prepare_dir(&args.dir, args.workload.is_filter_reuse())?;
     println!(
         "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} dbs={} group_commit={} allocator=system jemalloc=off",
         args.chunks,
@@ -188,6 +199,13 @@ fn main() -> eyre::Result<()> {
         args.dbs,
         u8::from(args.group_commit),
     );
+    if args.workload.is_filter_reuse() {
+        println!(
+            "mode=filter-reuse schema=v1 rewrite_filters={}",
+            u8::from(args.rewrite_filters)
+        );
+        return run_filter_reuse(&args);
+    }
     if args.workload.is_worst() {
         let raw = u64::from(args.chunks) * DATA_PROOF_BYTES as u64;
         let full = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64;
@@ -280,7 +298,7 @@ fn memory_predict(args: &Args) -> String {
                 args.batch
             )
         }
-        Workload::Filled | Workload::Mid | Workload::Worst => String::new(),
+        Workload::Filled | Workload::Mid | Workload::Worst | Workload::FilterReuse => String::new(),
     }
 }
 
@@ -289,7 +307,7 @@ fn run_memory(args: &Args) -> eyre::Result<()> {
         Workload::MemDbs => run_mem_dbs(args),
         Workload::IndexSpan => run_index_span(args),
         Workload::OffsetRows => run_offset_rows(args),
-        Workload::Filled | Workload::Mid | Workload::Worst => {
+        Workload::Filled | Workload::Mid | Workload::Worst | Workload::FilterReuse => {
             eyre::bail!("not a memory profile")
         }
     }
@@ -424,6 +442,88 @@ fn write_offset_rows(store: &SubmoduleIndex, chunks: u32, batch: u32) -> eyre::R
         })?;
         offset = end;
     }
+    Ok(())
+}
+
+fn print_legacy_ssts(store: &SubmoduleIndex, when: &str) -> eyre::Result<()> {
+    for file in store.legacy_path_hash_ssts()? {
+        println!(
+            "  sst when={when} name={} level={} bytes={} entries={} start={} end={}",
+            file.name,
+            file.level,
+            file.bytes,
+            file.entries,
+            fmt_offset(file.start),
+            fmt_offset(file.end),
+        );
+    }
+    Ok(())
+}
+
+/// Files whose key range overlaps the sampled offsets `0..chunks`.
+fn print_sst_cover(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
+    let end = chunks.saturating_sub(1);
+    let mut names = Vec::new();
+    for file in store.legacy_path_hash_ssts()? {
+        if sst_covers(&file, 0, end) {
+            names.push(format!("{}@{}", file.name, file.level));
+        }
+    }
+    let files = if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(",")
+    };
+    println!("  sst_cover shape=offset_get span_start=0 span_end={end} files={files}");
+    Ok(())
+}
+
+fn sst_covers(file: &LegacySstSpan, start: u32, end: u32) -> bool {
+    match (file.start, file.end) {
+        (Some(file_start), Some(file_end)) => file_start <= end && start <= file_end,
+        _ => true,
+    }
+}
+
+fn fmt_offset(offset: Option<u32>) -> String {
+    offset
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Point Gets on a copied schema-v1 path-hash SST. Does not write proofs.
+fn run_filter_reuse(args: &Args) -> eyre::Result<()> {
+    let dir = args.dir.join("rocks");
+    println!(
+        "engine=rocks sync=wal_fsync {} max_open_files=-1 file_opening_threads=16",
+        args.rocks.describe()
+    );
+    let started = Instant::now();
+    let store = SubmoduleIndex::open_rocks_v1_probe(&dir, args.rocks)?;
+    println!("  open_ms={}", started.elapsed().as_millis());
+    print_legacy_ssts(&store, "after_open")?;
+    if args.rewrite_filters {
+        let rewrite_ms = timed(|| store.compact_legacy_path_hashes())?;
+        println!("  rewrite_ms={rewrite_ms}");
+        print_legacy_ssts(&store, "after_rewrite")?;
+    }
+    print_sst_cover(&store, args.chunks)?;
+    let files = evict_cache(&dir)?;
+    let disk = disk_id(&dir)?;
+    time_shape(
+        disk.as_ref(),
+        "offset_get",
+        args.reads,
+        &store,
+        files,
+        true,
+        &mut |store, i| {
+            let at = sample_offset(i, args.chunks);
+            let present = store.legacy_path_hash_present(PartitionChunkOffset::from(at))?;
+            eyre::ensure!(present, "missing offset {at}");
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -766,7 +866,7 @@ fn read_phase(
                 .ok_or_else(|| eyre::eyre!("missing data path hash at {at}"))?;
             eyre::ensure!(hash == expected, "data path hash mismatch at {at}");
             let path = tx
-                .get_full_data_path(hash)?
+                .get_data_path_by_offset(PartitionChunkOffset::from(at))?
                 .ok_or_else(|| eyre::eyre!("missing data path body at {at}"))?;
             eyre::ensure!(path.len() == args.path_bytes, "serve path len at {at}");
             Ok(())
@@ -1316,7 +1416,7 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
         Workload::IndexSpan => args.chunks > 1_000_000,
         // A bloom that still fits in the 64 MiB cache is under this.
         Workload::OffsetRows => args.chunks > 2_000_000,
-        Workload::Filled | Workload::Mid | Workload::Worst => false,
+        Workload::Filled | Workload::Mid | Workload::Worst | Workload::FilterReuse => false,
     };
     if !args.workload.is_mid() && !worst_over && !memory_over {
         return Ok(());
@@ -1383,7 +1483,7 @@ fn fill(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-fn prepare_dir(path: &Path) -> eyre::Result<()> {
+fn prepare_dir(path: &Path, reuse: bool) -> eyre::Result<()> {
     let marked = path
         .components()
         .any(|component| matches!(component, Component::Normal(name) if name == "index-bench"));
@@ -1392,6 +1492,19 @@ fn prepare_dir(path: &Path) -> eyre::Result<()> {
         "refusing {}: path needs an index-bench component",
         path.display()
     );
+    if reuse {
+        eyre::ensure!(
+            !path.join("mdbx").exists(),
+            "refusing {}: directory also has mdbx/. Copy rocks/ to a new index-bench directory first",
+            path.display()
+        );
+        eyre::ensure!(
+            path.join("rocks").join("CURRENT").is_file(),
+            "refusing {}: rocks/CURRENT is missing",
+            path.display()
+        );
+        return Ok(());
+    }
     if path.exists() {
         eyre::ensure!(
             path.read_dir()?.next().is_none(),
@@ -1428,6 +1541,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     let mut rocks_set = false;
     let mut block_cache: Option<usize> = None;
     let mut group_commit = false;
+    let mut rewrite_filters = false;
     let mut it = args.into_iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -1469,6 +1583,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             "--worst-case" => worst_case = true,
             "--mid" => mid = true,
             "--group-commit" => group_commit = true,
+            "--rewrite-filters" => rewrite_filters = true,
             other => eyre::bail!("unknown argument {other}"),
         }
     }
@@ -1477,11 +1592,23 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         eyre::bail!("--dir is required");
     };
     let workload = resolve_workload(profile, mid, worst_case)?;
-    if group_commit && workload.is_memory() {
+    if group_commit && (workload.is_memory() || workload.is_filter_reuse()) {
         eyre::bail!(
             "--group-commit does not apply to --profile {}",
             workload.name()
         );
+    }
+    if rewrite_filters && !workload.is_filter_reuse() {
+        eyre::bail!("--rewrite-filters applies only to --profile filter-reuse");
+    }
+    if workload.is_filter_reuse() {
+        if engines_set && engines != Engines::Rocks {
+            eyre::bail!("--profile filter-reuse runs rocks only");
+        }
+        engines = Engines::Rocks;
+        if !chunks_set {
+            chunks = u32::try_from(MAX_DATA_TX_CHUNKS)?;
+        }
     }
     if workload.is_memory() {
         if engines_set && engines != Engines::Rocks {
@@ -1552,6 +1679,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         rocks,
         dbs,
         group_commit,
+        rewrite_filters,
     })
 }
 
@@ -1563,8 +1691,9 @@ fn parse_profile(value: &str) -> eyre::Result<Workload> {
         "mem-dbs" => Ok(Workload::MemDbs),
         "index-span" => Ok(Workload::IndexSpan),
         "offset-rows" => Ok(Workload::OffsetRows),
+        "filter-reuse" => Ok(Workload::FilterReuse),
         other => eyre::bail!(
-            "unknown profile {other}; use filled, mid, worst, mem-dbs, index-span, or offset-rows"
+            "unknown profile {other}; use filled, mid, worst, mem-dbs, index-span, offset-rows, or filter-reuse"
         ),
     }
 }
@@ -1613,8 +1742,12 @@ index-span writes --chunks offsets in one update. A max transaction is --chunks 
 offset-rows writes --chunks offset rows and no data paths, then does cold point reads. A full partition is --chunks 75534400.\n\
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
-Presets: {presets}. Each preset changes one setting. \
---rocks-block-cache overrides that preset's cache. A new block size needs an empty directory.\n\
+Baseline uses partitioned filters. full-filters is one full filter per SST, one cache shard, and a 128 MiB cache. \
+Presets: {presets}. Each preset other than full-filters changes one setting. \
+--rocks-block-cache overrides that preset's cache size and does not change the shard count. A new block size or a switch between baseline and full-filters needs an empty directory. An existing SST keeps its filter until --rewrite-filters.\n\
+--profile filter-reuse opens an existing schema-v1 rocks/ directory. It refuses a directory that also contains mdbx/. \
+--rewrite-filters forces a bottommost compaction of ChunkPathHashesByOffset so the existing SST is rewritten with this open's filter. A plain compact can trivial-move the file and keep the old filter. The run prints one sst line per live path-hash file and sst_cover for the sampled offsets. \
+Default --chunks is 20971520, the first max transaction in the stuck worst-case run.\n\
 --list-rocks prints the presets and exits.\n\
 --reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
@@ -1766,6 +1899,7 @@ VmHWM:\t   8600000 kB
             rocks: irys_database::submodule::RocksTuning::baseline().with_block_cache(1024),
             dbs: 1,
             group_commit: false,
+            rewrite_filters: false,
         };
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
@@ -1912,6 +2046,44 @@ VmHWM:\t   8600000 kB
                 "mem-dbs",
                 "--engine",
                 "mdbx"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn filter_reuse_defaults_to_the_first_max_tx_and_rocks() {
+        let args = parse(&["--dir", "index-bench", "--profile", "filter-reuse"]).unwrap();
+        assert_eq!(args.workload, Workload::FilterReuse);
+        assert_eq!(args.engines, Engines::Rocks);
+        assert_eq!(args.chunks, 20_971_520);
+        assert!(!args.rewrite_filters);
+        assert!(args.rocks.partition_filters);
+
+        let rewrite = parse(&[
+            "--dir",
+            "index-bench",
+            "--profile",
+            "filter-reuse",
+            "--rocks",
+            "full-filters",
+            "--rewrite-filters",
+        ])
+        .unwrap();
+        assert!(rewrite.rewrite_filters);
+        assert!(!rewrite.rocks.partition_filters);
+        assert_eq!(rewrite.rocks.block_cache_bytes, 128 * 1024 * 1024);
+        assert_eq!(rewrite.rocks.cache_shard_bits, 0);
+
+        assert!(parse(&["--dir", "index-bench", "--rewrite-filters"]).is_err());
+        assert!(
+            parse(&[
+                "--dir",
+                "index-bench",
+                "--profile",
+                "filter-reuse",
+                "--engine",
+                "both"
             ])
             .is_err()
         );
