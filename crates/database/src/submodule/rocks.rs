@@ -81,7 +81,9 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 ///
 /// The bench names the other values. Each of those changes one field, so a
 /// sweep can attribute a difference to that field. Options are fixed at
-/// open: a new block size needs an empty directory.
+/// open. A new block size or a filter change needs an empty directory. An
+/// existing SST keeps the filter it was built with until a compaction
+/// rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
@@ -97,8 +99,18 @@ pub struct RocksTuning {
     pub target_file_bytes: u64,
     /// Universal compaction. `false` is leveled compaction.
     pub universal: bool,
-    /// Partitioned full filters plus a two-level index. The top level stays
-    /// pinned. `false` is one full filter per SST.
+    /// Partitioned full filters and a two-level index. The top index and
+    /// filter stay pinned. `false` is one full filter per SST.
+    ///
+    /// Production open is `true`. A full filter for tens of millions of keys
+    /// is larger than one shard of the 64 MiB block cache. Once that SST
+    /// leaves level 0, every lookup reads the filter, checksums it, and
+    /// drops it.
+    ///
+    /// A planned 4 TB partition is about 15-17 million chunks. Data-path
+    /// keys stay one per chunk, so a full filter is still about 20 MB and
+    /// can miss a shard. Interval rows are fewer. This open is provisional
+    /// until a measurement at that size shows a full filter stays cached.
     pub partition_filters: bool,
 }
 
@@ -114,7 +126,7 @@ impl RocksTuning {
             background_jobs: BACKGROUND_JOBS,
             target_file_bytes: TARGET_FILE_BYTES,
             universal: false,
-            partition_filters: false,
+            partition_filters: true,
         }
     }
 
@@ -159,8 +171,8 @@ impl RocksTuning {
                 ..base
             },
             Self {
-                name: "partition-filters",
-                partition_filters: true,
+                name: "full-filters",
+                partition_filters: false,
                 ..base
             },
         ]
@@ -708,9 +720,9 @@ fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {
 fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
     let mut table = BlockBasedOptions::default();
     table.set_block_size(tuning.block_bytes);
-    // Full filter, ~10 bits per key. `false` is not a block-based filter.
-    // Baseline stores one filter per SST. `partition-filters` splits it so a
-    // lookup reads one partition, and pins the top level in the block cache.
+    // Full filter, 10 bits per key. `false` is not a block-based filter.
+    // Partitioned filters are the production open. One filter for a large
+    // SST does not fit a cache shard. See `RocksTuning::partition_filters`.
     table.set_bloom_filter(10.0, false);
     if tuning.partition_filters {
         table.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
@@ -1729,8 +1741,7 @@ mod tests {
         drop(probe);
         assert_eq!(fs::read_to_string(path.join(SCHEMA_FILE))?, SCHEMA_V1_TEXT);
 
-        let probe =
-            RocksSubmoduleStore::open_v1_probe(&path, RocksTuning::preset("partition-filters")?)?;
+        let probe = RocksSubmoduleStore::open_v1_probe(&path, RocksTuning::baseline())?;
         let before: Vec<_> = probe
             .legacy_path_hash_ssts()?
             .into_iter()
@@ -1761,6 +1772,11 @@ mod tests {
             }
         }
         assert!(opts.contains("partition_filters=true"), "{opts}");
+        assert!(opts.contains("index_type=kTwoLevelIndexSearch"), "{opts}");
+        assert!(
+            opts.contains("pin_top_level_index_and_filter=true"),
+            "{opts}"
+        );
         Ok(())
     }
 
@@ -1775,7 +1791,7 @@ mod tests {
                 && base.blobs
                 && !base.direct_io
                 && !base.universal
-                && !base.partition_filters
+                && base.partition_filters
         );
         assert_eq!(base.background_jobs, BACKGROUND_JOBS);
         assert_eq!(base.target_file_bytes, TARGET_FILE_BYTES);
@@ -1790,7 +1806,7 @@ mod tests {
         assert!(!RocksTuning::preset("no-compress")?.compress);
         assert!(RocksTuning::preset("direct-io")?.direct_io);
         assert!(RocksTuning::preset("universal")?.universal);
-        assert!(RocksTuning::preset("partition-filters")?.partition_filters);
+        assert!(!RocksTuning::preset("full-filters")?.partition_filters);
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -1817,24 +1833,22 @@ mod tests {
             let store = RocksSubmoduleStore::open_with(&path, preset)?;
             drop(store);
         }
-        let partitioned = persisted_options(&dir.path().join("partition-filters"))?;
-        assert!(
-            partitioned.contains("partition_filters=true"),
-            "{partitioned}"
-        );
-        assert!(
-            partitioned.contains("index_type=kTwoLevelIndexSearch"),
-            "{partitioned}"
-        );
-        assert!(
-            partitioned.contains("pin_top_level_index_and_filter=true"),
-            "{partitioned}"
-        );
         let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
         assert!(
-            baseline_opts.contains("partition_filters=false"),
+            baseline_opts.contains("partition_filters=true"),
             "{baseline_opts}"
         );
+        assert!(
+            baseline_opts.contains("index_type=kTwoLevelIndexSearch"),
+            "{baseline_opts}"
+        );
+        assert!(
+            baseline_opts.contains("pin_top_level_index_and_filter=true"),
+            "{baseline_opts}"
+        );
+        let full = persisted_options(&dir.path().join("full-filters"))?;
+        assert!(full.contains("partition_filters=false"), "{full}");
+        assert!(!full.contains("index_type=kTwoLevelIndexSearch"), "{full}");
         Ok(())
     }
 
@@ -1864,6 +1878,14 @@ mod tests {
         let plain_opts = persisted_options(&dir.path().join("plain"))?;
         assert!(plain_opts.contains("max_open_files=512"), "{plain_opts}");
         assert!(!plain_opts.contains("max_open_files=-1"), "{plain_opts}");
+        for opts in [&bench_opts, &plain_opts] {
+            assert!(opts.contains("partition_filters=true"), "{opts}");
+            assert!(opts.contains("index_type=kTwoLevelIndexSearch"), "{opts}");
+            assert!(
+                opts.contains("pin_top_level_index_and_filter=true"),
+                "{opts}"
+            );
+        }
         Ok(())
     }
 

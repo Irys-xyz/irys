@@ -1742,8 +1742,9 @@ index-span writes --chunks offsets in one update. A max transaction is --chunks 
 offset-rows writes --chunks offset rows and no data paths, then does cold point reads. A full partition is --chunks 75534400.\n\
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
+Baseline uses partitioned filters. full-filters is one full filter per SST. \
 Presets: {presets}. Each preset changes one setting. \
---rocks-block-cache overrides that preset's cache. A new block size or partition-filters needs an empty directory.\n\
+--rocks-block-cache overrides that preset's cache. A new block size or a switch between baseline and full-filters needs an empty directory. An existing SST keeps its filter until --rewrite-filters.\n\
 --profile filter-reuse opens an existing schema-v1 rocks/ directory. It refuses a directory that also contains mdbx/. \
 --rewrite-filters forces a bottommost compaction of ChunkPathHashesByOffset so the existing SST is rewritten with this open's filter. A plain compact can trivial-move the file and keep the old filter. The run prints one sst line per live path-hash file and sst_cover for the sampled offsets. \
 Default --chunks is 20971520, the first max transaction in the stuck worst-case run.\n\
@@ -2057,6 +2058,7 @@ VmHWM:\t   8600000 kB
         assert_eq!(args.engines, Engines::Rocks);
         assert_eq!(args.chunks, 20_971_520);
         assert!(!args.rewrite_filters);
+        assert!(args.rocks.partition_filters);
 
         let rewrite = parse(&[
             "--dir",
@@ -2064,12 +2066,12 @@ VmHWM:\t   8600000 kB
             "--profile",
             "filter-reuse",
             "--rocks",
-            "partition-filters",
+            "full-filters",
             "--rewrite-filters",
         ])
         .unwrap();
         assert!(rewrite.rewrite_filters);
-        assert!(rewrite.rocks.partition_filters);
+        assert!(!rewrite.rocks.partition_filters);
 
         assert!(parse(&["--dir", "index-bench", "--rewrite-filters"]).is_err());
         assert!(
