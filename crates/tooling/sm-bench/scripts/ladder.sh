@@ -427,7 +427,9 @@ run_one() {
             return 1
         fi
         "${cmd[@]}" || return 1
-        kill -INT "$bp" 2>/dev/null || true
+        # TERM, not INT: a background job of a non-interactive shell ignores
+        # SIGINT, so blk-run.sh would never see it. blk-run.sh traps TERM.
+        kill -TERM "$bp" 2>/dev/null || true
         wait "$bp" || true
         if ! python3 "$here/blk-report.py" "$out" >"$out/blk-report.out" 2>"$out/blk-report.err"; then
             echo "blk-report failed" >>"$out/blk-report.out"
