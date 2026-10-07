@@ -11,6 +11,36 @@ multi-major scenarios reference back to `RELEASE_PROCESS.md`.
 
 Throughout, the example version is `1.2.3`.
 
+## Checklist
+
+Copy this into the release issue/PR and tick it off. A release is not finished
+until every box is ticked — the post-tag steps are the ones that get skipped.
+
+```text
+Phase A — release/1.x
+  [ ] cherry-pick the chosen commits from master (PR, not a direct push)
+  [ ] bump crates/chain/Cargo.toml + Cargo.lock, PR titled "feat: release 1.2.3"
+  [ ] freeze release/1.x until both testnet and mainnet are tagged
+
+Phase B — testnet
+  [ ] merge release/1.x forward into release/testnet/1.x (PR)
+  [ ] apply per-release testnet patches (env-bound values only)
+  [ ] dispatch release.yml (testnet, 1.2.3, branch-tip SHA)
+  [ ] testnet-1.2.3 + testnet-latest + irys-testnet:1.2.3/:latest all moved
+  [ ] deploy and validate
+
+Phase C — master
+  [ ] cherry-pick the version bump onto master (PR)
+  [ ] master's crates/chain/Cargo.toml == newest testnet-X.Y.Z tag
+
+Phase D/E — mainnet
+  [ ] pre-flight: release/1.x unchanged since the testnet tag
+  [ ] merge release/1.x forward into release/mainnet/1.x (PR) + mainnet patches
+  [ ] dispatch release.yml (mainnet, 1.2.3, branch-tip SHA)
+  [ ] edit the draft release notes and publish
+  [ ] deploy
+```
+
 ## Prerequisites
 
 - `release/1.x` exists (created once per major from `master`)
@@ -34,6 +64,17 @@ git pull --ff-only
 Cherry-pick from `master` (one PR per commit batch is recommended; the
 `release/1.x` branch is protected). After the cherry-pick PR(s) merge:
 
+> **Cherry-pick — do not merge `master` into `release/1.x`.** A merge sweeps in
+> *everything* sitting on `master` at that moment, including work that was never
+> triaged for this release. The release line then stops being a curated subset of
+> `master` and you lose the ability to state what shipped. If you really do intend
+> to take all of `master`, make that explicit in the PR title/description and have
+> it reviewed as such — it is a deliberate exception, not the default.
+
+> **Everything lands via PR.** `release/1.x` and both deployment branches are
+> protected: never `git push` a release commit straight to them. A direct push
+> skips review, leaves no PR record of what shipped, and is how steps get missed.
+
 ```bash
 git pull --ff-only
 
@@ -41,9 +82,15 @@ $EDITOR crates/chain/Cargo.toml   # set version = "1.2.3"
 cargo update -p irys-chain        # keep lockfile in sync
 
 git add crates/chain/Cargo.toml Cargo.lock
-git commit -m "release: bump irys-chain to 1.2.3"
+git commit -m "feat: release 1.2.3"
 # Open a PR for the version bump; merge once CI passes.
 ```
+
+> **Use `feat: release <version>` verbatim** for the bump commit and its PR title.
+> `conventional-pr.yaml` rejects any PR title that is not a conventional commit
+> (`release:` is not a recognised type), and `.config/cliff.toml` sets
+> `filter_unconventional = true`, so a non-conventional subject is silently dropped
+> from the generated changelog as well.
 
 After the bump lands on `release/1.x`, do not add further commits to this
 branch until both the testnet and mainnet releases for `1.2.3` are tagged.
@@ -107,17 +154,58 @@ The workflow will:
 
 Then deploy `irys-testnet:1.2.3` to testnet and validate.
 
+Once `testnet-1.2.3` exists, go do [Phase C](#phase-c--mirror-the-version-onto-master-mandatory) —
+mirroring the version onto `master` is part of the release, not an afterthought.
+
 ### If testnet fails
 
 | Where the bug lives | What to do |
 |---|---|
-| Upstream code (would also affect mainnet) | Fix on `release/1.x` → bump version to `1.2.4` → backport (cherry-pick) to `master` → repeat Phase B |
-| Testnet-only (e.g. wrong bootstrap peer) | Commit the fix directly to `release/testnet/1.x` → bump `release/1.x` version to `1.2.4` and merge forward → repeat Phase B |
+| Upstream code (would also affect mainnet) | Fix on `release/1.x` → bump version to `1.2.4` → cherry-pick **both the fix and the bump** to `master` → repeat Phase B |
+| Testnet-only (e.g. wrong bootstrap peer) | Commit the fix directly to `release/testnet/1.x` → bump `release/1.x` version to `1.2.4` and merge forward → repeat Phase B. The *fix* does not go to `master`, but the **version bump still does** (Phase C) |
 
 Each iteration gets a new SemVer; earlier `testnet-1.2.X` tags are orphaned
 by design — see [`RELEASE_PROCESS.md` § Version Iteration](./RELEASE_PROCESS.md#version-iteration).
 
-## Phase C — Mainnet release
+## Phase C — Mirror the version onto `master` (mandatory)
+
+**Do this as soon as `testnet-1.2.3` is tagged — before you start Phase D.**
+
+`master` carries the version of the newest *released* build, so that anyone
+reading `crates/chain/Cargo.toml` on `master` sees what is actually live and the
+next release branches from a truthful version. The bump commit lives on
+`release/1.x`, so it has to be carried up explicitly; nothing does this for you.
+
+```bash
+git fetch origin --tags
+BUMP=$(git rev-parse origin/release/1.x)   # the "feat: release 1.2.3" commit
+
+git checkout -b chore/mirror-1.2.3 origin/master
+git cherry-pick -x "$BUMP"                 # Cargo.toml + Cargo.lock only
+git push -u origin chore/mirror-1.2.3
+gh pr create --base master --title "feat: release 1.2.3" \
+  --body "Mirror the 1.2.3 version bump from release/1.x onto master."
+```
+
+Cherry-pick the *named bump commit* — do not merge `release/1.x` into `master`.
+If the version bump was squashed together with other work on `release/1.x`, carry
+only the `crates/chain/Cargo.toml` + `Cargo.lock` hunks.
+
+If testnet then fails and you iterate to `1.2.4`, mirror that version too — the
+invariant is that `master` equals the newest released version, not that every
+attempted version reaches `master`.
+
+Verify before moving on:
+
+```bash
+git fetch origin --tags
+LATEST=$(git tag --list 'testnet-[0-9]*' | sort -V | tail -1)
+echo "latest testnet tag: $LATEST"
+echo "master version:     $(git show origin/master:crates/chain/Cargo.toml | grep -m1 '^version')"
+# the two must agree
+```
+
+## Phase D — Mainnet release
 
 **Pre-flight check:** confirm `release/1.x` has not advanced since
 `testnet-1.2.3` was tagged.
@@ -185,7 +273,7 @@ The workflow does everything testnet did, plus:
 - Creates a **draft** GitHub Release — does NOT auto-publish.
 - As the final, non-fatal step, retags and pushes `irys-mainnet:latest`.
 
-## Phase D — Custom changelog and publish
+## Phase E — Custom changelog and publish
 
 The draft body the workflow created has this shape:
 
@@ -288,7 +376,12 @@ After publishing, deploy `irys-mainnet:1.2.3` to mainnet.
 |---|---|
 | Where do I bump the version? | Only on `release/1.x`. Deployment branches inherit via merge. |
 | Cargo.toml conflicts during merge-forward? | Always resolve to `release/1.x`'s value. |
-| Bug found on testnet — where do I fix it? | Shared code: fix on `release/1.x` → bump version → backport (cherry-pick) to `master` → re-do Phase B. Env-specific: commit to the affected `release/<env>/1.x` + bump version on `release/1.x` (no master backport). |
+| Bug found on testnet — where do I fix it? | Shared code: fix on `release/1.x` → bump version → backport (cherry-pick) to `master` → re-do Phase B. Env-specific: commit to the affected `release/<env>/1.x` + bump version on `release/1.x` — the *fix* is not backported, but the *version bump* still is. |
+| Does the version bump always go back to `master`? | Yes — every released version, including env-specific-fix iterations and hotfixes. Only the *code* of an env-specific fix stays off `master`. See [Phase C](#phase-c--mirror-the-version-onto-master-mandatory). |
+| Can I merge `master` into `release/<major>.x` instead of cherry-picking? | Not by default — it ships whatever happens to be on `master`. If you mean it, say so in the PR and have it reviewed as a deliberate whole-branch take. |
+| Can I push release commits directly to `release/*`? | No. Every commit on `release/<major>.x` and the deployment branches lands via PR. |
+| What are the `release/<env>/X.Y.Z` branches? | Frozen per-version snapshots pushed by `release.yml` so the released commit has branch reachability. Cosmetic — never commit to them. |
+| What about the old `deployment/*` branches? | Dead — superseded by `release/*`. Never push to them; a push there publishes nothing. |
 | Critical mainnet hotfix without testnet? | Dispatch with `force=true`. See [`RELEASE_PROCESS.md` § Hotfixes](./RELEASE_PROCESS.md#hotfixes). |
 | Wrong changelog scope on mainnet? | Edit the draft before publishing — nothing assumes the auto-generated text is final. |
 | Need to roll back? | Dispatch `docker-retag.yml`. See [`RELEASE_PROCESS.md` § Rollback](./RELEASE_PROCESS.md#rollback). |
