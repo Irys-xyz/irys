@@ -669,9 +669,20 @@ fn open_submodule_index(
 
     let opened = match database.submodule_index {
         SubmoduleIndexEngine::Mdbx => {
-            // Args (incl. the test geometry cap) derived from the DatabaseConfig.
-            let args = irys_database::submodule_db_args(database)?;
-            SubmoduleIndex::open_mdbx(&path, args)
+            let rocks_dir = module_dir.join("rocks");
+            let mdbx_dat = path.join("mdbx.dat");
+            // An empty MDBX index would hide the live Rocks rows.
+            if rocks_index_present(&rocks_dir) && !mdbx_dat.is_file() {
+                Err(eyre!(
+                    "refusing to open {}: {} exists and the Rocks index was not copied",
+                    path.display(),
+                    rocks_dir.display()
+                ))
+            } else {
+                // Args (incl. the test geometry cap) derived from the DatabaseConfig.
+                let args = irys_database::submodule_db_args(database)?;
+                SubmoduleIndex::open_mdbx(&path, args)
+            }
         }
         SubmoduleIndexEngine::Rocksdb => {
             let mdbx_dat = module_dir.join("db").join("mdbx.dat");
@@ -4420,6 +4431,59 @@ mod tests {
         );
         assert!(!rocks_dir.join("SCHEMA").exists());
         assert!(!rocks_dir.join("CURRENT").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn submodule_index_engine_mdbx_refuses_uncopied_rocks() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("submodule_index_engine_refuse_rocks")
+            .build();
+        let module_dir = tmp_dir.path().join("module");
+        let mdbx_dat = module_dir.join("db").join("mdbx.dat");
+        let rocks_dir = module_dir.join("rocks");
+        fs::create_dir_all(&rocks_dir)?;
+        fs::write(rocks_dir.join("CURRENT"), b"live")?;
+
+        let error = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))
+            .expect_err("live Rocks data must not open an empty MDBX index");
+        let message = error.to_string();
+        assert!(
+            message.contains(&module_dir.join("db").display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&rocks_dir.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("the Rocks index was not copied"),
+            "{message}"
+        );
+        assert!(!mdbx_dat.exists());
+        assert!(rocks_dir.join("CURRENT").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn submodule_index_engine_mdbx_opens_when_both_indexes_exist() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("submodule_index_engine_both")
+            .build();
+        let module_dir = tmp_dir.path().join("module");
+        fs::create_dir_all(&module_dir)?;
+
+        let index = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))?;
+        drop(index);
+        let rocks_current = module_dir.join("rocks").join("CURRENT");
+        fs::create_dir_all(rocks_current.parent().expect("rocks parent"))?;
+        fs::write(&rocks_current, b"live")?;
+
+        let again = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))?;
+        drop(again);
+
+        assert!(module_dir.join("db").join("mdbx.dat").is_file());
+        assert_eq!(fs::read(&rocks_current)?, b"live");
         Ok(())
     }
 
