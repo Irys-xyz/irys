@@ -30,6 +30,149 @@ cargo build --release -p irys-sm-bench
 
 The binary is `target/release/irys-sm-bench`.
 
+## Host setup
+
+Use a dedicated HDD, or a spare storage-module disk. Stop the node before you touch the disk. Do not open a live node database. Do not open or replace `chunks.dat`.
+
+Create a directory whose path contains a component named `loadtest`. The bench refuses `--dir`, `--recall-file`, and `--write-file` without that component.
+
+Move a real entropy file in from an entropy-only module. `mv` keeps the inode. Set the mode to `0444`. The bench opens that file `O_RDONLY`.
+
+Pre-write the write region before the first measured run. An unwritten XFS extent reads back as zeros and the disk does no I/O, so a sparse file does not load the spindle. `scripts/fill.sh` writes an existing file with `O_DIRECT`, one segment at a time, and appends one rate line per segment. Segment duration comes from `/proc/uptime`. Create the stop file (default `./STOP`) to finish after the current segment. `--from INDEX` resumes.
+
+```sh
+crates/tooling/sm-bench/scripts/fill.sh \
+    --file /mnt/sm-2/loadtest/write-region.dat \
+    --log /home/ubuntu/loadtest/fill-write-region.log \
+    --segment-bytes $((16 * 1024 * 1024 * 1024))
+```
+
+The file must already exist. `fill.sh` does not allocate it.
+
+`scripts/run.sh` refuses the run when the mount has less than 500 GiB free. `--min-free-gib` changes that floor. `df -B1G` counts GiB.
+
+Record the queue before a ladder changes it. On the lab host the stock values were `max_sectors_kb=1280` (hardware max 32767), `read_ahead_kb=128`, `nr_requests=64`, scheduler `mq-deadline`. Use the file you record when the host differs. `examples/sysfs-orig.example.txt` is a host log of that record. It also has `rotational` and `queue_depth`, which `teardown.sh` does not restore. `run.sh` writes the four keys `teardown.sh` accepts to `<out>/sysfs.txt`. The scheduler value is the active name in brackets. A `# scheduler_raw=` line keeps the full queue string. `ladder.sh` sets `max_sectors_kb` for the ladder and restores it on EXIT, INT, and TERM. The restored value is the value read before the set, unless `restore_sectors_kb` names another value.
+
+Drop the write-region page cache before a measured run so those reads miss the host cache:
+
+```sh
+dd if=/mnt/sm-2/loadtest/write-region.dat iflag=nocache count=0
+```
+
+`ladder.sh --drop-cache` runs that before each run. A cold host cache still leaves the drive cache. The drive can complete a later read of the same LBAs from its own cache. The first pass over an LBA after a long idle is the cold read.
+
+### Detached ladder
+
+Build into a target directory outside the checkout:
+
+```sh
+CARGO_TARGET_DIR=/home/ubuntu/loadtest/target \
+    crates/tooling/sm-bench/scripts/build.sh /path/to/repo
+```
+
+`JOBS` (default 8) and `NICE` (default 15) change the build. Do not set `RUSTFLAGS`.
+
+A ladder config is `key=value` lines plus one `run` line per ladder. A flag on the command line overrides the same key. `common` is extra bench arguments for every run. Arguments are split on whitespace, so a value cannot contain a space.
+
+```
+device=sdc
+mount=/mnt/sm-2
+loadtest=/mnt/sm-2/loadtest
+out_root=/home/ubuntu/loadtest/runs
+bench=/home/ubuntu/loadtest/target/release/irys-sm-bench
+max_sectors_kb=32767
+restore_sectors_kb=1280
+drop_cache=true
+common=--index-engine rocks --rocks-preset baseline --index-group-commit 8 --ingest-concurrency 4096 --num-writes-before-sync 10000 --entropy-sweep-max-bytes 10485760
+run fine-16-32 --schedule crates/tooling/sm-bench/presets/fine-16-32.toml
+run recall-5x80 --schedule crates/tooling/sm-bench/presets/recall-5x80.toml --recall-chunks 80
+```
+
+`trace=true`, or `--trace`, starts `scripts/blk-run.sh` around each run and then runs `scripts/blk-report.py`. That needs `bpftrace` and a passwordless `sudo`.
+
+Start the ladder with no controlling terminal:
+
+```sh
+setsid nohup crates/tooling/sm-bench/scripts/ladder.sh \
+    --config /home/ubuntu/loadtest/ladder.conf \
+    > /home/ubuntu/loadtest/ladder.log 2>&1 < /dev/null &
+```
+
+The script writes `<out_root>/ladder.done` when it exits, including after a failure. Before each run it renames `db`, `rocks`, `intervals.json`, `packing_params.toml`, and `bench-prepop.json` into `loadtest/state-<name>/`. An existing destination is an error. Nothing is deleted. The last run's state stays in `loadtest/`. `prior_name` (default `prior`) is the directory name for state that is already there at the start.
+
+`run.sh` exits 0 when the bench exits non-zero, so the ladder continues after a scored failure. A guard failure exits 1 and stops the ladder. Guards: the pm2 app `Irys Node` is online, `pm2 jlist` cannot be read, free space is below the floor, or a path has no `loadtest` component. A missing `pm2` binary is allowed.
+
+One run, without the ladder:
+
+```sh
+crates/tooling/sm-bench/scripts/run.sh \
+    --name fine-16-32 --device sdc --mount /mnt/sm-2 \
+    --loadtest /mnt/sm-2/loadtest \
+    --out-root /home/ubuntu/loadtest/runs \
+    --bench /home/ubuntu/loadtest/target/release/irys-sm-bench \
+    -- --schedule crates/tooling/sm-bench/presets/fine-16-32.toml
+```
+
+Schedules in `presets/`, named by the question they ask:
+
+| File | Shape |
+| --- | --- |
+| `fine-16-32.toml` | Recall 1/s. Idle 600 s. Ingest 16, 20, 24, 28, 32 MiB/s |
+| `recall-5x80.toml` | Recall 5/s. Pass `--recall-chunks 80` (same bytes as one 400-chunk recall). Idle 600 s. Ingest 8, 12, 16, 20, 24 MiB/s |
+| `recall-5x80-traced.toml` | Same recall. Idle 180 s. Ingest 8, 12, 16 MiB/s. Pair with `--trace` |
+| `recall-1-traced.toml` | Recall 1/s. Idle 180 s. Ingest 16 and 20 MiB/s. Pair with `--trace` |
+
+All four set `stop_on_fail = false` so a hard step still leaves a full record.
+
+### Reading a run
+
+The table's main row is the whole step, in integer MiB. The `tail Ns:` line is the last N scored seconds (`--judge-tail-secs`, default 240). Both are judged. A step whose mean holds can still fail when the last minutes collapse. `summary.json` stores that window on `tail`. The field is `null` when the window is off or the step was interrupted. `header.json` stores `judge_tail_secs`.
+
+`scripts/analysis/minutes.py` prints each minute of a `samples.jsonl`. Use it when the tail fails and you need the shape of the drop.
+
+```sh
+python3 crates/tooling/sm-bench/scripts/analysis/minutes.py \
+    /home/ubuntu/loadtest/runs/fine-16-32/samples.jsonl ingest-32
+```
+
+`scripts/analysis/disktime.py` reads an `iostat -dmx` log. Busy time is `%util` times 10, in milliseconds. Transfer time is bytes divided by a zone rate. The remainder is positioning. `--recall-rate` defaults to 200 MiB/s. `--region-rate` defaults to 146 MiB/s. `--device` is required. The first device line is the since-boot average and is skipped.
+
+```sh
+python3 crates/tooling/sm-bench/scripts/analysis/disktime.py \
+    /home/ubuntu/loadtest/runs/fine-16-32/iostat.log \
+    --device sdc --window ingest-32:0:600
+```
+
+`scripts/analysis/ladder.py` prints one block per step from `samples.jsonl`. Its percentile is the floor rank of the per-second maxima. The bench table uses nearest-rank over every recall sample in the step. Those two numbers differ.
+
+`blk-report.py` writes `blk-transitions.csv` next to the trace. A row is one request class followed by another, with the service time of the second request. `packed_write` followed by `flush` is the drive writing its cache back to the media. See [Disk-time split](#disk-time-split).
+
+### Teardown
+
+Put the entropy file back on the module it came from, and restore mode `0664`.
+
+If the file stays off that module, set the module's `intervals.json` to one inclusive `Uninitialized` range:
+
+```json
+[[{"start": 0, "end": LAST}, "Uninitialized"]]
+```
+
+`LAST` is the last chunk offset (chunk count minus one). The next start then packs the range again. A module that still says `Entropy` will treat a new sparse file as packed entropy. Unwritten extents read as zeros and issue no I/O.
+
+Remove the write region, the run directories under `out_root`, and each `loadtest/state-<name>/` directory. `ladder.sh` never deletes them. The bench's own `intervals.json` under `loadtest/` is bench state. Remove it with the other state files.
+
+Restore the queue from the file you recorded:
+
+```sh
+crates/tooling/sm-bench/scripts/teardown.sh sdc /mnt/sm-2/loadtest/sysfs-orig.txt
+```
+
+`teardown.sh` also stops a running `irys-sm-bench`. It does not delete files.
+
+The ops repo's sm-loadtest playbooks cover the same provisioning and teardown.
+
+`examples/index-bench/` holds old wrappers for `submodule-index-bench`. That binary is not in this tree. Nothing there is called by this bench.
+
 ## Host run
 
 Record the queue settings before you change them:
@@ -144,20 +287,21 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | `--recall-latency-margin-ms` | 500 | Recall latency p99 may exceed the `idle` step by this much |
 | `--stop-on-fail` | on, from the schedule | Stop after a hard step failure. Overrides `stop_on_fail` in a schedule file |
 | `--no-stop-on-fail` | off | Run the remaining steps after a hard scored failure |
+| `--judge-tail-secs` | 240 | Also judge the last N scored seconds. `0` turns that judge off. The drain is outside the window |
 
 ## Output
 
 `--out` receives:
 
-- `header.json` — git commit, dirty flag, rustc version, and the resolved settings, including `index_engine`, `index_dir`, `rocks_preset`, `rocks_tuning`, and `rocks_block_cache_bytes`. The Rocks fields are null for MDBX. Written before the drivers start. Git data comes from `git` in the current directory. A failed git command records commit `unknown`.
+- `header.json` — git commit, dirty flag, rustc version, and the resolved settings, including `index_engine`, `index_dir`, `rocks_preset`, `rocks_tuning`, `rocks_block_cache_bytes`, and `judge_tail_secs`. The Rocks fields are null for MDBX. Written before the drivers start. Git data comes from `git` in the current directory. A failed git command records commit `unknown`.
 - `samples.jsonl` — one JSON object per second per driver (`recall`, `ingest`, `migration`, `serve`), including idle drivers. Latency fields are integer microseconds. The line is flushed as it is written.
 - `steps.jsonl` — one JSON object per line for the disk-time report. The first line is the run start (`kind` = `run`) with `realtime_ns` (`CLOCK_REALTIME`) and `monotonic_ns` (`CLOCK_MONOTONIC`), both nanoseconds. Each step then has `kind` = `step`, `index`, `name`, and `phase` of `start`, `drain`, or `end`, with the same two clocks. `start` is just before the step rate is published. `drain` is the start of the drain. `end` is after the drain, including the drain's index read. The scored sample lines do not include the drain. This file does.
 - `summary.json` — one object per step, plus `passed`, `exit_code`, and driver notes.
-- `table.txt` — the same table the process prints. The first line is the index engine and directory. A RocksDB step adds a `rocks:` line with stall time, pending compaction bytes, flushes, and running flushes.
+- `table.txt` — the same table the process prints. The first line is the index engine and directory. A RocksDB step adds a `rocks:` line with stall time, pending compaction bytes, flushes, and running flushes. A step with a tail window adds a `tail Ns:` line after that: ingest and migration enqueued/durable MiB/s with one truncated decimal, recall skips, start-delay p99, start-delay max, and `PASS` or `FAIL`.
 
 Exit `0` when every scored step passed. Exit `1` for usage, a safety refusal, a runtime error, or Ctrl-C. Exit `2` when a scored step failed. A scored failure plus Ctrl-C exits `2`. The summary is still written when the run had started.
 
-Each step summary has `offered_bytes`, `enqueued_bytes`, `durable_bytes`, and `enqueue_blocked_us` / `enqueue_blocked_secs` for ingest and for migration. `enqueue_blocked_us` is wall time the single generator waited before it could hand bytes to the module. For ingest that wait is the bench semaphore, and the same waits are `permit_wait_us`. For migration it is the pending-write ceiling. It does not include the index-ACK wait inside `write_data_chunk_queued`. The table shows recall `lat_p50_us`, `lat_p99_us`, and `start_p99_us`, and ingest and migration as offered/enqueued/durable MiB.
+Each step summary has `offered_bytes`, `enqueued_bytes`, `durable_bytes`, and `enqueue_blocked_us` / `enqueue_blocked_secs` for ingest and for migration. It also has `tail`. `tail` is `null` when `--judge-tail-secs` is 0 or the step was interrupted. `tail.reasons` are the window's own messages. The same miss on the step `reasons` list has a `tail: ` prefix when the window is shorter than the step. A window that covers every scored second does not repeat those reasons. The tail line is still printed, and `tail.passed` is its own verdict: a drain failure can be a step failure with a passing tail. `enqueue_blocked_us` is wall time the single generator waited before it could hand bytes to the module. For ingest that wait is the bench semaphore, and the same waits are `permit_wait_us`. For migration it is the pending-write ceiling. It does not include the index-ACK wait inside `write_data_chunk_queued`. The table shows recall `lat_p50_us`, `lat_p99_us`, and `start_p99_us`, and ingest and migration as offered/enqueued/durable MiB.
 
 Each `samples.jsonl` line has a `phases` object. Recall and serve leave it zero. `summary.json` repeats the step totals as `ingest_phases` and `migration_phases`. The table adds one line per write driver:
 
@@ -195,6 +339,8 @@ A step fails when any of these hold:
 - the pending-write backlog grew by more than one flush batch and is still high after the drain (needs at least 30 samples)
 - a body-migration row remains after the drain
 - a driver or the lane aborts
+
+The last `--judge-tail-secs` scored seconds (default 240) get a second verdict. Recall skips, recall p99, an enqueue shortfall, and the overloaded-second rule apply to that window. Durable bytes may lag the enqueue inside the window, because the drain is outside it. That gap is printed on the tail line and does not fail the tail. Bytes still pending after the drain, leftover migration rows, backlog growth, and an abort stay on the whole-step judge. `0` turns the window off. An interrupted step has no tail. A tail miss is part of the step verdict. A soft tail miss does not stop the ladder.
 
 The recall bar depends on the schedule. A step named `idle` is the baseline: skips fail it, and its own p99 does not. A later step fails when its start-delay p99 exceeds that baseline by more than `--recall-delay-margin-ms` (default 200), or its latency p99 exceeds the baseline by more than `--recall-latency-margin-ms` (default 500). The summary and the table still show the absolute microseconds. If no `idle` step has completed, the absolute ceilings apply: start-delay p99 above 200 ms, or latency p99 above 500 ms.
 

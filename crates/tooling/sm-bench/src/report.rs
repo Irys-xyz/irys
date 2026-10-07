@@ -1,7 +1,7 @@
 //! Run header, per-second samples, and the step summary.
 //!
-//! Latency values are integer microseconds. Rates in the table are integer MiB,
-//! `bytes / (1024 * 1024)`.
+//! Latency values are integer microseconds. The step row uses integer MiB,
+//! `bytes / (1024 * 1024)`. The tail line is MiB/s with one truncated decimal.
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write as _};
@@ -11,7 +11,7 @@ use std::process::Command;
 use eyre::{WrapErr as _, eyre};
 use serde::Serialize;
 
-use crate::schedule::{Plan, StepMeasured};
+use crate::schedule::{Plan, StepMeasured, TailWindow};
 use crate::stats::{DriverBucket, Phase, permit_avg_milli, summarize};
 
 #[derive(Serialize)]
@@ -294,6 +294,25 @@ struct StepOut {
     ingest_phases: PhasesOut,
     migration_phases: PhasesOut,
     rocks: Option<RocksStepStats>,
+    tail: Option<TailOut>,
+}
+
+#[derive(Serialize)]
+struct TailOut {
+    secs: u64,
+    ingest_offered_bytes: u64,
+    ingest_enqueued_bytes: u64,
+    ingest_durable_bytes: u64,
+    migration_offered_bytes: u64,
+    migration_enqueued_bytes: u64,
+    migration_durable_bytes: u64,
+    recall_ops: u64,
+    recall_skips: u64,
+    recall_start_p99_us: u64,
+    recall_start_max_us: u64,
+    recall_lat_p99_us: u64,
+    passed: bool,
+    reasons: Vec<String>,
 }
 
 pub(crate) struct StepRow {
@@ -308,6 +327,7 @@ pub(crate) struct StepRow {
     pub migration: DriverBucket,
     pub serve: DriverBucket,
     pub rocks: Option<RocksStepStats>,
+    pub tail: Option<TailWindow>,
 }
 
 /// RocksDB counters for one step. Stall time and flush count are deltas.
@@ -391,6 +411,30 @@ fn step_out(row: &StepRow) -> StepOut {
             true,
         ),
         rocks: row.rocks,
+        tail: row.tail.as_ref().map(tail_out),
+    }
+}
+
+fn tail_out(tail: &TailWindow) -> TailOut {
+    TailOut {
+        secs: tail.secs,
+        ingest_offered_bytes: tail.measured.scheduled_ingest,
+        ingest_enqueued_bytes: tail.measured.enqueued_ingest,
+        ingest_durable_bytes: tail.measured.durable_ingest,
+        migration_offered_bytes: tail.measured.scheduled_migration,
+        migration_enqueued_bytes: tail.measured.enqueued_migration,
+        migration_durable_bytes: tail.measured.durable_migration,
+        recall_ops: tail.measured.recall_ops,
+        recall_skips: tail.measured.recall_skips,
+        recall_start_p99_us: tail.measured.recall_start_p99_us,
+        recall_start_max_us: tail.recall_start_max_us,
+        recall_lat_p99_us: tail.measured.recall_lat_p99_us,
+        passed: tail.passed,
+        reasons: tail
+            .findings
+            .iter()
+            .map(|finding| finding.message.clone())
+            .collect(),
     }
 }
 
@@ -636,6 +680,9 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
                 rocks.running_flushes,
             ));
         }
+        if let Some(tail) = &row.tail {
+            out.push_str(&tail_line(tail));
+        }
         for reason in &row.reasons {
             out.push_str(&format!("  - {reason}\n"));
         }
@@ -678,6 +725,30 @@ fn phase_line(
         fmt_milli(phases.permit_avg_in_use_milli),
         fmt_secs(phases.gen_us),
     )
+}
+
+fn tail_line(tail: &TailWindow) -> String {
+    let verdict = if tail.passed { "PASS" } else { "FAIL" };
+    format!(
+        "tail {secs}s: ingest enq/dur {ingest_enq}/{ingest_dur} MiB/s  mig enq/dur {mig_enq}/{mig_dur} MiB/s  skips={skips}  start_p99_us={start_p99}  start_max_us={start_max}  {verdict}\n",
+        secs = tail.secs,
+        ingest_enq = mib_rate(tail.measured.enqueued_ingest, tail.secs),
+        ingest_dur = mib_rate(tail.measured.durable_ingest, tail.secs),
+        mig_enq = mib_rate(tail.measured.enqueued_migration, tail.secs),
+        mig_dur = mib_rate(tail.measured.durable_migration, tail.secs),
+        skips = tail.measured.recall_skips,
+        start_p99 = tail.measured.recall_start_p99_us,
+        start_max = tail.recall_start_max_us,
+    )
+}
+
+/// MiB/s with one truncated decimal. Integer arithmetic, so `21.9` is not rounded up.
+fn mib_rate(bytes: u64, secs: u64) -> String {
+    if secs == 0 {
+        return "0.0".to_string();
+    }
+    let tenths = bytes.saturating_mul(10) / (1024 * 1024) / secs;
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
 fn fmt_secs(micros: u64) -> String {
@@ -834,6 +905,7 @@ mod tests {
             migration: DriverBucket::default(),
             serve: DriverBucket::default(),
             rocks: None,
+            tail: None,
         };
         let text = table(&[row], "index_engine=mdbx index_dir=/loadtest/db\n");
         assert!(text.contains("index_engine=mdbx"));
@@ -841,7 +913,42 @@ mod tests {
         assert!(text.contains("migration phases: limit=off"));
         assert!(text.contains("txreg n=1 p99=80.0ms"));
         assert!(text.contains("wait=400.000s"));
+        assert!(!text.contains("tail "));
         assert!(percentile(&[80_000], 99) == 80_000);
+    }
+
+    #[test]
+    fn the_table_prints_the_tail_window() {
+        let mut window = measured(0);
+        window.secs = 240;
+        window.enqueued_ingest = 21 * 1024 * 1024 * 240;
+        window.durable_ingest = window.enqueued_ingest;
+        window.recall_skips = 0;
+        window.recall_start_p99_us = 620_000;
+        let row = StepRow {
+            name: "ingest-32".to_string(),
+            passed: false,
+            soft_fail: true,
+            reasons: vec!["tail: ingest enqueued is short".to_string()],
+            measured: measured(19_200 * 1024 * 1024),
+            recall: DriverBucket::default(),
+            ingest: DriverBucket::default(),
+            migration: DriverBucket::default(),
+            serve: DriverBucket::default(),
+            rocks: None,
+            tail: Some(crate::schedule::TailWindow {
+                secs: 240,
+                measured: window,
+                recall_start_max_us: 940_000,
+                passed: false,
+                findings: Vec::new(),
+            }),
+        };
+        let text = table(&[row], "");
+        assert!(text.contains(
+            "tail 240s: ingest enq/dur 21.0/21.0 MiB/s  mig enq/dur 0.0/0.0 MiB/s  skips=0  start_p99_us=620000  start_max_us=940000  FAIL"
+        ));
+        assert!(text.contains("tail: ingest enqueued is short"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use crate::schedule::percentile;
+use crate::schedule::{SecondView, percentile};
 
 /// One call's latency samples. Totals are the sum of the calls, so overlapping
 /// workers can add up to more than the step.
@@ -86,6 +86,8 @@ pub(crate) struct StepAccum {
     pub serve: DriverBucket,
     pub pending_samples: Vec<u64>,
     pub overloaded_secs: u64,
+    /// One entry per scored second. The drain is not included.
+    pub views: Vec<SecondView>,
 }
 
 impl StepAccum {
@@ -107,6 +109,13 @@ impl StepAccum {
         if overloaded {
             self.overloaded_secs = self.overloaded_secs.saturating_add(1);
         }
+        self.views.push(second_view(
+            recall,
+            ingest,
+            migration,
+            pending_bytes,
+            overloaded,
+        ));
     }
 
     pub(crate) fn add_permit_sample(&mut self, sample: &PermitSample) {
@@ -126,6 +135,29 @@ impl StepAccum {
 impl Buckets {
     pub(crate) fn take(&mut self) -> Self {
         std::mem::take(self)
+    }
+}
+
+fn second_view(
+    recall: &DriverBucket,
+    ingest: &DriverBucket,
+    migration: &DriverBucket,
+    pending_bytes: u64,
+    overloaded: bool,
+) -> SecondView {
+    SecondView {
+        recall_ops: recall.ops,
+        recall_skips: recall.skips,
+        recall_start_us: recall.delays_us.clone(),
+        recall_lat_us: recall.lats_us.clone(),
+        ingest_enqueued: ingest.enqueued,
+        ingest_durable: ingest.durable,
+        ingest_blocked_us: ingest.enqueue_blocked_us,
+        migration_enqueued: migration.enqueued,
+        migration_durable: migration.durable,
+        migration_blocked_us: migration.enqueue_blocked_us,
+        pending_bytes,
+        overloaded,
     }
 }
 

@@ -7,6 +7,9 @@
 //! A schedule with no `idle` step uses the absolute ceilings instead.
 //! Recall-margin misses and enqueue shortfalls are soft: they fail the step
 //! and do not stop the ladder. A durability backlog is not soft.
+//!
+//! The tail window judges the last N scored seconds on their own. A step
+//! whose mean meets the offer can still fail once the backlog fills.
 
 use std::path::Path;
 
@@ -481,6 +484,179 @@ fn blocked_label(micros: u64) -> String {
     format!("{whole}.{millis:03}")
 }
 
+/// One scored second. The tail judge folds the last N of these.
+/// Drain completions are not in this list.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SecondView {
+    pub recall_ops: u64,
+    pub recall_skips: u64,
+    pub recall_start_us: Vec<u64>,
+    pub recall_lat_us: Vec<u64>,
+    pub ingest_enqueued: u64,
+    pub ingest_durable: u64,
+    pub ingest_blocked_us: u64,
+    pub migration_enqueued: u64,
+    pub migration_durable: u64,
+    pub migration_blocked_us: u64,
+    pub pending_bytes: u64,
+    pub overloaded: bool,
+}
+
+/// Last N scored seconds, judged apart from the step mean.
+#[derive(Debug, Clone)]
+pub(crate) struct TailWindow {
+    pub secs: u64,
+    pub measured: StepMeasured,
+    pub recall_start_max_us: u64,
+    pub passed: bool,
+    pub findings: Vec<Finding>,
+}
+
+/// `tail_secs == 0` or an empty step returns `None`.
+/// A window longer than the step uses every scored second.
+pub(crate) fn tail_window(
+    views: &[SecondView],
+    tail_secs: u64,
+    rates: &Rates,
+    chunk_size: u64,
+    ceiling: u64,
+    flush_batch: u64,
+    rule: &RecallRule,
+) -> Option<TailWindow> {
+    if tail_secs == 0 || views.is_empty() {
+        return None;
+    }
+    let take = usize::try_from(tail_secs).unwrap_or(usize::MAX);
+    let start = views.len().saturating_sub(take);
+    let slice = &views[start..];
+    let secs = u64::try_from(slice.len()).unwrap_or(u64::MAX);
+    let mut recall_ops = 0_u64;
+    let mut recall_skips = 0_u64;
+    let mut starts = Vec::new();
+    let mut lats = Vec::new();
+    let mut start_max = 0_u64;
+    let mut ingest_enqueued = 0_u64;
+    let mut ingest_durable = 0_u64;
+    let mut ingest_blocked = 0_u64;
+    let mut migration_enqueued = 0_u64;
+    let mut migration_durable = 0_u64;
+    let mut migration_blocked = 0_u64;
+    let mut pending = Vec::with_capacity(slice.len());
+    let mut overloaded = 0_u64;
+    for view in slice {
+        recall_ops = recall_ops.saturating_add(view.recall_ops);
+        recall_skips = recall_skips.saturating_add(view.recall_skips);
+        starts.extend_from_slice(&view.recall_start_us);
+        lats.extend_from_slice(&view.recall_lat_us);
+        for sample in &view.recall_start_us {
+            start_max = start_max.max(*sample);
+        }
+        ingest_enqueued = ingest_enqueued.saturating_add(view.ingest_enqueued);
+        ingest_durable = ingest_durable.saturating_add(view.ingest_durable);
+        ingest_blocked = ingest_blocked.saturating_add(view.ingest_blocked_us);
+        migration_enqueued = migration_enqueued.saturating_add(view.migration_enqueued);
+        migration_durable = migration_durable.saturating_add(view.migration_durable);
+        migration_blocked = migration_blocked.saturating_add(view.migration_blocked_us);
+        pending.push(view.pending_bytes);
+        if view.overloaded {
+            overloaded = overloaded.saturating_add(1);
+        }
+    }
+    let measured = StepMeasured {
+        secs,
+        scheduled_ingest: mib_bytes(rates.ingest_mib_s, secs),
+        durable_ingest: ingest_durable,
+        enqueued_ingest: ingest_enqueued,
+        scheduled_migration: mib_bytes(rates.migration_mib_s, secs),
+        durable_migration: migration_durable,
+        enqueued_migration: migration_enqueued,
+        chunk_size,
+        recall_ops,
+        recall_skips,
+        recall_start_p99_us: percentile(&starts, 99),
+        recall_lat_p99_us: percentile(&lats, 99),
+        ingest_enqueue_blocked_us: ingest_blocked,
+        migration_enqueue_blocked_us: migration_blocked,
+        overloaded_secs: overloaded,
+        pending_samples: pending,
+        pending_after_drain: 0,
+        migration_jobs_after_drain: 0,
+        ceiling,
+        flush_batch,
+        aborted: None,
+    };
+    let findings = judge_tail(&measured, rule);
+    let passed = findings.is_empty();
+    Some(TailWindow {
+        secs,
+        measured,
+        recall_start_max_us: start_max,
+        passed,
+        findings,
+    })
+}
+
+/// Add tail misses when the window is a proper suffix of the step.
+/// A window that already covers every scored second is left out, so the
+/// step reasons are not repeated.
+pub(crate) fn merge_tail(
+    mut findings: Vec<Finding>,
+    tail: &TailWindow,
+    whole_secs: u64,
+) -> Vec<Finding> {
+    if tail.secs >= whole_secs {
+        return findings;
+    }
+    for finding in &tail.findings {
+        findings.push(Finding {
+            message: format!("tail: {}", finding.message),
+            soft: finding.soft,
+        });
+    }
+    findings
+}
+
+/// Steady-state checks for the tail window.
+///
+/// Recall skips, recall p99, the enqueue-versus-offer gap, and the
+/// overloaded-second rule match `judge`. Durable bytes may lag the enqueue
+/// inside the window, because the drain is outside it, so a durable
+/// shortfall is not a tail failure. Aborts, leftover migration rows, and
+/// bytes still pending after the drain stay on the whole-step judge.
+fn judge_tail(measured: &StepMeasured, rule: &RecallRule) -> Vec<Finding> {
+    let mut reasons = Vec::new();
+    if measured.recall_skips > 0 {
+        reasons.push(Finding::hard(format!(
+            "skipped {} recall(s) (start lag >= {RECALL_SKIP_LAG_STEPS} steps)",
+            measured.recall_skips
+        )));
+    }
+    recall_latency(measured, rule, &mut reasons);
+    short_of_offered(
+        "ingest",
+        measured.scheduled_ingest,
+        measured.enqueued_ingest,
+        measured.chunk_size,
+        measured.ingest_enqueue_blocked_us,
+        &mut reasons,
+    );
+    short_of_offered(
+        "migration",
+        measured.scheduled_migration,
+        measured.enqueued_migration,
+        measured.chunk_size,
+        measured.migration_enqueue_blocked_us,
+        &mut reasons,
+    );
+    if measured.secs >= 5 && measured.overloaded_secs.saturating_mul(5) > measured.secs {
+        reasons.push(Finding::hard(format!(
+            "overloaded for {}s of {}s",
+            measured.overloaded_secs, measured.secs
+        )));
+    }
+    reasons
+}
+
 fn backlog_grew(samples: &[u64], flush_batch: u64) -> bool {
     if samples.len() < 30 {
         return false;
@@ -688,5 +864,136 @@ mod tests {
         assert!(judge(&step, &rule).is_empty());
         step.enqueued_ingest -= 1;
         assert!(judge(&step, &rule).iter().any(|finding| finding.soft));
+    }
+
+    fn mib(mib_s: u64) -> u64 {
+        mib_s * 1024 * 1024
+    }
+
+    fn quiet_second(mib_s: u64, start_us: u64) -> SecondView {
+        SecondView {
+            recall_ops: 1,
+            recall_start_us: vec![start_us],
+            recall_lat_us: vec![1_000],
+            ingest_enqueued: mib(mib_s),
+            ingest_durable: mib(mib_s),
+            ..SecondView::default()
+        }
+    }
+
+    fn rates_at(ingest_mib_s: u64) -> Rates {
+        Rates {
+            recall_num: 1,
+            recall_den: 1,
+            ingest_mib_s,
+            migration_mib_s: 0,
+            serve_per_sec: 0,
+            serve_seq_pct: 50,
+        }
+    }
+
+    #[test]
+    fn a_late_collapse_fails_the_tail_when_the_mean_holds() {
+        let rule = absolute();
+        let rates = rates_at(24);
+        let mut views = Vec::new();
+        for sec in 0..600 {
+            let mib_s = if sec < 360 { 32 } else { 12 };
+            views.push(quiet_second(mib_s, 1_000));
+        }
+        let enqueued: u64 = views.iter().map(|view| view.ingest_enqueued).sum();
+        let mut whole = base();
+        whole.secs = 600;
+        whole.scheduled_ingest = mib_bytes(24, 600);
+        whole.enqueued_ingest = enqueued;
+        whole.durable_ingest = enqueued;
+        whole.recall_ops = 600;
+        whole.recall_start_p99_us = 1_000;
+        whole.recall_lat_p99_us = 1_000;
+        whole.pending_samples = vec![0; 600];
+        assert!(
+            judge(&whole, &rule).is_empty(),
+            "360s at 32 MiB/s and 240s at 12 MiB/s average 24"
+        );
+        let tail = tail_window(&views, 240, &rates, 262_144, 1_000_000, 100, &rule).unwrap();
+        assert_eq!(tail.secs, 240);
+        assert!(!tail.passed);
+        assert!(tail.findings.iter().all(|finding| finding.soft));
+        assert!(tail.findings[0].message.contains("short of offered"));
+        let merged = merge_tail(Vec::new(), &tail, 600);
+        assert!(merged[0].message.starts_with("tail: "));
+        assert!(!stop_for_score(&merged, true));
+    }
+
+    #[test]
+    fn tail_start_delay_fails_when_the_step_p99_does_not() {
+        let rule = RecallRule {
+            bar: RecallBar::Relative {
+                start_p99_us: 1_000,
+                lat_p99_us: 1_000,
+            },
+            delay_margin_us: 200_000,
+            latency_margin_us: 500_000,
+        };
+        let rates = rates_at(0);
+        let mut views = Vec::new();
+        for sec in 0..600 {
+            let start = if sec >= 596 { 10_000_000 } else { 1_000 };
+            views.push(quiet_second(0, start));
+        }
+        let mut starts = Vec::new();
+        for view in &views {
+            starts.extend_from_slice(&view.recall_start_us);
+        }
+        assert_eq!(percentile(&starts, 99), 1_000);
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        assert!(tail.measured.recall_start_p99_us > 200_000);
+        assert_eq!(tail.recall_start_max_us, 10_000_000);
+        assert!(!tail.passed);
+        assert!(tail.findings[0].message.contains("start-delay"));
+    }
+
+    #[test]
+    fn tail_durable_lag_is_not_a_failure() {
+        let rule = absolute();
+        let rates = rates_at(16);
+        let mut views = Vec::new();
+        for _ in 0..240 {
+            let mut view = quiet_second(16, 1_000);
+            view.ingest_durable = 0;
+            views.push(view);
+        }
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        assert!(tail.passed);
+        assert_eq!(tail.measured.durable_ingest, 0);
+        assert_eq!(tail.measured.enqueued_ingest, mib_bytes(16, 240));
+    }
+
+    #[test]
+    fn a_window_that_covers_the_step_is_not_merged_twice() {
+        let rule = absolute();
+        let rates = rates_at(8);
+        let views = vec![quiet_second(1, 1_000); 8];
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        assert_eq!(tail.secs, 8);
+        assert!(!tail.passed);
+        let merged = merge_tail(Vec::new(), &tail, 8);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn tail_skips_are_hard_and_zero_disables_the_window() {
+        let rule = absolute();
+        let rates = rates_at(0);
+        assert!(tail_window(&[], 240, &rates, 1, 1, 1, &rule).is_none());
+        let mut view = quiet_second(0, 1_000);
+        view.recall_skips = 3;
+        let views = vec![view; 300];
+        assert!(tail_window(&views, 0, &rates, 1, 1, 1, &rule).is_none());
+        let tail = tail_window(&views, 240, &rates, 1, 1, 1, &rule).unwrap();
+        assert!(!tail.passed);
+        assert!(tail.findings.iter().any(|finding| !finding.soft));
+        let merged = merge_tail(Vec::new(), &tail, 300);
+        assert!(stop_for_score(&merged, true));
     }
 }

@@ -40,7 +40,7 @@ use crate::report::{
 };
 use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
-    mib_bytes, parse_mix, preset, stop_for_score,
+    merge_tail, mib_bytes, parse_mix, preset, stop_for_score, tail_window,
 };
 use crate::stats::{PermitGauge, StepAccum, fold_permit};
 
@@ -154,7 +154,15 @@ struct Args {
     /// abort still stops the plan.
     #[arg(long, action = ArgAction::SetTrue, overrides_with = "stop_on_fail")]
     no_stop_on_fail: bool,
+    /// Judge the last N scored seconds as well as the whole step.
+    ///
+    /// A step can meet its mean and still collapse once buffers fill.
+    /// `0` turns the second judge off. The drain is not part of the window.
+    #[arg(long, default_value_t = DEFAULT_JUDGE_TAIL_SECS)]
+    judge_tail_secs: u64,
 }
+
+const DEFAULT_JUDGE_TAIL_SECS: u64 = 240;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum IngestIndex {
@@ -428,8 +436,10 @@ fn run() -> eyre::Result<i32> {
             "ingest_index serial commits index_transaction_data on the generator before that tx is paced. overlap starts the next commit during the current tx. Production indexes on the chunk migration service while another task writes bodies.",
             "Migration enqueue waits on the pending-write ceiling. Serve issues one read at a time.",
             "A step named idle is the recall baseline. Other steps use the absolute p99 ceilings when no idle step has completed.",
+            "judge_tail_secs scores the last N seconds as well as the whole step. Durable lag inside that window is not a failure. The drain check stays on the whole step.",
         ],
     });
+    header["judge_tail_secs"] = serde_json::json!(args.judge_tail_secs);
     header["index_engine"] = serde_json::Value::from(opened.index.engine_name());
     header["index_group_commit"] = serde_json::json!(args.index_group_commit);
     header["index_dir"] = serde_json::Value::from(index_dir.display().to_string());
@@ -480,6 +490,7 @@ fn run() -> eyre::Result<i32> {
     let stop_on_fail = plan.stop_on_fail;
     let ingest_concurrency = args.ingest_concurrency;
     let overlap_index = args.ingest_index == IngestIndex::Overlap;
+    let judge_tail_secs = args.judge_tail_secs;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -499,6 +510,7 @@ fn run() -> eyre::Result<i32> {
         latency_margin_us,
         overlap_index,
         &index_line,
+        judge_tail_secs,
     ))?;
     match opened.stop_lane() {
         Ok(()) => Ok(code),
@@ -654,6 +666,7 @@ async fn execute(
     latency_margin_us: u64,
     overlap_index: bool,
     index_line: &str,
+    judge_tail_secs: u64,
 ) -> eyre::Result<i32> {
     let (rates_tx, rates_rx) = watch::channel(Rates::idle());
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -748,6 +761,7 @@ async fn execute(
                 delay_margin_us,
                 latency_margin_us,
             },
+            judge_tail_secs,
         )
         .await?;
         if step.name == "idle" && !outcome.interrupted && outcome.row.measured.recall_ops > 0 {
@@ -830,6 +844,7 @@ async fn run_step(
     ceiling: u64,
     flush: u64,
     rule: RecallRule,
+    judge_tail_secs: u64,
 ) -> eyre::Result<StepOutcome> {
     io.permits.reset_window();
     let rocks_before = sample_rocks(&io.module);
@@ -907,10 +922,27 @@ async fn run_step(
         flush_batch: flush,
         aborted,
     };
+    let tail = if interrupted {
+        None
+    } else {
+        tail_window(
+            &accum.views,
+            judge_tail_secs,
+            &step.rates,
+            CHUNK_SIZE,
+            ceiling,
+            flush,
+            &rule,
+        )
+    };
     let findings = if interrupted {
         Vec::new()
     } else {
-        judge(&measured, &rule)
+        let whole = judge(&measured, &rule);
+        match &tail {
+            Some(window) => merge_tail(whole, window, measured.secs),
+            None => whole,
+        }
     };
     let mut reasons: Vec<String> = findings
         .iter()
@@ -939,6 +971,7 @@ async fn run_step(
             migration: accum.migration,
             serve: accum.serve,
             rocks,
+            tail,
         },
     })
 }
@@ -1192,6 +1225,13 @@ mod tests {
         let rocks = parsed(&["--index-engine", "rocks", "--index-group-commit", "8"]);
         assert_eq!(rocks.index_engine, IndexEngine::Rocks);
         assert_eq!(rocks.index_group_commit, 8);
+    }
+
+    #[test]
+    fn judge_tail_secs_defaults_to_four_minutes() {
+        assert_eq!(parsed(&[]).judge_tail_secs, DEFAULT_JUDGE_TAIL_SECS);
+        assert_eq!(parsed(&["--judge-tail-secs", "0"]).judge_tail_secs, 0);
+        assert_eq!(parsed(&["--judge-tail-secs", "90"]).judge_tail_secs, 90);
     }
 
     #[test]
