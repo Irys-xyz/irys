@@ -5,7 +5,7 @@ use crate::{
     db_cache::{
         CachedChunk, CachedChunkIndexEntry, CachedDataRoot, CachedIngressLeaf, CachedIngressLeafKey,
     },
-    submodule::tables::ChunkPathHashes,
+    submodule::tables::{ChunkPathHashes, TxPathInterval},
 };
 use irys_types::ingress::CachedIngressProof;
 use irys_types::{
@@ -100,6 +100,7 @@ impl_compression_for_compact!(
     CachedChunk,
     CachedIngressLeaf,
     ChunkPathHashes,
+    TxPathInterval,
     PartitionHashes,
     DataRootInfos,
     TxLeafBinding,

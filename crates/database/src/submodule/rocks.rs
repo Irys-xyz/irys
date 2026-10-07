@@ -6,9 +6,9 @@
 //! overlay first, so the batch sees its own uncommitted puts and deletes.
 //! `view` takes a snapshot and does not take the write mutex.
 //!
-//! Gap scans walk keys. RocksDB has no O(1) count that stays correct once
-//! the overlay hides or adds keys, so this engine does not copy the MDBX
-//! density fast path.
+//! Gap scans walk tx-path intervals. A covered offset with no data-path row
+//! is indexed. RocksDB has no O(1) count once the overlay hides keys, so a
+//! heal scan reads the intervals that touch the window.
 //!
 //! Large data-path and tx-path values go to blob files so compaction does
 //! not rewrite them. Small offset rows stay in SST blocks. rust-rocksdb
@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use eyre::WrapErr as _;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
 use rocksdb::{
@@ -31,14 +31,15 @@ use rocksdb::{
 };
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
+use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
 use super::tables::{
-    ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
-    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, TxLeafBinding,
-    TxLeafBindingByTxPathHash, TxPathByTxPathHash,
+    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
+    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, SUBMODULE_SCHEMA,
+    TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
+    TxPathIntervalByStart,
 };
 use super::{
-    SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, first_gap_with, gaps_with,
-    tables::Metadata as MetadataTable,
+    SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, tables::Metadata as MetadataTable,
 };
 use crate::metadata::MetadataKey;
 
@@ -53,7 +54,7 @@ const BACKGROUND_JOBS: i32 = 2;
 /// Leveled SST target. Compaction output preallocation uses this as a cap.
 const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA_FILE: &str = "SCHEMA";
-const SCHEMA_TEXT: &str = "irys-submodule-rocks 1\n";
+const SCHEMA_TEXT: &str = SUBMODULE_SCHEMA;
 
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
@@ -204,7 +205,7 @@ impl RocksTuning {
     }
 }
 
-const CF_COUNT: usize = 7;
+const CF_COUNT: usize = 8;
 
 #[derive(Clone, Copy)]
 enum Cf {
@@ -214,6 +215,7 @@ enum Cf {
     DataRoots,
     TxLeaf,
     Pending,
+    Interval,
     Metadata,
 }
 
@@ -225,17 +227,19 @@ impl Cf {
         Self::DataRoots,
         Self::TxLeaf,
         Self::Pending,
+        Self::Interval,
         Self::Metadata,
     ];
 
     /// Index families. `clear` deletes these and leaves the schema row in place.
-    const INDEX: [Self; 6] = [
+    const INDEX: [Self; 7] = [
         Self::PathHashes,
         Self::DataPath,
         Self::TxPath,
         Self::DataRoots,
         Self::TxLeaf,
         Self::Pending,
+        Self::Interval,
     ];
 
     fn index(self) -> usize {
@@ -246,18 +250,20 @@ impl Cf {
             Self::DataRoots => 3,
             Self::TxLeaf => 4,
             Self::Pending => 5,
-            Self::Metadata => 6,
+            Self::Interval => 6,
+            Self::Metadata => 7,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             Self::PathHashes => <ChunkPathHashesByOffset as Table>::NAME,
-            Self::DataPath => <ChunkDataPathByPathHash as Table>::NAME,
+            Self::DataPath => <ChunkDataPathByOffset as Table>::NAME,
             Self::TxPath => <TxPathByTxPathHash as Table>::NAME,
             Self::DataRoots => <DataRootInfosByDataRoot as Table>::NAME,
             Self::TxLeaf => <TxLeafBindingByTxPathHash as Table>::NAME,
             Self::Pending => <PendingBodyMigrationsByOffset as Table>::NAME,
+            Self::Interval => <TxPathIntervalByStart as Table>::NAME,
             Self::Metadata => <MetadataTable as Table>::NAME,
         }
     }
@@ -490,6 +496,18 @@ impl RocksSubmoduleStore {
     }
 
     #[cfg(test)]
+    pub(super) fn interval_row_count(&self) -> eyre::Result<usize> {
+        let handle = cf_handle(&self.db, Cf::Interval)?;
+        let snap = self.db.snapshot();
+        let mut count = 0;
+        for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+            item.wrap_err("scan tx intervals")?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    #[cfg(test)]
     fn schema_payload(&self) -> eyre::Result<Option<Vec<u8>>> {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let key = encode_key(MetadataKey::DBSchemaVersion);
@@ -719,17 +737,76 @@ impl<'a> Batch<'a> {
         self.overlay.maps[cf.index()].insert(key.to_vec(), None);
     }
 
-    fn path_hash_row_in_range(
-        &self,
+    fn put_data_path_hash(
+        &mut self,
+        offset: PartitionChunkOffset,
+        path_hash: Option<ChunkPathHash>,
+    ) {
+        let key = encode_key(offset);
+        match path_hash {
+            Some(data_path_hash) => self.put(
+                Cf::PathHashes,
+                &key,
+                &ChunkPathHashes {
+                    data_path_hash: Some(data_path_hash),
+                    tx_path_hash: None,
+                },
+            ),
+            None => self.delete(Cf::PathHashes, &key),
+        }
+    }
+
+    fn assign_tx_interval(
+        &mut self,
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
-    ) -> eyre::Result<bool> {
-        let rows = self.rows();
-        let mut cursor = rows.cursor(Cf::PathHashes, Some(&encode_key(start)))?;
-        let Some((key, _)) = cursor.next_kv()? else {
-            return Ok(false);
+        tx_path_hash: Option<H256>,
+    ) -> eyre::Result<()> {
+        if start > end {
+            return Ok(());
+        }
+        let existing = self.rows().intervals_touching(start, end)?;
+        let edit = plan_coverage(&existing, start, end, tx_path_hash);
+        for key in edit.delete {
+            self.delete(Cf::Interval, &encode_key(key));
+        }
+        for row in edit.put {
+            self.put(
+                Cf::Interval,
+                &encode_key(row.start),
+                &TxPathInterval {
+                    end: row.end,
+                    tx_path_hash: row.tx_path_hash,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn delete_offset_range(
+        &mut self,
+        cf: Cf,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let start_key = encode_key(start);
+        let keys = {
+            let rows = self.rows();
+            let mut cursor = rows.cursor(cf, Some(&start_key))?;
+            let mut keys = Vec::new();
+            while let Some((key, _)) = cursor.next_kv()? {
+                let offset = PartitionChunkOffset::decode(&key)?;
+                if offset > end {
+                    break;
+                }
+                keys.push(key);
+            }
+            keys
         };
-        Ok(PartitionChunkOffset::decode(&key)? <= end)
+        for key in keys {
+            self.delete(cf, &key);
+        }
+        Ok(())
     }
 
     fn commit(&self, sync: bool) -> eyre::Result<()> {
@@ -821,6 +898,132 @@ impl Rows<'_> {
                 break;
             }
             rows.push((key, V::decompress(&value)?));
+        }
+        Ok(rows)
+    }
+
+    fn floor_raw(&self, cf: Cf, key: &[u8]) -> eyre::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let cleared = self
+            .overlay
+            .is_some_and(|overlay| overlay.cleared[cf.index()]);
+        let handle = cf_handle(self.db, cf)?;
+        let mut db_iter = (!cleared).then(|| {
+            self.snap
+                .iterator_cf(&handle, IteratorMode::From(key, Direction::Reverse))
+        });
+        let mut db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+            Some(Ok((found_key, value))) => Some((found_key.into_vec(), value.into_vec())),
+            Some(Err(err)) => return Err(eyre::eyre!("{err}")),
+            None => None,
+        };
+        let bound = key.to_vec();
+        let mut overlay_iter = self
+            .overlay
+            .map(|overlay| overlay.maps[cf.index()].range(..=bound).rev());
+        let mut overlay_next = overlay_iter
+            .as_mut()
+            .and_then(|iter| iter.next())
+            .map(|(found_key, value)| (found_key.clone(), value.clone()));
+
+        loop {
+            let db_key = db_next.as_ref().map(|(found_key, _)| found_key.clone());
+            let overlay_key = overlay_next
+                .as_ref()
+                .map(|(found_key, _)| found_key.clone());
+            let take_overlay = match (db_key.as_deref(), overlay_key.as_deref()) {
+                (None, None) => return Ok(None),
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (Some(db_key), Some(overlay_key)) => overlay_key >= db_key,
+            };
+            if take_overlay {
+                let (found_key, value) = overlay_next.take().expect("overlay key is pending");
+                overlay_next = overlay_iter
+                    .as_mut()
+                    .and_then(|iter| iter.next())
+                    .map(|(next_key, next_value)| (next_key.clone(), next_value.clone()));
+                if db_key.as_deref() == Some(found_key.as_slice()) {
+                    db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+                        Some(Ok((next_key, next_value))) => {
+                            Some((next_key.into_vec(), next_value.into_vec()))
+                        }
+                        Some(Err(err)) => return Err(eyre::eyre!("{err}")),
+                        None => None,
+                    };
+                }
+                if let Some(value) = value {
+                    return Ok(Some((found_key, value)));
+                }
+            } else {
+                return Ok(db_next);
+            }
+        }
+    }
+
+    fn tx_hash_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
+        let Some(row) = self.floor_interval(offset)? else {
+            return Ok(None);
+        };
+        Ok((row.start <= offset && row.end >= offset).then_some(row.tx_path_hash))
+    }
+
+    fn floor_interval(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
+        let Some((key, value)) = self.floor_raw(Cf::Interval, &encode_key(offset))? else {
+            return Ok(None);
+        };
+        let start = PartitionChunkOffset::decode(&key)?;
+        let value = TxPathInterval::decompress(&value)?;
+        Ok(Some(IntervalRow {
+            start,
+            end: value.end,
+            tx_path_hash: value.tx_path_hash,
+        }))
+    }
+
+    fn intervals_touching(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<IntervalRow>> {
+        let start_key = encode_key(start);
+        let floor = self.floor_raw(Cf::Interval, &start_key)?;
+        // An exact hit is the row being edited. The previous key is the left
+        // neighbor a same-hash assign has to merge with.
+        let from_owned = if floor
+            .as_ref()
+            .is_some_and(|(key, _)| key.as_slice() == start_key.as_slice())
+            && start.0 > 0
+        {
+            let left_key = encode_key(PartitionChunkOffset(start.0 - 1));
+            self.floor_raw(Cf::Interval, &left_key)?
+                .map(|(key, _)| key)
+                .unwrap_or(start_key)
+        } else if let Some((key, _)) = floor {
+            key
+        } else {
+            start_key
+        };
+        let mut cursor = self.cursor(Cf::Interval, Some(&from_owned))?;
+        let left_limit = start.0.saturating_sub(1);
+        let right_limit = end.0.saturating_add(1);
+        let mut rows = Vec::new();
+        while let Some((key, value)) = cursor.next_kv()? {
+            let offset = PartitionChunkOffset::decode(&key)?;
+            let interval = TxPathInterval::decompress(&value)?;
+            if interval.end.0 < left_limit && offset < start {
+                continue;
+            }
+            if offset.0 > right_limit {
+                break;
+            }
+            rows.push(IntervalRow {
+                start: offset,
+                end: interval.end,
+                tx_path_hash: interval.tx_path_hash,
+            });
+            if offset.0 >= right_limit {
+                break;
+            }
         }
         Ok(rows)
     }
@@ -947,13 +1150,7 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkDataPath>> {
-        let Some(hash) = self
-            .get_path_hashes_by_offset(offset)?
-            .and_then(|hashes| hashes.data_path_hash)
-        else {
-            return Ok(None);
-        };
-        self.get_full_data_path(hash)
+        self.get_value(Cf::DataPath, &encode_key(offset))
     }
 
     fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
@@ -970,7 +1167,9 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkPathHashes>> {
-        self.get_value(Cf::PathHashes, &encode_key(offset))
+        let stored = self.get_value(Cf::PathHashes, &encode_key(offset))?;
+        let tx_path_hash = self.tx_hash_at(offset)?;
+        Ok(combine_hashes(stored, tx_path_hash))
     }
 
     fn path_hashes_in_inclusive_range(
@@ -981,8 +1180,35 @@ impl SubmoduleRead for Rows<'_> {
         if start > end {
             return Ok(Vec::new());
         }
+        let intervals = self.intervals_touching(start, end)?;
         let start_key = encode_key(start);
-        self.collect_until(Cf::PathHashes, Some(&start_key), |offset| *offset > end)
+        let stored = self.collect_until::<PartitionChunkOffset, ChunkPathHashes>(
+            Cf::PathHashes,
+            Some(&start_key),
+            |offset| *offset > end,
+        )?;
+        let mut index = 0;
+        let mut rows = Vec::new();
+        for (offset, hashes) in stored {
+            let Some(data_path_hash) = hashes.data_path_hash else {
+                continue;
+            };
+            while index < intervals.len() && intervals[index].end < offset {
+                index += 1;
+            }
+            let tx_path_hash = intervals.get(index).and_then(|interval| {
+                (interval.start <= offset && interval.end >= offset)
+                    .then_some(interval.tx_path_hash)
+            });
+            rows.push((
+                offset,
+                ChunkPathHashes {
+                    data_path_hash: Some(data_path_hash),
+                    tx_path_hash,
+                },
+            ));
+        }
+        Ok(rows)
     }
 
     fn first_missing_path_hash_offset(
@@ -990,17 +1216,11 @@ impl SubmoduleRead for Rows<'_> {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<Option<PartitionChunkOffset>> {
-        if start >= end {
-            return Ok(None);
-        }
-        let start_key = encode_key(start);
-        let mut cursor = self.cursor(Cf::PathHashes, Some(&start_key))?;
-        first_gap_with(start, end, || {
-            Ok(match cursor.next_kv()? {
-                Some((key, _)) => Some(PartitionChunkOffset::decode(&key)?),
-                None => None,
-            })
-        })
+        Ok(self
+            .missing_path_hash_ranges(start, end)?
+            .into_iter()
+            .next()
+            .map(|(gap_start, _)| gap_start))
     }
 
     fn missing_path_hash_ranges(
@@ -1011,18 +1231,8 @@ impl SubmoduleRead for Rows<'_> {
         if start >= end {
             return Ok(Vec::new());
         }
-        let start_key = encode_key(start);
-        let mut cursor = self.cursor(Cf::PathHashes, Some(&start_key))?;
-        gaps_with(start, end, || {
-            Ok(match cursor.next_kv()? {
-                Some((key, _)) => Some(PartitionChunkOffset::decode(&key)?),
-                None => None,
-            })
-        })
-    }
-
-    fn get_full_data_path(&self, path_hash: ChunkPathHash) -> eyre::Result<Option<ChunkDataPath>> {
-        self.get_value(Cf::DataPath, &encode_key(path_hash))
+        let intervals = self.intervals_touching(start, PartitionChunkOffset(end.0 - 1))?;
+        Ok(coverage_gaps(start, end, &intervals))
     }
 
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
@@ -1099,10 +1309,6 @@ impl SubmoduleRead for Batch<'_> {
         self.rows().missing_path_hash_ranges(start, end)
     }
 
-    fn get_full_data_path(&self, path_hash: ChunkPathHash) -> eyre::Result<Option<ChunkDataPath>> {
-        self.rows().get_full_data_path(path_hash)
-    }
-
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
         self.rows().get_full_tx_path(path_hash)
     }
@@ -1136,10 +1342,10 @@ impl SubmoduleRead for Batch<'_> {
 impl SubmoduleWrite for Batch<'_> {
     fn add_full_data_path(
         &mut self,
-        path_hash: ChunkPathHash,
+        offset: PartitionChunkOffset,
         data_path: ChunkDataPath,
     ) -> eyre::Result<()> {
-        self.put(Cf::DataPath, &encode_key(path_hash), &data_path);
+        self.put(Cf::DataPath, &encode_key(offset), &data_path);
         Ok(())
     }
 
@@ -1162,12 +1368,7 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hash: Option<ChunkPathHash>,
     ) -> eyre::Result<()> {
-        let mut hashes = self
-            .rows()
-            .get_path_hashes_by_offset(offset)?
-            .unwrap_or_default();
-        hashes.data_path_hash = path_hash;
-        self.put(Cf::PathHashes, &encode_key(offset), &hashes);
+        self.put_data_path_hash(offset, path_hash);
         Ok(())
     }
 
@@ -1176,13 +1377,7 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()> {
-        let mut hashes = self
-            .rows()
-            .get_path_hashes_by_offset(offset)?
-            .unwrap_or_default();
-        hashes.tx_path_hash = path_hash;
-        self.put(Cf::PathHashes, &encode_key(offset), &hashes);
-        Ok(())
+        self.assign_tx_interval(offset, offset, path_hash)
     }
 
     fn add_tx_path_hash_to_offset_range(
@@ -1191,30 +1386,7 @@ impl SubmoduleWrite for Batch<'_> {
         end: PartitionChunkOffset,
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()> {
-        if start > end {
-            return Ok(());
-        }
-        // No stored offset in this span. A blind put skips a filter read per
-        // missing key. A span that already has a row still reads that row so
-        // its data-path hash stays.
-        if !self.path_hash_row_in_range(start, end)? {
-            let hashes = ChunkPathHashes {
-                data_path_hash: None,
-                tx_path_hash: path_hash,
-            };
-            for raw in start.0..=end.0 {
-                self.put(
-                    Cf::PathHashes,
-                    &encode_key(PartitionChunkOffset::from(raw)),
-                    &hashes,
-                );
-            }
-            return Ok(());
-        }
-        for raw in start.0..=end.0 {
-            self.add_tx_path_hash_to_offset_index(PartitionChunkOffset::from(raw), path_hash)?;
-        }
-        Ok(())
+        self.assign_tx_interval(start, end, path_hash)
     }
 
     fn write_data_path_updates(
@@ -1223,13 +1395,8 @@ impl SubmoduleWrite for Batch<'_> {
     ) -> eyre::Result<()> {
         updates.sort_by_key(|(offset, _, _)| *offset);
         for (offset, path_hash, data_path) in updates {
-            self.add_full_data_path(path_hash, data_path)?;
-            let mut hashes = self
-                .rows()
-                .get_path_hashes_by_offset(offset)?
-                .unwrap_or_default();
-            hashes.data_path_hash = Some(path_hash);
-            self.put(Cf::PathHashes, &encode_key(offset), &hashes);
+            self.add_full_data_path(offset, data_path)?;
+            self.put_data_path_hash(offset, Some(path_hash));
         }
         Ok(())
     }
@@ -1239,12 +1406,25 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hashes: ChunkPathHashes,
     ) -> eyre::Result<()> {
-        self.put(Cf::PathHashes, &encode_key(offset), &path_hashes);
-        Ok(())
+        self.put_data_path_hash(offset, path_hashes.data_path_hash);
+        self.assign_tx_interval(offset, offset, path_hashes.tx_path_hash)
     }
 
     fn del_path_hashes_by_offset(&mut self, offset: PartitionChunkOffset) -> eyre::Result<()> {
-        self.delete(Cf::PathHashes, &encode_key(offset));
+        self.clear_paths_in_inclusive_range(offset, offset)
+    }
+
+    fn clear_paths_in_inclusive_range(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        if start > end {
+            return Ok(());
+        }
+        self.assign_tx_interval(start, end, None)?;
+        self.delete_offset_range(Cf::PathHashes, start, end)?;
+        self.delete_offset_range(Cf::DataPath, start, end)?;
         Ok(())
     }
 
