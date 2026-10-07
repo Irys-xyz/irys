@@ -11,7 +11,8 @@
 //! same until group commit is enabled. Then the registration is visible
 //! before it returns, and the fsync waits for the group.
 
-use std::{path::Path, sync::Arc};
+use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
@@ -205,6 +206,12 @@ pub struct MdbxSubmoduleStore {
     lifetime: Arc<EngineLifetime>,
     env: Arc<DatabaseEnv>,
     group: Arc<GroupCommit>,
+    /// Held across `MDBX_SAFE_NOSYNC` and the enabled bit, and across a
+    /// durable commit that still sees group commit as off. The flag makes
+    /// the next commit skip fsync. `finish_durable` skips its own sync until
+    /// the bit is set, so a commit between the two would return `Ok` and
+    /// vanish on crash.
+    nosync_enable: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for MdbxSubmoduleStore {
@@ -223,6 +230,7 @@ impl MdbxSubmoduleStore {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
             env: Arc::new(env),
             group,
+            nosync_enable: Arc::new(Mutex::new(())),
         })
     }
 
@@ -285,6 +293,10 @@ impl MdbxSubmoduleStore {
     }
 
     fn arm_group(&self) -> eyre::Result<()> {
+        let _guard = self
+            .nosync_enable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         set_safe_nosync(&self.env)?;
         self.group.finish_enable();
         Ok(())
@@ -596,6 +608,18 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
+        if self.group.is_enabled() {
+            let result = self.update_unsynced(f)?;
+            finish_durable(&self.env, &self.group)?;
+            return Ok(result);
+        }
+        // Group commit is off, or `arm_group` is between the flag and the
+        // bit. Hold the same lock as `arm_group` so this commit cannot use
+        // `MDBX_SAFE_NOSYNC` and then skip `sync_env`.
+        let _guard = self
+            .nosync_enable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let result = self.update_unsynced(f)?;
         finish_durable(&self.env, &self.group)?;
         Ok(result)
