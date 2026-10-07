@@ -1106,7 +1106,7 @@ impl Rows<'_> {
             self.snap
                 .iterator_cf(&handle, IteratorMode::From(key, Direction::Reverse))
         });
-        let mut db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+        let mut db_next = match db_iter.as_mut().and_then(Iterator::next) {
             Some(Ok((found_key, value))) => Some((found_key.into_vec(), value.into_vec())),
             Some(Err(err)) => return Err(eyre::eyre!("{err}")),
             None => None,
@@ -1117,7 +1117,7 @@ impl Rows<'_> {
             .map(|overlay| overlay.maps[cf.index()].range(..=bound).rev());
         let mut overlay_next = overlay_iter
             .as_mut()
-            .and_then(|iter| iter.next())
+            .and_then(Iterator::next)
             .map(|(found_key, value)| (found_key.clone(), value.clone()));
 
         loop {
@@ -1135,10 +1135,10 @@ impl Rows<'_> {
                 let (found_key, value) = overlay_next.take().expect("overlay key is pending");
                 overlay_next = overlay_iter
                     .as_mut()
-                    .and_then(|iter| iter.next())
+                    .and_then(Iterator::next)
                     .map(|(next_key, next_value)| (next_key.clone(), next_value.clone()));
                 if db_key.as_deref() == Some(found_key.as_slice()) {
-                    db_next = match db_iter.as_mut().and_then(|iter| iter.next()) {
+                    db_next = match db_iter.as_mut().and_then(Iterator::next) {
                         Some(Ok((next_key, next_value))) => {
                             Some((next_key.into_vec(), next_value.into_vec()))
                         }

@@ -219,17 +219,17 @@ fn data_size_for_offset(
     partition_offset: PartitionChunkOffset,
     cache: &mut HashMap<DataRoot, DataRootInfos>,
 ) -> eyre::Result<u64> {
-    if !cache.contains_key(&data_root) {
+    let infos = cache.entry(data_root).or_insert_with(|| {
         index_read_metrics::note("data_root");
-        let mut loaded = tx.get_data_root_infos_for_data_root(data_root)
+        let mut loaded = tx
+            .get_data_root_infos_for_data_root(data_root)
             .expect("Database read should succeed")
             .expect(
                 "there should be at least one start_offset for any data_root stored in the submodule",
             );
         loaded.0.sort_unstable();
-        cache.insert(data_root, loaded);
-    }
-    let infos = cache.get(&data_root).expect("just inserted");
+        loaded
+    });
     let index = infos
         .0
         .partition_point(|info| info.start_offset <= partition_offset.into())
@@ -582,7 +582,7 @@ const RECALL_INFLIGHT: usize = 2;
 /// slice width and pairs the slices. A one-chunk tail stays one `pread`.
 fn recall_piece_plan(len: u64, max_chunks: u64) -> Vec<(u64, u64)> {
     let mut pieces = Vec::new();
-    let mut done = 0u64;
+    let mut done = 0_u64;
     let cap = max_chunks.max(1);
     while done < len {
         let n = (len - done).min(cap);
@@ -1999,7 +1999,7 @@ impl StorageModule {
             let end = *chunk_range.end().min(interval.end());
 
             let mut run_start: Option<PartitionChunkOffset> = None;
-            let mut run_len = 0u64;
+            let mut run_len = 0_u64;
             for chunk_offset in start..=end {
                 let partition_chunk_offset = PartitionChunkOffset::from(chunk_offset);
                 visited.push(partition_chunk_offset);
@@ -2153,7 +2153,7 @@ impl StorageModule {
                     if *run_interval.start() != origin {
                         break;
                     }
-                    let mut done = 0u64;
+                    let mut done = 0_u64;
                     while done < len {
                         let n = (len - done).min(max_chunks);
                         let piece = PartitionChunkOffset(start.0 + done as u32);
@@ -2279,10 +2279,12 @@ impl StorageModule {
         };
         if rc != 0 {
             warn!("recall page cache drop failed at file offset {offset} length {len}: error {rc}");
-            return;
         }
+        // Count only a drop that `posix_fadvise` accepted.
         #[cfg(test)]
-        self.disk.recall_cache_drops.fetch_add(1, Ordering::SeqCst);
+        if rc == 0 {
+            self.disk.recall_cache_drops.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     /// Reads a single chunk from its physical storage location
@@ -3397,7 +3399,7 @@ impl StorageModule {
         indexed.sort_by_key(|(priority, offset)| (*priority, *offset));
 
         let mut out = Vec::new();
-        let mut completed = 0usize;
+        let mut completed = 0_usize;
         let mut current: Option<RunCursor> = None;
         let mut current_priority: Option<disk_lane::WritePriority> = None;
         for (priority, offset) in indexed {
@@ -3871,6 +3873,7 @@ impl StorageModule {
     /// 6. Updates interval tracking with new chunk state
     ///
     /// Note: Chunk size must match size in StorageModule.config
+    #[cfg(test)]
     fn write_chunk_internal(
         &self,
         chunk_offset: PartitionChunkOffset,
@@ -7497,7 +7500,7 @@ mod tests {
 
     #[test]
     fn coalesced_window_joins_adjacent_chunks_and_keeps_the_long_run() -> eyre::Result<()> {
-        let chunk_size = 32u64;
+        let chunk_size = 32_u64;
         let (_tmp, storage) = coalesce_fixture("coalesce_window", chunk_size)?;
         let body = |offset: u32| vec![offset as u8; chunk_size as usize];
         for offset in 0..8_u32 {

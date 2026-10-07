@@ -1220,9 +1220,7 @@ impl GossipClient {
         let mut attempt = 0_u32;
         loop {
             self.check_circuit_breaker(peer_id)?;
-            let result = self
-                .send_preserialized(address, route, body.clone())
-                .await;
+            let result = self.send_preserialized(address, route, body.clone()).await;
             if !push_response_rate_limited(&result) || attempt == PUSH_BACKPRESSURE_RETRIES {
                 return result;
             }
@@ -1628,9 +1626,7 @@ impl GossipClient {
         let peer = peer.1.clone();
 
         self.runtime_handle.spawn(async move {
-            let result = client
-                .push_data_with_backoff(&peer_id, &peer, &data)
-                .await;
+            let result = client.push_data_with_backoff(&peer_id, &peer, &data).await;
             Self::complete_push(
                 &peer_list,
                 &result,

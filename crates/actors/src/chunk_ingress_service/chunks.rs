@@ -124,6 +124,13 @@ pub fn select_data_size_from_storage_modules(
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::unused_async,
+        reason = "callers always await this; only the test body awaits the module write"
+    )
+)]
 async fn write_chunk_to_assigned_modules(
     modules: &[Arc<StorageModule>],
     chunk: &UnpackedChunk,
@@ -133,7 +140,7 @@ async fn write_chunk_to_assigned_modules(
     #[cfg(not(test))]
     {
         let _ = (modules, chunk);
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(test)]

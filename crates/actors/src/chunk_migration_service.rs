@@ -394,7 +394,7 @@ fn load_chunks_for_migration(
 }
 
 fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, MigrationError> {
-    let start = u32::from(*tx_start);
+    let start = *tx_start;
     let step = u32::try_from(step)
         .map_err(|_| MigrationError::Other(format!("tx offset step {step} exceeds u32")))?;
     let raw = start
@@ -671,6 +671,7 @@ fn get_cached_chunk(
     db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
 
+#[cfg(test)]
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,

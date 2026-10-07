@@ -63,7 +63,7 @@ pub fn trace_index_read<T>(caller: &'static str, body: impl FnOnce() -> T) -> T 
 }
 
 fn current() -> &'static str {
-    CALLER.with(|cell| cell.get())
+    CALLER.with(Cell::get)
 }
 
 static READS: LazyLock<Counter<u64>> = LazyLock::new(|| {

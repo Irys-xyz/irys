@@ -517,11 +517,12 @@ impl SubmoduleDrain {
                 cut_short = true;
                 break;
             }
-            if !run.is_empty() && (run.len() >= span_limit || run.len() >= self.budget) {
-                if self.flush_run(&mut run, &mut progress)? {
-                    cut_short = true;
-                    break;
-                }
+            if !run.is_empty()
+                && (run.len() >= span_limit || run.len() >= self.budget)
+                && self.flush_run(&mut run, &mut progress)?
+            {
+                cut_short = true;
+                break;
             }
             if self.budget == 0 {
                 cut_short = true;
@@ -612,12 +613,13 @@ impl SubmoduleDrain {
             };
             let mut resume = window_last + 1;
             for (step, body) in bodies.into_iter().enumerate() {
-                if !run.is_empty() && (run.len() >= span_limit || run.len() >= self.budget) {
-                    if self.flush_run(&mut run, &mut progress)? {
-                        cut_short = true;
-                        resume = partition_offset + step as i64;
-                        break;
-                    }
+                if !run.is_empty()
+                    && (run.len() >= span_limit || run.len() >= self.budget)
+                    && self.flush_run(&mut run, &mut progress)?
+                {
+                    cut_short = true;
+                    resume = partition_offset + step as i64;
+                    break;
                 }
                 if self.budget == 0 {
                     cut_short = true;
