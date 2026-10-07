@@ -35,6 +35,11 @@ def complete(mono, sector, nr, rwbs):
     return ("C", mono, sector, nr, rwbs, "", 0)
 
 
+# block_rq_complete prints blk_rq_pos. A flush request has no bio, so the
+# sector is (sector_t)-1.
+FLUSH_SECTOR = 18446744073709551615
+
+
 class PairAndTimeTests(unittest.TestCase):
     def test_serial_service_drops_queue_overlap(self):
         requests, unmatched_i, unmatched_c = MOD.pair_requests(
@@ -150,6 +155,110 @@ class PairAndTimeTests(unittest.TestCase):
         MOD.attribute(requests, 0, 266, 130)
         self.assertEqual(requests[0].service_ns, 30)
         self.assertEqual(requests[1].service_ns, 10)
+
+    def test_flush_fifo_ignores_sector_and_rwbs(self):
+        # Issue sector is 0. The completion sector is (sector_t)-1, and the
+        # PREFLUSH/FUA tail reuses the write's rwbs with nr_sector 0.
+        requests, unmatched_i, unmatched_c = MOD.pair_requests(
+            [
+                issued(0, 0, 0, "FF", pid=1),
+                issued(10, 0, 0, "FF", pid=2),
+                complete(30, FLUSH_SECTOR, 0, "FF"),
+                complete(40, 100, 0, "WSM"),
+            ]
+        )
+        self.assertEqual((unmatched_i, unmatched_c), (0, 0))
+        self.assertEqual([req.pid for req in requests], [1, 2])
+        self.assertEqual([req.rwbs for req in requests], ["FF", "FF"])
+        extents = [MOD.Extent(100, 200, "write-region.dat")]
+        for req in requests:
+            req.category = MOD.classify(req, extents)
+        MOD.attribute(requests, 0, 266, 130)
+        self.assertEqual([req.category for req in requests], ["flush", "flush"])
+        self.assertEqual(requests[0].service_ns, 30)
+        self.assertEqual(requests[1].service_ns, 10)
+        self.assertEqual(requests[0].positioning_ns, 30)
+        self.assertIsNone(requests[0].seek_sectors)
+        self.assertIsNone(requests[1].seek_sectors)
+
+    def test_fua_data_pairs_and_the_tail_is_flush(self):
+        requests, unmatched_i, unmatched_c = MOD.pair_requests(
+            [
+                issued(0, 5000, 16, "WSM", comm="kworker", pid=5),
+                complete(15, 5000, 16, "WSM"),
+                issued(16, 0, 0, "FF", pid=6),
+                complete(40, FLUSH_SECTOR, 0, "FF"),
+                complete(41, 5000, 0, "WSM"),
+                issued(42, 6000, 8, "R", pid=7),
+                complete(50, 6000, 8, "R"),
+            ]
+        )
+        self.assertEqual((unmatched_i, unmatched_c), (0, 0))
+        extents = [
+            MOD.Extent(5000, 5100, "write-region.dat"),
+            MOD.Extent(6000, 7000, "entropy-chunks.dat"),
+        ]
+        for req in requests:
+            req.category = MOD.classify(req, extents)
+        MOD.attribute(requests, 0, 266, 130)
+        self.assertEqual([req.pid for req in requests], [5, 6, 0, 7])
+        data, post, tail, read = requests
+        self.assertEqual(data.category, "packed_write")
+        self.assertEqual((data.sector, data.nr), (5000, 16))
+        self.assertEqual(data.service_ns, 15)
+        self.assertEqual(post.category, "flush")
+        # Issued at 16, after the data completion at 15, so the gap 15..16 is idle.
+        self.assertEqual(post.service_ns, 24)
+        self.assertEqual(post.positioning_ns, 24)
+        self.assertEqual(post.prev_category, "packed_write")
+        self.assertEqual(tail.category, "flush")
+        self.assertEqual(tail.nr, 0)
+        self.assertEqual(tail.service_ns, 0)
+        self.assertEqual(tail.prev_category, "flush")
+        self.assertEqual(read.category, "recall")
+        self.assertEqual(read.seek_sectors, 6000 - 5016)
+        self.assertEqual(read.prev_category, "flush")
+        self.assertEqual(read.service_ns, 8)
+
+    def test_ra_suffix_then_remainder(self):
+        requests, unmatched_i, unmatched_c = MOD.pair_requests(
+            [
+                issued(0, 1000, 100, "RA", pid=1),
+                complete(10, 1060, 40, "RA"),
+                complete(20, 1000, 60, "R"),
+            ]
+        )
+        self.assertEqual((unmatched_i, unmatched_c), (0, 0))
+        self.assertEqual(len(requests), 2)
+        MOD.attribute(requests, 0, 266, 130)
+        self.assertEqual((requests[0].sector, requests[0].nr), (1060, 40))
+        self.assertEqual((requests[1].sector, requests[1].nr), (1000, 60))
+        self.assertEqual(requests[0].issue_ns, 0)
+        self.assertEqual(requests[1].issue_ns, 0)
+        self.assertEqual(requests[0].service_ns, 10)
+        self.assertEqual(requests[1].service_ns, 10)
+        # The suffix completed first, so the head sits at its end.
+        self.assertEqual(requests[1].seek_sectors, 100)
+
+    def test_unpaired_rwbs_stay_with_the_pairing(self):
+        pairing = MOD.pair_requests(
+            [
+                issued(0, 0, 8, "RA"),
+                issued(1, 100, 8, "RA"),
+                issued(2, 0, 0, "FF"),
+                complete(10, 0, 8, "RA"),
+            ]
+        )
+        requests, unmatched_i, unmatched_c = pairing
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(unmatched_c, 0)
+        self.assertEqual(unmatched_i, 2)
+        self.assertEqual(pairing.issue_rwbs, {"FF": 1, "RA": 1})
+        self.assertEqual(pairing.complete_rwbs, {})
+        self.assertEqual(
+            MOD.format_unpaired("issues", pairing.issue_rwbs),
+            "unpaired issues: FF 1, RA 1",
+        )
 
 
 class ClassifyTests(unittest.TestCase):
@@ -376,6 +485,8 @@ class ReportFileTests(unittest.TestCase):
             text = (out / "blk-report.txt").read_text(encoding="utf-8")
             self.assertIn("metadata/other", text)
             self.assertIn("recall -> flush", text)
+            self.assertIn("unpaired issues: none", text)
+            self.assertIn("unpaired completes: none", text)
             self.assertIn("delta +10.0 ms", text)
             self.assertIn("iostat busy 440.0 ms", text)
             csv_text = (out / "blk-report.csv").read_text(encoding="utf-8")

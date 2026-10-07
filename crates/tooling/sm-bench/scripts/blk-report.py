@@ -24,6 +24,7 @@ import json
 import random
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 OUTER_MIB_S = 266.0
@@ -522,19 +523,85 @@ def _bucket_drop(buckets: dict, key, node: _QNode) -> None:
         del buckets[key]
 
 
-def pair_requests(events: list[tuple]) -> tuple[list[Request], int, int]:
+def _is_flush_issue(nr: int, rwbs: str) -> bool:
+    return nr == 0 and "F" in rwbs.upper()
+
+
+def _is_flush_complete(nr: int, rwbs: str) -> bool:
+    """Zero-length flush completion, or the tail of a PREFLUSH/FUA write.
+
+    The tail keeps the data request's rwbs (`WSM`, `WS`) and has nr_sector 0.
+    """
+    if nr != 0:
+        return False
+    flags = rwbs.upper()
+    if "F" in flags:
+        return True
+    return "W" in flags
+
+
+def _bump(counts: dict[str, int], rwbs: str) -> None:
+    counts[rwbs] = counts.get(rwbs, 0) + 1
+
+
+def _sorted_counts(counts: dict[str, int]) -> dict[str, int]:
+    keys = sorted(counts, key=lambda rwbs: (-counts[rwbs], rwbs))
+    return {key: counts[key] for key in keys}
+
+
+class Pairing(tuple):
+    """`(requests, unmatched_issues, unmatched_completes)`.
+
+    `issue_rwbs` and `complete_rwbs` are the same totals split by rwbs.
+    """
+
+    def __new__(
+        cls,
+        requests: list[Request],
+        unmatched_issues: int,
+        unmatched_completes: int,
+        issue_rwbs: dict[str, int],
+        complete_rwbs: dict[str, int],
+    ) -> "Pairing":
+        obj = super().__new__(cls, (requests, unmatched_issues, unmatched_completes))
+        obj.issue_rwbs = issue_rwbs
+        obj.complete_rwbs = complete_rwbs
+        return obj
+
+
+def _queue_rwbs(live: _Queue) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    node = live.head.next
+    while node is not live.tail:
+        _bump(counts, node.iss.rwbs)
+        node = node.next
+    return counts
+
+
+def pair_requests(events: list[tuple]) -> Pairing:
     """Match issue to complete. Merges grow an outstanding request.
 
-    A completion may be a prefix or a middle slice of the issued span.
-    Zero-length requests (flushes) match FIFO at the same sector.
+    A completion may be a prefix, a suffix, or a middle slice of the issued
+    span. The uncovered part stays outstanding.
+
+    Zero-length flush issues pair FIFO with zero-length completions. The
+    completion's sector and rwbs are not part of the key: `block_rq_complete`
+    reports `blk_rq_pos` of a flush, which is `(sector_t)-1`, and the
+    PREFLUSH/FUA sequence ends the original write again with `nr_sector` 0.
     """
     live = _Queue()
+    flushes: deque[Issued] = deque()
     done: list[Request] = []
-    unmatched_completes = 0
+    unmatched_complete_rwbs: dict[str, int] = {}
     seq = 0
     for kind, mono, sector, nr, rwbs, comm, pid in events:
         if kind == "I":
             fresh = Issued(mono, sector, nr, rwbs, comm, pid)
+            # Flush starts go to their own FIFO. A requeue traces another
+            # issue and no completion; those extras stay unpaired.
+            if _is_flush_issue(nr, rwbs):
+                flushes.append(fresh)
+                continue
             if nr > 0:
                 node = live.find_merge(sector, rwbs, nr)
                 if node is not None:
@@ -543,7 +610,16 @@ def pair_requests(events: list[tuple]) -> tuple[list[Request], int, int]:
             live.append(fresh)
             continue
         matched: Issued | None = None
-        if nr == 0:
+        if _is_flush_complete(nr, rwbs):
+            if flushes:
+                matched = flushes.popleft()
+            else:
+                # No flush start left. Keep the tail so it is counted as a flush.
+                # Its issue time is this completion, so it adds no service
+                # time on top of the post-flush that just finished.
+                flags = rwbs if "F" in rwbs.upper() else "F"
+                matched = Issued(mono, 0, 0, flags, "", 0)
+        elif nr == 0:
             node = live.find_zero(sector, rwbs)
             if node is not None:
                 matched = live.unlink(node)
@@ -565,11 +641,22 @@ def pair_requests(events: list[tuple]) -> tuple[list[Request], int, int]:
                         pieces.append(old.clone(sector=end, nr=old_end - end))
                     live.replace_with_pieces(node, pieces)
         if matched is None:
-            unmatched_completes += 1
+            _bump(unmatched_complete_rwbs, rwbs)
             continue
         done.append(Request(matched, mono, seq))
         seq += 1
-    return done, live.count, unmatched_completes
+    issue_rwbs = _queue_rwbs(live)
+    for iss in flushes:
+        _bump(issue_rwbs, iss.rwbs)
+    issue_rwbs = _sorted_counts(issue_rwbs)
+    complete_rwbs = _sorted_counts(unmatched_complete_rwbs)
+    return Pairing(
+        done,
+        sum(issue_rwbs.values()),
+        sum(complete_rwbs.values()),
+        issue_rwbs,
+        complete_rwbs,
+    )
 
 
 def coalesce(extents: list[Extent]) -> list[Extent]:
@@ -1096,14 +1183,11 @@ def build_report(
         raise SystemExit(f"trace not found: {trace_file}")
     with trace_file.open(encoding="utf-8", errors="replace") as handle:
         events, trace_dev, skipped = parse_trace_lines(handle, progress=progress)
-    requests, unmatched_issues, unmatched_completes = pair_requests(events)
+    pairing = pair_requests(events)
+    requests, unmatched_issues, unmatched_completes = pairing
     warnings = []
     if skipped:
         warnings.append(f"skipped {skipped} trace lines")
-    if unmatched_issues or unmatched_completes:
-        warnings.append(
-            f"unmatched issues {unmatched_issues}, unmatched completes {unmatched_completes}"
-        )
 
     device = {}
     device_file = out_dir / "device.txt"
@@ -1174,9 +1258,19 @@ def build_report(
         "requests": len(requests),
         "unmatched_issues": unmatched_issues,
         "unmatched_completes": unmatched_completes,
+        "unpaired_issues": pairing.issue_rwbs,
+        "unpaired_completes": pairing.complete_rwbs,
         "warnings": warnings,
         "steps": rendered,
     }
+
+
+def format_unpaired(title: str, counts: dict[str, int]) -> str:
+    if not counts:
+        body = "none"
+    else:
+        body = ", ".join(f"{rwbs} {count}" for rwbs, count in counts.items())
+    return f"unpaired {title}: {body}"
 
 
 def fmt_gib(value: float | None) -> str:
@@ -1193,6 +1287,8 @@ def render_text(report: dict) -> str:
         f"  requests {report['requests']}"
     )
     lines.append(report["zone_note"])
+    lines.append(format_unpaired("issues", report.get("unpaired_issues") or {}))
+    lines.append(format_unpaired("completes", report.get("unpaired_completes") or {}))
     for warning in report["warnings"]:
         lines.append(f"warning: {warning}")
     lines.append(
