@@ -766,7 +766,7 @@ fn read_phase(
                 .ok_or_else(|| eyre::eyre!("missing data path hash at {at}"))?;
             eyre::ensure!(hash == expected, "data path hash mismatch at {at}");
             let path = tx
-                .get_full_data_path(hash)?
+                .get_data_path_by_offset(PartitionChunkOffset::from(at))?
                 .ok_or_else(|| eyre::eyre!("missing data path body at {at}"))?;
             eyre::ensure!(path.len() == args.path_bytes, "serve path len at {at}");
             Ok(())

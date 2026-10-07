@@ -26,10 +26,10 @@ use super::rocks::{RocksBackground, RocksSubmoduleStore, RocksTuning};
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
-    add_tx_path_hash_to_offset_range, clear_submodule_database, create_or_open_submodule_db,
-    del_path_hashes_by_offset, del_pending_body_migration, del_pending_body_migrations_in_range,
-    first_missing_path_hash_offset_in_tx, get_data_path_by_offset,
-    get_data_root_infos_for_data_root, get_full_data_path, get_full_tx_path,
+    add_tx_path_hash_to_offset_range, clear_paths_in_inclusive_range, clear_submodule_database,
+    create_or_open_submodule_db, del_path_hashes_by_offset, del_pending_body_migration,
+    del_pending_body_migrations_in_range, first_missing_path_hash_offset_in_tx,
+    get_data_path_by_offset, get_data_root_infos_for_data_root, get_full_tx_path,
     get_path_hashes_by_offset, get_pending_body_migration, get_tx_leaf_binding,
     get_tx_path_by_offset, missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range,
     pending_body_migrations_from, set_data_root_infos_for_data_root, set_path_hashes_by_offset,
@@ -59,21 +59,19 @@ pub trait SubmoduleRead {
         end: PartitionChunkOffset,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>>;
 
-    /// First offset in half-open `[start, end)` with no path-hash key.
+    /// First offset in half-open `[start, end)` with no tx-path interval.
     fn first_missing_path_hash_offset(
         &self,
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<Option<PartitionChunkOffset>>;
 
-    /// Half-open path-hash holes `[gap_start, gap_end)` inside `[start, end)`.
+    /// Half-open spans inside `[start, end)` that no tx-path interval covers.
     fn missing_path_hash_ranges(
         &self,
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>>;
-
-    fn get_full_data_path(&self, path_hash: ChunkPathHash) -> eyre::Result<Option<ChunkDataPath>>;
 
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
 
@@ -100,7 +98,7 @@ pub trait SubmoduleRead {
 pub trait SubmoduleWrite: SubmoduleRead {
     fn add_full_data_path(
         &mut self,
-        path_hash: ChunkPathHash,
+        offset: PartitionChunkOffset,
         data_path: ChunkDataPath,
     ) -> eyre::Result<()>;
 
@@ -124,10 +122,10 @@ pub trait SubmoduleWrite: SubmoduleRead {
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()>;
 
-    /// Set `tx_path_hash` on every offset in the inclusive range `[start, end]`.
+    /// Record one tx-path interval for the inclusive range `[start, end]`.
     ///
-    /// A range past the last key is appended. An overlapping range keeps any
-    /// `data_path_hash` already stored on those offsets.
+    /// Overlapping intervals are split. `None` removes coverage. A data-path
+    /// hash already stored on an offset stays.
     fn add_tx_path_hash_to_offset_range(
         &mut self,
         start: PartitionChunkOffset,
@@ -135,9 +133,9 @@ pub trait SubmoduleWrite: SubmoduleRead {
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()>;
 
-    /// Store each chunk's data path and its offset-index hash in this batch.
+    /// Store each chunk's data path under its offset, and the hash on the offset row.
     ///
-    /// An existing `tx_path_hash` on the same offset stays in place.
+    /// The tx-path interval is left in place.
     fn write_data_path_updates(
         &mut self,
         updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
@@ -150,6 +148,13 @@ pub trait SubmoduleWrite: SubmoduleRead {
     ) -> eyre::Result<()>;
 
     fn del_path_hashes_by_offset(&mut self, offset: PartitionChunkOffset) -> eyre::Result<()>;
+
+    /// Drop tx coverage and per-chunk path rows in the inclusive range.
+    fn clear_paths_in_inclusive_range(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()>;
 
     fn set_data_root_infos_for_data_root(
         &mut self,
@@ -219,6 +224,14 @@ impl MdbxSubmoduleStore {
             env: Arc::new(env),
             group,
         })
+    }
+
+    #[cfg(test)]
+    fn interval_row_count(&self) -> eyre::Result<usize> {
+        use reth_db::transaction::DbTx as _;
+
+        self.env
+            .view(|tx| Ok(tx.entries::<super::tables::TxPathIntervalByStart>()? as usize))?
     }
 
     /// Visible registration commits, one sync per group.
@@ -418,13 +431,6 @@ macro_rules! impl_submodule_read {
                 missing_path_hash_ranges_in_tx(self.tx, start, end)
             }
 
-            fn get_full_data_path(
-                &self,
-                path_hash: ChunkPathHash,
-            ) -> eyre::Result<Option<ChunkDataPath>> {
-                get_full_data_path(self.tx, path_hash)
-            }
-
             fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
                 get_full_tx_path(self.tx, path_hash)
             }
@@ -466,10 +472,10 @@ impl_submodule_read!(MdbxWrite<'_>);
 impl SubmoduleWrite for MdbxWrite<'_> {
     fn add_full_data_path(
         &mut self,
-        path_hash: ChunkPathHash,
+        offset: PartitionChunkOffset,
         data_path: ChunkDataPath,
     ) -> eyre::Result<()> {
-        add_full_data_path(self.tx, path_hash, data_path)
+        add_full_data_path(self.tx, offset, data_path)
     }
 
     fn add_full_tx_path(&mut self, path_hash: TxPathHash, tx_path: TxPath) -> eyre::Result<()> {
@@ -526,6 +532,14 @@ impl SubmoduleWrite for MdbxWrite<'_> {
 
     fn del_path_hashes_by_offset(&mut self, offset: PartitionChunkOffset) -> eyre::Result<()> {
         del_path_hashes_by_offset(self.tx, offset)
+    }
+
+    fn clear_paths_in_inclusive_range(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        clear_paths_in_inclusive_range(self.tx, start, end)
     }
 
     fn set_data_root_infos_for_data_root(
@@ -694,6 +708,15 @@ impl SubmoduleIndex {
             Self::Mdbx(store) => store.update_registration(f),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.update_registration(f),
+        }
+    }
+
+    #[cfg(test)]
+    fn interval_row_count(&self) -> eyre::Result<usize> {
+        match self {
+            Self::Mdbx(store) => store.interval_row_count(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.interval_row_count(),
         }
     }
 
@@ -902,6 +925,56 @@ mod tests {
     }
 
     #[test]
+    fn reassign_merges_with_the_left_neighbor() -> eyre::Result<()> {
+        each_engine("submodule_store_merge_left", |store| {
+            let hash_a = H256::repeat_byte(1);
+            let hash_b = H256::repeat_byte(2);
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(4),
+                    Some(hash_a),
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(5),
+                    PartitionChunkOffset::from(9),
+                    Some(hash_b),
+                )
+            })?;
+            assert_eq!(store.interval_row_count()?, 2);
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(5),
+                    PartitionChunkOffset::from(9),
+                    Some(hash_a),
+                )
+            })?;
+            assert_eq!(store.interval_row_count()?, 1);
+            let at_nine = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(9)))?
+                .expect("merged span covers the old right edge");
+            assert_eq!(at_nine.tx_path_hash, Some(hash_a));
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(2),
+                    Some(hash_b),
+                )
+            })?;
+            assert_eq!(store.interval_row_count()?, 2);
+            let at_three = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(3)))?
+                .expect("right remnant");
+            assert_eq!(at_three.tx_path_hash, Some(hash_a));
+            let at_nine = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(9)))?
+                .expect("right remnant still reaches the old end");
+            assert_eq!(at_nine.tx_path_hash, Some(hash_a));
+            Ok(())
+        })
+    }
+
+    #[test]
     fn data_path_batch_keeps_an_existing_tx_path_hash() -> eyre::Result<()> {
         each_engine("submodule_store_data_path_batch", |store| {
             let offset = PartitionChunkOffset::from(4);
@@ -924,7 +997,7 @@ mod tests {
                 .expect("offset row");
             assert_eq!(hashes.tx_path_hash, Some(tx_hash));
             assert_eq!(hashes.data_path_hash, Some(data_hash));
-            let path = store.view(|tx| tx.get_full_data_path(data_hash))?;
+            let path = store.view(|tx| tx.get_data_path_by_offset(offset))?;
             assert_eq!(path, Some(vec![1, 2, 3]));
             Ok(())
         })
@@ -934,17 +1007,22 @@ mod tests {
     fn uncommitted_writes_change_gap_scans() -> eyre::Result<()> {
         each_engine("submodule_store_gaps", |store| {
             store.update(|tx| {
-                let present = ChunkPathHashes {
-                    data_path_hash: Some(H256::repeat_byte(3)),
-                    tx_path_hash: None,
-                };
-                tx.set_path_hashes_by_offset(PartitionChunkOffset::from(0), present.clone())?;
-                tx.set_path_hashes_by_offset(PartitionChunkOffset::from(2), present)?;
-                let rows = tx.path_hashes_in_inclusive_range(
+                let tx_hash = H256::repeat_byte(3);
+                tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(0),
-                    PartitionChunkOffset::from(2),
+                    PartitionChunkOffset::from(0),
+                    Some(tx_hash),
                 )?;
-                assert_eq!(rows.len(), 2);
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(2),
+                    PartitionChunkOffset::from(2),
+                    Some(tx_hash),
+                )?;
+                tx.write_data_path_updates(vec![(
+                    PartitionChunkOffset::from(1),
+                    H256::repeat_byte(4),
+                    vec![1],
+                )])?;
                 assert_eq!(
                     tx.missing_path_hash_ranges(
                         PartitionChunkOffset::from(0),
@@ -962,6 +1040,11 @@ mod tests {
                         PartitionChunkOffset::from(4),
                     )?,
                     Some(PartitionChunkOffset::from(0))
+                );
+                assert!(
+                    tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?
+                        .is_some(),
+                    "a data path does not fill a tx-coverage hole"
                 );
                 Ok(())
             })?;

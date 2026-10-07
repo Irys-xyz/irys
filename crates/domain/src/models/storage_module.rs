@@ -191,7 +191,7 @@ fn metas_in_tx(
             cached.clone()
         } else {
             index_read_metrics::note("data_path");
-            let loaded = tx.get_full_data_path(data_path_hash)?.map(Base64::from);
+            let loaded = tx.get_data_path_by_offset(offset)?.map(Base64::from);
             data_paths.insert(data_path_hash, loaded.clone());
             loaded
         };
@@ -262,7 +262,7 @@ fn paths_in_tx(
         let data_path = match hashes.data_path_hash {
             Some(hash) => cached_bytes(&mut data_paths, hash, || {
                 index_read_metrics::note("data_path");
-                tx.get_full_data_path(hash)
+                tx.get_data_path_by_offset(offset)
             })?,
             None => None,
         };
@@ -2430,14 +2430,12 @@ impl StorageModule {
             let submodule_end = *interval.end();
             let slice_end = submodule_end.min(range_end);
             submodule.db.update(|tx| {
-                for offset in cursor..=slice_end {
-                    let part_offset = PartitionChunkOffset::from(offset);
-                    // Delete the key entirely so gap scans see a real hole.
-                    // Writing `{None,None}` placeholders left "present" keys that
-                    // the density check treated as indexed, hiding the gap from heal.
-                    tx.del_path_hashes_by_offset(part_offset)?;
-                }
-                Ok(())
+                // Removing coverage makes heal see a hole. Deleting the path
+                // rows makes a later read miss the data path.
+                tx.clear_paths_in_inclusive_range(
+                    PartitionChunkOffset::from(cursor),
+                    PartitionChunkOffset::from(slice_end),
+                )
             })?;
             // Advance to the next submodule covering the range.
             if submodule_end >= range_end {
@@ -2557,8 +2555,8 @@ impl StorageModule {
                     },
                 )?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
-                    // One cursor for the intersecting offsets. A tip range appends;
-                    // an overlap keeps any data path already stored on those keys.
+                    // One interval for this submodule's slice of the tx. A later
+                    // placement that overlaps it is split. Data-path hashes stay.
                     tx.add_tx_path_hash_to_offset_range(
                         range.start(),
                         range.end(),
@@ -3151,11 +3149,11 @@ impl StorageModule {
                 return Ok(None);
             };
 
-            let Some(data_path_hash) = data_path_hash else {
+            if data_path_hash.is_none() {
                 return Ok(None);
-            };
+            }
             index_read_metrics::note("data_path");
-            let Some(data_path) = tx.get_full_data_path(data_path_hash)? else {
+            let Some(data_path) = tx.get_data_path_by_offset(partition_offset)? else {
                 return Ok(None);
             };
 
