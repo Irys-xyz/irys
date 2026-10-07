@@ -1,0 +1,29 @@
+# Traced recall 1/s x 400 chunks. Idle is 180 s. Ingest is 16 and 20 MiB/s.
+# Pair with ladder.sh --trace.
+stop_on_fail = false
+
+[[step]]
+name = "idle"
+secs = 180
+recall_num = 1
+recall_den = 1
+
+[[step]]
+name = "ingest-16"
+secs = 600
+recall_num = 1
+recall_den = 1
+ingest_mib_s = 16
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-20"
+secs = 600
+recall_num = 1
+recall_den = 1
+ingest_mib_s = 20
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50

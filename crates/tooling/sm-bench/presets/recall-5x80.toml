@@ -1,0 +1,60 @@
+# Five 80-chunk recalls per second. Same recall bytes as one 400-chunk
+# recall, split into five reads. Stand-in for several partitions on one
+# spindle through one lane. Pass --recall-chunks 80 with this file.
+stop_on_fail = false
+
+[[step]]
+name = "idle"
+secs = 600
+recall_num = 5
+recall_den = 1
+
+[[step]]
+name = "ingest-8"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 8
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-12"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 12
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-16"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 16
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-20"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 20
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-24"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 24
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
