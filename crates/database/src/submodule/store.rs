@@ -851,6 +851,57 @@ mod tests {
     }
 
     #[test]
+    fn tx_range_preserves_data_path_hashes_and_appends() -> eyre::Result<()> {
+        each_engine("submodule_store_tx_range", |store| {
+            let data_hash = H256::repeat_byte(4);
+            let old_tx = H256::repeat_byte(5);
+            let new_tx = H256::repeat_byte(6);
+            let tail_tx = H256::repeat_byte(7);
+            store.update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(2),
+                    ChunkPathHashes {
+                        data_path_hash: Some(data_hash),
+                        tx_path_hash: Some(old_tx),
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(3),
+                    Some(new_tx),
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(4),
+                    PartitionChunkOffset::from(5),
+                    Some(tail_tx),
+                )
+            })?;
+            let at_two = path_at(store, 2)?.expect("offset 2");
+            assert_eq!(at_two.data_path_hash, Some(data_hash));
+            assert_eq!(at_two.tx_path_hash, Some(new_tx));
+            let at_zero = path_at(store, 0)?.expect("offset 0");
+            assert_eq!(at_zero.data_path_hash, None);
+            assert_eq!(at_zero.tx_path_hash, Some(new_tx));
+            let at_five = path_at(store, 5)?.expect("offset 5");
+            assert_eq!(at_five.data_path_hash, None);
+            assert_eq!(at_five.tx_path_hash, Some(tail_tx));
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(6),
+                    PartitionChunkOffset::from(7),
+                    Some(tail_tx),
+                )
+            })?;
+            let at_six = path_at(store, 6)?.expect("offset 6");
+            assert_eq!(at_six.data_path_hash, None);
+            assert_eq!(at_six.tx_path_hash, Some(tail_tx));
+            let at_two = path_at(store, 2)?.expect("offset 2 after append");
+            assert_eq!(at_two.data_path_hash, Some(data_hash));
+            Ok(())
+        })
+    }
+
+    #[test]
     fn data_path_batch_keeps_an_existing_tx_path_hash() -> eyre::Result<()> {
         each_engine("submodule_store_data_path_batch", |store| {
             let offset = PartitionChunkOffset::from(4);

@@ -1614,7 +1614,7 @@ offset-rows writes --chunks offset rows and no data paths, then does cold point 
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
 Presets: {presets}. Each preset changes one setting. \
---rocks-block-cache overrides that preset's cache. A new block size needs an empty directory.\n\
+--rocks-block-cache overrides that preset's cache. A new block size or partition-filters needs an empty directory.\n\
 --list-rocks prints the presets and exits.\n\
 --reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
