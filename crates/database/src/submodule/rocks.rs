@@ -82,7 +82,7 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// The bench names the other values. Each of those changes one field, so a
 /// sweep can attribute a difference to that field, except `full-filters`.
 /// That preset is the full-filter residency trial: one shard and 128 MiB.
-/// `wal-recycle` reuses retired WAL files. Options are fixed at open. A new
+/// `no-wal-recycle` turns WAL file reuse off (baseline reuses 4). Options are fixed at open. A new
 /// block size or a filter change needs an empty directory. An existing SST
 /// keeps the filter it was built with until a compaction rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,9 +123,10 @@ pub struct RocksTuning {
     pub partition_filters: bool,
     /// Retired WAL files to overwrite instead of allocating a new file.
     ///
-    /// `0` is the baseline: each WAL switch creates a file, and each sync of
-    /// that growing file updates its size. A non-zero count keeps that many
-    /// old files. A later sync writes inside a file that already has blocks.
+    /// The baseline (production open) is `4`: that many retired files are kept
+    /// and overwritten, so a later sync writes inside a file that already has
+    /// blocks. `0` (`no-wal-recycle`): each WAL switch creates a file, and each
+    /// sync of that growing file updates its size.
     ///
     /// RocksDB 10.4 keeps a non-zero count for `kPointInTimeRecovery` (this
     /// open's default; the binding does not set a recovery mode) and for
@@ -151,7 +152,7 @@ impl RocksTuning {
             target_file_bytes: TARGET_FILE_BYTES,
             universal: false,
             partition_filters: true,
-            recycle_log_file_num: 0,
+            recycle_log_file_num: 4,
         }
     }
 
@@ -205,15 +206,14 @@ impl RocksTuning {
                 cache_shard_bits: 0,
                 ..base
             },
-            // Four retired files. RocksDB 10.4 does not scale this count
-            // with `max_write_buffer_number` (2 here) or with the column
-            // family count. One WAL covers every family, so two files
-            // would cover the live WAL and the one a flush retires. Four
-            // leaves sized spares so a switch does not allocate. Recovery
-            // stays `kPointInTimeRecovery`, which keeps the count.
+            // WAL file reuse off, for an A/B against the baseline's 4.
+            // Baseline keeps four retired files: RocksDB 10.4 does not scale
+            // the count with `max_write_buffer_number` (2 here) or the column
+            // family count, and one WAL covers every family. Recovery stays
+            // `kPointInTimeRecovery`, which keeps a non-zero count.
             Self {
-                name: "wal-recycle",
-                recycle_log_file_num: 4,
+                name: "no-wal-recycle",
+                recycle_log_file_num: 0,
                 ..base
             },
         ]
@@ -781,8 +781,9 @@ fn open_db(
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
-    // Baseline is 0. `wal-recycle` is 4. Point-in-time recovery, the
-    // default, keeps a non-zero count. See `RocksTuning::recycle_log_file_num`.
+    // Baseline (production) is 4, as before; `no-wal-recycle` is 0.
+    // Point-in-time recovery, the default, keeps a non-zero count.
+    // See `RocksTuning::recycle_log_file_num`.
     db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
     if preload_tables {
         // Bench only. -1 keeps every table open and preloads them in DB::Open.
@@ -1967,12 +1968,12 @@ mod tests {
         assert_eq!(full_filters.block_cache_bytes, 128 * 1024 * 1024);
         assert_eq!(full_filters.cache_shard_bits, 0);
         assert_eq!(base.cache_shard_bits, -1);
-        assert_eq!(base.recycle_log_file_num, 0);
-        let wal_recycle = RocksTuning::preset("wal-recycle")?;
-        assert_eq!(wal_recycle.recycle_log_file_num, 4);
-        assert!(base.describe().contains("recycle_log_file_num=0"));
-        assert!(wal_recycle.describe().contains("recycle_log_file_num=4"));
-        assert!(wal_recycle.describe().contains("filters=partitioned"));
+        assert_eq!(base.recycle_log_file_num, 4);
+        let no_recycle = RocksTuning::preset("no-wal-recycle")?;
+        assert_eq!(no_recycle.recycle_log_file_num, 0);
+        assert!(base.describe().contains("recycle_log_file_num=4"));
+        assert!(no_recycle.describe().contains("recycle_log_file_num=0"));
+        assert!(no_recycle.describe().contains("filters=partitioned"));
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -2003,7 +2004,7 @@ mod tests {
         }
         let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
         assert!(
-            baseline_opts.contains("recycle_log_file_num=0"),
+            baseline_opts.contains("recycle_log_file_num=4"),
             "{baseline_opts}"
         );
         assert!(
@@ -2027,13 +2028,19 @@ mod tests {
         let full = persisted_options(&dir.path().join("full-filters"))?;
         assert!(full.contains("partition_filters=false"), "{full}");
         assert!(!full.contains("index_type=kTwoLevelIndexSearch"), "{full}");
-        let recycled = persisted_options(&dir.path().join("wal-recycle"))?;
-        assert!(recycled.contains("recycle_log_file_num=4"), "{recycled}");
+        let no_recycle_opts = persisted_options(&dir.path().join("no-wal-recycle"))?;
         assert!(
-            recycled.contains("wal_recovery_mode=kPointInTimeRecovery"),
-            "{recycled}"
+            no_recycle_opts.contains("recycle_log_file_num=0"),
+            "{no_recycle_opts}"
         );
-        assert!(recycled.contains("partition_filters=true"), "{recycled}");
+        assert!(
+            no_recycle_opts.contains("wal_recovery_mode=kPointInTimeRecovery"),
+            "{no_recycle_opts}"
+        );
+        assert!(
+            no_recycle_opts.contains("partition_filters=true"),
+            "{no_recycle_opts}"
+        );
         Ok(())
     }
 
@@ -2045,7 +2052,7 @@ mod tests {
             .prefix("submodule_rocks_wal_recycle")
             .build();
         let path = dir.path().join("index");
-        let preset = RocksTuning::preset("wal-recycle")?;
+        let preset = RocksTuning::baseline();
         let durable = [(1_u32, 11_u8), (2, 22), (3, 33), (4, 44)];
         let wal_only = (5_u32, 55_u8);
         {
