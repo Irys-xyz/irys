@@ -34,7 +34,7 @@ use irys_database::IrysDatabaseArgs as _;
 use irys_database::submodule::tables::{
     ChunkPathHashes, DataRootInfo, PendingBodyMigration, TxLeafBinding,
 };
-use irys_database::submodule::{RocksTuning, SubmoduleIndex, SubmoduleStore as _};
+use irys_database::submodule::{LegacySstSpan, RocksTuning, SubmoduleIndex, SubmoduleStore as _};
 use irys_types::{DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset, TERABYTE};
 use reth_db::mdbx::DatabaseArguments;
 
@@ -445,6 +445,52 @@ fn write_offset_rows(store: &SubmoduleIndex, chunks: u32, batch: u32) -> eyre::R
     Ok(())
 }
 
+fn print_legacy_ssts(store: &SubmoduleIndex, when: &str) -> eyre::Result<()> {
+    for file in store.legacy_path_hash_ssts()? {
+        println!(
+            "  sst when={when} name={} level={} bytes={} entries={} start={} end={}",
+            file.name,
+            file.level,
+            file.bytes,
+            file.entries,
+            fmt_offset(file.start),
+            fmt_offset(file.end),
+        );
+    }
+    Ok(())
+}
+
+/// Files whose key range overlaps the sampled offsets `0..chunks`.
+fn print_sst_cover(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
+    let end = chunks.saturating_sub(1);
+    let mut names = Vec::new();
+    for file in store.legacy_path_hash_ssts()? {
+        if sst_covers(&file, 0, end) {
+            names.push(format!("{}@{}", file.name, file.level));
+        }
+    }
+    let files = if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(",")
+    };
+    println!("  sst_cover shape=offset_get span_start=0 span_end={end} files={files}");
+    Ok(())
+}
+
+fn sst_covers(file: &LegacySstSpan, start: u32, end: u32) -> bool {
+    match (file.start, file.end) {
+        (Some(file_start), Some(file_end)) => file_start <= end && start <= file_end,
+        _ => true,
+    }
+}
+
+fn fmt_offset(offset: Option<u32>) -> String {
+    offset
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
 /// Point Gets on a copied schema-v1 path-hash SST. Does not write proofs.
 fn run_filter_reuse(args: &Args) -> eyre::Result<()> {
     let dir = args.dir.join("rocks");
@@ -455,10 +501,13 @@ fn run_filter_reuse(args: &Args) -> eyre::Result<()> {
     let started = Instant::now();
     let store = SubmoduleIndex::open_rocks_v1_probe(&dir, args.rocks)?;
     println!("  open_ms={}", started.elapsed().as_millis());
+    print_legacy_ssts(&store, "after_open")?;
     if args.rewrite_filters {
         let rewrite_ms = timed(|| store.compact_legacy_path_hashes())?;
         println!("  rewrite_ms={rewrite_ms}");
+        print_legacy_ssts(&store, "after_rewrite")?;
     }
+    print_sst_cover(&store, args.chunks)?;
     let files = evict_cache(&dir)?;
     let disk = disk_id(&dir)?;
     time_shape(
@@ -1696,7 +1745,7 @@ offset-rows writes --chunks offset rows and no data paths, then does cold point 
 Presets: {presets}. Each preset changes one setting. \
 --rocks-block-cache overrides that preset's cache. A new block size or partition-filters needs an empty directory.\n\
 --profile filter-reuse opens an existing schema-v1 rocks/ directory. It refuses a directory that also contains mdbx/. \
---rewrite-filters compacts ChunkPathHashesByOffset so the open's filter options replace the SST filter. \
+--rewrite-filters forces a bottommost compaction of ChunkPathHashesByOffset so the existing SST is rewritten with this open's filter. A plain compact can trivial-move the file and keep the old filter. The run prints one sst line per live path-hash file and sst_cover for the sampled offsets. \
 Default --chunks is 20971520, the first max transaction in the stuck worst-case run.\n\
 --list-rocks prints the presets and exits.\n\
 --reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root.\n\
