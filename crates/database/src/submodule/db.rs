@@ -524,12 +524,13 @@ fn intervals_touching<T: DbTx>(
     end: PartitionChunkOffset,
 ) -> eyre::Result<Vec<IntervalRow>> {
     let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
+    // `seek` lands on the first start >= the edit. That row's left neighbor
+    // is one key lower, including when the hit is exact.
     let mut current = match cursor.seek(start)? {
-        Some((key, _)) if key > start => match cursor.prev()? {
+        Some(_) => match cursor.prev()? {
             Some(previous) => Some(previous),
             None => cursor.seek(start)?,
         },
-        Some(pair) => Some(pair),
         None => cursor.last()?,
     };
     let left_limit = start.0.saturating_sub(1);

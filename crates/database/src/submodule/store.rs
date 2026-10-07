@@ -226,6 +226,14 @@ impl MdbxSubmoduleStore {
         })
     }
 
+    #[cfg(test)]
+    fn interval_row_count(&self) -> eyre::Result<usize> {
+        use reth_db::transaction::DbTx as _;
+
+        self.env
+            .view(|tx| Ok(tx.entries::<super::tables::TxPathIntervalByStart>()? as usize))?
+    }
+
     /// Visible registration commits, one sync per group.
     ///
     /// `MDBX_SAFE_NOSYNC` is env-wide, so every later commit on this environment
@@ -704,6 +712,15 @@ impl SubmoduleIndex {
     }
 
     #[cfg(test)]
+    fn interval_row_count(&self) -> eyre::Result<usize> {
+        match self {
+            Self::Mdbx(store) => store.interval_row_count(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.interval_row_count(),
+        }
+    }
+
+    #[cfg(test)]
     fn group_sync_count(&self) -> u64 {
         match self {
             Self::Mdbx(store) => store.group.sync_count(),
@@ -852,6 +869,56 @@ mod tests {
             })?;
             let infos = store.view(|tx| tx.get_data_root_infos_for_data_root(data_root))?;
             assert_eq!(infos.expect("committed list").0.len(), 2);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn reassign_merges_with_the_left_neighbor() -> eyre::Result<()> {
+        each_engine("submodule_store_merge_left", |store| {
+            let hash_a = H256::repeat_byte(1);
+            let hash_b = H256::repeat_byte(2);
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(4),
+                    Some(hash_a),
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(5),
+                    PartitionChunkOffset::from(9),
+                    Some(hash_b),
+                )
+            })?;
+            assert_eq!(store.interval_row_count()?, 2);
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(5),
+                    PartitionChunkOffset::from(9),
+                    Some(hash_a),
+                )
+            })?;
+            assert_eq!(store.interval_row_count()?, 1);
+            let at_nine = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(9)))?
+                .expect("merged span covers the old right edge");
+            assert_eq!(at_nine.tx_path_hash, Some(hash_a));
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(2),
+                    Some(hash_b),
+                )
+            })?;
+            assert_eq!(store.interval_row_count()?, 2);
+            let at_three = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(3)))?
+                .expect("right remnant");
+            assert_eq!(at_three.tx_path_hash, Some(hash_a));
+            let at_nine = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(9)))?
+                .expect("right remnant still reaches the old end");
+            assert_eq!(at_nine.tx_path_hash, Some(hash_a));
             Ok(())
         })
     }

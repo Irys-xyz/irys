@@ -481,6 +481,18 @@ impl RocksSubmoduleStore {
     }
 
     #[cfg(test)]
+    pub(super) fn interval_row_count(&self) -> eyre::Result<usize> {
+        let handle = cf_handle(&self.db, Cf::Interval)?;
+        let snap = self.db.snapshot();
+        let mut count = 0;
+        for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+            item.wrap_err("scan tx intervals")?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    #[cfg(test)]
     fn schema_payload(&self) -> eyre::Result<Option<Vec<u8>>> {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let key = encode_key(MetadataKey::DBSchemaVersion);
@@ -953,11 +965,23 @@ impl Rows<'_> {
     ) -> eyre::Result<Vec<IntervalRow>> {
         let start_key = encode_key(start);
         let floor = self.floor_raw(Cf::Interval, &start_key)?;
-        let from = match floor.as_ref() {
-            Some((key, _)) if key.as_slice() <= start_key.as_slice() => Some(key.as_slice()),
-            _ => Some(start_key.as_slice()),
+        // An exact hit is the row being edited. The previous key is the left
+        // neighbor a same-hash assign has to merge with.
+        let from_owned = if floor
+            .as_ref()
+            .is_some_and(|(key, _)| key.as_slice() == start_key.as_slice())
+            && start.0 > 0
+        {
+            let left_key = encode_key(PartitionChunkOffset(start.0 - 1));
+            self.floor_raw(Cf::Interval, &left_key)?
+                .map(|(key, _)| key)
+                .unwrap_or(start_key)
+        } else if let Some((key, _)) = floor {
+            key
+        } else {
+            start_key
         };
-        let mut cursor = self.cursor(Cf::Interval, from)?;
+        let mut cursor = self.cursor(Cf::Interval, Some(&from_owned))?;
         let left_limit = start.0.saturating_sub(1);
         let right_limit = end.0.saturating_add(1);
         let mut rows = Vec::new();
