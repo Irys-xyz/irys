@@ -37,10 +37,10 @@ pub(super) struct GroupCommit {
     enabled: AtomicBool,
     syncs: AtomicU64,
     /// Synced WAL writes. RocksDB only. Includes backstop syncs.
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     wal_syncs: AtomicU64,
     /// Backstop thread, explicit `sync_group`, and shutdown WAL syncs.
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     backstop_syncs: AtomicU64,
     /// Set when a RocksDB WAL sync fails. Later index writes must fail.
     /// RocksDB can clear its own background error; this flag does not clear.
@@ -71,7 +71,7 @@ struct State {
     delay: Duration,
     /// [`GroupCommit::set_delay`] has run. Rocks enable uses its default
     /// only when this is false, so a caller-supplied bound is kept.
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     delay_set: bool,
 }
 
@@ -109,18 +109,18 @@ impl GroupCommit {
         self.syncs.load(Ordering::Relaxed)
     }
 
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn wal_syncs(&self) -> u64 {
         self.wal_syncs.load(Ordering::Relaxed)
     }
 
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn backstop_syncs(&self) -> u64 {
         self.backstop_syncs.load(Ordering::Relaxed)
     }
 
     /// One `set_sync(true)` write or `flush_wal(true)` that is not the backstop.
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn note_wal_sync(&self) {
         self.wal_syncs.fetch_add(1, Ordering::Relaxed);
     }
@@ -129,7 +129,7 @@ impl GroupCommit {
     ///
     /// Also counts as a WAL sync. A synced data write that covers the open
     /// group does not call this.
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn note_backstop_sync(&self) {
         self.wal_syncs.fetch_add(1, Ordering::Relaxed);
         self.backstop_syncs.fetch_add(1, Ordering::Relaxed);
@@ -160,7 +160,7 @@ impl GroupCommit {
     ///
     /// `Duration::ZERO` makes the thread sync as soon as it wakes. It does
     /// not sync on the caller thread.
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn set_delay(&self, delay: Duration) {
         let mut state = self.lock();
         state.delay = delay;
@@ -169,7 +169,7 @@ impl GroupCommit {
         self.wake.notify_all();
     }
 
-    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    #[cfg_attr(not(feature = "rocksdb"), expect(dead_code))]
     pub(super) fn delay_is_set(&self) -> bool {
         self.lock().delay_set
     }

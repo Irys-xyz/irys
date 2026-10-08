@@ -1,6 +1,7 @@
 pub mod db;
 mod group;
 mod interval;
+mod migrate;
 #[cfg(feature = "rocksdb")]
 pub mod rocks;
 pub mod store;

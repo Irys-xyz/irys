@@ -4,7 +4,7 @@ use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::{
-    Database as _, DatabaseEnv,
+    DatabaseEnv,
     cursor::DbCursorRO as _,
     mdbx::DatabaseArguments,
     table::Table,
@@ -12,17 +12,21 @@ use reth_db::{
 };
 
 use crate::{
-    metadata::MetadataKey,
     open_or_create_db,
     submodule::tables::{DataRootInfo, DataRootInfosByDataRoot},
 };
 
+use super::migrate;
+pub use super::migrate::{
+    DetectedSubmoduleSchema, MigrationStats, SubmoduleMigrationOptions,
+    require_submodule_index_copy,
+};
+
 use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
 use super::tables::{
-    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos, Metadata,
-    PendingBodyMigration, PendingBodyMigrationsByOffset, SUBMODULE_SCHEMA, SubmoduleTables,
-    TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
-    TxPathIntervalByStart,
+    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos,
+    PendingBodyMigration, PendingBodyMigrationsByOffset, SubmoduleTables, TxLeafBinding,
+    TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
 };
 
 /// Creates or opens a *submodule* MDBX database with the given [`DatabaseArguments`].
@@ -30,32 +34,31 @@ use super::tables::{
 /// The caller supplies fully-built args (sync mode, geometry, etc.) — typically
 /// via [`crate::submodule_db_args`] — so DB tuning lives in one place instead of
 /// being threaded through as individual parameters.
+///
+/// A schema v1 directory is migrated before this returns. The schema row is
+/// written only when that migration has committed.
 pub fn create_or_open_submodule_db<P: AsRef<Path>>(
     path: P,
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    let env = open_or_create_db(path, SubmoduleTables::ALL, args)?;
-    ensure_mdbx_schema(&env)?;
+    let (env, _) = open_submodule_index(path, args, SubmoduleMigrationOptions::default())?;
     Ok(env)
 }
 
-fn ensure_mdbx_schema(env: &DatabaseEnv) -> eyre::Result<()> {
-    let expected = SUBMODULE_SCHEMA.as_bytes().to_vec();
-    let read = env.tx()?;
-    let current = read.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
-    let occupied = read.entries::<ChunkPathHashesByOffset>()? > 0;
-    drop(read);
-    match current {
-        Some(found) if found == expected => Ok(()),
-        Some(_) => eyre::bail!("submodule index schema row does not match this binary"),
-        None if occupied => eyre::bail!("submodule index has rows from an older schema"),
-        None => {
-            let write = env.tx_mut()?;
-            write.put::<Metadata>(MetadataKey::DBSchemaVersion, expected)?;
-            write.commit()?;
-            Ok(())
-        }
-    }
+/// Opens the submodule index and returns what the schema check did.
+///
+/// [`SubmoduleMigrationOptions::fail_after_commits`] stops a migration after
+/// that many committed transactions. Production passes
+/// [`SubmoduleMigrationOptions::default`].
+pub fn open_submodule_index<P: AsRef<Path>>(
+    path: P,
+    args: DatabaseArguments,
+    options: SubmoduleMigrationOptions,
+) -> eyre::Result<(DatabaseEnv, MigrationStats)> {
+    let path = path.as_ref();
+    let env = open_or_create_db(path, SubmoduleTables::ALL, args)?;
+    let stats = migrate::ensure_mdbx_schema(&env, path, &options)?;
+    Ok((env, stats))
 }
 
 /// Full data path stored at `offset`.
@@ -83,6 +86,15 @@ pub fn get_path_hashes_by_offset<T: DbTx>(
 ) -> eyre::Result<Option<ChunkPathHashes>> {
     let stored = tx.get::<ChunkPathHashesByOffset>(offset)?;
     let tx_path_hash = tx_hash_at(tx, offset)?;
+    // Schema v1 could leave a key whose hashes are both empty. v2 deletes that
+    // key instead. The row has no interval, so keep the stored answer.
+    if tx_path_hash.is_none()
+        && stored
+            .as_ref()
+            .is_some_and(|hashes| hashes.data_path_hash.is_none() && hashes.tx_path_hash.is_none())
+    {
+        return Ok(stored);
+    }
     Ok(combine_hashes(stored, tx_path_hash))
 }
 

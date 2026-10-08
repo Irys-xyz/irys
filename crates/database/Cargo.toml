@@ -38,6 +38,10 @@ name = "submodule-index-bench"
 path = "src/bin/submodule_index_bench.rs"
 required-features = ["rocksdb"]
 
+[[bin]]
+name = "submodule-index-migrate"
+path = "src/bin/submodule_index_migrate.rs"
+
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true

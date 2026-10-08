@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
-/// Bytes stored in the submodule `Metadata` schema row.
+/// Bytes stored in the submodule `Metadata` schema row after open succeeds.
 ///
-/// A directory written by an older index refuses to open.
+/// A schema v1 directory has no row. Open migrates it and writes this value
+/// only when the new rows are complete. Any other row is refused.
 pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 
 // Per-submodule database tables
@@ -163,6 +164,26 @@ impl Ord for DataRootInfo {
     }
 }
 
+/// Schema v1 table kept so migration can read hash-keyed data paths.
+///
+/// Not part of [`SubmoduleTables`]. A new database does not create it.
+pub mod v1 {
+    use irys_types::{ChunkDataPath, ChunkPathHash};
+    use paste::paste;
+    use reth_db::table::TableInfo;
+    use reth_db::{TableSet, TableType, TableViewer, tables};
+    use std::fmt;
+
+    tables! {
+        V1DataPathTables;
+        /// Data paths written by schema v1, keyed by the data-path hash.
+        table ChunkDataPathByPathHash {
+            type Key = ChunkPathHash;
+            type Value = ChunkDataPath;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
@@ -227,5 +248,98 @@ mod tests {
         );
 
         Ok(())
+    }
+}
+
+/// Table sets that match schema v1. Test writers use these to build a `db/`
+/// the way master and the release binaries do: same names, same encodings,
+/// no schema row.
+#[cfg(test)]
+pub mod v1_fixture {
+    pub mod master {
+        use crate::metadata::MetadataKey;
+        use irys_types::{
+            ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+        };
+        use paste::paste;
+        use reth_db::table::TableInfo;
+        use reth_db::{TableSet, TableType, TableViewer, tables};
+        use std::fmt;
+
+        use super::super::{ChunkPathHashes, DataRootInfos, PendingBodyMigration, TxLeafBinding};
+
+        tables! {
+            MasterV1Tables;
+            table ChunkPathHashesByOffset {
+                type Key = PartitionChunkOffset;
+                type Value = ChunkPathHashes;
+            }
+            table ChunkDataPathByPathHash {
+                type Key = ChunkPathHash;
+                type Value = ChunkDataPath;
+            }
+            table TxPathByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxPath;
+            }
+            table DataRootInfosByDataRoot {
+                type Key = DataRoot;
+                type Value = DataRootInfos;
+            }
+            table TxLeafBindingByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxLeafBinding;
+            }
+            table PendingBodyMigrationsByOffset {
+                type Key = PartitionChunkOffset;
+                type Value = PendingBodyMigration;
+            }
+            table Metadata {
+                type Key = MetadataKey;
+                type Value = Vec<u8>;
+            }
+        }
+    }
+
+    /// Release mainnet 4.x has no `PendingBodyMigrationsByOffset` table.
+    pub mod mainnet {
+        use crate::metadata::MetadataKey;
+        use irys_types::{
+            ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+        };
+        use paste::paste;
+        use reth_db::table::TableInfo;
+        use reth_db::{TableSet, TableType, TableViewer, tables};
+        use std::fmt;
+
+        use super::super::{ChunkPathHashes, DataRootInfos, TxLeafBinding};
+
+        tables! {
+            MainnetV1Tables;
+            table ChunkPathHashesByOffset {
+                type Key = PartitionChunkOffset;
+                type Value = ChunkPathHashes;
+            }
+            table ChunkDataPathByPathHash {
+                type Key = ChunkPathHash;
+                type Value = ChunkDataPath;
+            }
+            table TxPathByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxPath;
+            }
+            table DataRootInfosByDataRoot {
+                type Key = DataRoot;
+                type Value = DataRootInfos;
+            }
+            table TxLeafBindingByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxLeafBinding;
+            }
+            table Metadata {
+                type Key = MetadataKey;
+                type Value = Vec<u8>;
+            }
+        }
     }
 }

@@ -917,7 +917,10 @@ impl SubmoduleIndex {
     /// bound. A later call updates a running thread.
     pub fn set_wal_backstop(&self, delay: Duration) {
         match self {
-            Self::Mdbx(_) => {}
+            // The parameter is read only by the RocksDB engine.
+            Self::Mdbx(_) => {
+                let _ = delay;
+            }
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.set_wal_backstop(delay),
         }
