@@ -29,11 +29,12 @@ use irys_types::{
 use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
 use rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction,
-    IteratorMode, Options, WriteBatch, WriteOptions,
+    IteratorMode, Options, ReadOptions, WriteBatch, WriteOptions,
 };
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
+use super::store::PresenceReconcile;
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
     DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, SUBMODULE_SCHEMA,
@@ -913,6 +914,67 @@ impl RocksSubmoduleStore {
         Ok(count)
     }
 
+    /// Latest committed WAL sequence. A read leaves it unchanged.
+    pub(super) fn committed_sequence(&self) -> eyre::Result<u64> {
+        Ok(self.db.latest_sequence_number())
+    }
+
+    /// Delete presence rows in each inclusive span.
+    ///
+    /// Counts keys only. `DeleteRange` then removes them. A span with no
+    /// presence key does not enter the batch. An empty result does not write,
+    /// so the sequence stays put.
+    pub(super) fn delete_presence_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        if ranges.iter().all(|(start, end)| start > end) {
+            return Ok(PresenceReconcile::default());
+        }
+        let _guard = self.lock_write();
+        let snap = self.db.snapshot();
+        let mut path_hash_rows = 0_u64;
+        let mut data_path_rows = 0_u64;
+        let mut deletes = Vec::new();
+        for &(start, end) in ranges {
+            if start > end {
+                continue;
+            }
+            let path_count = count_presence_keys(&self.db, &snap, Cf::PathHashes, start, end)?;
+            let data_count = count_presence_keys(&self.db, &snap, Cf::DataPath, start, end)?;
+            path_hash_rows = path_hash_rows.saturating_add(path_count);
+            data_path_rows = data_path_rows.saturating_add(data_count);
+            if path_count > 0 {
+                deletes.push((Cf::PathHashes, start, end));
+            }
+            if data_count > 0 {
+                deletes.push((Cf::DataPath, start, end));
+            }
+        }
+        drop(snap);
+        if deletes.is_empty() {
+            return Ok(PresenceReconcile {
+                path_hash_rows,
+                data_path_rows,
+            });
+        }
+        let mut batch = WriteBatch::new();
+        for (cf, start, end) in deletes {
+            let handle = cf_handle(&self.db, cf)?;
+            batch.delete_range_cf(&handle, encode_key(start), exclusive_end_key(end));
+        }
+        let mut opts = WriteOptions::default();
+        opts.set_sync(true);
+        self.db
+            .write_opt(batch, &opts)
+            .wrap_err("reconcile presence rows")?;
+        self.group.cover_durable();
+        Ok(PresenceReconcile {
+            path_hash_rows,
+            data_path_rows,
+        })
+    }
+
     #[cfg(test)]
     fn schema_payload(&self) -> eyre::Result<Option<Vec<u8>>> {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
@@ -925,6 +987,13 @@ impl RocksSubmoduleStore {
 }
 
 impl super::SubmoduleStore for RocksSubmoduleStore {
+    fn drop_presence_in_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        self.delete_presence_ranges(ranges)
+    }
+
     fn view<R>(
         &self,
         f: impl FnOnce(&mut dyn SubmoduleRead) -> eyre::Result<R>,
@@ -1400,6 +1469,44 @@ fn cf_handle(db: &DB, cf: Cf) -> eyre::Result<&rocksdb::ColumnFamily> {
 
 fn encode_key<K: Encode>(key: K) -> Vec<u8> {
     key.encode().as_ref().to_vec()
+}
+
+/// Exclusive end of an inclusive offset span. `DeleteRange` is half-open.
+///
+/// The offset past `u32::MAX` is the 4-byte max key plus a trailing zero.
+/// The bytewise comparator sorts that longer key after every 4-byte offset.
+fn exclusive_end_key(end: PartitionChunkOffset) -> Vec<u8> {
+    match end.0.checked_add(1) {
+        Some(next) => encode_key(PartitionChunkOffset(next)),
+        None => {
+            let mut key = encode_key(end);
+            key.push(0);
+            key
+        }
+    }
+}
+
+/// Keys in `[start, end]`. Does not read values.
+fn count_presence_keys(
+    db: &DB,
+    snap: &rocksdb::Snapshot<'_>,
+    cf: Cf,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<u64> {
+    let handle = cf_handle(db, cf)?;
+    let mut opts = ReadOptions::default();
+    opts.fill_cache(false);
+    opts.set_iterate_upper_bound(exclusive_end_key(end));
+    let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+    iter.seek(encode_key(start));
+    let mut count = 0_u64;
+    while iter.key().is_some() {
+        count = count.saturating_add(1);
+        iter.next();
+    }
+    iter.status().wrap_err("count presence keys")?;
+    Ok(count)
 }
 
 fn compress_value<V: Compress>(value: &V) -> Vec<u8> {

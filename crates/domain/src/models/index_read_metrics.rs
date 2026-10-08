@@ -105,6 +105,17 @@ pub(crate) fn note_view(offsets: u64) {
     SPAN_OFFSETS.add(offsets, &[KeyValue::new("caller", caller)]);
 }
 
+static PRESENCE_RECONCILED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.presence_rows_reconciled_total")
+        .with_description("Presence rows removed at open because their offset interval is not Data")
+        .build()
+});
+
+pub(crate) fn note_presence_reconciled(rows: u64) {
+    PRESENCE_RECONCILED.add(rows, &[]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DATA_SYNC, INGRESS_SIZE, PLACEMENT, current, with_caller};

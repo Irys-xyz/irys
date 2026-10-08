@@ -22,6 +22,7 @@ use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 
+use super::db::{delete_presence_in_ranges, presence_in_ranges};
 #[cfg(feature = "rocksdb")]
 use super::rocks::{
     LegacySstSpan, RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning,
@@ -187,6 +188,23 @@ pub trait SubmoduleWrite: SubmoduleRead {
     fn clear(&mut self) -> eyre::Result<()>;
 }
 
+/// Rows removed from the two presence families.
+///
+/// A presence row says the bytes at that offset are durable data. Tx-path
+/// intervals, tx paths, data-root info, tx-leaf bindings, pending body
+/// migrations, and the schema row are not presence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PresenceReconcile {
+    pub path_hash_rows: u64,
+    pub data_path_rows: u64,
+}
+
+impl PresenceReconcile {
+    pub fn rows_removed(self) -> u64 {
+        self.path_hash_rows.saturating_add(self.data_path_rows)
+    }
+}
+
 /// Open, read, and commit one submodule index.
 ///
 /// `view` and `update` borrow the engine only for the closure. The closure's
@@ -199,6 +217,19 @@ pub trait SubmoduleStore: Send + Sync {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R>;
+
+    /// Delete presence rows in each inclusive span.
+    ///
+    /// Presence is the offset path-hash row and the offset data-path row.
+    /// An empty list, or spans that hold no presence row, does not commit.
+    /// One commit covers every span that has a row. Cost is one seek per span
+    /// per presence family, plus the rows removed. RocksDB deletes with
+    /// `DeleteRange` and does not read values. MDBX walks a cursor inside
+    /// each span.
+    fn drop_presence_in_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile>;
 }
 
 /// MDBX submodule index. One environment, the tables in [`super::tables`].
@@ -318,6 +349,12 @@ impl MdbxSubmoduleStore {
     fn safe_nosync(&self) -> eyre::Result<bool> {
         let flags = env_flags(&self.env)?;
         Ok(flags & ffi::MDBX_SAFE_NOSYNC != 0)
+    }
+
+    /// Latest committed write id. A read leaves it unchanged.
+    pub(super) fn committed_sequence(&self) -> eyre::Result<u64> {
+        self.env
+            .view_eyre(|tx| tx.id().map_err(|err| eyre::eyre!("mdbx txn id: {err}")))
     }
 }
 
@@ -626,6 +663,41 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         finish_durable(&self.env, &self.group)?;
         Ok(result)
     }
+
+    fn drop_presence_in_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        if ranges.iter().all(|(start, end)| start > end) {
+            return Ok(PresenceReconcile::default());
+        }
+        // One seek per span per family. A miss does not open a write txn.
+        let present = self.env.view_eyre(|tx| presence_in_ranges(tx, ranges))?;
+        if !present {
+            return Ok(PresenceReconcile::default());
+        }
+        let commit = |tx: &_| {
+            let (path_hash_rows, data_path_rows) = delete_presence_in_ranges(tx, ranges)?;
+            Ok(PresenceReconcile {
+                path_hash_rows,
+                data_path_rows,
+            })
+        };
+        // Same durability split as `update`. Group commit is off at module
+        // open, so this commit is a normal synced write.
+        if self.group.is_enabled() {
+            let stats = self.env.update_eyre(commit)?;
+            finish_durable(&self.env, &self.group)?;
+            return Ok(stats);
+        }
+        let _guard = self
+            .nosync_enable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let stats = self.env.update_eyre(commit)?;
+        finish_durable(&self.env, &self.group)?;
+        Ok(stats)
+    }
 }
 
 /// Which engine holds a submodule index. The node opens MDBX.
@@ -818,6 +890,19 @@ impl SubmoduleIndex {
             Self::Rocks(_) => eyre::bail!("not an mdbx index"),
         }
     }
+
+    /// Latest committed write id.
+    ///
+    /// A read leaves it unchanged. A reconcile that finds no presence row does
+    /// not move it. MDBX reports the snapshot id. RocksDB reports the WAL
+    /// sequence.
+    pub fn committed_sequence(&self) -> eyre::Result<u64> {
+        match self {
+            Self::Mdbx(store) => store.committed_sequence(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.committed_sequence(),
+        }
+    }
 }
 
 impl SubmoduleStore for SubmoduleIndex {
@@ -840,6 +925,17 @@ impl SubmoduleStore for SubmoduleIndex {
             Self::Mdbx(store) => store.update(f),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.update(f),
+        }
+    }
+
+    fn drop_presence_in_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        match self {
+            Self::Mdbx(store) => store.drop_presence_in_ranges(ranges),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.drop_presence_in_ranges(ranges),
         }
     }
 }
@@ -1240,6 +1336,127 @@ mod tests {
             let err = store.enable_group_commit(0).unwrap_err();
             assert!(err.to_string().contains("at least 1"));
             assert!(!store.group_commit_enabled());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn drop_presence_removes_only_presence_rows() -> eyre::Result<()> {
+        each_engine("submodule_presence_reconcile", |store| {
+            let tx_hash = H256::repeat_byte(9);
+            let data_root = H256::repeat_byte(4);
+            let tx_path = vec![9_u8];
+            let leaf = TxLeafBinding {
+                data_root,
+                prefix_hash: H256::repeat_byte(1),
+            };
+            let info = DataRootInfo {
+                start_offset: RelativeChunkOffset(1),
+                data_size: 64,
+            };
+            let pending = PendingBodyMigration {
+                data_root,
+                data_size: 64,
+                start_offset: RelativeChunkOffset(1),
+                block_height: 7,
+                attempts: 1,
+            };
+            let max = PartitionChunkOffset::from(u32::MAX);
+            store.update(|tx| {
+                tx.write_data_path_updates(vec![
+                    (PartitionChunkOffset::from(1), H256::repeat_byte(1), vec![1]),
+                    (PartitionChunkOffset::from(3), H256::repeat_byte(3), vec![3]),
+                    (max, H256::repeat_byte(7), vec![7]),
+                ])?;
+                tx.add_full_tx_path(tx_hash, tx_path.clone())?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(1),
+                    PartitionChunkOffset::from(3),
+                    Some(tx_hash),
+                )?;
+                tx.add_tx_leaf_binding(tx_hash, &leaf)?;
+                tx.add_data_root_info(data_root, &info)?;
+                tx.add_pending_body_migration(PartitionChunkOffset::from(1), &pending)?;
+                Ok(())
+            })?;
+
+            let before = store.committed_sequence()?;
+            let stats = store.drop_presence_in_ranges(&[
+                (PartitionChunkOffset::from(3), PartitionChunkOffset::from(3)),
+                (max, max),
+            ])?;
+            assert_eq!(stats.path_hash_rows, 2);
+            assert_eq!(stats.data_path_rows, 2);
+            assert!(store.committed_sequence()? > before);
+
+            let data_at =
+                |offset: PartitionChunkOffset| store.view(|tx| tx.get_data_path_by_offset(offset));
+            assert_eq!(data_at(PartitionChunkOffset::from(1))?, Some(vec![1]));
+            assert_eq!(data_at(PartitionChunkOffset::from(3))?, None);
+            assert_eq!(data_at(max)?, None);
+
+            let rows = store
+                .view(|tx| tx.path_hashes_in_inclusive_range(PartitionChunkOffset::from(0), max))?;
+            assert_eq!(
+                rows.into_iter()
+                    .map(|(offset, _)| offset.0)
+                    .collect::<Vec<_>>(),
+                vec![1]
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?,
+                Some(tx_path.clone())
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(tx_hash))?,
+                Some(tx_path)
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_tx_leaf_binding(tx_hash))?,
+                Some(leaf)
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_data_root_infos_for_data_root(data_root))?,
+                Some(DataRootInfos(vec![info]))
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(1)))?,
+                Some(pending)
+            );
+
+            let seq = store.committed_sequence()?;
+            let again = store.drop_presence_in_ranges(&[
+                (PartitionChunkOffset::from(3), PartitionChunkOffset::from(3)),
+                (max, max),
+            ])?;
+            assert_eq!(again.rows_removed(), 0);
+            let gap = store.drop_presence_in_ranges(&[(
+                PartitionChunkOffset::from(10),
+                PartitionChunkOffset::from(20),
+            )])?;
+            assert_eq!(gap.rows_removed(), 0);
+            let empty = store.drop_presence_in_ranges(&[])?;
+            assert_eq!(empty.rows_removed(), 0);
+            let backwards = store.drop_presence_in_ranges(&[(
+                PartitionChunkOffset::from(5),
+                PartitionChunkOffset::from(4),
+            )])?;
+            assert_eq!(backwards.rows_removed(), 0);
+            assert_eq!(store.committed_sequence()?, seq);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn drop_presence_on_empty_index_does_not_commit() -> eyre::Result<()> {
+        each_engine("submodule_presence_empty", |store| {
+            let seq = store.committed_sequence()?;
+            let stats = store.drop_presence_in_ranges(&[(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(u32::MAX),
+            )])?;
+            assert_eq!(stats.rows_removed(), 0);
+            assert_eq!(store.committed_sequence()?, seq);
             Ok(())
         })
     }

@@ -362,9 +362,68 @@ pub fn clear_paths_in_inclusive_range<T: DbTxMut + DbTx>(
         return Ok(());
     }
     assign_tx_interval(tx, start, end, None)?;
-    delete_offset_rows::<ChunkPathHashesByOffset, T>(tx, start, end)?;
-    delete_offset_rows::<ChunkDataPathByOffset, T>(tx, start, end)?;
+    let _ = delete_offset_rows::<ChunkPathHashesByOffset, T>(tx, start, end)?;
+    let _ = delete_offset_rows::<ChunkDataPathByOffset, T>(tx, start, end)?;
     Ok(())
+}
+
+/// `true` when a presence row's key lies in any inclusive span.
+///
+/// One seek per span per presence family. The seek stops at the first hit.
+pub(super) fn presence_in_ranges<T: DbTx>(
+    tx: &T,
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<bool> {
+    for &(start, end) in ranges {
+        if start > end {
+            continue;
+        }
+        if offset_key_in_range::<ChunkPathHashesByOffset, T>(tx, start, end)?
+            || offset_key_in_range::<ChunkDataPathByOffset, T>(tx, start, end)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Delete presence rows in each inclusive span. Returns `(path-hash rows, data-path rows)`.
+pub(super) fn delete_presence_in_ranges<T: DbTxMut + DbTx>(
+    tx: &T,
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<(u64, u64)> {
+    let mut path_hash_rows = 0_u64;
+    let mut data_path_rows = 0_u64;
+    for &(start, end) in ranges {
+        if start > end {
+            continue;
+        }
+        path_hash_rows += u64::try_from(delete_offset_rows::<ChunkPathHashesByOffset, T>(
+            tx, start, end,
+        )?)
+        .unwrap_or(u64::MAX);
+        data_path_rows += u64::try_from(delete_offset_rows::<ChunkDataPathByOffset, T>(
+            tx, start, end,
+        )?)
+        .unwrap_or(u64::MAX);
+    }
+    Ok((path_hash_rows, data_path_rows))
+}
+
+fn offset_key_in_range<OffsetTable, T>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<bool>
+where
+    OffsetTable: Table<Key = PartitionChunkOffset>,
+    T: DbTx,
+{
+    let mut cursor = tx.cursor_read::<OffsetTable>()?;
+    Ok(match cursor.seek(start)? {
+        Some((key, _)) => key <= end,
+        None => false,
+    })
 }
 
 /// get DataRootInfos for the `data_root`
@@ -587,7 +646,7 @@ fn delete_offset_rows<OffsetTable, T>(
     tx: &T,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
-) -> eyre::Result<()>
+) -> eyre::Result<usize>
 where
     OffsetTable: Table<Key = PartitionChunkOffset>,
     T: DbTxMut + DbTx,
@@ -600,10 +659,11 @@ where
         }
         keys
     };
+    let removed = keys.len();
     for key in keys {
         tx.delete::<OffsetTable>(key, None)?;
     }
-    Ok(())
+    Ok(removed)
 }
 
 #[cfg(test)]

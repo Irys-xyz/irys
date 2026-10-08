@@ -13,5 +13,6 @@ pub use rocks::{
     RocksSubmoduleStore, RocksTuning,
 };
 pub use store::{
-    MdbxSubmoduleStore, SubmoduleIndex, SubmoduleRead, SubmoduleStore, SubmoduleWrite,
+    MdbxSubmoduleStore, PresenceReconcile, SubmoduleIndex, SubmoduleRead, SubmoduleStore,
+    SubmoduleWrite,
 };

@@ -389,6 +389,8 @@ struct IntervalDisk {
 enum SyncFailurePoint {
     BeforeDataFsync,
     BeforeIntervalCommit,
+    /// Intervals are on disk. The index clear has not run.
+    AfterResetIntervals,
 }
 
 #[derive(Debug, Clone)]
@@ -1077,6 +1079,17 @@ impl StorageModule {
                 &expected,
                 &gaps
             ));
+        }
+
+        // A bench split writes synthetic presence under Entropy after this
+        // open returns. Reconciling here would delete a resumed prepopulate.
+        // Production open has no split.
+        #[cfg(feature = "bench")]
+        let reconcile = split.is_none();
+        #[cfg(not(feature = "bench"))]
+        let reconcile = true;
+        if reconcile {
+            Self::reconcile_presence(&submodule_map, &loaded_intervals)?;
         }
 
         // A RocksDB registration returns once its rows are visible. One sync
@@ -1771,7 +1784,11 @@ impl StorageModule {
         Ok(durable)
     }
 
-    /// Reinit intervals setting them as Uninitialized, and erase db
+    /// Reinit intervals as `Uninitialized`, then erase the index.
+    ///
+    /// The interval files hit disk before the index clear. A crash between
+    /// the two reloads the span as `Uninitialized`. The next open drops
+    /// presence rows under that span.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
         {
             let mut pending = self.pending_writes.write().unwrap();
@@ -1800,6 +1817,10 @@ impl StorageModule {
         };
         self.write_intervals_to_submodules()
             .wrap_err("Could not update submodule interval files")?;
+        // Intervals are durable. The clear is the next step. A crash here is
+        // repaired by the open-time presence reconcile.
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AfterResetIntervals)?;
 
         for (_interval, submodule) in self.submodules.iter() {
             submodule.db.update(|tx| tx.clear())?;
@@ -2743,6 +2764,61 @@ impl StorageModule {
         }
 
         global_intervals
+    }
+
+    /// Drop presence rows whose loaded interval is not `Data`.
+    ///
+    /// Runs after `Interrupted` has been reloaded as `Uninitialized`, and
+    /// before group commit or the disk lane. Cost is one in-memory walk of
+    /// the interval map, then one seek per non-`Data` span per presence
+    /// family, plus the rows removed. A fully `Data` module does not touch
+    /// the index. A span with no presence row does not commit. A capacity
+    /// partition that is all `Entropy` and has an empty index is those seeks
+    /// and no write.
+    fn reconcile_presence(
+        submodules: &SubmoduleMap,
+        intervals: &StorageIntervals,
+    ) -> eyre::Result<()> {
+        for (submodule_interval, submodule) in submodules.iter() {
+            let spans = Self::non_data_spans(intervals, *submodule_interval);
+            if spans.is_empty() {
+                continue;
+            }
+            let stats = submodule.db.drop_presence_in_ranges(&spans)?;
+            if stats.path_hash_rows == 0 && stats.data_path_rows == 0 {
+                continue;
+            }
+            warn!(
+                submodule = %submodule.path.display(),
+                path_hash_rows = stats.path_hash_rows,
+                data_path_rows = stats.data_path_rows,
+                ranges = ?spans,
+                "removed presence rows under intervals that are not Data"
+            );
+            index_read_metrics::note_presence_reconciled(
+                stats.path_hash_rows.saturating_add(stats.data_path_rows),
+            );
+        }
+        Ok(())
+    }
+
+    /// Inclusive non-`Data` spans clipped to one submodule.
+    fn non_data_spans(
+        intervals: &StorageIntervals,
+        submodule: Interval<PartitionChunkOffset>,
+    ) -> Vec<(PartitionChunkOffset, PartitionChunkOffset)> {
+        let mut spans = Vec::new();
+        for (interval, kind) in intervals.overlapping(submodule) {
+            if *kind == ChunkType::Data {
+                continue;
+            }
+            let start = interval.start().max(submodule.start());
+            let end = interval.end().min(submodule.end());
+            if start <= end {
+                spans.push((start, end));
+            }
+        }
+        spans
     }
 
     pub fn get_chunk_type(&self, chunk_offset: &PartitionChunkOffset) -> Option<ChunkType> {
@@ -5474,6 +5550,320 @@ mod tests {
         let (_, mdbx_sub) = mdbx.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         assert!(!mdbx_sub.db.group_commit_enabled());
         Ok(())
+    }
+
+    struct SeededIndex {
+        tx_hash: H256,
+        data_root: H256,
+        tx_path: Vec<u8>,
+        leaf: TxLeafBinding,
+        info: DataRootInfo,
+        pending: PendingBodyMigration,
+    }
+
+    fn presence_info() -> StorageModuleInfo {
+        StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ii!(0, 7), "sub".into())],
+        }
+    }
+
+    fn open_presence_module(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 8,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: 0,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp.path().to_path_buf(),
+            database: index_database(engine),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(&presence_info(), &config)?;
+        Ok((tmp, config, storage))
+    }
+
+    fn reopen_presence(config: &Config) -> eyre::Result<StorageModule> {
+        StorageModule::new(&presence_info(), config)
+    }
+
+    fn for_each_index_engine(
+        prefix: &str,
+        mut f: impl FnMut(&Config, StorageModule) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let (tmp, config, storage) =
+                open_presence_module(&format!("{prefix}_{engine:?}"), engine)?;
+            f(&config, storage).map_err(|err| eyre!("{engine:?}: {err}"))?;
+            drop(tmp);
+        }
+        Ok(())
+    }
+
+    fn seed_mixed_index(module: &StorageModule) -> eyre::Result<SeededIndex> {
+        let tx_hash = H256::repeat_byte(9);
+        let data_root = H256::repeat_byte(4);
+        let tx_path = vec![9_u8, 9];
+        let leaf = TxLeafBinding {
+            data_root,
+            prefix_hash: H256::repeat_byte(1),
+        };
+        let info = DataRootInfo {
+            start_offset: RelativeChunkOffset(1),
+            data_size: 64,
+        };
+        let pending = PendingBodyMigration {
+            data_root,
+            data_size: 64,
+            start_offset: RelativeChunkOffset(1),
+            block_height: 7,
+            attempts: 1,
+        };
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.update(|tx| {
+            tx.write_data_path_updates(vec![
+                (PartitionChunkOffset::from(2), H256::repeat_byte(2), vec![2]),
+                (PartitionChunkOffset::from(3), H256::repeat_byte(3), vec![3]),
+                (PartitionChunkOffset::from(6), H256::repeat_byte(6), vec![6]),
+            ])?;
+            tx.add_full_tx_path(tx_hash, tx_path.clone())?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(1),
+                PartitionChunkOffset::from(6),
+                Some(tx_hash),
+            )?;
+            tx.add_tx_leaf_binding(tx_hash, &leaf)?;
+            tx.add_data_root_info(data_root, &info)?;
+            tx.add_pending_body_migration(PartitionChunkOffset::from(3), &pending)?;
+            Ok(())
+        })?;
+        Ok(SeededIndex {
+            tx_hash,
+            data_root,
+            tx_path,
+            leaf,
+            info,
+            pending,
+        })
+    }
+
+    fn data_path_at(module: &StorageModule, offset: u32) -> eyre::Result<Option<Vec<u8>>> {
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(offset))?;
+        submodule
+            .db
+            .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))
+    }
+
+    fn presence_offsets(module: &StorageModule) -> eyre::Result<Vec<u32>> {
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let rows = submodule.db.view(|tx| {
+            tx.path_hashes_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )
+        })?;
+        Ok(rows.into_iter().map(|(offset, _)| offset.0).collect())
+    }
+
+    fn assert_registration(module: &StorageModule, seeded: &SeededIndex) -> eyre::Result<()> {
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert_eq!(
+            submodule
+                .db
+                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?,
+            Some(seeded.tx_path.clone())
+        );
+        assert_eq!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?,
+            Some(seeded.leaf.clone())
+        );
+        assert_eq!(
+            submodule
+                .db
+                .view(|tx| tx.get_data_root_infos_for_data_root(seeded.data_root))?,
+            Some(DataRootInfos(vec![seeded.info.clone()]))
+        );
+        assert_eq!(
+            submodule
+                .db
+                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(3)))?,
+            Some(seeded.pending.clone())
+        );
+        assert_eq!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?,
+            Some(seeded.tx_path.clone())
+        );
+        let hashes = submodule
+            .db
+            .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(3)))?
+            .expect("tx coverage stays");
+        assert_eq!(hashes.tx_path_hash, Some(seeded.tx_hash));
+        Ok(())
+    }
+
+    fn assert_no_data_path_hash(module: &StorageModule) -> eyre::Result<()> {
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let hashes = submodule
+            .db
+            .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(3)))?
+            .expect("tx coverage stays after the data path is removed");
+        assert_eq!(hashes.data_path_hash, None);
+        Ok(())
+    }
+
+    fn index_sequence(module: &StorageModule) -> eyre::Result<u64> {
+        let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.committed_sequence()
+    }
+
+    fn write_interval_spans(
+        module: &StorageModule,
+        spans: &[(u32, u32, ChunkType)],
+    ) -> eyre::Result<()> {
+        let mut map = StorageIntervals::new();
+        for &(start, end, kind) in spans {
+            map.insert_merge_touching_if_values_equal(partition_chunk_offset_ii!(start, end), kind)
+                .expect("interval span");
+        }
+        let path = submodule_interval_path(module, 0);
+        let mut file = get_atomic_file(&path)?;
+        file.write_all(serde_json::to_string(&map)?.as_bytes())?;
+        file.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reopen_drops_presence_under_interrupted_and_keeps_data() -> eyre::Result<()> {
+        for_each_index_engine("presence_interrupted", |config, storage| {
+            let seeded = seed_mixed_index(&storage)?;
+            write_interval_spans(
+                &storage,
+                &[
+                    (0, 2, ChunkType::Data),
+                    (3, 5, ChunkType::Interrupted),
+                    (6, 7, ChunkType::Entropy),
+                ],
+            )?;
+            // Shutdown must not rewrite the crash image.
+            storage.suppress_interval_flush_for_test();
+            drop(storage);
+
+            let reloaded = reopen_presence(config)?;
+            assert_eq!(
+                reloaded.get_chunk_type(&PartitionChunkOffset::from(2)),
+                Some(ChunkType::Data)
+            );
+            assert_eq!(
+                reloaded.get_chunk_type(&PartitionChunkOffset::from(3)),
+                Some(ChunkType::Uninitialized)
+            );
+            assert_eq!(
+                reloaded.get_chunk_type(&PartitionChunkOffset::from(6)),
+                Some(ChunkType::Entropy)
+            );
+            assert_eq!(data_path_at(&reloaded, 2)?, Some(vec![2]));
+            assert_eq!(data_path_at(&reloaded, 3)?, None);
+            assert_eq!(data_path_at(&reloaded, 6)?, None);
+            assert_eq!(presence_offsets(&reloaded)?, vec![2]);
+            assert_registration(&reloaded, &seeded)?;
+            assert_no_data_path_hash(&reloaded)?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn offline_uninitialized_edit_drops_presence() -> eyre::Result<()> {
+        for_each_index_engine("presence_offline_edit", |config, storage| {
+            let seeded = seed_mixed_index(&storage)?;
+            {
+                let mut intervals = storage.intervals.write().unwrap();
+                *intervals = StorageIntervals::new();
+                intervals
+                    .insert_merge_touching_if_values_equal(
+                        partition_chunk_offset_ii!(0, 7),
+                        ChunkType::Data,
+                    )
+                    .expect("data span");
+            }
+            storage.write_intervals_to_submodules()?;
+            let path = submodule_interval_path(&storage, 0);
+            drop(storage);
+
+            let text = fs::read_to_string(&path)?;
+            assert!(text.contains("\"Data\""), "{text}");
+            let edited = text.replace("\"Data\"", "\"Uninitialized\"");
+            fs::write(&path, edited)?;
+
+            let reloaded = reopen_presence(config)?;
+            assert_eq!(
+                reloaded.get_chunk_type(&PartitionChunkOffset::from(2)),
+                Some(ChunkType::Uninitialized)
+            );
+            assert_eq!(data_path_at(&reloaded, 2)?, None);
+            assert_eq!(data_path_at(&reloaded, 3)?, None);
+            assert_eq!(data_path_at(&reloaded, 6)?, None);
+            assert!(presence_offsets(&reloaded)?.is_empty());
+            assert_registration(&reloaded, &seeded)?;
+            assert_no_data_path_hash(&reloaded)?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn reset_crash_before_index_clear_drops_presence_on_reopen() -> eyre::Result<()> {
+        for_each_index_engine("presence_reset_crash", |config, storage| {
+            let seeded = seed_mixed_index(&storage)?;
+            storage.fail_next_sync_at(SyncFailurePoint::AfterResetIntervals);
+            let err = storage.reset().unwrap_err();
+            assert!(err.to_string().contains("AfterResetIntervals"), "{err}");
+            assert_eq!(data_path_at(&storage, 2)?, Some(vec![2]));
+            assert_eq!(data_path_at(&storage, 3)?, Some(vec![3]));
+            assert_registration(&storage, &seeded)?;
+            drop(storage);
+
+            let reloaded = reopen_presence(config)?;
+            assert_eq!(
+                reloaded.get_chunk_type(&PartitionChunkOffset::from(2)),
+                Some(ChunkType::Uninitialized)
+            );
+            assert_eq!(data_path_at(&reloaded, 2)?, None);
+            assert_eq!(data_path_at(&reloaded, 3)?, None);
+            assert_eq!(data_path_at(&reloaded, 6)?, None);
+            assert!(presence_offsets(&reloaded)?.is_empty());
+            assert_registration(&reloaded, &seeded)?;
+            assert_no_data_path_hash(&reloaded)?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn clean_reopen_does_not_commit() -> eyre::Result<()> {
+        for_each_index_engine("presence_noop_reopen", |config, storage| {
+            let seq = index_sequence(&storage)?;
+            drop(storage);
+            let reloaded = reopen_presence(config)?;
+            assert_eq!(index_sequence(&reloaded)?, seq);
+            Ok(())
+        })
     }
 
     #[cfg(feature = "bench")]
