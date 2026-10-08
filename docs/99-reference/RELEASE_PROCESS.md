@@ -10,12 +10,16 @@
 
 ## Branches
 
-- **`master`** — integration branch. All feature work merges here via PR. Not deployed to any environment.
-- **`release/<major>.x`** — long-lived release branches (e.g. `release/1.x`). Source of truth for the canonical SemVer version. Created from `master`; receives cherry-picks from `master`. Version bumps in `crates/chain/Cargo.toml` happen on these branches directly. Never deployed.
+- **`master`** — integration branch. All feature work merges here via PR. Not deployed to any environment. Carries the version of the newest *released* build (see [Version Mirroring on `master`](#version-mirroring-on-master)).
+- **`release/<major>.x`** — long-lived release branches (e.g. `release/1.x`). Source of truth for the canonical SemVer version. Created from `master`; receives **cherry-picks** from `master` — never a wholesale `merge master`, which would ship everything that happens to be on `master` and destroy the curation the release line exists to provide. Version bumps in `crates/chain/Cargo.toml` happen on these branches directly. Never deployed.
 - **`release/devnet`** — long-lived branch for devnet. Carries devnet-specific patches on top of `master`. Built on demand.
 - **`release/testnet/<major>.x`** — long-lived branch per major. `release/<major>.x` merged forward + testnet-specific patch commits (chain IDs, bootstrap peers, etc.).
 - **`release/mainnet/<major>.x`** — long-lived branch per major. `release/<major>.x` merged forward + mainnet-specific patch commits.
 - **Feature branches** — short-lived, merge into `master` via PR.
+- **`release/<env>/<X.Y.Z>`** — frozen per-version snapshot branches, pushed automatically by `release.yml` so each released commit has *branch* reachability (GitHub otherwise shows "commit does not belong to any branch"). Never commit to them; never rebase them. Provenance is checked against the `<env>-X.Y.Z` tag, not these, so a missing one is cosmetic.
+- **`deployment/*`** — **dead.** The pre-rename names for the deployment branches (see commit `76f9ed49` "feat: move from deployment/ to release/"). Nothing builds or deploys from them. Pushing a release commit to `deployment/devnet` instead of `release/devnet` publishes nothing and leaves the dead branch looking live.
+
+Every commit on `release/<major>.x` and on the deployment branches lands **via PR**. These branches are protected; a direct push skips review and CI association, and leaves no record of what shipped or why.
 
 ## Versioning
 
@@ -42,6 +46,37 @@ The image stream name disambiguates the environment, so the Docker tag itself do
 
 The canonical version source is the `irys-chain` crate (`crates/chain/Cargo.toml`) on `release/<major>.x`. The workflow validates that the deployment-branch tip's `crates/chain/Cargo.toml` matches the release version input.
 
+### Version Mirroring on `master`
+
+`master`'s `crates/chain/Cargo.toml` must equal the **newest released version** —
+i.e. the highest `testnet-X.Y.Z` tag, since testnet always releases first.
+
+The bump commit is authored on `release/<major>.x`, so nothing carries it to
+`master` on its own: once `testnet-X.Y.Z` is tagged, cherry-pick the *named bump
+commit* up to `master` via PR. Do not merge `release/<major>.x` into `master` to
+achieve this.
+
+This holds for **every** released version — including hotfixes and env-specific
+fix iterations. "No `master` backport" for an env-specific fix refers to the
+fix's *code*, never to the version bump: the bump lives on `release/<major>.x`,
+which is env-agnostic, so it always goes up.
+
+Why it matters: `master` is where the next release line is cut from and where
+anyone looks to answer "what version are we on". If `master` lags, the next cut
+starts from a stale version, the bump commit has to be re-derived, and the
+version printed by a `master` build silently misidentifies the node.
+
+Verify after any release:
+
+```bash
+git fetch origin --tags
+LATEST=$(git tag --list 'testnet-[0-9]*' | sort -V | tail -1)
+test "${LATEST#testnet-}" = "$(git show origin/master:crates/chain/Cargo.toml \
+  | sed -n 's/^version = "\(.*\)"/\1/p')" \
+  && echo "master is in sync with $LATEST" \
+  || echo "MASTER IS BEHIND $LATEST — mirror the bump"
+```
+
 ### Version Iteration
 
 When iterating releases, each fix gets a new version: `testnet-1.0.0` → fix → `testnet-1.0.1` → fix → `testnet-1.0.2`. The mainnet release version matches the final testnet release — if the last testnet release is `testnet-1.0.2`, the mainnet tag is `mainnet-1.0.2`. Earlier testnet versions (`testnet-1.0.0`, `testnet-1.0.1`) are orphaned. This is expected.
@@ -52,8 +87,9 @@ Testnet releases ARE the release candidates for mainnet — there is no separate
 
 ```text
 master ──► release/devnet ──► devnet (on demand)
-  │
-  ▼ (cherry-pick / merge)
+  │   ▲
+  │   └── (cherry-pick the version bump back up — mandatory, see Version Mirroring)
+  ▼ (cherry-pick — never `merge master`)
 release/<major>.x  (canonical version source; never deployed directly)
   │
   ├──► release/testnet/<major>.x  ──testnet-X.Y.Z──► testnet (auto-published prerelease)
@@ -63,7 +99,8 @@ release/<major>.x  (canonical version source; never deployed directly)
 1. Work merges into `master`. Devnet builds from `release/devnet` (merged forward from `master` on demand).
 2. When ready to release, cherry-pick changes from `master` into `release/<major>.x`, bump the version in `crates/chain/Cargo.toml`, and stabilize.
 3. Merge `release/<major>.x` forward into `release/testnet/<major>.x`. Apply any per-release testnet patches as additional commits. Trigger the **Release** workflow as `testnet` → validates (including that the commit's `release/<major>.x` merge-base had a passing core CI run; Benchmarks and Coverage do not gate), builds, pushes `testnet-X.Y.Z` git tag, pushes image to `irys-testnet:X.Y.Z`, updates `testnet-latest` (both Docker and git), creates auto-published prerelease. Deploy to testnet.
-4. After testnet validation, merge `release/<major>.x` forward into `release/mainnet/<major>.x`. Apply any per-release mainnet patches as additional commits. Trigger the **Release** workflow as `mainnet` on a commit whose `release/<major>.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-X.Y.Z` git tag, pushes image to `irys-mainnet:X.Y.Z`, updates `mainnet-latest`, creates **draft** release. A maintainer reviews the notes and publishes.
+4. Once `testnet-X.Y.Z` is tagged, cherry-pick the version-bump commit from `release/<major>.x` up to `master` via PR, so `master` mirrors the newest released version. See [Version Mirroring on `master`](#version-mirroring-on-master).
+5. After testnet validation, merge `release/<major>.x` forward into `release/mainnet/<major>.x`. Apply any per-release mainnet patches as additional commits. Trigger the **Release** workflow as `mainnet` on a commit whose `release/<major>.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-X.Y.Z` git tag, pushes image to `irys-mainnet:X.Y.Z`, updates `mainnet-latest`, creates **draft** release. A maintainer reviews the notes and publishes.
 
 ### Atomicity
 
@@ -157,13 +194,13 @@ The bug is in code shared across environments. The fix routes through `release/<
 
 1. Branch off `release/<major>.x`, write the fix + a regression test, and pre-flight on **devnet**. (You may instead branch off a `release/<env>/<major>.x` to reproduce against exactly what's deployed — but the commit that *lands* must be the isolated, env-agnostic fix. If it won't apply to `release/<major>.x`, it's really an env-specific fix — see below.)
 2. Land the fix on `release/<major>.x` (cherry-pick the isolated fix commit if you developed off an env branch) and bump the PATCH version in `crates/chain/Cargo.toml` there — the canonical version source.
-3. **Backport to `master` (mandatory)** — otherwise the fix regresses the next time a release is cut from `master`. Cherry-pick the *named* commit(s) up to `master` (carry the version-bump commit too, to keep master's version mirroring the latest release; drop that hunk in the rare case master is already version-ahead). Cherry-pick the specific commits — do **not** merge, and do **not** later re-cherry-pick them downward (they now exist under two SHAs, so a range cherry-pick from `master` could re-apply and conflict).
+3. **Backport to `master` (mandatory)** — otherwise the fix regresses the next time a release is cut from `master`. Cherry-pick the *named* commit(s) up to `master` (carry the version-bump commit too — see [Version Mirroring on `master`](#version-mirroring-on-master); drop that hunk in the rare case master is already version-ahead). Cherry-pick the specific commits — do **not** merge, and do **not** later re-cherry-pick them downward (they now exist under two SHAs, so a range cherry-pick from `master` could re-apply and conflict).
 4. Merge `release/<major>.x` forward into `release/testnet/<major>.x`, dispatch the **Release** workflow as `testnet`, deploy, and endurance-test — testnet is the release candidate.
 5. After the testnet soak, merge `release/<major>.x` forward into `release/mainnet/<major>.x`, dispatch as `mainnet`, deploy.
 
 ### Env-specific hotfix (one environment only)
 
-The bug is in environment-local code or config (chain IDs, bootstrap peers, env-only consensus divergence). The fix must **not** leave that environment, or it would contaminate the shared branches. Branch off the affected `release/<env>/<major>.x`, fix, and merge back into that same branch; bump the version on `release/<major>.x` (still the canonical source) and merge forward; dispatch the env's release. **No `master` backport** — the change is environment-local.
+The bug is in environment-local code or config (chain IDs, bootstrap peers, env-only consensus divergence). The fix must **not** leave that environment, or it would contaminate the shared branches. Branch off the affected `release/<env>/<major>.x`, fix, and merge back into that same branch; bump the version on `release/<major>.x` (still the canonical source) and merge forward; dispatch the env's release. **No `master` backport of the fix** — that change is environment-local. The **version bump still goes to `master`** as usual: it lives on the env-agnostic `release/<major>.x`, and `master` must keep mirroring the newest released version. See [Version Mirroring on `master`](#version-mirroring-on-master).
 
 ### Emergency (skip testnet, straight to mainnet)
 
@@ -195,13 +232,14 @@ Starting from a new major version:
 
 1. Branch `release/1.x` from `master`.
 2. Cherry-pick the desired commits from `master` to `release/1.x`.
-3. Bump version in `crates/chain/Cargo.toml` on `release/1.x`, commit.
+3. Bump version in `crates/chain/Cargo.toml` on `release/1.x` (via PR, titled `feat: release 1.0.0`).
 4. Branch `release/testnet/1.x` from `release/1.x` (first time only). Apply any sticky testnet patches.
 5. Trigger the release workflow as `testnet` targeting a commit on `release/testnet/1.x` → validates, builds, pushes `testnet-1.0.0` tag + image to `irys-testnet`, updates `testnet-latest`, auto-publishes prerelease. Deploy to testnet.
-6. Validate on testnet. Fix issues on `release/1.x` and backport (cherry-pick) to `master` (if upstream) or by direct commit to `release/testnet/1.x` (if env-specific), bump version on `release/1.x` and merge forward, tag `testnet-1.0.1`, repeat as needed. Earlier testnet versions are orphaned.
-7. Once stable, branch `release/mainnet/1.x` from `release/1.x` (first time only). Apply any sticky mainnet patches. Merge `release/1.x` forward.
-8. Trigger the release workflow as `mainnet` on a commit on `release/mainnet/1.x` whose `release/1.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-1.0.1` tag + image, updates `mainnet-latest`, creates draft release. Maintainer reviews and publishes. Deploy to mainnet.
-9. Future minor/patch releases continue on `release/1.x` and flow through the same deployment branches. A new `release/2.x` branch plus new `release/testnet/2.x` and `release/mainnet/2.x` are created when a major version bump is needed.
+6. Cherry-pick the version-bump commit up to `master` so `master` mirrors `1.0.0` — see [Version Mirroring on `master`](#version-mirroring-on-master).
+7. Validate on testnet. Fix issues on `release/1.x` and backport (cherry-pick) to `master` (if upstream) or by commit to `release/testnet/1.x` (if env-specific), bump version on `release/1.x` and merge forward, tag `testnet-1.0.1`, mirror the new bump to `master`, repeat as needed. Earlier testnet versions are orphaned.
+8. Once stable, branch `release/mainnet/1.x` from `release/1.x` (first time only). Apply any sticky mainnet patches. Merge `release/1.x` forward.
+9. Trigger the release workflow as `mainnet` on a commit on `release/mainnet/1.x` whose `release/1.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-1.0.1` tag + image, updates `mainnet-latest`, creates draft release. Maintainer reviews and publishes. Deploy to mainnet.
+10. Future minor/patch releases continue on `release/1.x` and flow through the same deployment branches. A new `release/2.x` branch plus new `release/testnet/2.x` and `release/mainnet/2.x` are created when a major version bump is needed.
 
 ## Authoring Deployment-Specific Patches
 
@@ -209,7 +247,8 @@ Deployment-specific patches (e.g., chain IDs, bootstrap peer addresses, env-spec
 
 **Rules:**
 
-- Version bumps in `crates/chain/Cargo.toml` happen **only on `release/<major>.x`**. Deployment branches inherit the version via merge-forward.
+- Every commit on `release/<major>.x` and on a deployment branch lands **via PR** — never a direct push, even for a one-line version bump.
+- Version bumps in `crates/chain/Cargo.toml` happen **only on `release/<major>.x`**. Deployment branches inherit the version via merge-forward, and the bump is mirrored up to `master` once the testnet tag exists.
 - If a `release/<major>.x` → deployment-branch merge produces a Cargo.toml version conflict, resolve to `release/<major>.x`'s value. The deployment branch must never carry its own version.
 - Patches that should apply to multiple envs go on `release/<major>.x`, not on individual deployment branches.
 - Patches that change protocol behavior should never be env-specific. Env patches are for env-bound values only.
