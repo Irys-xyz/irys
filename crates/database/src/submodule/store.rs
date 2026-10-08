@@ -11,7 +11,8 @@
 //! same until group commit is enabled. Then the registration is visible
 //! before it returns. MDBX syncs the group on a count, a durable write, or
 //! 50 ms. RocksDB leaves it unsynced until the next synced write, the WAL
-//! backstop, or shutdown.
+//! backstop, or shutdown. A failed RocksDB WAL sync rejects later `update`
+//! and `update_covered` calls.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -331,7 +332,13 @@ impl MdbxSubmoduleStore {
         let group = Arc::clone(&self.group);
         self.lifetime
             .spawn(Arc::clone(&self.group), move || match env.upgrade() {
-                Some(env) => sync_if_dirty(&env, &group),
+                Some(env) => {
+                    let result = sync_if_dirty(&env, &group);
+                    if let Err(ref err) = result {
+                        tracing::error!(%err, "submodule index group sync failed");
+                    }
+                    result
+                }
                 None => Ok(()),
             })
     }
@@ -867,7 +874,8 @@ impl SubmoduleIndex {
     ///
     /// Durable, unless [`Self::enable_group_commit`] is on. Then the rows are
     /// visible to the next view. MDBX syncs with the group. RocksDB does not
-    /// sync this write.
+    /// sync this write. A caller that publishes an external effect must
+    /// [`Self::sync_group`] each touched index first.
     pub fn update_registration<R>(
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
@@ -887,7 +895,8 @@ impl SubmoduleIndex {
     /// syncing. [`Self::published_generation`] advances.
     /// [`Self::wait_until_durable`] waits until a later synced write or the
     /// backstop covers that generation. With group commit off, this is
-    /// [`SubmoduleStore::update`].
+    /// [`SubmoduleStore::update`]. A RocksDB WAL sync failure makes this
+    /// and [`SubmoduleStore::update`] return an error.
     pub fn update_covered<R>(
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
@@ -962,6 +971,24 @@ impl SubmoduleIndex {
             Self::Mdbx(_) => 0,
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.wal_backstop_sync_count(),
+        }
+    }
+
+    /// The next dirty RocksDB WAL sync fails once. Later writes then fail.
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    pub fn fail_next_wal_sync(&self) {
+        match self {
+            Self::Mdbx(_) => panic!("fail_next_wal_sync is rocks only"),
+            Self::Rocks(store) => store.fail_next_wal_sync(),
+        }
+    }
+
+    /// `true` after a RocksDB WAL sync failure until this index is dropped.
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    pub fn wal_sync_failed(&self) -> bool {
+        match self {
+            Self::Mdbx(_) => false,
+            Self::Rocks(store) => store.wal_sync_failed(),
         }
     }
 
@@ -1726,6 +1753,105 @@ mod tests {
         assert_eq!(store.group_sync_count(), 1);
         assert!(store.durable_generation() >= published);
         assert!(path_at(&store, 4)?.is_some());
+        Ok(())
+    }
+
+    /// RocksDB `SyncWAL` (`FlushWAL(true)`) calls `WALIOStatusCheck` on an IO
+    /// error. With paranoid checks left on, that is a background error and a
+    /// file-scope WAL error stops later writes. RocksDB may clear it. This
+    /// flag does not, so `update` and `update_covered` keep failing. The
+    /// backstop thread and an explicit sync share that path. Shutdown's last
+    /// sync does too.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_wal_sync_failure_rejects_later_writes() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_wal_sync_fail")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        let label = dir
+            .path()
+            .file_name()
+            .expect("temp dir name")
+            .to_string_lossy();
+        store.set_wal_backstop(Duration::from_secs(60));
+        store.enable_group_commit(8)?;
+        put_registration(&store, 1, 1)?;
+        assert!(!store.wal_sync_failed());
+        store.fail_next_wal_sync();
+        let err = store.sync_group().unwrap_err();
+        assert!(
+            err.to_string().contains(label.as_ref()),
+            "sync error names the submodule: {err}"
+        );
+        assert!(store.wal_sync_failed());
+        assert!(path_at(&store, 1)?.is_some(), "the row stays visible");
+        let update_err = store
+            .update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(2),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(2)),
+                        tx_path_hash: None,
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(update_err.to_string().contains("read-only"), "{update_err}");
+        let covered_err = store
+            .update_covered(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(3),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(3)),
+                        tx_path_hash: None,
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(
+            covered_err.to_string().contains(label.as_ref()),
+            "{covered_err}"
+        );
+        assert!(path_at(&store, 2)?.is_none());
+        assert!(path_at(&store, 3)?.is_none());
+        Ok(())
+    }
+
+    /// The backstop thread uses the same sync as shutdown's last flush.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_backstop_sync_failure_rejects_later_writes() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_backstop_fail")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        store.set_wal_backstop(Duration::from_millis(30));
+        store.enable_group_commit(1_000)?;
+        store.fail_next_wal_sync();
+        put_registration(&store, 4, 4)?;
+        let started = Instant::now();
+        while !store.wal_sync_failed() {
+            if started.elapsed() > Duration::from_secs(2) {
+                eyre::bail!("backstop sync failure did not stick");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            store
+                .update_registration(|tx| {
+                    tx.set_path_hashes_by_offset(
+                        PartitionChunkOffset::from(5),
+                        ChunkPathHashes {
+                            data_path_hash: Some(H256::repeat_byte(5)),
+                            tx_path_hash: None,
+                        },
+                    )
+                })
+                .is_err()
+        );
+        assert!(path_at(&store, 4)?.is_some());
+        assert!(path_at(&store, 5)?.is_none());
         Ok(())
     }
 

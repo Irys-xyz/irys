@@ -17,7 +17,10 @@ use irys_types::{
     hash_sha256, validate_path,
 };
 use reth::tasks::shutdown::Shutdown;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::{Notify, mpsc::UnboundedReceiver, oneshot};
 use tracing::{error, instrument};
 
@@ -54,8 +57,33 @@ pub struct ChunkMigrationServiceInner {
     pub db: DatabaseProvider,
     /// Service sender channels
     pub service_senders: ServiceSenders,
-    /// Wakes the body-migration worker once a block's indexes have committed.
+    /// Wakes the body-migration worker once a block's indexes are durable.
     pub body_wakeup: Arc<Notify>,
+    /// Test-only. Runs after the per-block WAL sync and before side effects.
+    #[cfg(test)]
+    index_durable_hook: Option<IndexDurableHook>,
+}
+
+/// Observes the moment a block's index registrations are durable.
+#[cfg(test)]
+struct IndexDurableHook(Arc<dyn Fn() + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for IndexDurableHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IndexDurableHook(..)")
+    }
+}
+
+#[cfg(test)]
+impl IndexDurableHook {
+    fn new(hook: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(hook))
+    }
+
+    fn call(&self) {
+        (self.0)();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -108,7 +136,14 @@ impl ChunkMigrationServiceInner {
             db,
             service_senders,
             body_wakeup,
+            #[cfg(test)]
+            index_durable_hook: None,
         }
+    }
+
+    #[cfg(test)]
+    fn set_index_durable_hook(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        self.index_durable_hook = Some(IndexDurableHook::new(hook));
     }
 
     /// Infallible by design: one block whose migration fails must not take the
@@ -232,6 +267,7 @@ impl ChunkMigrationServiceInner {
         // state (each ledger writes into its own storage modules) but does
         // produce divergent log/trace output and divergent intermediate
         // crash-recovery state.
+        let mut touched = Vec::new();
         for ledger_entry in block.data_ledgers.iter() {
             let Ok(ledger) = DataLedger::try_from(ledger_entry.ledger_id) else {
                 tracing::warn!(
@@ -250,12 +286,22 @@ impl ChunkMigrationServiceInner {
                 &block_index,
                 &config,
                 &storage_modules,
+                &mut touched,
             )?;
         }
 
-        // This block's indexes are committed; the bodies they describe are now
-        // owed as `PendingBodyMigrationsByOffset` rows. Wake the worker — it
-        // also polls, so a lost wake-up only costs latency, never progress.
+        // One SyncWAL per submodule this block wrote. Per-tx registrations
+        // stay unsynced. The wake and `OnBlockMigrated` below treat the rows
+        // as durable, so a failed sync must not publish them.
+        self.sync_block_indexes(&touched)?;
+        #[cfg(test)]
+        if let Some(hook) = &self.index_durable_hook {
+            hook.call();
+        }
+
+        // The bodies are now owed as `PendingBodyMigrationsByOffset` rows.
+        // Wake the worker — it also polls, so a lost wake-up only costs
+        // latency, never progress.
         self.body_wakeup.notify_one();
 
         // forward the finalization message to the cache service for cleanup
@@ -270,6 +316,30 @@ impl ChunkMigrationServiceInner {
             );
         }
 
+        Ok(())
+    }
+
+    /// One synced WAL write per dirty submodule of each storage module this
+    /// block indexed. A module touched by several txs is synced once.
+    ///
+    /// `sync_group` is a no-op on a clean submodule and on an MDBX index
+    /// whose group commit is off. A failure is the same error a synced
+    /// registration used to return.
+    fn sync_block_indexes(&self, touched: &[Arc<StorageModule>]) -> Result<(), MigrationError> {
+        let mut seen = HashSet::new();
+        for module in touched {
+            if !seen.insert(module.id) {
+                continue;
+            }
+            if let Err(err) = module.sync_index_registrations() {
+                error!(
+                    storage_module.id = module.id,
+                    %err,
+                    "failed to sync block index registrations"
+                );
+                return Err(MigrationError::ChunkIndexWrite);
+            }
+        }
         Ok(())
     }
 }
@@ -287,6 +357,7 @@ pub fn process_ledger_transactions(
     block_index: &BlockIndex,
     config: &Config,
     storage_modules_guard: &StorageModulesReadGuard,
+    touched: &mut Vec<Arc<StorageModule>>,
 ) -> Result<(), MigrationError> {
     let path_pairs = get_tx_path_pairs(block, ledger, txs).map_err(|e| {
         MigrationError::Other(format!("tx path merklization failed for {ledger:?}: {e}"))
@@ -318,6 +389,7 @@ pub fn process_ledger_transactions(
             ledger,
             storage_modules_guard,
             block.height,
+            touched,
         )?;
 
         prev_chunk_offset += num_chunks_in_tx as u64;
@@ -640,6 +712,7 @@ fn update_storage_module_indexes(
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
     block_height: u64,
+    touched: &mut Vec<Arc<StorageModule>>,
 ) -> Result<(), MigrationError> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules_guard, ledger, &tx_chunk_range);
@@ -659,6 +732,7 @@ fn update_storage_module_indexes(
                 );
                 MigrationError::ChunkIndexWrite
             })?;
+        touched.push(storage_module);
     }
     Ok(())
 }
@@ -897,13 +971,21 @@ mod tests {
         open_or_create_db, submodule::tables::PendingBodyMigration, tables::IrysTables,
     };
     use irys_domain::{ChunkType, StorageModuleInfo};
+    use irys_storage::ie;
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        BlockIndexItem, ConsensusConfig, DataTransaction, H256List, IrysAddress, LedgerIndexItem,
-        NodeConfig, PartitionChunkOffset, irys::IrysSigner, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        BlockIndexItem, ConsensusConfig, DataTransaction, H256List, IrysAddress, LedgerChunkOffset,
+        LedgerChunkRange, LedgerIndexItem, NodeConfig, PartitionChunkOffset, SubmoduleIndexEngine,
+        irys::IrysSigner, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
-    use std::{sync::RwLock, time::Duration};
+    use std::{
+        sync::{
+            Mutex, RwLock,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
 
     struct Fixture {
         _tmp: irys_testing_utils::utils::tempfile::TempDir,
@@ -924,6 +1006,18 @@ mod tests {
     /// no cached bodies; `seed_cache` adds them. `max_pending_write_bytes` is
     /// the module's pending-write ceiling (`None` = derived default).
     fn fixture(num_chunks: u64, max_pending_write_bytes: Option<u64>) -> eyre::Result<Fixture> {
+        fixture_with(
+            num_chunks,
+            max_pending_write_bytes,
+            SubmoduleIndexEngine::Mdbx,
+        )
+    }
+
+    fn fixture_with(
+        num_chunks: u64,
+        max_pending_write_bytes: Option<u64>,
+        engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<Fixture> {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let chunk_size = 32_u64;
         let mut node_config = NodeConfig {
@@ -940,6 +1034,11 @@ mod tests {
             ..NodeConfig::testing()
         };
         node_config.storage.max_pending_write_bytes = max_pending_write_bytes;
+        node_config.database.submodule_index = engine;
+        if engine == SubmoduleIndexEngine::Rocksdb {
+            // The ordering test must observe the block sync, not the backstop.
+            node_config.storage.index_wal_backstop_ms = 60_000;
+        }
         let config = Config::new_with_random_peer_id(node_config);
 
         let sm = Arc::new(StorageModule::new(
@@ -1005,6 +1104,7 @@ mod tests {
                 &self.block_index,
                 &self.config,
                 &self.guard,
+                &mut Vec::new(),
             )
         }
 
@@ -1484,6 +1584,140 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), handle)
             .await
             .expect("worker did not stop on shutdown")?;
+        Ok(())
+    }
+
+    fn notify_pending(notify: &Notify) -> bool {
+        let mut waiting = std::pin::pin!(notify.notified());
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        matches!(waiting.as_mut().poll(&mut cx), Poll::Pending)
+    }
+
+    fn submit_txs(f: &Fixture) -> Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>> {
+        let mut txs = HashMap::new();
+        txs.insert(DataLedger::Submit, vec![f.tx.header.clone()]);
+        Arc::new(txs)
+    }
+
+    /// Registrations in one block stay unsynced until one WAL sync. The body
+    /// wake and `OnBlockMigrated` run only after that sync.
+    #[test]
+    fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
+        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb)?;
+        f.persist_block()?;
+        let db = {
+            let (_, sub) =
+                f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            sub.db.clone()
+        };
+        let syncs_before = db.wal_sync_count();
+        let backstop_before = db.wal_backstop_sync_count();
+        f.sm.index_transaction_data(
+            &f.tx.header,
+            &vec![1, 2, 3],
+            LedgerChunkRange(ie(LedgerChunkOffset::from(0), LedgerChunkOffset::from(1))),
+            f.block.height,
+        )?;
+        assert_eq!(
+            db.wal_sync_count(),
+            syncs_before,
+            "a registration inside the block does not sync"
+        );
+        assert!(db.published_generation() > db.durable_generation());
+
+        let (service_senders, receivers) = ServiceSenders::new();
+        let cache_rx = Arc::new(Mutex::new(receivers.chunk_cache));
+        let body_wakeup = Arc::new(Notify::new());
+        let mut inner = ChunkMigrationServiceInner::new(
+            f.block_index.clone(),
+            &f.guard,
+            f.db.clone(),
+            service_senders,
+            f.config.clone(),
+            Arc::clone(&body_wakeup),
+        );
+        let hook_cache = Arc::clone(&cache_rx);
+        let hook_wake = Arc::clone(&body_wakeup);
+        let hook_db = db.clone();
+        let saw = Arc::new(AtomicBool::new(false));
+        let hook_saw = Arc::clone(&saw);
+        inner.set_index_durable_hook(move || {
+            assert!(hook_db.wal_sync_count() > syncs_before);
+            assert!(hook_db.durable_generation() >= hook_db.published_generation());
+            assert!(
+                hook_cache.lock().expect("cache rx").try_recv().is_err(),
+                "OnBlockMigrated sent before the sync"
+            );
+            assert!(
+                notify_pending(&hook_wake),
+                "body worker woken before the sync"
+            );
+            hook_saw.store(true, Ordering::SeqCst);
+        });
+
+        inner.on_block_migrated(Arc::clone(&f.block), submit_txs(&f))?;
+        assert!(saw.load(Ordering::SeqCst), "sync hook did not run");
+        assert_eq!(db.wal_sync_count(), syncs_before + 1);
+        assert_eq!(db.wal_backstop_sync_count(), backstop_before + 1);
+        let traced = cache_rx
+            .lock()
+            .expect("cache rx")
+            .try_recv()
+            .expect("OnBlockMigrated");
+        match traced.inner {
+            CacheServiceAction::OnBlockMigrated(height, None) => {
+                assert_eq!(height, f.block.height);
+            }
+            other => panic!("unexpected cache message: {other:?}"),
+        }
+        assert!(cache_rx.lock().expect("cache rx").try_recv().is_err());
+        assert!(!notify_pending(&body_wakeup));
+        Ok(())
+    }
+
+    /// A failed per-block sync is the old registration-sync error, and it
+    /// does not wake the body worker or send `OnBlockMigrated`.
+    #[test]
+    fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
+        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb)?;
+        f.persist_block()?;
+        let db = {
+            let (_, sub) =
+                f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            sub.db.clone()
+        };
+        db.fail_next_wal_sync();
+        let (service_senders, receivers) = ServiceSenders::new();
+        let mut cache_rx = receivers.chunk_cache;
+        let body_wakeup = Arc::new(Notify::new());
+        let mut inner = ChunkMigrationServiceInner::new(
+            f.block_index.clone(),
+            &f.guard,
+            f.db.clone(),
+            service_senders,
+            f.config.clone(),
+            Arc::clone(&body_wakeup),
+        );
+        let saw = Arc::new(AtomicBool::new(false));
+        let hook_saw = Arc::clone(&saw);
+        inner.set_index_durable_hook(move || {
+            hook_saw.store(true, Ordering::SeqCst);
+        });
+
+        let err = inner
+            .on_block_migrated(Arc::clone(&f.block), submit_txs(&f))
+            .expect_err("sync failure");
+        assert!(matches!(err, MigrationError::ChunkIndexWrite));
+        assert!(
+            !saw.load(Ordering::SeqCst),
+            "side effects ran after a failed sync"
+        );
+        assert!(cache_rx.try_recv().is_err());
+        assert!(notify_pending(&body_wakeup));
+        assert!(db.wal_sync_failed());
+        assert!(db.published_generation() > db.durable_generation());
+        assert_eq!(f.rows()?.len(), 1);
         Ok(())
     }
 }

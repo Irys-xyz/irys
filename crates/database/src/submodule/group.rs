@@ -42,6 +42,13 @@ pub(super) struct GroupCommit {
     /// Backstop thread, explicit `sync_group`, and shutdown WAL syncs.
     #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
     backstop_syncs: AtomicU64,
+    /// Set when a RocksDB WAL sync fails. Later index writes must fail.
+    /// RocksDB can clear its own background error; this flag does not clear.
+    #[cfg(feature = "rocksdb")]
+    wal_failed: AtomicBool,
+    /// Test hook. The next dirty WAL sync fails once and sets [`Self::wal_failed`].
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    fail_next_sync: AtomicBool,
     state: Mutex<State>,
     wake: Condvar,
 }
@@ -75,6 +82,10 @@ impl GroupCommit {
             syncs: AtomicU64::new(0),
             wal_syncs: AtomicU64::new(0),
             backstop_syncs: AtomicU64::new(0),
+            #[cfg(feature = "rocksdb")]
+            wal_failed: AtomicBool::new(false),
+            #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+            fail_next_sync: AtomicBool::new(false),
             state: Mutex::new(State {
                 stop: false,
                 spawned: false,
@@ -122,6 +133,27 @@ impl GroupCommit {
     pub(super) fn note_backstop_sync(&self) {
         self.wal_syncs.fetch_add(1, Ordering::Relaxed);
         self.backstop_syncs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A WAL sync failed. Stays set for the life of this index.
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn note_wal_failure(&self) {
+        self.wal_failed.store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn wal_failed(&self) -> bool {
+        self.wal_failed.load(Ordering::Acquire)
+    }
+
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    pub(super) fn arm_fail_next_sync(&self) {
+        self.fail_next_sync.store(true, Ordering::Release);
+    }
+
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    pub(super) fn take_fail_next_sync(&self) -> bool {
+        self.fail_next_sync.swap(false, Ordering::AcqRel)
     }
 
     /// Replace the quiet-group bound and wake the delay thread.
@@ -395,19 +427,14 @@ impl Drop for EngineLifetime {
 fn run_delay(group: &GroupCommit, sync: &mut impl FnMut() -> eyre::Result<()>) {
     loop {
         // Stop does one last sync so the final registrations are durable
-        // before the database handle closes.
+        // before the database handle closes. The sync closure logs a failure.
         if !group.wait_until_due() {
-            if let Err(err) = sync() {
-                tracing::error!(%err, "submodule index group sync failed");
-            }
+            let _ = sync();
             return;
         }
-        if let Err(err) = sync() {
-            tracing::error!(%err, "submodule index group sync failed");
-            if !group.wait_retry() {
-                let _ = sync();
-                return;
-            }
+        if sync().is_err() && !group.wait_retry() {
+            let _ = sync();
+            return;
         }
     }
 }

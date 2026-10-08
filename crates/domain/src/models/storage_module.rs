@@ -1365,9 +1365,10 @@ impl StorageModule {
 
         // A RocksDB registration returns once its rows are visible. The WAL
         // becomes durable at the next synced write on that database, at
-        // `index_wal_backstop_ms`, or on clean shutdown. MDBX keeps one
-        // durable commit per registration: its group-commit path aborts
-        // inside libmdbx.
+        // `index_wal_backstop_ms`, or on clean shutdown. Chunk migration
+        // does that synced write once per touched submodule before it
+        // publishes the block. MDBX keeps one durable commit per
+        // registration: its group-commit path aborts inside libmdbx.
         // Set the backstop before enable, including a bench split that arms
         // group commit after this open returns.
         for (_, submodule) in submodule_map.iter() {
@@ -3568,7 +3569,8 @@ impl StorageModule {
     }
 
     /// MDBX registrations per sync. RocksDB does not sync on this count.
-    /// The next synced write, the WAL backstop, or shutdown covers them.
+    /// Chunk migration syncs each touched submodule once per block. The
+    /// WAL backstop or shutdown covers a group that is still open.
     const ROCKS_INDEX_TXS_PER_SYNC: u32 = 8;
 
     /// Make index registration commits visible without an fsync on every call.
@@ -3584,6 +3586,19 @@ impl StorageModule {
     pub fn enable_index_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
         for (_, submodule) in self.submodules.iter() {
             submodule.db.enable_group_commit(txs_per_sync)?;
+        }
+        Ok(())
+    }
+
+    /// Make this module's visible index rows durable.
+    ///
+    /// One synced WAL write per submodule that still has unsynced rows.
+    /// A clean submodule does not sync. MDBX with group commit off returns
+    /// without a sync: each registration was already durable. Do not call
+    /// this while holding an index write lock.
+    pub fn sync_index_registrations(&self) -> eyre::Result<()> {
+        for (_, submodule) in self.submodules.iter() {
+            submodule.db.sync_group()?;
         }
         Ok(())
     }

@@ -635,8 +635,21 @@ impl RocksSubmoduleStore {
         if !self.group.is_enabled() {
             return Ok(());
         }
+        self.ensure_writable()?;
         let _guard = self.lock_write();
-        sync_wal_locked(&self.db, &self.group)
+        self.ensure_writable()?;
+        sync_wal_locked(&self.db, &self.group, &self.submodule)
+    }
+
+    /// The next dirty WAL sync fails once. Later writes then fail.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn fail_next_wal_sync(&self) {
+        self.group.arm_fail_next_sync();
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn wal_sync_failed(&self) -> bool {
+        self.group.wal_failed()
     }
 
     pub(super) fn set_wal_backstop(&self, delay: Duration) {
@@ -692,23 +705,37 @@ impl RocksSubmoduleStore {
         if !self.group.is_enabled() {
             return self.update(f);
         }
+        self.ensure_writable()?;
         let _guard = self.lock_write();
+        // The sync that sets the flag holds this lock.
+        self.ensure_writable()?;
         let result = self.apply(false, f)?;
         self.group.note_visible();
         Ok(result)
+    }
+
+    fn ensure_writable(&self) -> eyre::Result<()> {
+        if self.group.wal_failed() {
+            eyre::bail!(
+                "submodule index {} is read-only after a WAL sync failure",
+                self.submodule
+            );
+        }
+        Ok(())
     }
 
     fn spawn_delay(&self) -> eyre::Result<()> {
         let db = Arc::downgrade(&self.db);
         let write = Arc::clone(&self.write);
         let group = Arc::clone(&self.group);
+        let submodule = self.submodule.clone();
         self.lifetime
             .spawn(Arc::clone(&self.group), move || match db.upgrade() {
                 Some(db) => {
                     let _guard = write
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    sync_wal_locked(&db, &group)
+                    sync_wal_locked(&db, &group, &submodule)
                 }
                 None => Ok(()),
             })
@@ -1142,7 +1169,9 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
+        self.ensure_writable()?;
         let _guard = self.lock_write();
+        self.ensure_writable()?;
         let result = self.apply(true, f)?;
         // A synced write covers earlier unsynced registrations in this WAL.
         self.group.cover_durable();
@@ -1150,14 +1179,39 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
     }
 }
 
-fn sync_wal_locked(db: &DB, group: &GroupCommit) -> eyre::Result<()> {
+fn sync_wal_locked(db: &DB, group: &GroupCommit, submodule: &str) -> eyre::Result<()> {
     let Some(generation) = group.dirty_generation() else {
         return Ok(());
     };
-    db.flush_wal(true).wrap_err("sync submodule index wal")?;
+    // `FlushWAL(true)` is `SyncWAL`. On an IO error, `WALIOStatusCheck` sets a
+    // background error when paranoid checks are on (this open keeps that
+    // default). A file-scope WAL error is a hard error, so later writes fail
+    // while it stands. RocksDB may clear it (`max_bgerror_resume_count`
+    // defaults to `INT_MAX`). The flag below does not clear.
+    #[cfg(any(test, feature = "test-utils"))]
+    if group.take_fail_next_sync() {
+        return Err(note_wal_sync_failure(
+            group,
+            submodule,
+            eyre::eyre!("injected submodule index wal sync failure for {submodule}"),
+        ));
+    }
+    if let Err(err) = db.flush_wal(true) {
+        return Err(note_wal_sync_failure(
+            group,
+            submodule,
+            eyre::eyre!("sync submodule index wal for {submodule}: {err}"),
+        ));
+    }
     group.note_backstop_sync();
     group.mark_synced(generation, true);
     Ok(())
+}
+
+fn note_wal_sync_failure(group: &GroupCommit, submodule: &str, err: eyre::Report) -> eyre::Report {
+    group.note_wal_failure();
+    tracing::error!(submodule, %err, "submodule index wal sync failed");
+    err
 }
 
 fn submodule_label(rocks_path: &Path) -> String {
