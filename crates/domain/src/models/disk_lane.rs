@@ -23,7 +23,9 @@
 //! A data-path row is written only after this gap's `chunks.dat` fdatasync.
 //! One index batch per submodule covers those rows. A synced RocksDB batch
 //! also covers registrations still waiting on group commit.
-//! `min_durable_interval_ms` can defer that pair. `0` does not. Pwrites
+//! `min_durable_interval_ms` can defer that pair. The node default is 250 ms
+//! for HDD storage modules (16–28 MiB/s stays under saturation, about
+//! +100 ms durable p99). `0` syncs on every gap and does not defer. Pwrites
 //! still run. Force, shutdown, drop, pending bytes over the headroom line,
 //! and the pending-byte ceiling do not defer it. The interval is the longest
 //! wait. Recall does not wait on a deferred pair.

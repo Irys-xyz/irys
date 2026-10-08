@@ -1371,7 +1371,8 @@ mod tests {
         expected_config.storage.entropy_sweep_max_bytes = 256 * 1024;
         expected_config.storage.entropy_coalesce_hole_bytes = 256 * 1024;
         expected_config.storage.intervals_persist_secs = node::DEFAULT_INTERVALS_PERSIST_SECS;
-        // Omitted `min_durable_interval_ms` stays 0: a durable point on every gap.
+        // Omitted `min_durable_interval_ms` takes the production default (250).
+        // `NodeConfig::testing()` pins 0 and must not be the expectation here.
         expected_config.storage.min_durable_interval_ms = node::DEFAULT_MIN_DURABLE_INTERVAL_MS;
         // Omitted headroom stays at two fifths of the pending-byte ceiling.
         expected_config.storage.durable_headroom_permille = node::DEFAULT_DURABLE_HEADROOM_PERMILLE;

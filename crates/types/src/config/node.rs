@@ -601,11 +601,15 @@ pub struct StorageSyncConfig {
     pub index_wal_backstop_ms: u64,
     /// Minimum milliseconds between durable points.
     ///
+    /// The default is 250. On HDD storage modules that cap keeps a
+    /// 16–28 MiB/s ingest, at one recall per second, under drive saturation
+    /// (about 7–19 points of drive time) and adds about 100 ms to durable
+    /// p99. `0` syncs on every gap.
+    ///
     /// A durable point is the `chunks.dat` `fdatasync` and the synced presence
-    /// commit that follows it. `0` runs that pair every time the lane would,
-    /// which is the previous behaviour. A positive value defers a pair that
-    /// would land sooner than this after the previous pair. Pwrites keep
-    /// running. Recall does not wait on a deferred pair.
+    /// commit that follows it. A positive value defers a pair that would land
+    /// sooner than this after the previous pair. Pwrites keep running. Recall
+    /// does not wait on a deferred pair.
     ///
     /// These still run the pair immediately: `force_sync_pending_chunks`,
     /// shutdown, drop, pending bytes over [`Self::durable_headroom_permille`]
@@ -666,8 +670,12 @@ pub const DEFAULT_INTERVALS_PERSIST_SECS: u64 = 30;
 /// Default RocksDB index WAL backstop. See [`StorageSyncConfig::index_wal_backstop_ms`].
 pub const DEFAULT_INDEX_WAL_BACKSTOP_MS: u64 = 1000;
 
-/// Default gap between durable points. `0` runs a point on every gap.
-pub const DEFAULT_MIN_DURABLE_INTERVAL_MS: u64 = 0;
+/// Default gap between durable points, in milliseconds.
+///
+/// 250 is for HDD storage modules. A 16–28 MiB/s ingest at one recall per
+/// second stays under saturation and durable p99 rises by about 100 ms.
+/// `0` syncs on every gap.
+pub const DEFAULT_MIN_DURABLE_INTERVAL_MS: u64 = 250;
 
 /// Default headroom line, in parts per thousand of the pending-byte ceiling.
 /// See [`StorageSyncConfig::durable_headroom_permille`].
@@ -1504,7 +1512,8 @@ impl NodeConfig {
                 // Tests read `intervals.json` as soon as `sync` returns.
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
-                min_durable_interval_ms: DEFAULT_MIN_DURABLE_INTERVAL_MS,
+                // Tests read durability as soon as `sync` returns. 0 does not defer.
+                min_durable_interval_ms: 0,
                 durable_headroom_permille: DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             data_sync: DataSyncServiceConfig {
@@ -1933,11 +1942,16 @@ mod run_mode_tests {
             parsed.durable_headroom_permille,
             DEFAULT_DURABLE_HEADROOM_PERMILLE
         );
-        let spaced: StorageSyncConfig =
-            toml::from_str("min_durable_interval_ms = 250\ndurable_headroom_permille = 400")
-                .unwrap();
-        assert_eq!(spaced.min_durable_interval_ms, 250);
-        assert_eq!(spaced.durable_headroom_permille, 400);
+        assert_eq!(NodeConfig::testing().storage.min_durable_interval_ms, 0);
+        assert_eq!(
+            NodeConfig::testnet().storage.min_durable_interval_ms,
+            DEFAULT_MIN_DURABLE_INTERVAL_MS
+        );
+        // An explicit 0 still overrides the production default.
+        let every_gap: StorageSyncConfig =
+            toml::from_str("min_durable_interval_ms = 0\ndurable_headroom_permille = 400").unwrap();
+        assert_eq!(every_gap.min_durable_interval_ms, 0);
+        assert_eq!(every_gap.durable_headroom_permille, 400);
     }
 
     #[test]

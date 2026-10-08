@@ -437,6 +437,7 @@ impl TestSetup {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             data_sync: DataSyncServiceConfig {

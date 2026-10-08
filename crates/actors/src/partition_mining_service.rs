@@ -1100,6 +1100,7 @@ mod tests {
             }),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),

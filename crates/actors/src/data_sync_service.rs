@@ -1988,6 +1988,7 @@ mod write_outcome_tests {
                 num_writes_before_sync: num_chunks,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp.path().to_path_buf(),

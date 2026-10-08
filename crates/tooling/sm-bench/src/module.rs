@@ -37,7 +37,8 @@ pub(crate) struct OpenRequest<'a> {
     pub num_writes_before_sync: u64,
     pub entropy_sweep_max_bytes: u64,
     pub intervals_persist_secs: u64,
-    /// `0` runs a durable point on every gap.
+    /// `0` runs a durable point on every gap. The bench default is the node
+    /// default, 250, for HDD storage modules.
     pub min_durable_interval_ms: u64,
     /// Parts per thousand of the pending-byte ceiling. See
     /// `StorageSyncConfig::durable_headroom_permille`.

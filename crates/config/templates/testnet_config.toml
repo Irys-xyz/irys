@@ -38,11 +38,8 @@ num_writes_before_sync = 1
 # Seconds between completion rewrites of intervals.json. Write-ahead
 # Interrupted marks are still immediate. 0 rewrites on every sync.
 intervals_persist_secs = 30
-# Minimum milliseconds between durable points (chunks.dat fdatasync and the
-# synced presence commit). 0 runs a point whenever the lane would, which is
-# the previous behaviour. Pwrites are not delayed. A force sync, shutdown,
-# drop, headroom loss, and the pending-byte ceiling still run a point immediately.
-min_durable_interval_ms = 0
+# HDD storage modules; 0 syncs on every gap.
+min_durable_interval_ms = 250
 # Pending bytes, in parts per thousand of the memory ceiling, above which
 # a durable point runs at once. The interval above is the longest wait.
 # Crossing the line closes deferral until pending bytes fall to half of it.

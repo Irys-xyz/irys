@@ -2429,7 +2429,8 @@ impl StorageModule {
         }
     }
 
-    /// Milliseconds configured between durable points. `0` is every point.
+    /// Milliseconds configured between durable points. The node default is
+    /// 250 for HDD storage modules. `0` is every point.
     fn min_durable_interval(&self) -> Duration {
         Duration::from_millis(self.config.node_config.storage.min_durable_interval_ms)
     }
@@ -2866,7 +2867,7 @@ impl StorageModule {
         // is younger than `min_durable_interval_ms` and pending bytes are
         // inside the headroom line. The pwrites above already ran. Force,
         // headroom loss, the pending-byte ceiling, and a zero interval do
-        // not hold the pair. `0` is every point: the previous behaviour.
+        // not hold the pair. `0` is every point.
         let Some(cause) = self.durable_cause(force) else {
             self.park_written_ahead(&write_batch);
             return Ok(());
@@ -6544,6 +6545,7 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 intervals_persist_secs: 0,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp.path().to_path_buf(),
@@ -8711,6 +8713,7 @@ mod tests {
                 num_writes_before_sync: 10,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: base_path,
@@ -9260,6 +9263,7 @@ mod tests {
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
                 intervals_persist_secs: persist_secs,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -9514,6 +9518,7 @@ mod tests {
                 num_writes_before_sync: 1000,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             ..NodeConfig::testing()
@@ -9602,6 +9607,7 @@ mod tests {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -9653,6 +9659,7 @@ mod tests {
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: chunk_size,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -10033,6 +10040,7 @@ mod tests {
                 entropy_sweep_max_bytes: 32,
                 // These tests read intervals.json as soon as sync returns.
                 intervals_persist_secs: 0,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -10245,6 +10253,7 @@ mod tests {
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: chunk_size,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -10278,6 +10287,7 @@ mod tests {
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: chunk_size,
+                min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),

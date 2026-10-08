@@ -118,10 +118,13 @@ struct Args {
     #[arg(long, default_value_t = irys_types::DEFAULT_INTERVALS_PERSIST_SECS)]
     intervals_persist_secs: u64,
     /// Minimum milliseconds between durable points. A durable point is the
-    /// `chunks.dat` `fdatasync` and the synced presence commit. `0` runs a
-    /// point on every gap. Pwrites are not delayed. Force, shutdown, drop,
-    /// headroom loss, and the pending-byte ceiling stay immediate. This is
-    /// the longest a point may wait.
+    /// `chunks.dat` `fdatasync` and the synced presence commit. The default
+    /// matches the node: 250, so a run without this flag measures production.
+    /// On HDD that cap keeps a 16–28 MiB/s ingest under saturation and adds
+    /// about 100 ms to durable p99. `0` runs a point on every gap. Pwrites
+    /// are not delayed. Force, shutdown, drop, headroom loss, and the
+    /// pending-byte ceiling stay immediate. This is the longest a point
+    /// may wait.
     #[arg(long, default_value_t = irys_types::DEFAULT_MIN_DURABLE_INTERVAL_MS)]
     min_durable_interval_ms: u64,
     /// Pending bytes, in parts per thousand of the memory ceiling, above
@@ -479,7 +482,7 @@ fn run() -> eyre::Result<i32> {
         .as_array_mut()
         .expect("io_notes is an array")
         .push(serde_json::Value::from(
-            "min_durable_interval_ms spaces the chunks.dat fdatasync and the synced presence commit. 0 is a point on every gap. Pwrites are not delayed. Force, shutdown, drop, headroom loss, and the pending-byte ceiling stay immediate. The interval is the longest wait.",
+            "min_durable_interval_ms defaults to 250, the node default for HDD storage modules. It spaces the chunks.dat fdatasync and the synced presence commit. 0 is a point on every gap. Pwrites are not delayed. Force, shutdown, drop, headroom loss, and the pending-byte ceiling stay immediate. The interval is the longest wait.",
         ));
     header["io_notes"]
         .as_array_mut()
@@ -1208,8 +1211,8 @@ mod tests {
             irys_types::DEFAULT_MIN_DURABLE_INTERVAL_MS
         );
         assert_eq!(
-            parsed(&["--min-durable-interval-ms", "250"]).min_durable_interval_ms,
-            250
+            parsed(&["--min-durable-interval-ms", "0"]).min_durable_interval_ms,
+            0
         );
         assert_eq!(
             args.durable_headroom_permille,

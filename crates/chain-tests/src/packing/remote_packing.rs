@@ -76,6 +76,7 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
             num_writes_before_sync: 1,
             max_pending_write_bytes: None,
             entropy_sweep_interval_millis: 0,
+            min_durable_interval_ms: 0,
             ..StorageSyncConfig::default()
         },
         packing: irys_types::PackingConfig {
