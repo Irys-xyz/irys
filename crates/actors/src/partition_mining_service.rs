@@ -22,7 +22,7 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use openssl::sha;
 use reth::tasks::shutdown::Shutdown;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{Instrument as _, debug, error, info, warn};
 
@@ -57,6 +57,8 @@ pub struct PartitionMiningServiceInner {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStateReadonly,
+    /// Expiry `reset` did not finish. Retried until it does. Packing waits.
+    expiry_reset_pending: bool,
     /// Path lookups this miner issued. Proves a non-winning recall does not
     /// open the index.
     #[cfg(test)]
@@ -90,6 +92,7 @@ impl PartitionMiningServiceInner {
             difficulty: initial_difficulty,
             ranges: fresh_ranges(&config.consensus),
             steps_guard,
+            expiry_reset_pending: false,
             #[cfg(test)]
             data_path_lookups: std::sync::atomic::AtomicU64::new(0),
         }
@@ -118,42 +121,87 @@ impl PartitionMiningServiceInner {
 
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_partitions_expiration(&mut self, expired: &H256List) {
-        if let Some(partition_hash) = self.storage_module.partition_hash()
-            && expired.0.contains(&partition_hash)
-        {
-            if let Ok(interval) = self.storage_module.reset() {
+        let Some(partition_hash) = self.storage_module.partition_hash() else {
+            return;
+        };
+        if !expired.0.contains(&partition_hash) {
+            return;
+        }
+        // This call is the attempt. Do not also run the retry here: a
+        // successful retry and this handler would pack twice.
+        match self.storage_module.reset() {
+            Ok(interval) => {
+                self.expiry_reset_pending = false;
                 debug!(
                     storage_module.partition_hash = ?partition_hash,
                     storage_module.packing_interval = ?interval,
                     "Expiring partition hash"
                 );
-                if let Ok(req) =
-                    PackingRequest::new(self.storage_module.clone(), PartitionChunkRange(interval))
-                {
-                    match self.service_senders.packing_sender.try_send(req) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            warn!(
-                                storage_module.id = %self.storage_module.id,
-                                storage_module.partition_hash = ?partition_hash,
-                                storage_module.packing_interval = ?interval,
-                                "Dropping packing request due to a saturated channel"
-                            );
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                            error!(
-                                storage_module.id = %self.storage_module.id,
-                                storage_module.partition_hash = ?partition_hash,
-                                storage_module.packing_interval = ?interval,
-                                "Packing channel closed; failed to enqueue repacking request"
-                            );
-                        }
-                    }
-                }
-            } else {
+                self.enqueue_expiry_packing(partition_hash, PartitionChunkRange(interval));
+            }
+            Err(err) => {
+                self.expiry_reset_pending = true;
                 error!(
                     storage_module.partition_hash = ?partition_hash,
-                    "Expiring partition hash, could not reset its storage module!"
+                    "Expiring partition hash, could not reset its storage module: {err}"
+                );
+            }
+        }
+    }
+
+    /// Finish an expiry reset that returned an error. No-op when none is
+    /// pending, and when another caller already finished the reset.
+    fn finish_expiry_reset(&mut self) {
+        if !self.expiry_reset_pending {
+            return;
+        }
+        if !self.storage_module.reset_incomplete() {
+            self.expiry_reset_pending = false;
+            return;
+        }
+        let Some(partition_hash) = self.storage_module.partition_hash() else {
+            self.expiry_reset_pending = false;
+            return;
+        };
+        match self.storage_module.reset() {
+            Ok(interval) => {
+                self.expiry_reset_pending = false;
+                debug!(
+                    storage_module.partition_hash = ?partition_hash,
+                    storage_module.packing_interval = ?interval,
+                    "Finished a pending partition expiry reset"
+                );
+                self.enqueue_expiry_packing(partition_hash, PartitionChunkRange(interval));
+            }
+            Err(err) => {
+                error!(
+                    storage_module.partition_hash = ?partition_hash,
+                    "Partition expiry reset still failing: {err}"
+                );
+            }
+        }
+    }
+
+    fn enqueue_expiry_packing(&self, partition_hash: irys_types::H256, range: PartitionChunkRange) {
+        let Ok(req) = PackingRequest::new(self.storage_module.clone(), range) else {
+            return;
+        };
+        match self.service_senders.packing_sender.try_send(req) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    storage_module.id = %self.storage_module.id,
+                    storage_module.partition_hash = ?partition_hash,
+                    storage_module.packing_interval = ?range,
+                    "Dropping packing request due to a saturated channel"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                error!(
+                    storage_module.id = %self.storage_module.id,
+                    storage_module.partition_hash = ?partition_hash,
+                    storage_module.packing_interval = ?range,
+                    "Packing channel closed; failed to enqueue repacking request"
                 );
             }
         }
@@ -591,6 +639,10 @@ impl PartitionMiningService {
 
     async fn start(mut self) {
         info!("Starting partition mining service");
+        // Monotonic. A stalled runtime retries once, then waits again.
+        let mut expiry_retry = tokio::time::interval(Duration::from_secs(5));
+        expiry_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        expiry_retry.tick().await;
         loop {
             tokio::select! {
                 // Shutdown
@@ -617,15 +669,18 @@ impl PartitionMiningService {
                     match evt {
                         Some(arc_evt) => match arc_evt.as_ref() {
                             MiningBroadcastEvent::Seed(msg) => {
+                                self.state.finish_expiry_reset();
                                 self.mine_seed(msg);
                             }
                             MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
+                                self.state.finish_expiry_reset();
                                 self.state.update_difficulty(h.diff);
                             }
                             MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list)) => {
                                 self.state.handle_partitions_expiration(list);
                             }
                             MiningBroadcastEvent::Reanchored => {
+                                self.state.finish_expiry_reset();
                                 self.state.handle_reanchored();
                             }
                         },
@@ -634,6 +689,10 @@ impl PartitionMiningService {
                             break;
                         }
                     }
+                }
+
+                _ = expiry_retry.tick(), if self.state.expiry_reset_pending => {
+                    self.state.finish_expiry_reset();
                 }
             }
         }
@@ -647,7 +706,7 @@ mod tests {
     use irys_domain::StorageModuleInfo;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        ConsensusConfig, ConsensusOptions, DataLedger, DataTransactionLedger, H256,
+        ConsensusConfig, ConsensusOptions, DataLedger, DataTransactionLedger, H256, H256List,
         LedgerChunkOffset, LedgerChunkRange, NodeConfig, StorageSyncConfig, irys::IrysSigner,
         ledger_chunk_offset_ii, partition::PartitionAssignment,
     };
@@ -655,6 +714,66 @@ mod tests {
     use nodit::interval::ii;
     use std::sync::RwLock;
     use std::sync::atomic::AtomicBool;
+
+    /// A failed expiry reset must not enqueue packing. The retry does.
+    #[test]
+    fn failed_expiry_reset_does_not_pack_until_retry() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x77);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), "hdd0".into())],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+        );
+
+        inner.handle_partitions_expiration(&H256List(vec![H256::repeat_byte(0x01)]));
+        assert!(!inner.expiry_reset_pending);
+
+        storage_module.fail_next_reset_for_test();
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]));
+        assert!(inner.expiry_reset_pending);
+        assert!(storage_module.reset_incomplete());
+        assert!(receivers.packing.try_recv().is_err());
+
+        inner.finish_expiry_reset();
+        assert!(!inner.expiry_reset_pending);
+        assert!(!storage_module.reset_incomplete());
+        assert!(receivers.packing.try_recv().is_ok());
+        inner.finish_expiry_reset();
+        assert!(receivers.packing.try_recv().is_err());
+    }
 
     /// The consumer half of the in-process VDF re-anchor: `handle_reanchored` — the
     /// one-line dispatch target of `MiningBroadcastEvent::Reanchored` in the service

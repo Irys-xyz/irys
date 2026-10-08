@@ -76,25 +76,33 @@ pub(super) async fn heal_ledger_data_indexes(
     ctx: &IndexHealCtx<'_>,
     cancel: &Shutdown,
 ) -> eyre::Result<HealOutcome> {
-    let ledger_modules: Vec<Arc<StorageModule>> = {
+    let (ledger_modules, mut needs_retry) = {
         let guard = ctx.storage_modules.read().unwrap();
-        guard
-            .iter()
-            .filter(|sm| {
-                sm.partition_assignment()
-                    .and_then(|a| a.ledger_id)
-                    .is_some()
-            })
-            .cloned()
-            .collect()
+        let mut modules = Vec::new();
+        let mut needs_retry = false;
+        for sm in guard.iter() {
+            let ledger = sm
+                .partition_assignment()
+                .and_then(|assignment| assignment.ledger_id)
+                .is_some();
+            if !ledger {
+                continue;
+            }
+            // A half-finished reset must not be rebuilt. The assignment retry
+            // finishes the clear.
+            if sm.reset_incomplete() {
+                needs_retry = true;
+                continue;
+            }
+            modules.push(sm.clone());
+        }
+        (modules, needs_retry)
     };
 
     debug!(
         storage_module.ledger_assigned_count = ledger_modules.len(),
         "healing data indexes for ledger-assigned storage modules"
     );
-
-    let mut needs_retry = false;
     // Unique placement blocks (height → hash) across all SMs.
     let mut blocks_to_migrate: BTreeMap<u64, BlockHash> = BTreeMap::new();
     // SMs that needed repair — re-verify readiness after migrate.

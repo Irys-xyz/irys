@@ -368,7 +368,7 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// | Ahead `Entropy` / `Uninitialized` → `Interrupted` on disk only | Same rewrite, up to 512 MiB forward inside the submodule | Write-ahead coalesce | About one rewrite per 512 MiB (~0.03/s) while the frontier is contiguous |
 /// | `Interrupted` → `Data` or `Entropy` | After `fdatasync` and the presence commit. At most every `intervals_persist_secs`, sooner on the next write-ahead rewrite, on `force_sync`, or on clean shutdown | Completion | Was ~0.96/s. Now rides the write-ahead or the 30 s timer |
 /// | Failed `pwrite` → live `Uninitialized`, file stays `Interrupted` | No extra rewrite. Load maps both to `Uninitialized` | Completion lag is safe | Rare |
-/// | Any → `Uninitialized` on reset or rollback | Immediately, then the index clear / repack | Write-ahead | Rare |
+/// | Any → `Uninitialized` on reset | After the index clear. A metadata marker covers a crash before the file rewrite | Write-ahead | Rare |
 /// | `index_transaction_data`, group commit, chunk `fdatasync` | Not an interval rewrite | Durable point is the chunk `fdatasync` plus the presence commit | `fdatasync` stays ~0.96/s |
 ///
 /// `intervals_persist_secs = 0` does both file rewrites on every sync and
@@ -394,7 +394,11 @@ struct IntervalDisk {
 enum SyncFailurePoint {
     BeforeDataFsync,
     BeforeIntervalCommit,
-    /// Intervals are on disk. The index clear has not run.
+    /// Reset marker is durable. The index clear has not run.
+    AfterResetMarker,
+    /// Index is cleared. The interval file is not rewritten yet.
+    AfterResetClear,
+    /// Interval file is `Uninitialized`. The reset marker is still set.
     AfterResetIntervals,
 }
 
@@ -431,6 +435,10 @@ pub struct StorageModule {
     /// Shared with submodule drains so tests can fail the next index commit.
     #[cfg(any(test, feature = "test-utils"))]
     index_commit_fail_next: Arc<AtomicBool>,
+    /// Set while `reset` has not finished. Heal must not rebuild this index.
+    reset_incomplete: AtomicBool,
+    #[cfg(any(test, feature = "test-utils"))]
+    reset_fail_next: AtomicBool,
     #[cfg(test)]
     fail_entropy_read_nth: AtomicU64,
     #[cfg(test)]
@@ -1337,6 +1345,10 @@ impl StorageModule {
             ));
         }
 
+        // A crash during reset leaves the marker set. Finish the clear and
+        // rewrite that submodule's intervals before the file is loaded.
+        Self::finish_pending_resets(&submodule_map)?;
+
         // Attempt to load a global set of intervals from the submodules
         let loaded_intervals: NoditMap<
             PartitionChunkOffset,
@@ -1371,6 +1383,11 @@ impl StorageModule {
         let reconcile = true;
         if reconcile {
             Self::reconcile_presence(&submodule_map, &loaded_intervals)?;
+            Self::reconcile_uninitialized_coverage(
+                &submodule_map,
+                &loaded_intervals,
+                config.consensus.chunk_size,
+            )?;
         }
 
         // A RocksDB registration returns once its rows are visible. The WAL
@@ -1411,6 +1428,9 @@ impl StorageModule {
             pending_writes: RwLock::new(PendingWrites::default()),
             #[cfg(any(test, feature = "test-utils"))]
             index_commit_fail_next,
+            reset_incomplete: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-utils"))]
+            reset_fail_next: AtomicBool::new(false),
             #[cfg(test)]
             fail_entropy_read_nth: AtomicU64::new(0),
             #[cfg(test)]
@@ -1879,6 +1899,17 @@ impl StorageModule {
         self.index_commit_fail_next.store(true, Ordering::SeqCst);
     }
 
+    /// `true` while `reset` has not finished in this process.
+    pub fn reset_incomplete(&self) -> bool {
+        self.reset_incomplete.load(Ordering::SeqCst)
+    }
+
+    /// The next `reset` returns an error before it writes.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn fail_next_reset_for_test(&self) {
+        self.reset_fail_next.store(true, Ordering::SeqCst);
+    }
+
     /// `true` once. The packed chunk is not queued, and no index row is written.
     #[cfg(any(test, feature = "test-utils"))]
     fn take_index_commit_failure(&self) -> bool {
@@ -2068,12 +2099,21 @@ impl StorageModule {
         Ok(durable)
     }
 
-    /// Reinit intervals as `Uninitialized`, then erase the index.
+    /// Erase the index, then mark every offset `Uninitialized`.
     ///
-    /// The interval files hit disk before the index clear. A crash between
-    /// the two reloads the span as `Uninitialized`. The next open drops
-    /// presence rows under that span.
+    /// The metadata marker is durable before the clear. A crash after the
+    /// marker and before the marker is dropped is finished on the next open:
+    /// the index is cleared again and that submodule's interval file is
+    /// rewritten to `Uninitialized`. The in-memory map flips to
+    /// `Uninitialized` as soon as the clear commits, so this process does not
+    /// serve the old bytes while the file still names them `Data`.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
+        #[cfg(any(test, feature = "test-utils"))]
+        if self.reset_fail_next.swap(false, Ordering::SeqCst) {
+            self.reset_incomplete.store(true, Ordering::SeqCst);
+            eyre::bail!("injected storage module reset failure");
+        }
+        self.reset_incomplete.store(true, Ordering::SeqCst);
         {
             let mut pending = self.pending_writes.write().unwrap();
             self.index_write_generation.fetch_add(1, Ordering::SeqCst);
@@ -2089,6 +2129,17 @@ impl StorageModule {
         }
         self.fail_queued_sweeps();
         self.poll_acks();
+
+        for (_, submodule) in self.submodules.iter() {
+            submodule.db.set_reset_in_progress()?;
+        }
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AfterResetMarker)?;
+
+        for (_, submodule) in self.submodules.iter() {
+            submodule.db.update(|tx| tx.clear())?;
+        }
+
         let storage_interval = {
             let mut intervals = self.intervals.write().unwrap();
             let start = intervals.first_key_value().unwrap().0.start();
@@ -2100,17 +2151,18 @@ impl StorageModule {
                 .expect("Failed to create new interval, should never happen as interval is empty!");
             storage_interval
         };
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AfterResetClear)?;
+
         self.write_intervals_to_submodules()
             .wrap_err("Could not update submodule interval files")?;
-        // Intervals are durable. The clear is the next step. A crash here is
-        // repaired by the open-time presence reconcile.
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetIntervals)?;
 
-        for (_interval, submodule) in self.submodules.iter() {
-            submodule.db.update(|tx| tx.clear())?;
+        for (_, submodule) in self.submodules.iter() {
+            submodule.db.clear_reset_in_progress()?;
         }
-
+        self.reset_incomplete.store(false, Ordering::SeqCst);
         Ok(storage_interval)
     }
 
@@ -2675,8 +2727,7 @@ impl StorageModule {
     /// is created spanning the submodule's entire range to ensure consistency.
     pub fn write_intervals_to_submodules(&self) -> eyre::Result<()> {
         // A running lane writes the files itself. This caller waits. A stopped
-        // lane, and the lane thread, write here. Reset and rollback use this
-        // path, so the file matches the live map before the index changes.
+        // lane, and the lane thread, write here.
         if self.disk.lane_running()
             && !self.disk.on_lane_thread()
             && Self::lane_request_done(self.disk.request_lane_persist())?
@@ -3213,6 +3264,74 @@ impl StorageModule {
             );
         }
         Ok(())
+    }
+
+    /// Finish a reset that crashed after the marker was written.
+    ///
+    /// The index is cleared again. That submodule's interval file becomes
+    /// `Uninitialized` for its whole span. Then the marker is dropped.
+    fn finish_pending_resets(submodules: &SubmoduleMap) -> eyre::Result<()> {
+        for (interval, submodule) in submodules.iter() {
+            if !submodule.db.reset_in_progress()? {
+                continue;
+            }
+            submodule.db.update(|tx| tx.clear())?;
+            let path = submodule
+                .intervals_file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let mut map = StorageIntervals::new();
+            map.insert_strict(*interval, ChunkType::Uninitialized)
+                .map_err(|err| eyre::eyre!("reset interval span: {err:?}"))?;
+            let mut file = get_atomic_file(&path)?;
+            file.write_all(serde_json::to_string(&map)?.as_bytes())?;
+            file.commit()?;
+            submodule.db.clear_reset_in_progress()?;
+        }
+        Ok(())
+    }
+
+    /// Drop tx intervals, data-root placements, and pending jobs under
+    /// `Uninitialized` spans.
+    ///
+    /// `Entropy` is not included. A tx can be indexed there before its bytes
+    /// are stored. Presence under `Entropy` is still removed by
+    /// [`Self::reconcile_presence`]. A span with no coverage row does not commit.
+    fn reconcile_uninitialized_coverage(
+        submodules: &SubmoduleMap,
+        intervals: &StorageIntervals,
+        chunk_size: u64,
+    ) -> eyre::Result<()> {
+        for (submodule_interval, submodule) in submodules.iter() {
+            let spans = Self::uninitialized_spans(intervals, *submodule_interval);
+            if spans.is_empty() {
+                continue;
+            }
+            submodule
+                .db
+                .drop_uninitialized_coverage(&spans, chunk_size)?;
+        }
+        Ok(())
+    }
+
+    /// Inclusive `Uninitialized` spans clipped to one submodule.
+    fn uninitialized_spans(
+        intervals: &StorageIntervals,
+        submodule: Interval<PartitionChunkOffset>,
+    ) -> Vec<(PartitionChunkOffset, PartitionChunkOffset)> {
+        let mut spans = Vec::new();
+        for (interval, kind) in intervals.overlapping(submodule) {
+            if *kind != ChunkType::Uninitialized {
+                continue;
+            }
+            let start = interval.start().max(submodule.start());
+            let end = interval.end().min(submodule.end());
+            if start <= end {
+                spans.push((start, end));
+            }
+        }
+        spans
     }
 
     /// Inclusive non-`Data` spans clipped to one submodule.
@@ -6154,7 +6273,6 @@ mod tests {
         tx_path: Vec<u8>,
         leaf: TxLeafBinding,
         info: DataRootInfo,
-        pending: PendingBodyMigration,
     }
 
     fn presence_info() -> StorageModuleInfo {
@@ -6214,11 +6332,15 @@ mod tests {
     fn seed_mixed_index(module: &StorageModule) -> eyre::Result<SeededIndex> {
         let tx_hash = H256::repeat_byte(9);
         let data_root = H256::repeat_byte(4);
-        let tx_path = vec![9_u8, 9];
         let leaf = TxLeafBinding {
             data_root,
             prefix_hash: H256::repeat_byte(1),
         };
+        // Readiness re-checks the tx-path leaf against fold(data_root, prefix_hash).
+        // A leaf-only proof is the shortest bytes that check accepts.
+        let folded = DataTransactionLedger::fold_tx_root_leaf(data_root, leaf.prefix_hash);
+        let mut tx_path = folded.0.to_vec();
+        tx_path.extend_from_slice(&[0_u8; 32]);
         let info = DataRootInfo {
             start_offset: RelativeChunkOffset(1),
             data_size: 64,
@@ -6254,7 +6376,6 @@ mod tests {
             tx_path,
             leaf,
             info,
-            pending,
         })
     }
 
@@ -6276,7 +6397,9 @@ mod tests {
         Ok(rows.into_iter().map(|(offset, _)| offset.0).collect())
     }
 
-    fn assert_registration(module: &StorageModule, seeded: &SeededIndex) -> eyre::Result<()> {
+    /// Uninitialized `[3, 5]` drops pending and splits the tx interval.
+    /// Entropy `[6, 7]` keeps the tx remnant. The data-root extent is `[1, 2]`.
+    fn assert_entropy_hole_kept(module: &StorageModule, seeded: &SeededIndex) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         assert_eq!(
             submodule
@@ -6296,33 +6419,86 @@ mod tests {
                 .view(|tx| tx.get_data_root_infos_for_data_root(seeded.data_root))?,
             Some(DataRootInfos(vec![seeded.info.clone()]))
         );
-        assert_eq!(
+        assert!(
             submodule
                 .db
-                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(3)))?,
-            Some(seeded.pending.clone())
+                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(3)))?
+                .is_none()
+        );
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?
+                .is_none()
         );
         assert_eq!(
             submodule
                 .db
-                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?,
+                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?,
             Some(seeded.tx_path.clone())
         );
-        let hashes = submodule
+        assert_eq!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(6)))?,
+            Some(seeded.tx_path.clone())
+        );
+        let at_two = submodule
             .db
-            .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(3)))?
-            .expect("tx coverage stays");
-        assert_eq!(hashes.tx_path_hash, Some(seeded.tx_hash));
+            .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(2)))?
+            .expect("data span keeps the row");
+        assert_eq!(at_two.tx_path_hash, Some(seeded.tx_hash));
+        assert!(at_two.data_path_hash.is_some());
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(3)))?
+                .is_none()
+        );
+        let at_six = submodule
+            .db
+            .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?
+            .expect("entropy keeps tx coverage");
+        assert_eq!(at_six.tx_path_hash, Some(seeded.tx_hash));
+        assert!(at_six.data_path_hash.is_none());
+        assert!(module.is_data_root_index_ready_at(PartitionChunkOffset::from(2)));
+        assert!(!module.is_data_root_index_ready_at(PartitionChunkOffset::from(3)));
         Ok(())
     }
 
-    fn assert_no_data_path_hash(module: &StorageModule) -> eyre::Result<()> {
+    /// A fully `Uninitialized` span drops intervals, placements, and pending jobs.
+    /// Tx-path blobs are not coverage.
+    fn assert_uninitialized_coverage_dropped(
+        module: &StorageModule,
+        seeded: &SeededIndex,
+    ) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        let hashes = submodule
+        assert_eq!(
+            submodule
+                .db
+                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?,
+            Some(seeded.tx_path.clone())
+        );
+        for offset in [2_u32, 3, 6] {
+            assert!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(offset)))?
+                    .is_none(),
+                "offset {offset}"
+            );
+        }
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(3)))?
+                .is_none()
+        );
+        let infos = submodule
             .db
-            .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(3)))?
-            .expect("tx coverage stays after the data path is removed");
-        assert_eq!(hashes.data_path_hash, None);
+            .view(|tx| tx.get_data_root_infos_for_data_root(seeded.data_root))?;
+        assert!(infos.as_ref().is_none_or(|infos| infos.0.is_empty()));
+        assert!(!module.is_data_root_index_ready_at(PartitionChunkOffset::from(2)));
         Ok(())
     }
 
@@ -6380,8 +6556,7 @@ mod tests {
             assert_eq!(data_path_at(&reloaded, 3)?, None);
             assert_eq!(data_path_at(&reloaded, 6)?, None);
             assert_eq!(presence_offsets(&reloaded)?, vec![2]);
-            assert_registration(&reloaded, &seeded)?;
-            assert_no_data_path_hash(&reloaded)?;
+            assert_entropy_hole_kept(&reloaded, &seeded)?;
             Ok(())
         })
     }
@@ -6418,35 +6593,118 @@ mod tests {
             assert_eq!(data_path_at(&reloaded, 3)?, None);
             assert_eq!(data_path_at(&reloaded, 6)?, None);
             assert!(presence_offsets(&reloaded)?.is_empty());
-            assert_registration(&reloaded, &seeded)?;
-            assert_no_data_path_hash(&reloaded)?;
+            assert_uninitialized_coverage_dropped(&reloaded, &seeded)?;
             Ok(())
         })
     }
 
     #[test]
-    fn reset_crash_before_index_clear_drops_presence_on_reopen() -> eyre::Result<()> {
-        for_each_index_engine("presence_reset_crash", |config, storage| {
-            let seeded = seed_mixed_index(&storage)?;
-            storage.fail_next_sync_at(SyncFailurePoint::AfterResetIntervals);
-            let err = storage.reset().unwrap_err();
-            assert!(err.to_string().contains("AfterResetIntervals"), "{err}");
-            assert_eq!(data_path_at(&storage, 2)?, Some(vec![2]));
-            assert_eq!(data_path_at(&storage, 3)?, Some(vec![3]));
-            assert_registration(&storage, &seeded)?;
-            drop(storage);
+    fn reset_crash_at_each_step_serves_nothing_on_reopen() -> eyre::Result<()> {
+        for point in [
+            SyncFailurePoint::AfterResetMarker,
+            SyncFailurePoint::AfterResetClear,
+            SyncFailurePoint::AfterResetIntervals,
+        ] {
+            for_each_index_engine(&format!("presence_reset_{point:?}"), |config, storage| {
+                let seeded = seed_mixed_index(&storage)?;
+                assert!(storage.write_chunk(
+                    PartitionChunkOffset::from(2),
+                    vec![9_u8; 32],
+                    ChunkType::Data
+                ));
+                storage.force_sync_pending_chunks()?;
+                storage.fail_next_sync_at(point);
+                let err = storage.reset().unwrap_err();
+                assert!(err.to_string().contains(&format!("{point:?}")), "{err}");
+                let (_, submodule) =
+                    storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+                assert!(submodule.db.reset_in_progress()?);
+                match point {
+                    SyncFailurePoint::AfterResetMarker => {
+                        assert_eq!(data_path_at(&storage, 2)?, Some(vec![2]));
+                        assert_eq!(
+                            storage.get_chunk_type(&PartitionChunkOffset::from(2)),
+                            Some(ChunkType::Data)
+                        );
+                    }
+                    SyncFailurePoint::AfterResetClear | SyncFailurePoint::AfterResetIntervals => {
+                        assert!(data_path_at(&storage, 2)?.is_none());
+                        assert_eq!(
+                            storage.get_chunk_type(&PartitionChunkOffset::from(2)),
+                            Some(ChunkType::Uninitialized)
+                        );
+                        assert!(
+                            storage
+                                .generate_full_chunk(PartitionChunkOffset::from(2))?
+                                .is_none()
+                        );
+                    }
+                    _ => {}
+                }
+                storage.suppress_interval_flush_for_test();
+                drop(storage);
 
-            let reloaded = reopen_presence(config)?;
-            assert_eq!(
-                reloaded.get_chunk_type(&PartitionChunkOffset::from(2)),
-                Some(ChunkType::Uninitialized)
-            );
-            assert_eq!(data_path_at(&reloaded, 2)?, None);
-            assert_eq!(data_path_at(&reloaded, 3)?, None);
-            assert_eq!(data_path_at(&reloaded, 6)?, None);
-            assert!(presence_offsets(&reloaded)?.is_empty());
-            assert_registration(&reloaded, &seeded)?;
-            assert_no_data_path_hash(&reloaded)?;
+                let reloaded = reopen_presence(config)?;
+                assert_eq!(
+                    reloaded.get_chunk_type(&PartitionChunkOffset::from(2)),
+                    Some(ChunkType::Uninitialized)
+                );
+                assert!(data_path_at(&reloaded, 2)?.is_none());
+                assert!(data_path_at(&reloaded, 3)?.is_none());
+                assert!(data_path_at(&reloaded, 6)?.is_none());
+                assert!(presence_offsets(&reloaded)?.is_empty());
+                // The reset clear removes every index family, including the
+                // tx-path blob. Open coverage repair only runs when the clear
+                // did not.
+                let (_, reloaded_sub) =
+                    reloaded.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+                assert!(
+                    reloaded_sub
+                        .db
+                        .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?
+                        .is_none()
+                );
+                assert!(
+                    reloaded_sub
+                        .db
+                        .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?
+                        .is_none()
+                );
+                assert!(
+                    reloaded_sub
+                        .db
+                        .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(3)))?
+                        .is_none()
+                );
+                let infos = reloaded_sub
+                    .db
+                    .view(|tx| tx.get_data_root_infos_for_data_root(seeded.data_root))?;
+                assert!(infos.as_ref().is_none_or(|infos| infos.0.is_empty()));
+                assert!(!reloaded.is_data_root_index_ready_at(PartitionChunkOffset::from(2)));
+                assert!(
+                    reloaded
+                        .generate_full_chunk(PartitionChunkOffset::from(2))?
+                        .is_none()
+                );
+                assert!(!reloaded_sub.db.reset_in_progress()?);
+                assert!(!reloaded.reset_incomplete());
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reset_error_stays_incomplete() -> eyre::Result<()> {
+        for_each_index_engine("presence_reset_err", |_config, storage| {
+            storage.fail_next_reset_for_test();
+            let err = storage.reset().unwrap_err();
+            assert!(err.to_string().contains("injected"), "{err}");
+            assert!(storage.reset_incomplete());
+            let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            assert!(!submodule.db.reset_in_progress()?);
+            storage.reset()?;
+            assert!(!storage.reset_incomplete());
             Ok(())
         })
     }

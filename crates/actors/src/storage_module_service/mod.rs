@@ -35,7 +35,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{Instrument as _, debug, error, warn};
 
 // Messages that the StorageModuleService service supports
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StorageModuleServiceMessage {
     PartitionAssignmentsUpdated {
         storage_module_infos: Arc<Vec<StorageModuleInfo>>,
@@ -62,6 +62,25 @@ pub struct StorageModuleServiceInner {
     shutdown: Shutdown,
     /// Last heal pass left unrepaired work — run periodic heal until clear.
     index_heal_needs_retry: bool,
+    /// Assignment update whose reset did not finish. The next tick retries it.
+    pending_assignment: Option<StorageModuleServiceMessage>,
+}
+
+/// Reset did not finish. The assignment is unchanged. The service stays up
+/// and retries the same update.
+#[derive(Debug)]
+struct ResetNotFinished;
+
+impl std::fmt::Display for ResetNotFinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("storage module reset did not finish")
+    }
+}
+
+impl std::error::Error for ResetNotFinished {}
+
+fn is_reset_not_finished(err: &eyre::Report) -> bool {
+    err.downcast_ref::<ResetNotFinished>().is_some()
 }
 
 impl std::fmt::Debug for StorageModuleServiceInner {
@@ -99,6 +118,7 @@ impl StorageModuleServiceInner {
             config,
             shutdown,
             index_heal_needs_retry: true, // force heal until first pass reports clean
+            pending_assignment: None,
         }
     }
 
@@ -129,6 +149,25 @@ impl StorageModuleServiceInner {
             }
         }
         Ok(())
+    }
+
+    /// Apply one assignment update. A reset that does not finish is stored and
+    /// retried. The service stays up. Any other error still aborts it.
+    async fn apply_assignment(&mut self, msg: StorageModuleServiceMessage) -> eyre::Result<()> {
+        match self.handle_message(msg.clone()).await {
+            Ok(()) => {
+                self.pending_assignment = None;
+                Ok(())
+            }
+            Err(err) if is_reset_not_finished(&err) => {
+                debug!(
+                    "storage module reset did not finish; the assignment update will be retried"
+                );
+                self.pending_assignment = Some(msg);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn spawn_disk_lanes(&self) -> DiskLaneSet {
@@ -204,8 +243,6 @@ impl StorageModuleServiceInner {
                 .map(|module| (module.id, module.clone()))
                 .collect()
         };
-        let mut packing_modules = Vec::new();
-
         debug!("StorageModuleInfos:\n{:#?}", storage_module_info_update);
 
         let update_info_by_id: HashMap<usize, &StorageModuleInfo> = storage_module_info_update
@@ -227,7 +264,11 @@ impl StorageModuleServiceInner {
             match update_info_by_id.get(module_id) {
                 None => {
                     // storage module is present locally, not present in the update
-                    self.clear_assignment_if_outdated(module, update_height, "missing_from_update");
+                    self.clear_assignment_if_outdated(
+                        module,
+                        update_height,
+                        "missing_from_update",
+                    )?;
                 }
                 Some(sm_info) => {
                     if sm_info.submodules.is_empty() {
@@ -249,7 +290,7 @@ impl StorageModuleServiceInner {
                             module,
                             update_height,
                             "explicitly_unassigned",
-                        );
+                        )?;
                     }
                 }
             }
@@ -265,11 +306,12 @@ impl StorageModuleServiceInner {
             if existing.partition_assignment().is_none()
                 && let Some(assignment) = sm_info.partition_assignment
             {
+                // Clear before the assignment changes. A failed reset leaves the
+                // module unassigned, so the next update takes this branch again.
+                let range = self.reset_for_assignment(existing)?;
                 existing.assign_partition(assignment, update_height);
-
-                // Record this storage module as needing packing, the protocol will always assign a new partition_hash
-                // to capacity for 1 epoch so we can schedule this formerly unassigned storage module for packing
-                packing_modules.push(existing.clone());
+                // The protocol assigns a new partition to capacity for one epoch.
+                self.enqueue_packing(existing, range);
 
                 // Skip any further validations for now
                 continue;
@@ -319,49 +361,20 @@ impl StorageModuleServiceInner {
                 {
                     let ledger_before = existing_pa.ledger_id;
 
-                    // Update the storage modules partition assignment (and packing params toml)
-                    // to match ledger/capacity reassignment
-                    existing.assign_partition(info_pa, update_height);
-
+                    // Expiry clears the index before the assignment changes.
+                    // A failed reset leaves the ledger assignment in place, so
+                    // the next update still sees the ledger→capacity transition.
+                    // A module that already moved is not reset again.
                     if ledger_before.is_some() && info_pa.ledger_id.is_none() {
-                        // This storage module is expiring from LedgerSlot->Capacity
-                        packing_modules.push(existing.clone());
-                    }
-                    // Capacity→LedgerSlot and long-lived ledger assigns: index
-                    // repair runs below for *all* ledger-assigned SMs (path-hash
-                    // gap scan). Direct ledger A→B reassignment relies on the
-                    // mining-bus reset path, not this presence scan.
-                }
-            }
-        }
-
-        // For each module requiring packing, start packing and mining
-        for packing_sm in packing_modules {
-            // Reset packing params and indexes on the storage module
-            if let Ok(interval) = packing_sm.reset() {
-                // Message packing service to fill up fresh entropy chunks on the drive
-                let sender = self.service_senders.packing_sender();
-                if let Ok(req) =
-                    PackingRequest::new(packing_sm.clone(), PartitionChunkRange(interval))
-                {
-                    match sender.try_send(req) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!(
-                                target = "irys::packing",
-                                storage_module.id = %packing_sm.id,
-                                storage_module.packing_interval = ?interval,
-                                "Dropping packing request due to a saturated channel"
-                            );
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                            tracing::error!(
-                                target = "irys::packing",
-                                storage_module.id = %packing_sm.id,
-                                storage_module.packing_interval = ?interval,
-                                "Packing channel closed; failed to enqueue repacking request"
-                            );
-                        }
+                        let range = self.reset_for_assignment(existing)?;
+                        existing.assign_partition(info_pa, update_height);
+                        self.enqueue_packing(existing, range);
+                    } else {
+                        // Capacity→LedgerSlot and long-lived ledger assigns.
+                        // Index repair runs below for ledger-assigned modules.
+                        // Direct ledger A→B reassignment uses the mining-bus
+                        // reset path, not this presence scan.
+                        existing.assign_partition(info_pa, update_height);
                     }
                 }
             }
@@ -378,14 +391,65 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
+    /// Reset, or report that the assignment update must be retried.
+    /// The assignment itself is not changed here.
+    fn reset_for_assignment(
+        &self,
+        module: &Arc<StorageModule>,
+    ) -> eyre::Result<PartitionChunkRange> {
+        match module.reset() {
+            Ok(interval) => Ok(PartitionChunkRange(interval)),
+            Err(err) => {
+                warn!(
+                    storage_module.id = module.id,
+                    "storage module reset failed: {err}"
+                );
+                Err(ResetNotFinished.into())
+            }
+        }
+    }
+
+    /// Ask the packing service to fill the range. A full or closed channel
+    /// does not fail the assignment update.
+    fn enqueue_packing(&self, module: &Arc<StorageModule>, range: PartitionChunkRange) {
+        let sender = self.service_senders.packing_sender();
+        let Ok(req) = PackingRequest::new(module.clone(), range) else {
+            return;
+        };
+        match sender.try_send(req) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    target = "irys::packing",
+                    storage_module.id = %module.id,
+                    storage_module.packing_interval = ?range,
+                    "Dropping packing request due to a saturated channel"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+                tracing::error!(
+                    target = "irys::packing",
+                    storage_module.id = %module.id,
+                    storage_module.packing_interval = ?range,
+                    "Packing channel closed; failed to enqueue repacking request"
+                );
+            }
+        }
+    }
+
     fn clear_assignment_if_outdated(
         &self,
         module: &Arc<StorageModule>,
         update_height: u64,
         reason: &'static str,
-    ) {
+    ) -> eyre::Result<()> {
         if module.partition_assignment().is_none() {
-            return;
+            // The assignment is already gone. Finish a reset that stopped
+            // before its marker was dropped.
+            if module.reset_incomplete() {
+                self.reset_for_assignment(module)?;
+            }
+            return Ok(());
         }
 
         let path = &self.submodules_config.submodule_paths[module.id];
@@ -404,7 +468,7 @@ impl StorageModuleServiceInner {
                 storage_module.clear_reason = reason,
                 "skipping unassign: local packing params are newer than update"
             );
-            return;
+            return Ok(());
         }
 
         debug!(
@@ -413,26 +477,17 @@ impl StorageModuleServiceInner {
             storage_module.clear_reason = reason,
             "clearing local partition assignment"
         );
+        // Reset while the assignment is still present. A failure leaves it
+        // in place so the next update retries the unassign.
+        let range = self.reset_for_assignment(module)?;
         module.clear_assignment(update_height);
-
-        match module.reset() {
-            Ok(interval) => {
-                debug!(
-                    packing.interval = ?interval,
-                    storage_module.id = module.id,
-                    storage_module.clear_reason = reason,
-                    "storage module reset after unassign"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    storage_module.id = module.id,
-                    storage_module.clear_reason = reason,
-                    "failed to reset storage module after unassign: {}",
-                    e
-                );
-            }
-        }
+        debug!(
+            packing.interval = ?range,
+            storage_module.id = module.id,
+            storage_module.clear_reason = reason,
+            "storage module reset before unassign"
+        );
+        Ok(())
     }
 
     /// Validates that a storage module's partition assignment matches the on-disk parameters.
@@ -597,8 +652,10 @@ impl StorageModuleService {
                     match msg {
                         Some(traced) => {
                             let (msg, parent_span) = traced.into_parts();
+                            // A newer update replaces one that is waiting to retry.
+                            self.inner.pending_assignment = None;
                             let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
-                            self.inner.handle_message(msg).instrument(span).await?;
+                            self.inner.apply_assignment(msg).instrument(span).await?;
                         }
                         None => {
                             tracing::warn!("Message channel closed unexpectedly");
@@ -614,16 +671,23 @@ impl StorageModuleService {
                     }
                 }
                 _ = interval.tick() => {
-                     self.inner.tick();
+                    if let Some(pending) = self.inner.pending_assignment.clone() {
+                        self.inner.apply_assignment(pending).await?;
+                    }
+                    self.inner.tick();
                 }
             }
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        if let Some(pending) = self.inner.pending_assignment.clone() {
+            self.inner.apply_assignment(pending).await?;
+        }
         while let Ok(traced) = self.msg_rx.try_recv() {
             let (msg, parent_span) = traced.into_parts();
+            self.inner.pending_assignment = None;
             let span = tracing::trace_span!(parent: &parent_span, "storage_module_handle_message");
-            self.inner.handle_message(msg).instrument(span).await?
+            self.inner.apply_assignment(msg).instrument(span).await?
         }
 
         tracing::info!("shutting down StorageModule Service gracefully");
@@ -645,5 +709,183 @@ impl Drop for DiskLaneSet {
                 error!("disk lane thread panicked: {payload:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod assignment_reset_tests {
+    use super::*;
+    use crate::services::ServiceSenders;
+    use irys_config::StorageSubmodulesConfig;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::{
+        BlockIndex, BlockTree, BlockTreeReadGuard, StorageModule, StorageModuleInfo,
+        block_index_guard::BlockIndexReadGuard,
+    };
+    use irys_testing_utils::{new_mock_signed_header, utils::TempDirBuilder};
+    use irys_types::{
+        Config, ConsensusConfig, ConsensusOptions, DataLedger, DatabaseProvider, H256, NodeConfig,
+        NodeMode, PartitionChunkOffset, partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+    use reth_db::mdbx::DatabaseArguments;
+    use std::sync::{Arc, RwLock};
+
+    struct Harness {
+        _tmp: irys_testing_utils::tempfile::TempDir,
+        _shutdown_tx: reth::tasks::shutdown::Signal,
+        receivers: crate::services::ServiceReceivers,
+        inner: StorageModuleServiceInner,
+        module: Arc<StorageModule>,
+        path: std::path::PathBuf,
+    }
+
+    fn harness(ledger_id: Option<u32>) -> Harness {
+        let tmp = TempDirBuilder::new().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.node_mode = NodeMode::Miner;
+        node_config.base_directory = tmp.path().to_path_buf();
+        node_config.consensus = ConsensusOptions::Custom(ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 10,
+            ..ConsensusConfig::testing()
+        });
+        let submodules = StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), 1)
+            .expect("submodules");
+        let path = submodules.submodule_paths[0].clone();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let partition_hash = H256::repeat_byte(0x21);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id,
+                slot_index: ledger_id.map(|_| 0),
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.clone())],
+        };
+        let module = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+
+        let db_env = open_or_create_db(
+            tmp.path().join("chain-db"),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("db args"),
+        )
+        .expect("chain db");
+        let block_index = BlockIndex::new_for_testing(DatabaseProvider(Arc::new(db_env)));
+        let block_index_guard = BlockIndexReadGuard::new(block_index);
+        let block_tree = BlockTree::new(&new_mock_signed_header(), config.consensus.clone());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let (service_senders, receivers) = ServiceSenders::new();
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let inner = StorageModuleServiceInner::new(
+            Arc::new(RwLock::new(vec![Arc::clone(&module)])),
+            block_index_guard,
+            block_tree_guard,
+            service_senders,
+            config,
+            shutdown_rx,
+        );
+        Harness {
+            _tmp: tmp,
+            _shutdown_tx: shutdown_tx,
+            receivers,
+            inner,
+            module,
+            path,
+        }
+    }
+
+    fn capacity_update(
+        path: &std::path::Path,
+        hash: H256,
+        miner: irys_types::IrysAddress,
+    ) -> Arc<Vec<StorageModuleInfo>> {
+        Arc::new(vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.to_path_buf())],
+        }])
+    }
+
+    #[tokio::test]
+    async fn expiry_reset_failure_keeps_the_ledger_and_retries() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let hash = harness.module.partition_hash().expect("assigned");
+        let miner = harness
+            .module
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = capacity_update(&harness.path, hash, miner);
+
+        harness.module.fail_next_reset_for_test();
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: Arc::clone(&update),
+                update_height: 4,
+            })
+            .await
+            .expect("reset failure is retried, not fatal");
+        assert!(harness.inner.pending_assignment.is_some());
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert!(harness.module.reset_incomplete());
+        assert!(harness.receivers.packing.try_recv().is_err());
+
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: update,
+                update_height: 4,
+            })
+            .await
+            .expect("retry finishes the reset");
+        assert!(harness.inner.pending_assignment.is_none());
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert!(!harness.module.reset_incomplete());
+        assert!(harness.receivers.packing.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn unassign_reset_failure_keeps_the_assignment() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let path = harness.path.clone();
+        let update = Arc::new(vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), path)],
+        }]);
+
+        harness.module.fail_next_reset_for_test();
+        let err = harness
+            .inner
+            .handle_partition_assignments_update(Arc::clone(&update), 4)
+            .await
+            .expect_err("reset failure");
+        assert!(super::is_reset_not_finished(&err));
+        assert!(harness.module.partition_assignment().is_some());
+        assert!(harness.module.reset_incomplete());
+
+        harness
+            .inner
+            .handle_partition_assignments_update(update, 4)
+            .await
+            .expect("retry clears the assignment");
+        assert!(harness.module.partition_assignment().is_none());
+        assert!(!harness.module.reset_incomplete());
+        assert!(harness.receivers.packing.try_recv().is_err());
     }
 }
