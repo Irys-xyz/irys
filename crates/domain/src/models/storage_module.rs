@@ -750,6 +750,11 @@ pub enum WriteDataChunkError {
     /// was refused and should be retried later.
     #[error("storage module data writes are paused for recovery")]
     WritesPaused,
+    /// The bytes are not stored yet. A writer already holds a placement, or
+    /// the disk lane gave the disk back before the write finished. The caller
+    /// retries later.
+    #[error("storage write backpressure")]
+    Backpressure,
     /// Any other write failure (IO, index update, packing, etc.).
     #[error(transparent)]
     Other(#[from] eyre::Report),
@@ -7603,8 +7608,8 @@ mod tests {
             .write_data_chunk(&chunk)
             .expect_err("second writer must not succeed while occupied");
         assert!(
-            err.to_string().contains("index write already in flight"),
-            "expected in-flight error, got {err}"
+            matches!(err, WriteDataChunkError::Backpressure),
+            "expected backpressure, got {err}"
         );
         assert_eq!(
             storage_module.get_chunk_type(&offset),
@@ -7616,6 +7621,46 @@ mod tests {
             storage_module.get_chunk_type(&offset),
             Some(ChunkType::Data)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn busy_placement_blocks_the_free_one() -> eyre::Result<()> {
+        use irys_database::submodule::tables::DataRootInfo;
+        use irys_types::RelativeChunkOffset;
+
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("busy_placement_blocks_free")?;
+        let (_, submodule) =
+            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.update(|tx| {
+            tx.add_data_root_info(
+                chunk.data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(1),
+                    data_size: 5,
+                },
+            )
+        })?;
+
+        let busy = PartitionChunkOffset::from(0);
+        let free = PartitionChunkOffset::from(1);
+        storage_module.occupy_offset_for_test(busy);
+        let err = storage_module
+            .write_data_chunk(&chunk)
+            .expect_err("a busy placement must not start a partial write");
+        assert!(matches!(err, WriteDataChunkError::Backpressure));
+        assert_eq!(
+            storage_module.get_chunk_type(&busy),
+            Some(ChunkType::Entropy)
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&free),
+            Some(ChunkType::Entropy)
+        );
+        let pending = storage_module.pending_writes.read().unwrap();
+        assert!(pending.occupancy.contains_key(&busy));
+        assert!(!pending.occupancy.contains_key(&free));
+        assert!(pending.get(&free).is_none());
         Ok(())
     }
 

@@ -1037,11 +1037,8 @@ impl GossipClient {
                     // Backpressure, not a fault. Expires on its own, so unlike
                     // the arm above there is nothing to initiate.
                     RejectionReason::RateLimited => Ok(PeerHealth::AnsweredNotServing),
-                    // Gossip is paused on a live peer. The pause ends on its
-                    // own. A breaker failure would skip this probe until the
-                    // cooldown, so the resume would be invisible.
-                    RejectionReason::GossipDisabled => Ok(PeerHealth::Unhealthy),
-                    RejectionReason::InvalidData
+                    RejectionReason::GossipDisabled
+                    | RejectionReason::InvalidData
                     | RejectionReason::UnableToVerifyOrigin
                     | RejectionReason::InvalidCredentials
                     | RejectionReason::ProtocolMismatch
@@ -1510,23 +1507,17 @@ impl GossipClient {
                 peer_list.set_is_online_by_peer_id(peer_id, true);
                 circuit_breaker.record_success(peer_id);
             }
-            // The peer answered. A rate limit is backpressure. A handshake
-            // request stays probeable. Neither reply is a delivery, so the
-            // seen-cache still allows a later offer.
+            // The peer answered, and the bytes were not stored. A rate limit
+            // is backpressure. A handshake request stays probeable. Gossip
+            // paused on purpose is not a dead peer: opening the breaker would
+            // hide the next push for the whole cooldown. None of these is a
+            // delivery, so the seen-cache still allows a later offer.
             Ok(GossipResponse::Rejected(
-                RejectionReason::RateLimited | RejectionReason::HandshakeRequired(_),
+                RejectionReason::RateLimited
+                | RejectionReason::HandshakeRequired(_)
+                | RejectionReason::GossipDisabled,
             ))
             | Err(GossipError::RateLimited) => {}
-            // A paused peer is still there. Counting the pause as a failure
-            // opens the breaker, and then both this push path and the health
-            // probe skip the peer until the cooldown. Data offered in that
-            // window, including an ingress proof, is dropped and not retried.
-            Ok(GossipResponse::Rejected(RejectionReason::GossipDisabled)) => {
-                peer_list.decrease_peer_score_by_peer_id(
-                    peer_id,
-                    ScoreDecreaseReason::NetworkError("gossip push rejected".to_string()),
-                );
-            }
             Ok(GossipResponse::Rejected(_)) => {
                 peer_list.decrease_peer_score_by_peer_id(
                     peer_id,
@@ -3652,6 +3643,30 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn gossip_disabled_push_does_not_score_or_open_the_breaker() {
+            let client = production_client();
+            let (peer_list, peer_id, initial) = scored_peer();
+            let cache = GossipCache::new();
+            let result = Ok(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+
+            for _ in 0..5 {
+                finish_push(&client, &peer_list, &peer_id, &result, &cache);
+            }
+
+            let updated = peer_list
+                .get_peer(&peer_id)
+                .expect("peer")
+                .reputation_score
+                .get();
+            assert_eq!(updated, initial);
+            assert!(!push_response_accepted(&result));
+            assert!(!peer_has_data(&cache, peer_id));
+            assert!(client.circuit_breaker.is_available(&peer_id));
+        }
+
+        #[tokio::test]
         async fn hard_rejection_is_not_a_delivery_and_trips_the_breaker() {
             let client = production_client();
             let (peer_list, peer_id, initial) = scored_peer();
@@ -4033,57 +4048,6 @@ mod tests {
             assert!(
                 client.circuit_breaker.is_available(&probed_peer),
                 "a peer asking us to back off must stay probeable"
-            );
-        }
-
-        /// Gossip pauses on its own. An open breaker would hide the resume
-        /// from the next health probe.
-        #[tokio::test]
-        async fn repeated_gossip_disabled_does_not_open_the_circuit_breaker() {
-            let client = client_with_production_breaker();
-            let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let probed_peer = IrysPeerId::from(IrysAddress::from([12_u8; 20]));
-
-            probe_repeatedly_with_rejection(
-                &client,
-                &peer_list,
-                &probed_peer,
-                RejectionReason::GossipDisabled,
-                8,
-                PeerHealth::Unhealthy,
-            )
-            .await;
-
-            assert!(
-                client.circuit_breaker.is_available(&probed_peer),
-                "a peer that paused gossip must stay probeable"
-            );
-        }
-
-        /// Broadcast scoring is the path that sees a paused peer reject a push.
-        /// Those rejections must not open the breaker either: the message is
-        /// not retried, so an open breaker drops it for the whole cooldown.
-        #[tokio::test]
-        async fn gossip_disabled_push_does_not_open_the_circuit_breaker() {
-            let client = client_with_production_breaker();
-            let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let probed_peer = IrysPeerId::from(IrysAddress::from([13_u8; 20]));
-            let result = Ok(GossipResponse::<()>::Rejected(
-                RejectionReason::GossipDisabled,
-            ));
-
-            for _ in 0..8 {
-                GossipClient::handle_score(
-                    &peer_list,
-                    &result,
-                    &probed_peer,
-                    &client.circuit_breaker,
-                );
-            }
-
-            assert!(
-                client.circuit_breaker.is_available(&probed_peer),
-                "rejected pushes while gossip is paused must not open the breaker"
             );
         }
 

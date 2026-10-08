@@ -1044,9 +1044,7 @@ impl StorageModule {
                 Ok(groups.into_iter().next())
             }
             Ok(None) => Ok(None),
-            Err(OccupyFailure::InFlight) => Err(WriteDataChunkError::Other(eyre::eyre!(
-                "index write already in flight"
-            ))),
+            Err(OccupyFailure::InFlight) => Err(WriteDataChunkError::Backpressure),
             Err(OccupyFailure::Write(error)) => Err(error),
         }
     }
@@ -1071,6 +1069,7 @@ impl StorageModule {
                     items.push(BatchEnqueueItem::Queued(offsets));
                 }
                 Ok(None) => items.push(BatchEnqueueItem::NotQueued),
+                // Nothing was reserved. The caller retries this body.
                 Err(OccupyFailure::InFlight) => items.push(BatchEnqueueItem::NotQueued),
                 Err(OccupyFailure::Write(WriteDataChunkError::DataRootNotFound)) => {
                     items.push(BatchEnqueueItem::DataRootNotFound);
@@ -1137,12 +1136,21 @@ impl StorageModule {
                 return Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused));
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
+            // A busy placement blocks the whole occupy. Writing the free
+            // placements and returning Ok lets ingress accept the chunk while
+            // the busy one can still fail and stay empty. Decide here, before
+            // any reserve, so the holder cannot release the offset in a gap.
+            let mut saw_occupancy = false;
+            let mut planned: Vec<(PartitionChunkOffset, Option<Vec<u8>>)> = Vec::new();
             for partition_offset in &partition_offsets {
                 let partition_offset = *partition_offset;
-                if pending.occupancy.contains_key(&partition_offset)
-                    || pending
-                        .get(&partition_offset)
-                        .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
+                if pending.occupancy.contains_key(&partition_offset) {
+                    saw_occupancy = true;
+                    continue;
+                }
+                if pending
+                    .get(&partition_offset)
+                    .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
                 {
                     continue;
                 }
@@ -1152,16 +1160,16 @@ impl StorageModule {
                 if pending_entropy.is_none() && !disk_entropy.contains(&partition_offset) {
                     continue;
                 }
+                planned.push((partition_offset, pending_entropy));
+            }
+            if saw_occupancy {
+                return Err(OccupyFailure::InFlight);
+            }
+            for (partition_offset, pending_entropy) in planned {
                 pending.occupancy.insert(partition_offset, generation);
                 selected.push((partition_offset, generation, pending_entropy));
             }
             if selected.is_empty() {
-                if partition_offsets
-                    .iter()
-                    .any(|offset| pending.occupancy.contains_key(offset))
-                {
-                    return Err(OccupyFailure::InFlight);
-                }
                 return Ok(None);
             }
             let queued = unpacked.len() as u64 * selected.len() as u64;
@@ -2431,7 +2439,9 @@ impl Drop for LaneExit<'_> {
 }
 
 fn entropy_read_unfinished() -> WriteDataChunkError {
-    WriteDataChunkError::Other(eyre::eyre!("entropy read did not finish"))
+    // The waiter gave the disk back. The bytes are not stored. Ingress maps
+    // this variant to Overloaded so the sender retries.
+    WriteDataChunkError::Backpressure
 }
 
 struct SpanAnchor {
@@ -2510,6 +2520,7 @@ fn clone_error(error: &WriteDataChunkError) -> WriteDataChunkError {
     match error {
         WriteDataChunkError::DataRootNotFound => WriteDataChunkError::DataRootNotFound,
         WriteDataChunkError::WritesPaused => WriteDataChunkError::WritesPaused,
+        WriteDataChunkError::Backpressure => WriteDataChunkError::Backpressure,
         WriteDataChunkError::Other(report) => WriteDataChunkError::Other(eyre::eyre!("{report}")),
     }
 }
