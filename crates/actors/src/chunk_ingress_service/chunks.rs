@@ -9,9 +9,7 @@ use super::metrics::{
 use irys_database::{
     complete_ingress_leaves, confirm_data_size_for_data_root, db::IrysDatabaseExt as _,
 };
-use irys_domain::StorageModule;
-#[cfg(test)]
-use irys_domain::WriteDataChunkError;
+use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
     ChunkPathHash, DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
@@ -124,90 +122,71 @@ pub fn select_data_size_from_storage_modules(
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::unused_async,
-        reason = "callers always await this; only the test body awaits the module write"
-    )
-)]
 async fn write_chunk_to_assigned_modules(
     modules: &[Arc<StorageModule>],
     chunk: &UnpackedChunk,
 ) -> Result<(), ChunkIngressError> {
-    // The write offset is the data-root index entry. Skip the read, and the
-    // storage-module write that needs it.
-    #[cfg(not(test))]
-    {
-        let _ = (modules, chunk);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    {
-        let mut wrote_any = false;
-        let mut in_flight = false;
-        for sm in modules {
-            let writeable_offsets = match sm.get_writeable_offsets(chunk) {
-                Ok(offsets) => offsets,
-                Err(error) => {
-                    error!(
-                        ?error,
-                        storage_module = sm.id,
-                        data_root = ?chunk.data_root,
-                        tx_offset = %chunk.tx_offset,
-                        "Failed to resolve writeable offsets"
-                    );
-                    return Err(ChunkIngressError::Critical(
-                        CriticalChunkIngressError::DatabaseError,
-                    ));
-                }
-            };
-            if writeable_offsets.is_empty() {
-                if sm.has_in_flight_index_for(chunk) {
-                    in_flight = true;
-                }
-                continue;
+    let mut wrote_any = false;
+    let mut in_flight = false;
+    for sm in modules {
+        let writeable_offsets = match sm.get_writeable_offsets(chunk) {
+            Ok(offsets) => offsets,
+            Err(error) => {
+                error!(
+                    ?error,
+                    storage_module = sm.id,
+                    data_root = ?chunk.data_root,
+                    tx_offset = %chunk.tx_offset,
+                    "Failed to resolve writeable offsets"
+                );
+                return Err(ChunkIngressError::Critical(
+                    CriticalChunkIngressError::DatabaseError,
+                ));
             }
-            info!(
-                target: "irys::mempool::chunk_ingress",
-                "Writing chunk with offset {} for data_root {} to sm {}",
-                &chunk.tx_offset,
-                &chunk.data_root,
-                &sm.id
-            );
-            match sm.write_data_chunk_queued(chunk).await {
-                Ok(()) => wrote_any = true,
-                Err(WriteDataChunkError::WritesPaused) => {}
-                Err(error) if write_is_backpressure(&error) => {
-                    return Err(AdvisoryChunkIngressError::Overloaded.into());
-                }
-                Err(error) => {
-                    error!(
-                        "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
-                        chunk.data_root, chunk.tx_offset, sm.id, error
-                    );
-                    return Err(ChunkIngressError::Critical(
-                        CriticalChunkIngressError::Other(format!(
-                            "Failed to write chunk to storage_module {}",
-                            sm.id
-                        )),
-                    ));
-                }
+        };
+        if writeable_offsets.is_empty() {
+            if sm.has_in_flight_index_for(chunk) {
+                in_flight = true;
+            }
+            continue;
+        }
+        info!(
+            target: "irys::mempool::chunk_ingress",
+            "Writing chunk with offset {} for data_root {} to sm {}",
+            &chunk.tx_offset,
+            &chunk.data_root,
+            &sm.id
+        );
+        match sm.write_data_chunk_queued(chunk).await {
+            Ok(()) => wrote_any = true,
+            Err(WriteDataChunkError::WritesPaused) => {}
+            Err(error) if write_is_backpressure(&error) => {
+                return Err(AdvisoryChunkIngressError::Overloaded.into());
+            }
+            Err(error) => {
+                error!(
+                    "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
+                    chunk.data_root, chunk.tx_offset, sm.id, error
+                );
+                return Err(ChunkIngressError::Critical(
+                    CriticalChunkIngressError::Other(format!(
+                        "Failed to write chunk to storage_module {}",
+                        sm.id
+                    )),
+                ));
             }
         }
-        if !wrote_any && in_flight {
-            // The bytes are already queued. The sender should retry later, not
-            // treat this peer as having rejected the chunk.
-            return Err(AdvisoryChunkIngressError::Overloaded.into());
-        }
-        Ok(())
     }
+    if !wrote_any && in_flight {
+        // The bytes are already queued. The sender should retry later, not
+        // treat this peer as having rejected the chunk.
+        return Err(AdvisoryChunkIngressError::Overloaded.into());
+    }
+    Ok(())
 }
 
 /// A retry of a chunk that is already queued, or a waiter that gave the disk
 /// back to mining, is backpressure. The sender must try again later.
-#[cfg(test)]
 fn write_is_backpressure(error: &WriteDataChunkError) -> bool {
     let WriteDataChunkError::Other(inner) = error else {
         return false;
