@@ -305,11 +305,11 @@ struct PendingWrites {
     chunks: ChunkMap,
     /// Offset → generation that reserved it. Only that generation may release.
     occupancy: HashMap<PartitionChunkOffset, u64>,
-    /// Who queued each packed chunk. Equal-length runs break ties with this.
+    /// Who queued each packed chunk. A priority change starts a new run.
     priorities: HashMap<PartitionChunkOffset, disk_lane::WritePriority>,
-    /// When each packed chunk was queued. While the disk is busy, the oldest
-    /// short run may jump a longer one after `reorder_grace`. Further short
-    /// runs wait another `reorder_grace`. An idle disk writes them.
+    /// When each packed chunk was queued. While the disk is busy, short runs
+    /// wait out `reorder_grace`. One pass then writes the oldest of those.
+    /// Further short runs wait another `reorder_grace`. An idle disk writes them.
     queued_at: HashMap<PartitionChunkOffset, Instant>,
     /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
     queued_unpacked_bytes: u64,
@@ -624,10 +624,12 @@ struct CoalescedRun {
 }
 
 /// Length and age of one packed run. The peek path uses this so it does not
-/// clone chunk bytes.
+/// clone chunk bytes. The start and the age are read by tests.
 struct RunMeta {
+    #[cfg_attr(not(test), allow(dead_code))]
     start: PartitionChunkOffset,
     byte_len: u64,
+    #[cfg_attr(not(test), allow(dead_code))]
     oldest: Instant,
 }
 
@@ -1443,6 +1445,7 @@ impl StorageModule {
     /// short-run hold leaves every short run out of this count, so entropy
     /// can use the disk while those runs wait for a neighbor. An idle disk
     /// counts every queued run.
+    #[cfg(test)]
     fn longest_ready_write_bytes(&self) -> u64 {
         let pending = self.pending_writes.read().unwrap();
         if pending.is_empty() {
@@ -2078,9 +2081,9 @@ impl StorageModule {
         }
         // A short run seeks about as much as a full one and moves far less
         // data. While the disk is busy, one pass writes every full run and
-        // the oldest aged short run. The hold keeps the other short runs
-        // queued for a neighbor. Durability, a recall flush, and an idle
-        // disk write every run. An idle release does not arm the hold.
+        // the oldest aged short run, in offset order. The hold keeps the
+        // other short runs queued for a neighbor. Durability, a recall flush,
+        // and an idle disk write every run. An idle release does not arm the hold.
         let mut emitted_short = false;
         if coalesce && !force && !disk_idle && !self.short_runs_due(pending_count) {
             let full = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
@@ -4447,10 +4450,10 @@ impl StorageModule {
     }
 
     /// Pending chunks inside a reorder scan, joined into runs of at most `cap`
-    /// bytes. An aged run fills an in-flight slot first, then a longer run.
-    /// `one_short` keeps every full run and the oldest aged short run, so a
-    /// pile of short runs cannot fill the window and hide a full run. The
-    /// caller passes false when the disk is idle, so the short runs go out.
+    /// bytes. Runs stay in offset order. `one_short` keeps every full run and
+    /// the oldest aged short run, so a pile of short runs cannot fill the
+    /// window and hide a full run. The caller passes false when the disk is
+    /// idle, so the short runs go out.
     fn select_coalesced_window(
         &self,
         pending: &PendingWrites,
@@ -4551,19 +4554,6 @@ impl StorageModule {
         for run in &mut runs {
             run.aged = run.oldest.elapsed() >= grace;
         }
-        runs.sort_by(|left, right| {
-            right
-                .aged
-                .cmp(&left.aged)
-                .then(right.byte_len.cmp(&left.byte_len))
-                .then(left.oldest.cmp(&right.oldest))
-                .then(left.priority.cmp(&right.priority))
-                .then_with(|| {
-                    let left_off = left.items.first().map(|(offset, _)| *offset);
-                    let right_off = right.items.first().map(|(offset, _)| *offset);
-                    left_off.cmp(&right_off)
-                })
-        });
         if one_short {
             let held = self.disk.short_writes_held();
             let mut chosen: Option<usize> = None;
@@ -4587,16 +4577,10 @@ impl StorageModule {
                 }
             }
             let mut kept = Vec::with_capacity(runs.len());
-            let mut short_run = None;
             for (index, run) in runs.into_iter().enumerate() {
-                if run.byte_len >= cap {
+                if run.byte_len >= cap || chosen == Some(index) {
                     kept.push(run);
-                } else if chosen == Some(index) {
-                    short_run = Some(run);
                 }
-            }
-            if let Some(short_run) = short_run {
-                kept.insert(0, short_run);
             }
             runs = kept;
         }
@@ -4628,7 +4612,7 @@ impl StorageModule {
             && self.same_chunks_file(run.start, next_offset)
     }
 
-    /// Runs in the order `batch` already has. The coalesce window ranks that
+    /// Runs in the order `batch` already has. The coalesce window is offset
     /// order. A new priority or a break in the adjacent range starts a run.
     fn plan_ranked_runs(
         &self,
@@ -4689,8 +4673,7 @@ impl StorageModule {
 
     /// Flush order is priority, then ascending offset. `cap` bounds one
     /// `pwrite`. A run is always at least one chunk. The coalesce path uses
-    /// `plan_ranked_runs` so this order does not put a short high-priority
-    /// run ahead of a longer one.
+    /// `plan_ranked_runs` so a later priority does not jump an earlier offset.
     fn plan_write_runs(
         &self,
         batch: &[(
@@ -9277,9 +9260,9 @@ mod tests {
 
         storage.write_chunk(PartitionChunkOffset::from(50), body(50), ChunkType::Entropy);
         let pending = storage.pending_writes.read().unwrap();
-        let long_first = storage.select_coalesced_window(&pending, 1, 512, cap, false);
-        let long_offsets: Vec<u32> = long_first.iter().map(|(offset, _, _)| offset.0).collect();
-        assert_eq!(long_offsets, vec![0, 1, 2, 3]);
+        let low_offset = storage.select_coalesced_window(&pending, 1, 512, cap, false);
+        let low_offsets: Vec<u32> = low_offset.iter().map(|(offset, _, _)| offset.0).collect();
+        assert_eq!(low_offsets, vec![0, 1, 2, 3]);
         drop(pending);
 
         let aged_at = Instant::now()
@@ -9290,9 +9273,9 @@ mod tests {
             pending
                 .queued_at
                 .insert(PartitionChunkOffset::from(50), aged_at);
-            let jumped = storage.select_coalesced_window(&pending, 1, 512, cap, false);
-            assert_eq!(jumped.len(), 1);
-            assert_eq!(jumped[0].0, PartitionChunkOffset::from(50));
+            let stayed = storage.select_coalesced_window(&pending, 1, 512, cap, false);
+            let stayed_offsets: Vec<u32> = stayed.iter().map(|(offset, _, _)| offset.0).collect();
+            assert_eq!(stayed_offsets, vec![0, 1, 2, 3]);
         }
 
         let (_hole_tmp, holed) = coalesce_fixture("coalesce_hole", chunk_size)?;
@@ -9342,7 +9325,7 @@ mod tests {
         let cap = chunk_size * 4;
         let batch = storage.select_coalesced_window(&pending, 8, 512, cap, true);
         let offsets: Vec<u32> = batch.iter().map(|(offset, _, _)| offset.0).collect();
-        assert_eq!(offsets, vec![20, 0, 1, 2, 3]);
+        assert_eq!(offsets, vec![0, 1, 2, 3, 20]);
 
         storage.disk.arm_short_hold(Duration::from_secs(30));
         let held = storage.select_coalesced_window(&pending, 8, 512, cap, true);
