@@ -627,7 +627,7 @@ struct CoalescedRun {
 /// clone chunk bytes. The age is read by tests.
 struct RunMeta {
     byte_len: u64,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     oldest: Instant,
 }
 
