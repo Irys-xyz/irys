@@ -6601,112 +6601,6 @@ mod tests {
         Ok((tmp_dir, storage_module))
     }
 
-    fn queue_packed_chunk(
-        storage: &StorageModule,
-        ledger_offset: u64,
-        root_byte: u8,
-        path: Vec<u8>,
-        priority: super::disk_lane::WritePriority,
-    ) -> eyre::Result<()> {
-        let data_root = H256::from([root_byte; 32]);
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size: 32,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
-        storage.index_transaction_data(
-            &data_tx,
-            &path,
-            LedgerChunkRange(ledger_chunk_offset_ii!(ledger_offset, ledger_offset)),
-            0,
-        )?;
-        storage.enqueue_unpacked(
-            &UnpackedChunk {
-                data_root,
-                data_size: 32,
-                data_path: path.into(),
-                bytes: vec![root_byte; 32].into(),
-                tx_offset: TxChunkOffset::from(0),
-            },
-            priority,
-            false,
-        )?;
-        Ok(())
-    }
-
-    #[test]
-    fn span_island_enters_the_buffer_as_one_run() -> eyre::Result<()> {
-        let (_tmp, storage) = entropy_disk_module("span_island_one_run")?;
-        queue_packed_chunk(
-            &storage,
-            0,
-            1,
-            vec![1, 2, 3, 4],
-            super::disk_lane::WritePriority::Migration,
-        )?;
-        queue_packed_chunk(
-            &storage,
-            1,
-            2,
-            vec![5, 6, 7, 8],
-            super::disk_lane::WritePriority::Migration,
-        )?;
-        assert!(storage.sweep_one_for_test());
-        assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 1);
-
-        let pending = storage.pending_writes.read().unwrap();
-        assert_eq!(pending.len(), 2);
-        let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].byte_len, 64);
-        let queued_at: Vec<_> = pending.queued_at.values().copied().collect();
-        assert_eq!(queued_at.len(), 2);
-        assert_eq!(queued_at[0], queued_at[1]);
-        Ok(())
-    }
-
-    #[test]
-    fn span_island_shares_one_priority() -> eyre::Result<()> {
-        let (_tmp, storage) = entropy_disk_module("span_island_priority")?;
-        queue_packed_chunk(
-            &storage,
-            0,
-            1,
-            vec![1, 2, 3, 4],
-            super::disk_lane::WritePriority::Ingress,
-        )?;
-        queue_packed_chunk(
-            &storage,
-            1,
-            2,
-            vec![5, 6, 7, 8],
-            super::disk_lane::WritePriority::Migration,
-        )?;
-        storage.drive_entropy_queue_for_test();
-        let pending = storage.pending_writes.read().unwrap();
-        let runs = storage.write_run_metas(&pending, super::disk_lane::WRITE_RUN_MAX_BYTES);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].byte_len, 64);
-        assert_eq!(
-            pending
-                .priorities
-                .get(&PartitionChunkOffset::from(0))
-                .copied(),
-            Some(super::disk_lane::WritePriority::Migration)
-        );
-        assert_eq!(
-            pending
-                .priorities
-                .get(&PartitionChunkOffset::from(1))
-                .copied(),
-            Some(super::disk_lane::WritePriority::Migration)
-        );
-        Ok(())
-    }
-
     #[test]
     fn contiguous_deposit_is_one_sweep_and_one_write_run() -> eyre::Result<()> {
         let (_tmp, storage) = entropy_disk_module("batch_span")?;
@@ -8851,7 +8745,10 @@ mod tests {
         let offsets = {
             let pending = storage.pending_writes.read().unwrap();
             let batch = storage.select_coalesced_window(&pending, 8, 512, 32 * 4, true);
-            batch.iter().map(|(offset, _, _)| offset.0).collect::<Vec<_>>()
+            batch
+                .iter()
+                .map(|(offset, _, _)| offset.0)
+                .collect::<Vec<_>>()
         };
         assert_eq!(offsets, vec![0, 2]);
         storage.disk.release_for_test();

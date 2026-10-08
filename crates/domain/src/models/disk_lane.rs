@@ -6,10 +6,10 @@
 //! in the kernel keep running beside those `pread`s. The lane submits no
 //! new write until the recall drops the disk. It sorts a reorder buffer of
 //! pending chunks by offset and joins adjacent chunks into one `pwrite` of
-//! at most `WRITE_RUN_MAX_BYTES`. Contiguous chunks from one entropy span
-//! enter that buffer together, after every member of that span is packed.
-//! A caller that already holds neighboring chunks publishes that run in one
-//! insert, so the lane cannot read a prefix of it. A short run waits for
+//! at most `WRITE_RUN_MAX_BYTES`. Each packed chunk enters that buffer on
+//! its own, with its own priority and queue time. A caller that already
+//! holds neighboring chunks publishes that run in one insert, so the lane
+//! cannot read a prefix of it. A short run waits for
 //! that size, a recall flush, the pending set at `num_writes_before_sync`,
 //! or `reorder_grace` only while the chunk disk is busy. A busy pass writes
 //! every full run and every aged short run, in offset order. An idle disk
@@ -212,36 +212,11 @@ enum OccupyFailure {
     InFlight,
 }
 
-/// One packed chunk held until the rest of its island is packed.
-struct ReleasedChunk {
-    group: u64,
-    offset: PartitionChunkOffset,
-    packed: Vec<u8>,
-    generation: u64,
-    priority: WritePriority,
-    byte_len: u64,
-    proof: (ChunkPathHash, ChunkDataPath),
-}
-
-/// Packed chunks from one contiguous island, waiting for the remaining members.
-struct SpanRelease {
-    left: usize,
-    ready: Vec<ReleasedChunk>,
-}
-
-enum AccountedRelease {
-    Missing(Option<ReleasedChunk>),
-    Open,
-    Finished(SpanRelease),
-}
-
 #[derive(Default)]
 struct SweepQueue {
     slots: Vec<SweepSlot>,
     groups: HashMap<u64, SweepGroup>,
     next_group: u64,
-    next_release: u64,
-    releases: HashMap<u64, SpanRelease>,
 }
 
 /// Wakeups for recall vs write vs entropy. `chunks.dat` is locked only after
@@ -1481,8 +1456,7 @@ impl StorageModule {
     }
 
     fn entropy_idle(&self) -> bool {
-        let queue = self.disk.queue();
-        queue.slots.is_empty() && queue.releases.is_empty()
+        self.disk.queue().slots.is_empty()
     }
 
     /// Drop the waiter. Slots already queued still pack. A group that already
@@ -1778,47 +1752,9 @@ impl StorageModule {
             }
             pending_submit.push((slot, entropy));
         }
-        self.submit_contiguous_islands(pending_submit);
-    }
-
-    /// Split kept offsets into islands. A hole is not a member: only the next
-    /// offset joins. An island longer than one chunk is inserted as one step
-    /// after every member is packed, so a write pass cannot see a prefix of it.
-    fn submit_contiguous_islands(&self, accepted: Vec<(SweepSlot, Vec<u8>)>) {
-        let mut island: Vec<(SweepSlot, Vec<u8>)> = Vec::new();
-        for (slot, entropy) in accepted {
-            let joins = island
-                .last()
-                .is_some_and(|(prev, _)| prev.offset.0.checked_add(1) == Some(slot.offset.0));
-            if !island.is_empty() && !joins {
-                self.submit_island(std::mem::take(&mut island));
-            }
-            island.push((slot, entropy));
+        for (slot, entropy) in pending_submit {
+            self.submit_packed(slot, entropy);
         }
-        if !island.is_empty() {
-            self.submit_island(island);
-        }
-    }
-
-    fn submit_island(&self, island: Vec<(SweepSlot, Vec<u8>)>) {
-        let release_id = (island.len() > 1).then(|| self.open_span_release(island.len()));
-        for (slot, entropy) in island {
-            self.submit_packed(slot, entropy, release_id);
-        }
-    }
-
-    fn open_span_release(&self, len: usize) -> u64 {
-        let mut queue = self.disk.queue();
-        let id = queue.next_release;
-        queue.next_release = queue.next_release.wrapping_add(1);
-        queue.releases.insert(
-            id,
-            SpanRelease {
-                left: len,
-                ready: Vec::with_capacity(len),
-            },
-        );
-        id
     }
 
     fn restore_span(&self, span: Vec<SweepSlot>) {
@@ -1982,10 +1918,10 @@ impl StorageModule {
             self.fail_queued_group(group);
             return;
         };
-        self.submit_packed(slot, entropy, None);
+        self.submit_packed(slot, entropy);
     }
 
-    fn submit_packed(&self, slot: SweepSlot, entropy: Vec<u8>, release_id: Option<u64>) {
+    fn submit_packed(&self, slot: SweepSlot, entropy: Vec<u8>) {
         let group = slot.group;
         let group_failed = self
             .disk
@@ -1995,7 +1931,6 @@ impl StorageModule {
             .is_some_and(|entry| entry.failed.is_some());
         if group_failed {
             self.fail_slot(slot, WriteDataChunkError::WritesPaused);
-            self.note_release_gap(release_id);
             return;
         }
         // Recheck immediately before the chunk is queued. A pause or reset
@@ -2003,7 +1938,6 @@ impl StorageModule {
         if let Err(error) = self.slot_still_valid(&slot) {
             self.fail_slot(slot, error);
             self.fail_queued_group(group);
-            self.note_release_gap(release_id);
             return;
         }
         // The data-path row is written after `chunks.dat` is fdatasync'd.
@@ -2015,7 +1949,6 @@ impl StorageModule {
                 WriteDataChunkError::Other(eyre::eyre!("injected index drain commit failure")),
             );
             self.fail_queued_group(group);
-            self.note_release_gap(release_id);
             return;
         }
         let offset = slot.offset;
@@ -2027,43 +1960,23 @@ impl StorageModule {
                 )),
             );
             self.fail_queued_group(group);
-            self.note_release_gap(release_id);
             return;
         }
         let packed = packing_xor_vec_u8(entropy, &slot.unpacked);
-        let chunk = ReleasedChunk {
-            group: slot.group,
-            offset: slot.offset,
+        let inserted = self.commit_packed(
+            slot.offset,
             packed,
-            generation: slot.generation,
-            priority: slot.priority,
-            byte_len: slot.byte_len,
-            proof: (slot.path_hash, (*slot.data_path).clone()),
+            slot.generation,
+            slot.priority,
+            slot.byte_len,
+            (slot.path_hash, (*slot.data_path).clone()),
+        );
+        let error = if inserted {
+            None
+        } else {
+            Some(WriteDataChunkError::WritesPaused)
         };
-        let Some(id) = release_id else {
-            let inserted = self.commit_packed(
-                chunk.offset,
-                chunk.packed,
-                chunk.generation,
-                chunk.priority,
-                chunk.byte_len,
-                chunk.proof,
-            );
-            let error = if inserted {
-                None
-            } else {
-                Some(WriteDataChunkError::WritesPaused)
-            };
-            self.mark_group_slot_done(chunk.group, error);
-            return;
-        };
-        let already_failed = self
-            .disk
-            .queue()
-            .groups
-            .get(&group)
-            .is_some_and(|entry| entry.failed.is_some());
-        self.finish_released(id, already_failed, chunk, Ok(()));
+        self.mark_group_slot_done(group, error);
     }
 
     fn slot_still_valid(&self, slot: &SweepSlot) -> Result<(), WriteDataChunkError> {
@@ -2178,165 +2091,6 @@ impl StorageModule {
     /// The data-path row is written later, after this gap's fdatasync.
     pub(super) fn poll_acks(&self) {}
 
-    /// Count one island member. Insert only when every member has been counted,
-    /// and insert each surviving contiguous piece under one lock.
-    fn finish_released(
-        &self,
-        id: u64,
-        already_failed: bool,
-        chunk: ReleasedChunk,
-        result: Result<(), WriteDataChunkError>,
-    ) {
-        let ready = match result {
-            Ok(()) if already_failed => {
-                self.release_queued_offset(chunk.offset, chunk.generation, chunk.byte_len);
-                self.mark_group_slot_done(chunk.group, None);
-                None
-            }
-            Ok(()) => Some(chunk),
-            Err(error) => {
-                self.release_queued_offset(chunk.offset, chunk.generation, chunk.byte_len);
-                self.mark_group_slot_done(chunk.group, Some(error));
-                None
-            }
-        };
-        match self.account_release(id, ready) {
-            AccountedRelease::Open => {}
-            AccountedRelease::Finished(release) => self.commit_release(release),
-            AccountedRelease::Missing(Some(chunk)) => {
-                let inserted = self.commit_packed(
-                    chunk.offset,
-                    chunk.packed,
-                    chunk.generation,
-                    chunk.priority,
-                    chunk.byte_len,
-                    chunk.proof,
-                );
-                let error = if inserted {
-                    None
-                } else {
-                    Some(WriteDataChunkError::WritesPaused)
-                };
-                self.mark_group_slot_done(chunk.group, error);
-            }
-            AccountedRelease::Missing(None) => {}
-        }
-    }
-
-    fn note_release_gap(&self, release_id: Option<u64>) {
-        let Some(id) = release_id else {
-            return;
-        };
-        if let AccountedRelease::Finished(release) = self.account_release(id, None) {
-            self.commit_release(release);
-        }
-    }
-
-    fn account_release(&self, id: u64, ready: Option<ReleasedChunk>) -> AccountedRelease {
-        let mut queue = self.disk.queue();
-        let finished = {
-            let Some(release) = queue.releases.get_mut(&id) else {
-                return AccountedRelease::Missing(ready);
-            };
-            if let Some(chunk) = ready {
-                release.ready.push(chunk);
-            }
-            release.left = release.left.saturating_sub(1);
-            release.left == 0
-        };
-        if !finished {
-            return AccountedRelease::Open;
-        }
-        match queue.releases.remove(&id) {
-            Some(release) => AccountedRelease::Finished(release),
-            None => AccountedRelease::Missing(None),
-        }
-    }
-
-    fn commit_release(&self, release: SpanRelease) {
-        let mut kept = Vec::with_capacity(release.ready.len());
-        for chunk in release.ready {
-            let group_failed = self
-                .disk
-                .queue()
-                .groups
-                .get(&chunk.group)
-                .is_some_and(|entry| entry.failed.is_some());
-            if group_failed {
-                self.release_queued_offset(chunk.offset, chunk.generation, chunk.byte_len);
-                self.mark_group_slot_done(chunk.group, None);
-                continue;
-            }
-            kept.push(chunk);
-        }
-        kept.sort_by_key(|chunk| chunk.offset);
-        let mut piece: Vec<ReleasedChunk> = Vec::new();
-        for chunk in kept {
-            let joins = piece
-                .last()
-                .is_some_and(|prev| prev.offset.0.checked_add(1) == Some(chunk.offset.0));
-            if !piece.is_empty() && !joins {
-                self.insert_packed_piece(&mut piece);
-            }
-            piece.push(chunk);
-        }
-        self.insert_packed_piece(&mut piece);
-    }
-
-    /// Insert one contiguous piece. Every member shares the best priority in
-    /// the piece and one queue time, so the joiner does not split the piece.
-    fn insert_packed_piece(&self, piece: &mut Vec<ReleasedChunk>) {
-        if piece.is_empty() {
-            return;
-        }
-        let priority = piece
-            .iter()
-            .map(|chunk| chunk.priority)
-            .min()
-            .expect("packed piece");
-        let queued_at = Instant::now();
-        let mut outcomes = Vec::with_capacity(piece.len());
-        let mut wrote = false;
-        {
-            let mut pending = self.pending_writes.write().unwrap();
-            for chunk in piece.drain(..) {
-                pending.queued_unpacked_bytes =
-                    pending.queued_unpacked_bytes.saturating_sub(chunk.byte_len);
-                if pending.occupancy.get(&chunk.offset).copied() != Some(chunk.generation) {
-                    outcomes.push((chunk.group, false));
-                    continue;
-                }
-                pending.occupancy.remove(&chunk.offset);
-                if self.data_writes_paused()
-                    || self.index_write_generation.load(Ordering::SeqCst) != chunk.generation
-                {
-                    outcomes.push((chunk.group, false));
-                    continue;
-                }
-                pending.insert(chunk.offset, (chunk.packed, ChunkType::Data));
-                pending.priorities.insert(chunk.offset, priority);
-                pending.queued_at.insert(chunk.offset, queued_at);
-                pending.proofs.insert(chunk.offset, chunk.proof);
-                wrote = true;
-                outcomes.push((chunk.group, true));
-            }
-            if wrote {
-                *self.last_pending_write.write().unwrap() = queued_at;
-            }
-        }
-        if wrote {
-            self.disk.notify();
-        }
-        for (group, inserted) in outcomes {
-            let error = if inserted {
-                None
-            } else {
-                Some(WriteDataChunkError::WritesPaused)
-            };
-            self.mark_group_slot_done(group, error);
-        }
-    }
-
     fn commit_packed(
         &self,
         offset: PartitionChunkOffset,
@@ -2379,11 +2133,6 @@ impl StorageModule {
     #[cfg(test)]
     pub(super) fn drive_entropy_queue_for_test(&self) {
         self.drain_entropy_queue();
-    }
-
-    #[cfg(test)]
-    pub(super) fn sweep_one_for_test(&self) -> bool {
-        self.sweep_one()
     }
 
     #[cfg(test)]
