@@ -1898,10 +1898,12 @@ impl StorageModule {
                 return Err(WriteDataChunkError::WritesPaused);
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
-            // An empty prepare is success. This has to be decided here: a later
-            // read can miss the holder releasing the offset, and ingress then
-            // reports the chunk as stored.
+            // A busy placement blocks the whole prepare. Writing the other
+            // placements and returning Ok lets ingress accept the chunk while
+            // the busy one can still fail and stay empty. Decide here, before
+            // any reserve, so the holder cannot release the offset in a gap.
             let mut saw_occupancy = false;
+            let mut planned = Vec::new();
             for partition_offset in partition_offsets.iter().copied() {
                 if pending.occupancy.contains_key(&partition_offset) {
                     saw_occupancy = true;
@@ -1923,11 +1925,14 @@ impl StorageModule {
                 } else {
                     continue;
                 };
+                planned.push((partition_offset, source));
+            }
+            if saw_occupancy {
+                return Err(WriteDataChunkError::Backpressure);
+            }
+            for (partition_offset, source) in planned {
                 pending.occupancy.insert(partition_offset, generation);
                 occupied.push((partition_offset, generation, source));
-            }
-            if occupied.is_empty() && saw_occupancy {
-                return Err(WriteDataChunkError::Backpressure);
             }
         }
 
@@ -3434,11 +3439,11 @@ mod tests {
     }
 
     #[test]
-    fn busy_placement_still_writes_a_free_one() -> eyre::Result<()> {
+    fn busy_placement_blocks_the_free_one() -> eyre::Result<()> {
         use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
         use irys_types::RelativeChunkOffset;
 
-        let (_tmp, storage_module, chunk) = packed_submit_fixture("busy_placement_free_sibling")?;
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("busy_placement_blocks_free")?;
         let (_, submodule) =
             storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         submodule.db.update_eyre(|tx| {
@@ -3455,15 +3460,22 @@ mod tests {
         let busy = PartitionChunkOffset::from(0);
         let free = PartitionChunkOffset::from(1);
         storage_module.occupy_offset_for_test(busy);
-        storage_module.write_data_chunk(&chunk)?;
+        let err = storage_module
+            .write_data_chunk(&chunk)
+            .expect_err("a busy placement must not start a partial write");
+        assert!(matches!(err, WriteDataChunkError::Backpressure));
         assert_eq!(
             storage_module.get_chunk_type(&busy),
             Some(ChunkType::Entropy)
         );
-        assert_eq!(storage_module.get_chunk_type(&free), Some(ChunkType::Data));
+        assert_eq!(
+            storage_module.get_chunk_type(&free),
+            Some(ChunkType::Entropy)
+        );
         let pending = storage_module.pending_writes.read().unwrap();
         assert!(pending.occupancy.contains_key(&busy));
-        assert!(pending.get(&busy).is_none());
+        assert!(!pending.occupancy.contains_key(&free));
+        assert!(pending.get(&free).is_none());
         Ok(())
     }
 
