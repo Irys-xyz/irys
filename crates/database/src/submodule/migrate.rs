@@ -811,9 +811,9 @@ mod tests {
     use super::super::tables::v1::ChunkDataPathByPathHash;
     use super::super::tables::v1_fixture::{mainnet, master};
     use super::super::tables::{
-        ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos, Metadata,
-        PendingBodyMigration, SUBMODULE_SCHEMA, SubmoduleTables, TxLeafBinding,
-        TxPathIntervalByStart,
+        ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo,
+        DataRootInfos, Metadata, PendingBodyMigration, SUBMODULE_SCHEMA, SubmoduleTables,
+        TxLeafBinding, TxPathIntervalByStart,
     };
     use super::{
         DetectedSubmoduleSchema, Phase, Progress, SubmoduleMigrationOptions, decode_progress,
@@ -821,6 +821,7 @@ mod tests {
     };
     use crate::metadata::MetadataKey;
     use crate::submodule::{create_or_open_submodule_db, open_submodule_index};
+    use crate::submodule::{open_pristine_v1_read_only, verify_submodule_read_equivalence};
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
 
     fn h(byte: u8) -> H256 {
@@ -1478,6 +1479,148 @@ mod tests {
         assert!(err.to_string().contains("does not match this binary"));
         let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args)?;
         assert_eq!(legacy_of(&env)?, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_against_pristine_v1_matches_and_a_corrupt_row_fails() -> eyre::Result<()> {
+        let args = testing_args()?;
+        assert!(open_pristine_v1_read_only(Path::new("db"), args.clone()).is_err());
+
+        let parent = temp("sm-verify-copy");
+        let pristine = parent.path().join("pristine.copy");
+        let migrated = parent.path().join("migrated.copy");
+        std::fs::create_dir(&pristine)?;
+        write_master(&pristine, &master_fixture())?;
+        copy_dir(&pristine, &migrated)?;
+        let (env, stats) = open_submodule_index(
+            &migrated,
+            args.clone(),
+            SubmoduleMigrationOptions::default(),
+        )?;
+        assert!(stats.migrated);
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::V1);
+        drop(env);
+
+        let digest = files_digest(&pristine)?;
+        let report = compare_copy(&pristine, &migrated, &args)?;
+        assert_eq!(report.offsets_checked, 10);
+        assert_eq!(report.matches, 10);
+        assert!(!report.has_mismatch(), "{report}");
+        assert!(report.samples.is_empty());
+        assert_eq!(report.data_root_infos_checked, 1);
+        assert_eq!(report.tx_path_rows_checked, 3);
+        assert_eq!(report.tx_leaf_bindings_checked, 1);
+        assert_eq!(report.pending_body_checked, 1);
+        assert_eq!(
+            report.to_string().lines().next(),
+            Some("offsets_checked: 10")
+        );
+        assert_eq!(files_digest(&pristine)?, digest);
+        {
+            let v1 = open_pristine_v1_read_only(&pristine, args.clone())?;
+            let tx = v1.tx()?;
+            assert_eq!(tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?, None);
+            assert_eq!(
+                tx.get::<master::ChunkDataPathByPathHash>(h(10))?,
+                Some(vec![10])
+            );
+        }
+
+        {
+            let env = open_or_create_db(&migrated, SubmoduleTables::ALL, args.clone())?;
+            let tx = env.tx_mut()?;
+            tx.put::<ChunkDataPathByOffset>(PartitionChunkOffset(0), b"corrupt".to_vec())?;
+            tx.commit()?;
+        }
+        let report = compare_copy(&pristine, &migrated, &args)?;
+        assert!(report.has_mismatch());
+        assert_eq!(report.offsets_checked, 10);
+        assert_eq!(report.matches, 9);
+        assert_eq!(report.mismatch_data_path, 1);
+        assert_eq!(report.mismatch_tx_path, 0);
+        assert_eq!(report.mismatch_data_path_hash, 0);
+        assert_eq!(report.mismatch_tx_path_hash, 0);
+        assert_eq!(report.data_root_infos_mismatches, 0);
+        assert_eq!(report.tx_path_rows_mismatches, 0);
+        assert_eq!(report.tx_leaf_bindings_mismatches, 0);
+        assert_eq!(report.pending_body_mismatches, 0);
+        let text = report.to_string();
+        assert!(text.contains("mismatch_data_path: 1"), "{text}");
+        assert!(text.contains("mismatch: data_path offset 0"), "{text}");
+        assert_eq!(files_digest(&pristine)?, digest);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_mainnet_v1_without_pending_table_matches() -> eyre::Result<()> {
+        let args = testing_args()?;
+        let parent = temp("sm-mainnet-verify-copy");
+        let pristine = parent.path().join("pristine.copy");
+        let migrated = parent.path().join("migrated.copy");
+        std::fs::create_dir(&pristine)?;
+        let mut fixture = master_fixture();
+        fixture.pending = None;
+        write_mainnet(&pristine, &fixture)?;
+        copy_dir(&pristine, &migrated)?;
+        let (env, stats) = open_submodule_index(
+            &migrated,
+            args.clone(),
+            SubmoduleMigrationOptions::default(),
+        )?;
+        assert!(stats.migrated);
+        drop(env);
+
+        let digest = files_digest(&pristine)?;
+        let report = compare_copy(&pristine, &migrated, &args)?;
+        assert_eq!(report.offsets_checked, 10);
+        assert_eq!(report.matches, 10);
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(report.pending_body_checked, 0);
+        assert_eq!(report.pending_body_mismatches, 0);
+        assert_eq!(files_digest(&pristine)?, digest);
+        Ok(())
+    }
+
+    fn compare_copy(
+        pristine: &Path,
+        migrated: &Path,
+        args: &reth_db::mdbx::DatabaseArguments,
+    ) -> eyre::Result<crate::submodule::ReadEquivalenceReport> {
+        let v1 = open_pristine_v1_read_only(pristine, args.clone())?;
+        let (v2, _) =
+            open_submodule_index(migrated, args.clone(), SubmoduleMigrationOptions::default())?;
+        let left = v1.tx()?;
+        let right = v2.tx()?;
+        verify_submodule_read_equivalence(&left, &right)
+    }
+
+    fn files_digest(root: &Path) -> eyre::Result<Vec<(String, [u8; 32])>> {
+        let mut out = Vec::new();
+        digest_dir(root, "", &mut out)?;
+        out.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(out)
+    }
+
+    fn digest_dir(dir: &Path, prefix: &str, out: &mut Vec<(String, [u8; 32])>) -> eyre::Result<()> {
+        let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let rel = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                digest_dir(&entry.path(), &rel, out)?;
+            } else if kind.is_file() {
+                let bytes = std::fs::read(entry.path())?;
+                out.push((rel, irys_types::hash_sha256(&bytes)));
+            }
+        }
         Ok(())
     }
 

@@ -6,6 +6,7 @@ mod migrate;
 pub mod rocks;
 pub mod store;
 pub mod tables;
+mod verify;
 
 pub use db::*;
 #[cfg(feature = "rocksdb")]
@@ -16,4 +17,8 @@ pub use rocks::{
 pub use store::{
     MdbxSubmoduleStore, PresenceReconcile, SubmoduleIndex, SubmoduleRead, SubmoduleStore,
     SubmoduleWrite,
+};
+pub use verify::{
+    MismatchSample, ReadEquivalenceReport, open_pristine_v1_read_only,
+    verify_submodule_read_equivalence,
 };
