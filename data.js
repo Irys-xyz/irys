@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791489698837,
+  "lastUpdate": 1791490581232,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -16351,6 +16351,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a660725db136581a5781fc12f226c46beff39d85",
+          "message": "docs(release): make the master version mirror an explicit release phase (#1584)\n\nThe 4.0.8 testnet release shipped without its version bump reaching master,\nleaving master's crates/chain/Cargo.toml at 4.0.7 while 4.0.8 was live. The\nstep existed only inside the Hotfixes section, phrased as a parenthetical, and\nthe env-specific-hotfix path said \"No master backport\" without distinguishing\nthe fix's code from the version bump.\n\n- RELEASE_PROCESS.md: new \"Version Mirroring on master\" section stating the\n  invariant (master == newest released version) with a verification snippet;\n  wire it into the Release Flow steps, the flow diagram, Process in Action,\n  and both hotfix paths.\n- RELEASE_PLAYBOOK.md: promote it to its own mandatory Phase C between the\n  testnet and mainnet phases, add a copy-paste release checklist up top, and\n  add decision-table rows.\n- Document that release/<major>.x takes cherry-picks, not a wholesale\n  'merge master', and that every release commit lands via PR.\n- Document the workflow-created release/<env>/X.Y.Z snapshot branches and\n  record that the pre-rename deployment/* branches are dead.\n- Fix the bump commit message the playbook prescribes: 'release:' is not a\n  conventional-commit type, so conventional-pr.yaml rejects it and git-cliff\n  (filter_unconventional = true) drops it from the changelog. The repo's\n  actual convention is 'feat: release X.Y.Z'.\n- Drop rust.yml's always-run case for the dead deployment/* namespace (a no-op\n  on push, where SHOULD_RUN already defaults true) and fix cliff.toml's stale\n  deployment/ branch names.",
+          "timestamp": "2026-10-08T20:39:34+01:00",
+          "tree_id": "357bdb25b7e7ea234466cae3694f1f84dc403b96",
+          "url": "https://github.com/Irys-xyz/irys/commit/a660725db136581a5781fc12f226c46beff39d85"
+        },
+        "date": 1791490579787,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012123,
+            "range": "± 0.000267",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120447,
+            "range": "± 0.000715",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.204404,
+            "range": "± 0.047891",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.952459,
+            "range": "± 0.210637",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074899,
+            "range": "± 0.000221",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 749.4657,
+            "range": "± 8.86285",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1044.681417,
+            "range": "± 34.190672",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120631,
+            "range": "± 0.002007",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1213.855659,
+            "range": "± 5.486008",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1639.689982,
+            "range": "± 86.540747",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.173705,
+            "range": "± 0.053881",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 218.385675,
+            "range": "± 18.498501",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.617485,
+            "range": "± 14.315598",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
