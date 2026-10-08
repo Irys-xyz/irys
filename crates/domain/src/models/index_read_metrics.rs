@@ -53,11 +53,12 @@ pub fn with_index_caller<T>(caller: &'static str, body: impl FnOnce() -> T) -> T
     with_caller(caller, body)
 }
 
-/// One span per operation, named `index_read`, with the caller as a field.
-/// Page gets under it keep that caller. Do not call this inside a rayon worker:
-/// the span would have no parent and the export would be one trace per get.
+/// One debug span per operation, named `index_read`, with the caller as a field.
+/// The counters stay at the call. Page gets under the span keep that caller.
+/// Do not call this inside a rayon worker: the span would have no parent and
+/// the export would be one trace per get.
 pub fn trace_index_read<T>(caller: &'static str, body: impl FnOnce() -> T) -> T {
-    let span = tracing::info_span!("index_read", caller);
+    let span = tracing::debug_span!("index_read", caller);
     let _enter = span.enter();
     with_caller(caller, body)
 }
