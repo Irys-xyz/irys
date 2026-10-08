@@ -70,8 +70,14 @@ intervals_persist_secs = 30
 # Minimum milliseconds between durable points (chunks.dat fdatasync and the
 # synced presence commit). 0 runs a point whenever the lane would, which is
 # the previous behaviour. Pwrites are not delayed. A force sync, shutdown,
-# drop, and the pending-byte ceiling still run a point immediately.
+# drop, headroom loss, and the pending-byte ceiling still run a point immediately.
 min_durable_interval_ms = 0
+# Pending bytes, in parts per thousand of the memory ceiling, above which
+# a durable point runs at once. The interval above is the longest wait.
+# Crossing the line closes deferral until pending bytes fall to half of it.
+# 400 is about 26 MiB when the ceiling is 64 MiB. 1000 is the ceiling.
+# 0 runs a point as soon as any byte is pending.
+durable_headroom_permille = 400
 # Milliseconds a RocksDB index may leave a non-durable write unsynced.
 # The next synced write on that database, this backstop, or clean shutdown
 # makes it durable. 0 syncs on the backstop thread as soon as it wakes.

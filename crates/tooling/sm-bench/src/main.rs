@@ -120,9 +120,17 @@ struct Args {
     /// Minimum milliseconds between durable points. A durable point is the
     /// `chunks.dat` `fdatasync` and the synced presence commit. `0` runs a
     /// point on every gap. Pwrites are not delayed. Force, shutdown, drop,
-    /// and the pending-byte ceiling stay immediate.
+    /// headroom loss, and the pending-byte ceiling stay immediate. This is
+    /// the longest a point may wait.
     #[arg(long, default_value_t = irys_types::DEFAULT_MIN_DURABLE_INTERVAL_MS)]
     min_durable_interval_ms: u64,
+    /// Pending bytes, in parts per thousand of the memory ceiling, above
+    /// which a durable point runs at once. `400` is the default line.
+    /// Crossing it keeps deferral closed until pending bytes fall to half
+    /// the line. `1000` puts the line on the ceiling. `0` runs a point as
+    /// soon as any byte is pending.
+    #[arg(long, default_value_t = irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE)]
+    durable_headroom_permille: u64,
     #[arg(long, default_value_t = 262_144)]
     entropy_sweep_max_bytes: u64,
     /// Transaction size mix `chunks:weight,...`.
@@ -360,6 +368,7 @@ fn run() -> eyre::Result<i32> {
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
         intervals_persist_secs: args.intervals_persist_secs,
         min_durable_interval_ms: args.min_durable_interval_ms,
+        durable_headroom_permille: args.durable_headroom_permille,
         index,
         index_group_commit: args.index_group_commit,
     })?;
@@ -465,11 +474,18 @@ fn run() -> eyre::Result<i32> {
         ],
     });
     header["min_durable_interval_ms"] = serde_json::json!(args.min_durable_interval_ms);
+    header["durable_headroom_permille"] = serde_json::json!(args.durable_headroom_permille);
     header["io_notes"]
         .as_array_mut()
         .expect("io_notes is an array")
         .push(serde_json::Value::from(
-            "min_durable_interval_ms spaces the chunks.dat fdatasync and the synced presence commit. 0 is a point on every gap. Pwrites are not delayed. Force, shutdown, drop, and the pending-byte ceiling stay immediate.",
+            "min_durable_interval_ms spaces the chunks.dat fdatasync and the synced presence commit. 0 is a point on every gap. Pwrites are not delayed. Force, shutdown, drop, headroom loss, and the pending-byte ceiling stay immediate. The interval is the longest wait.",
+        ));
+    header["io_notes"]
+        .as_array_mut()
+        .expect("io_notes is an array")
+        .push(serde_json::Value::from(
+            "durable_headroom_permille is the pending-byte line, in parts per thousand of the memory ceiling. Crossing it runs the durable point at once and keeps deferral closed until pending bytes fall to half the line. 1000 puts the line on the ceiling. 0 runs a point as soon as any byte is pending.",
         ));
     header["judge_tail_secs"] = serde_json::json!(args.judge_tail_secs);
     header["index_engine"] = serde_json::Value::from(opened.index.engine_name());
@@ -884,6 +900,7 @@ async fn run_step(
 ) -> eyre::Result<StepOutcome> {
     io.permits.reset_window();
     let rocks_before = sample_rocks(&io.module);
+    let durable_before = io.module.durable_point_counts();
     let mut accum = StepAccum::default();
     let started = tokio::time::Instant::now();
     let mut interrupted = false;
@@ -991,6 +1008,10 @@ async fn run_step(
     let soft_fail = !passed && !interrupted && findings.iter().all(|finding| finding.soft);
     let rocks = rocks_before
         .and_then(|before| sample_rocks(&io.module).map(|after| rocks_delta(before, after)));
+    let durable_points = io
+        .module
+        .durable_point_counts()
+        .saturating_delta(durable_before);
     Ok(StepOutcome {
         passed,
         interrupted,
@@ -1007,6 +1028,7 @@ async fn run_step(
             migration: accum.migration,
             serve: accum.serve,
             rocks,
+            durable_points,
             tail,
         },
     })
@@ -1188,6 +1210,14 @@ mod tests {
         assert_eq!(
             parsed(&["--min-durable-interval-ms", "250"]).min_durable_interval_ms,
             250
+        );
+        assert_eq!(
+            args.durable_headroom_permille,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE
+        );
+        assert_eq!(
+            parsed(&["--durable-headroom-permille", "1000"]).durable_headroom_permille,
+            1000
         );
         assert!(args.rocks_preset.is_none());
         assert!(args.rocks_block_cache.is_none());

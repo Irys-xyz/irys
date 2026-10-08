@@ -608,12 +608,35 @@ pub struct StorageSyncConfig {
     /// running. Recall does not wait on a deferred pair.
     ///
     /// These still run the pair immediately: `force_sync_pending_chunks`,
-    /// shutdown, drop, and a pending-byte level above the ceiling
+    /// shutdown, drop, pending bytes over [`Self::durable_headroom_permille`]
+    /// of the ceiling, and a pending-byte level above the ceiling
     /// (`max_pending_write_bytes`, or
     /// `max(2 × num_writes_before_sync, 256) × chunk_size × submodules`).
-    /// Reset drops pending bytes instead of waiting.
+    /// Reset drops pending bytes instead of waiting. The interval is the
+    /// longest a point may wait. Headroom loss ends the wait sooner.
     #[serde(default = "default_min_durable_interval_ms")]
     pub min_durable_interval_ms: u64,
+    /// Pending bytes, in parts per thousand of the memory ceiling, above
+    /// which a durable point runs at once.
+    ///
+    /// The lane defers only while pending bytes (queued, written ahead, and
+    /// unpacked) stay at or under `ceiling * durable_headroom_permille / 1000`,
+    /// and only until [`Self::min_durable_interval_ms`]. Crossing the line
+    /// closes deferral. It stays closed until pending bytes are at or under
+    /// half that line, so a full queue cannot re-arm a large sync by dipping
+    /// just under the line. An owed recall flush still defers on this line:
+    /// that recall is waiting on the flush and must not wait on the fdatasync.
+    ///
+    /// `400` is two fifths of the ceiling. With `num_writes_before_sync` 100,
+    /// 256 KiB chunks, and one submodule the ceiling is 64 MiB and the line
+    /// is about 26 MiB. A 16 MiB/s stream parks about 4 MiB in a 250 ms cap
+    /// and queues about one recall of backlog only while the disk is behind,
+    /// which stays under the line. A 24 MiB/s stream fills the recall's
+    /// second and queues more than 26 MiB, so the next point is immediate.
+    /// `1000` puts the line on the ceiling. `0` runs a point as soon as any
+    /// byte is pending.
+    #[serde(default = "default_durable_headroom_permille")]
+    pub durable_headroom_permille: u64,
     /// Accepted so an older config that set this key still loads.
     /// The value is ignored. Recall pages stay cached.
     #[serde(default)]
@@ -632,6 +655,7 @@ impl Default for StorageSyncConfig {
             intervals_persist_secs: default_intervals_persist_secs(),
             index_wal_backstop_ms: default_index_wal_backstop_ms(),
             min_durable_interval_ms: default_min_durable_interval_ms(),
+            durable_headroom_permille: default_durable_headroom_permille(),
         }
     }
 }
@@ -645,6 +669,10 @@ pub const DEFAULT_INDEX_WAL_BACKSTOP_MS: u64 = 1000;
 /// Default gap between durable points. `0` runs a point on every gap.
 pub const DEFAULT_MIN_DURABLE_INTERVAL_MS: u64 = 0;
 
+/// Default headroom line, in parts per thousand of the pending-byte ceiling.
+/// See [`StorageSyncConfig::durable_headroom_permille`].
+pub const DEFAULT_DURABLE_HEADROOM_PERMILLE: u64 = 400;
+
 fn default_intervals_persist_secs() -> u64 {
     DEFAULT_INTERVALS_PERSIST_SECS
 }
@@ -655,6 +683,10 @@ fn default_index_wal_backstop_ms() -> u64 {
 
 fn default_min_durable_interval_ms() -> u64 {
     DEFAULT_MIN_DURABLE_INTERVAL_MS
+}
+
+fn default_durable_headroom_permille() -> u64 {
+    DEFAULT_DURABLE_HEADROOM_PERMILLE
 }
 
 fn default_entropy_sweep_interval_millis() -> u64 {
@@ -1473,6 +1505,7 @@ impl NodeConfig {
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 min_durable_interval_ms: DEFAULT_MIN_DURABLE_INTERVAL_MS,
+                durable_headroom_permille: DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1674,6 +1707,7 @@ impl NodeConfig {
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 min_durable_interval_ms: DEFAULT_MIN_DURABLE_INTERVAL_MS,
+                durable_headroom_permille: DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1895,8 +1929,15 @@ mod run_mode_tests {
             parsed.min_durable_interval_ms,
             DEFAULT_MIN_DURABLE_INTERVAL_MS
         );
-        let spaced: StorageSyncConfig = toml::from_str("min_durable_interval_ms = 250").unwrap();
+        assert_eq!(
+            parsed.durable_headroom_permille,
+            DEFAULT_DURABLE_HEADROOM_PERMILLE
+        );
+        let spaced: StorageSyncConfig =
+            toml::from_str("min_durable_interval_ms = 250\ndurable_headroom_permille = 400")
+                .unwrap();
         assert_eq!(spaced.min_durable_interval_ms, 250);
+        assert_eq!(spaced.durable_headroom_permille, 400);
     }
 
     #[test]

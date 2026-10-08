@@ -422,6 +422,168 @@ impl Default for ChunkTimeRecord {
     }
 }
 
+/// Why a durable point runs now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DurablePointCause {
+    /// `force_sync`, shutdown, or drop.
+    Forced,
+    /// Pending bytes are above the memory ceiling.
+    Ceiling,
+    /// Pending bytes crossed the headroom line, or the latch is still closed.
+    Headroom,
+    /// The interval is zero, this is the first point, or the interval elapsed.
+    Interval,
+}
+
+impl DurablePointCause {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Forced => "forced",
+            Self::Ceiling => "ceiling",
+            Self::Headroom => "headroom",
+            Self::Interval => "interval",
+        }
+    }
+}
+
+/// Inputs for [`durable_point_decision`]. Durations are monotonic.
+#[derive(Clone, Copy)]
+pub(super) struct DurableDeferQuery {
+    pub force: bool,
+    pub interval: Duration,
+    pub since_last: Option<Duration>,
+    pub pending_bytes: u64,
+    pub ceiling_bytes: u64,
+    pub headroom_bytes: u64,
+    /// `true` while deferral is allowed. A pending-byte level above
+    /// `headroom_bytes` stores `false`. It stays `false` until pending bytes
+    /// are at or under half the line.
+    pub headroom_open: bool,
+    /// An owed recall flush must not fdatasync only because headroom is gone.
+    pub recall_flush_owed: bool,
+}
+
+/// `cause == None` defers the point. `headroom_open` is the latch to store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DurablePointDecision {
+    pub cause: Option<DurablePointCause>,
+    pub headroom_open: bool,
+}
+
+/// Defer only while the interval is the longest wait and the backlog is inside
+/// the headroom line. A larger backlog never starts a new deferral. The
+/// interval is an upper bound: once it has elapsed the point runs even when
+/// the backlog is small. Force, a zero interval, the first point, and the
+/// memory ceiling run it immediately. Headroom loss does too, except while a
+/// recall is waiting on the owed flush.
+pub(super) fn durable_point_decision(query: DurableDeferQuery) -> DurablePointDecision {
+    let mut headroom_open = query.headroom_open;
+    if query.pending_bytes > query.headroom_bytes {
+        headroom_open = false;
+    } else if query.pending_bytes <= query.headroom_bytes / 2 {
+        headroom_open = true;
+    }
+
+    let cause = if query.force {
+        Some(DurablePointCause::Forced)
+    } else if query.interval.is_zero() || query.since_last.is_none() {
+        Some(DurablePointCause::Interval)
+    } else if query.pending_bytes > query.ceiling_bytes {
+        Some(DurablePointCause::Ceiling)
+    } else if query.since_last.expect("checked above") >= query.interval {
+        Some(DurablePointCause::Interval)
+    } else if !headroom_open && !query.recall_flush_owed {
+        Some(DurablePointCause::Headroom)
+    } else {
+        None
+    };
+    DurablePointDecision {
+        cause,
+        headroom_open,
+    }
+}
+
+/// Durable points since this module was opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DurablePointCounts {
+    /// Ran in the window that wrote the bytes, or cut a parked point short,
+    /// because the caller forced it.
+    pub immediate_forced: u64,
+    /// Same, because pending bytes were above the memory ceiling.
+    pub immediate_ceiling: u64,
+    /// Same, because pending bytes were over the headroom line.
+    pub immediate_headroom: u64,
+    /// Same, because the interval was zero, this was the first point, or the
+    /// interval had already elapsed and nothing was parked.
+    pub immediate_interval: u64,
+    /// Parked bytes whose interval then elapsed.
+    pub deferred_interval: u64,
+}
+
+impl DurablePointCounts {
+    pub fn immediate(self) -> u64 {
+        self.immediate_forced
+            .saturating_add(self.immediate_ceiling)
+            .saturating_add(self.immediate_headroom)
+            .saturating_add(self.immediate_interval)
+    }
+
+    pub fn saturating_delta(self, earlier: Self) -> Self {
+        Self {
+            immediate_forced: self
+                .immediate_forced
+                .saturating_sub(earlier.immediate_forced),
+            immediate_ceiling: self
+                .immediate_ceiling
+                .saturating_sub(earlier.immediate_ceiling),
+            immediate_headroom: self
+                .immediate_headroom
+                .saturating_sub(earlier.immediate_headroom),
+            immediate_interval: self
+                .immediate_interval
+                .saturating_sub(earlier.immediate_interval),
+            deferred_interval: self
+                .deferred_interval
+                .saturating_sub(earlier.deferred_interval),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DurablePointAtoms {
+    immediate_forced: AtomicU64,
+    immediate_ceiling: AtomicU64,
+    immediate_headroom: AtomicU64,
+    immediate_interval: AtomicU64,
+    deferred_interval: AtomicU64,
+}
+
+impl DurablePointAtoms {
+    fn record(&self, parked: bool, cause: DurablePointCause) {
+        let deferred = parked && cause == DurablePointCause::Interval;
+        let slot = match (deferred, cause) {
+            (true, _) => &self.deferred_interval,
+            (false, DurablePointCause::Forced) => &self.immediate_forced,
+            (false, DurablePointCause::Ceiling) => &self.immediate_ceiling,
+            (false, DurablePointCause::Headroom) => &self.immediate_headroom,
+            (false, DurablePointCause::Interval) => &self.immediate_interval,
+        };
+        slot.fetch_add(1, Ordering::Relaxed);
+        let timing = if deferred { "deferred" } else { "immediate" };
+        super::index_read_metrics::note_durable_point(timing, cause.label());
+    }
+
+    fn snapshot(&self) -> DurablePointCounts {
+        DurablePointCounts {
+            immediate_forced: self.immediate_forced.load(Ordering::Relaxed),
+            immediate_ceiling: self.immediate_ceiling.load(Ordering::Relaxed),
+            immediate_headroom: self.immediate_headroom.load(Ordering::Relaxed),
+            immediate_interval: self.immediate_interval.load(Ordering::Relaxed),
+            deferred_interval: self.deferred_interval.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Maps a logical partition (fixed size) to physical storage across multiple drives
 #[derive(Debug)]
 pub struct StorageModule {
@@ -456,6 +618,13 @@ pub struct StorageModule {
     /// Monotonic time of the last successful durable point. `None` until the
     /// first one, so that point is not deferred.
     last_durable_at: Mutex<Option<Instant>>,
+    /// `true` while pending bytes are inside the headroom line, so a durable
+    /// point may wait out `min_durable_interval_ms`. Crossing the line stores
+    /// `false` until pending bytes fall to half the line.
+    headroom_open: AtomicBool,
+    /// Counts of durable points by timing and cause. The meter exports the
+    /// same counts.
+    durable_points: DurablePointAtoms,
     /// Set while network-partition recovery rewrites this module's ranges.
     /// Data writes re-check it under the `pending_writes` lock at insert time,
     /// so once it is set no body can be queued behind recovery's
@@ -1446,6 +1615,8 @@ impl StorageModule {
             index_views: AtomicU64::new(0),
             sync_in_progress: Mutex::new(()),
             last_durable_at: Mutex::new(None),
+            headroom_open: AtomicBool::new(true),
+            durable_points: DurablePointAtoms::default(),
             data_writes_paused: AtomicBool::new(false),
             #[cfg(test)]
             sync_failure: Mutex::new(None),
@@ -2263,6 +2434,34 @@ impl StorageModule {
         Duration::from_millis(self.config.node_config.storage.min_durable_interval_ms)
     }
 
+    /// Pending bytes above this end a deferral early. The memory ceiling is
+    /// the hard stop above it. Permille above 1000 is the ceiling.
+    fn durable_headroom_bytes(&self) -> u64 {
+        let permille = self
+            .config
+            .node_config
+            .storage
+            .durable_headroom_permille
+            .min(1000);
+        self.pending_memory_ceiling_bytes().saturating_mul(permille) / 1000
+    }
+
+    fn durable_cause(&self, force: bool) -> Option<DurablePointCause> {
+        let decision = durable_point_decision(DurableDeferQuery {
+            force,
+            interval: self.min_durable_interval(),
+            since_last: self.load_last_durable_at().map(|last| last.elapsed()),
+            pending_bytes: self.pending_write_bytes(),
+            ceiling_bytes: self.pending_memory_ceiling_bytes(),
+            headroom_bytes: self.durable_headroom_bytes(),
+            headroom_open: self.headroom_open.load(Ordering::Relaxed),
+            recall_flush_owed: self.disk.recall_flush_is_owed(),
+        });
+        self.headroom_open
+            .store(decision.headroom_open, Ordering::Relaxed);
+        decision.cause
+    }
+
     fn has_written_ahead(&self) -> bool {
         !self.pending_writes.read().unwrap().written_ahead.is_empty()
     }
@@ -2307,20 +2506,14 @@ impl StorageModule {
 
     /// True when this window must not fdatasync yet.
     ///
-    /// Force, a zero interval, the first point, and pending bytes above the
-    /// ceiling all return false. A deferred point returns after the pwrites,
-    /// so an owed recall flush does not wait on it.
+    /// Force, a zero interval, the first point, pending bytes over the
+    /// headroom line, and pending bytes above the ceiling all return false.
+    /// A closed headroom latch stays closed until pending bytes fall to half
+    /// the line. An owed recall flush still returns true on headroom loss, so
+    /// that recall does not wait on the fdatasync. The interval is the longest
+    /// wait: a younger point is never held past it.
     fn defer_durable_point(&self, force: bool) -> bool {
-        if force || self.min_durable_interval().is_zero() {
-            return false;
-        }
-        if self.pending_write_bytes() > self.pending_memory_ceiling_bytes() {
-            return false;
-        }
-        let Some(last) = self.load_last_durable_at() else {
-            return false;
-        };
-        last.elapsed() < self.min_durable_interval()
+        self.durable_cause(force).is_none()
     }
 
     /// Time until parked bytes may take a durable point. `None` when the
@@ -2336,6 +2529,11 @@ impl StorageModule {
         Some(self.min_durable_interval().saturating_sub(last.elapsed()))
     }
 
+    /// Durable points since this module was opened, by timing and cause.
+    pub fn durable_point_counts(&self) -> DurablePointCounts {
+        self.durable_points.snapshot()
+    }
+
     /// Run a due durable point that an earlier window parked. No new pwrite.
     fn finish_deferred_durable_point(&self) -> eyre::Result<()> {
         if self.durable_point_remaining() != Some(Duration::ZERO) {
@@ -2348,7 +2546,13 @@ impl StorageModule {
         if self.durable_point_remaining() != Some(Duration::ZERO) {
             return Ok(());
         }
-        self.finish_durable_point(false, &[], Vec::new(), &BTreeSet::new())
+        // The checks above already found the point due. Read the cause again
+        // under the sync lock. A new owed flush can still defer a headroom
+        // point. Force, the ceiling, and an elapsed interval stay due.
+        let Some(cause) = self.durable_cause(false) else {
+            return Ok(());
+        };
+        self.finish_durable_point(false, &[], Vec::new(), &BTreeSet::new(), cause)
     }
 
     fn park_written_ahead(
@@ -2394,6 +2598,8 @@ impl StorageModule {
     /// Fdatasync, presence commit, interval completion, then drop the fence.
     /// `write_batch` was pwritten by this call. Parked bytes from earlier
     /// windows join the same point. The caller holds `sync_in_progress`.
+    /// `cause` is the decision that started this point. A non-empty point
+    /// counts once, after the sync succeeds.
     fn finish_durable_point(
         &self,
         force: bool,
@@ -2404,11 +2610,15 @@ impl StorageModule {
         )],
         mut runs: Vec<WriteRun>,
         touched_starts: &BTreeSet<PartitionChunkOffset>,
+        cause: DurablePointCause,
     ) -> eyre::Result<()> {
         let ahead = self.snapshot_written_ahead();
         if write_batch.is_empty() && ahead.is_empty() {
             return Ok(());
         }
+        // Parked means an earlier window already wrote these bytes and waited.
+        // A headroom or ceiling cause that ends that wait counts as immediate.
+        let parked = !ahead.is_empty();
         let mut durable_batch = write_batch.to_vec();
         durable_batch.extend(ahead.iter().cloned());
         let ahead_runs = self.plan_write_runs(&ahead, self.config.consensus.chunk_size.max(1));
@@ -2472,6 +2682,7 @@ impl StorageModule {
         }
         drop(pending);
         self.stamp_durable_point();
+        self.durable_points.record(parked, cause);
         Ok(())
     }
 
@@ -2576,8 +2787,8 @@ impl StorageModule {
         };
 
         if write_batch.is_empty() {
-            if !self.defer_durable_point(force) {
-                self.finish_durable_point(force, &[], Vec::new(), &BTreeSet::new())?;
+            if let Some(cause) = self.durable_cause(force) {
+                self.finish_durable_point(force, &[], Vec::new(), &BTreeSet::new(), cause)?;
             }
             return self.flush_forced_interval_completions(force);
         }
@@ -2591,8 +2802,8 @@ impl StorageModule {
             runs.truncate(limit);
         }
         if runs.is_empty() {
-            if !self.defer_durable_point(force) {
-                self.finish_durable_point(force, &[], Vec::new(), &BTreeSet::new())?;
+            if let Some(cause) = self.durable_cause(force) {
+                self.finish_durable_point(force, &[], Vec::new(), &BTreeSet::new(), cause)?;
             }
             return self.flush_forced_interval_completions(force);
         }
@@ -2652,14 +2863,15 @@ impl StorageModule {
         }
 
         // Hold the fdatasync and the presence commit when the previous point
-        // is younger than `min_durable_interval_ms`. The pwrites above already
-        // ran. Force, the pending-byte ceiling, and a zero interval do not
-        // hold the pair. `0` is every point: the previous behaviour.
-        if self.defer_durable_point(force) {
+        // is younger than `min_durable_interval_ms` and pending bytes are
+        // inside the headroom line. The pwrites above already ran. Force,
+        // headroom loss, the pending-byte ceiling, and a zero interval do
+        // not hold the pair. `0` is every point: the previous behaviour.
+        let Some(cause) = self.durable_cause(force) else {
             self.park_written_ahead(&write_batch);
             return Ok(());
-        }
-        self.finish_durable_point(force, &write_batch, runs, &touched_starts)?;
+        };
+        self.finish_durable_point(force, &write_batch, runs, &touched_starts, cause)?;
 
         debug!(
             "sync_pending_chunks took {:.3}s for {} chunks",
@@ -7656,6 +7868,7 @@ mod tests {
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 min_durable_interval_ms: 0,
+                durable_headroom_permille: irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
@@ -10087,6 +10300,7 @@ mod tests {
         prefix: &str,
         min_durable_interval_ms: u64,
         max_pending_write_bytes: Option<u64>,
+        durable_headroom_permille: u64,
     ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
         let chunk_size = 32;
@@ -10103,6 +10317,7 @@ mod tests {
                 entropy_sweep_max_bytes: chunk_size,
                 intervals_persist_secs: 0,
                 min_durable_interval_ms,
+                durable_headroom_permille,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -10138,7 +10353,12 @@ mod tests {
 
     #[test]
     fn zero_durable_interval_syncs_every_batch() -> eyre::Result<()> {
-        let (_tmp, storage) = durable_spacing_module("durable_interval_zero", 0, None)?;
+        let (_tmp, storage) = durable_spacing_module(
+            "durable_interval_zero",
+            0,
+            None,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
+        )?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
@@ -10152,13 +10372,22 @@ mod tests {
             written.get_at_point(PartitionChunkOffset::from(1)).copied(),
             Some(ChunkType::Data)
         );
+        let counts = storage.durable_point_counts();
+        assert_eq!(counts.immediate_interval, 2);
+        assert_eq!(counts.deferred_interval, 0);
+        assert_eq!(counts.immediate(), 2);
         Ok(())
     }
 
     #[test]
     fn durable_points_stay_at_least_the_interval_apart() -> eyre::Result<()> {
         let interval = Duration::from_millis(1_000);
-        let (_tmp, storage) = durable_spacing_module("durable_interval_space", 1_000, None)?;
+        let (_tmp, storage) = durable_spacing_module(
+            "durable_interval_space",
+            1_000,
+            None,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
+        )?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         let stamped = Instant::now();
@@ -10169,6 +10398,8 @@ mod tests {
         let deferred = PartitionChunkOffset::from(1);
         assert!(!storage.is_data_chunk_durable_at(deferred));
         assert!(storage.pending_write_bytes() > 0);
+        assert_eq!(storage.durable_point_counts().immediate_interval, 1);
+        assert_eq!(storage.durable_point_counts().deferred_interval, 0);
         assert_eq!(storage.read_chunk_internal(deferred)?, vec![2_u8; 32]);
         let intervals = read_intervals_file(&submodule_interval_path(&storage, 0))?;
         assert_eq!(
@@ -10186,12 +10417,21 @@ mod tests {
             completed.get_at_point(deferred).copied(),
             Some(ChunkType::Data)
         );
+        let counts = storage.durable_point_counts();
+        assert_eq!(counts.immediate_interval, 1);
+        assert_eq!(counts.deferred_interval, 1);
+        assert_eq!(counts.immediate_headroom, 0);
         Ok(())
     }
 
     #[test]
     fn force_sync_bypasses_the_durable_interval() -> eyre::Result<()> {
-        let (_tmp, storage) = durable_spacing_module("durable_interval_force", 60_000, None)?;
+        let (_tmp, storage) = durable_spacing_module(
+            "durable_interval_force",
+            60_000,
+            None,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
+        )?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         write_spacing_chunk(&storage, 1, 2);
@@ -10206,12 +10446,20 @@ mod tests {
         );
         assert!(storage.is_data_chunk_durable_at(deferred));
         assert!(!storage.has_pending_writes());
+        let counts = storage.durable_point_counts();
+        assert_eq!(counts.immediate_forced, 1);
+        assert_eq!(counts.deferred_interval, 0);
         Ok(())
     }
 
     #[test]
     fn shutdown_bypasses_the_durable_interval() -> eyre::Result<()> {
-        let (_tmp, storage) = durable_spacing_module("durable_interval_stop", 60_000, None)?;
+        let (_tmp, storage) = durable_spacing_module(
+            "durable_interval_stop",
+            60_000,
+            None,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
+        )?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         write_spacing_chunk(&storage, 1, 2);
@@ -10230,7 +10478,12 @@ mod tests {
 
     #[test]
     fn drop_bypasses_the_durable_interval() -> eyre::Result<()> {
-        let (_tmp, storage) = durable_spacing_module("durable_interval_drop", 60_000, None)?;
+        let (_tmp, storage) = durable_spacing_module(
+            "durable_interval_drop",
+            60_000,
+            None,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
+        )?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         write_spacing_chunk(&storage, 1, 2);
@@ -10254,7 +10507,12 @@ mod tests {
 
     #[test]
     fn reset_discards_a_deferred_durable_point() -> eyre::Result<()> {
-        let (_tmp, storage) = durable_spacing_module("durable_interval_reset", 60_000, None)?;
+        let (_tmp, storage) = durable_spacing_module(
+            "durable_interval_reset",
+            60_000,
+            None,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
+        )?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         write_spacing_chunk(&storage, 1, 2);
@@ -10280,9 +10538,11 @@ mod tests {
     #[test]
     fn pending_byte_ceiling_bypasses_the_durable_interval() -> eyre::Result<()> {
         // One chunk is the ceiling (`num_writes_before_sync` × chunk size).
-        // The bypass is strict `>`, so one parked chunk stays deferred and
-        // the next chunk pushes the total over.
-        let (_tmp, storage) = durable_spacing_module("durable_interval_ceiling", 60_000, Some(32))?;
+        // Permille 1000 puts the headroom line on that ceiling, so this test
+        // still trips the strict `>` ceiling bypass and not the headroom line.
+        // One parked chunk stays deferred. The next chunk pushes the total over.
+        let (_tmp, storage) =
+            durable_spacing_module("durable_interval_ceiling", 60_000, Some(32), 1000)?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
@@ -10302,12 +10562,51 @@ mod tests {
         assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
         assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(2)));
         assert!(!storage.has_pending_writes());
+        assert!(storage.durable_point_counts().immediate_ceiling >= 1);
+        assert_eq!(storage.durable_point_counts().deferred_interval, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn headroom_loss_runs_the_durable_point_immediately() -> eyre::Result<()> {
+        // Ceiling is max(2 × num_writes_before_sync, 256) × chunk size = 8192.
+        // Permille 4 is 32 bytes. One parked chunk equals the line and stays
+        // deferred. The next chunk crosses it and must not wait out 60 s.
+        let (_tmp, storage) = durable_spacing_module("durable_interval_headroom", 60_000, None, 4)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        assert!(!storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert_eq!(storage.pending_write_bytes(), 32);
+
+        write_spacing_chunk(&storage, 2, 3);
+        let started = Instant::now();
+        storage.sync_pending_chunks()?;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "headroom loss waited out the durable interval"
+        );
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(2)));
+        assert!(!storage.has_pending_writes());
+        let counts = storage.durable_point_counts();
+        assert_eq!(counts.immediate_interval, 1);
+        assert!(counts.immediate_headroom >= 1);
+        assert_eq!(counts.deferred_interval, 0);
         Ok(())
     }
 
     #[test]
     fn recall_does_not_wait_on_a_deferred_durable_point() -> eyre::Result<()> {
-        let (_tmp, storage) = durable_spacing_module("durable_interval_recall", 60_000, None)?;
+        let (_tmp, storage) = durable_spacing_module(
+            "durable_interval_recall",
+            60_000,
+            None,
+            irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
+        )?;
         write_spacing_chunk(&storage, 0, 1);
         storage.sync_pending_chunks()?;
         write_spacing_chunk(&storage, 1, 2);
@@ -10326,5 +10625,130 @@ mod tests {
         assert!(!lane.module.is_data_chunk_durable_at(deferred));
         assert_eq!(lane.module.read_chunk_internal(deferred)?, vec![2_u8; 32]);
         Ok(())
+    }
+
+    fn defer_query() -> DurableDeferQuery {
+        DurableDeferQuery {
+            force: false,
+            interval: Duration::from_millis(250),
+            since_last: Some(Duration::from_millis(1)),
+            pending_bytes: 0,
+            ceiling_bytes: 1_000,
+            headroom_bytes: 400,
+            headroom_open: true,
+            recall_flush_owed: false,
+        }
+    }
+
+    #[test]
+    fn durable_point_defers_while_pending_bytes_stay_inside_the_line() {
+        let mut query = defer_query();
+        query.pending_bytes = 400;
+        let decision = durable_point_decision(query);
+        assert_eq!(decision.cause, None);
+        assert!(decision.headroom_open);
+
+        query.pending_bytes = 300;
+        let inside = durable_point_decision(query);
+        assert_eq!(inside.cause, None);
+        assert!(inside.headroom_open);
+
+        query.since_last = Some(Duration::from_millis(249));
+        query.pending_bytes = 0;
+        let young = durable_point_decision(query);
+        assert_eq!(young.cause, None);
+        assert!(young.headroom_open);
+    }
+
+    #[test]
+    fn durable_point_runs_when_the_headroom_signal_trips() {
+        let mut query = defer_query();
+        query.pending_bytes = 401;
+        let crossed = durable_point_decision(query);
+        assert_eq!(crossed.cause, Some(DurablePointCause::Headroom));
+        assert!(!crossed.headroom_open);
+
+        // An owed recall flush does not fdatasync only because the line broke.
+        // The latch stays closed for the next call.
+        query.recall_flush_owed = true;
+        let owed = durable_point_decision(query);
+        assert_eq!(owed.cause, None);
+        assert!(!owed.headroom_open);
+
+        query.recall_flush_owed = false;
+        query.headroom_open = false;
+        query.pending_bytes = 201;
+        let held = durable_point_decision(query);
+        assert_eq!(held.cause, Some(DurablePointCause::Headroom));
+        assert!(!held.headroom_open);
+
+        query.pending_bytes = 200;
+        let reopened = durable_point_decision(query);
+        assert_eq!(reopened.cause, None);
+        assert!(reopened.headroom_open);
+
+        query.pending_bytes = 0;
+        query.headroom_open = false;
+        let cleared = durable_point_decision(query);
+        assert_eq!(cleared.cause, None);
+        assert!(cleared.headroom_open);
+    }
+
+    #[test]
+    fn durable_point_never_waits_past_the_interval() {
+        let mut query = defer_query();
+        query.since_last = Some(Duration::from_millis(250));
+        query.pending_bytes = 0;
+        let elapsed = durable_point_decision(query);
+        assert_eq!(elapsed.cause, Some(DurablePointCause::Interval));
+        assert!(elapsed.headroom_open);
+
+        // A completed wait counts as the interval even when the latch is closed.
+        query.pending_bytes = 401;
+        query.headroom_open = false;
+        let both = durable_point_decision(query);
+        assert_eq!(both.cause, Some(DurablePointCause::Interval));
+        assert!(!both.headroom_open);
+
+        query.interval = Duration::ZERO;
+        query.since_last = Some(Duration::from_millis(1));
+        query.pending_bytes = 0;
+        query.headroom_open = true;
+        let off = durable_point_decision(query);
+        assert_eq!(off.cause, Some(DurablePointCause::Interval));
+
+        query.interval = Duration::from_millis(250);
+        query.since_last = None;
+        query.pending_bytes = 5_000;
+        let first = durable_point_decision(query);
+        assert_eq!(first.cause, Some(DurablePointCause::Interval));
+        assert!(!first.headroom_open);
+    }
+
+    #[test]
+    fn durable_point_bypasses_are_unchanged() {
+        let mut query = defer_query();
+        query.force = true;
+        query.pending_bytes = 0;
+        let forced = durable_point_decision(query);
+        assert_eq!(forced.cause, Some(DurablePointCause::Forced));
+
+        query.force = false;
+        query.pending_bytes = 1_001;
+        query.recall_flush_owed = true;
+        let ceiling = durable_point_decision(query);
+        assert_eq!(ceiling.cause, Some(DurablePointCause::Ceiling));
+        assert!(!ceiling.headroom_open);
+
+        // Pending bytes equal to the ceiling still defer. The bypass is strict `>`.
+        query.pending_bytes = 1_000;
+        query.ceiling_bytes = 1_000;
+        query.headroom_bytes = 1_000;
+        query.headroom_open = true;
+        query.recall_flush_owed = false;
+        query.since_last = Some(Duration::from_millis(1));
+        let equal = durable_point_decision(query);
+        assert_eq!(equal.cause, None);
+        assert!(equal.headroom_open);
     }
 }

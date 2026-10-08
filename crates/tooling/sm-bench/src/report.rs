@@ -294,6 +294,7 @@ struct StepOut {
     ingest_phases: PhasesOut,
     migration_phases: PhasesOut,
     rocks: Option<RocksStepStats>,
+    durable_points: irys_domain::DurablePointCounts,
     tail: Option<TailOut>,
 }
 
@@ -327,6 +328,8 @@ pub(crate) struct StepRow {
     pub migration: DriverBucket,
     pub serve: DriverBucket,
     pub rocks: Option<RocksStepStats>,
+    /// Durable points during the step, including the drain.
+    pub durable_points: irys_domain::DurablePointCounts,
     pub tail: Option<TailWindow>,
 }
 
@@ -422,6 +425,7 @@ fn step_out(row: &StepRow) -> StepOut {
             true,
         ),
         rocks: row.rocks,
+        durable_points: row.durable_points,
         tail: row.tail.as_ref().map(tail_out),
     }
 }
@@ -682,6 +686,7 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
             row.measured.secs,
             true,
         ));
+        out.push_str(&durable_line(row.durable_points));
         if let Some(rocks) = row.rocks {
             out.push_str(&format!(
                 "rocks: stall={} pending_compaction_bytes={} flushes={} running_flushes={} wal_syncs={} wal_backstop_syncs={} small_file_compactions={} files_before={} files_after={}\n",
@@ -704,6 +709,18 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
         }
     }
     out
+}
+
+fn durable_line(counts: irys_domain::DurablePointCounts) -> String {
+    format!(
+        "durable points: immediate={} deferred={} forced={} ceiling={} headroom={} interval={}\n",
+        counts.immediate(),
+        counts.deferred_interval,
+        counts.immediate_forced,
+        counts.immediate_ceiling,
+        counts.immediate_headroom,
+        counts.immediate_interval,
+    )
 }
 
 fn phase_line(
@@ -927,11 +944,21 @@ mod tests {
                 small_file_compact_files_before: 80,
                 small_file_compact_files_after: 3,
             }),
+            durable_points: irys_domain::DurablePointCounts {
+                immediate_forced: 0,
+                immediate_ceiling: 0,
+                immediate_headroom: 4,
+                immediate_interval: 8,
+                deferred_interval: 40,
+            },
             tail: None,
         };
         let text = table(&[row], "index_engine=rocks index_dir=/loadtest/rocks\n");
         assert!(text.contains(
             "rocks: stall=0.0ms pending_compaction_bytes=0 flushes=3 running_flushes=0 wal_syncs=1 wal_backstop_syncs=0 small_file_compactions=2 files_before=80 files_after=3"
+        ));
+        assert!(text.contains(
+            "durable points: immediate=12 deferred=40 forced=0 ceiling=0 headroom=4 interval=8"
         ));
     }
 
@@ -952,6 +979,7 @@ mod tests {
             migration: DriverBucket::default(),
             serve: DriverBucket::default(),
             rocks: None,
+            durable_points: irys_domain::DurablePointCounts::default(),
             tail: None,
         };
         let text = table(&[row], "index_engine=mdbx index_dir=/loadtest/db\n");
@@ -983,6 +1011,7 @@ mod tests {
             migration: DriverBucket::default(),
             serve: DriverBucket::default(),
             rocks: None,
+            durable_points: irys_domain::DurablePointCounts::default(),
             tail: Some(crate::schedule::TailWindow {
                 secs: 240,
                 measured: window,

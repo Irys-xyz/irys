@@ -117,6 +117,25 @@ pub(crate) fn note_presence_reconciled(rows: u64) {
     PRESENCE_RECONCILED.add(rows, &[]);
 }
 
+static DURABLE_POINTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.durable_points_total")
+        .with_description(
+            "Lane durable points by timing and cause. immediate did not wait out min_durable_interval_ms. deferred waited for that interval. cause is forced, ceiling, headroom, or interval.",
+        )
+        .build()
+});
+
+pub(super) fn note_durable_point(timing: &'static str, cause: &'static str) {
+    DURABLE_POINTS.add(
+        1,
+        &[
+            KeyValue::new("timing", timing),
+            KeyValue::new("cause", cause),
+        ],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DATA_SYNC, INGRESS_SIZE, PLACEMENT, current, with_caller};

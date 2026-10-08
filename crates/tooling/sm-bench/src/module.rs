@@ -39,6 +39,9 @@ pub(crate) struct OpenRequest<'a> {
     pub intervals_persist_secs: u64,
     /// `0` runs a durable point on every gap.
     pub min_durable_interval_ms: u64,
+    /// Parts per thousand of the pending-byte ceiling. See
+    /// `StorageSyncConfig::durable_headroom_permille`.
+    pub durable_headroom_permille: u64,
     pub index: BenchIndex,
     /// Arms group commit. MDBX syncs every N. RocksDB does not.
     /// `0` skips the call; the method rejects 0.
@@ -78,6 +81,7 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         entropy_sweep_max_bytes: request.entropy_sweep_max_bytes,
         intervals_persist_secs: request.intervals_persist_secs,
         min_durable_interval_ms: request.min_durable_interval_ms,
+        durable_headroom_permille: request.durable_headroom_permille,
         ..StorageSyncConfig::default()
     };
     // Production durability and the 2 TiB submodule geometry. The testing

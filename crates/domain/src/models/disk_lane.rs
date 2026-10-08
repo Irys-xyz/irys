@@ -24,8 +24,9 @@
 //! One index batch per submodule covers those rows. A synced RocksDB batch
 //! also covers registrations still waiting on group commit.
 //! `min_durable_interval_ms` can defer that pair. `0` does not. Pwrites
-//! still run. Force, shutdown, drop, and the pending-byte ceiling do not
-//! defer it. Recall does not wait on a deferred pair.
+//! still run. Force, shutdown, drop, pending bytes over the headroom line,
+//! and the pending-byte ceiling do not defer it. The interval is the longest
+//! wait. Recall does not wait on a deferred pair.
 //! This thread stores a write-ahead `Interrupted` mark in `intervals.json`
 //! before those `pwrite`s. A completion (`Data` or `Entropy`) is rewritten
 //! with the next write-ahead, on the persist interval, or on shutdown.
@@ -2262,8 +2263,9 @@ impl StorageModule {
             return true;
         }
         // A deferred durable point becomes ready when its interval elapses,
-        // or immediately when pending bytes are over the ceiling. Zero
-        // remaining must count as ready: a zero grace waits for a notify.
+        // when pending bytes cross the headroom line, or when they are over
+        // the ceiling. Zero remaining must count as ready: a zero grace
+        // waits for a notify.
         if self.durable_point_remaining() == Some(Duration::ZERO) {
             return true;
         }
@@ -2834,6 +2836,7 @@ mod tests {
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 min_durable_interval_ms: 0,
+                durable_headroom_permille: irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
