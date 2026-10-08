@@ -1,3 +1,5 @@
+#[cfg(feature = "rocksdb")]
+mod convert;
 pub mod db;
 mod group;
 mod interval;
@@ -8,6 +10,11 @@ pub mod store;
 pub mod tables;
 mod verify;
 
+#[cfg(feature = "rocksdb")]
+pub use convert::{
+    ConvertOptions, ConvertStats, EngineEquivalenceReport, convert_mdbx_to_rocks,
+    convert_rocks_to_mdbx, verify_mdbx_and_rocks,
+};
 pub use db::*;
 #[cfg(feature = "rocksdb")]
 pub use rocks::{

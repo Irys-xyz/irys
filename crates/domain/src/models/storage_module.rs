@@ -761,9 +761,11 @@ fn open_submodule_index(
             // An empty MDBX index would hide the live Rocks rows.
             if rocks_index_present(&rocks_dir) && !mdbx_dat.is_file() {
                 Err(eyre!(
-                    "refusing to open {}: {} exists and the Rocks index was not copied",
+                    "refusing to open {}: {} exists and the Rocks index was not copied. Stop the node and run `submodule-index-convert rocks-to-mdbx {} {}`, then verify. If the node wrote new rows into rocks/ after switching to RocksDB, that command is the rollback. Switching database.submodule_index back to mdbx without it leaves those rows out of db/.",
                     path.display(),
-                    rocks_dir.display()
+                    rocks_dir.display(),
+                    rocks_dir.display(),
+                    path.display()
                 ))
             } else {
                 // Args (incl. the test geometry cap) derived from the DatabaseConfig.
@@ -772,13 +774,16 @@ fn open_submodule_index(
             }
         }
         SubmoduleIndexEngine::Rocksdb => {
-            let mdbx_dat = module_dir.join("db").join("mdbx.dat");
+            let mdbx_dir = module_dir.join("db");
+            let mdbx_dat = mdbx_dir.join("mdbx.dat");
             // An empty Rocks index would hide the live MDBX rows.
             if mdbx_dat.is_file() && !rocks_index_present(&path) {
                 Err(eyre!(
-                    "refusing to open {}: {} exists and the MDBX index was not copied",
+                    "refusing to open {}: {} exists and the MDBX index was not copied. Stop the node and run `submodule-index-convert mdbx-to-rocks {} {}`, then verify, then set database.submodule_index to rocksdb. Keep db/ until rollback is proven. If the node wrote new rows into rocks/ after the switch, rollback is `submodule-index-convert rocks-to-mdbx`.",
                     path.display(),
-                    mdbx_dat.display()
+                    mdbx_dat.display(),
+                    mdbx_dir.display(),
+                    path.display()
                 ))
             } else {
                 // The first submodule installs the process cache. The rest share it.
@@ -6108,6 +6113,29 @@ mod tests {
         );
         assert!(!rocks_dir.join("SCHEMA").exists());
         assert!(!rocks_dir.join("CURRENT").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn submodule_index_engine_rocksdb_refuses_incomplete_conversion() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("submodule_index_engine_incomplete")
+            .build();
+        let module_dir = tmp_dir.path().join("module");
+        let mdbx_dat = module_dir.join("db").join("mdbx.dat");
+        let rocks_dir = module_dir.join("rocks");
+        fs::create_dir_all(mdbx_dat.parent().expect("db parent"))?;
+        fs::write(&mdbx_dat, b"live")?;
+        fs::create_dir_all(&rocks_dir)?;
+        fs::write(rocks_dir.join("CURRENT"), b"MANIFEST-000001\n")?;
+
+        let error =
+            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))
+                .expect_err("incomplete rocks conversion must not open");
+        let message = format!("{error:#}");
+        assert!(message.contains("submodule-index-convert"), "{message}");
+        assert!(message.contains("SCHEMA"), "{message}");
+        assert!(!rocks_dir.join("SCHEMA").exists());
         Ok(())
     }
 

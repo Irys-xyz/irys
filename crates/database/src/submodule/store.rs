@@ -39,12 +39,12 @@ use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
     add_tx_path_hash_to_offset_range, clear_paths_in_inclusive_range, clear_submodule_database,
-    create_or_open_submodule_db, del_path_hashes_by_offset, del_pending_body_migration,
-    del_pending_body_migrations_in_range, first_missing_path_hash_offset_in_tx,
-    get_data_path_by_offset, get_data_root_infos_for_data_root, get_full_tx_path,
-    get_path_hashes_by_offset, get_pending_body_migration, get_tx_leaf_binding,
-    get_tx_path_by_offset, missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range,
-    pending_body_migrations_from, set_data_root_infos_for_data_root, set_path_hashes_by_offset,
+    del_path_hashes_by_offset, del_pending_body_migration, del_pending_body_migrations_in_range,
+    first_missing_path_hash_offset_in_tx, get_data_path_by_offset,
+    get_data_root_infos_for_data_root, get_full_tx_path, get_path_hashes_by_offset,
+    get_pending_body_migration, get_tx_leaf_binding, get_tx_path_by_offset,
+    missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range, pending_body_migrations_from,
+    set_data_root_infos_for_data_root, set_path_hashes_by_offset,
     tables::{ChunkPathHashes, DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
     write_data_path_updates,
 };
@@ -313,13 +313,144 @@ impl std::fmt::Debug for MdbxSubmoduleStore {
 
 impl MdbxSubmoduleStore {
     pub fn open(path: impl AsRef<Path>, args: DatabaseArguments) -> eyre::Result<Self> {
-        let env = create_or_open_submodule_db(path, args)?;
+        Ok(Self::open_with_stats(path, args)?.0)
+    }
+
+    /// Opens the index and reports whether schema v1 was migrated.
+    ///
+    /// A v1 directory is migrated in place before this returns. The exclusive
+    /// lock is the caller's `args` flag.
+    pub(super) fn open_with_stats(
+        path: impl AsRef<Path>,
+        args: DatabaseArguments,
+    ) -> eyre::Result<(Self, super::migrate::MigrationStats)> {
+        let (env, stats) = super::db::open_submodule_index(
+            path,
+            args,
+            super::migrate::SubmoduleMigrationOptions::default(),
+        )?;
+        Ok((Self::from_env(env), stats))
+    }
+
+    /// Creates an MDBX directory for conversion and writes the incomplete marker.
+    ///
+    /// Does not run the v1 migration and does not write [`super::tables::SUBMODULE_SCHEMA`].
+    /// That stamp is [`Self::put_schema_bytes`] after the copy. A crash before
+    /// the stamp leaves the incomplete marker, which open refuses.
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn open_for_convert(
+        path: impl AsRef<Path>,
+        args: DatabaseArguments,
+    ) -> eyre::Result<Self> {
+        let env = crate::open_or_create_db(path, super::tables::SubmoduleTables::ALL, args)?;
+        let store = Self::from_env(env);
+        match store.schema_bytes()? {
+            Some(bytes) if bytes.as_slice() == super::tables::SUBMODULE_SCHEMA.as_bytes() => {
+                eyre::bail!("refusing to convert into a completed MDBX index");
+            }
+            _ => {}
+        }
+        store.put_schema_bytes(super::tables::SUBMODULE_CONVERT_INCOMPLETE.as_bytes())?;
+        Ok(store)
+    }
+
+    fn from_env(env: DatabaseEnv) -> Self {
         let group = GroupCommit::new();
-        Ok(Self {
+        Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
             env: Arc::new(env),
             group,
             nosync_enable: Arc::new(Mutex::new(())),
+        }
+    }
+
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn schema_bytes(&self) -> eyre::Result<Option<Vec<u8>>> {
+        self.env.view_eyre(super::db::read_schema_bytes)
+    }
+
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn put_schema_bytes(&self, bytes: &[u8]) -> eyre::Result<()> {
+        let owned = bytes.to_vec();
+        self.env
+            .update_eyre(|tx| super::db::write_schema_bytes(tx, &owned))?;
+        sync_env(&self.env)
+    }
+
+    /// Next rows after `after`, in key order. One row is returned even when
+    /// it is larger than `limit_bytes`, so the scan always moves forward.
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn read_rows<T, F>(
+        &self,
+        after: Option<T::Key>,
+        limit_rows: usize,
+        limit_bytes: usize,
+        value_len: F,
+    ) -> eyre::Result<Vec<(T::Key, T::Value)>>
+    where
+        T: reth_db::table::Table,
+        T::Key: Copy + Ord,
+        F: Fn(&T::Value) -> usize,
+    {
+        use reth_db::cursor::DbCursorRO as _;
+        use reth_db::transaction::DbTx as _;
+
+        let limit_rows = limit_rows.max(1);
+        let limit_bytes = limit_bytes.max(1);
+        self.env.view_eyre(|tx| {
+            let mut cursor = tx.cursor_read::<T>()?;
+            let walker = cursor.walk(after)?;
+            let mut out = Vec::new();
+            let mut bytes = 0_usize;
+            for entry in walker {
+                let (key, value) = entry?;
+                if after.is_some_and(|prev| key <= prev) {
+                    continue;
+                }
+                let next_bytes = bytes.saturating_add(value_len(&value));
+                if !out.is_empty() && (out.len() >= limit_rows || next_bytes > limit_bytes) {
+                    break;
+                }
+                bytes = next_bytes;
+                out.push((key, value));
+                if out.len() >= limit_rows || bytes >= limit_bytes {
+                    break;
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Next keys after `after`, in key order. Values are not kept.
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn read_keys<T>(
+        &self,
+        after: Option<T::Key>,
+        limit: usize,
+    ) -> eyre::Result<Vec<T::Key>>
+    where
+        T: reth_db::table::Table,
+        T::Key: Copy + Ord,
+    {
+        use reth_db::cursor::DbCursorRO as _;
+        use reth_db::transaction::DbTx as _;
+
+        let limit = limit.max(1);
+        self.env.view_eyre(|tx| {
+            let mut cursor = tx.cursor_read::<T>()?;
+            let walker = cursor.walk(after)?;
+            let mut out = Vec::new();
+            for entry in walker {
+                let (key, _) = entry?;
+                if after.is_some_and(|prev| key <= prev) {
+                    continue;
+                }
+                out.push(key);
+                if out.len() == limit {
+                    break;
+                }
+            }
+            Ok(out)
         })
     }
 

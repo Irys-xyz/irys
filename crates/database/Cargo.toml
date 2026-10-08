@@ -42,6 +42,11 @@ required-features = ["rocksdb"]
 name = "submodule-index-migrate"
 path = "src/bin/submodule_index_migrate.rs"
 
+[[bin]]
+name = "submodule-index-convert"
+path = "src/bin/submodule_index_convert.rs"
+required-features = ["rocksdb"]
+
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true

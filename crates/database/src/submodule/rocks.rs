@@ -24,6 +24,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -915,7 +916,7 @@ impl std::fmt::Debug for RocksSubmoduleStore {
 
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_inner(path, RocksTuning::baseline(), true, false, None)
+        Self::open_inner(path, RocksTuning::baseline(), true, false, None, true)
     }
 
     /// Same open as [`Self::open`], with a private block cache.
@@ -935,7 +936,7 @@ impl RocksSubmoduleStore {
 
     /// Open with an explicit preset. [`Self::open`] stays on the baseline.
     pub fn open_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, false, false, None)
+        Self::open_inner(path, tuning, false, false, None, true)
     }
 
     /// Bench open. Same table cache as [`Self::open`], and it skips the
@@ -943,7 +944,7 @@ impl RocksSubmoduleStore {
     ///
     /// Histograms and timers stay off.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, true, true, None)
+        Self::open_inner(path, tuning, true, true, None, true)
     }
 
     /// Baseline open on an explicit resource set.
@@ -954,12 +955,28 @@ impl RocksSubmoduleStore {
         path: impl AsRef<Path>,
         resources: Arc<RocksResources>,
     ) -> eyre::Result<Self> {
-        Self::open_inner(path, RocksTuning::baseline(), true, false, Some(resources))
+        Self::open_inner(
+            path,
+            RocksTuning::baseline(),
+            true,
+            false,
+            Some(resources),
+            true,
+        )
     }
 
     /// `true` when this database uses a shared cache and write-buffer manager.
     pub fn uses_shared_resources(&self) -> bool {
         self.resources.is_some()
+    }
+
+    /// Opens a conversion target. Does not write the SCHEMA file or the schema row.
+    ///
+    /// [`Self::stamp_schema_marker`] writes both after the copy is durable.
+    /// A crash before that leaves `CURRENT` and no SCHEMA file. [`Self::open`]
+    /// refuses that directory.
+    pub(super) fn open_converting(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        Self::open_inner(path, RocksTuning::baseline(), true, false, None, false)
     }
 
     /// Open a schema-v1 directory for point reads of `ChunkPathHashesByOffset`.
@@ -1056,9 +1073,20 @@ impl RocksSubmoduleStore {
         collect_stats: bool,
         preload_tables: bool,
         resources: Option<Arc<RocksResources>>,
+        stamp_schema: bool,
     ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        check_schema_file(&path)?;
+        if stamp_schema {
+            // A directory with CURRENT and no SCHEMA is a crashed conversion
+            // or a crashed first open. Stamping it here would hide missing rows.
+            refuse_incomplete_directory(&path)?;
+            check_schema_file(&path)?;
+        } else if path.join(SCHEMA_FILE).is_file() {
+            eyre::bail!(
+                "refusing to convert into completed rocks index {}",
+                path.display()
+            );
+        }
         let resources = shared_resources_for(tuning, resources)?;
         let (db, stats) = open_db(
             &path,
@@ -1067,10 +1095,12 @@ impl RocksSubmoduleStore {
             preload_tables,
             resources.as_deref(),
         )?;
-        ensure_schema_row(&db)?;
-        let marker = path.join(SCHEMA_FILE);
-        if !marker.exists() {
-            fs::write(&marker, SCHEMA_TEXT).wrap_err("write schema marker")?;
+        if stamp_schema {
+            ensure_schema_row(&db)?;
+            let marker = path.join(SCHEMA_FILE);
+            if !marker.exists() {
+                fs::write(&marker, SCHEMA_TEXT).wrap_err("write schema marker")?;
+            }
         }
         let group = GroupCommit::new();
         let db = Arc::new(db);
@@ -1090,6 +1120,121 @@ impl RocksSubmoduleStore {
             path,
             stats,
         })
+    }
+
+    /// Syncs the copied rows, writes the schema row, then the SCHEMA file.
+    ///
+    /// The file is last. A crash before the rename leaves no completion marker.
+    pub(super) fn stamp_schema_marker(&self) -> eyre::Result<()> {
+        let _guard = self.lock_write();
+        self.db
+            .flush_wal(true)
+            .wrap_err("sync wal before schema marker")?;
+        ensure_schema_row(&self.db)?;
+        write_schema_marker_file(&self.path)
+    }
+
+    pub(super) fn schema_bytes(&self) -> eyre::Result<Option<Vec<u8>>> {
+        let handle = cf_handle(&self.db, Cf::Metadata)?;
+        let key = encode_key(MetadataKey::DBSchemaVersion);
+        match self.db.get_cf(&handle, key).wrap_err("read schema row")? {
+            Some(bytes) => Ok(Some(Vec::<u8>::decompress(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Next rows after `after`, in key order. A single oversized value is
+    /// still returned so the caller moves forward.
+    pub(super) fn read_cf_batch<K, V, F>(
+        &self,
+        cf: &str,
+        after: Option<K>,
+        limit_rows: usize,
+        limit_bytes: usize,
+        value_len: F,
+    ) -> eyre::Result<Vec<(K, V)>>
+    where
+        K: Decode + Encode + Ord + Copy,
+        V: Decompress,
+        F: Fn(&V) -> usize,
+    {
+        let limit_rows = limit_rows.max(1);
+        let limit_bytes = limit_bytes.max(1);
+        let handle = self
+            .db
+            .cf_handle(cf)
+            .ok_or_else(|| eyre::eyre!("missing column family {cf}"))?;
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        let encoded = after.map(encode_key);
+        let mode = match &encoded {
+            None => IteratorMode::Start,
+            Some(bytes) => IteratorMode::From(bytes.as_slice(), Direction::Forward),
+        };
+        let snap = self.db.snapshot();
+        let mut out = Vec::new();
+        let mut bytes_used = 0_usize;
+        for item in snap.iterator_cf_opt(handle, opts, mode) {
+            let (key, value) = item.wrap_err("scan rocksdb row")?;
+            let key =
+                K::decode(key.as_ref()).map_err(|err| eyre::eyre!("decode key in {cf}: {err}"))?;
+            if after.is_some_and(|prev| key <= prev) {
+                continue;
+            }
+            let value = V::decompress(value.as_ref())
+                .map_err(|err| eyre::eyre!("decode value in {cf}: {err}"))?;
+            let next_bytes = bytes_used.saturating_add(value_len(&value));
+            if !out.is_empty() && (out.len() >= limit_rows || next_bytes > limit_bytes) {
+                break;
+            }
+            bytes_used = next_bytes;
+            out.push((key, value));
+            if out.len() >= limit_rows || bytes_used >= limit_bytes {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Next keys after `after`. Values are not read.
+    pub(super) fn read_cf_keys<K>(
+        &self,
+        cf: &str,
+        after: Option<K>,
+        limit: usize,
+    ) -> eyre::Result<Vec<K>>
+    where
+        K: Decode + Encode + Ord + Copy,
+    {
+        let limit = limit.max(1);
+        let handle = self
+            .db
+            .cf_handle(cf)
+            .ok_or_else(|| eyre::eyre!("missing column family {cf}"))?;
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        let encoded = after.map(encode_key);
+        let snap = self.db.snapshot();
+        let mut iter = snap.raw_iterator_cf_opt(handle, opts);
+        match &encoded {
+            None => iter.seek_to_first(),
+            Some(bytes) => iter.seek(bytes),
+        }
+        let mut out = Vec::new();
+        while out.len() < limit {
+            let Some(key_bytes) = iter.key() else {
+                break;
+            };
+            let key =
+                K::decode(key_bytes).map_err(|err| eyre::eyre!("decode key in {cf}: {err}"))?;
+            iter.next();
+            if after.is_some_and(|prev| key <= prev) {
+                continue;
+            }
+            out.push(key);
+        }
+        iter.status().wrap_err("scan rocksdb keys")?;
+        Ok(out)
     }
 
     pub(super) fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
@@ -2273,12 +2418,49 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
     opts
 }
 
+/// `CURRENT` without SCHEMA is an unfinished conversion. Open must not
+/// create the marker, or the node would serve a partial index.
+fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
+    if path.join(SCHEMA_FILE).exists() {
+        return Ok(());
+    }
+    if path.join("CURRENT").is_file() {
+        eyre::bail!(
+            "submodule index {} has RocksDB files but no SCHEMA marker, so the conversion is incomplete. Delete this directory and rerun `submodule-index-convert mdbx-to-rocks` with --replace-incomplete. Do not start the node on it. If a completed rocks/ index has rows written after the switch, rollback is `submodule-index-convert rocks-to-mdbx`.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn check_schema_file(path: &Path) -> eyre::Result<()> {
     let marker = path.join(SCHEMA_FILE);
     if !marker.exists() {
         return Ok(());
     }
     check_schema_text(path, SCHEMA_TEXT)
+}
+
+/// Writes SCHEMA via a temp file and a rename, after the bytes are synced.
+fn write_schema_marker_file(dir: &Path) -> eyre::Result<()> {
+    let tmp = dir.join("SCHEMA.tmp");
+    let final_path = dir.join(SCHEMA_FILE);
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .wrap_err("create schema marker")?;
+        file.write_all(SCHEMA_TEXT.as_bytes())
+            .wrap_err("write schema marker")?;
+        file.sync_all().wrap_err("sync schema marker")?;
+    }
+    fs::rename(&tmp, &final_path).wrap_err("rename schema marker")?;
+    if let Ok(dir_file) = fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+    Ok(())
 }
 
 fn check_schema_text(path: &Path, expected: &str) -> eyre::Result<()> {

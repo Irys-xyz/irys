@@ -17,6 +17,13 @@ use std::fmt;
 /// only when the new rows are complete. Any other row is refused.
 pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 
+/// Metadata row written while a conversion into MDBX is still copying.
+///
+/// Open refuses this value. The converter replaces it with
+/// [`SUBMODULE_SCHEMA`] only after every row is durable. A crash leaves
+/// this row, so the directory is incomplete and must be deleted and redone.
+pub const SUBMODULE_CONVERT_INCOMPLETE: &str = "irys-submodule-index convert-incomplete\n";
+
 // Per-submodule database tables
 tables! {
     SubmoduleTables;

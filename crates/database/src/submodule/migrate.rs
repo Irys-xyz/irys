@@ -22,8 +22,8 @@ use crate::metadata::MetadataKey;
 
 use super::tables::v1::ChunkDataPathByPathHash;
 use super::tables::{
-    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, Metadata, SUBMODULE_SCHEMA,
-    TxPathInterval, TxPathIntervalByStart,
+    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, Metadata,
+    SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, TxPathInterval, TxPathIntervalByStart,
 };
 
 const PROGRESS_PREFIX: &str = "irys-submodule-index migrate-v1 ";
@@ -161,6 +161,12 @@ pub(super) fn ensure_mdbx_schema(
         SchemaRow::Foreign => {
             eyre::bail!(
                 "submodule index schema row does not match this binary ({})",
+                path.display()
+            );
+        }
+        SchemaRow::ConvertIncomplete => {
+            eyre::bail!(
+                "submodule index {} is an incomplete MDBX conversion and has no completion marker. Delete this directory and rerun `submodule-index-convert rocks-to-mdbx` with --replace-incomplete. Do not start the node on it. The RocksDB source is unchanged. If a completed rocks/ index has rows written after the switch, that command is also the rollback.",
                 path.display()
             );
         }
@@ -633,6 +639,8 @@ enum SchemaRow {
     Absent,
     Current,
     Foreign,
+    /// `submodule-index-convert` is copying into this directory.
+    ConvertIncomplete,
     Progress(Progress),
 }
 
@@ -642,6 +650,9 @@ fn classify(bytes: &Option<Vec<u8>>) -> SchemaRow {
     };
     if bytes.as_slice() == SUBMODULE_SCHEMA.as_bytes() {
         return SchemaRow::Current;
+    }
+    if bytes.as_slice() == SUBMODULE_CONVERT_INCOMPLETE.as_bytes() {
+        return SchemaRow::ConvertIncomplete;
     }
     match decode_progress(bytes) {
         Some(progress) => SchemaRow::Progress(progress),
