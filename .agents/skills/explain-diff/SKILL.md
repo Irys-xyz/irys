@@ -140,7 +140,7 @@ Result: delta semantics plus a ranked review-focus map; ends by offering a dedic
 
 ## CI mode (Irys addendum)
 
-`.github/workflows/pr-explain.yml` runs this skill headlessly against a pull request when it is opened and again when it is merged. The workflow, not the skill, owns everything that would otherwise need a terminal or a network call, so in CI mode the steps above change in exactly four places.
+`.github/workflows/pr-explain.yml` runs this skill headlessly against one pull request when someone starts it by hand (`workflow_dispatch`). The workflow, not the skill, owns everything that would otherwise need a terminal or a network call, so in CI mode the steps above change in exactly four places.
 
 **Inputs arrive as files, not commands.** The workflow writes the PR's unified diff, its title and description, and its commit messages into `.pr-explain/` and names those files in the prompt. Read them instead of running `git diff`, `git log`, `gh pr view` or `gh pr diff`; do not fetch anything from the network. The diff is the GitHub API's view of the PR (base merge-base to head), so it is the same artefact `gh pr diff` would produce.
 

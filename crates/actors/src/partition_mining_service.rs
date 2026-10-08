@@ -14,8 +14,8 @@ use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    Base64, ChunkDataPath, Config, H256List, PartitionChunkOffset, PartitionChunkRange,
-    ProofDeserialize as _, SendTraced as _, TokioServiceHandle, TxPath, U256,
+    Base64, ChunkDataPath, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
+    PartitionChunkRange, ProofDeserialize as _, SendTraced as _, TokioServiceHandle, TxPath, U256,
     block_production::{Seed, SolutionContext},
     get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
 };
@@ -57,6 +57,10 @@ pub struct PartitionMiningServiceInner {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStateReadonly,
+    /// Path lookups this miner issued. Proves a non-winning recall does not
+    /// open the index.
+    #[cfg(test)]
+    data_path_lookups: std::sync::atomic::AtomicU64,
 }
 
 /// Fresh recall-range rotation state sized for the partition.
@@ -86,6 +90,8 @@ impl PartitionMiningServiceInner {
             difficulty: initial_difficulty,
             ranges: fresh_ranges(&config.consensus),
             steps_guard,
+            #[cfg(test)]
+            data_path_lookups: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -334,7 +340,13 @@ impl PartitionMiningServiceInner {
         offset: PartitionChunkOffset,
         chunk_bytes: &[u8],
     ) -> Option<(TxPath, ChunkDataPath)> {
-        let paths = match self.storage_module.read_tx_data_paths(offset, offset) {
+        #[cfg(test)]
+        self.data_path_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (tx_path, data_path) = match self
+            .storage_module
+            .read_tx_data_path(LedgerChunkOffset::from(*offset))
+        {
             Ok(paths) => paths,
             Err(error) => {
                 warn!(
@@ -346,7 +358,7 @@ impl PartitionMiningServiceInner {
                 return None;
             }
         };
-        let Some((Some(tx_path), Some(data_path))) = paths.get(&offset).cloned() else {
+        let (Some(tx_path), Some(data_path)) = (tx_path, data_path) else {
             warn!(
                 storage_module.id = self.storage_module.id,
                 chunk_offset = offset.0,
@@ -501,6 +513,16 @@ impl PartitionMiningServiceInner {
     ) -> Option<SolutionContext> {
         self.mine_partition_with_seed(mining_seed, vdf_step, checkpoints)
             .expect("test_mine_partition_with_seed failed")
+    }
+
+    fn clear_data_path_lookups(&self) {
+        self.data_path_lookups
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn data_path_lookup_count(&self) -> u64 {
+        self.data_path_lookups
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -854,7 +876,6 @@ mod tests {
         };
         let storage_module =
             Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
-        let views = Arc::clone(&storage_module);
 
         // Pack offsets 1..10 as Entropy, leaving offset 0 Uninitialized (the hole).
         let chunk = vec![0_u8; config.consensus.chunk_size as usize];
@@ -915,9 +936,9 @@ mod tests {
             "solution hash must be over the true offset"
         );
         assert_eq!(
-            views.index_view_count(),
+            inner.data_path_lookup_count(),
             0,
-            "an entropy win reads no index view"
+            "an entropy win reads no proof path"
         );
     }
 
@@ -929,6 +950,20 @@ mod tests {
     fn open_data_miner(
         difficulty: U256,
         indexed: bool,
+    ) -> (
+        irys_testing_utils::utils::tempfile::TempDir,
+        Arc<StorageModule>,
+        PartitionMiningServiceInner,
+    ) {
+        open_data_miner_with_tx_data(difficulty, indexed, None)
+    }
+
+    /// `tx_data` replaces the four full chunks when `indexed` is set. The
+    /// partition stays [`DATA_CHUNKS`] long, so a short tail still has a slot.
+    fn open_data_miner_with_tx_data(
+        difficulty: U256,
+        indexed: bool,
+        tx_data: Option<Vec<u8>>,
     ) -> (
         irys_testing_utils::utils::tempfile::TempDir,
         Arc<StorageModule>,
@@ -988,7 +1023,16 @@ mod tests {
                 .force_sync_pending_chunks()
                 .expect("sync entropy");
             let signer = IrysSigner::random_signer(&config.consensus);
-            let data: Vec<u8> = (0..chunks as u8).flat_map(|byte| vec![byte; 32]).collect();
+            let data = tx_data.unwrap_or_else(|| {
+                (0..chunks as u8)
+                    .flat_map(|byte| vec![byte; chunk_size])
+                    .collect()
+            });
+            let tx_chunks = data.len().div_ceil(chunk_size) as u64;
+            assert!(
+                tx_chunks <= chunks,
+                "transaction chunks must fit the partition"
+            );
             let tx = signer
                 .sign_transaction(
                     signer
@@ -1003,7 +1047,7 @@ mod tests {
                 .index_transaction_data(
                     &tx.header,
                     &proofs[0].proof,
-                    LedgerChunkRange(ledger_chunk_offset_ii!(0, chunks - 1)),
+                    LedgerChunkRange(ledger_chunk_offset_ii!(0, tx_chunks - 1)),
                     0,
                 )
                 .expect("index transaction");
@@ -1047,14 +1091,14 @@ mod tests {
     }
 
     #[test]
-    fn data_recall_with_no_solution_opens_no_index_view() {
-        let (_tmp, storage, mut inner) = open_data_miner(U256::MAX, true);
-        storage.clear_index_view_count();
+    fn data_recall_with_no_solution_reads_no_proof_path() {
+        let (_tmp, _storage, mut inner) = open_data_miner(U256::MAX, true);
+        inner.clear_data_path_lookups();
         assert!(
             mine_once(&mut inner).is_none(),
             "only an all-0xff hash meets U256::MAX"
         );
-        assert_eq!(storage.index_view_count(), 0);
+        assert_eq!(inner.data_path_lookup_count(), 0);
     }
 
     #[test]
@@ -1062,13 +1106,11 @@ mod tests {
         let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), true);
         let offset = PartitionChunkOffset::from(0);
         let (expected_tx, expected_data) = storage
-            .read_tx_data_paths(offset, offset)
-            .expect("pre-read paths")
-            .remove(&offset)
-            .expect("offset 0 is indexed");
+            .read_tx_data_path(LedgerChunkOffset::from(*offset))
+            .expect("pre-read paths");
         let expected_tx = expected_tx.expect("tx path");
         let expected_data = expected_data.expect("data path");
-        storage.clear_index_view_count();
+        inner.clear_data_path_lookups();
 
         let solution = mine_once(&mut inner).expect("difficulty 0 finds the first chunk");
         assert_eq!(solution.chunk_offset, 0);
@@ -1078,22 +1120,22 @@ mod tests {
             Some(expected_data.as_slice())
         );
         assert_eq!(
-            storage.index_view_count(),
+            inner.data_path_lookup_count(),
             1,
-            "one winning offset opens one view"
+            "one winning offset opens one path read"
         );
     }
 
     #[test]
     fn winning_data_chunk_with_no_stored_path_submits_nothing() {
-        let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), false);
-        storage.clear_index_view_count();
+        let (_tmp, _storage, mut inner) = open_data_miner(U256::zero(), false);
+        inner.clear_data_path_lookups();
         assert!(
             mine_once(&mut inner).is_none(),
             "a data win with empty paths is not submitted"
         );
         assert_eq!(
-            storage.index_view_count(),
+            inner.data_path_lookup_count(),
             DATA_CHUNKS,
             "each data chunk is looked up, then skipped"
         );
@@ -1103,13 +1145,17 @@ mod tests {
     fn winning_data_chunk_whose_leaf_does_not_bind_submits_nothing() {
         let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), true);
         let end = PartitionChunkOffset::from(DATA_CHUNKS - 1);
-        let before = storage
-            .read_tx_data_paths(PartitionChunkOffset::from(0), end)
-            .expect("paths before overwrite");
-        assert_eq!(before.len(), DATA_CHUNKS as usize);
+        let mut before = Vec::new();
+        for offset in 0..=*end {
+            before.push(
+                storage
+                    .read_tx_data_path(LedgerChunkOffset::from(offset))
+                    .expect("path before overwrite"),
+            );
+        }
         assert!(
             before
-                .values()
+                .iter()
                 .all(|(tx_path, data_path)| tx_path.is_some() && data_path.is_some())
         );
         let garbage = vec![0xA5_u8; 32];
@@ -1123,18 +1169,62 @@ mod tests {
         storage
             .force_sync_pending_chunks()
             .expect("sync overwritten bytes");
-        let after = storage
-            .read_tx_data_paths(PartitionChunkOffset::from(0), end)
-            .expect("paths after overwrite");
-        assert_eq!(
-            after, before,
-            "overwriting chunk bytes must leave the stored paths in place"
-        );
-        storage.clear_index_view_count();
+        for (offset, expected) in before.iter().enumerate() {
+            let after = storage
+                .read_tx_data_path(LedgerChunkOffset::from(offset as u32))
+                .expect("path after overwrite");
+            assert_eq!(
+                &after, expected,
+                "overwriting chunk bytes must leave the stored paths in place"
+            );
+        }
+        inner.clear_data_path_lookups();
         assert!(
             mine_once(&mut inner).is_none(),
             "a data win whose leaf does not bind the recall bytes is not submitted"
         );
-        assert_eq!(storage.index_view_count(), DATA_CHUNKS);
+        assert_eq!(inner.data_path_lookup_count(), DATA_CHUNKS);
+    }
+
+    #[test]
+    fn short_final_chunk_binds_its_prefix_only() {
+        let chunk_size = 32_usize;
+        let tail = 10_usize;
+        let mut data = Vec::new();
+        for byte in 0..3_u8 {
+            data.extend(std::iter::repeat_n(byte, chunk_size));
+        }
+        data.extend(std::iter::repeat_n(0x5A, tail));
+        let (_tmp, storage, inner) = open_data_miner_with_tx_data(U256::zero(), true, Some(data));
+        let offset = PartitionChunkOffset::from(3);
+        let read = storage
+            .read_chunks(partition_chunk_offset_ie!(3, 4))
+            .expect("read the short chunk");
+        let (chunk_bytes, chunk_type) = read.get(&offset).expect("offset 3");
+        assert_eq!(*chunk_type, ChunkType::Data);
+        assert_eq!(chunk_bytes.len(), chunk_size);
+        let (_, data_path) = storage
+            .read_tx_data_path(LedgerChunkOffset::from(*offset))
+            .expect("path read");
+        let data_path = data_path.expect("data path");
+
+        assert!(
+            inner.data_path_binds_chunk(offset, chunk_bytes, &data_path),
+            "the stored short chunk matches its leaf"
+        );
+
+        let mut prefix = chunk_bytes.clone();
+        prefix[0] ^= 0x01;
+        assert!(
+            !inner.data_path_binds_chunk(offset, &prefix, &data_path),
+            "a byte inside the hashed prefix must not bind"
+        );
+
+        let mut past_span = chunk_bytes.clone();
+        past_span[tail] ^= 0x01;
+        assert!(
+            inner.data_path_binds_chunk(offset, &past_span, &data_path),
+            "a byte past the short span is not part of the leaf"
+        );
     }
 }

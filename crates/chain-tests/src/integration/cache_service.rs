@@ -18,6 +18,8 @@ use tracing::info;
 #[test_log::test(tokio::test)]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
+    // Pre-Cascade expiry: the block counts below expire slot 0 by allocation age.
+    config.consensus.get_mut().hardforks.cascade = None;
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().num_chunks_in_partition = 10;
     config.consensus.get_mut().block_migration_depth = 2;

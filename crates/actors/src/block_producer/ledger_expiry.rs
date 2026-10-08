@@ -4185,7 +4185,8 @@ mod tests {
     fn expired_submit_range_none_when_expired_slots_hold_no_chunks() -> eyre::Result<()> {
         // No Cascade config: the pre-Cascade gate is transparent, so an
         // unwritten, aged, non-last slot recycles by allocation age alone.
-        let node_config = NodeConfig::testing();
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().hardforks.cascade = None;
         let config = Config::new_with_random_peer_id(node_config);
         let mut epoch = empty_epoch_snapshot(&config);
         epoch.ledgers[DataLedger::Submit].allocate_slots(2, 1);

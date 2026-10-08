@@ -37,7 +37,6 @@
 //! - Storage Module handles mapping of partition chunk offsets to appropriate submodule
 
 use std::os::unix::fs::FileExt as _;
-use std::os::unix::io::AsRawFd as _;
 
 use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
@@ -857,6 +856,57 @@ fn open_mdbx_index(path: &Path, config: &Config) -> eyre::Result<SubmoduleIndex>
     })
 }
 
+// libc binds both `posix_fadvise` and `POSIX_FADV_RANDOM` on these targets.
+// Apple and the other BSDs do not. A missing advise must not stop the open.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "emscripten",
+    target_os = "l4re",
+    target_os = "freebsd",
+))]
+use std::os::unix::io::AsRawFd as _;
+
+/// `posix_fadvise(RANDOM)` for the whole file. Length 0 means from
+/// `offset` to the end. A failed advise is fatal: the descriptor would
+/// keep fetching past every large pread.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "emscripten",
+    target_os = "l4re",
+    target_os = "freebsd",
+))]
+fn advise_chunks_random(file: &File, path: &Path) -> eyre::Result<()> {
+    // Safety: `file` owns a live descriptor. The advice does not change bytes.
+    let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
+    if rc != 0 {
+        return Err(eyre!(
+            "posix_fadvise(POSIX_FADV_RANDOM) failed on {}: error {rc}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// This target has no `posix_fadvise` binding. The open continues, and
+/// read-ahead stays at the kernel default.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "emscripten",
+    target_os = "l4re",
+    target_os = "freebsd",
+)))]
+fn advise_chunks_random(_file: &File, path: &Path) -> eyre::Result<()> {
+    warn!(
+        path = %path.display(),
+        os = std::env::consts::OS,
+        "posix_fadvise(POSIX_FADV_RANDOM) is not available; chunks.dat keeps the kernel read-ahead"
+    );
+    Ok(())
+}
+
 impl StorageModule {
     /// Initializes a new StorageModule. The index engine comes from
     /// `config.node_config.database.submodule_index`.
@@ -1214,7 +1264,7 @@ impl StorageModule {
                     .recall
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                Self::advise_random(&recall)
+                advise_chunks_random(&recall, Path::new("split recall"))
                     .wrap_err("Failed to disable read-ahead on the recall file")?;
             }
             {
@@ -1222,7 +1272,7 @@ impl StorageModule {
                     .write
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                Self::advise_random(&write)
+                advise_chunks_random(&write, Path::new("split write"))
                     .wrap_err("Failed to disable read-ahead on the write file")?;
             }
             return Ok(OpenedChunkFile {
@@ -1252,12 +1302,7 @@ impl StorageModule {
         // so one advise covers recall, entropy, and serve. A large buffered
         // read otherwise fetches past its range by the device's maximum
         // request size.
-        Self::advise_random(&chunks_file).wrap_err_with(|| {
-            format!(
-                "Failed to disable read-ahead on chunks file: {}",
-                path.display()
-            )
-        })?;
+        advise_chunks_random(&chunks_file, &path)?;
         Ok(OpenedChunkFile {
             file: Arc::new(Mutex::new(chunks_file)),
             #[cfg(feature = "bench")]
@@ -3178,44 +3223,54 @@ impl StorageModule {
         }
     }
 
-    /// `posix_fadvise(RANDOM)` for the whole file. Length 0 means from
-    /// `offset` to the end. A failed advise is fatal: the descriptor would
-    /// keep fetching past every large pread.
-    fn advise_random(file: &File) -> eyre::Result<()> {
-        // Safety: `file` owns a live descriptor. The advice does not change bytes.
-        let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
-        if rc != 0 {
-            return Err(eyre!("posix_fadvise(POSIX_FADV_RANDOM) failed: error {rc}"));
-        }
-        Ok(())
-    }
-
     /// `posix_fadvise(DONTNEED)` on one copied recall range. A failed advise
     /// leaves the recall result intact: the bytes are already in memory.
+    /// Targets without `posix_fadvise` skip the drop.
     fn advise_dontneed(&self, file: &File, offset: u64, len: u64) {
         if len == 0 {
             return;
         }
-        let (Ok(offset), Ok(len)) = (i64::try_from(offset), i64::try_from(len)) else {
-            warn!("recall page cache drop skipped a range that does not fit off_t");
-            return;
-        };
-        // Safety: `file` owns a live descriptor. The advice does not change bytes.
-        let rc = unsafe {
-            libc::posix_fadvise(
-                file.as_raw_fd(),
-                offset as libc::off_t,
-                len as libc::off_t,
-                libc::POSIX_FADV_DONTNEED,
-            )
-        };
-        if rc != 0 {
-            warn!("recall page cache drop failed at file offset {offset} length {len}: error {rc}");
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "emscripten",
+            target_os = "l4re",
+            target_os = "freebsd",
+        )))]
+        {
+            let _ = (self, file, offset);
         }
-        // Count only a drop that `posix_fadvise` accepted.
-        #[cfg(test)]
-        if rc == 0 {
-            self.disk.recall_cache_drops.fetch_add(1, Ordering::SeqCst);
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "emscripten",
+            target_os = "l4re",
+            target_os = "freebsd",
+        ))]
+        {
+            let (Ok(offset), Ok(len)) = (i64::try_from(offset), i64::try_from(len)) else {
+                warn!("recall page cache drop skipped a range that does not fit off_t");
+                return;
+            };
+            // Safety: `file` owns a live descriptor. The advice does not change bytes.
+            let rc = unsafe {
+                libc::posix_fadvise(
+                    file.as_raw_fd(),
+                    offset as libc::off_t,
+                    len as libc::off_t,
+                    libc::POSIX_FADV_DONTNEED,
+                )
+            };
+            if rc != 0 {
+                warn!(
+                    "recall page cache drop failed at file offset {offset} length {len}: error {rc}"
+                );
+            }
+            // Count only a drop that `posix_fadvise` accepted.
+            #[cfg(test)]
+            if rc == 0 {
+                self.disk.recall_cache_drops.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 

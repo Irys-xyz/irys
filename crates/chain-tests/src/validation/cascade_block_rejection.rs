@@ -22,6 +22,7 @@ use irys_types::{DataLedger, DataTransactionLedger, H256, H256List, NodeConfig, 
 async fn heavy_cascade_block_rejects_invalid_term_ledger_metadata() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing().with_consensus(|c| {
         c.chunk_size = 32;
+        c.hardforks.cascade = None;
     });
 
     // Ensure no Cascade hardfork
