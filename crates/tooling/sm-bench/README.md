@@ -276,7 +276,7 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | `--rocks-block-cache BYTES` | preset size | Replaces the preset block cache. Refused unless `--index-engine rocks`. `0` is an error |
 | `--seed` | 1 | Recall, ingest, and serve RNGs |
 | `--create-small BYTES` | unset | Create both files at this size for a local smoke run. Multiple of 262144. The recall file is mode `0444` |
-| `--num-writes-before-sync` | 1000 | Production sync cadence |
+| `--num-writes-before-sync` | 100 | Production sync cadence |
 | `--entropy-sweep-max-bytes` | 262144 | One entropy pread is one chunk |
 | `--ingest-mix` | `1:40,4:25,16:20,64:10,256:5` | `chunks:weight` list |
 | `--serve-seq-chunks` | 8 | Longest sequential serve read |

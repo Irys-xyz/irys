@@ -105,7 +105,7 @@ struct Args {
     /// Create missing recall and write files at this exact size. A multiple of 256 KiB.
     #[arg(long)]
     create_small: Option<u64>,
-    #[arg(long, default_value_t = 1_000)]
+    #[arg(long, default_value_t = 100)]
     num_writes_before_sync: u64,
     /// Seconds between completion rewrites of `intervals.json`.
     /// Write-ahead `Interrupted` marks stay immediate. `0` rewrites on every sync.

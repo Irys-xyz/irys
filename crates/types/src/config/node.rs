@@ -523,7 +523,7 @@ pub struct StorageSyncConfig {
 impl Default for StorageSyncConfig {
     fn default() -> Self {
         Self {
-            num_writes_before_sync: 1_000,
+            num_writes_before_sync: 100,
             max_pending_write_bytes: None,
             entropy_sweep_interval_millis: default_entropy_sweep_interval_millis(),
             entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),

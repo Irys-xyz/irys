@@ -63,7 +63,7 @@ public_port = 30303
 bind_port = 30303
 
 [storage]
-num_writes_before_sync = 1000
+num_writes_before_sync = 100
 # Seconds between completion rewrites of intervals.json. Write-ahead
 # Interrupted marks are still immediate. 0 rewrites on every sync.
 intervals_persist_secs = 30
