@@ -94,6 +94,10 @@ struct Args {
     /// Replace the preset block cache, in bytes. Requires `--index-engine rocks`.
     #[arg(long)]
     rocks_block_cache: Option<u64>,
+    /// Replace the preset small-file compact threshold. `0` turns the hook off.
+    /// Requires `--index-engine rocks`.
+    #[arg(long)]
+    rocks_small_file_compact_threshold: Option<u64>,
     /// Arm index group commit. MDBX syncs every N registrations. RocksDB
     /// does not sync on this count: the next synced write or the WAL
     /// backstop does.
@@ -210,12 +214,13 @@ fn resolve_index(
     engine: IndexEngine,
     preset: Option<&str>,
     block_cache: Option<u64>,
+    small_file_compact_threshold: Option<u64>,
 ) -> eyre::Result<BenchIndex> {
     match engine {
         IndexEngine::Mdbx => {
-            if preset.is_some() || block_cache.is_some() {
+            if preset.is_some() || block_cache.is_some() || small_file_compact_threshold.is_some() {
                 return Err(eyre!(
-                    "--rocks-preset and --rocks-block-cache require --index-engine rocks"
+                    "--rocks-preset, --rocks-block-cache, and --rocks-small-file-compact-threshold require --index-engine rocks"
                 ));
             }
             Ok(BenchIndex::Mdbx)
@@ -229,6 +234,12 @@ fn resolve_index(
                 let bytes = usize::try_from(bytes)
                     .map_err(|_| eyre!("--rocks-block-cache does not fit in usize"))?;
                 tuning = tuning.with_block_cache(bytes);
+            }
+            if let Some(threshold) = small_file_compact_threshold {
+                let threshold = usize::try_from(threshold).map_err(|_| {
+                    eyre!("--rocks-small-file-compact-threshold does not fit in usize")
+                })?;
+                tuning = tuning.with_small_file_compact_threshold(threshold);
             }
             Ok(BenchIndex::Rocks(tuning))
         }
@@ -334,6 +345,7 @@ fn run() -> eyre::Result<i32> {
         args.index_engine,
         args.rocks_preset.as_deref(),
         args.rocks_block_cache,
+        args.rocks_small_file_compact_threshold,
     )?;
 
     let mut opened = open_module(OpenRequest {
@@ -1173,8 +1185,9 @@ mod tests {
         );
         assert!(args.rocks_preset.is_none());
         assert!(args.rocks_block_cache.is_none());
+        assert!(args.rocks_small_file_compact_threshold.is_none());
         assert_eq!(
-            resolve_index(args.index_engine, None, None).unwrap(),
+            resolve_index(args.index_engine, None, None, None).unwrap(),
             BenchIndex::Mdbx
         );
     }
@@ -1186,6 +1199,7 @@ mod tests {
             preset.index_engine,
             preset.rocks_preset.as_deref(),
             preset.rocks_block_cache,
+            preset.rocks_small_file_compact_threshold,
         )
         .unwrap_err();
         assert!(
@@ -1198,6 +1212,20 @@ mod tests {
             cache.index_engine,
             cache.rocks_preset.as_deref(),
             cache.rocks_block_cache,
+            cache.rocks_small_file_compact_threshold,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("require --index-engine rocks"),
+            "{err}"
+        );
+
+        let threshold = parsed(&["--rocks-small-file-compact-threshold", "8"]);
+        let err = resolve_index(
+            threshold.index_engine,
+            threshold.rocks_preset.as_deref(),
+            threshold.rocks_block_cache,
+            threshold.rocks_small_file_compact_threshold,
         )
         .unwrap_err();
         assert!(
@@ -1213,6 +1241,7 @@ mod tests {
             args.index_engine,
             args.rocks_preset.as_deref(),
             args.rocks_block_cache,
+            args.rocks_small_file_compact_threshold,
         )
         .unwrap() else {
             panic!("expected rocks");
@@ -1231,6 +1260,7 @@ mod tests {
             args.index_engine,
             args.rocks_preset.as_deref(),
             args.rocks_block_cache,
+            args.rocks_small_file_compact_threshold,
         )
         .unwrap() else {
             panic!("expected rocks");
@@ -1241,19 +1271,83 @@ mod tests {
     }
 
     #[test]
+    fn rocks_small_file_compact_threshold_overrides_the_preset() {
+        let args = parsed(&[
+            "--index-engine",
+            "rocks",
+            "--rocks-preset",
+            "fdatasync-wal-rotate-compact",
+            "--rocks-small-file-compact-threshold",
+            "4",
+        ]);
+        assert_eq!(args.rocks_small_file_compact_threshold, Some(4));
+        let BenchIndex::Rocks(tuning) = resolve_index(
+            args.index_engine,
+            args.rocks_preset.as_deref(),
+            args.rocks_block_cache,
+            args.rocks_small_file_compact_threshold,
+        )
+        .unwrap() else {
+            panic!("expected rocks");
+        };
+        let preset = RocksTuning::preset("fdatasync-wal-rotate-compact").unwrap();
+        assert_eq!(tuning.name, preset.name);
+        assert_eq!(tuning.small_file_compact_threshold, 4);
+        assert_ne!(preset.small_file_compact_threshold, 4);
+        assert_eq!(tuning.use_fsync, preset.use_fsync);
+        assert_eq!(tuning.max_total_wal_size, preset.max_total_wal_size);
+        assert_eq!(tuning.block_cache_bytes, preset.block_cache_bytes);
+        assert!(
+            tuning.describe().contains("small_file_compact_threshold=4"),
+            "{}",
+            tuning.describe()
+        );
+
+        let off = parsed(&[
+            "--index-engine",
+            "rocks",
+            "--rocks-preset",
+            "fdatasync-wal-rotate-compact",
+            "--rocks-small-file-compact-threshold",
+            "0",
+        ]);
+        let BenchIndex::Rocks(tuning) = resolve_index(
+            off.index_engine,
+            off.rocks_preset.as_deref(),
+            off.rocks_block_cache,
+            off.rocks_small_file_compact_threshold,
+        )
+        .unwrap() else {
+            panic!("expected rocks");
+        };
+        assert_eq!(tuning.small_file_compact_threshold, 0);
+        assert!(tuning.describe().contains("small_file_compact_threshold=0"));
+    }
+
+    #[test]
     fn every_shared_preset_parses_and_bad_values_fail() {
         for name in RocksTuning::preset_names().split(", ") {
             let args = parsed(&["--index-engine", "rocks", "--rocks-preset", name]);
-            let BenchIndex::Rocks(tuning) =
-                resolve_index(args.index_engine, args.rocks_preset.as_deref(), None).unwrap()
-            else {
+            let BenchIndex::Rocks(tuning) = resolve_index(
+                args.index_engine,
+                args.rocks_preset.as_deref(),
+                None,
+                args.rocks_small_file_compact_threshold,
+            )
+            .unwrap() else {
                 panic!("expected rocks");
             };
             assert_eq!(tuning.name, name);
         }
 
         let args = parsed(&["--index-engine", "rocks", "--rocks-preset", "nope"]);
-        let err = resolve_index(args.index_engine, args.rocks_preset.as_deref(), None).unwrap_err();
+        let err = resolve_index(
+            args.index_engine,
+            args.rocks_preset.as_deref(),
+            None,
+            args.rocks_small_file_compact_threshold,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unknown rocks preset"), "{err}");
 
         let args = parsed(&["--index-engine", "rocks", "--rocks-block-cache", "0"]);
@@ -1261,6 +1355,7 @@ mod tests {
             args.index_engine,
             args.rocks_preset.as_deref(),
             args.rocks_block_cache,
+            args.rocks_small_file_compact_threshold,
         )
         .unwrap_err();
         assert!(err.to_string().contains("greater than 0"), "{err}");

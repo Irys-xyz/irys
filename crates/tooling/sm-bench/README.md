@@ -274,6 +274,7 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 | `--index-engine` | `mdbx` | `mdbx` opens `--dir/db`. `rocks` opens `--dir/rocks`. A directory that already belongs to the other engine is refused |
 | `--rocks-preset` | `baseline` when the engine is `rocks` | Same names as `RocksTuning::presets`. Refused unless `--index-engine rocks` |
 | `--rocks-block-cache BYTES` | preset size | Replaces the preset block cache. Refused unless `--index-engine rocks`. `0` is an error |
+| `--rocks-small-file-compact-threshold N` | preset value | Replaces the preset per-CF small-file compact threshold. `0` turns the hook off. Refused unless `--index-engine rocks`. The resolved count is `small_file_compact_threshold` in the `rocks_tuning` text |
 | `--seed` | 1 | Recall, ingest, and serve RNGs |
 | `--create-small BYTES` | unset | Create both files at this size for a local smoke run. Multiple of 262144. The recall file is mode `0444` |
 | `--num-writes-before-sync` | 100 | Production sync cadence |
@@ -292,7 +293,7 @@ Rates are integers. `recall_num = 0` turns recall off. There is no float parser.
 
 `--out` receives:
 
-- `header.json` — git commit, dirty flag, rustc version, and the resolved settings, including `index_engine`, `index_dir`, `rocks_preset`, `rocks_tuning`, `rocks_block_cache_bytes`, and `judge_tail_secs`. The Rocks fields are null for MDBX. Written before the drivers start. Git data comes from `git` in the current directory. A failed git command records commit `unknown`.
+- `header.json` — git commit, dirty flag, rustc version, and the resolved settings, including `index_engine`, `index_dir`, `rocks_preset`, `rocks_tuning`, `rocks_block_cache_bytes`, and `judge_tail_secs`. `rocks_tuning` includes `small_file_compact_threshold` after any `--rocks-small-file-compact-threshold` override. The Rocks fields are null for MDBX. Written before the drivers start. Git data comes from `git` in the current directory. A failed git command records commit `unknown`.
 - `samples.jsonl` — one JSON object per second per driver (`recall`, `ingest`, `migration`, `serve`), including idle drivers. Latency fields are integer microseconds. The line is flushed as it is written.
 - `steps.jsonl` — one JSON object per line for the disk-time report. The first line is the run start (`kind` = `run`) with `realtime_ns` (`CLOCK_REALTIME`) and `monotonic_ns` (`CLOCK_MONOTONIC`), both nanoseconds. Each step then has `kind` = `step`, `index`, `name`, and `phase` of `start`, `drain`, or `end`, with the same two clocks. `start` is just before the step rate is published. `drain` is the start of the drain. `end` is after the drain, including the drain's index read. The scored sample lines do not include the drain. This file does.
 - `summary.json` — one object per step, plus `passed`, `exit_code`, and driver notes.

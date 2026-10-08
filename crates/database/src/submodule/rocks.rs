@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
 use irys_types::{
@@ -334,6 +334,13 @@ impl RocksTuning {
         self
     }
 
+    /// Replace the small-file compact threshold after a preset is chosen.
+    /// `0` leaves the hook off. The name stays.
+    pub fn with_small_file_compact_threshold(mut self, threshold: usize) -> Self {
+        self.small_file_compact_threshold = threshold;
+        self
+    }
+
     pub fn describe(self) -> String {
         let compression = if self.compress { "lz4" } else { "none" };
         let blob = if self.blobs {
@@ -572,10 +579,15 @@ fn compact_small_files(state: &CompactState, db: &DB, threshold: usize, submodul
         if before <= limit {
             continue;
         }
+        // Live SST bytes of this family before the rewrite. That is the
+        // input the compact reads.
+        let bytes = live_sst_bytes(db, handle);
+        let started = Instant::now();
         let mut opts = rocksdb::CompactOptions::default();
         opts.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::Force);
         opts.set_exclusive_manual_compaction(false);
         db.compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let after = live_sst_count(db, handle);
         state.compactions.fetch_add(1, Ordering::Relaxed);
         state.files_before.fetch_add(before, Ordering::Relaxed);
@@ -583,8 +595,10 @@ fn compact_small_files(state: &CompactState, db: &DB, threshold: usize, submodul
         tracing::info!(
             submodule,
             cf = cf.name(),
-            before,
-            after,
+            files_before = before,
+            files_after = after,
+            bytes,
+            elapsed_ms,
             "small-file compact_range"
         );
     }
@@ -600,6 +614,10 @@ fn live_sst_count(db: &DB, handle: &rocksdb::ColumnFamily) -> u64 {
         }
     }
     total
+}
+
+fn live_sst_bytes(db: &DB, handle: &rocksdb::ColumnFamily) -> u64 {
+    read_cf_u64(db, handle, rocksdb::properties::LIVE_SST_FILES_SIZE).unwrap_or(0)
 }
 
 #[derive(Clone)]
