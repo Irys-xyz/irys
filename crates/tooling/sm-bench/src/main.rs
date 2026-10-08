@@ -94,7 +94,9 @@ struct Args {
     /// Replace the preset block cache, in bytes. Requires `--index-engine rocks`.
     #[arg(long)]
     rocks_block_cache: Option<u64>,
-    /// Index registrations per fsync. Applies to both engines.
+    /// Arm index group commit. MDBX syncs every N registrations. RocksDB
+    /// does not sync on this count: the next synced write or the WAL
+    /// backstop does.
     ///
     /// `0` does not call `enable_index_group_commit` (that method rejects 0)
     /// and keeps one durable commit per registration.
@@ -1000,6 +1002,10 @@ fn rocks_delta(before: RocksIngestStats, after: RocksIngestStats) -> RocksStepSt
         pending_compaction_bytes: after.pending_compaction_bytes,
         flushes: after.flushes.saturating_sub(before.flushes),
         running_flushes: after.running_flushes,
+        wal_syncs: after.wal_syncs.saturating_sub(before.wal_syncs),
+        wal_backstop_syncs: after
+            .wal_backstop_syncs
+            .saturating_sub(before.wal_backstop_syncs),
     }
 }
 

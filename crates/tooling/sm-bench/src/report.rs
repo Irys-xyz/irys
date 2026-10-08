@@ -330,14 +330,18 @@ pub(crate) struct StepRow {
     pub tail: Option<TailWindow>,
 }
 
-/// RocksDB counters for one step. Stall time and flush count are deltas.
-/// Pending compaction bytes and running flushes are the gauge at step end.
+/// RocksDB counters for one step. Stall time, flush count, and WAL syncs are
+/// deltas. Pending compaction bytes and running flushes are the gauge at step end.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct RocksStepStats {
     pub write_stall_us: u64,
     pub pending_compaction_bytes: u64,
     pub flushes: u64,
     pub running_flushes: u64,
+    /// Synced WAL writes during the step, including backstop syncs.
+    pub wal_syncs: u64,
+    /// Backstop, explicit group sync, and shutdown WAL syncs during the step.
+    pub wal_backstop_syncs: u64,
 }
 
 #[derive(Serialize)]
@@ -673,11 +677,13 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
         ));
         if let Some(rocks) = row.rocks {
             out.push_str(&format!(
-                "rocks: stall={} pending_compaction_bytes={} flushes={} running_flushes={}\n",
+                "rocks: stall={} pending_compaction_bytes={} flushes={} running_flushes={} wal_syncs={} wal_backstop_syncs={}\n",
                 fmt_ms(rocks.write_stall_us),
                 rocks.pending_compaction_bytes,
                 rocks.flushes,
                 rocks.running_flushes,
+                rocks.wal_syncs,
+                rocks.wal_backstop_syncs,
             ));
         }
         if let Some(tail) = &row.tail {

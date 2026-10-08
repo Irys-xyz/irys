@@ -1,9 +1,11 @@
 //! Opt-in group commit for one submodule index.
 //!
 //! The group stays off until a caller enables it. A registration is visible
-//! when its write returns. The fsync waits for `txs_per_sync` registrations,
-//! a later durable write, an explicit sync, or 50 ms after the first unsynced
-//! write. The clock is [`Instant`]: this bound is in-process only.
+//! when its write returns. MDBX syncs every `txs_per_sync` registrations, on
+//! a later durable write, on an explicit sync, or 50 ms after the first
+//! unsynced write. RocksDB ignores that count. The next synced write on that
+//! database, the configured backstop, or clean shutdown makes the WAL
+//! durable. The clock is [`Instant`]: this bound is in-process only.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,8 +14,13 @@ use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
 
-/// How long a quiet index may leave a registration unsynced.
+/// How long a quiet MDBX index may leave a registration unsynced.
+///
+/// Also the pause after a failed sync, so a zero Rocks backstop cannot spin.
 const DELAY: Duration = Duration::from_millis(50);
+
+/// How long [`GroupCommit::wait_until_synced`] waits after the group stops.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// What `prepare` tells the store to do.
 pub(super) enum EnableStep {
@@ -29,6 +36,12 @@ pub(super) enum EnableStep {
 pub(super) struct GroupCommit {
     enabled: AtomicBool,
     syncs: AtomicU64,
+    /// Synced WAL writes. RocksDB only. Includes backstop syncs.
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    wal_syncs: AtomicU64,
+    /// Backstop thread, explicit `sync_group`, and shutdown WAL syncs.
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    backstop_syncs: AtomicU64,
     state: Mutex<State>,
     wake: Condvar,
 }
@@ -43,9 +56,16 @@ struct State {
     generation: u64,
     /// Registrations covered by a later sync.
     synced_generation: u64,
-    /// First unsynced registration in the open group. The 50 ms bound starts
+    /// First unsynced registration in the open group. The delay bound starts
     /// here and does not move forward when more writes arrive.
     dirty_since: Option<Instant>,
+    /// How long a quiet group waits. MDBX stays at [`DELAY`]. RocksDB sets
+    /// this from `index_wal_backstop_ms` before the delay thread starts.
+    delay: Duration,
+    /// [`GroupCommit::set_delay`] has run. Rocks enable uses its default
+    /// only when this is false, so a caller-supplied bound is kept.
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    delay_set: bool,
 }
 
 impl GroupCommit {
@@ -53,6 +73,8 @@ impl GroupCommit {
         Arc::new(Self {
             enabled: AtomicBool::new(false),
             syncs: AtomicU64::new(0),
+            wal_syncs: AtomicU64::new(0),
+            backstop_syncs: AtomicU64::new(0),
             state: Mutex::new(State {
                 stop: false,
                 spawned: false,
@@ -60,6 +82,8 @@ impl GroupCommit {
                 generation: 0,
                 synced_generation: 0,
                 dirty_since: None,
+                delay: DELAY,
+                delay_set: false,
             }),
             wake: Condvar::new(),
         })
@@ -72,6 +96,55 @@ impl GroupCommit {
     #[cfg(test)]
     pub(super) fn sync_count(&self) -> u64 {
         self.syncs.load(Ordering::Relaxed)
+    }
+
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    pub(super) fn wal_syncs(&self) -> u64 {
+        self.wal_syncs.load(Ordering::Relaxed)
+    }
+
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    pub(super) fn backstop_syncs(&self) -> u64 {
+        self.backstop_syncs.load(Ordering::Relaxed)
+    }
+
+    /// One `set_sync(true)` write or `flush_wal(true)` that is not the backstop.
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    pub(super) fn note_wal_sync(&self) {
+        self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One backstop, explicit group sync, or shutdown `flush_wal(true)`.
+    ///
+    /// Also counts as a WAL sync. A synced data write that covers the open
+    /// group does not call this.
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    pub(super) fn note_backstop_sync(&self) {
+        self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+        self.backstop_syncs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Replace the quiet-group bound and wake the delay thread.
+    ///
+    /// `Duration::ZERO` makes the thread sync as soon as it wakes. It does
+    /// not sync on the caller thread.
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    pub(super) fn set_delay(&self, delay: Duration) {
+        let mut state = self.lock();
+        state.delay = delay;
+        state.delay_set = true;
+        drop(state);
+        self.wake.notify_all();
+    }
+
+    #[cfg_attr(not(feature = "rocksdb"), allow(dead_code))]
+    pub(super) fn delay_is_set(&self) -> bool {
+        self.lock().delay_set
+    }
+
+    #[cfg(all(test, feature = "rocksdb"))]
+    pub(super) fn delay(&self) -> Duration {
+        self.lock().delay
     }
 
     pub(super) fn prepare(&self, txs_per_sync: u32) -> eyre::Result<EnableStep> {
@@ -105,6 +178,9 @@ impl GroupCommit {
     }
 
     /// Record one visible registration. `true` when the group is full.
+    ///
+    /// MDBX syncs when this returns `true`. RocksDB ignores the bool: the
+    /// next synced write or the backstop covers the record.
     pub(super) fn note_visible(&self) -> bool {
         let mut state = self.lock();
         state.generation = state.generation.wrapping_add(1);
@@ -120,6 +196,45 @@ impl GroupCommit {
 
     pub(super) fn generation(&self) -> u64 {
         self.lock().generation
+    }
+
+    pub(super) fn synced_generation(&self) -> u64 {
+        self.lock().synced_generation
+    }
+
+    /// Block until `target` is covered.
+    ///
+    /// The caller must not hold the index write lock: the sync that covers
+    /// `target` takes that lock. After stop, a failed final sync returns
+    /// within [`STOP_WAIT`] instead of waiting forever.
+    pub(super) fn wait_until_synced(&self, target: u64) -> eyre::Result<()> {
+        let mut state = self.lock();
+        let mut stop_deadline = None;
+        loop {
+            if state.synced_generation >= target {
+                return Ok(());
+            }
+            if state.stop {
+                let deadline = *stop_deadline.get_or_insert_with(|| Instant::now() + STOP_WAIT);
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    eyre::bail!("index sync stopped before generation {target} became durable");
+                }
+                let (guard, timeout) = self
+                    .wake
+                    .wait_timeout(state, left)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = guard;
+                if timeout.timed_out() && state.synced_generation < target {
+                    eyre::bail!("index sync stopped before generation {target} became durable");
+                }
+                continue;
+            }
+            state = self
+                .wake
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
 
     /// Generation a sync should cover, when any registration is still unsynced.
@@ -155,7 +270,8 @@ impl GroupCommit {
     /// The caller just did its own synced write, which also covers the open group.
     ///
     /// Rocks only. A synced `WriteBatch` already flushed the WAL, so this does
-    /// not sync again. MDBX commits are not synced that way.
+    /// not sync again and does not count a backstop sync. MDBX commits are
+    /// not synced that way.
     #[cfg(feature = "rocksdb")]
     pub(super) fn cover_durable(&self) {
         if !self.is_enabled() {
@@ -183,7 +299,7 @@ impl GroupCommit {
                 return false;
             }
             if let Some(since) = state.dirty_since {
-                let left = DELAY.saturating_sub(since.elapsed());
+                let left = state.delay.saturating_sub(since.elapsed());
                 if left.is_zero() {
                     return true;
                 }
@@ -203,6 +319,9 @@ impl GroupCommit {
 
     /// Park one delay after a failed sync so a persistent error does not spin.
     /// `false` when the group is stopping.
+    ///
+    /// The pause is [`DELAY`], not the configured backstop. A zero backstop
+    /// would otherwise retry without sleeping.
     pub(super) fn wait_retry(&self) -> bool {
         let state = self.lock();
         if state.stop {

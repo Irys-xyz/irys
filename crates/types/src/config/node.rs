@@ -514,6 +514,15 @@ pub struct StorageSyncConfig {
     /// `0` rewrites completions on every sync.
     #[serde(default = "default_intervals_persist_secs")]
     pub intervals_persist_secs: u64,
+    /// Milliseconds a RocksDB submodule index may leave a non-durable write
+    /// unsynced.
+    ///
+    /// The write is in the WAL page cache. It becomes durable at the next
+    /// synced write on that database, when this backstop syncs the WAL, or
+    /// on clean shutdown. `0` makes the backstop thread sync as soon as it
+    /// wakes. MDBX ignores this key and keeps its own 50 ms group.
+    #[serde(default = "default_index_wal_backstop_ms")]
+    pub index_wal_backstop_ms: u64,
     /// Accepted so an older config that set this key still loads.
     /// The value is ignored. Recall pages stay cached.
     #[serde(default)]
@@ -530,6 +539,7 @@ impl Default for StorageSyncConfig {
             entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
             drop_recall_page_cache: false,
             intervals_persist_secs: default_intervals_persist_secs(),
+            index_wal_backstop_ms: default_index_wal_backstop_ms(),
         }
     }
 }
@@ -537,8 +547,15 @@ impl Default for StorageSyncConfig {
 /// Default gap between completion rewrites of `intervals.json`.
 pub const DEFAULT_INTERVALS_PERSIST_SECS: u64 = 30;
 
+/// Default RocksDB index WAL backstop. See [`StorageSyncConfig::index_wal_backstop_ms`].
+pub const DEFAULT_INDEX_WAL_BACKSTOP_MS: u64 = 1000;
+
 fn default_intervals_persist_secs() -> u64 {
     DEFAULT_INTERVALS_PERSIST_SECS
+}
+
+fn default_index_wal_backstop_ms() -> u64 {
+    DEFAULT_INDEX_WAL_BACKSTOP_MS
 }
 
 fn default_entropy_sweep_interval_millis() -> u64 {
@@ -1355,6 +1372,7 @@ impl NodeConfig {
                 drop_recall_page_cache: false,
                 // Tests read `intervals.json` as soon as `sync` returns.
                 intervals_persist_secs: 0,
+                index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1553,6 +1571,7 @@ impl NodeConfig {
                 entropy_coalesce_hole_bytes: 256 * 1024,
                 drop_recall_page_cache: false,
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
+                index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1767,6 +1786,9 @@ mod run_mode_tests {
         );
         let immediate: StorageSyncConfig = toml::from_str("intervals_persist_secs = 0").unwrap();
         assert_eq!(immediate.intervals_persist_secs, 0);
+        assert_eq!(parsed.index_wal_backstop_ms, DEFAULT_INDEX_WAL_BACKSTOP_MS);
+        let backstop: StorageSyncConfig = toml::from_str("index_wal_backstop_ms = 0").unwrap();
+        assert_eq!(backstop.index_wal_backstop_ms, 0);
     }
 
     #[test]

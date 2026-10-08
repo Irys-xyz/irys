@@ -9,10 +9,13 @@
 //!
 //! `update` stays durable. [`SubmoduleIndex::update_registration`] is the
 //! same until group commit is enabled. Then the registration is visible
-//! before it returns, and the fsync waits for the group.
+//! before it returns. MDBX syncs the group on a count, a durable write, or
+//! 50 ms. RocksDB leaves it unsynced until the next synced write, the WAL
+//! backstop, or shutdown.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
@@ -313,6 +316,14 @@ impl MdbxSubmoduleStore {
             sync_if_dirty(&self.env, &self.group)?;
         }
         Ok(result)
+    }
+
+    /// Same durability as [`Self::update`]. MDBX has no WAL to ride.
+    pub(super) fn update_covered<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        self.update(f)
     }
 
     fn spawn_delay(&self) -> eyre::Result<()> {
@@ -820,10 +831,13 @@ impl SubmoduleIndex {
 
     /// Turn on group commit for this index. `txs_per_sync` of 0 is rejected.
     ///
-    /// Registration writes stay visible before they return. The fsync runs
-    /// every `txs_per_sync` registrations, on [`Self::sync_group`], on the
-    /// next durable [`SubmoduleStore::update`], or 50 ms after the first
-    /// unsynced registration.
+    /// Registration writes stay visible before they return. MDBX syncs every
+    /// `txs_per_sync` registrations, on [`Self::sync_group`], on the next
+    /// durable [`SubmoduleStore::update`], or 50 ms after the first unsynced
+    /// registration. RocksDB does not sync on that count. The next synced
+    /// write on that database, the WAL backstop, or clean shutdown makes the
+    /// records durable. [`Self::set_wal_backstop`] sets the Rocks bound.
+    /// An unset bound is one second.
     pub fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
         match self {
             Self::Mdbx(store) => store.enable_group_commit(txs_per_sync),
@@ -852,7 +866,8 @@ impl SubmoduleIndex {
     /// Commit one index registration.
     ///
     /// Durable, unless [`Self::enable_group_commit`] is on. Then the rows are
-    /// visible to the next view and the sync waits for the group.
+    /// visible to the next view. MDBX syncs with the group. RocksDB does not
+    /// sync this write.
     pub fn update_registration<R>(
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
@@ -861,6 +876,100 @@ impl SubmoduleIndex {
             Self::Mdbx(store) => store.update_registration(f),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.update_registration(f),
+        }
+    }
+
+    /// Commit rows that must exist before a later durable write, and need
+    /// not sync on their own.
+    ///
+    /// MDBX delegates to [`SubmoduleStore::update`], so the commit stays
+    /// durable. RocksDB with group commit on appends the WAL without
+    /// syncing. [`Self::published_generation`] advances.
+    /// [`Self::wait_until_durable`] waits until a later synced write or the
+    /// backstop covers that generation. With group commit off, this is
+    /// [`SubmoduleStore::update`].
+    pub fn update_covered<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        match self {
+            Self::Mdbx(store) => store.update_covered(f),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.update_covered(f),
+        }
+    }
+
+    /// Bound how long a RocksDB index may leave an unsynced write in the
+    /// page cache. MDBX ignores this and keeps its 50 ms group delay.
+    ///
+    /// [`Duration::ZERO`] makes the backstop thread sync as soon as it
+    /// wakes. It does not sync on this thread. Call this before
+    /// [`Self::enable_group_commit`] so the delay thread starts with the
+    /// bound. A later call updates a running thread.
+    pub fn set_wal_backstop(&self, delay: Duration) {
+        match self {
+            Self::Mdbx(_) => {}
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.set_wal_backstop(delay),
+        }
+    }
+
+    /// Covered writes visible so far. Not a durability watermark.
+    ///
+    /// Sample this after the write returns. A concurrent newer write can
+    /// only make [`Self::wait_until_durable`] wait longer.
+    pub fn published_generation(&self) -> u64 {
+        match self {
+            Self::Mdbx(store) => store.group.generation(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.published_generation(),
+        }
+    }
+
+    /// Highest generation a synced write or the backstop has covered.
+    pub fn durable_generation(&self) -> u64 {
+        match self {
+            Self::Mdbx(store) => store.group.synced_generation(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.durable_generation(),
+        }
+    }
+
+    /// Block until `generation` is covered by a synced write or the backstop.
+    ///
+    /// Do not call this while holding the index write lock. After the index
+    /// stops, this returns an error if `generation` is still unsynced for 5 s.
+    pub fn wait_until_durable(&self, generation: u64) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(store) => store.group.wait_until_synced(generation),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.wait_until_durable(generation),
+        }
+    }
+
+    /// Synced WAL writes since open, including backstop syncs. MDBX is 0.
+    pub fn wal_sync_count(&self) -> u64 {
+        match self {
+            Self::Mdbx(_) => 0,
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.wal_sync_count(),
+        }
+    }
+
+    /// Backstop, explicit group sync, and shutdown WAL syncs. MDBX is 0.
+    pub fn wal_backstop_sync_count(&self) -> u64 {
+        match self {
+            Self::Mdbx(_) => 0,
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.wal_backstop_sync_count(),
+        }
+    }
+
+    #[cfg(all(test, feature = "rocksdb"))]
+    fn wal_backstop_delay(&self) -> Duration {
+        match self {
+            Self::Mdbx(store) => store.group.delay(),
+            Self::Rocks(store) => store.wal_backstop_delay(),
         }
     }
 
@@ -1293,17 +1402,63 @@ mod tests {
 
     #[test]
     fn group_commit_syncs_every_n_registrations() -> eyre::Result<()> {
-        each_engine("submodule_store_group_n", |store| {
-            store.enable_group_commit(2)?;
-            put_registration(store, 1, 1)?;
-            assert_eq!(store.group_sync_count(), 0);
-            put_registration(store, 2, 2)?;
-            assert_eq!(store.group_sync_count(), 1);
-            put_registration(store, 3, 3)?;
-            assert_eq!(store.group_sync_count(), 1);
-            assert!(path_at(store, 3)?.is_some());
-            Ok(())
-        })
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_store_group_n")
+            .build();
+        let store =
+            SubmoduleIndex::open_mdbx(dir.path().join("db"), DatabaseArguments::irys_testing()?)?;
+        store.enable_group_commit(2)?;
+        put_registration(&store, 1, 1)?;
+        assert_eq!(store.group_sync_count(), 0);
+        put_registration(&store, 2, 2)?;
+        assert_eq!(store.group_sync_count(), 1);
+        put_registration(&store, 3, 3)?;
+        assert_eq!(store.group_sync_count(), 1);
+        assert!(path_at(&store, 3)?.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_full_group_does_not_sync_until_a_durable_write() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_group_n")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        store.set_wal_backstop(Duration::from_secs(60));
+        store.enable_group_commit(2)?;
+        put_registration(&store, 1, 1)?;
+        put_registration(&store, 2, 2)?;
+        assert_eq!(store.group_sync_count(), 0);
+        assert_eq!(store.wal_sync_count(), 0);
+        assert_eq!(store.wal_backstop_sync_count(), 0);
+        let published = store.published_generation();
+        assert!(published > store.durable_generation());
+        store.update_covered(|tx| {
+            tx.set_path_hashes_by_offset(
+                PartitionChunkOffset::from(3),
+                ChunkPathHashes {
+                    data_path_hash: Some(H256::repeat_byte(3)),
+                    tx_path_hash: None,
+                },
+            )
+        })?;
+        assert_eq!(store.wal_sync_count(), 0);
+        store.update(|tx| {
+            tx.set_path_hashes_by_offset(
+                PartitionChunkOffset::from(4),
+                ChunkPathHashes {
+                    data_path_hash: Some(H256::repeat_byte(4)),
+                    tx_path_hash: None,
+                },
+            )
+        })?;
+        assert_eq!(store.wal_sync_count(), 1);
+        assert_eq!(store.wal_backstop_sync_count(), 0);
+        assert_eq!(store.group_sync_count(), 0);
+        assert!(store.durable_generation() >= published);
+        store.wait_until_durable(published)?;
+        Ok(())
     }
 
     #[test]
@@ -1464,6 +1619,8 @@ mod tests {
     #[test]
     fn quiet_registration_syncs_after_the_delay() -> eyre::Result<()> {
         each_engine("submodule_store_group_delay", |store| {
+            // Rocks uses this bound. MDBX keeps its 50 ms delay.
+            store.set_wal_backstop(Duration::from_millis(50));
             store.enable_group_commit(1_000)?;
             let started = Instant::now();
             put_registration(store, 7, 7)?;
@@ -1482,6 +1639,109 @@ mod tests {
             assert!(path_at(store, 7)?.is_some());
             Ok(())
         })
+    }
+
+    /// A clean `DB` drop is not a power loss: close may sync the WAL, and
+    /// shutdown does sync it. This checks the covering write, then reopen.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_synced_write_makes_an_unsynced_registration_durable() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_cover_reopen")
+            .build();
+        let path = dir.path().join("index");
+        {
+            let store = SubmoduleIndex::open_rocks(&path)?;
+            store.set_wal_backstop(Duration::from_secs(60));
+            store.enable_group_commit(8)?;
+            put_registration(&store, 1, 1)?;
+            assert_eq!(store.wal_sync_count(), 0);
+            assert_eq!(store.wal_backstop_sync_count(), 0);
+            let published = store.published_generation();
+            assert!(published > store.durable_generation());
+            store.update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(2),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(2)),
+                        tx_path_hash: None,
+                    },
+                )
+            })?;
+            assert!(store.durable_generation() >= published);
+            assert_eq!(store.wal_backstop_sync_count(), 0);
+            assert_eq!(store.wal_sync_count(), 1);
+            store.wait_until_durable(published)?;
+        }
+        let store = SubmoduleIndex::open_rocks(&path)?;
+        assert!(path_at(&store, 1)?.is_some());
+        assert!(path_at(&store, 2)?.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_shutdown_syncs_a_quiet_registration() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_shutdown_sync")
+            .build();
+        let path = dir.path().join("index");
+        {
+            let store = SubmoduleIndex::open_rocks(&path)?;
+            store.set_wal_backstop(Duration::from_secs(60));
+            store.enable_group_commit(8)?;
+            put_registration(&store, 6, 6)?;
+            assert_eq!(store.wal_sync_count(), 0);
+            assert!(store.published_generation() > store.durable_generation());
+        }
+        let store = SubmoduleIndex::open_rocks(&path)?;
+        assert!(path_at(&store, 6)?.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_backstop_syncs_a_quiet_registration() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_backstop")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        let delay = Duration::from_millis(80);
+        store.set_wal_backstop(delay);
+        store.enable_group_commit(1_000)?;
+        assert_eq!(store.wal_backstop_delay(), delay);
+        let started = Instant::now();
+        put_registration(&store, 4, 4)?;
+        let published = store.published_generation();
+        assert_eq!(store.wal_sync_count(), 0);
+        assert_eq!(store.wal_backstop_sync_count(), 0);
+        store.wait_until_durable(published)?;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= delay,
+            "backstop sync ran after {elapsed:?}, bound is {delay:?}"
+        );
+        assert_eq!(store.wal_backstop_sync_count(), 1);
+        assert_eq!(store.wal_sync_count(), 1);
+        assert_eq!(store.group_sync_count(), 1);
+        assert!(store.durable_generation() >= published);
+        assert!(path_at(&store, 4)?.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_backstop_defaults_to_one_second() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_backstop_default")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        store.enable_group_commit(8)?;
+        assert_eq!(
+            store.wal_backstop_delay(),
+            Duration::from_millis(irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS)
+        );
+        Ok(())
     }
 
     #[test]

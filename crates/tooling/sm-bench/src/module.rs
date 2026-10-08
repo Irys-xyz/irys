@@ -38,7 +38,8 @@ pub(crate) struct OpenRequest<'a> {
     pub entropy_sweep_max_bytes: u64,
     pub intervals_persist_secs: u64,
     pub index: BenchIndex,
-    /// Registrations per fsync. `0` skips the call; the method rejects 0.
+    /// Arms group commit. MDBX syncs every N. RocksDB does not.
+    /// `0` skips the call; the method rejects 0.
     pub index_group_commit: u32,
 }
 

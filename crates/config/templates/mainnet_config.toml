@@ -67,6 +67,11 @@ num_writes_before_sync = 100
 # Seconds between completion rewrites of intervals.json. Write-ahead
 # Interrupted marks are still immediate. 0 rewrites on every sync.
 intervals_persist_secs = 30
+# Milliseconds a RocksDB index may leave a non-durable write unsynced.
+# The next synced write on that database, this backstop, or clean shutdown
+# makes it durable. 0 syncs on the backstop thread as soon as it wakes.
+# MDBX ignores this key.
+index_wal_backstop_ms = 1000
 # Bytes of chunk data one storage module may hold in memory awaiting flush before
 # background body migration pauses writing to it. Default is
 # max(2 × num_writes_before_sync, 256) × chunk_size × submodules (two flush

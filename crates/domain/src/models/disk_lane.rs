@@ -2811,6 +2811,7 @@ mod tests {
                 entropy_coalesce_hole_bytes: chunk_size * hole_chunks,
                 drop_recall_page_cache: false,
                 intervals_persist_secs: 0,
+                index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()

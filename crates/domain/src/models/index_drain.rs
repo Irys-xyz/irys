@@ -515,9 +515,9 @@ impl DrainRunner {
                 .collect();
             tx.write_data_path_updates(updates)
         })?;
-        // No-op unless group commit is on. A durable `update` already synced
-        // this batch and any registration still waiting on the group. The
-        // ack below must not run ahead of that sync.
+        // A presence batch is a durable point, so this `update` stays synced.
+        // The ack below must not run ahead of that sync. `sync_group` is a
+        // no-op once the write covered the open group.
         self.db.sync_group()
     }
 }

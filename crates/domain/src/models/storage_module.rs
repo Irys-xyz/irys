@@ -1363,10 +1363,18 @@ impl StorageModule {
             Self::reconcile_presence(&submodule_map, &loaded_intervals)?;
         }
 
-        // A RocksDB registration returns once its rows are visible. One sync
-        // covers 8 registrations, the next durable index write, or 50 ms.
-        // MDBX keeps one durable commit per registration: its group-commit
-        // path aborts inside libmdbx.
+        // A RocksDB registration returns once its rows are visible. The WAL
+        // becomes durable at the next synced write on that database, at
+        // `index_wal_backstop_ms`, or on clean shutdown. MDBX keeps one
+        // durable commit per registration: its group-commit path aborts
+        // inside libmdbx.
+        // Set the backstop before enable, including a bench split that arms
+        // group commit after this open returns.
+        for (_, submodule) in submodule_map.iter() {
+            submodule.db.set_wal_backstop(Duration::from_millis(
+                config.node_config.storage.index_wal_backstop_ms,
+            ));
+        }
         // A bench split picks its own engine. The bench turns group commit
         // on for that open; this path must not arm MDBX from a Rocks config.
         #[cfg(feature = "bench")]
@@ -3559,15 +3567,19 @@ impl StorageModule {
         }
     }
 
-    /// Registrations folded into one RocksDB sync. The 50 ms cap still applies.
+    /// MDBX registrations per sync. RocksDB does not sync on this count.
+    /// The next synced write, the WAL backstop, or shutdown covers them.
     const ROCKS_INDEX_TXS_PER_SYNC: u32 = 8;
 
     /// Make index registration commits visible without an fsync on every call.
     ///
-    /// `txs_per_sync` registrations, the next durable index write, or 50 ms,
-    /// whichever comes first, then one sync. [`Self::new`] turns this on for a
-    /// RocksDB index at [`Self::ROCKS_INDEX_TXS_PER_SYNC`]. An MDBX index does
-    /// not call it, so each of its registrations is durable before it returns.
+    /// MDBX syncs every `txs_per_sync` registrations, on the next durable
+    /// index write, or after 50 ms. RocksDB ignores the count. A registration
+    /// stays unsynced until the next synced write on that database, the
+    /// configured WAL backstop, or clean shutdown. [`Self::new`] turns this
+    /// on for a RocksDB index and sets the backstop from
+    /// `storage.index_wal_backstop_ms`. An MDBX index does not call it, so
+    /// each of its registrations is durable before it returns.
     /// `txs_per_sync` of 0 is rejected.
     pub fn enable_index_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
         for (_, submodule) in self.submodules.iter() {
@@ -3728,17 +3740,19 @@ impl StorageModule {
             .submodules
             .get_key_value_at_point(key)
             .map_err(|_| eyre::eyre!("No submodule found for Partition Offset {:?}", key))?;
-        let removed = submodule
-            .db
-            .update(|tx| match tx.get_pending_body_migration(key)? {
-                Some(job) if job.data_root == data_root && job.block_height == block_height => {
-                    tx.del_pending_body_migration(key)
-                }
-                _ => Ok(false),
-            })?;
-        // No-op unless group commit is on. The delete above is already durable.
-        // This covers a registration that has not reached its sync threshold.
-        submodule.db.sync_group()?;
+        let removed =
+            submodule
+                .db
+                .update_covered(|tx| match tx.get_pending_body_migration(key)? {
+                    Some(job) if job.data_root == data_root && job.block_height == block_height => {
+                        tx.del_pending_body_migration(key)
+                    }
+                    _ => Ok(false),
+                })?;
+        // The delete is visible now. On RocksDB it stays unsynced until the
+        // next synced write, the WAL backstop, or shutdown. Losing it leaves
+        // the job row, and the body worker retries the same data_root and
+        // block_height. MDBX commits this durably.
         Ok(removed)
     }
 
@@ -3779,7 +3793,7 @@ impl StorageModule {
             .map_err(|_| eyre::eyre!("No submodule found for Partition Offset {:?}", key))?;
         submodule
             .db
-            .update(|tx| match tx.get_pending_body_migration(key)? {
+            .update_covered(|tx| match tx.get_pending_body_migration(key)? {
                 Some(mut job) if job.data_root == data_root && job.block_height == block_height => {
                     job.attempts = job.attempts.saturating_add(1);
                     tx.add_pending_body_migration(key, &job)?;
@@ -5826,6 +5840,74 @@ mod tests {
         Ok(())
     }
 
+    /// A visible data-root row is not a durable body. The prune gate stays
+    /// closed until the chunk interval is `Data`, which happens after the
+    /// chunk `fdatasync` and the presence commit. A synced index write that
+    /// is not that commit does not open the gate, and it does cover the
+    /// earlier registration.
+    #[test]
+    fn unsynced_data_root_does_not_satisfy_the_prune_gate() -> eyre::Result<()> {
+        let (_tmp, _config, storage) =
+            open_presence_module("prune_gate", SubmoduleIndexEngine::Rocksdb)?;
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.set_wal_backstop(Duration::from_secs(60));
+        let data_root = H256::repeat_byte(4);
+        let syncs_before = submodule.db.wal_sync_count();
+        submodule.db.update_registration(|tx| {
+            tx.add_data_root_info(
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 32,
+                },
+            )
+        })?;
+        let published = submodule.db.published_generation();
+        assert!(published > submodule.db.durable_generation());
+        assert_eq!(submodule.db.wal_sync_count(), syncs_before);
+        assert_eq!(submodule.db.wal_backstop_sync_count(), 0);
+        assert!(
+            !storage.collect_data_root_infos(data_root)?.0.is_empty(),
+            "the registration is visible before it is durable"
+        );
+        let offset = PartitionChunkOffset::from(0);
+        let candidates = BTreeSet::from([TxChunkOffset::from(0)]);
+        assert!(!storage.is_data_chunk_durable_at(offset));
+        assert!(
+            storage
+                .durable_tx_offsets_for_data_root(data_root, &candidates)?
+                .is_empty()
+        );
+
+        submodule.db.update(|tx| {
+            tx.set_path_hashes_by_offset(
+                offset,
+                ChunkPathHashes {
+                    data_path_hash: Some(H256::repeat_byte(1)),
+                    tx_path_hash: None,
+                },
+            )
+        })?;
+        assert!(submodule.db.durable_generation() >= published);
+        assert_eq!(submodule.db.wal_backstop_sync_count(), 0);
+        assert!(submodule.db.wal_sync_count() > syncs_before);
+        assert!(!storage.is_data_chunk_durable_at(offset));
+        assert!(
+            storage
+                .durable_tx_offsets_for_data_root(data_root, &candidates)?
+                .is_empty()
+        );
+
+        assert!(storage.write_chunk(offset, vec![9_u8; 32], ChunkType::Data));
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(offset));
+        assert_eq!(
+            storage.durable_tx_offsets_for_data_root(data_root, &candidates)?,
+            candidates
+        );
+        Ok(())
+    }
+
     struct SeededIndex {
         tx_hash: H256,
         data_root: H256,
@@ -7043,6 +7125,7 @@ mod tests {
                 entropy_coalesce_hole_bytes: sweep_bytes,
                 drop_recall_page_cache: false,
                 intervals_persist_secs: 0,
+                index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()

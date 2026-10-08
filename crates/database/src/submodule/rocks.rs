@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use eyre::WrapErr as _;
 use irys_types::{
@@ -598,6 +599,12 @@ impl RocksSubmoduleStore {
     }
 
     pub(super) fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
+        // A caller that already set the bound keeps it. Otherwise one second.
+        if !self.group.delay_is_set() {
+            self.group.set_delay(Duration::from_millis(
+                irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
+            ));
+        }
         match self.group.prepare(txs_per_sync)? {
             EnableStep::On => Ok(()),
             EnableStep::Spawn => {
@@ -632,8 +639,53 @@ impl RocksSubmoduleStore {
         sync_wal_locked(&self.db, &self.group)
     }
 
+    pub(super) fn set_wal_backstop(&self, delay: Duration) {
+        self.group.set_delay(delay);
+    }
+
+    pub(super) fn published_generation(&self) -> u64 {
+        self.group.generation()
+    }
+
+    pub(super) fn durable_generation(&self) -> u64 {
+        self.group.synced_generation()
+    }
+
+    pub(super) fn wait_until_durable(&self, generation: u64) -> eyre::Result<()> {
+        self.group.wait_until_synced(generation)
+    }
+
+    pub(super) fn wal_sync_count(&self) -> u64 {
+        self.group.wal_syncs()
+    }
+
+    pub(super) fn wal_backstop_sync_count(&self) -> u64 {
+        self.group.backstop_syncs()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wal_backstop_delay(&self) -> Duration {
+        self.group.delay()
+    }
+
     /// Visible registration. The caller holds no write lock.
+    ///
+    /// With group commit on, the WAL record is not synced here. The next
+    /// synced write, the backstop, or shutdown covers it. The count that
+    /// fills an MDBX group does not sync this database.
     pub(super) fn update_registration<R>(
+        &self,
+        f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
+    ) -> eyre::Result<R> {
+        self.update_covered(f)
+    }
+
+    /// WAL append without a sync when group commit is on.
+    ///
+    /// [`GroupCommit::note_visible`] arms the backstop. The returned bool is
+    /// the MDBX "group is full" signal and is ignored here. Group commit off
+    /// is a normal synced [`Self::update`].
+    pub(super) fn update_covered<R>(
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
@@ -642,9 +694,7 @@ impl RocksSubmoduleStore {
         }
         let _guard = self.lock_write();
         let result = self.apply(false, f)?;
-        if self.group.note_visible() {
-            sync_wal_locked(&self.db, &self.group)?;
-        }
+        self.group.note_visible();
         Ok(result)
     }
 
@@ -684,6 +734,9 @@ impl RocksSubmoduleStore {
         };
         let result = f(&mut batch)?;
         batch.commit(sync, &self.submodule)?;
+        if sync {
+            self.group.note_wal_sync();
+        }
         Ok(result)
     }
 
@@ -804,6 +857,16 @@ impl RocksSubmoduleStore {
                 name,
             );
         }
+        // Publish even when statistics are off. `absolute` so a 60 s scrape
+        // does not double-count. The schema write at open is not included:
+        // it runs before this store exists.
+        metrics::counter!("irys.rocksdb.wal_syncs", "submodule" => submodule.to_owned())
+            .absolute(self.group.wal_syncs());
+        metrics::counter!(
+            "irys.rocksdb.wal_backstop_syncs",
+            "submodule" => submodule.to_owned()
+        )
+        .absolute(self.group.backstop_syncs());
         let Some(stats) = &self.stats else {
             return;
         };
@@ -906,7 +969,9 @@ impl RocksSubmoduleStore {
                 .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
         }
         self.db.flush_wal(true).wrap_err("sync wal")?;
-        // The synced WAL covers any open registration group.
+        // The synced WAL covers any open registration group. This flush is
+        // the caller's durable point, not a backstop sync.
+        self.group.note_wal_sync();
         self.group.cover_durable();
         Ok(())
     }
@@ -962,6 +1027,8 @@ impl RocksSubmoduleStore {
             pending_compaction_bytes,
             flushes,
             running_flushes,
+            wal_syncs: self.group.wal_syncs(),
+            wal_backstop_syncs: self.group.backstop_syncs(),
         })
     }
 
@@ -1031,6 +1098,7 @@ impl RocksSubmoduleStore {
         self.db
             .write_opt(batch, &opts)
             .wrap_err("reconcile presence rows")?;
+        self.group.note_wal_sync();
         self.group.cover_durable();
         Ok(PresenceReconcile {
             path_hash_rows,
@@ -1087,6 +1155,7 @@ fn sync_wal_locked(db: &DB, group: &GroupCommit) -> eyre::Result<()> {
         return Ok(());
     };
     db.flush_wal(true).wrap_err("sync submodule index wal")?;
+    group.note_backstop_sync();
     group.mark_synced(generation, true);
     Ok(())
 }
@@ -1215,6 +1284,14 @@ fn describe_rocks_metrics() {
         metrics::describe_counter!(
             "irys.rocksdb.wal_file_synced",
             "WAL syncs since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.wal_syncs",
+            "Synced WAL writes on this submodule database, including backstop syncs"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.wal_backstop_syncs",
+            "WAL syncs from the backstop thread, an explicit group sync, or shutdown"
         );
         metrics::describe_counter!(
             "irys.rocksdb.wal_file_bytes",
@@ -1485,14 +1562,18 @@ fn schema_value() -> Vec<u8> {
     compress_value(&SCHEMA_TEXT.as_bytes().to_vec())
 }
 
-/// Counters a bench step can subtract. Stall time and flush count are
-/// cumulative. Pending compaction bytes and running flushes are gauges.
+/// Counters a bench step can subtract. Stall time, flush count, and WAL
+/// syncs are cumulative. Pending compaction bytes and running flushes are gauges.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RocksIngestStats {
     pub write_stall_micros: u64,
     pub pending_compaction_bytes: u64,
     pub flushes: u64,
     pub running_flushes: u64,
+    /// Synced WAL writes since open, including backstop syncs.
+    pub wal_syncs: u64,
+    /// Backstop, explicit group sync, and shutdown WAL syncs since open.
+    pub wal_backstop_syncs: u64,
 }
 
 fn int_property_cf(db: &DB, handle: &rocksdb::ColumnFamily, name: &str) -> eyre::Result<u64> {
@@ -2729,6 +2810,8 @@ mod tests {
         assert_eq!(stats.pending_compaction_bytes, 0);
         assert_eq!(stats.flushes, 0);
         assert_eq!(stats.running_flushes, 0);
+        assert_eq!(stats.wal_syncs, 0);
+        assert_eq!(stats.wal_backstop_syncs, 0);
         drop(store);
         let index = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
         let again = index.rocks_ingest_stats()?.expect("rocks counters");
