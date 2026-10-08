@@ -1492,7 +1492,9 @@ impl StorageModule {
             })
             .collect();
         indexed.sort_by_key(|(_, offset)| *offset);
-        indexed.truncate(disk_lane::WRITE_REORDER_CHUNKS);
+        indexed.truncate(disk_lane::write_reorder_scan(
+            self.config.node_config.storage.num_writes_before_sync,
+        ));
 
         let mut runs = Vec::new();
         let mut current: Option<RunCursor> = None;
@@ -1990,7 +1992,9 @@ impl StorageModule {
                 self.select_coalesced_window(
                     &pending,
                     limit,
-                    disk_lane::WRITE_REORDER_CHUNKS,
+                    disk_lane::write_reorder_scan(
+                        self.config.node_config.storage.num_writes_before_sync,
+                    ),
                     run_cap,
                     !disk_idle && !self.short_runs_due(pending.len()),
                 )

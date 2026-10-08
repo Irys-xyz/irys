@@ -65,9 +65,15 @@ const INFLIGHT_DISK_OPS: usize = 3;
 /// Commands one storage module may have in the kernel at once. This is the
 /// block-queue depth. The service-time budget can stop earlier.
 const INFLIGHT_WRITES: usize = 64;
-/// Pending chunks sorted by offset before one flush. The scan has to be at
-/// least as wide as the durability count, or later chunks are never joined.
-pub(super) const WRITE_REORDER_CHUNKS: usize = 10_000;
+/// Pending chunks sorted by offset before one flush. A larger
+/// `num_writes_before_sync` widens the scan so later chunks are still joined.
+pub(super) const WRITE_REORDER_CHUNKS: usize = 1_000;
+
+/// Chunks looked at before one flush. At least [`WRITE_REORDER_CHUNKS`], and
+/// at least the durability count.
+pub(super) fn write_reorder_scan(num_writes_before_sync: u64) -> usize {
+    WRITE_REORDER_CHUNKS.max(usize::try_from(num_writes_before_sync).unwrap_or(usize::MAX))
+}
 /// Largest packed `pwrite`. One entropy `pread` uses `entropy_sweep_max_bytes`.
 pub(super) const WRITE_RUN_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Head movement charged for one more in-flight command.
@@ -82,12 +88,11 @@ fn service_us(count: u64, bytes: u64) -> u64 {
     count.saturating_mul(SEEK_US).saturating_add(transfer)
 }
 
-/// Wait before a short run may jump a longer one.
+/// Wait before a short run is eligible while the chunk disk is busy.
 ///
 /// One capped run costs about `service_us(1, WRITE_RUN_MAX_BYTES)`. That
 /// interval is too short to use as the wait: a short run would flush before
-/// a neighbor was queued, and at a full reorder buffer every chunk would
-/// already be older than one run. This wait is the service time of one
+/// a neighbor was queued. This wait is the service time of one default
 /// reorder scan filled with capped runs, so neighbors can still join.
 pub(super) fn reorder_grace(chunk_size: u64) -> Duration {
     let chunk = chunk_size.max(1);
@@ -2679,8 +2684,8 @@ mod tests {
         let production = super::reorder_grace(256 * 1024);
         assert!(small > Duration::from_millis(50));
         assert!(small < Duration::from_millis(200));
-        assert!(production > Duration::from_secs(10));
-        assert!(production < Duration::from_secs(20));
+        assert!(production > Duration::from_secs(1));
+        assert!(production < Duration::from_secs(2));
     }
 
     #[test]
