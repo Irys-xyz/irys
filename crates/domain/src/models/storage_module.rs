@@ -380,6 +380,10 @@ pub enum WriteDataChunkError {
     /// was refused and should be retried later.
     #[error("storage module data writes are paused for recovery")]
     WritesPaused,
+    /// A writer already holds this offset. The bytes are not stored yet.
+    /// The caller retries later.
+    #[error("storage write backpressure")]
+    Backpressure,
     /// Any other write failure (IO, index update, packing, etc.).
     #[error(transparent)]
     Other(#[from] eyre::Report),
@@ -1950,11 +1954,20 @@ impl StorageModule {
                 return Err(WriteDataChunkError::WritesPaused);
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
+            // A busy placement blocks the whole prepare. Writing the other
+            // placements and returning Ok lets ingress accept the chunk while
+            // the busy one can still fail and stay empty. Decide here, before
+            // any reserve, so the holder cannot release the offset in a gap.
+            let mut saw_occupancy = false;
+            let mut planned = Vec::new();
             for partition_offset in partition_offsets.iter().copied() {
-                if pending.occupancy.contains_key(&partition_offset)
-                    || pending
-                        .get(&partition_offset)
-                        .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
+                if pending.occupancy.contains_key(&partition_offset) {
+                    saw_occupancy = true;
+                    continue;
+                }
+                if pending
+                    .get(&partition_offset)
+                    .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
                 {
                     continue;
                 }
@@ -1968,6 +1981,12 @@ impl StorageModule {
                 } else {
                     continue;
                 };
+                planned.push((partition_offset, source));
+            }
+            if saw_occupancy {
+                return Err(WriteDataChunkError::Backpressure);
+            }
+            for (partition_offset, source) in planned {
                 pending.occupancy.insert(partition_offset, generation);
                 occupied.push((partition_offset, generation, source));
             }
@@ -2032,17 +2051,6 @@ impl StorageModule {
                 generation,
                 done: Some(done_rx),
             });
-        }
-        if prepared.is_empty() {
-            let pending = self.pending_writes.read().unwrap();
-            if partition_offsets
-                .iter()
-                .any(|offset| pending.occupancy.contains_key(offset))
-            {
-                return Err(WriteDataChunkError::Other(eyre::eyre!(
-                    "index write already in flight"
-                )));
-            }
         }
         Ok(prepared)
     }
@@ -3470,8 +3478,8 @@ mod tests {
             .write_data_chunk(&chunk)
             .expect_err("second writer must not succeed while occupied");
         assert!(
-            err.to_string().contains("index write already in flight"),
-            "expected in-flight error, got {err}"
+            matches!(err, WriteDataChunkError::Backpressure),
+            "expected backpressure, got {err}"
         );
         assert_eq!(
             storage_module.get_chunk_type(&offset),
@@ -3483,6 +3491,47 @@ mod tests {
             storage_module.get_chunk_type(&offset),
             Some(ChunkType::Data)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn busy_placement_blocks_the_free_one() -> eyre::Result<()> {
+        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_types::RelativeChunkOffset;
+
+        let (_tmp, storage_module, chunk) = packed_submit_fixture("busy_placement_blocks_free")?;
+        let (_, submodule) =
+            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.update_eyre(|tx| {
+            add_data_root_info(
+                tx,
+                chunk.data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(1),
+                    data_size: 5,
+                },
+            )
+        })?;
+
+        let busy = PartitionChunkOffset::from(0);
+        let free = PartitionChunkOffset::from(1);
+        storage_module.occupy_offset_for_test(busy);
+        let err = storage_module
+            .write_data_chunk(&chunk)
+            .expect_err("a busy placement must not start a partial write");
+        assert!(matches!(err, WriteDataChunkError::Backpressure));
+        assert_eq!(
+            storage_module.get_chunk_type(&busy),
+            Some(ChunkType::Entropy)
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&free),
+            Some(ChunkType::Entropy)
+        );
+        let pending = storage_module.pending_writes.read().unwrap();
+        assert!(pending.occupancy.contains_key(&busy));
+        assert!(!pending.occupancy.contains_key(&free));
+        assert!(pending.get(&free).is_none());
         Ok(())
     }
 

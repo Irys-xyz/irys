@@ -160,6 +160,9 @@ async fn write_chunk_to_assigned_modules(
         match sm.write_data_chunk_queued(chunk).await {
             Ok(()) => wrote_any = true,
             Err(WriteDataChunkError::WritesPaused) => {}
+            Err(WriteDataChunkError::Backpressure) => {
+                return Err(AdvisoryChunkIngressError::Overloaded.into());
+            }
             Err(error) => {
                 error!(
                     "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
@@ -175,11 +178,9 @@ async fn write_chunk_to_assigned_modules(
         }
     }
     if !wrote_any && in_flight {
-        return Err(ChunkIngressError::Critical(
-            CriticalChunkIngressError::Other(
-                "index write already in flight on an assigned storage module".into(),
-            ),
-        ));
+        // The bytes are already queued. The sender should retry later, not
+        // treat this peer as having rejected the chunk.
+        return Err(AdvisoryChunkIngressError::Overloaded.into());
     }
     Ok(())
 }
