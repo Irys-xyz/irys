@@ -858,13 +858,7 @@ fn open_mdbx_index(path: &Path, config: &Config) -> eyre::Result<SubmoduleIndex>
 
 // libc binds both `posix_fadvise` and `POSIX_FADV_RANDOM` on these targets.
 // Apple and the other BSDs do not. A missing advise must not stop the open.
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "emscripten",
-    target_os = "l4re",
-    target_os = "freebsd",
-))]
+// `AsRawFd` itself is unix-wide: Linux `fallocate` and `fstatvfs` use it.
 use std::os::unix::io::AsRawFd as _;
 
 /// `posix_fadvise(RANDOM)` for the whole file. Length 0 means from
@@ -905,6 +899,226 @@ fn advise_chunks_random(_file: &File, path: &Path) -> eyre::Result<()> {
         "posix_fadvise(POSIX_FADV_RANDOM) is not available; chunks.dat keeps the kernel read-ahead"
     );
     Ok(())
+}
+
+/// `st_blocks` is in 512-byte units. A hole makes this smaller than `st_size`.
+fn allocated_bytes(meta: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    meta.blocks().saturating_mul(512)
+}
+
+/// True when the file is shorter than the submodule, or when it already has
+/// that length but still has a hole (`st_blocks * 512 < st_size`).
+///
+/// A file that is already at least `full_len` and has a block for every byte
+/// is left alone. XFS `fallocate` mode 0 of a fully allocated file still
+/// walks the extent map: `xfs_alloc_file_space` commits one transaction per
+/// extent while it holds the inode I/O lock. The maximum XFS extent is 8 GiB,
+/// so an 18 TiB file is about 2300 extents. That walk is tens of milliseconds
+/// when the log stays in memory, and it can reach seconds when a checkpoint
+/// hits a HDD. Every read and write of the file waits for it. Open pays that
+/// only for a short file or a hole.
+fn chunks_file_needs_reserve(len: u64, allocated: u64, full_len: u64) -> bool {
+    len < full_len || allocated < len
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Bytes free for this process (`f_bavail * f_frsize`).
+fn filesystem_free_bytes(file: &File) -> eyre::Result<u64> {
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // Safety: `file` owns a live descriptor. On success `fstatvfs` writes
+    // the whole struct.
+    let rc = unsafe { libc::fstatvfs(file.as_raw_fd(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(eyre!(
+            "fstatvfs failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Safety: `rc == 0`, so the kernel filled `stat`.
+    let stat = unsafe { stat.assume_init() };
+    let frsize = if stat.f_frsize == 0 {
+        stat.f_bsize
+    } else {
+        stat.f_frsize
+    };
+    let avail = u128::from(stat.f_bavail).saturating_mul(u128::from(frsize));
+    Ok(u64::try_from(avail).unwrap_or(u64::MAX))
+}
+
+fn no_space(file: &File, path: &Path, wanted: u64) -> eyre::Report {
+    match filesystem_free_bytes(file) {
+        Ok(free) => eyre!(
+            "not enough free space to allocate {}: wanted {wanted} bytes, {free} bytes free",
+            path.display()
+        ),
+        Err(err) => eyre!(
+            "not enough free space to allocate {}: wanted {wanted} bytes ({err})",
+            path.display()
+        ),
+    }
+}
+
+/// Extend a short file to `full_len`. Does not shrink, and does not reserve
+/// blocks for an existing hole.
+fn extend_with_set_len(file: &File, path: &Path, full_len: u64) -> eyre::Result<()> {
+    let len = file
+        .metadata()
+        .wrap_err_with(|| format!("stat {}", path.display()))?
+        .len();
+    if len >= full_len {
+        warn!(
+            path = %path.display(),
+            bytes = full_len,
+            len,
+            "chunks file stays sparse; this path cannot reserve existing holes"
+        );
+        return Ok(());
+    }
+    let started = Instant::now();
+    file.set_len(full_len).map_err(|err| {
+        if err.raw_os_error() == Some(libc::ENOSPC) {
+            no_space(file, path, full_len)
+        } else {
+            eyre!("set_len({full_len}) failed on {}: {err}", path.display())
+        }
+    })?;
+    let elapsed_ms = elapsed_ms(started);
+    info!(
+        path = %path.display(),
+        bytes = full_len,
+        elapsed_ms,
+        "set_len chunks file"
+    );
+    Ok(())
+}
+
+/// `fallocate` mode 0. `EOPNOTSUPP` falls back to `set_len`.
+#[cfg(target_os = "linux")]
+fn fallocate_chunks(file: &File, path: &Path, full_len: u64) -> eyre::Result<()> {
+    let len = libc::off_t::try_from(full_len).map_err(|_| {
+        eyre!(
+            "chunks file {} length {full_len} does not fit in off_t",
+            path.display()
+        )
+    })?;
+    let started = Instant::now();
+    loop {
+        // Safety: `file` owns a live descriptor. Mode 0 allocates unwritten
+        // extents for holes and does not rewrite written bytes.
+        let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len) };
+        if rc == 0 {
+            let elapsed_ms = elapsed_ms(started);
+            info!(
+                path = %path.display(),
+                bytes = full_len,
+                elapsed_ms,
+                "fallocate chunks file"
+            );
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EOPNOTSUPP) => {
+                warn!(
+                    path = %path.display(),
+                    bytes = full_len,
+                    "fallocate is not supported on this filesystem; setting the logical size without reserving blocks"
+                );
+                return extend_with_set_len(file, path, full_len);
+            }
+            Some(libc::ENOSPC) => return Err(no_space(file, path, full_len)),
+            _ => {
+                return Err(eyre!(
+                    "fallocate mode 0 of {full_len} bytes failed on {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
+/// Reserve `full_len` bytes for the submodule data file.
+///
+/// Linux calls `fallocate` mode 0. A filesystem without `fallocate` gets
+/// `set_len` and a warning. Other operating systems do that directly.
+fn allocate_chunks_file(file: &File, path: &Path, full_len: u64) -> eyre::Result<()> {
+    if full_len == 0 {
+        return Err(eyre!(
+            "refusing to allocate a zero-length chunks file at {}",
+            path.display()
+        ));
+    }
+    let meta = file
+        .metadata()
+        .wrap_err_with(|| format!("stat {}", path.display()))?;
+    let len = meta.len();
+    let allocated = allocated_bytes(&meta);
+    if !chunks_file_needs_reserve(len, allocated, full_len) {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        fallocate_chunks(file, path, full_len)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        warn!(
+            path = %path.display(),
+            bytes = full_len,
+            os = std::env::consts::OS,
+            "fallocate is not available on this operating system; setting the logical size without reserving blocks"
+        );
+        extend_with_set_len(file, path, full_len)
+    }
+}
+
+/// Byte length to reserve for this submodule.
+///
+/// The inclusive interval is the production file. A bench split reserves the
+/// write-region window instead: that file is not the partition `chunks.dat`.
+fn submodule_reserve_len(
+    interval: &Interval<PartitionChunkOffset>,
+    chunk_size: u64,
+    #[cfg(feature = "bench")] split: Option<&Arc<SplitBacking>>,
+) -> eyre::Result<u64> {
+    #[cfg(feature = "bench")]
+    if let Some(split) = split {
+        return split
+            .write_chunks
+            .checked_mul(chunk_size)
+            .ok_or_else(|| eyre!("split write region byte length overflow"));
+    }
+    let start = u64::from(interval.start().0);
+    let end = u64::from(interval.end().0);
+    let chunks = end
+        .checked_sub(start)
+        .and_then(|span| span.checked_add(1))
+        .ok_or_else(|| eyre!("submodule interval {start}..={end} chunk count overflow"))?;
+    chunks.checked_mul(chunk_size).ok_or_else(|| {
+        eyre!(
+            "submodule interval {start}..={end} ({chunks} chunks of {chunk_size} bytes) overflows"
+        )
+    })
+}
+
+/// Path of an already-open split write file, for the allocation log.
+#[cfg(feature = "bench")]
+fn split_write_label(file: &File, sub_base_path: &Path) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let link = format!("/proc/self/fd/{}", file.as_raw_fd());
+        if let Ok(target) = fs::read_link(link) {
+            return target;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = file;
+    sub_base_path.join("split-write")
 }
 
 impl StorageModule {
@@ -969,8 +1183,15 @@ impl StorageModule {
             tracing::info!(custom.sub_base_path = ?sub_base_path);
             fs::create_dir_all(&sub_base_path)?; // Ensure the directory exists (for component tests)
 
+            let full_len = submodule_reserve_len(
+                &submodule_interval,
+                config.consensus.chunk_size,
+                #[cfg(feature = "bench")]
+                split.as_ref(),
+            )?;
             let opened = Self::open_submodule_file(
                 &sub_base_path,
+                full_len,
                 #[cfg(feature = "bench")]
                 split.as_ref(),
             )?;
@@ -1246,6 +1467,7 @@ impl StorageModule {
 
     fn open_submodule_file(
         sub_base_path: &Path,
+        full_len: u64,
         #[cfg(feature = "bench")] split: Option<&Arc<SplitBacking>>,
     ) -> eyre::Result<OpenedChunkFile> {
         #[cfg(feature = "bench")]
@@ -1272,7 +1494,12 @@ impl StorageModule {
                     .write
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                advise_chunks_random(&write, Path::new("split write"))
+                // The write region stands in for `chunks.dat`. Reserve it the
+                // same way. The recall file stays untouched: it is read-only.
+                let label = split_write_label(&write, sub_base_path);
+                allocate_chunks_file(&write, &label, full_len)
+                    .wrap_err("Failed to allocate the split write file")?;
+                advise_chunks_random(&write, &label)
                     .wrap_err("Failed to disable read-ahead on the write file")?;
             }
             return Ok(OpenedChunkFile {
@@ -1296,6 +1523,11 @@ impl StorageModule {
                     e
                 )
             })?;
+        // Mode 0 reserves holes up to the submodule length and leaves bytes
+        // that are already written where they are. A partition that does not
+        // fit fails here, before the first packed write.
+        allocate_chunks_file(&chunks_file, &path, full_len)
+            .wrap_err_with(|| format!("Failed to allocate {}", path.display()))?;
         // Every chunks.dat read is a pread of a range the caller already
         // sized. The next read is not the bytes after that range. Read-ahead
         // state belongs to this open file description, and a dup shares it,
@@ -5176,6 +5408,258 @@ mod tests {
             geometry_max_size: Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE),
             submodule_index: engine,
         }
+    }
+
+    /// Larger than one filesystem block, so a sparse hole is visible in `st_blocks`.
+    const RESERVE_CHUNK: u64 = 64 * 1024;
+    const RESERVE_CHUNKS: u64 = 4;
+
+    fn reserve_bytes() -> u64 {
+        RESERVE_CHUNK * RESERVE_CHUNKS
+    }
+
+    fn reserve_fixture(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModuleInfo,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: RESERVE_CHUNK,
+                num_chunks_in_partition: RESERVE_CHUNKS,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let last = u32::try_from(RESERVE_CHUNKS - 1).expect("chunk count");
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(partition_chunk_offset_ii!(0, last), "hdd0".into())],
+        };
+        Ok((tmp, config, info))
+    }
+
+    fn chunks_path(tmp: &irys_testing_utils::utils::tempfile::TempDir) -> PathBuf {
+        tmp.path().join("hdd0").join("chunks.dat")
+    }
+
+    fn read_prefix(path: &Path, len: usize) -> eyre::Result<Vec<u8>> {
+        let mut file = File::open(path)?;
+        let mut buf = vec![0_u8; len];
+        file.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_reserved(path: &Path, full_len: u64) -> eyre::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = fs::metadata(path)?;
+        assert_eq!(meta.len(), full_len, "{}", path.display());
+        let allocated = meta.blocks().saturating_mul(512);
+        assert!(
+            allocated >= full_len,
+            "{} allocated {allocated} bytes, full length is {full_len}",
+            path.display()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn chunks_reserve_runs_for_a_short_or_sparse_file() {
+        assert!(chunks_file_needs_reserve(0, 0, 100));
+        // A dense prefix that is still shorter than the submodule.
+        assert!(chunks_file_needs_reserve(50, 50, 100));
+        // Full logical size, with a hole.
+        assert!(chunks_file_needs_reserve(100, 40, 100));
+        // Longer than the submodule, with a hole somewhere.
+        assert!(chunks_file_needs_reserve(150, 40, 100));
+        assert!(!chunks_file_needs_reserve(100, 100, 100));
+        // Block rounding can report more allocated bytes than `st_size`.
+        assert!(!chunks_file_needs_reserve(100, 128, 100));
+        // Longer and dense: do not shrink.
+        assert!(!chunks_file_needs_reserve(180, 180, 100));
+    }
+
+    #[test]
+    fn submodule_reserve_len_counts_inclusive_offsets() -> eyre::Result<()> {
+        let interval = partition_chunk_offset_ii!(0, 4);
+        let len = submodule_reserve_len(
+            &interval,
+            32,
+            #[cfg(feature = "bench")]
+            None,
+        )?;
+        assert_eq!(len, 5 * 32);
+        Ok(())
+    }
+
+    #[test]
+    fn no_space_names_the_path_the_wanted_bytes_and_the_free_bytes() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("chunks_no_space").build();
+        let path = tmp.path().join("chunks.dat");
+        let file = File::create(&path)?;
+        let text = no_space(&file, &path, 1234).to_string();
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("wanted 1234 bytes"), "{text}");
+        assert!(text.contains("bytes free"), "{text}");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn new_chunks_file_is_reserved() -> eyre::Result<()> {
+        let (tmp, config, info) = reserve_fixture("chunks_reserve_new")?;
+        let storage = StorageModule::new(&info, &config)?;
+        let path = chunks_path(&tmp);
+        assert_reserved(&path, reserve_bytes())?;
+        let head = read_prefix(&path, 1)?;
+        assert_eq!(head, [0]);
+        drop(storage);
+        Ok(())
+    }
+
+    #[test]
+    fn partial_chunks_file_keeps_its_bytes() -> eyre::Result<()> {
+        let (tmp, config, info) = reserve_fixture("chunks_reserve_partial")?;
+        let path = chunks_path(&tmp);
+        fs::create_dir_all(path.parent().expect("parent"))?;
+        let pattern = vec![0xA5_u8; RESERVE_CHUNK as usize];
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)?;
+            file.write_all(&pattern)?;
+        }
+        assert!(fs::metadata(&path)?.len() < reserve_bytes());
+
+        let storage = StorageModule::new(&info, &config)?;
+        assert_eq!(read_prefix(&path, pattern.len())?, pattern);
+        assert_eq!(fs::metadata(&path)?.len(), reserve_bytes());
+        #[cfg(target_os = "linux")]
+        assert_reserved(&path, reserve_bytes())?;
+        drop(storage);
+
+        // The second open finds a file that already covers the submodule.
+        let reopened = StorageModule::new(&info, &config)?;
+        assert_eq!(read_prefix(&path, pattern.len())?, pattern);
+        assert_eq!(fs::metadata(&path)?.len(), reserve_bytes());
+        drop(reopened);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sparse_full_chunks_file_keeps_its_bytes_and_is_reserved() -> eyre::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let (tmp, config, info) = reserve_fixture("chunks_reserve_sparse")?;
+        let path = chunks_path(&tmp);
+        fs::create_dir_all(path.parent().expect("parent"))?;
+        let pattern = vec![0x5A_u8; RESERVE_CHUNK as usize];
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)?;
+            file.write_all(&pattern)?;
+            file.set_len(reserve_bytes())?;
+        }
+        let before = fs::metadata(&path)?;
+        assert_eq!(before.len(), reserve_bytes());
+        let allocated = before.blocks().saturating_mul(512);
+        assert!(
+            allocated < before.len(),
+            "setup file is not sparse: allocated {allocated}, len {}",
+            before.len()
+        );
+
+        let storage = StorageModule::new(&info, &config)?;
+        assert_eq!(read_prefix(&path, pattern.len())?, pattern);
+        assert_reserved(&path, reserve_bytes())?;
+        drop(storage);
+        Ok(())
+    }
+
+    #[cfg(feature = "bench")]
+    #[test]
+    fn split_write_region_is_reserved_and_recall_is_unchanged() -> eyre::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = TempDirBuilder::new().prefix("split_reserve").build();
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let recall_path = tmp.path().join("recall");
+        let write_path = tmp.path().join("write");
+        let recall_pattern = vec![0x22_u8; 4096];
+        let write_pattern = vec![0x11_u8; RESERVE_CHUNK as usize];
+        {
+            let mut recall = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&recall_path)?;
+            recall.write_all(&recall_pattern)?;
+            recall.set_len(reserve_bytes())?;
+            let mut write = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&write_path)?;
+            write.write_all(&write_pattern)?;
+        }
+        let recall_before = fs::metadata(&recall_path)?;
+        let recall = OpenOptions::new().read(true).open(&recall_path)?;
+        let write = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&write_path)?;
+        let split = Arc::new(SplitBacking::open(recall, write, 0, RESERVE_CHUNKS)?);
+        let config = Config::new_with_random_peer_id(NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: RESERVE_CHUNK,
+                num_chunks_in_partition: RESERVE_CHUNKS,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        });
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: None,
+            submodules: vec![(
+                partition_chunk_offset_ii!(
+                    0,
+                    u32::try_from(RESERVE_CHUNKS - 1).expect("chunk count")
+                ),
+                "sub".into(),
+            )],
+        };
+        let storage = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)?;
+        drop(storage);
+
+        assert!(!sub.join("chunks.dat").exists());
+        let recall_after = fs::metadata(&recall_path)?;
+        assert_eq!(recall_after.len(), recall_before.len());
+        assert_eq!(recall_after.blocks(), recall_before.blocks());
+        assert_eq!(
+            read_prefix(&recall_path, recall_pattern.len())?,
+            recall_pattern
+        );
+        assert_eq!(
+            read_prefix(&write_path, write_pattern.len())?,
+            write_pattern
+        );
+        assert_eq!(fs::metadata(&write_path)?.len(), reserve_bytes());
+        #[cfg(target_os = "linux")]
+        assert_reserved(&write_path, reserve_bytes())?;
+        Ok(())
     }
 
     #[test]
