@@ -307,9 +307,9 @@ struct PendingWrites {
     occupancy: HashMap<PartitionChunkOffset, u64>,
     /// Who queued each packed chunk. A priority change starts a new run.
     priorities: HashMap<PartitionChunkOffset, disk_lane::WritePriority>,
-    /// When each packed chunk was queued. While the disk is busy, short runs
-    /// wait out `reorder_grace`. One pass then writes the oldest of those.
-    /// Further short runs wait another `reorder_grace`. An idle disk writes them.
+    /// When each packed chunk was queued. While the disk is busy, a short run
+    /// waits out `reorder_grace`. Every aged short run is then eligible. An
+    /// idle disk writes them without that wait.
     queued_at: HashMap<PartitionChunkOffset, Instant>,
     /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
     queued_unpacked_bytes: u64,
@@ -624,10 +624,8 @@ struct CoalescedRun {
 }
 
 /// Length and age of one packed run. The peek path uses this so it does not
-/// clone chunk bytes. The start and the age are read by tests.
+/// clone chunk bytes. The age is read by tests.
 struct RunMeta {
-    #[cfg_attr(not(test), allow(dead_code))]
-    start: PartitionChunkOffset,
     byte_len: u64,
     #[cfg_attr(not(test), allow(dead_code))]
     oldest: Instant,
@@ -1410,9 +1408,8 @@ impl StorageModule {
 
     /// A packed run is ready for the disk when the chunk disk is idle, one
     /// run fills the write cap, the pending set has reached the durability
-    /// count, or the oldest short run has waited `reorder_grace` and no
-    /// earlier short run still holds that grace. Other short runs stay in
-    /// memory so a neighbor can join while the disk stays busy.
+    /// count, or a short run has waited `reorder_grace`. Young short runs
+    /// stay in memory so a neighbor can join while the disk stays busy.
     fn pending_run_ready(&self) -> bool {
         let pending = self.pending_writes.read().unwrap();
         if pending.is_empty() {
@@ -1427,8 +1424,7 @@ impl StorageModule {
         }
         let chunk = self.config.consensus.chunk_size.max(1);
         let cap = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
-        self.has_full_write_run(&pending, cap)
-            || (self.has_aged_pending(&pending, chunk) && !self.disk.short_writes_held())
+        self.has_full_write_run(&pending, cap) || self.has_aged_pending(&pending, chunk)
     }
 
     /// True when the oldest chunk in some run has waited out `reorder_grace`.
@@ -1441,10 +1437,8 @@ impl StorageModule {
     }
 
     /// Bytes of the longest packed run that may hit the disk now. Zero when
-    /// every run is still held for a neighbor. While the disk is busy, a
-    /// short-run hold leaves every short run out of this count, so entropy
-    /// can use the disk while those runs wait for a neighbor. An idle disk
-    /// counts every queued run.
+    /// every run is still waiting out `reorder_grace`. An idle disk, the
+    /// durability count, and an owed recall flush count every queued run.
     #[cfg(test)]
     fn longest_ready_write_bytes(&self) -> u64 {
         let pending = self.pending_writes.read().unwrap();
@@ -1453,38 +1447,14 @@ impl StorageModule {
         }
         let chunk = self.config.consensus.chunk_size.max(1);
         let cap = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
-        if self.disk.chunk_disk_idle() {
-            return self
-                .write_run_metas(&pending, cap)
-                .into_iter()
-                .map(|run| run.byte_len)
-                .max()
-                .unwrap_or(0);
-        }
         let grace = disk_lane::reorder_grace(chunk);
-        let due_all = self.short_runs_due(pending.len());
-        let held = self.disk.short_writes_held();
-        let mut best_full = 0_u64;
-        let mut best_short: Option<(Instant, PartitionChunkOffset, u64)> = None;
-        for run in self.write_run_metas(&pending, cap) {
-            if due_all || run.byte_len >= cap {
-                best_full = best_full.max(run.byte_len);
-                continue;
-            }
-            if held || run.oldest.elapsed() < grace {
-                continue;
-            }
-            let take = match best_short {
-                None => true,
-                Some((oldest, start, _)) => {
-                    run.oldest < oldest || (run.oldest == oldest && run.start < start)
-                }
-            };
-            if take {
-                best_short = Some((run.oldest, run.start, run.byte_len));
-            }
-        }
-        best_full.max(best_short.map(|(_, _, bytes)| bytes).unwrap_or(0))
+        let due_all = self.disk.chunk_disk_idle() || self.short_runs_due(pending.len());
+        self.write_run_metas(&pending, cap)
+            .into_iter()
+            .filter(|run| due_all || run.byte_len >= cap || run.oldest.elapsed() >= grace)
+            .map(|run| run.byte_len)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Durability and an owed recall flush write short runs. The count is
@@ -1557,7 +1527,6 @@ impl StorageModule {
             }
             if let Some(cursor) = current.take() {
                 runs.push(RunMeta {
-                    start: cursor.start,
                     byte_len: cursor.byte_len,
                     oldest: current_oldest.unwrap_or_else(Instant::now),
                 });
@@ -1574,7 +1543,6 @@ impl StorageModule {
         }
         if let Some(cursor) = current.take() {
             runs.push(RunMeta {
-                start: cursor.start,
                 byte_len: cursor.byte_len,
                 oldest: current_oldest.unwrap_or_else(Instant::now),
             });
@@ -2001,8 +1969,7 @@ impl StorageModule {
             self.config.node_config.storage.num_writes_before_sync
         };
         // Capture before this commit's own write hold. An idle disk writes
-        // every short run and does not arm the hold. A busy disk keeps one
-        // aged short run so the others can still gain a neighbor.
+        // every short run. A busy disk writes full runs and aged short runs.
         let disk_idle = self.disk.chunk_disk_idle();
         let chunk = self.config.consensus.chunk_size.max(1);
         let run_cap = if coalesce {
@@ -2016,14 +1983,8 @@ impl StorageModule {
         };
 
         // First use read lock to check if we have work to do
-        let (mut write_batch, pending_count, queued_at) = {
+        let mut write_batch = {
             let pending = self.pending_writes.read().unwrap();
-            let pending_count = pending.len();
-            let queued_at = if coalesce {
-                pending.queued_at.clone()
-            } else {
-                HashMap::new()
-            };
 
             let pending_writes = if coalesce && let Some(limit) = max_runs {
                 self.select_coalesced_window(
@@ -2064,7 +2025,7 @@ impl StorageModule {
             };
 
             drop(pending);
-            (pending_writes, pending_count, queued_at)
+            pending_writes
         };
 
         if write_batch.is_empty() {
@@ -2078,57 +2039,6 @@ impl StorageModule {
         };
         if let Some(limit) = max_runs {
             runs.truncate(limit);
-        }
-        // A short run seeks about as much as a full one and moves far less
-        // data. While the disk is busy, one pass writes every full run and
-        // the oldest aged short run, in offset order. The hold keeps the
-        // other short runs queued for a neighbor. Durability, a recall flush,
-        // and an idle disk write every run. An idle release does not arm the hold.
-        let mut emitted_short = false;
-        if coalesce && !force && !disk_idle && !self.short_runs_due(pending_count) {
-            let full = disk_lane::WRITE_RUN_MAX_BYTES.max(chunk);
-            let grace = disk_lane::reorder_grace(chunk);
-            let held = self.disk.short_writes_held();
-            let mut oldest_short: Option<(Instant, u32, usize)> = None;
-            if !held {
-                for (index, run) in runs.iter().enumerate() {
-                    if run.bytes.len() as u64 >= full {
-                        continue;
-                    }
-                    let Some(oldest) = run
-                        .offsets
-                        .iter()
-                        .filter_map(|offset| queued_at.get(offset).copied())
-                        .min()
-                    else {
-                        continue;
-                    };
-                    if oldest.elapsed() < grace {
-                        continue;
-                    }
-                    let start = run.start.0;
-                    let take = match oldest_short {
-                        None => true,
-                        Some((prev, prev_start, _)) => {
-                            oldest < prev || (oldest == prev && start < prev_start)
-                        }
-                    };
-                    if take {
-                        oldest_short = Some((oldest, start, index));
-                    }
-                }
-            }
-            let keep_short = oldest_short.map(|(_, _, index)| index);
-            let mut kept = Vec::with_capacity(runs.len());
-            for (index, run) in runs.into_iter().enumerate() {
-                if run.bytes.len() as u64 >= full {
-                    kept.push(run);
-                } else if keep_short == Some(index) {
-                    emitted_short = true;
-                    kept.push(run);
-                }
-            }
-            runs = kept;
         }
         if runs.is_empty() {
             return self.flush_forced_interval_completions(force);
@@ -2238,10 +2148,6 @@ impl StorageModule {
             &then.elapsed().as_secs_f64(),
             &len
         );
-
-        if emitted_short {
-            self.disk.arm_short_hold(disk_lane::reorder_grace(chunk));
-        }
 
         Ok(())
     }
@@ -4450,17 +4356,17 @@ impl StorageModule {
     }
 
     /// Pending chunks inside a reorder scan, joined into runs of at most `cap`
-    /// bytes. Runs stay in offset order. `one_short` keeps every full run and
-    /// the oldest aged short run, so a pile of short runs cannot fill the
-    /// window and hide a full run. The caller passes false when the disk is
-    /// idle, so the short runs go out.
+    /// bytes. Runs stay in offset order. `hold_young` leaves a short run
+    /// queued until its oldest chunk has waited `reorder_grace`. Full runs
+    /// stay. The caller passes false when the disk is idle or every short
+    /// run is due, so those short runs go out.
     fn select_coalesced_window(
         &self,
         pending: &PendingWrites,
         max_runs: usize,
         scan_chunks: usize,
         cap: u64,
-        one_short: bool,
+        hold_young: bool,
     ) -> Vec<(
         PartitionChunkOffset,
         (ChunkBytes, ChunkType),
@@ -4554,35 +4460,8 @@ impl StorageModule {
         for run in &mut runs {
             run.aged = run.oldest.elapsed() >= grace;
         }
-        if one_short {
-            let held = self.disk.short_writes_held();
-            let mut chosen: Option<usize> = None;
-            if !held {
-                for (index, run) in runs.iter().enumerate() {
-                    if !run.aged || run.byte_len >= cap {
-                        continue;
-                    }
-                    let start = run.items.first().map(|(offset, _)| *offset);
-                    let take = match chosen.and_then(|picked| runs.get(picked)) {
-                        None => true,
-                        Some(prev) => {
-                            let prev_start = prev.items.first().map(|(offset, _)| *offset);
-                            run.oldest < prev.oldest
-                                || (run.oldest == prev.oldest && start < prev_start)
-                        }
-                    };
-                    if take {
-                        chosen = Some(index);
-                    }
-                }
-            }
-            let mut kept = Vec::with_capacity(runs.len());
-            for (index, run) in runs.into_iter().enumerate() {
-                if run.byte_len >= cap || chosen == Some(index) {
-                    kept.push(run);
-                }
-            }
-            runs = kept;
+        if hold_young {
+            runs.retain(|run| run.byte_len >= cap || run.aged);
         }
         runs.truncate(max_runs);
 
@@ -8930,7 +8809,6 @@ mod tests {
         storage.disk.occupy_for_test();
         assert!(!storage.pending_run_ready());
         assert_eq!(storage.longest_ready_write_bytes(), 0);
-        storage.disk.arm_short_hold(Duration::from_secs(30));
         storage.disk.release_for_test();
         assert!(storage.pending_run_ready());
         assert_eq!(storage.longest_ready_write_bytes(), 32);
@@ -8938,7 +8816,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_disk_holds_further_short_writes_after_one_aged_run() -> eyre::Result<()> {
+    fn busy_disk_writes_every_aged_short_run() -> eyre::Result<()> {
         let (_tmp, storage) = seek_run_fixture("busy_aged_write", 32, 10_000, 8)?;
         storage.write_chunk(
             PartitionChunkOffset::from(0),
@@ -8948,6 +8826,11 @@ mod tests {
         storage.write_chunk(
             PartitionChunkOffset::from(2),
             vec![2_u8; 32],
+            ChunkType::Data,
+        );
+        storage.write_chunk(
+            PartitionChunkOffset::from(4),
+            vec![3_u8; 32],
             ChunkType::Data,
         );
         let aged = Instant::now()
@@ -8965,12 +8848,13 @@ mod tests {
         storage.disk.occupy_for_test();
         assert!(storage.pending_run_ready());
         assert_eq!(storage.longest_ready_write_bytes(), 32);
-        storage.disk.arm_short_hold(Duration::from_secs(30));
-        assert!(!storage.pending_run_ready());
-        assert_eq!(storage.longest_ready_write_bytes(), 0);
+        let offsets = {
+            let pending = storage.pending_writes.read().unwrap();
+            let batch = storage.select_coalesced_window(&pending, 8, 512, 32 * 4, true);
+            batch.iter().map(|(offset, _, _)| offset.0).collect::<Vec<_>>()
+        };
+        assert_eq!(offsets, vec![0, 2]);
         storage.disk.release_for_test();
-        assert!(storage.pending_run_ready());
-        assert_eq!(storage.longest_ready_write_bytes(), 32);
         Ok(())
     }
 
@@ -9296,9 +9180,9 @@ mod tests {
     }
 
     #[test]
-    fn one_short_window_keeps_full_runs_and_the_oldest() -> eyre::Result<()> {
+    fn aged_short_runs_join_the_full_runs() -> eyre::Result<()> {
         let chunk_size = 32_u64;
-        let (_tmp, storage) = coalesce_fixture("one_short_window", chunk_size)?;
+        let (_tmp, storage) = coalesce_fixture("aged_short_runs", chunk_size)?;
         let body = |offset: u32| vec![offset as u8; chunk_size as usize];
         for offset in 0..4_u32 {
             storage.write_chunk(
@@ -9309,6 +9193,7 @@ mod tests {
         }
         storage.write_chunk(PartitionChunkOffset::from(10), body(10), ChunkType::Data);
         storage.write_chunk(PartitionChunkOffset::from(20), body(20), ChunkType::Data);
+        storage.write_chunk(PartitionChunkOffset::from(30), body(30), ChunkType::Data);
         let older = Instant::now()
             .checked_sub(Duration::from_secs(3))
             .expect("test clock");
@@ -9325,12 +9210,11 @@ mod tests {
         let cap = chunk_size * 4;
         let batch = storage.select_coalesced_window(&pending, 8, 512, cap, true);
         let offsets: Vec<u32> = batch.iter().map(|(offset, _, _)| offset.0).collect();
-        assert_eq!(offsets, vec![0, 1, 2, 3, 20]);
+        assert_eq!(offsets, vec![0, 1, 2, 3, 10, 20]);
 
-        storage.disk.arm_short_hold(Duration::from_secs(30));
-        let held = storage.select_coalesced_window(&pending, 8, 512, cap, true);
-        let held_offsets: Vec<u32> = held.iter().map(|(offset, _, _)| offset.0).collect();
-        assert_eq!(held_offsets, vec![0, 1, 2, 3]);
+        let released = storage.select_coalesced_window(&pending, 8, 512, cap, false);
+        let released_offsets: Vec<u32> = released.iter().map(|(offset, _, _)| offset.0).collect();
+        assert_eq!(released_offsets, vec![0, 1, 2, 3, 10, 20, 30]);
         Ok(())
     }
 

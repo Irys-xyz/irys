@@ -11,20 +11,16 @@
 //! A caller that already holds neighboring chunks publishes that run in one
 //! insert, so the lane cannot read a prefix of it. A short run waits for
 //! that size, a recall flush, the pending set at `num_writes_before_sync`,
-//! or `reorder_grace` only while the chunk disk is busy. One busy pass
-//! writes every full run and the oldest aged short run, in offset order.
-//! The next short run waits another `reorder_grace` while the disk stays
-//! busy, so the others can still gain a neighbor. An idle disk issues the
-//! short runs already queued, in offset order, and does not arm the hold.
-//! Entropy reads use the same rule on their own queue and their own hold.
-//! A short span waits for the sweep cap, the disk-slot count at
-//! `num_writes_before_sync`, a recall flush, or `reorder_grace` only while
-//! the chunk disk is busy. One busy pass reads every full span and the
+//! or `reorder_grace` only while the chunk disk is busy. A busy pass writes
+//! every full run and every aged short run, in offset order. An idle disk
+//! writes every short run already queued.
+//! Entropy reads keep their own hold. A short span waits for the sweep cap,
+//! the disk-slot count at `num_writes_before_sync`, a recall flush, or
+//! `reorder_grace` only while the chunk disk is busy. One busy pass reads
+//! every full span and the
 //! oldest aged short span, in offset order. Further short spans wait
 //! another grace while the disk stays busy. An idle disk issues the short
 //! spans already queued, in offset order, and does not arm the read hold.
-//! The write hold and the read hold stay separate, so a short write does
-//! not block a ready read.
 //! New submits stop when another command would put the in-flight set past
 //! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
 //! The file lock is dropped before the lane moves on.
@@ -270,8 +266,6 @@ pub(super) struct DiskGate {
     lane_stop: AtomicBool,
     /// Index commits wait while a chunk run or a mining recall holds this.
     index_gap: Arc<IndexGap>,
-    /// Further short runs wait until this instant. Full runs ignore it.
-    short_hold_until: Mutex<Option<Instant>>,
     /// Further short entropy spans wait until this instant. Full spans ignore it.
     read_short_hold_until: Mutex<Option<Instant>>,
     /// Set for the life of `run_disk_lane`. External flushes use it to avoid
@@ -518,7 +512,6 @@ impl DiskGate {
             lane_started: AtomicBool::new(false),
             lane_stop: AtomicBool::new(false),
             index_gap,
-            short_hold_until: Mutex::new(None),
             read_short_hold_until: Mutex::new(None),
             lane_thread: Mutex::new(None),
             handoff: LaneHandoff::new(),
@@ -623,36 +616,6 @@ impl DiskGate {
 
     fn wake_lane_handoff(&self) {
         self.handoff.wake();
-    }
-
-    /// True while a short run written earlier still owns the grace window.
-    pub(super) fn short_writes_held(&self) -> bool {
-        self.short_hold_remaining().is_some()
-    }
-
-    /// Time until another short run may be written. `None` when the hold
-    /// is unset or already due.
-    pub(super) fn short_hold_remaining(&self) -> Option<Duration> {
-        let guard = self
-            .short_hold_until
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let until = (*guard)?;
-        let now = Instant::now();
-        if now < until {
-            Some(until.saturating_duration_since(now))
-        } else {
-            None
-        }
-    }
-
-    /// Block further short runs for `grace` after one short run is written.
-    pub(super) fn arm_short_hold(&self, grace: Duration) {
-        let mut guard = self
-            .short_hold_until
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        *guard = Instant::now().checked_add(grace);
     }
 
     /// True while a short entropy span read earlier still owns the grace window.
@@ -2605,9 +2568,9 @@ impl StorageModule {
 
     /// Time until the next packed write is allowed.
     /// `None` when nothing is queued. Zero when the disk is idle, a full run
-    /// is ready, the durability count is reached, or an aged short run outside
-    /// the short-run hold is ready. A hold after one short run keeps the other
-    /// short runs queued while the disk stays busy.
+    /// is ready, the durability count is reached, or an aged short run is
+    /// ready. A young short run waits out `reorder_grace` while the disk
+    /// stays busy.
     fn write_grace_remaining(&self) -> Option<Duration> {
         let pending = self.pending_writes.read().unwrap();
         let oldest = pending.queued_at.values().copied().min()?;
@@ -2616,14 +2579,13 @@ impl StorageModule {
         }
         let chunk = self.config.consensus.chunk_size.max(1);
         let grace = reorder_grace(chunk);
-        let until_aged = grace.saturating_sub(oldest.elapsed());
         if self.short_runs_due(pending.len())
             || self.has_full_write_run(&pending, WRITE_RUN_MAX_BYTES.max(chunk))
+            || oldest.elapsed() >= grace
         {
             return Some(Duration::ZERO);
         }
-        let until_hold = self.disk.short_hold_remaining().unwrap_or(Duration::ZERO);
-        Some(until_aged.max(until_hold))
+        Some(grace.saturating_sub(oldest.elapsed()))
     }
 
     /// Time until the next entropy read is allowed.
@@ -2676,11 +2638,11 @@ impl StorageModule {
     /// ready: the loop waits for the notify. An idle disk with a queued short
     /// command is ready, so the lane does not sleep on `reorder_grace`. While
     /// the disk is busy, a short packed run waits for the cap, the durability
-    /// count, or `reorder_grace`, and after one short run the others wait
-    /// another grace. A short entropy span follows the same rule on the read
-    /// hold. A full run, an owed recall flush, the one eligible short run, a
-    /// ready entropy span, memory entropy, or an external flush or interval
-    /// write is ready.
+    /// count, or `reorder_grace`. A short entropy span follows the same wait,
+    /// and after one short span the others wait another grace on the read
+    /// hold. A full run, an owed recall flush, an aged short run, a ready
+    /// entropy span, memory entropy, or an external flush or interval write
+    /// is ready.
     fn lane_work_ready(&self) -> bool {
         if !self.disk.disk_available() {
             return false;
