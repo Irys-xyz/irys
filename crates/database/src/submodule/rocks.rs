@@ -13,9 +13,9 @@
 //! Large data-path and tx-path values go to blob files so compaction does
 //! not rewrite them. Small offset rows stay in SST blocks. rust-rocksdb
 //! 0.24 has no `set_allow_fallocate` (the RocksDB default stays on). WAL
-//! recycle and `wal_bytes_per_sync` are the durability knobs this binding
-//! exposes. Every open keeps SST readers (`max_open_files=-1`, 16 opening
-//! threads). Blob readers stay lazy.
+//! recycle, `wal_bytes_per_sync`, `use_fsync`, and `max_total_wal_size` are
+//! the durability knobs this binding exposes. Every open keeps SST readers
+//! (`max_open_files=-1`, 16 opening threads). Blob readers stay lazy.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -56,6 +56,11 @@ pub const BLOB_MIN_BYTES: u64 = 2048;
 const BACKGROUND_JOBS: i32 = 2;
 /// Leveled SST target. Compaction output preallocation uses this as a cap.
 const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
+/// Live WAL cap for the rotate presets. The bench index writes about
+/// 10 KiB/s of WAL, so 1 MiB switches logs about every 100 s and a 600 s
+/// step runs mostly on reused WAL files. Each switch flushes every family
+/// that holds data in the old log.
+const WAL_ROTATE_BYTES: u64 = 1024 * 1024;
 const SCHEMA_FILE: &str = "SCHEMA";
 const SCHEMA_TEXT: &str = SUBMODULE_SCHEMA;
 /// Marker written by the per-offset index. The on-disk worst-case directory
@@ -83,11 +88,14 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
 /// The bench names the other values. Each of those changes one field, so a
-/// sweep can attribute a difference to that field, except `full-filters`.
-/// That preset is the full-filter residency trial: one shard and 128 MiB.
-/// `no-wal-recycle` turns WAL file reuse off (baseline reuses 4). Options are fixed at open. A new
-/// block size or a filter change needs an empty directory. An existing SST
-/// keeps the filter it was built with until a compaction rewrites the file.
+/// sweep can attribute a difference to that field. Two presets change more
+/// than one field: `full-filters` (one shard and a 128 MiB cache) and
+/// `fdatasync-wal-rotate` (`fdatasync` plus the WAL cap). `no-wal-recycle`
+/// turns WAL file reuse off (baseline reuses 4). `fdatasync-wal` keeps every
+/// other baseline field and selects `fdatasync`. The rotate presets cap the
+/// live WAL at [`WAL_ROTATE_BYTES`]. Options are fixed at open. A new block
+/// size or a filter change needs an empty directory. An existing SST keeps
+/// the filter it was built with until a compaction rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
@@ -139,6 +147,32 @@ pub struct RocksTuning {
     /// does not use `disableWAL`, `WAL_ttl_seconds`, or `WAL_size_limit_MB`.
     /// Those last two also force the count to 0.
     pub recycle_log_file_num: usize,
+    /// `true` syncs the WAL, the MANIFEST, SST files, and blob files with
+    /// `fsync`. `false` uses `fdatasync`.
+    ///
+    /// RocksDB treats the two calls as equally durable. The flag exists for
+    /// old filesystem bugs (fdatasync on ext4 before Linux 3.7). It is not a
+    /// separate mode for directory entries. A new file still syncs its
+    /// directory through `FsyncWithDirOptions`, and that path ignores this
+    /// flag.
+    ///
+    /// Baseline (production) is `true`. `fdatasync-wal` is `false`.
+    pub use_fsync: bool,
+    /// Live WAL bytes that force a memtable switch and a flush.
+    ///
+    /// `0` (baseline) lets RocksDB pick
+    /// `4 * sum(write_buffer_size * max_write_buffer_number)`. That product
+    /// is about 4 GiB with these buffers, so a bench step never fills a log.
+    /// A non-zero value switches once the live logs pass it. RocksDB applies
+    /// the value only when the database has more than one column family.
+    /// This store has the default family plus eight.
+    ///
+    /// The switch flushes every column family that still references the
+    /// oldest log. Each non-empty family writes an L0 SST, and compaction
+    /// reads those files again. `recycle_log_file_num` can then reuse the
+    /// retired log. A reused file keeps its old size, so later syncs overwrite
+    /// bytes that are already allocated.
+    pub max_total_wal_size: u64,
 }
 
 impl RocksTuning {
@@ -156,11 +190,13 @@ impl RocksTuning {
             universal: false,
             partition_filters: true,
             recycle_log_file_num: 4,
+            use_fsync: true,
+            max_total_wal_size: 0,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 10] {
+    pub const fn presets() -> [Self; 13] {
         let base = Self::baseline();
         [
             base,
@@ -219,6 +255,29 @@ impl RocksTuning {
                 recycle_log_file_num: 0,
                 ..base
             },
+            // `fdatasync` for the WAL, the MANIFEST, SST files, and blob files.
+            // Baseline stays on `fsync`. See `RocksTuning::use_fsync`.
+            Self {
+                name: "fdatasync-wal",
+                use_fsync: false,
+                ..base
+            },
+            // Same `fdatasync`, plus a 1 MiB live-WAL cap. A full log
+            // switches, the flush retires it, and the next log can reuse
+            // that file. See `RocksTuning::max_total_wal_size`.
+            Self {
+                name: "fdatasync-wal-rotate",
+                use_fsync: false,
+                max_total_wal_size: WAL_ROTATE_BYTES,
+                ..base
+            },
+            // Same 1 MiB cap with baseline `fsync`. A run can separate the
+            // sync call from the rotation.
+            Self {
+                name: "fsync-wal-rotate",
+                max_total_wal_size: WAL_ROTATE_BYTES,
+                ..base
+            },
         ]
     }
 
@@ -258,9 +317,11 @@ impl RocksTuning {
             "full"
         };
         format!(
-            "rocks={} recycle_log_file_num={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
+            "rocks={} recycle_log_file_num={} use_fsync={} max_total_wal_size={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
             self.name,
             self.recycle_log_file_num,
+            self.use_fsync,
+            self.max_total_wal_size,
             self.block_bytes,
             self.background_jobs,
             self.target_file_bytes,
@@ -283,6 +344,8 @@ impl RocksTuning {
             + usize::from(self.universal != other.universal)
             + usize::from(self.partition_filters != other.partition_filters)
             + usize::from(self.recycle_log_file_num != other.recycle_log_file_num)
+            + usize::from(self.use_fsync != other.use_fsync)
+            + usize::from(self.max_total_wal_size != other.max_total_wal_size)
     }
 }
 
@@ -1235,6 +1298,13 @@ fn open_db(
     // Point-in-time recovery, the default, keeps a non-zero count.
     // See `RocksTuning::recycle_log_file_num`.
     db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
+    // Baseline (production) is fsync. A bench preset can select fdatasync.
+    // The flag also covers the MANIFEST, SST files, and blob files.
+    // See `RocksTuning::use_fsync`.
+    db_opts.set_use_fsync(tuning.use_fsync);
+    // `0` keeps the RocksDB dynamic cap. A rotate preset sets 1 MiB.
+    // See `RocksTuning::max_total_wal_size`.
+    db_opts.set_max_total_wal_size(tuning.max_total_wal_size);
     // A 512 cap evicts SST readers. The next Get then reads the footer,
     // index, and filter. -1 keeps every table open. Blob readers stay lazy.
     db_opts.set_max_open_files(-1);
@@ -1243,7 +1313,6 @@ fn open_db(
         // Bench only. Skip table properties that only choose compaction inputs.
         db_opts.set_skip_stats_update_on_db_open(true);
     }
-    db_opts.set_use_fsync(true);
     if collect_stats {
         // Tickers only. Timers and histograms stay off.
         db_opts.enable_statistics();
@@ -1367,10 +1436,11 @@ fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Opti
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
     db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
+    db_opts.set_use_fsync(tuning.use_fsync);
+    db_opts.set_max_total_wal_size(tuning.max_total_wal_size);
     db_opts.set_max_open_files(-1);
     db_opts.set_max_file_opening_threads(16);
     db_opts.set_skip_stats_update_on_db_open(true);
-    db_opts.set_use_fsync(true);
     db_opts.enable_statistics();
     db_opts.set_statistics_level(rocksdb::statistics::StatsLevel::ExceptHistogramOrTimers);
     db_opts.set_stats_dump_period_sec(0);
@@ -2463,11 +2533,32 @@ mod tests {
         assert_eq!(full_filters.cache_shard_bits, 0);
         assert_eq!(base.cache_shard_bits, -1);
         assert_eq!(base.recycle_log_file_num, 4);
+        assert!(base.use_fsync);
+        assert_eq!(base.max_total_wal_size, 0);
         let no_recycle = RocksTuning::preset("no-wal-recycle")?;
         assert_eq!(no_recycle.recycle_log_file_num, 0);
         assert!(base.describe().contains("recycle_log_file_num=4"));
+        assert!(base.describe().contains("use_fsync=true"));
+        assert!(base.describe().contains("max_total_wal_size=0"));
         assert!(no_recycle.describe().contains("recycle_log_file_num=0"));
         assert!(no_recycle.describe().contains("filters=partitioned"));
+        let fdatasync = RocksTuning::preset("fdatasync-wal")?;
+        assert!(!fdatasync.use_fsync);
+        assert_eq!(fdatasync.max_total_wal_size, 0);
+        assert_eq!(fdatasync.recycle_log_file_num, 4);
+        assert!(fdatasync.describe().contains("use_fsync=false"));
+        let fdatasync_rotate = RocksTuning::preset("fdatasync-wal-rotate")?;
+        assert!(!fdatasync_rotate.use_fsync);
+        assert_eq!(fdatasync_rotate.max_total_wal_size, WAL_ROTATE_BYTES);
+        assert_eq!(fdatasync_rotate.recycle_log_file_num, 4);
+        let fsync_rotate = RocksTuning::preset("fsync-wal-rotate")?;
+        assert!(fsync_rotate.use_fsync);
+        assert_eq!(fsync_rotate.max_total_wal_size, WAL_ROTATE_BYTES);
+        assert!(
+            fsync_rotate
+                .describe()
+                .contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}"))
+        );
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -2477,6 +2568,8 @@ mod tests {
                 assert_eq!(preset.knob_diffs(base), 0);
             } else if preset.name == "full-filters" {
                 assert_eq!(preset.knob_diffs(base), 3, "{}", preset.name);
+            } else if preset.name == "fdatasync-wal-rotate" {
+                assert_eq!(preset.knob_diffs(base), 2, "{}", preset.name);
             } else {
                 assert_eq!(preset.knob_diffs(base), 1, "{}", preset.name);
             }
@@ -2534,6 +2627,46 @@ mod tests {
         assert!(
             no_recycle_opts.contains("partition_filters=true"),
             "{no_recycle_opts}"
+        );
+        assert!(baseline_opts.contains("use_fsync=true"), "{baseline_opts}");
+        assert!(
+            baseline_opts.contains("max_total_wal_size=0"),
+            "{baseline_opts}"
+        );
+        let fdatasync_opts = persisted_options(&dir.path().join("fdatasync-wal"))?;
+        assert!(
+            fdatasync_opts.contains("use_fsync=false"),
+            "{fdatasync_opts}"
+        );
+        assert!(
+            fdatasync_opts.contains("max_total_wal_size=0"),
+            "{fdatasync_opts}"
+        );
+        assert!(
+            fdatasync_opts.contains("recycle_log_file_num=4"),
+            "{fdatasync_opts}"
+        );
+        let fdatasync_rotate_opts = persisted_options(&dir.path().join("fdatasync-wal-rotate"))?;
+        assert!(
+            fdatasync_rotate_opts.contains("use_fsync=false"),
+            "{fdatasync_rotate_opts}"
+        );
+        assert!(
+            fdatasync_rotate_opts.contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}")),
+            "{fdatasync_rotate_opts}"
+        );
+        let fsync_rotate_opts = persisted_options(&dir.path().join("fsync-wal-rotate"))?;
+        assert!(
+            fsync_rotate_opts.contains("use_fsync=true"),
+            "{fsync_rotate_opts}"
+        );
+        assert!(
+            fsync_rotate_opts.contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}")),
+            "{fsync_rotate_opts}"
+        );
+        assert!(
+            fsync_rotate_opts.contains("recycle_log_file_num=4"),
+            "{fsync_rotate_opts}"
         );
         Ok(())
     }
@@ -2644,6 +2777,8 @@ mod tests {
                 opts.contains("pin_top_level_index_and_filter=true"),
                 "{opts}"
             );
+            assert!(opts.contains("use_fsync=true"), "{opts}");
+            assert!(opts.contains("max_total_wal_size=0"), "{opts}");
         }
         Ok(())
     }

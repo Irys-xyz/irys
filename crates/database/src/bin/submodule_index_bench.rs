@@ -1743,7 +1743,7 @@ offset-rows writes --chunks offset rows and no data paths, then does cold point 
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
 Baseline uses partitioned filters. full-filters is one full filter per SST, one cache shard, and a 128 MiB cache. \
-Presets: {presets}. Each preset other than full-filters changes one setting. \
+Presets: {presets}. Each preset other than full-filters and fdatasync-wal-rotate changes one setting. \
 --rocks-block-cache overrides that preset's cache size and does not change the shard count. A new block size or a switch between baseline and full-filters needs an empty directory. An existing SST keeps its filter until --rewrite-filters.\n\
 --profile filter-reuse opens an existing schema-v1 rocks/ directory. It refuses a directory that also contains mdbx/. \
 --rewrite-filters forces a bottommost compaction of ChunkPathHashesByOffset so the existing SST is rewritten with this open's filter. A plain compact can trivial-move the file and keep the old filter. The run prints one sst line per live path-hash file and sst_cover for the sampled offsets. \
