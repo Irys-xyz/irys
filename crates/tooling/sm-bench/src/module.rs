@@ -37,7 +37,6 @@ pub(crate) struct OpenRequest<'a> {
     pub num_writes_before_sync: u64,
     pub entropy_sweep_max_bytes: u64,
     pub intervals_persist_secs: u64,
-    pub drop_recall_page_cache: bool,
     pub index: BenchIndex,
     /// Registrations per fsync. `0` skips the call; the method rejects 0.
     pub index_group_commit: u32,
@@ -75,7 +74,6 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         num_writes_before_sync: request.num_writes_before_sync,
         entropy_sweep_max_bytes: request.entropy_sweep_max_bytes,
         intervals_persist_secs: request.intervals_persist_secs,
-        drop_recall_page_cache: request.drop_recall_page_cache,
         ..StorageSyncConfig::default()
     };
     // Production durability and the 2 TiB submodule geometry. The testing

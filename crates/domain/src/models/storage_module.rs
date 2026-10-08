@@ -70,7 +70,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock, TryLockError,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -2906,10 +2906,6 @@ impl StorageModule {
         }
         drop(pending);
 
-        if recall && self.config.node_config.storage.drop_recall_page_cache {
-            self.drop_recall_page_cache(&disk_runs);
-        }
-
         Ok(chunk_map)
     }
 
@@ -3054,133 +3050,6 @@ impl StorageModule {
             }
         }
         Ok(())
-    }
-
-    /// Drop clean pages for recall runs that no longer hold a packed write.
-    ///
-    /// Called while the recall hold is still live, so the lane starts no new
-    /// write. Linux `DONTNEED` starts writeback of dirty pages in the range
-    /// before it drops clean pages. Offsets stay in `pending_writes` until
-    /// after `sync_all`, so a run that overlaps pending is left cached. The
-    /// file mutex is try-locked: a flush that already holds it waits on this
-    /// recall, and waiting here would deadlock.
-    fn drop_recall_page_cache(&self, runs: &[(PartitionChunkOffset, u64, ChunkType)]) {
-        let chunk_size = self.config.consensus.chunk_size;
-        if chunk_size == 0 {
-            return;
-        }
-
-        let mut targets: Vec<(Arc<Mutex<File>>, u64, u64)> = Vec::new();
-        {
-            let pending = self.pending_writes.read().unwrap();
-            for &(start, len, _) in runs {
-                if len == 0 {
-                    continue;
-                }
-                let Some(last) = u32::try_from(len - 1)
-                    .ok()
-                    .and_then(|count| start.0.checked_add(count))
-                else {
-                    continue;
-                };
-                if pending
-                    .chunks
-                    .range(start..=PartitionChunkOffset(last))
-                    .next()
-                    .is_some()
-                {
-                    continue;
-                }
-                let Ok((interval, submodule)) = self.submodules.get_key_value_at_point(start)
-                else {
-                    continue;
-                };
-                if last > interval.end().0 {
-                    continue;
-                }
-                let file_offset = u64::from(*(start - interval.start())) * chunk_size;
-                let Some(byte_len) = len.checked_mul(chunk_size) else {
-                    continue;
-                };
-                let file_arc = Arc::clone(&submodule.file);
-                #[cfg(feature = "bench")]
-                let file_arc = if let Some(split) = &submodule.split {
-                    Arc::clone(&split.recall)
-                } else {
-                    file_arc
-                };
-                targets.push((file_arc, file_offset, byte_len));
-            }
-        }
-
-        for (file_arc, offset, len) in targets {
-            let dup = {
-                let file = match file_arc.try_lock() {
-                    Ok(guard) => guard,
-                    Err(TryLockError::WouldBlock) => continue,
-                    Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-                };
-                match file.try_clone() {
-                    Ok(dup) => dup,
-                    Err(error) => {
-                        warn!("recall page cache drop could not dup chunks.dat: {error}");
-                        continue;
-                    }
-                }
-            };
-            self.advise_dontneed(&dup, offset, len);
-        }
-    }
-
-    /// `posix_fadvise(DONTNEED)` on one copied recall range. A failed advise
-    /// leaves the recall result intact: the bytes are already in memory.
-    /// Targets without `posix_fadvise` skip the drop.
-    fn advise_dontneed(&self, file: &File, offset: u64, len: u64) {
-        if len == 0 {
-            return;
-        }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "emscripten",
-            target_os = "l4re",
-            target_os = "freebsd",
-        )))]
-        {
-            let _ = (self, file, offset);
-        }
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "emscripten",
-            target_os = "l4re",
-            target_os = "freebsd",
-        ))]
-        {
-            let (Ok(offset), Ok(len)) = (i64::try_from(offset), i64::try_from(len)) else {
-                warn!("recall page cache drop skipped a range that does not fit off_t");
-                return;
-            };
-            // Safety: `file` owns a live descriptor. The advice does not change bytes.
-            let rc = unsafe {
-                libc::posix_fadvise(
-                    file.as_raw_fd(),
-                    offset as libc::off_t,
-                    len as libc::off_t,
-                    libc::POSIX_FADV_DONTNEED,
-                )
-            };
-            if rc != 0 {
-                warn!(
-                    "recall page cache drop failed at file offset {offset} length {len}: error {rc}"
-                );
-            }
-            // Count only a drop that `posix_fadvise` accepted.
-            #[cfg(test)]
-            if rc == 0 {
-                self.disk.recall_cache_drops.fetch_add(1, Ordering::SeqCst);
-            }
-        }
     }
 
     /// Reads a single chunk from its physical storage location
@@ -8456,7 +8325,6 @@ mod tests {
 
     fn recall_flush_fixture(
         prefix: &str,
-        drop_pages: bool,
     ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
         let chunk_size = 32;
@@ -8471,7 +8339,6 @@ mod tests {
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: chunk_size,
-                drop_recall_page_cache: drop_pages,
                 ..StorageSyncConfig::default()
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -8522,7 +8389,7 @@ mod tests {
 
     #[test]
     fn recall_flushes_one_write_window() -> eyre::Result<()> {
-        let (_tmp, storage_module) = recall_flush_fixture("recall_flush_window", false)?;
+        let (_tmp, storage_module) = recall_flush_fixture("recall_flush_window")?;
         storage_module.read_recall_chunks(partition_chunk_offset_ii!(0, 0))?;
         assert_recall_window(&storage_module, 3);
         // Below the sync threshold the rest stays pending.
@@ -8531,75 +8398,6 @@ mod tests {
         storage_module.read_recall_chunks(partition_chunk_offset_ii!(0, 0))?;
         assert!(!storage_module.has_pending_writes());
         assert_recall_window(&storage_module, 6);
-        Ok(())
-    }
-
-    #[test]
-    fn recall_page_cache_drops_synced_runs() -> eyre::Result<()> {
-        let (_tmp, storage_module) = recall_flush_fixture("recall_drop_pages", true)?;
-        storage_module.force_sync_pending_chunks()?;
-        let got = storage_module.read_recall_chunks(partition_chunk_offset_ii!(0, 5))?;
-        assert_eq!(got.len(), 6);
-        assert_eq!(
-            storage_module
-                .disk
-                .recall_cache_drops
-                .load(Ordering::SeqCst),
-            1
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn recall_page_cache_stays_when_the_flag_is_off() -> eyre::Result<()> {
-        let (_tmp, storage_module) = recall_flush_fixture("recall_keep_pages", false)?;
-        storage_module.force_sync_pending_chunks()?;
-        let got = storage_module.read_recall_chunks(partition_chunk_offset_ii!(0, 5))?;
-        assert_eq!(got.len(), 6);
-        assert_eq!(
-            storage_module
-                .disk
-                .recall_cache_drops
-                .load(Ordering::SeqCst),
-            0
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn recall_page_cache_skips_a_run_with_a_packed_write() -> eyre::Result<()> {
-        let (_tmp, storage_module) = recall_flush_fixture("recall_drop_pending", true)?;
-        storage_module.force_sync_pending_chunks()?;
-        assert!(storage_module.write_chunk(
-            PartitionChunkOffset::from(2),
-            vec![9_u8; 32],
-            ChunkType::Data,
-        ));
-        storage_module.drop_recall_page_cache(&[(
-            PartitionChunkOffset::from(0),
-            6,
-            ChunkType::Data,
-        )]);
-        assert_eq!(
-            storage_module
-                .disk
-                .recall_cache_drops
-                .load(Ordering::SeqCst),
-            0
-        );
-        storage_module.force_sync_pending_chunks()?;
-        storage_module.drop_recall_page_cache(&[(
-            PartitionChunkOffset::from(0),
-            6,
-            ChunkType::Data,
-        )]);
-        assert_eq!(
-            storage_module
-                .disk
-                .recall_cache_drops
-                .load(Ordering::SeqCst),
-            1
-        );
         Ok(())
     }
 

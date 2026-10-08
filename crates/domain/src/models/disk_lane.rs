@@ -248,9 +248,6 @@ pub(super) struct DiskGate {
     /// call when the run fits the recall range.
     #[cfg(test)]
     pub(super) source_preads: AtomicU64,
-    /// Recall runs whose clean pages were dropped after the bytes were copied.
-    #[cfg(test)]
-    pub(super) recall_cache_drops: AtomicU64,
     /// Sweep-queue publishes. One contiguous run is one publish.
     #[cfg(test)]
     pub(super) enqueue_notifies: AtomicU64,
@@ -487,8 +484,6 @@ impl DiskGate {
             entropy_preads: AtomicU64::new(0),
             #[cfg(test)]
             source_preads: AtomicU64::new(0),
-            #[cfg(test)]
-            recall_cache_drops: AtomicU64::new(0),
             #[cfg(test)]
             enqueue_notifies: AtomicU64::new(0),
         }

@@ -113,9 +113,6 @@ struct Args {
     intervals_persist_secs: u64,
     #[arg(long, default_value_t = 262_144)]
     entropy_sweep_max_bytes: u64,
-    /// Leave recall pages cached. The bench default drops them.
-    #[arg(long)]
-    keep_recall_cache: bool,
     /// Transaction size mix `chunks:weight,...`.
     #[arg(long, default_value = "1:40,4:25,16:20,64:10,256:5")]
     ingest_mix: String,
@@ -342,7 +339,6 @@ fn run() -> eyre::Result<i32> {
         num_writes_before_sync: args.num_writes_before_sync,
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
         intervals_persist_secs: args.intervals_persist_secs,
-        drop_recall_page_cache: !args.keep_recall_cache,
         index,
         index_group_commit: args.index_group_commit,
     })?;
@@ -413,7 +409,6 @@ fn run() -> eyre::Result<i32> {
         "num_writes_before_sync": args.num_writes_before_sync,
         "intervals_persist_secs": args.intervals_persist_secs,
         "entropy_sweep_max_bytes": args.entropy_sweep_max_bytes,
-        "drop_recall_page_cache": !args.keep_recall_cache,
         "ingest_mix": args.ingest_mix,
         "serve_seq_chunks": args.serve_seq_chunks,
         "ingest_concurrency": args.ingest_concurrency,

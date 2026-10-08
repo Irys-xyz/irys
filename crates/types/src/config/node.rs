@@ -514,11 +514,8 @@ pub struct StorageSyncConfig {
     /// `0` rewrites completions on every sync.
     #[serde(default = "default_intervals_persist_secs")]
     pub intervals_persist_secs: u64,
-    /// After a mining recall has copied `chunks.dat` bytes into memory, drop
-    /// those file pages from the cache. Recall bytes are read once, and
-    /// leaving them cached pushes index pages out. A range that still holds
-    /// a pending packed write is left cached, because dropping it starts
-    /// writeback of dirty pages outside the lane. Default off.
+    /// Accepted so an older config that set this key still loads.
+    /// The value is ignored. Recall pages stay cached.
     #[serde(default)]
     pub drop_recall_page_cache: bool,
 }
