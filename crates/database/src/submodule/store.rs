@@ -26,7 +26,11 @@ use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 
-use super::db::{delete_presence_in_ranges, presence_in_ranges};
+use super::db::{
+    delete_presence_in_ranges, delete_reset_marker, has_pending_body_migration_in_range,
+    list_data_root_infos, presence_in_ranges, put_reset_marker, read_reset_marker,
+    trim_data_root_placements, tx_interval_overlaps,
+};
 #[cfg(feature = "rocksdb")]
 use super::rocks::{
     LegacySstSpan, RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning,
@@ -100,6 +104,31 @@ pub trait SubmoduleRead {
         &self,
         start: Option<PartitionChunkOffset>,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>>;
+
+    /// `true` when a pending-job key lies in `[start, end]`.
+    ///
+    /// The key is the offset. The scan does not read the job value. The
+    /// iterator stops at `end`.
+    fn has_pending_in_inclusive_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool>;
+
+    /// `true` when a tx-path interval overlaps `[start, end]`.
+    ///
+    /// The value holds the inclusive end, so the scan reads it.
+    fn tx_interval_overlaps(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool>;
+
+    /// Every data-root row.
+    ///
+    /// The key is a hash. It has no offset order. The value lists placements,
+    /// so a span check has to read it. The scan does not fill the block cache.
+    fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>>;
 }
 
 /// Exclusive write batch. Reads inside the batch see its own writes.
@@ -234,6 +263,29 @@ pub trait SubmoduleStore: Send + Sync {
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile>;
+
+    /// Drop tx intervals, data-root placements, and pending jobs that overlap
+    /// `spans`.
+    ///
+    /// Callers pass `Uninitialized` spans only. An `Entropy` span keeps its
+    /// tx index: those rows name bytes that are not stored yet. An empty
+    /// list, or spans with no such rows, does not commit. Tx-path blobs and
+    /// leaf bindings are not coverage. A tx interval that starts before the
+    /// span is split, not deleted as a key range.
+    fn drop_uninitialized_coverage(
+        &self,
+        spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+        chunk_size: u64,
+    ) -> eyre::Result<()>;
+
+    /// `true` when a reset started and has not dropped its marker.
+    fn reset_in_progress(&self) -> eyre::Result<bool>;
+
+    /// Durable marker. Same sync as `update`. `clear` does not remove it.
+    fn set_reset_in_progress(&self) -> eyre::Result<()>;
+
+    /// Remove the reset marker. Same sync as `update`.
+    fn clear_reset_in_progress(&self) -> eyre::Result<()>;
 }
 
 /// MDBX submodule index. One environment, the tables in [`super::tables`].
@@ -531,6 +583,26 @@ macro_rules! impl_submodule_read {
             ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
                 pending_body_migrations_from(self.tx, start)
             }
+
+            fn has_pending_in_inclusive_range(
+                &self,
+                start: PartitionChunkOffset,
+                end: PartitionChunkOffset,
+            ) -> eyre::Result<bool> {
+                has_pending_body_migration_in_range(self.tx, start, end)
+            }
+
+            fn tx_interval_overlaps(
+                &self,
+                start: PartitionChunkOffset,
+                end: PartitionChunkOffset,
+            ) -> eyre::Result<bool> {
+                tx_interval_overlaps(self.tx, start, end)
+            }
+
+            fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+                list_data_root_infos(self.tx)
+            }
         }
     };
 }
@@ -716,6 +788,110 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         finish_durable(&self.env, &self.group)?;
         Ok(stats)
     }
+
+    fn drop_uninitialized_coverage(
+        &self,
+        spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+        chunk_size: u64,
+    ) -> eyre::Result<()> {
+        drop_uninitialized_coverage_on(self, spans, chunk_size)
+    }
+
+    fn reset_in_progress(&self) -> eyre::Result<bool> {
+        self.env.view_eyre(read_reset_marker)
+    }
+
+    fn set_reset_in_progress(&self) -> eyre::Result<()> {
+        self.commit_marker(true)
+    }
+
+    fn clear_reset_in_progress(&self) -> eyre::Result<()> {
+        self.commit_marker(false)
+    }
+}
+
+impl MdbxSubmoduleStore {
+    /// Same durability split as `update`. The marker is not a registration.
+    fn commit_marker(&self, present: bool) -> eyre::Result<()> {
+        let commit = |tx: &_| {
+            if present {
+                put_reset_marker(tx)
+            } else {
+                delete_reset_marker(tx)
+            }
+        };
+        if self.group.is_enabled() {
+            self.env.update_eyre(commit)?;
+            finish_durable(&self.env, &self.group)?;
+            return Ok(());
+        }
+        let _guard = self
+            .nosync_enable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.env.update_eyre(commit)?;
+        finish_durable(&self.env, &self.group)?;
+        Ok(())
+    }
+}
+
+fn spans_need_coverage_drop(
+    tx: &mut dyn SubmoduleRead,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    chunk_size: u64,
+) -> eyre::Result<bool> {
+    for &(start, end) in spans {
+        if tx.has_pending_in_inclusive_range(start, end)? || tx.tx_interval_overlaps(start, end)? {
+            return Ok(true);
+        }
+    }
+    for (_, infos) in tx.data_root_entries()? {
+        for info in &infos.0 {
+            if spans.iter().any(|(start, end)| {
+                super::db::placement_overlaps_inclusive_span(info, *start, *end, chunk_size)
+            }) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn drop_coverage_rows(
+    tx: &mut dyn SubmoduleWrite,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    chunk_size: u64,
+) -> eyre::Result<()> {
+    for &(start, end) in spans {
+        tx.add_tx_path_hash_to_offset_range(start, end, None)?;
+        tx.del_pending_body_migrations_in_range(start, end)?;
+    }
+    for (root, infos) in tx.data_root_entries()? {
+        if let Some(remaining) = trim_data_root_placements(infos, spans, chunk_size) {
+            tx.set_data_root_infos_for_data_root(root, remaining)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn drop_uninitialized_coverage_on(
+    store: &impl SubmoduleStore,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    chunk_size: u64,
+) -> eyre::Result<()> {
+    let spans: Vec<_> = spans
+        .iter()
+        .copied()
+        .filter(|(start, end)| start <= end)
+        .collect();
+    if spans.is_empty() {
+        return Ok(());
+    }
+    let present = store.view(|tx| spans_need_coverage_drop(tx, &spans, chunk_size))?;
+    if !present {
+        return Ok(());
+    }
+    store.update(|tx| drop_coverage_rows(tx, &spans, chunk_size))
 }
 
 /// Which engine holds a submodule index. The node opens MDBX.
@@ -1077,6 +1253,42 @@ impl SubmoduleStore for SubmoduleIndex {
             Self::Rocks(store) => store.drop_presence_in_ranges(ranges),
         }
     }
+
+    fn drop_uninitialized_coverage(
+        &self,
+        spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+        chunk_size: u64,
+    ) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(store) => store.drop_uninitialized_coverage(spans, chunk_size),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.drop_uninitialized_coverage(spans, chunk_size),
+        }
+    }
+
+    fn reset_in_progress(&self) -> eyre::Result<bool> {
+        match self {
+            Self::Mdbx(store) => store.reset_in_progress(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.reset_in_progress(),
+        }
+    }
+
+    fn set_reset_in_progress(&self) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(store) => store.set_reset_in_progress(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.set_reset_in_progress(),
+        }
+    }
+
+    fn clear_reset_in_progress(&self) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(store) => store.clear_reset_in_progress(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.clear_reset_in_progress(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1368,6 +1580,167 @@ mod tests {
         })
     }
 
+    fn pending_job(data_root: H256) -> PendingBodyMigration {
+        PendingBodyMigration {
+            data_root,
+            data_size: 32,
+            start_offset: RelativeChunkOffset(0),
+            block_height: 1,
+            attempts: 0,
+        }
+    }
+
+    /// Inclusive range delete drops both ends and keeps the neighbors.
+    /// `u32::MAX` is inside `[MAX, MAX]` and outside `[1, 5]`.
+    #[test]
+    fn offset_range_delete_keeps_neighbors_and_the_max_end() -> eyre::Result<()> {
+        each_engine("submodule_range_bounds", |store| {
+            let keys = [0_u32, 1, 5, u32::MAX - 1, u32::MAX];
+            let data_root = H256::repeat_byte(4);
+            store.update(|tx| {
+                for key in keys {
+                    let offset = PartitionChunkOffset::from(key);
+                    tx.write_data_path_updates(vec![(
+                        offset,
+                        H256::repeat_byte((key % 200) as u8),
+                        vec![key as u8],
+                    )])?;
+                    tx.add_pending_body_migration(offset, &pending_job(data_root))?;
+                }
+                Ok(())
+            })?;
+
+            store.update(|tx| {
+                tx.clear_paths_in_inclusive_range(
+                    PartitionChunkOffset::from(1),
+                    PartitionChunkOffset::from(5),
+                )?;
+                let removed = tx.del_pending_body_migrations_in_range(
+                    PartitionChunkOffset::from(1),
+                    PartitionChunkOffset::from(5),
+                )?;
+                assert_eq!(removed, 2);
+                assert!(
+                    tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?
+                        .is_none()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(5))?
+                        .is_none()
+                );
+                assert!(
+                    tx.get_data_path_by_offset(PartitionChunkOffset::from(0))?
+                        .is_some()
+                );
+                Ok(())
+            })?;
+            for key in [0_u32, u32::MAX - 1, u32::MAX] {
+                assert!(
+                    store
+                        .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(key)))?
+                        .is_some(),
+                    "offset {key} stays"
+                );
+                assert!(
+                    store
+                        .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(key)))?
+                        .is_some(),
+                    "pending {key} stays"
+                );
+            }
+            for key in [1_u32, 5] {
+                assert!(
+                    store
+                        .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(key)))?
+                        .is_none(),
+                    "offset {key} is gone"
+                );
+                assert!(
+                    store
+                        .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(key)))?
+                        .is_none()
+                );
+                assert!(
+                    store
+                        .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(key)))?
+                        .is_none()
+                );
+            }
+
+            let max = PartitionChunkOffset::from(u32::MAX);
+            let before_max = PartitionChunkOffset::from(u32::MAX - 1);
+            store.update(|tx| {
+                let removed = tx.del_pending_body_migrations_in_range(max, max)?;
+                assert_eq!(removed, 1);
+                tx.clear_paths_in_inclusive_range(max, max)?;
+                assert!(tx.get_data_path_by_offset(max)?.is_none());
+                assert!(tx.get_data_path_by_offset(before_max)?.is_some());
+                Ok(())
+            })?;
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(before_max))?
+                    .is_some()
+            );
+            assert!(store.view(|tx| tx.get_data_path_by_offset(max))?.is_none());
+            assert!(
+                store
+                    .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(0)))?
+                    .is_some()
+            );
+
+            store.update(|tx| {
+                let removed = tx.del_pending_body_migrations_in_range(before_max, max)?;
+                assert_eq!(removed, 1);
+                tx.clear_paths_in_inclusive_range(before_max, max)?;
+                let outside = tx.del_pending_body_migrations_in_range(
+                    PartitionChunkOffset::from(1),
+                    PartitionChunkOffset::from(5),
+                )?;
+                assert_eq!(outside, 0);
+                Ok(())
+            })?;
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(before_max))?
+                    .is_none()
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_data_path_by_offset(before_max))?
+                    .is_none()
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(0)))?
+                    .is_some()
+            );
+
+            // A put after the range delete in the same batch stays.
+            store.update(|tx| {
+                tx.clear_paths_in_inclusive_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(0),
+                )?;
+                tx.write_data_path_updates(vec![(
+                    PartitionChunkOffset::from(0),
+                    H256::repeat_byte(8),
+                    vec![8],
+                )])?;
+                assert_eq!(
+                    tx.get_data_path_by_offset(PartitionChunkOffset::from(0))?,
+                    Some(vec![8])
+                );
+                Ok(())
+            })?;
+            assert_eq!(
+                store.view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(0)))?,
+                Some(vec![8])
+            );
+            Ok(())
+        })
+    }
+
     #[test]
     fn clear_then_write_in_one_batch_drops_only_the_old_rows() -> eyre::Result<()> {
         each_engine("submodule_store_clear", |store| {
@@ -1394,6 +1767,34 @@ mod tests {
                 store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?,
                 Some(hashes)
             );
+            Ok(())
+        })
+    }
+
+    /// `clear` removes index families and leaves the reset marker.
+    #[test]
+    fn reset_marker_survives_clear() -> eyre::Result<()> {
+        each_engine("submodule_reset_marker", |store| {
+            store.update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(1),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(3)),
+                        tx_path_hash: None,
+                    },
+                )
+            })?;
+            assert!(!store.reset_in_progress()?);
+            store.set_reset_in_progress()?;
+            store.update(|tx| tx.clear())?;
+            assert!(store.reset_in_progress()?);
+            assert!(
+                store
+                    .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(1)))?
+                    .is_none()
+            );
+            store.clear_reset_in_progress()?;
+            assert!(!store.reset_in_progress()?);
             Ok(())
         })
     }

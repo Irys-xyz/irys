@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum MetadataKey {
     DBSchemaVersion = 1,
+    /// Set before a storage-module reset clears the index. Open finishes the
+    /// clear while this row is present. It is not a schema version.
+    SubmoduleResetInProgress = 2,
 }
 
 impl Encode for MetadataKey {
@@ -29,6 +32,7 @@ impl Decode for MetadataKey {
         let arr: [u8; 4] = value.try_into().map_err(|_| DatabaseError::Decode)?;
         match u32::from_le_bytes(arr) {
             1 => Ok(Self::DBSchemaVersion),
+            2 => Ok(Self::SubmoduleResetInProgress),
             _ => Err(DatabaseError::Decode),
         }
     }
@@ -52,12 +56,22 @@ mod tests {
     fn metadata_key_encoding_is_le_u32() {
         let encoded = MetadataKey::DBSchemaVersion.encode();
         assert_eq!(encoded, 1_u32.to_le_bytes());
+        assert_eq!(
+            MetadataKey::SubmoduleResetInProgress.encode(),
+            2_u32.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn reset_marker_key_roundtrips() {
+        let key = MetadataKey::SubmoduleResetInProgress;
+        assert_eq!(MetadataKey::decode(&key.encode()).unwrap(), key);
     }
 
     proptest! {
         #[test]
         fn metadata_key_decode_rejects_invalid_discriminants(val in any::<u32>()) {
-            prop_assume!(val != 1);
+            prop_assume!(val != 1 && val != 2);
             let bytes = val.to_le_bytes();
             prop_assert!(MetadataKey::decode(&bytes).is_err());
         }

@@ -1391,6 +1391,24 @@ impl RocksSubmoduleStore {
             None => Ok(None),
         }
     }
+
+    /// Visible keys. Does not read values. A range tombstone hides its span.
+    #[cfg(test)]
+    fn cf_key_count(&self, cf: Cf) -> eyre::Result<usize> {
+        let handle = cf_handle(&self.db, cf)?;
+        let snap = self.db.snapshot();
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+        iter.seek_to_first();
+        let mut count = 0_usize;
+        while iter.key().is_some() {
+            count = count.saturating_add(1);
+            iter.next();
+        }
+        iter.status().wrap_err("count column family keys")?;
+        Ok(count)
+    }
 }
 
 impl super::SubmoduleStore for RocksSubmoduleStore {
@@ -1425,6 +1443,58 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
         // A synced write covers earlier unsynced registrations in this WAL.
         self.group.cover_durable();
         Ok(result)
+    }
+
+    fn drop_uninitialized_coverage(
+        &self,
+        spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+        chunk_size: u64,
+    ) -> eyre::Result<()> {
+        super::store::drop_uninitialized_coverage_on(self, spans, chunk_size)
+    }
+
+    fn reset_in_progress(&self) -> eyre::Result<bool> {
+        let handle = cf_handle(&self.db, Cf::Metadata)?;
+        let key = encode_key(MetadataKey::SubmoduleResetInProgress);
+        Ok(self
+            .db
+            .get_cf(&handle, key)
+            .wrap_err("read reset marker")?
+            .is_some())
+    }
+
+    fn set_reset_in_progress(&self) -> eyre::Result<()> {
+        self.write_metadata(MetadataKey::SubmoduleResetInProgress, Some(vec![1_u8]))
+    }
+
+    fn clear_reset_in_progress(&self) -> eyre::Result<()> {
+        self.write_metadata(MetadataKey::SubmoduleResetInProgress, None)
+    }
+}
+
+impl RocksSubmoduleStore {
+    /// Synced metadata write. Same WAL barrier as `update`. Not part of `clear`.
+    fn write_metadata(&self, key: MetadataKey, value: Option<Vec<u8>>) -> eyre::Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.lock_write();
+        self.ensure_writable()?;
+        let handle = cf_handle(&self.db, Cf::Metadata)?;
+        let mut batch = WriteBatch::new();
+        let encoded = encode_key(key);
+        match &value {
+            Some(bytes) => {
+                batch.put_cf(&handle, encoded, compress_value(bytes));
+            }
+            None => batch.delete_cf(&handle, encoded),
+        }
+        let mut opts = WriteOptions::default();
+        opts.set_sync(true);
+        self.db
+            .write_opt(batch, &opts)
+            .wrap_err("write submodule metadata")?;
+        self.group.note_wal_sync();
+        self.group.cover_durable();
+        Ok(())
     }
 }
 
@@ -1959,6 +2029,48 @@ fn exclusive_end_key(end: PartitionChunkOffset) -> Vec<u8> {
     }
 }
 
+/// Exclusive end of every key in `cf`.
+///
+/// Offset families use a 4-byte big-endian key. Hash families use 32 bytes.
+/// The extra `0` sorts after the all-`0xFF` key of that width, so the
+/// half-open range covers the last key. `Metadata` is not cleared.
+fn full_cf_end(cf: Cf) -> Vec<u8> {
+    match cf {
+        Cf::PathHashes | Cf::DataPath | Cf::Pending | Cf::Interval => {
+            exclusive_end_key(PartitionChunkOffset(u32::MAX))
+        }
+        Cf::TxPath | Cf::DataRoots | Cf::TxLeaf | Cf::Metadata => {
+            let mut key = vec![0xFF; 32];
+            key.push(0);
+            key
+        }
+    }
+}
+
+/// `true` when the family has a key. Does not read the value.
+fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<bool> {
+    let handle = cf_handle(db, cf)?;
+    let mut opts = ReadOptions::default();
+    opts.fill_cache(false);
+    let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+    iter.seek_to_first();
+    let present = iter.key().is_some();
+    iter.status().wrap_err("seek column family")?;
+    Ok(present)
+}
+
+/// `true` when `key` is an offset inside one of `ranges`.
+///
+/// Hash keys are 32 bytes. They do not decode as offsets and are not hidden.
+fn offset_key_in_ranges(ranges: &[(u32, u32)], key: &[u8]) -> bool {
+    let Ok(offset) = PartitionChunkOffset::decode(key) else {
+        return false;
+    };
+    ranges
+        .iter()
+        .any(|(start, end)| offset.0 >= *start && offset.0 <= *end)
+}
+
 /// Keys in `[start, end]`. Does not read values.
 fn count_presence_keys(
     db: &DB,
@@ -1992,6 +2104,11 @@ fn compress_value<V: Compress>(value: &V) -> Vec<u8> {
 struct Overlay {
     maps: [BTreeMap<Vec<u8>, Option<Vec<u8>>>; CF_COUNT],
     cleared: [bool; CF_COUNT],
+    /// Inclusive offset spans removed with `DeleteRange` at commit.
+    ///
+    /// Only offset-keyed families use this. A put stored after the span is
+    /// recorded stays in `maps` and is applied after the tombstone.
+    deleted_ranges: [Vec<(u32, u32)>; CF_COUNT],
 }
 
 struct Rows<'a> {
@@ -2069,29 +2186,27 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
+    /// Remove inclusive offset keys with one `DeleteRange`.
+    ///
+    /// The key is a 4-byte big-endian offset, so the byte order matches the
+    /// offset order. An empty span writes nothing. This does not read values.
+    /// Hash-keyed families are not offset spans: a caller that needs a hash
+    /// row reads that value.
     fn delete_offset_range(
         &mut self,
         cf: Cf,
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<()> {
-        let start_key = encode_key(start);
-        let keys = {
-            let rows = self.rows();
-            let mut cursor = rows.cursor(cf, Some(&start_key))?;
-            let mut keys = Vec::new();
-            while let Some((key, _)) = cursor.next_kv()? {
-                let offset = PartitionChunkOffset::decode(&key)?;
-                if offset > end {
-                    break;
-                }
-                keys.push(key);
-            }
-            keys
-        };
-        for key in keys {
-            self.delete(cf, &key);
+        if start > end {
+            return Ok(());
         }
+        if !self.rows().offset_range_has_key(cf, start, end)? {
+            return Ok(());
+        }
+        let index = cf.index();
+        self.overlay.maps[index].retain(|key, _| !offset_key_in_ranges(&[(start.0, end.0)], key));
+        self.overlay.deleted_ranges[index].push((start.0, end.0));
         Ok(())
     }
 
@@ -2099,10 +2214,21 @@ impl<'a> Batch<'a> {
         let mut batch = WriteBatch::new();
         for cf in Cf::ALL {
             let handle = cf_handle(self.db, cf)?;
+            // One range tombstone covers the family. A point delete per key
+            // would read every value, including blobs, into this batch.
+            // Dropping the family is not one batch: a crash can leave it missing.
             if self.overlay.cleared[cf.index()] {
-                for item in self.snap.iterator_cf(&handle, IteratorMode::Start) {
-                    let (key, _) = item.wrap_err("scan column family for clear")?;
-                    batch.delete_cf(&handle, key);
+                if cf_has_key(self.db, self.snap, cf)? {
+                    // Empty begin sorts before every key. `from` and `to` share one type.
+                    batch.delete_range_cf(&handle, Vec::<u8>::new(), full_cf_end(cf));
+                }
+            } else {
+                for &(start, end) in &self.overlay.deleted_ranges[cf.index()] {
+                    batch.delete_range_cf(
+                        &handle,
+                        encode_key(PartitionChunkOffset(start)),
+                        exclusive_end_key(PartitionChunkOffset(end)),
+                    );
                 }
             }
             for (key, value) in &self.overlay.maps[cf.index()] {
@@ -2137,7 +2263,9 @@ impl Rows<'_> {
             if let Some(value) = overlay.maps[cf.index()].get(key) {
                 return Ok(value.clone());
             }
-            if overlay.cleared[cf.index()] {
+            if overlay.cleared[cf.index()]
+                || offset_key_in_ranges(&overlay.deleted_ranges[cf.index()], key)
+            {
                 return Ok(None);
             }
         }
@@ -2160,10 +2288,18 @@ impl Rows<'_> {
             Some(key) => IteratorMode::From(key, Direction::Forward),
             None => IteratorMode::Start,
         };
-        let db = self.snap.iterator_cf(&handle, mode).map(|item| {
-            item.map(|(key, value)| (key.into_vec(), value.into_vec()))
-                .map_err(|err| eyre::eyre!("{err}"))
-        });
+        let hidden = self
+            .overlay
+            .map(|overlay| overlay.deleted_ranges[cf.index()].clone())
+            .unwrap_or_default();
+        let db = self
+            .snap
+            .iterator_cf(&handle, mode)
+            .filter_map(move |item| match item {
+                Ok((key, _)) if offset_key_in_ranges(&hidden, &key) => None,
+                Ok((key, value)) => Some(Ok((key.into_vec(), value.into_vec()))),
+                Err(err) => Some(Err(eyre::eyre!("{err}"))),
+            });
         let cleared = self
             .overlay
             .is_some_and(|overlay| overlay.cleared[cf.index()]);
@@ -2248,10 +2384,154 @@ impl Rows<'_> {
                 if let Some(value) = value {
                     return Ok(Some((found_key, value)));
                 }
+            } else if db_next.as_ref().is_some_and(|(key, _)| {
+                self.overlay.is_some_and(|overlay| {
+                    offset_key_in_ranges(&overlay.deleted_ranges[cf.index()], key)
+                })
+            }) {
+                db_next = match db_iter.as_mut().and_then(Iterator::next) {
+                    Some(Ok((next_key, next_value))) => {
+                        Some((next_key.into_vec(), next_value.into_vec()))
+                    }
+                    Some(Err(err)) => return Err(eyre::eyre!("{err}")),
+                    None => None,
+                };
             } else {
                 return Ok(db_next);
             }
         }
+    }
+
+    /// `true` when a visible offset key lies in `[start, end]`.
+    ///
+    /// The iterator stops at the first hit. `iterate_upper_bound` is the
+    /// exclusive end, and `fill_cache` is off. Values are not read.
+    fn offset_range_has_key(
+        &self,
+        cf: Cf,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        if start > end {
+            return Ok(false);
+        }
+        if let Some(overlay) = self.overlay {
+            let start_key = encode_key(start);
+            let end_key = encode_key(end);
+            if overlay.maps[cf.index()]
+                .range(start_key..=end_key)
+                .any(|(_, value)| value.is_some())
+            {
+                return Ok(true);
+            }
+        }
+        let Some(key) = self.first_offset_key(cf, start, end)? else {
+            return Ok(false);
+        };
+        if let Some(overlay) = self.overlay
+            && overlay.maps[cf.index()].contains_key(&key)
+        {
+            // The overlay entry is a delete or it would have returned above.
+            // Keep scanning the snapshot for a key the overlay does not hide.
+            return self.offset_snapshot_has_uncovered_key(cf, start, end);
+        }
+        Ok(true)
+    }
+
+    fn offset_snapshot_has_uncovered_key(
+        &self,
+        cf: Cf,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        let handle = cf_handle(self.db, cf)?;
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        opts.set_iterate_upper_bound(exclusive_end_key(end));
+        let mut iter = self.snap.raw_iterator_cf_opt(&handle, opts);
+        iter.seek(encode_key(start));
+        loop {
+            let key = iter.key().map(<[u8]>::to_vec);
+            let Some(key) = key else {
+                break;
+            };
+            let hidden = self.overlay.is_some_and(|overlay| {
+                overlay.maps[cf.index()].contains_key(&key)
+                    || offset_key_in_ranges(&overlay.deleted_ranges[cf.index()], &key)
+            });
+            if !hidden {
+                iter.status().wrap_err("seek offset range")?;
+                return Ok(true);
+            }
+            iter.next();
+        }
+        iter.status().wrap_err("seek offset range")?;
+        Ok(false)
+    }
+
+    /// First snapshot key in `[start, end]`, without its value.
+    fn first_offset_key(
+        &self,
+        cf: Cf,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Option<Vec<u8>>> {
+        let handle = cf_handle(self.db, cf)?;
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        opts.set_iterate_upper_bound(exclusive_end_key(end));
+        let mut iter = self.snap.raw_iterator_cf_opt(&handle, opts);
+        iter.seek(encode_key(start));
+        let key = iter.key().map(<[u8]>::to_vec);
+        iter.status().wrap_err("seek offset range")?;
+        Ok(key)
+    }
+
+    /// Visible keys in `[start, end]`. Does not read values.
+    fn count_offset_keys(
+        &self,
+        cf: Cf,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<usize> {
+        if start > end {
+            return Ok(0);
+        }
+        let handle = cf_handle(self.db, cf)?;
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        opts.set_iterate_upper_bound(exclusive_end_key(end));
+        let mut iter = self.snap.raw_iterator_cf_opt(&handle, opts);
+        iter.seek(encode_key(start));
+        let mut count = 0_usize;
+        loop {
+            let key = iter.key().map(<[u8]>::to_vec);
+            let Some(key) = key else {
+                break;
+            };
+            let overlay_hit = self
+                .overlay
+                .and_then(|overlay| overlay.maps[cf.index()].get(&key));
+            let ranged = self.overlay.is_some_and(|overlay| {
+                offset_key_in_ranges(&overlay.deleted_ranges[cf.index()], &key)
+            });
+            if !ranged && overlay_hit.is_none() {
+                count = count.saturating_add(1);
+            }
+            iter.next();
+        }
+        iter.status().wrap_err("count offset keys")?;
+        if let Some(overlay) = self.overlay {
+            let start_key = encode_key(start);
+            let end_key = encode_key(end);
+            count = count.saturating_add(
+                overlay.maps[cf.index()]
+                    .range(start_key..=end_key)
+                    .filter(|(_, value)| value.is_some())
+                    .count(),
+            );
+        }
+        Ok(count)
     }
 
     fn tx_hash_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
@@ -2558,6 +2838,67 @@ impl SubmoduleRead for Rows<'_> {
         let start_key = start.map(encode_key);
         self.collect_until(Cf::Pending, start_key.as_deref(), |_| false)
     }
+
+    fn has_pending_in_inclusive_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        self.offset_range_has_key(Cf::Pending, start, end)
+    }
+
+    fn tx_interval_overlaps(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        if start > end {
+            return Ok(false);
+        }
+        let rows = self.intervals_touching(start, end)?;
+        Ok(rows.iter().any(|row| row.start <= end && row.end >= start))
+    }
+
+    fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+        // The key is a hash. It has no offset order. The value lists
+        // placements, so the scan reads it. `fill_cache` stays off.
+        let cleared = self
+            .overlay
+            .is_some_and(|overlay| overlay.cleared[Cf::DataRoots.index()]);
+        let mut rows = BTreeMap::new();
+        if !cleared {
+            let handle = cf_handle(self.db, Cf::DataRoots)?;
+            let mut opts = ReadOptions::default();
+            opts.fill_cache(false);
+            for item in self
+                .snap
+                .iterator_cf_opt(&handle, opts, IteratorMode::Start)
+            {
+                let (key, value) = item.map_err(|err| eyre::eyre!("{err}"))?;
+                if self.overlay.is_some_and(|overlay| {
+                    overlay.maps[Cf::DataRoots.index()].contains_key(key.as_ref())
+                }) {
+                    continue;
+                }
+                let root = DataRoot::decode(key.as_ref())?;
+                rows.insert(root, DataRootInfos::decompress(value.as_ref())?);
+            }
+        }
+        if let Some(overlay) = self.overlay {
+            for (key, value) in &overlay.maps[Cf::DataRoots.index()] {
+                let root = DataRoot::decode(key)?;
+                match value {
+                    Some(bytes) => {
+                        rows.insert(root, DataRootInfos::decompress(bytes)?);
+                    }
+                    None => {
+                        rows.remove(&root);
+                    }
+                }
+            }
+        }
+        Ok(rows.into_iter().collect())
+    }
 }
 
 impl SubmoduleRead for Batch<'_> {
@@ -2630,6 +2971,26 @@ impl SubmoduleRead for Batch<'_> {
         start: Option<PartitionChunkOffset>,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
         self.rows().pending_body_migrations_from(start)
+    }
+
+    fn has_pending_in_inclusive_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        self.rows().has_pending_in_inclusive_range(start, end)
+    }
+
+    fn tx_interval_overlaps(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        self.rows().tx_interval_overlaps(start, end)
+    }
+
+    fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+        self.rows().data_root_entries()
     }
 }
 
@@ -2764,16 +3125,11 @@ impl SubmoduleWrite for Batch<'_> {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<usize> {
-        let offsets: Vec<PartitionChunkOffset> = self
-            .rows()
-            .pending_body_migrations_from(Some(start))?
-            .into_iter()
-            .map(|(offset, _)| offset)
-            .take_while(|offset| *offset <= end)
-            .collect();
-        let removed = offsets.len();
-        for offset in offsets {
-            self.delete(Cf::Pending, &encode_key(offset));
+        // The key is the offset. One `DeleteRange` covers `[start, end]`.
+        // The count is keys only. The job value is not read.
+        let removed = self.rows().count_offset_keys(Cf::Pending, start, end)?;
+        if removed > 0 {
+            self.delete_offset_range(Cf::Pending, start, end)?;
         }
         Ok(removed)
     }
@@ -2782,6 +3138,7 @@ impl SubmoduleWrite for Batch<'_> {
         for cf in Cf::INDEX {
             self.overlay.cleared[cf.index()] = true;
             self.overlay.maps[cf.index()].clear();
+            self.overlay.deleted_ranges[cf.index()].clear();
         }
         Ok(())
     }
@@ -2792,7 +3149,7 @@ mod tests {
     use super::*;
     use crate::submodule::SubmoduleIndex;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::H256;
+    use irys_types::{H256, RelativeChunkOffset};
 
     #[test]
     fn reopen_reads_the_row_and_keeps_the_schema_across_clear() -> eyre::Result<()> {
@@ -2832,6 +3189,118 @@ mod tests {
         );
         let marker = fs::read_to_string(path.join(SCHEMA_FILE))?;
         assert_eq!(marker, SCHEMA_TEXT);
+        Ok(())
+    }
+
+    /// `clear` is one range tombstone per non-empty index family. It does not
+    /// read values. 100k rows plus one blob must finish well under a scan.
+    #[test]
+    fn clear_of_a_large_index_leaves_only_metadata() -> eyre::Result<()> {
+        const ROWS: u32 = 100_000;
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_clear_large")
+            .build();
+        let path = dir.path().join("index");
+        let store = RocksSubmoduleStore::open(&path)?;
+        let tx_hash = H256::repeat_byte(9);
+        let data_root = H256::repeat_byte(4);
+        for start in (0..ROWS).step_by(20_000) {
+            let end = start.saturating_add(20_000).min(ROWS);
+            store.update(|tx| {
+                let updates = (start..end)
+                    .map(|offset| {
+                        (
+                            PartitionChunkOffset::from(offset),
+                            H256::repeat_byte((offset % 200) as u8),
+                            vec![offset as u8],
+                        )
+                    })
+                    .collect();
+                tx.write_data_path_updates(updates)
+            })?;
+        }
+        store.update(|tx| {
+            tx.add_full_tx_path(tx_hash, vec![9_u8; 64 * 1024])?;
+            tx.add_tx_leaf_binding(
+                tx_hash,
+                &TxLeafBinding {
+                    data_root,
+                    prefix_hash: H256::repeat_byte(1),
+                },
+            )?;
+            tx.add_data_root_info(
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 64,
+                },
+            )?;
+            tx.add_pending_body_migration(
+                PartitionChunkOffset::from(3),
+                &PendingBodyMigration {
+                    data_root,
+                    data_size: 64,
+                    start_offset: RelativeChunkOffset(0),
+                    block_height: 1,
+                    attempts: 0,
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(10),
+                Some(tx_hash),
+            )?;
+            tx.add_full_data_path(PartitionChunkOffset::from(0), vec![7_u8; 256 * 1024])?;
+            Ok(())
+        })?;
+        assert!(store.cf_key_count(Cf::PathHashes)? >= usize::try_from(ROWS)?);
+        assert!(store.cf_key_count(Cf::DataPath)? >= usize::try_from(ROWS)?);
+
+        let started = std::time::Instant::now();
+        store.update(|tx| tx.clear())?;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "clear took {elapsed:?}"
+        );
+
+        for cf in Cf::INDEX {
+            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name());
+        }
+        assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
+        let payload = store.schema_payload()?.expect("schema row");
+        assert_eq!(payload, SCHEMA_TEXT.as_bytes());
+        assert!(
+            store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(50_000)))?
+                .is_none()
+        );
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(0)))?
+                .is_none()
+        );
+        assert!(store.view(|tx| tx.get_full_tx_path(tx_hash))?.is_none());
+        assert!(
+            store
+                .view(|tx| tx.get_data_root_infos_for_data_root(data_root))?
+                .is_none()
+        );
+        assert!(
+            store
+                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(3)))?
+                .is_none()
+        );
+        assert_eq!(store.interval_row_count()?, 0);
+        drop(store);
+
+        let store = RocksSubmoduleStore::open(&path)?;
+        assert_eq!(store.cf_key_count(Cf::PathHashes)?, 0);
+        assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
+        assert_eq!(
+            store.schema_payload()?.expect("schema row"),
+            SCHEMA_TEXT.as_bytes()
+        );
         Ok(())
     }
 

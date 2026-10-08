@@ -12,6 +12,7 @@ use reth_db::{
 };
 
 use crate::{
+    metadata::MetadataKey,
     open_or_create_db,
     submodule::tables::{DataRootInfo, DataRootInfosByDataRoot},
 };
@@ -24,7 +25,7 @@ pub use super::migrate::{
 
 use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
 use super::tables::{
-    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos,
+    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos, Metadata,
     PendingBodyMigration, PendingBodyMigrationsByOffset, SubmoduleTables, TxLeafBinding,
     TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
 };
@@ -515,20 +516,136 @@ pub fn pending_body_migrations_from<T: DbTx>(
 /// by network-partition recovery when those offsets are unassigned: the bodies
 /// they owed belong to txs that are no longer canonical. Returns the number of
 /// rows removed.
+///
+/// The key is the offset. `walk_range` stops at `end`. MDBX yields the value
+/// with the key. The value is not used to find the row.
 pub fn del_pending_body_migrations_in_range<T: DbTxMut + DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<usize> {
-    let orphaned: Vec<PartitionChunkOffset> = pending_body_migrations_from(tx, Some(start))?
-        .into_iter()
-        .map(|(offset, _)| offset)
-        .take_while(|offset| *offset <= end)
-        .collect();
+    if start > end {
+        return Ok(0);
+    }
+    let orphaned: Vec<PartitionChunkOffset> = {
+        let mut cursor = tx.cursor_read::<PendingBodyMigrationsByOffset>()?;
+        cursor
+            .walk_range(start..=end)?
+            .map(|row| row.map(|(offset, _)| offset))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     for offset in &orphaned {
         tx.delete::<PendingBodyMigrationsByOffset>(*offset, None)?;
     }
     Ok(orphaned.len())
+}
+
+/// `true` when a pending-job key lies in `[start, end]`. Does not use the value.
+pub fn has_pending_body_migration_in_range<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<bool> {
+    if start > end {
+        return Ok(false);
+    }
+    let mut cursor = tx.cursor_read::<PendingBodyMigrationsByOffset>()?;
+    Ok(cursor
+        .walk_range(start..=end)?
+        .next()
+        .transpose()?
+        .is_some())
+}
+
+/// `true` when a tx-path interval overlaps `[start, end]`.
+///
+/// The value holds the inclusive end, so the scan reads it. A row that only
+/// touches a neighbor does not count.
+pub fn tx_interval_overlaps<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<bool> {
+    if start > end {
+        return Ok(false);
+    }
+    let rows = intervals_touching(tx, start, end)?;
+    Ok(rows.iter().any(|row| row.start <= end && row.end >= start))
+}
+
+/// Every data-root row.
+///
+/// The key is a hash. It has no offset order. The value lists placements, so
+/// a span check has to read it.
+pub fn list_data_root_infos<T: DbTx>(
+    tx: &T,
+) -> eyre::Result<Vec<(irys_types::DataRoot, DataRootInfos)>> {
+    let mut cursor = tx.cursor_read::<DataRootInfosByDataRoot>()?;
+    Ok(cursor.walk(None)?.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// `true` when the placement extent overlaps the inclusive span.
+///
+/// Extent is `[start_offset, start_offset + ceil(data_size / chunk_size) - 1]`.
+/// A zero `chunk_size` overlaps, so the placement is not kept.
+pub(super) fn placement_overlaps_inclusive_span(
+    info: &DataRootInfo,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    chunk_size: u64,
+) -> bool {
+    if chunk_size == 0 {
+        return true;
+    }
+    let extent_start = info.start_offset.0;
+    let extent_chunks = info.data_size.div_ceil(chunk_size) as i32;
+    let extent_end = (extent_start + extent_chunks).saturating_sub(1);
+    !(extent_end < start.0 as i32 || extent_start > end.0 as i32)
+}
+
+/// Placements that miss every span. `None` when nothing overlapped.
+pub(super) fn trim_data_root_placements(
+    infos: DataRootInfos,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    chunk_size: u64,
+) -> Option<DataRootInfos> {
+    let mut changed = false;
+    let remaining = infos
+        .0
+        .into_iter()
+        .filter(|info| {
+            let hit = spans.iter().any(|(start, end)| {
+                placement_overlaps_inclusive_span(info, *start, *end, chunk_size)
+            });
+            if hit {
+                changed = true;
+            }
+            !hit
+        })
+        .collect();
+    changed.then_some(DataRootInfos(remaining))
+}
+
+/// Durable row written before a reset clears the index.
+pub fn put_reset_marker<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
+    tx.put::<Metadata>(MetadataKey::SubmoduleResetInProgress, vec![1_u8])?;
+    Ok(())
+}
+
+pub fn delete_reset_marker<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
+    tx.delete::<Metadata>(MetadataKey::SubmoduleResetInProgress, None)?;
+    Ok(())
+}
+
+/// `true` when the reset row is present.
+///
+/// A value that will not decode still counts. Open then finishes the reset.
+pub fn read_reset_marker<T: DbTx>(tx: &T) -> eyre::Result<bool> {
+    match tx.get::<Metadata>(MetadataKey::SubmoduleResetInProgress) {
+        Ok(value) => Ok(value.is_some()),
+        Err(reth_db::DatabaseError::Decode) => Ok(true),
+        Err(err) => Err(eyre::eyre!("read reset marker: {err}")),
+    }
 }
 
 /// clear db
