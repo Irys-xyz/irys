@@ -330,8 +330,9 @@ pub(crate) struct StepRow {
     pub tail: Option<TailWindow>,
 }
 
-/// RocksDB counters for one step. Stall time, flush count, and WAL syncs are
-/// deltas. Pending compaction bytes and running flushes are the gauge at step end.
+/// RocksDB counters for one step. Stall time, flush count, WAL syncs, and
+/// small-file compact counts are deltas. Pending compaction bytes and
+/// running flushes are the gauge at step end.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct RocksStepStats {
     pub write_stall_us: u64,
@@ -342,6 +343,12 @@ pub(crate) struct RocksStepStats {
     pub wal_syncs: u64,
     /// Backstop, explicit group sync, and shutdown WAL syncs during the step.
     pub wal_backstop_syncs: u64,
+    /// Count-triggered compact_range calls during the step.
+    pub small_file_compactions: u64,
+    /// Live SST files counted before those calls, summed.
+    pub small_file_compact_files_before: u64,
+    /// Live SST files counted after those calls, summed.
+    pub small_file_compact_files_after: u64,
 }
 
 #[derive(Serialize)]
@@ -677,13 +684,16 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
         ));
         if let Some(rocks) = row.rocks {
             out.push_str(&format!(
-                "rocks: stall={} pending_compaction_bytes={} flushes={} running_flushes={} wal_syncs={} wal_backstop_syncs={}\n",
+                "rocks: stall={} pending_compaction_bytes={} flushes={} running_flushes={} wal_syncs={} wal_backstop_syncs={} small_file_compactions={} files_before={} files_after={}\n",
                 fmt_ms(rocks.write_stall_us),
                 rocks.pending_compaction_bytes,
                 rocks.flushes,
                 rocks.running_flushes,
                 rocks.wal_syncs,
                 rocks.wal_backstop_syncs,
+                rocks.small_file_compactions,
+                rocks.small_file_compact_files_before,
+                rocks.small_file_compact_files_after,
             ));
         }
         if let Some(tail) = &row.tail {
@@ -892,6 +902,37 @@ mod tests {
         );
         assert!(rocks.contains("rocks_preset=baseline"));
         assert!(rocks.contains("rocks_block_cache_bytes=64"));
+    }
+
+    #[test]
+    fn the_table_prints_rocks_small_file_compactions() {
+        let row = StepRow {
+            name: "ingest-16".to_string(),
+            passed: true,
+            soft_fail: false,
+            reasons: Vec::new(),
+            measured: measured(0),
+            recall: DriverBucket::default(),
+            ingest: DriverBucket::default(),
+            migration: DriverBucket::default(),
+            serve: DriverBucket::default(),
+            rocks: Some(RocksStepStats {
+                write_stall_us: 0,
+                pending_compaction_bytes: 0,
+                flushes: 3,
+                running_flushes: 0,
+                wal_syncs: 1,
+                wal_backstop_syncs: 0,
+                small_file_compactions: 2,
+                small_file_compact_files_before: 80,
+                small_file_compact_files_after: 3,
+            }),
+            tail: None,
+        };
+        let text = table(&[row], "index_engine=rocks index_dir=/loadtest/rocks\n");
+        assert!(text.contains(
+            "rocks: stall=0.0ms pending_compaction_bytes=0 flushes=3 running_flushes=0 wal_syncs=1 wal_backstop_syncs=0 small_file_compactions=2 files_before=80 files_after=3"
+        ));
     }
 
     #[test]

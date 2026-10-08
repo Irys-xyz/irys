@@ -1020,6 +1020,15 @@ fn rocks_delta(before: RocksIngestStats, after: RocksIngestStats) -> RocksStepSt
         wal_backstop_syncs: after
             .wal_backstop_syncs
             .saturating_sub(before.wal_backstop_syncs),
+        small_file_compactions: after
+            .small_file_compactions
+            .saturating_sub(before.small_file_compactions),
+        small_file_compact_files_before: after
+            .small_file_compact_files_before
+            .saturating_sub(before.small_file_compact_files_before),
+        small_file_compact_files_after: after
+            .small_file_compact_files_after
+            .saturating_sub(before.small_file_compact_files_after),
     }
 }
 

@@ -20,7 +20,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use eyre::WrapErr as _;
@@ -62,6 +64,13 @@ const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// step runs mostly on reused WAL files. Each switch flushes every family
 /// that holds data in the old log.
 const WAL_ROTATE_BYTES: u64 = 1024 * 1024;
+/// Live SST files on one column family that start a whole-range compact
+/// in `fdatasync-wal-rotate-compact`. Baseline keeps `0` (the hook off).
+const SMALL_FILE_COMPACT_THRESHOLD: usize = 64;
+/// How often the compact thread rechecks live SST counts.
+const SMALL_FILE_COMPACT_POLL: Duration = Duration::from_millis(100);
+/// Levels counted by `rocksdb.num-files-at-level<N>` (RocksDB default).
+const SST_LEVELS: usize = 7;
 const SCHEMA_FILE: &str = "SCHEMA";
 const SCHEMA_TEXT: &str = SUBMODULE_SCHEMA;
 /// Marker written by the per-offset index. The on-disk worst-case directory
@@ -89,14 +98,16 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
 /// The bench names the other values. Each of those changes one field, so a
-/// sweep can attribute a difference to that field. Two presets change more
-/// than one field: `full-filters` (one shard and a 128 MiB cache) and
-/// `fdatasync-wal-rotate` (`fdatasync` plus the WAL cap). `no-wal-recycle`
-/// turns WAL file reuse off (baseline reuses 4). `fdatasync-wal` keeps every
-/// other baseline field and selects `fdatasync`. The rotate presets cap the
-/// live WAL at [`WAL_ROTATE_BYTES`]. Options are fixed at open. A new block
-/// size or a filter change needs an empty directory. An existing SST keeps
-/// the filter it was built with until a compaction rewrites the file.
+/// sweep can attribute a difference to that field. Three presets change more
+/// than one field: `full-filters` (one shard and a 128 MiB cache),
+/// `fdatasync-wal-rotate` (`fdatasync` plus the WAL cap), and
+/// `fdatasync-wal-rotate-compact` (that rotate pair plus a 64-file compact).
+/// `no-wal-recycle` turns WAL file reuse off (baseline reuses 4).
+/// `fdatasync-wal` keeps every other baseline field and selects `fdatasync`.
+/// The rotate presets cap the live WAL at [`WAL_ROTATE_BYTES`]. Options are
+/// fixed at open. A new block size or a filter change needs an empty
+/// directory. An existing SST keeps the filter it was built with until a
+/// compaction rewrites the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
@@ -174,6 +185,14 @@ pub struct RocksTuning {
     /// retired log. A reused file keeps its old size, so later syncs overwrite
     /// bytes that are already allocated.
     pub max_total_wal_size: u64,
+    /// Live SST files on one column family that start a whole-range compact.
+    ///
+    /// `0` (baseline) leaves the hook off. A positive value runs
+    /// `compact_range_cf` with `BottommostLevelCompaction::Force` on that
+    /// family so small files at the bottom level merge. The call runs on a
+    /// dedicated thread, off the write lock, and at most one compact is in
+    /// flight per database.
+    pub small_file_compact_threshold: usize,
 }
 
 impl RocksTuning {
@@ -193,11 +212,12 @@ impl RocksTuning {
             recycle_log_file_num: 4,
             use_fsync: true,
             max_total_wal_size: 0,
+            small_file_compact_threshold: 0,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 13] {
+    pub const fn presets() -> [Self; 14] {
         let base = Self::baseline();
         [
             base,
@@ -279,6 +299,17 @@ impl RocksTuning {
                 max_total_wal_size: WAL_ROTATE_BYTES,
                 ..base
             },
+            // Rotate plus a count-triggered CompactRange. WAL switches flush
+            // tiny memtables. Offset keys do not overlap, so those files
+            // trivial-move to L6 and stay there. Force-rewriting the bottom
+            // level merges them once a family has more than 64 live SSTs.
+            Self {
+                name: "fdatasync-wal-rotate-compact",
+                use_fsync: false,
+                max_total_wal_size: WAL_ROTATE_BYTES,
+                small_file_compact_threshold: SMALL_FILE_COMPACT_THRESHOLD,
+                ..base
+            },
         ]
     }
 
@@ -318,11 +349,12 @@ impl RocksTuning {
             "full"
         };
         format!(
-            "rocks={} recycle_log_file_num={} use_fsync={} max_total_wal_size={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
+            "rocks={} recycle_log_file_num={} use_fsync={} max_total_wal_size={} small_file_compact_threshold={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
             self.name,
             self.recycle_log_file_num,
             self.use_fsync,
             self.max_total_wal_size,
+            self.small_file_compact_threshold,
             self.block_bytes,
             self.background_jobs,
             self.target_file_bytes,
@@ -347,6 +379,7 @@ impl RocksTuning {
             + usize::from(self.recycle_log_file_num != other.recycle_log_file_num)
             + usize::from(self.use_fsync != other.use_fsync)
             + usize::from(self.max_total_wal_size != other.max_total_wal_size)
+            + usize::from(self.small_file_compact_threshold != other.small_file_compact_threshold)
     }
 }
 
@@ -418,10 +451,163 @@ impl Cf {
     }
 }
 
+/// Count-triggered whole-range compact. One thread per database.
+///
+/// The thread waits on [`SMALL_FILE_COMPACT_POLL`]. `compact_range_cf` then
+/// runs on RocksDB's background pool and this thread blocks until it
+/// finishes. The write mutex stays free. `threshold == 0` skips the thread.
+struct SmallFileCompactor {
+    state: Arc<CompactState>,
+    join: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct CompactState {
+    stop: AtomicBool,
+    wake: Condvar,
+    wait: Mutex<()>,
+    compactions: AtomicU64,
+    files_before: AtomicU64,
+    files_after: AtomicU64,
+}
+
+impl CompactState {
+    fn new() -> Self {
+        Self {
+            stop: AtomicBool::new(false),
+            wake: Condvar::new(),
+            wait: Mutex::new(()),
+            compactions: AtomicU64::new(0),
+            files_before: AtomicU64::new(0),
+            files_after: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.compactions.load(Ordering::Relaxed),
+            self.files_before.load(Ordering::Relaxed),
+            self.files_after.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl SmallFileCompactor {
+    fn start(db: Arc<DB>, threshold: usize, submodule: String) -> eyre::Result<Arc<Self>> {
+        let state = Arc::new(CompactState::new());
+        let this = Arc::new(Self {
+            state: Arc::clone(&state),
+            join: Mutex::new(None),
+        });
+        if threshold == 0 {
+            return Ok(this);
+        }
+        let join = std::thread::Builder::new()
+            .name("irys-idx-compact".into())
+            .spawn(move || run_small_file_compact(&state, &db, threshold, &submodule))
+            .wrap_err("spawn submodule index small-file compact thread")?;
+        {
+            let mut slot = this
+                .join
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            slot.replace(join);
+        }
+        Ok(this)
+    }
+}
+
+impl Drop for SmallFileCompactor {
+    fn drop(&mut self) {
+        self.state.stop.store(true, Ordering::Release);
+        self.state.wake.notify_all();
+        let join = self
+            .join
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(join) = join
+            && join.join().is_err()
+        {
+            tracing::error!("submodule index small-file compact thread panicked");
+        }
+    }
+}
+
+fn run_small_file_compact(state: &CompactState, db: &DB, threshold: usize, submodule: &str) {
+    loop {
+        if state.stop.load(Ordering::Acquire) {
+            return;
+        }
+        compact_small_files(state, db, threshold, submodule);
+        if state.stop.load(Ordering::Acquire) {
+            return;
+        }
+        let guard = state
+            .wait
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.stop.load(Ordering::Acquire) {
+            return;
+        }
+        let (_guard, _) = state
+            .wake
+            .wait_timeout(guard, SMALL_FILE_COMPACT_POLL)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+fn compact_small_files(state: &CompactState, db: &DB, threshold: usize, submodule: &str) {
+    if threshold == 0 {
+        return;
+    }
+    let limit = threshold as u64;
+    for cf in Cf::ALL {
+        if state.stop.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(handle) = cf_handle(db, cf) else {
+            continue;
+        };
+        let before = live_sst_count(db, handle);
+        if before <= limit {
+            continue;
+        }
+        let mut opts = rocksdb::CompactOptions::default();
+        opts.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::Force);
+        opts.set_exclusive_manual_compaction(false);
+        db.compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
+        let after = live_sst_count(db, handle);
+        state.compactions.fetch_add(1, Ordering::Relaxed);
+        state.files_before.fetch_add(before, Ordering::Relaxed);
+        state.files_after.fetch_add(after, Ordering::Relaxed);
+        tracing::info!(
+            submodule,
+            cf = cf.name(),
+            before,
+            after,
+            "small-file compact_range"
+        );
+    }
+}
+
+fn live_sst_count(db: &DB, handle: &rocksdb::ColumnFamily) -> u64 {
+    let mut total = 0_u64;
+    for level in 0..SST_LEVELS {
+        if let Ok(Some(count)) =
+            db.property_int_value_cf(handle, rocksdb::properties::num_files_at_level(level))
+        {
+            total = total.saturating_add(count);
+        }
+    }
+    total
+}
+
 #[derive(Clone)]
 pub struct RocksSubmoduleStore {
     /// Dropped first so the delay thread joins before `db` closes.
     lifetime: Arc<EngineLifetime>,
+    /// Joins next so a CompactRange finishes before `db` closes.
+    compact: Arc<SmallFileCompactor>,
     db: Arc<DB>,
     write: Arc<Mutex<()>>,
     group: Arc<GroupCommit>,
@@ -500,12 +686,15 @@ impl RocksSubmoduleStore {
         check_schema_text(&path, SCHEMA_V1_TEXT)?;
         let (db, stats) = open_existing_db(&path, &tuning)?;
         let group = GroupCommit::new();
+        let db = Arc::new(db);
+        let submodule = submodule_label(&path);
         Ok(Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
-            db: Arc::new(db),
+            compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone())?,
+            db,
             write: Arc::new(Mutex::new(())),
             group,
-            submodule: submodule_label(&path),
+            submodule,
             path,
             stats,
         })
@@ -587,12 +776,19 @@ impl RocksSubmoduleStore {
             fs::write(&marker, SCHEMA_TEXT).wrap_err("write schema marker")?;
         }
         let group = GroupCommit::new();
+        let db = Arc::new(db);
+        let submodule = submodule_label(&path);
         Ok(Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
-            db: Arc::new(db),
+            compact: SmallFileCompactor::start(
+                Arc::clone(&db),
+                tuning.small_file_compact_threshold,
+                submodule.clone(),
+            )?,
+            db,
             write: Arc::new(Mutex::new(())),
             group,
-            submodule: submodule_label(&path),
+            submodule,
             path,
             stats,
         })
@@ -894,6 +1090,22 @@ impl RocksSubmoduleStore {
             "submodule" => submodule.to_owned()
         )
         .absolute(self.group.backstop_syncs());
+        let (compactions, files_before, files_after) = self.compact.state.snapshot();
+        metrics::counter!(
+            "irys.rocksdb.small_file_compactions",
+            "submodule" => submodule.to_owned()
+        )
+        .absolute(compactions);
+        metrics::counter!(
+            "irys.rocksdb.small_file_compact_files_before",
+            "submodule" => submodule.to_owned()
+        )
+        .absolute(files_before);
+        metrics::counter!(
+            "irys.rocksdb.small_file_compact_files_after",
+            "submodule" => submodule.to_owned()
+        )
+        .absolute(files_after);
         let Some(stats) = &self.stats else {
             return;
         };
@@ -1049,6 +1261,11 @@ impl RocksSubmoduleStore {
             .property_int_value("rocksdb.num-running-flushes")
             .map_err(|error| eyre::eyre!("rocksdb.num-running-flushes: {error}"))?
             .unwrap_or(0);
+        let (
+            small_file_compactions,
+            small_file_compact_files_before,
+            small_file_compact_files_after,
+        ) = self.compact.state.snapshot();
         Ok(RocksIngestStats {
             write_stall_micros,
             pending_compaction_bytes,
@@ -1056,6 +1273,9 @@ impl RocksSubmoduleStore {
             running_flushes,
             wal_syncs: self.group.wal_syncs(),
             wal_backstop_syncs: self.group.backstop_syncs(),
+            small_file_compactions,
+            small_file_compact_files_before,
+            small_file_compact_files_after,
         })
     }
 
@@ -1131,6 +1351,35 @@ impl RocksSubmoduleStore {
             path_hash_rows,
             data_path_rows,
         })
+    }
+
+    #[cfg(test)]
+    fn flush_memtables(&self) -> eyre::Result<()> {
+        let _guard = self.lock_write();
+        for cf in Cf::ALL {
+            let handle = cf_handle(&self.db, cf)?;
+            self.db.flush_cf(&handle).wrap_err("flush column family")?;
+        }
+        Ok(())
+    }
+
+    /// Keep flushed L0 files in place so a test can pile up tiny SSTs.
+    #[cfg(test)]
+    fn disable_auto_compaction(&self) -> eyre::Result<()> {
+        for cf in Cf::ALL {
+            let handle = cf_handle(&self.db, cf)?;
+            self.db
+                .set_options_cf(handle, &[("disable_auto_compactions", "true")])
+                .wrap_err("disable auto compaction")?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn path_hash_sst_count(&self) -> u64 {
+        cf_handle(&self.db, Cf::PathHashes)
+            .map(|handle| live_sst_count(&self.db, handle))
+            .unwrap_or(0)
     }
 
     #[cfg(test)]
@@ -1350,6 +1599,18 @@ fn describe_rocks_metrics() {
         metrics::describe_counter!(
             "irys.rocksdb.wal_file_bytes",
             "WAL bytes written since this submodule database opened"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.small_file_compactions",
+            "Count-triggered compact_range calls on this submodule database"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.small_file_compact_files_before",
+            "Live SST files counted before each count-triggered compact_range"
+        );
+        metrics::describe_counter!(
+            "irys.rocksdb.small_file_compact_files_after",
+            "Live SST files counted after each count-triggered compact_range"
         );
         metrics::describe_histogram!(
             "irys.rocksdb.write_batch_bytes",
@@ -1616,8 +1877,9 @@ fn schema_value() -> Vec<u8> {
     compress_value(&SCHEMA_TEXT.as_bytes().to_vec())
 }
 
-/// Counters a bench step can subtract. Stall time, flush count, and WAL
-/// syncs are cumulative. Pending compaction bytes and running flushes are gauges.
+/// Counters a bench step can subtract. Stall time, flush count, WAL syncs,
+/// and small-file compact counts are cumulative. Pending compaction bytes
+/// and running flushes are gauges.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RocksIngestStats {
     pub write_stall_micros: u64,
@@ -1628,6 +1890,12 @@ pub struct RocksIngestStats {
     pub wal_syncs: u64,
     /// Backstop, explicit group sync, and shutdown WAL syncs since open.
     pub wal_backstop_syncs: u64,
+    /// Count-triggered `compact_range` calls since open.
+    pub small_file_compactions: u64,
+    /// Live SST files counted before each of those calls, summed.
+    pub small_file_compact_files_before: u64,
+    /// Live SST files counted after each of those calls, summed.
+    pub small_file_compact_files_after: u64,
 }
 
 fn int_property_cf(db: &DB, handle: &rocksdb::ColumnFamily, name: &str) -> eyre::Result<u64> {
@@ -2670,11 +2938,13 @@ mod tests {
         assert_eq!(base.recycle_log_file_num, 4);
         assert!(base.use_fsync);
         assert_eq!(base.max_total_wal_size, 0);
+        assert_eq!(base.small_file_compact_threshold, 0);
         let no_recycle = RocksTuning::preset("no-wal-recycle")?;
         assert_eq!(no_recycle.recycle_log_file_num, 0);
         assert!(base.describe().contains("recycle_log_file_num=4"));
         assert!(base.describe().contains("use_fsync=true"));
         assert!(base.describe().contains("max_total_wal_size=0"));
+        assert!(base.describe().contains("small_file_compact_threshold=0"));
         assert!(no_recycle.describe().contains("recycle_log_file_num=0"));
         assert!(no_recycle.describe().contains("filters=partitioned"));
         let fdatasync = RocksTuning::preset("fdatasync-wal")?;
@@ -2686,14 +2956,27 @@ mod tests {
         assert!(!fdatasync_rotate.use_fsync);
         assert_eq!(fdatasync_rotate.max_total_wal_size, WAL_ROTATE_BYTES);
         assert_eq!(fdatasync_rotate.recycle_log_file_num, 4);
+        assert_eq!(fdatasync_rotate.small_file_compact_threshold, 0);
         let fsync_rotate = RocksTuning::preset("fsync-wal-rotate")?;
         assert!(fsync_rotate.use_fsync);
         assert_eq!(fsync_rotate.max_total_wal_size, WAL_ROTATE_BYTES);
+        assert_eq!(fsync_rotate.small_file_compact_threshold, 0);
         assert!(
             fsync_rotate
                 .describe()
                 .contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}"))
         );
+        let rotate_compact = RocksTuning::preset("fdatasync-wal-rotate-compact")?;
+        assert!(!rotate_compact.use_fsync);
+        assert_eq!(rotate_compact.max_total_wal_size, WAL_ROTATE_BYTES);
+        assert_eq!(
+            rotate_compact.small_file_compact_threshold,
+            SMALL_FILE_COMPACT_THRESHOLD
+        );
+        assert_eq!(rotate_compact.recycle_log_file_num, 4);
+        assert!(rotate_compact.describe().contains(&format!(
+            "small_file_compact_threshold={SMALL_FILE_COMPACT_THRESHOLD}"
+        )));
 
         let mut names = Vec::new();
         for preset in RocksTuning::presets() {
@@ -2705,6 +2988,8 @@ mod tests {
                 assert_eq!(preset.knob_diffs(base), 3, "{}", preset.name);
             } else if preset.name == "fdatasync-wal-rotate" {
                 assert_eq!(preset.knob_diffs(base), 2, "{}", preset.name);
+            } else if preset.name == "fdatasync-wal-rotate-compact" {
+                assert_eq!(preset.knob_diffs(base), 3, "{}", preset.name);
             } else {
                 assert_eq!(preset.knob_diffs(base), 1, "{}", preset.name);
             }
@@ -2803,6 +3088,107 @@ mod tests {
             fsync_rotate_opts.contains("recycle_log_file_num=4"),
             "{fsync_rotate_opts}"
         );
+        let rotate_compact_opts =
+            persisted_options(&dir.path().join("fdatasync-wal-rotate-compact"))?;
+        assert!(
+            rotate_compact_opts.contains("use_fsync=false"),
+            "{rotate_compact_opts}"
+        );
+        assert!(
+            rotate_compact_opts.contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}")),
+            "{rotate_compact_opts}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn small_file_compact_stays_off_when_the_threshold_is_zero() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_compact_off")
+            .build();
+        let store =
+            RocksSubmoduleStore::open_with(dir.path().join("index"), RocksTuning::baseline())?;
+        store.disable_auto_compaction()?;
+        let rows = 20_u32;
+        for offset in 0..rows {
+            put_offset(&store, offset, offset as u8)?;
+            store.flush_memtables()?;
+        }
+        let files = store.path_hash_sst_count();
+        assert!(
+            files > 8,
+            "expected many tiny SSTs after per-row flushes, got {files}"
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        let stats = store.ingest_stats()?;
+        assert_eq!(stats.small_file_compactions, 0);
+        assert!(
+            store.path_hash_sst_count() > 8,
+            "threshold 0 must leave the tiny SSTs in place, started with {files}"
+        );
+        for offset in 0..rows {
+            assert_eq!(
+                path_hashes_at(&store, offset)?,
+                Some(hashes_for(offset as u8))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn small_file_compact_merges_tiny_ssts_past_the_threshold() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_compact_on")
+            .build();
+        let path = dir.path().join("index");
+        let rows = 20_u32;
+        let files = {
+            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
+            store.disable_auto_compaction()?;
+            for offset in 0..rows {
+                put_offset(&store, offset, offset as u8)?;
+                store.flush_memtables()?;
+            }
+            let files = store.path_hash_sst_count();
+            assert!(
+                files > 8,
+                "expected many tiny SSTs after per-row flushes, got {files}"
+            );
+            assert_eq!(store.ingest_stats()?.small_file_compactions, 0);
+            files
+        };
+        let tuning = RocksTuning {
+            small_file_compact_threshold: 8,
+            ..RocksTuning::baseline()
+        };
+        let store = RocksSubmoduleStore::open_with(&path, tuning)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let stats = store.ingest_stats()?;
+            let after = store.path_hash_sst_count();
+            if stats.small_file_compactions > 0 && after < files {
+                assert!(
+                    stats.small_file_compact_files_after < stats.small_file_compact_files_before,
+                    "before={} after={}",
+                    stats.small_file_compact_files_before,
+                    stats.small_file_compact_files_after
+                );
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                eyre::bail!(
+                    "compact did not merge tiny SSTs: files {files} -> {after}, compactions {}",
+                    stats.small_file_compactions
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for offset in 0..rows {
+            assert_eq!(
+                path_hashes_at(&store, offset)?,
+                Some(hashes_for(offset as u8))
+            );
+        }
         Ok(())
     }
 
@@ -2866,6 +3252,9 @@ mod tests {
         assert_eq!(stats.running_flushes, 0);
         assert_eq!(stats.wal_syncs, 0);
         assert_eq!(stats.wal_backstop_syncs, 0);
+        assert_eq!(stats.small_file_compactions, 0);
+        assert_eq!(stats.small_file_compact_files_before, 0);
+        assert_eq!(stats.small_file_compact_files_after, 0);
         drop(store);
         let index = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
         let again = index.rocks_ingest_stats()?.expect("rocks counters");
