@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791490581232,
+  "lastUpdate": 1791491513178,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -16459,6 +16459,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "30e949d35a34b07ce8e52086fb45c0ae4003fa28",
+          "message": "fix(p2p): treat a rate-limited chunk push as backpressure (#1578)\n\n* fix(p2p): treat a rate-limited chunk push as backpressure\n\nA RateLimited reply raised the peer score, recorded a breaker success,\nand marked the chunk seen. Seen chunks are not offered again.\n\nRateLimited is backpressure: no score change, no breaker event, and no\nrecord_seen. The sender retries three more times (250 ms, 500 ms, 1 s)\nand then stops. A hard rejection still lowers the score and records a\nfailure. Only an accepted push is a delivery.\n\nThe receiver answers after 4 s, drops the chunk semaphore permit, and\ndetaches the packing task. An in-flight index write, and a write that\nstopped because the entropy read did not finish, return Overloaded.\nGossip already reports Overloaded as RateLimited.\n\n* fix(p2p): keep a paused peer out of the gossip breaker\n\nGossipDisabled is a pause. Counting it as a hard failure opened the\nbreaker after five replies. The cooldown is 30s, long enough to drop\nthe next ingress proof.\n\nA paused peer gets no score change, no breaker event, and no\nrecord_seen. A hard rejection still records a failure.\n\n* fix(storage): report an in-flight chunk write as backpressure\n\nWriteDataChunkError::Backpressure replaces a match on the error text.\nIngress maps that variant to Overloaded. A later disk lane returns the\nsame variant when a write gives the disk back.\n\n* fix(storage): decide chunk backpressure under the write lock\n\nAn empty prepare is success. The occupancy check ran after the lock\nwas released, so a holder could drop the offset in that gap and the\nwrite reported the chunk as stored. The all-busy decision now happens\nin the same lock as the scan. A free placement is still written when\nanother placement is busy.\n\n* fix(storage): refuse a partial write while a placement is busy\n\nA busy placement used to be skipped while the free ones were written.\nIngress then treated the chunk as stored, and the busy placement could\nstill fail and stay empty. The prepare now returns Backpressure before\nit reserves any offset.",
+          "timestamp": "2026-10-08T21:11:35+01:00",
+          "tree_id": "9c6632f347f925ee68d157b90de8e25afd608679",
+          "url": "https://github.com/Irys-xyz/irys/commit/30e949d35a34b07ce8e52086fb45c0ae4003fa28"
+        },
+        "date": 1791491510802,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.013112,
+            "range": "± 0.000458",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.127661,
+            "range": "± 0.005201",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.379844,
+            "range": "± 0.127604",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.334504,
+            "range": "± 0.309028",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.080312,
+            "range": "± 0.002279",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 769.395959,
+            "range": "± 27.031409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 988.287782,
+            "range": "± 5.438321",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117925,
+            "range": "± 0.002173",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1196.032121,
+            "range": "± 11.423954",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1641.680613,
+            "range": "± 174.828778",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03317,
+            "range": "± 0.000286",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.339317,
+            "range": "± 1.001177",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.733929,
+            "range": "± 10.216494",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
