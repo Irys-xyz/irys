@@ -44,7 +44,7 @@ use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 #[cfg(feature = "bench")]
 use irys_database::submodule::RocksTuning;
 use irys_database::submodule::{
-    SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
+    SubmoduleIndex, SubmoduleRead, SubmoduleStore as _, install_process_rocks_resources,
     tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
@@ -781,7 +781,9 @@ fn open_submodule_index(
                     mdbx_dat.display()
                 ))
             } else {
-                SubmoduleIndex::open_rocks(&path)
+                // The first submodule installs the process cache. The rest share it.
+                install_process_rocks_resources(database)
+                    .and_then(|_| SubmoduleIndex::open_rocks(&path))
             }
         }
     };
@@ -5780,6 +5782,7 @@ mod tests {
             cache_sync_mode: DbSyncMode::UtterlyNoSync,
             geometry_max_size: Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE),
             submodule_index: engine,
+            ..DatabaseConfig::default()
         }
     }
 

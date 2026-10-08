@@ -278,23 +278,37 @@ fn bloom_bytes(keys: u64) -> u64 {
 }
 
 fn memory_predict(args: &Args) -> String {
-    let cache = args.rocks.block_cache_bytes as u64;
+    let shared = args.rocks.share_resources;
+    // A shared open uses the process cache, not the private preset field.
+    // The bench does not install a custom size, so that cache is the default.
+    let cache = if shared {
+        irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+    } else {
+        args.rocks.block_cache_bytes as u64
+    };
+    let shared_resources = if shared { "on" } else { "off" };
     let keys = u64::from(args.chunks);
     let bloom = bloom_bytes(keys);
     match args.workload {
         Workload::MemDbs => {
-            let serving = cache.saturating_mul(u64::from(args.dbs));
+            let serving = if shared {
+                cache
+            } else {
+                cache.saturating_mul(u64::from(args.dbs))
+            };
             format!(
-                "rows_per_db={keys} block_cache_bytes={cache} serving_cache_bytes={serving} bloom_bytes_per_db={bloom}"
+                "rows_per_db={keys} block_cache_bytes={cache} serving_cache_bytes={serving} bloom_bytes_per_db={bloom} shared_resources={shared_resources}"
             )
         }
         Workload::IndexSpan => {
-            format!("one_update=1 rows={keys} bloom_bytes={bloom} block_cache_bytes={cache}")
+            format!(
+                "one_update=1 rows={keys} bloom_bytes={bloom} block_cache_bytes={cache} shared_resources={shared_resources}"
+            )
         }
         Workload::OffsetRows => {
             let fits = if bloom <= cache { "yes" } else { "no" };
             format!(
-                "rows={keys} batch={} bloom_bytes={bloom} block_cache_bytes={cache} bloom_fits={fits}",
+                "rows={keys} batch={} bloom_bytes={bloom} block_cache_bytes={cache} bloom_fits={fits} shared_resources={shared_resources}",
                 args.batch
             )
         }
@@ -1775,9 +1789,9 @@ mod tests {
         HEAD_SAMPLES, LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH,
         MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS,
         Workload, bloom_bytes, commits_for, data_path_bytes, head_tail, mdbx_map_bytes,
-        pairing_layers, parse_arg_list, parse_diskstats, parse_mount_line, parse_proc_status,
-        percentile, proof_bytes, ranks, rewritten_data_path, sample_offset, seq_offset,
-        shaped_proof,
+        memory_predict, pairing_layers, parse_arg_list, parse_diskstats, parse_mount_line,
+        parse_proc_status, percentile, proof_bytes, ranks, rewritten_data_path, sample_offset,
+        seq_offset, shaped_proof,
     };
 
     #[test]
@@ -1935,6 +1949,7 @@ VmHWM:\t   8600000 kB
         assert_eq!(args.rocks.name, "block-16k");
         assert_eq!(args.rocks.block_bytes, 16 * 1024);
         assert_eq!(args.rocks.block_cache_bytes, BLOCK_CACHE_BYTES);
+        assert!(args.rocks.share_resources);
 
         let cache = parse(&[
             "--dir",
@@ -1947,6 +1962,7 @@ VmHWM:\t   8600000 kB
         .unwrap();
         assert_eq!(cache.rocks.name, "cache-1g");
         assert_eq!(cache.rocks.block_cache_bytes, 4096);
+        assert!(!cache.rocks.share_resources);
         assert_eq!(cache.engines, Engines::Both);
 
         let defaults = parse(&["--dir", "index-bench"]).unwrap();
@@ -1954,6 +1970,7 @@ VmHWM:\t   8600000 kB
         assert_eq!(defaults.engines, Engines::Both);
         assert_eq!(defaults.rocks.name, "baseline");
         assert_eq!(defaults.rocks.block_cache_bytes, BLOCK_CACHE_BYTES);
+        assert!(defaults.rocks.share_resources);
         assert_eq!(defaults.chunks, 4096);
         assert!(!defaults.group_commit);
 
@@ -2036,6 +2053,16 @@ VmHWM:\t   8600000 kB
         .unwrap();
         assert_eq!(rows.chunks, 75_534_400);
         assert!(bloom_bytes(u64::from(rows.chunks)) > BLOCK_CACHE_BYTES as u64);
+        let predicted = memory_predict(&rows);
+        assert!(predicted.contains("shared_resources=on"), "{predicted}");
+        assert!(predicted.contains("bloom_fits=yes"), "{predicted}");
+        assert!(
+            predicted.contains(&format!(
+                "block_cache_bytes={}",
+                irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+            )),
+            "{predicted}"
+        );
 
         assert!(parse(&["--dir", "index-bench", "--profile", "index-span"]).is_err());
         assert!(
@@ -2059,6 +2086,7 @@ VmHWM:\t   8600000 kB
         assert_eq!(args.chunks, 20_971_520);
         assert!(!args.rewrite_filters);
         assert!(args.rocks.partition_filters);
+        assert!(args.rocks.share_resources);
 
         let rewrite = parse(&[
             "--dir",
@@ -2074,6 +2102,7 @@ VmHWM:\t   8600000 kB
         assert!(!rewrite.rocks.partition_filters);
         assert_eq!(rewrite.rocks.block_cache_bytes, 128 * 1024 * 1024);
         assert_eq!(rewrite.rocks.cache_shard_bits, 0);
+        assert!(!rewrite.rocks.share_resources);
 
         assert!(parse(&["--dir", "index-bench", "--rewrite-filters"]).is_err());
         assert!(

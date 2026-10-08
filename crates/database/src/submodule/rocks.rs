@@ -16,18 +16,24 @@
 //! recycle, `wal_bytes_per_sync`, `use_fsync`, and `max_total_wal_size` are
 //! the durability knobs this binding exposes. Every open keeps SST readers
 //! (`max_open_files=-1`, 16 opening threads). Blob readers stay lazy.
+//!
+//! A production open shares one block cache, one write-buffer manager, and
+//! the process Env thread pools. A bench preset can opt out and keep a
+//! private cache. `max_open_files` stays `-1`: a finite cap drops table
+//! readers and reloads the filter on the next read.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use eyre::WrapErr as _;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, DatabaseConfig, H256, PartitionChunkOffset, TxPath,
+    TxPathHash,
 };
 use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
 use rocksdb::{
@@ -51,12 +57,18 @@ use crate::metadata::MetadataKey;
 
 /// User-data block size. Uncompressed. Reads of the offset index pull this much.
 const BLOCK_BYTES: usize = 64 * 1024;
-/// Shared by every column family of this one database.
+/// Private block cache for an open that opts out of [`RocksResources`].
+/// Production baseline does not use this size.
 pub const BLOCK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Values at or above this size move into blob files on the path column families.
 pub const BLOB_MIN_BYTES: u64 = 2048;
-/// Compaction threads for one HDD. The bench can select another preset.
+/// Per-database background-job cap. The process Env pools are separate.
+/// The bench can select another preset.
 const BACKGROUND_JOBS: i32 = 2;
+/// Refill period for an optional flush and compaction rate limiter.
+const RATE_LIMIT_REFILL_PERIOD_US: i64 = 100_000;
+/// Fairness of that limiter. Matches the binding's example.
+const RATE_LIMIT_FAIRNESS: i32 = 10;
 /// Leveled SST target. Compaction output preallocation uses this as a cap.
 const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// Live WAL cap for the rotate presets. The bench index writes about
@@ -102,7 +114,9 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// than one field: `full-filters` (one shard and a 128 MiB cache),
 /// `fdatasync-wal-rotate` (`fdatasync` plus the WAL cap), and
 /// `fdatasync-wal-rotate-compact` (that rotate pair plus a 64-file compact).
-/// `no-wal-recycle` turns WAL file reuse off (baseline reuses 4).
+/// `share_resources` is not one of those fields. `cache-1g` and
+/// `full-filters` turn it off so the private cache size is the one that
+/// opens. `no-wal-recycle` turns WAL file reuse off (baseline reuses 4).
 /// `fdatasync-wal` keeps every other baseline field and selects `fdatasync`.
 /// The rotate presets cap the live WAL at [`WAL_ROTATE_BYTES`]. Options are
 /// fixed at open. A new block size or a filter change needs an empty
@@ -193,6 +207,14 @@ pub struct RocksTuning {
     /// dedicated thread, off the write lock, and at most one compact is in
     /// flight per database.
     pub small_file_compact_threshold: usize,
+    /// Use the process-wide block cache, write-buffer manager, and Env pools.
+    ///
+    /// `false` builds a private cache of `block_cache_bytes` and does not
+    /// attach the write-buffer manager or a rate limiter. `cache_shard_bits`
+    /// applies to that private cache. The process cache uses shard bits `-1`.
+    /// `cache-1g`, `full-filters`, and [`Self::with_block_cache`] set `false`
+    /// so a bench can compare cache sizes. Preset diffs do not count this flag.
+    pub share_resources: bool,
 }
 
 impl RocksTuning {
@@ -213,6 +235,7 @@ impl RocksTuning {
             use_fsync: true,
             max_total_wal_size: 0,
             small_file_compact_threshold: 0,
+            share_resources: true,
         }
     }
 
@@ -234,6 +257,7 @@ impl RocksTuning {
             Self {
                 name: "cache-1g",
                 block_cache_bytes: 1024 * 1024 * 1024,
+                share_resources: false,
                 ..base
             },
             Self {
@@ -264,6 +288,7 @@ impl RocksTuning {
                 partition_filters: false,
                 block_cache_bytes: 128 * 1024 * 1024,
                 cache_shard_bits: 0,
+                share_resources: false,
                 ..base
             },
             // WAL file reuse off, for an A/B against the baseline's 4.
@@ -329,8 +354,11 @@ impl RocksTuning {
     }
 
     /// Replace the cache after a preset is chosen. The name stays.
+    ///
+    /// The replacement is private. The process cache would ignore `bytes`.
     pub fn with_block_cache(mut self, bytes: usize) -> Self {
         self.block_cache_bytes = bytes;
+        self.share_resources = false;
         self
     }
 
@@ -355,8 +383,9 @@ impl RocksTuning {
         } else {
             "full"
         };
+        let shared = if self.share_resources { "on" } else { "off" };
         format!(
-            "rocks={} recycle_log_file_num={} use_fsync={} max_total_wal_size={} small_file_compact_threshold={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={}",
+            "rocks={} recycle_log_file_num={} use_fsync={} max_total_wal_size={} small_file_compact_threshold={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={} shared_resources={shared}",
             self.name,
             self.recycle_log_file_num,
             self.use_fsync,
@@ -370,7 +399,8 @@ impl RocksTuning {
         )
     }
 
-    /// Knobs only. The name is not a knob.
+    /// Table knobs only. The name and `share_resources` are not knobs.
+    /// `share_resources` selects the process cache. It does not change an SST.
     #[cfg(test)]
     fn knob_diffs(self, other: Self) -> usize {
         usize::from(self.block_bytes != other.block_bytes)
@@ -387,6 +417,225 @@ impl RocksTuning {
             + usize::from(self.use_fsync != other.use_fsync)
             + usize::from(self.max_total_wal_size != other.max_total_wal_size)
             + usize::from(self.small_file_compact_threshold != other.small_file_compact_threshold)
+    }
+}
+
+/// Sizes for the process-wide RocksDB cache, write buffer, and Env pools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RocksResourceLimits {
+    pub block_cache_bytes: u64,
+    pub write_buffer_bytes: u64,
+    pub flush_threads: u32,
+    pub compaction_threads: u32,
+    /// `0` does not install a rate limiter.
+    pub rate_limit_bytes_per_sec: u64,
+}
+
+impl RocksResourceLimits {
+    pub const fn production() -> Self {
+        Self {
+            block_cache_bytes: irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES,
+            write_buffer_bytes: irys_types::DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES,
+            flush_threads: irys_types::DEFAULT_ROCKSDB_FLUSH_THREADS,
+            compaction_threads: irys_types::DEFAULT_ROCKSDB_COMPACTION_THREADS,
+            rate_limit_bytes_per_sec: irys_types::DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC,
+        }
+    }
+
+    pub fn from_database(config: &DatabaseConfig) -> eyre::Result<Self> {
+        let limits = Self {
+            block_cache_bytes: config.rocksdb_block_cache_bytes,
+            write_buffer_bytes: config.rocksdb_write_buffer_bytes,
+            flush_threads: config.rocksdb_flush_threads,
+            compaction_threads: config.rocksdb_compaction_threads,
+            rate_limit_bytes_per_sec: config.rocksdb_rate_limit_bytes_per_sec,
+        };
+        limits.check()?;
+        Ok(limits)
+    }
+
+    fn check(self) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.block_cache_bytes > 0,
+            "rocksdb_block_cache_bytes must be greater than 0"
+        );
+        eyre::ensure!(
+            self.write_buffer_bytes > 0,
+            "rocksdb_write_buffer_bytes must be greater than 0"
+        );
+        eyre::ensure!(
+            self.write_buffer_bytes <= self.block_cache_bytes,
+            "rocksdb_write_buffer_bytes ({}) exceeds rocksdb_block_cache_bytes ({})",
+            self.write_buffer_bytes,
+            self.block_cache_bytes
+        );
+        eyre::ensure!(
+            self.flush_threads >= 1,
+            "rocksdb_flush_threads must be greater than 0"
+        );
+        eyre::ensure!(
+            self.compaction_threads >= 1,
+            "rocksdb_compaction_threads must be greater than 0"
+        );
+        usize::try_from(self.block_cache_bytes)
+            .wrap_err("rocksdb_block_cache_bytes does not fit in usize")?;
+        usize::try_from(self.write_buffer_bytes)
+            .wrap_err("rocksdb_write_buffer_bytes does not fit in usize")?;
+        i32::try_from(self.flush_threads).wrap_err("rocksdb_flush_threads does not fit in i32")?;
+        i32::try_from(self.compaction_threads)
+            .wrap_err("rocksdb_compaction_threads does not fit in i32")?;
+        if self.rate_limit_bytes_per_sec > 0 {
+            i64::try_from(self.rate_limit_bytes_per_sec)
+                .wrap_err("rocksdb_rate_limit_bytes_per_sec does not fit in i64")?;
+        }
+        Ok(())
+    }
+
+    fn flush_pool(self) -> i32 {
+        i32::try_from(self.flush_threads).expect("flush threads checked")
+    }
+
+    fn compaction_pool(self) -> i32 {
+        i32::try_from(self.compaction_threads).expect("compaction threads checked")
+    }
+}
+
+/// One block cache and one write-buffer manager for every submodule index
+/// that opts in. The Env is the process default. Its flush and compaction
+/// pools are raised to these limits and are never reduced.
+///
+/// The write-buffer manager charges memtable bytes to the block cache and
+/// does not stall writers. A stall waits for every writer that shares the
+/// manager. The idle arena is about 1 MiB per column family and a flush
+/// replaces it with another arena, so a stall cannot reclaim that floor.
+/// Forty databases and nine families are about 360 MiB. That fits in the
+/// 512 MiB budget. Above that floor, raise both this budget and the cache.
+pub struct RocksResources {
+    limits: RocksResourceLimits,
+    cache: rocksdb::Cache,
+    write_buffer: rocksdb::WriteBufferManager,
+    env: rocksdb::Env,
+}
+
+impl RocksResources {
+    pub fn new(limits: RocksResourceLimits) -> eyre::Result<Arc<Self>> {
+        limits.check()?;
+        let cache_bytes = usize::try_from(limits.block_cache_bytes)
+            .wrap_err("rocksdb_block_cache_bytes does not fit in usize")?;
+        let mut cache_opts = rocksdb::LruCacheOptions::default();
+        cache_opts.set_capacity(cache_bytes);
+        // `-1` caps at 64 shards. 1 GiB is then 16 MiB per shard, which holds
+        // a partitioned filter block. One shard would serialize every lookup.
+        cache_opts.set_num_shard_bits(-1);
+        let cache = rocksdb::Cache::new_lru_cache_opts(&cache_opts);
+        let write_bytes = usize::try_from(limits.write_buffer_bytes)
+            .wrap_err("rocksdb_write_buffer_bytes does not fit in usize")?;
+        let write_buffer = rocksdb::WriteBufferManager::new_write_buffer_manager_with_cache(
+            write_bytes,
+            false,
+            cache.clone(),
+        );
+        let env = rocksdb::Env::new().wrap_err("open the default rocksdb env")?;
+        raise_default_env_threads(&env, limits.flush_pool(), limits.compaction_pool());
+        Ok(Arc::new(Self {
+            limits,
+            cache,
+            write_buffer,
+            env,
+        }))
+    }
+
+    pub fn limits(&self) -> RocksResourceLimits {
+        self.limits
+    }
+
+    pub fn block_cache_usage(&self) -> u64 {
+        u64::try_from(self.cache.get_usage()).unwrap_or(u64::MAX)
+    }
+
+    pub fn block_cache_pinned_usage(&self) -> u64 {
+        u64::try_from(self.cache.get_pinned_usage()).unwrap_or(u64::MAX)
+    }
+
+    pub fn block_cache_capacity(&self) -> u64 {
+        self.limits.block_cache_bytes
+    }
+
+    pub fn write_buffer_usage(&self) -> u64 {
+        u64::try_from(self.write_buffer.get_usage()).unwrap_or(u64::MAX)
+    }
+
+    pub fn write_buffer_capacity(&self) -> u64 {
+        u64::try_from(self.write_buffer.get_buffer_size()).unwrap_or(u64::MAX)
+    }
+}
+
+/// First successful install wins. A later call with different sizes keeps
+/// that set and logs the mismatch. Thread pools still only grow.
+static PROCESS_ROCKS_RESOURCES: OnceLock<Arc<RocksResources>> = OnceLock::new();
+/// Highest flush and compaction pool sizes this process has requested.
+/// `SetBackgroundThreads` can shrink a pool. A later open must not do that.
+static ENV_THREAD_POOLS: Mutex<(i32, i32)> = Mutex::new((0, 0));
+
+/// Install the process set from node config. The first call creates it.
+/// Later calls keep the first cache and write buffer.
+pub fn install_process_rocks_resources(config: &DatabaseConfig) -> eyre::Result<()> {
+    let limits = RocksResourceLimits::from_database(config)?;
+    if let Some(existing) = PROCESS_ROCKS_RESOURCES.get() {
+        note_existing_resources(existing, limits);
+        return Ok(());
+    }
+    let created = RocksResources::new(limits)?;
+    match PROCESS_ROCKS_RESOURCES.set(created) {
+        Ok(()) => Ok(()),
+        Err(loser) => {
+            if let Some(existing) = PROCESS_ROCKS_RESOURCES.get() {
+                note_existing_resources(existing, loser.limits);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn note_existing_resources(existing: &RocksResources, requested: RocksResourceLimits) {
+    if existing.limits != requested {
+        tracing::warn!(
+            installed_block_cache_bytes = existing.limits.block_cache_bytes,
+            requested_block_cache_bytes = requested.block_cache_bytes,
+            installed_write_buffer_bytes = existing.limits.write_buffer_bytes,
+            requested_write_buffer_bytes = requested.write_buffer_bytes,
+            "rocksdb process resources already installed; keeping the first set"
+        );
+    }
+    raise_default_env_threads(
+        &existing.env,
+        requested.flush_pool(),
+        requested.compaction_pool(),
+    );
+}
+
+fn process_rocks_resources() -> eyre::Result<Arc<RocksResources>> {
+    if let Some(existing) = PROCESS_ROCKS_RESOURCES.get() {
+        return Ok(Arc::clone(existing));
+    }
+    let created = RocksResources::new(RocksResourceLimits::production())?;
+    Ok(Arc::clone(PROCESS_ROCKS_RESOURCES.get_or_init(|| created)))
+}
+
+fn raise_default_env_threads(env: &rocksdb::Env, flush: i32, compaction: i32) {
+    let mut guard = ENV_THREAD_POOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Clone so the setters can take `&mut`. Both wrappers point at the
+    // process default Env. The bottom pool stays at zero.
+    let mut env = env.clone();
+    if flush > guard.0 {
+        env.set_high_priority_background_threads(flush);
+        guard.0 = flush;
+    }
+    if compaction > guard.1 {
+        env.set_background_threads(compaction);
+        guard.1 = compaction;
     }
 }
 
@@ -627,6 +876,9 @@ pub struct RocksSubmoduleStore {
     /// Joins next so a CompactRange finishes before `db` closes.
     compact: Arc<SmallFileCompactor>,
     db: Arc<DB>,
+    /// Process cache and write-buffer manager when this open uses them.
+    /// Declared after `db` so the database closes before this `Arc` drops.
+    resources: Option<Arc<RocksResources>>,
     write: Arc<Mutex<()>>,
     group: Arc<GroupCommit>,
     path: PathBuf,
@@ -663,13 +915,14 @@ impl std::fmt::Debug for RocksSubmoduleStore {
 
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_inner(path, RocksTuning::baseline(), true, false)
+        Self::open_inner(path, RocksTuning::baseline(), true, false, None)
     }
 
-    /// Same open as [`Self::open`], with an explicit block cache.
+    /// Same open as [`Self::open`], with a private block cache.
     ///
     /// The bench uses this to repeat a read test at more than one cache size.
-    /// Production keeps [`BLOCK_CACHE_BYTES`].
+    /// The private cache opts out of the process set, so `block_cache_bytes`
+    /// is the cache that opens. Production [`Self::open`] uses the shared set.
     pub fn open_with_block_cache(
         path: impl AsRef<Path>,
         block_cache_bytes: usize,
@@ -682,7 +935,7 @@ impl RocksSubmoduleStore {
 
     /// Open with an explicit preset. [`Self::open`] stays on the baseline.
     pub fn open_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, false, false)
+        Self::open_inner(path, tuning, false, false, None)
     }
 
     /// Bench open. Same table cache as [`Self::open`], and it skips the
@@ -690,7 +943,23 @@ impl RocksSubmoduleStore {
     ///
     /// Histograms and timers stay off.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, true, true)
+        Self::open_inner(path, tuning, true, true, None)
+    }
+
+    /// Baseline open on an explicit resource set.
+    ///
+    /// The set wins over the process `OnceLock`. Tests use this to measure
+    /// one cache without depending on whatever this process installed first.
+    pub fn open_with_resources(
+        path: impl AsRef<Path>,
+        resources: Arc<RocksResources>,
+    ) -> eyre::Result<Self> {
+        Self::open_inner(path, RocksTuning::baseline(), true, false, Some(resources))
+    }
+
+    /// `true` when this database uses a shared cache and write-buffer manager.
+    pub fn uses_shared_resources(&self) -> bool {
+        self.resources.is_some()
     }
 
     /// Open a schema-v1 directory for point reads of `ChunkPathHashesByOffset`.
@@ -702,7 +971,8 @@ impl RocksSubmoduleStore {
     pub fn open_v1_probe(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         check_schema_text(&path, SCHEMA_V1_TEXT)?;
-        let (db, stats) = open_existing_db(&path, &tuning)?;
+        let resources = shared_resources_for(tuning, None)?;
+        let (db, stats) = open_existing_db(&path, &tuning, resources.as_deref())?;
         let group = GroupCommit::new();
         let db = Arc::new(db);
         let submodule = submodule_label(&path);
@@ -710,6 +980,7 @@ impl RocksSubmoduleStore {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
             compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone())?,
             db,
+            resources,
             write: Arc::new(Mutex::new(())),
             group,
             submodule,
@@ -784,10 +1055,18 @@ impl RocksSubmoduleStore {
         tuning: RocksTuning,
         collect_stats: bool,
         preload_tables: bool,
+        resources: Option<Arc<RocksResources>>,
     ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         check_schema_file(&path)?;
-        let (db, stats) = open_db(&path, &tuning, collect_stats, preload_tables)?;
+        let resources = shared_resources_for(tuning, resources)?;
+        let (db, stats) = open_db(
+            &path,
+            &tuning,
+            collect_stats,
+            preload_tables,
+            resources.as_deref(),
+        )?;
         ensure_schema_row(&db)?;
         let marker = path.join(SCHEMA_FILE);
         if !marker.exists() {
@@ -804,6 +1083,7 @@ impl RocksSubmoduleStore {
                 submodule.clone(),
             )?,
             db,
+            resources,
             write: Arc::new(Mutex::new(())),
             group,
             submodule,
@@ -1010,6 +1290,9 @@ impl RocksSubmoduleStore {
         };
         describe_rocks_metrics();
         let submodule = self.submodule.as_str();
+        if let Some(resources) = &self.resources {
+            report_shared_resource_metrics(resources);
+        }
         set_db_gauge(
             &self.db,
             rocksdb::properties::IS_WRITE_STOPPED,
@@ -1050,6 +1333,18 @@ impl RocksSubmoduleStore {
             &self.db,
             rocksdb::properties::BLOCK_CACHE_CAPACITY,
             "irys.rocksdb.block_cache_capacity_bytes",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::BLOCK_CACHE_PINNED_USAGE,
+            "irys.rocksdb.block_cache_pinned_bytes",
+            submodule,
+        );
+        set_db_gauge(
+            &self.db,
+            rocksdb::properties::CUR_SIZE_ALL_MEM_TABLES,
+            "irys.rocksdb.memtable_bytes",
             submodule,
         );
         for cf in Cf::ALL {
@@ -1606,11 +1901,39 @@ fn describe_rocks_metrics() {
         );
         metrics::describe_gauge!(
             "irys.rocksdb.block_cache_usage_bytes",
-            "Block cache bytes in use for this submodule database"
+            "Bytes in the block cache this submodule database uses. A shared cache repeats this total on every submodule. Do not add those series."
         );
         metrics::describe_gauge!(
             "irys.rocksdb.block_cache_capacity_bytes",
-            "Block cache capacity for this submodule database"
+            "Block cache capacity for this submodule database. A shared cache repeats this capacity on every submodule."
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.block_cache_pinned_bytes",
+            "Pinned bytes in the block cache this submodule database uses. A shared cache repeats this total on every submodule."
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.memtable_bytes",
+            "Memtable bytes in this submodule database, summed across column families"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.shared_block_cache_usage_bytes",
+            "Bytes in the process-wide RocksDB block cache, including the write-buffer charge"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.shared_block_cache_pinned_bytes",
+            "Pinned bytes in the process-wide RocksDB block cache"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.shared_block_cache_capacity_bytes",
+            "Capacity of the process-wide RocksDB block cache"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.shared_write_buffer_usage_bytes",
+            "Memtable bytes charged to the process-wide write buffer manager"
+        );
+        metrics::describe_gauge!(
+            "irys.rocksdb.shared_write_buffer_capacity_bytes",
+            "Budget of the process-wide write buffer manager"
         );
         metrics::describe_counter!(
             "irys.rocksdb.block_cache_filter_miss",
@@ -1708,6 +2031,19 @@ fn describe_rocks_metrics() {
     });
 }
 
+fn report_shared_resource_metrics(resources: &RocksResources) {
+    metrics::gauge!("irys.rocksdb.shared_block_cache_usage_bytes")
+        .set(resources.block_cache_usage() as f64);
+    metrics::gauge!("irys.rocksdb.shared_block_cache_pinned_bytes")
+        .set(resources.block_cache_pinned_usage() as f64);
+    metrics::gauge!("irys.rocksdb.shared_block_cache_capacity_bytes")
+        .set(resources.block_cache_capacity() as f64);
+    metrics::gauge!("irys.rocksdb.shared_write_buffer_usage_bytes")
+        .set(resources.write_buffer_usage() as f64);
+    metrics::gauge!("irys.rocksdb.shared_write_buffer_capacity_bytes")
+        .set(resources.write_buffer_capacity() as f64);
+}
+
 fn read_db_u64(db: &DB, name: impl rocksdb::CStrLike) -> Option<u64> {
     match db.property_int_value(name) {
         Ok(value) => value,
@@ -1760,17 +2096,33 @@ fn set_ticker(
         .absolute(opts.get_ticker_count(ticker));
 }
 
+fn shared_resources_for(
+    tuning: RocksTuning,
+    passed: Option<Arc<RocksResources>>,
+) -> eyre::Result<Option<Arc<RocksResources>>> {
+    match passed {
+        Some(resources) => Ok(Some(resources)),
+        None if tuning.share_resources => Ok(Some(process_rocks_resources()?)),
+        None => Ok(None),
+    }
+}
+
 fn open_db(
     path: &Path,
     tuning: &RocksTuning,
     collect_stats: bool,
     preload_tables: bool,
+    resources: Option<&RocksResources>,
 ) -> eyre::Result<(DB, Option<Arc<Options>>)> {
-    let cache = block_cache(tuning);
+    let cache = open_cache(tuning, resources);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
-    // One or two background jobs so compaction does not flood an HDD.
+    // Per-database cap so one index cannot take every shared pool thread.
+    // The pools themselves are process-wide. This value stays at or below
+    // those pools for the baseline (2 jobs asks for 1 flush and 1
+    // compaction). A higher `background_jobs` still grows the pool:
+    // RocksDB only increases it.
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
@@ -1787,6 +2139,9 @@ fn open_db(
     db_opts.set_max_total_wal_size(tuning.max_total_wal_size);
     // A 512 cap evicts SST readers. The next Get then reads the footer,
     // index, and filter. -1 keeps every table open. Blob readers stay lazy.
+    // A full submodule is a few dozen SST files plus lazy blob files.
+    // Forty of those stay under a normal nofile limit. A finite cap brings
+    // the table-reader reload cliff back, so this stays -1.
     db_opts.set_max_open_files(-1);
     db_opts.set_max_file_opening_threads(16);
     if preload_tables {
@@ -1800,14 +2155,59 @@ fn open_db(
         db_opts.set_stats_dump_period_sec(0);
         db_opts.set_stats_persist_period_sec(0);
     }
+    if let Some(resources) = resources {
+        apply_shared_limits(&mut db_opts, resources)?;
+    }
 
-    let families = Cf::ALL.into_iter().map(|cf| {
-        rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(&cache, cf, tuning))
-    });
+    let families = user_column_families(&cache, tuning);
     let db = DB::open_cf_descriptors(&db_opts, path, families)
         .wrap_err("open rocksdb submodule index")?;
     let stats = collect_stats.then(|| Arc::new(db_opts));
     Ok((db, stats))
+}
+
+fn apply_shared_limits(db_opts: &mut Options, resources: &RocksResources) -> eyre::Result<()> {
+    db_opts.set_env(&resources.env);
+    // DBImpl reads the manager from the database options. One manager
+    // covers every column family and can be shared across databases.
+    db_opts.set_write_buffer_manager(&resources.write_buffer);
+    let rate = resources.limits.rate_limit_bytes_per_sec;
+    if rate > 0 {
+        let rate =
+            i64::try_from(rate).wrap_err("rocksdb_rate_limit_bytes_per_sec does not fit in i64")?;
+        // The binding builds a new limiter on each call and does not return
+        // it. One limiter per database is what this open can do. Writes only
+        // (flush and compaction). N databases on one disk get N times this rate.
+        db_opts.set_ratelimiter(rate, RATE_LIMIT_REFILL_PERIOD_US, RATE_LIMIT_FAIRNESS);
+    }
+    Ok(())
+}
+
+fn open_cache(tuning: &RocksTuning, resources: Option<&RocksResources>) -> rocksdb::Cache {
+    match resources {
+        Some(resources) => resources.cache.clone(),
+        None => block_cache(tuning),
+    }
+}
+
+fn user_column_families(
+    cache: &rocksdb::Cache,
+    tuning: &RocksTuning,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    let mut families: Vec<_> = Cf::ALL
+        .into_iter()
+        .map(|cf| {
+            rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(cache, cf, tuning))
+        })
+        .collect();
+    // The binding opens "default" with a private 32 MiB cache when this list
+    // omits it. That cache would scale with the database count. Give it this
+    // open's cache and write buffer instead. The family stays empty.
+    families.push(rocksdb::ColumnFamilyDescriptor::new(
+        rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
+        column_options(cache, Cf::Metadata, tuning),
+    ));
+    families
 }
 
 fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {
@@ -1907,8 +2307,12 @@ fn legacy_cf_kind(name: &str) -> Cf {
     }
 }
 
-fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Option<Arc<Options>>)> {
-    let cache = block_cache(tuning);
+fn open_existing_db(
+    path: &Path,
+    tuning: &RocksTuning,
+    resources: Option<&RocksResources>,
+) -> eyre::Result<(DB, Option<Arc<Options>>)> {
+    let cache = open_cache(tuning, resources);
     let mut db_opts = Options::default();
     db_opts.create_if_missing(false);
     db_opts.create_missing_column_families(false);
@@ -1925,16 +2329,17 @@ fn open_existing_db(path: &Path, tuning: &RocksTuning) -> eyre::Result<(DB, Opti
     db_opts.set_statistics_level(rocksdb::statistics::StatsLevel::ExceptHistogramOrTimers);
     db_opts.set_stats_dump_period_sec(0);
     db_opts.set_stats_persist_period_sec(0);
+    if let Some(resources) = resources {
+        apply_shared_limits(&mut db_opts, resources)?;
+    }
 
-    let listed = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
-    let names: Vec<String> = listed
-        .into_iter()
-        .filter(|name| name != "default")
-        .collect();
+    let names = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
     eyre::ensure!(
         names.iter().any(|name| name == LEGACY_PATH_HASH_CF),
         "missing column family {LEGACY_PATH_HASH_CF}"
     );
+    // Keep "default" in the list. Omitting it makes the binding open that
+    // family with a private 32 MiB cache.
     let families = names.into_iter().map(|name| {
         let opts = column_options(&cache, legacy_cf_kind(&name), tuning);
         rocksdb::ColumnFamilyDescriptor::new(name, opts)
@@ -3406,6 +3811,8 @@ mod tests {
         );
         assert_eq!(base.background_jobs, BACKGROUND_JOBS);
         assert_eq!(base.target_file_bytes, TARGET_FILE_BYTES);
+        assert!(base.share_resources);
+        assert!(base.describe().contains("shared_resources=on"));
 
         let block_16k = RocksTuning::preset("block-16k")?;
         let block_256k = RocksTuning::preset("block-256k")?;
@@ -3413,6 +3820,8 @@ mod tests {
         assert_eq!(block_16k.block_bytes, 16 * 1024);
         assert_eq!(block_256k.block_bytes, 256 * 1024);
         assert_eq!(cache.block_cache_bytes, 1 << 30);
+        assert!(!cache.share_resources);
+        assert!(cache.describe().contains("shared_resources=off"));
         assert!(!RocksTuning::preset("no-blob")?.blobs);
         assert!(!RocksTuning::preset("no-compress")?.compress);
         assert!(RocksTuning::preset("direct-io")?.direct_io);
@@ -3421,6 +3830,7 @@ mod tests {
         assert!(!full_filters.partition_filters);
         assert_eq!(full_filters.block_cache_bytes, 128 * 1024 * 1024);
         assert_eq!(full_filters.cache_shard_bits, 0);
+        assert!(!full_filters.share_resources);
         assert_eq!(base.cache_shard_bits, -1);
         assert_eq!(base.recycle_log_file_num, 4);
         assert!(base.use_fsync);
@@ -3486,7 +3896,11 @@ mod tests {
         let overridden = cache.with_block_cache(4096);
         assert_eq!(overridden.name, "cache-1g");
         assert_eq!(overridden.block_cache_bytes, 4096);
+        assert!(!overridden.share_resources);
         assert_eq!(overridden.knob_diffs(base), 1);
+        let private = base.with_block_cache(4096);
+        assert!(!private.share_resources);
+        assert_eq!(private.block_cache_bytes, 4096);
 
         let dir = TempDirBuilder::new()
             .prefix("submodule_rocks_presets")
@@ -3494,6 +3908,13 @@ mod tests {
         for preset in RocksTuning::presets() {
             let path = dir.path().join(preset.name);
             let store = RocksSubmoduleStore::open_with(&path, preset)?;
+            assert_eq!(store.uses_shared_resources(), preset.share_resources);
+            let capacity = property_u64(&store.db, rocksdb::properties::BLOCK_CACHE_CAPACITY)?;
+            if preset.share_resources {
+                assert_eq!(capacity, irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES);
+            } else {
+                assert_eq!(capacity, preset.block_cache_bytes as u64);
+            }
             drop(store);
         }
         let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
@@ -3772,6 +4193,16 @@ mod tests {
         );
         let plain = RocksSubmoduleStore::open(dir.path().join("plain"))?;
         assert!(plain.background()?.no_file_opens.is_some());
+        assert!(plain.uses_shared_resources());
+        assert!(bench.uses_shared_resources());
+        assert!(Arc::ptr_eq(
+            plain.resources.as_ref().expect("shared"),
+            bench.resources.as_ref().expect("shared"),
+        ));
+        assert_eq!(
+            property_u64(&plain.db, rocksdb::properties::BLOCK_CACHE_CAPACITY)?,
+            irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+        );
         plain.report_metrics();
         let plain_opts = persisted_options(&dir.path().join("plain"))?;
         assert!(plain_opts.contains("max_open_files=-1"), "{plain_opts}");
@@ -3793,7 +4224,148 @@ mod tests {
             assert!(opts.contains("use_fsync=true"), "{opts}");
             assert!(opts.contains("max_total_wal_size=0"), "{opts}");
         }
+        let private = RocksSubmoduleStore::open_with_block_cache(
+            dir.path().join("private"),
+            8 * 1024 * 1024,
+        )?;
+        assert!(!private.uses_shared_resources());
+        assert_eq!(
+            property_u64(&private.db, rocksdb::properties::BLOCK_CACHE_CAPACITY)?,
+            8 * 1024 * 1024
+        );
         Ok(())
+    }
+
+    #[test]
+    fn resource_limits_reject_a_buffer_above_the_cache() {
+        let mut config = DatabaseConfig::default();
+        config.rocksdb_write_buffer_bytes = config.rocksdb_block_cache_bytes + 1;
+        assert!(RocksResourceLimits::from_database(&config).is_err());
+        config.rocksdb_write_buffer_bytes = 0;
+        assert!(RocksResourceLimits::from_database(&config).is_err());
+        config = DatabaseConfig::default();
+        config.rocksdb_block_cache_bytes = 0;
+        assert!(RocksResourceLimits::from_database(&config).is_err());
+        config = DatabaseConfig::default();
+        config.rocksdb_flush_threads = 0;
+        assert!(RocksResourceLimits::from_database(&config).is_err());
+        config = DatabaseConfig::default();
+        config.rocksdb_compaction_threads = 0;
+        assert!(RocksResourceLimits::from_database(&config).is_err());
+        assert_eq!(
+            RocksResourceLimits::from_database(&DatabaseConfig::default())
+                .expect("production limits")
+                .block_cache_bytes,
+            irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+        );
+    }
+
+    /// Forty databases on one explicit set stay inside that set.
+    ///
+    /// The column write buffer stays 64 MiB, so each empty family reserves
+    /// about 1 MiB. Forty databases and nine families are about 360 MiB.
+    /// That fits in the 512 MiB manager and in the 1 GiB cache. A smaller
+    /// manager cannot hold the idle arenas.
+    #[test]
+    fn forty_databases_share_one_cache_and_write_buffer() -> eyre::Result<()> {
+        let limits = RocksResourceLimits::production();
+        let resources = RocksResources::new(limits)?;
+        let before = rocksdb_thread_count();
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_shared")
+            .build();
+        let mut stores = Vec::with_capacity(40);
+        for index in 0..40 {
+            let path = dir.path().join(format!("db-{index}"));
+            stores.push(RocksSubmoduleStore::open_with_resources(
+                path,
+                Arc::clone(&resources),
+            )?);
+        }
+        let after = rocksdb_thread_count();
+        if cfg!(target_os = "linux") {
+            assert!(
+                before >= 6,
+                "expected the flush and compaction pools, saw {before}"
+            );
+            assert_eq!(
+                after, before,
+                "rocksdb threads changed across 40 opens: {before} -> {after}"
+            );
+        }
+        let mut memtables = 0_u64;
+        for store in &stores {
+            assert!(store.uses_shared_resources());
+            assert!(Arc::ptr_eq(
+                store.resources.as_ref().expect("shared"),
+                &resources
+            ));
+            let capacity = property_u64(&store.db, rocksdb::properties::BLOCK_CACHE_CAPACITY)?;
+            let usage = property_u64(&store.db, rocksdb::properties::BLOCK_CACHE_USAGE)?;
+            assert_eq!(capacity, limits.block_cache_bytes);
+            assert!(usage <= capacity, "cache usage {usage} exceeds {capacity}");
+            memtables = memtables.saturating_add(property_u64(
+                &store.db,
+                rocksdb::properties::CUR_SIZE_ALL_MEM_TABLES,
+            )?);
+            store.report_metrics();
+        }
+        assert!(
+            memtables <= limits.write_buffer_bytes,
+            "memtables {memtables} exceed {}",
+            limits.write_buffer_bytes
+        );
+        assert!(
+            resources.write_buffer_usage() <= resources.write_buffer_capacity(),
+            "write buffer {} exceeds {}",
+            resources.write_buffer_usage(),
+            resources.write_buffer_capacity()
+        );
+        assert!(resources.block_cache_usage() <= resources.block_cache_capacity());
+        assert_eq!(resources.write_buffer_capacity(), limits.write_buffer_bytes);
+        Ok(())
+    }
+
+    /// The binding creates a limiter inside each open. Two opens must both succeed.
+    #[test]
+    fn rate_limit_opens_one_limiter_per_database() -> eyre::Result<()> {
+        let limits = RocksResourceLimits {
+            block_cache_bytes: 8 * 1024 * 1024,
+            write_buffer_bytes: 4 * 1024 * 1024,
+            flush_threads: irys_types::DEFAULT_ROCKSDB_FLUSH_THREADS,
+            compaction_threads: irys_types::DEFAULT_ROCKSDB_COMPACTION_THREADS,
+            rate_limit_bytes_per_sec: 1024 * 1024,
+        };
+        let resources = RocksResources::new(limits)?;
+        let dir = TempDirBuilder::new().prefix("submodule_rocks_rate").build();
+        let first =
+            RocksSubmoduleStore::open_with_resources(dir.path().join("a"), Arc::clone(&resources))?;
+        let second =
+            RocksSubmoduleStore::open_with_resources(dir.path().join("b"), Arc::clone(&resources))?;
+        assert!(first.uses_shared_resources());
+        assert!(second.uses_shared_resources());
+        assert_eq!(
+            property_u64(&first.db, rocksdb::properties::BLOCK_CACHE_CAPACITY)?,
+            limits.block_cache_bytes
+        );
+        assert_eq!(
+            property_u64(&second.db, rocksdb::properties::BLOCK_CACHE_CAPACITY)?,
+            limits.block_cache_bytes
+        );
+        Ok(())
+    }
+
+    fn rocksdb_thread_count() -> usize {
+        let Ok(tasks) = fs::read_dir("/proc/self/task") else {
+            return 0;
+        };
+        tasks
+            .flatten()
+            .filter(|task| {
+                fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|comm| comm.starts_with("rocksdb:"))
+            })
+            .count()
     }
 
     fn hashes_for(byte: u8) -> ChunkPathHashes {

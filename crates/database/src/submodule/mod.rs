@@ -12,7 +12,8 @@ pub use db::*;
 #[cfg(feature = "rocksdb")]
 pub use rocks::{
     BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, LegacySstSpan, RocksBackground, RocksIngestStats,
-    RocksSubmoduleStore, RocksTuning,
+    RocksResourceLimits, RocksResources, RocksSubmoduleStore, RocksTuning,
+    install_process_rocks_resources,
 };
 pub use store::{
     MdbxSubmoduleStore, PresenceReconcile, SubmoduleIndex, SubmoduleRead, SubmoduleStore,

@@ -385,14 +385,16 @@ fn run() -> eyre::Result<i32> {
         write_end,
     )?;
     let index_dir = dir.join(opened.index.dir_name());
-    let (rocks_preset, rocks_tuning, rocks_block_cache_bytes) = match opened.index {
-        BenchIndex::Mdbx => (None, None, None),
-        BenchIndex::Rocks(tuning) => (
-            Some(tuning.name),
-            Some(tuning.describe()),
-            Some(tuning.block_cache_bytes),
-        ),
-    };
+    let (rocks_preset, rocks_tuning, rocks_block_cache_bytes, rocks_shared_resources) =
+        match opened.index {
+            BenchIndex::Mdbx => (None, None, None, None),
+            BenchIndex::Rocks(tuning) => (
+                Some(tuning.name),
+                Some(tuning.describe()),
+                Some(tuning.block_cache_bytes),
+                Some(tuning.share_resources),
+            ),
+        };
     let index_line = index_banner(
         opened.index.engine_name(),
         &index_dir,
@@ -481,6 +483,10 @@ fn run() -> eyre::Result<i32> {
         .unwrap_or(serde_json::Value::Null);
     header["rocks_block_cache_bytes"] = match rocks_block_cache_bytes {
         Some(bytes) => serde_json::json!(bytes),
+        None => serde_json::Value::Null,
+    };
+    header["rocks_shared_resources"] = match rocks_shared_resources {
+        Some(shared) => serde_json::json!(shared),
         None => serde_json::Value::Null,
     };
     std::fs::create_dir_all(&args.out)?;
@@ -1247,6 +1253,7 @@ mod tests {
             panic!("expected rocks");
         };
         assert_eq!(tuning, RocksTuning::baseline());
+        assert!(tuning.share_resources);
 
         let args = parsed(&[
             "--index-engine",
@@ -1268,6 +1275,7 @@ mod tests {
         assert_eq!(tuning.name, "no-blob");
         assert!(!tuning.blobs);
         assert_eq!(tuning.block_cache_bytes, 1_048_576);
+        assert!(!tuning.share_resources);
     }
 
     #[test]

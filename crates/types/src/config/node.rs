@@ -63,6 +63,33 @@ pub enum SubmoduleIndexEngine {
     Rocksdb,
 }
 
+/// Block cache shared by every RocksDB submodule index in the process.
+///
+/// Partitioned filters stay in this cache. A 64 MiB cache has 1 MiB shards,
+/// and a full filter for a 4 TB partition is about 20 MB, so that block is
+/// loaded and dropped on every lookup. 1 GiB is 16 MiB per shard. The
+/// write-buffer manager charges memtables to this cache, so this value must
+/// be at least [`DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES`].
+pub const DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Memtable budget for every RocksDB submodule index in the process.
+///
+/// An idle column family holds about 1 MiB. Forty databases and nine
+/// families are about 360 MiB, which fits in 512 MiB. The cache must be at
+/// least this large because the charge lives in the block cache.
+pub const DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
+/// High-priority Env threads. Flushes use this pool. The pool is process-wide.
+///
+/// Two threads let one flush run while another disk flushes. One thread per
+/// database is not required: the pool is shared.
+pub const DEFAULT_ROCKSDB_FLUSH_THREADS: u32 = 2;
+/// Low-priority Env threads. Compactions use this pool. The pool is process-wide.
+///
+/// Four threads let several of about ten HDD spindles compact at once. The
+/// optional rate limit is the byte cap.
+pub const DEFAULT_ROCKSDB_COMPACTION_THREADS: u32 = 4;
+/// `0` leaves the flush and compaction rate limiter off.
+pub const DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC: u64 = 0;
+
 /// Database durability and sync settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +116,35 @@ pub struct DatabaseConfig {
     /// `mdbx` opens `db/`. `rocksdb` opens a sibling `rocks/` directory.
     #[serde(default)]
     pub submodule_index: SubmoduleIndexEngine,
+
+    /// Block cache shared by every RocksDB submodule index. Ignored for MDBX.
+    /// See [`DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES`].
+    #[serde(default = "default_rocksdb_block_cache_bytes")]
+    pub rocksdb_block_cache_bytes: u64,
+
+    /// Memtable budget shared by every RocksDB submodule index and charged to
+    /// the block cache. Ignored for MDBX. Writers are not stalled. RocksDB
+    /// schedules flushes once mutable memtables pass 7/8 of this budget.
+    #[serde(default = "default_rocksdb_write_buffer_bytes")]
+    pub rocksdb_write_buffer_bytes: u64,
+
+    /// Process-wide RocksDB flush threads. Ignored for MDBX.
+    #[serde(default = "default_rocksdb_flush_threads")]
+    pub rocksdb_flush_threads: u32,
+
+    /// Process-wide RocksDB compaction threads. Ignored for MDBX.
+    #[serde(default = "default_rocksdb_compaction_threads")]
+    pub rocksdb_compaction_threads: u32,
+
+    /// Flush and compaction write cap, bytes per second, per submodule
+    /// database. `0` leaves the limiter off. Ignored for MDBX.
+    ///
+    /// One limiter per physical disk is the right scope. Each open builds its
+    /// own limiter, and the open does not know which disk the directory is
+    /// on. N submodules on one disk then get N times this rate. Set the value
+    /// to the disk budget divided by the submodule count on that disk.
+    #[serde(default = "default_rocksdb_rate_limit_bytes_per_sec")]
+    pub rocksdb_rate_limit_bytes_per_sec: u64,
 }
 
 fn default_db_sync_mode() -> DbSyncMode {
@@ -96,6 +152,21 @@ fn default_db_sync_mode() -> DbSyncMode {
 }
 fn default_cache_db_sync_mode() -> DbSyncMode {
     DbSyncMode::SafeNoSync
+}
+fn default_rocksdb_block_cache_bytes() -> u64 {
+    DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+}
+fn default_rocksdb_write_buffer_bytes() -> u64 {
+    DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES
+}
+fn default_rocksdb_flush_threads() -> u32 {
+    DEFAULT_ROCKSDB_FLUSH_THREADS
+}
+fn default_rocksdb_compaction_threads() -> u32 {
+    DEFAULT_ROCKSDB_COMPACTION_THREADS
+}
+fn default_rocksdb_rate_limit_bytes_per_sec() -> u64 {
+    DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC
 }
 
 impl Default for DatabaseConfig {
@@ -105,6 +176,11 @@ impl Default for DatabaseConfig {
             cache_sync_mode: default_cache_db_sync_mode(),
             geometry_max_size: None,
             submodule_index: SubmoduleIndexEngine::Mdbx,
+            rocksdb_block_cache_bytes: default_rocksdb_block_cache_bytes(),
+            rocksdb_write_buffer_bytes: default_rocksdb_write_buffer_bytes(),
+            rocksdb_flush_threads: default_rocksdb_flush_threads(),
+            rocksdb_compaction_threads: default_rocksdb_compaction_threads(),
+            rocksdb_rate_limit_bytes_per_sec: default_rocksdb_rate_limit_bytes_per_sec(),
         }
     }
 }
@@ -1524,6 +1600,7 @@ impl NodeConfig {
                 // exhaust virtual address space (see TEST_DB_GEOMETRY_MAX_SIZE).
                 geometry_max_size: Some(crate::TEST_DB_GEOMETRY_MAX_SIZE),
                 submodule_index: SubmoduleIndexEngine::Mdbx,
+                ..DatabaseConfig::default()
             },
         }
     }
@@ -1922,6 +1999,51 @@ mod run_mode_tests {
         assert_eq!(config.sync_mode, DbSyncMode::Durable);
         assert_eq!(config.cache_sync_mode, DbSyncMode::SafeNoSync);
         assert_eq!(config.submodule_index, SubmoduleIndexEngine::Mdbx);
+        assert_eq!(
+            config.rocksdb_block_cache_bytes,
+            DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
+        );
+        assert_eq!(
+            config.rocksdb_write_buffer_bytes,
+            DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES
+        );
+        assert_eq!(config.rocksdb_flush_threads, DEFAULT_ROCKSDB_FLUSH_THREADS);
+        assert_eq!(
+            config.rocksdb_compaction_threads,
+            DEFAULT_ROCKSDB_COMPACTION_THREADS
+        );
+        assert_eq!(
+            config.rocksdb_rate_limit_bytes_per_sec,
+            DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC
+        );
+        assert_eq!(DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES, 1024 * 1024 * 1024);
+        assert_eq!(DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES, 512 * 1024 * 1024);
+        assert_eq!(DEFAULT_ROCKSDB_FLUSH_THREADS, 2);
+        assert_eq!(DEFAULT_ROCKSDB_COMPACTION_THREADS, 4);
+        assert_eq!(DEFAULT_ROCKSDB_RATE_LIMIT_BYTES_PER_SEC, 0);
+
+        let omitted: DatabaseConfig = toml::from_str("").expect("empty toml");
+        assert_eq!(omitted, DatabaseConfig::default());
+        let omitted_json: DatabaseConfig = serde_json::from_str("{}").expect("empty json");
+        assert_eq!(omitted_json, DatabaseConfig::default());
+
+        let tuned: DatabaseConfig = toml::from_str(
+            "
+            rocksdb_block_cache_bytes = 8388608
+            rocksdb_write_buffer_bytes = 4194304
+            rocksdb_flush_threads = 1
+            rocksdb_compaction_threads = 1
+            rocksdb_rate_limit_bytes_per_sec = 1048576
+            ",
+        )
+        .expect("rocks resource toml");
+        assert_eq!(tuned.rocksdb_block_cache_bytes, 8 * 1024 * 1024);
+        assert_eq!(tuned.rocksdb_write_buffer_bytes, 4 * 1024 * 1024);
+        assert_eq!(tuned.rocksdb_flush_threads, 1);
+        assert_eq!(tuned.rocksdb_compaction_threads, 1);
+        assert_eq!(tuned.rocksdb_rate_limit_bytes_per_sec, 1024 * 1024);
+        assert_eq!(tuned.sync_mode, DbSyncMode::Durable);
+        assert_eq!(tuned.submodule_index, SubmoduleIndexEngine::Mdbx);
     }
 
     /// A config with no `submodule_index` stays on MDBX. `rocksdb` selects the
