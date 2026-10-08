@@ -287,6 +287,113 @@ fn classify_synced_chunk(
     DataSyncWriteOutcome::NoWriteableOffset
 }
 
+#[cfg(test)]
+mod scheduler_fairness_tests {
+    use super::{dispatch_round_robin, dispatch_term_then_publish};
+
+    #[test]
+    fn shared_capacity_is_round_robin_across_storage_modules() {
+        let mut ids = [0_u8, 1_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let next_cursor = dispatch_round_robin(&mut ids, 0, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![0, 1, 0]);
+        assert_eq!(next_cursor, 1);
+
+        let mut ids = [0_u8, 1_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let _ = dispatch_round_robin(&mut ids, next_cursor, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![1, 0, 1]);
+    }
+
+    #[test]
+    fn term_ledgers_take_permits_before_publish_when_capacity_is_scarce() {
+        // 1 Submit + 3 Publish, only 3 shared permits: Submit must not be the
+        // SM left out, or the term write head waits behind a permanent backlog.
+        let mut term = [1_u8];
+        let mut publish = [0_u8, 2_u8, 3_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 1, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![1, 0, 2]);
+        assert!(!order.contains(&3), "a Publish SM is the one that waits");
+    }
+
+    #[test]
+    fn two_term_ledgers_rotate_fairly_ahead_of_publish() {
+        let mut term = [1_u8, 4_u8];
+        let mut publish = [0_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let (next_term, next_publish) =
+            dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 1, |id| {
+                if permits == 0 {
+                    return false;
+                }
+                permits -= 1;
+                order.push(id);
+                true
+            });
+        assert_eq!(order, vec![1, 4, 0]);
+        assert_eq!(next_term, 1);
+        assert_eq!(next_publish, 0);
+
+        let mut term = [1_u8, 4_u8];
+        let mut publish = [0_u8];
+        let mut permits = 3_usize;
+        let mut order = Vec::new();
+        let _ =
+            dispatch_term_then_publish(&mut term, &mut publish, next_term, next_publish, 1, |id| {
+                if permits == 0 {
+                    return false;
+                }
+                permits -= 1;
+                order.push(id);
+                true
+            });
+        assert_eq!(order, vec![4, 1, 0]);
+    }
+
+    #[test]
+    fn one_storage_module_fills_a_span_before_the_next() {
+        let mut term = [1_u8, 4_u8];
+        let mut publish = [0_u8];
+        let mut permits = 5_usize;
+        let mut order = Vec::new();
+        let _ = dispatch_term_then_publish(&mut term, &mut publish, 0, 0, 3, |id| {
+            if permits == 0 {
+                return false;
+            }
+            permits -= 1;
+            order.push(id);
+            true
+        });
+        assert_eq!(order, vec![1, 1, 1, 4, 4]);
+    }
+}
+
 pub enum DataSyncServiceMessage {
     /// Refresh peer/orchestrator membership for current ledger-assigned SMs.
     ///
