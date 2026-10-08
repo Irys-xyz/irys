@@ -23,6 +23,9 @@
 //! A data-path row is written only after this gap's `chunks.dat` fdatasync.
 //! One index batch per submodule covers those rows. A synced RocksDB batch
 //! also covers registrations still waiting on group commit.
+//! `min_durable_interval_ms` can defer that pair. `0` does not. Pwrites
+//! still run. Force, shutdown, drop, and the pending-byte ceiling do not
+//! defer it. Recall does not wait on a deferred pair.
 //! This thread stores a write-ahead `Interrupted` mark in `intervals.json`
 //! before those `pwrite`s. A completion (`Data` or `Entropy`) is rewritten
 //! with the next write-ahead, on the persist interval, or on shutdown.
@@ -1973,6 +1976,7 @@ impl StorageModule {
             return false;
         }
         pending.occupancy.remove(&offset);
+        pending.written_ahead.remove(&offset);
         if self.data_writes_paused()
             || self.index_write_generation.load(Ordering::SeqCst) != generation
         {
@@ -2225,6 +2229,7 @@ impl StorageModule {
             self.write_grace_remaining(),
             self.read_grace_remaining(),
             self.interval_flush_remaining(),
+            self.durable_point_remaining(),
         ]
         .into_iter()
         .flatten()
@@ -2254,6 +2259,12 @@ impl StorageModule {
         // Zero remaining must count as ready: `wait_until_lane_event` treats
         // a zero grace as "wait for a notify".
         if self.interval_flush_remaining() == Some(Duration::ZERO) {
+            return true;
+        }
+        // A deferred durable point becomes ready when its interval elapses,
+        // or immediately when pending bytes are over the ceiling. Zero
+        // remaining must count as ready: a zero grace waits for a notify.
+        if self.durable_point_remaining() == Some(Duration::ZERO) {
             return true;
         }
         // Memory entropy needs the sweep lock. A young short disk span stays
@@ -2317,6 +2328,16 @@ impl StorageModule {
             }
         } else if self.pending_run_ready() {
             self.write_ready_runs();
+        }
+        // After the owed flag drops, so a recall does not wait on a pair
+        // this pass deferred. A due pair runs here.
+        if self.durable_point_remaining() == Some(Duration::ZERO)
+            && let Err(error) = self.finish_deferred_durable_point()
+        {
+            tracing::error!(
+                "Couldn't finish a deferred durable point for storage_module {}: {error}",
+                self.id
+            );
         }
         if !owed_flush && !self.disk.recall_pending() {
             self.pump_entropy_reads();
@@ -2812,6 +2833,7 @@ mod tests {
                 drop_recall_page_cache: false,
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                min_durable_interval_ms: 0,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()

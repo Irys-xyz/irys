@@ -523,6 +523,21 @@ pub struct StorageSyncConfig {
     /// wakes. MDBX ignores this key and keeps its own 50 ms group.
     #[serde(default = "default_index_wal_backstop_ms")]
     pub index_wal_backstop_ms: u64,
+    /// Minimum milliseconds between durable points.
+    ///
+    /// A durable point is the `chunks.dat` `fdatasync` and the synced presence
+    /// commit that follows it. `0` runs that pair every time the lane would,
+    /// which is the previous behaviour. A positive value defers a pair that
+    /// would land sooner than this after the previous pair. Pwrites keep
+    /// running. Recall does not wait on a deferred pair.
+    ///
+    /// These still run the pair immediately: `force_sync_pending_chunks`,
+    /// shutdown, drop, and a pending-byte level above the ceiling
+    /// (`max_pending_write_bytes`, or
+    /// `max(2 × num_writes_before_sync, 256) × chunk_size × submodules`).
+    /// Reset drops pending bytes instead of waiting.
+    #[serde(default = "default_min_durable_interval_ms")]
+    pub min_durable_interval_ms: u64,
     /// Accepted so an older config that set this key still loads.
     /// The value is ignored. Recall pages stay cached.
     #[serde(default)]
@@ -540,6 +555,7 @@ impl Default for StorageSyncConfig {
             drop_recall_page_cache: false,
             intervals_persist_secs: default_intervals_persist_secs(),
             index_wal_backstop_ms: default_index_wal_backstop_ms(),
+            min_durable_interval_ms: default_min_durable_interval_ms(),
         }
     }
 }
@@ -550,12 +566,19 @@ pub const DEFAULT_INTERVALS_PERSIST_SECS: u64 = 30;
 /// Default RocksDB index WAL backstop. See [`StorageSyncConfig::index_wal_backstop_ms`].
 pub const DEFAULT_INDEX_WAL_BACKSTOP_MS: u64 = 1000;
 
+/// Default gap between durable points. `0` runs a point on every gap.
+pub const DEFAULT_MIN_DURABLE_INTERVAL_MS: u64 = 0;
+
 fn default_intervals_persist_secs() -> u64 {
     DEFAULT_INTERVALS_PERSIST_SECS
 }
 
 fn default_index_wal_backstop_ms() -> u64 {
     DEFAULT_INDEX_WAL_BACKSTOP_MS
+}
+
+fn default_min_durable_interval_ms() -> u64 {
+    DEFAULT_MIN_DURABLE_INTERVAL_MS
 }
 
 fn default_entropy_sweep_interval_millis() -> u64 {
@@ -1373,6 +1396,7 @@ impl NodeConfig {
                 // Tests read `intervals.json` as soon as `sync` returns.
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                min_durable_interval_ms: DEFAULT_MIN_DURABLE_INTERVAL_MS,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1572,6 +1596,7 @@ impl NodeConfig {
                 drop_recall_page_cache: false,
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                min_durable_interval_ms: DEFAULT_MIN_DURABLE_INTERVAL_MS,
             },
             data_sync: DataSyncServiceConfig {
                 max_pending_chunk_requests: 1000,
@@ -1789,6 +1814,12 @@ mod run_mode_tests {
         assert_eq!(parsed.index_wal_backstop_ms, DEFAULT_INDEX_WAL_BACKSTOP_MS);
         let backstop: StorageSyncConfig = toml::from_str("index_wal_backstop_ms = 0").unwrap();
         assert_eq!(backstop.index_wal_backstop_ms, 0);
+        assert_eq!(
+            parsed.min_durable_interval_ms,
+            DEFAULT_MIN_DURABLE_INTERVAL_MS
+        );
+        let spaced: StorageSyncConfig = toml::from_str("min_durable_interval_ms = 250").unwrap();
+        assert_eq!(spaced.min_durable_interval_ms, 250);
     }
 
     #[test]

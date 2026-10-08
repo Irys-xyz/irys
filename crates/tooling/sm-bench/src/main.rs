@@ -113,6 +113,12 @@ struct Args {
     /// Write-ahead `Interrupted` marks stay immediate. `0` rewrites on every sync.
     #[arg(long, default_value_t = irys_types::DEFAULT_INTERVALS_PERSIST_SECS)]
     intervals_persist_secs: u64,
+    /// Minimum milliseconds between durable points. A durable point is the
+    /// `chunks.dat` `fdatasync` and the synced presence commit. `0` runs a
+    /// point on every gap. Pwrites are not delayed. Force, shutdown, drop,
+    /// and the pending-byte ceiling stay immediate.
+    #[arg(long, default_value_t = irys_types::DEFAULT_MIN_DURABLE_INTERVAL_MS)]
+    min_durable_interval_ms: u64,
     #[arg(long, default_value_t = 262_144)]
     entropy_sweep_max_bytes: u64,
     /// Transaction size mix `chunks:weight,...`.
@@ -341,6 +347,7 @@ fn run() -> eyre::Result<i32> {
         num_writes_before_sync: args.num_writes_before_sync,
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
         intervals_persist_secs: args.intervals_persist_secs,
+        min_durable_interval_ms: args.min_durable_interval_ms,
         index,
         index_group_commit: args.index_group_commit,
     })?;
@@ -443,6 +450,13 @@ fn run() -> eyre::Result<i32> {
             "judge_tail_secs scores the last N seconds as well as the whole step. Durable lag inside that window is not a failure. The drain check stays on the whole step.",
         ],
     });
+    header["min_durable_interval_ms"] = serde_json::json!(args.min_durable_interval_ms);
+    header["io_notes"]
+        .as_array_mut()
+        .expect("io_notes is an array")
+        .push(serde_json::Value::from(
+            "min_durable_interval_ms spaces the chunks.dat fdatasync and the synced presence commit. 0 is a point on every gap. Pwrites are not delayed. Force, shutdown, drop, and the pending-byte ceiling stay immediate.",
+        ));
     header["judge_tail_secs"] = serde_json::json!(args.judge_tail_secs);
     header["index_engine"] = serde_json::Value::from(opened.index.engine_name());
     header["index_group_commit"] = serde_json::json!(args.index_group_commit);
@@ -1139,6 +1153,14 @@ mod tests {
         assert_eq!(
             parsed(&["--intervals-persist-secs", "0"]).intervals_persist_secs,
             0
+        );
+        assert_eq!(
+            args.min_durable_interval_ms,
+            irys_types::DEFAULT_MIN_DURABLE_INTERVAL_MS
+        );
+        assert_eq!(
+            parsed(&["--min-durable-interval-ms", "250"]).min_durable_interval_ms,
+            250
         );
         assert!(args.rocks_preset.is_none());
         assert!(args.rocks_block_cache.is_none());

@@ -1371,6 +1371,8 @@ mod tests {
         expected_config.storage.entropy_sweep_max_bytes = 256 * 1024;
         expected_config.storage.entropy_coalesce_hole_bytes = 256 * 1024;
         expected_config.storage.intervals_persist_secs = node::DEFAULT_INTERVALS_PERSIST_SECS;
+        // Omitted `min_durable_interval_ms` stays 0: a durable point on every gap.
+        expected_config.storage.min_durable_interval_ms = node::DEFAULT_MIN_DURABLE_INTERVAL_MS;
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();

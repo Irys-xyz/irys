@@ -316,6 +316,12 @@ struct PendingWrites {
     /// Data-path proof for a packed data chunk. The index row is written only
     /// after `chunks.dat` is fdatasync'd. Entropy has no proof.
     proofs: HashMap<PartitionChunkOffset, (ChunkPathHash, ChunkDataPath)>,
+    /// Pwritten bytes not yet covered by a durable point. Still pending: they
+    /// count toward `pending_write_bytes` and are not reported durable. The
+    /// next point fdatasyncs them, commits presence, then drops them. A newer
+    /// enqueue for the same offset removes the entry so the new bytes are
+    /// pwritten.
+    written_ahead: BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>,
 }
 
 impl Deref for PendingWrites {
@@ -436,8 +442,12 @@ pub struct StorageModule {
     /// Serializes flushes so two callers cannot claim and write the same
     /// pending batch concurrently. Pending entries remain present until the
     /// data fsync and interval commit both succeed, and therefore serve as the
-    /// durability fence themselves.
+    /// durability fence themselves. `written_ahead` is that fence after the
+    /// pwrite and before the durable point.
     sync_in_progress: Mutex<()>,
+    /// Monotonic time of the last successful durable point. `None` until the
+    /// first one, so that point is not deferred.
+    last_durable_at: Mutex<Option<Instant>>,
     /// Set while network-partition recovery rewrites this module's ranges.
     /// Data writes re-check it under the `pending_writes` lock at insert time,
     /// so once it is set no body can be queued behind recovery's
@@ -1408,6 +1418,7 @@ impl StorageModule {
             #[cfg(any(test, feature = "test-utils"))]
             index_views: AtomicU64::new(0),
             sync_in_progress: Mutex::new(()),
+            last_durable_at: Mutex::new(None),
             data_writes_paused: AtomicBool::new(false),
             #[cfg(test)]
             sync_failure: Mutex::new(None),
@@ -1644,7 +1655,8 @@ impl StorageModule {
     }
 
     pub fn has_pending_writes(&self) -> bool {
-        !self.pending_writes.read().unwrap().is_empty()
+        let pending = self.pending_writes.read().unwrap();
+        !pending.is_empty() || !pending.written_ahead.is_empty()
     }
 
     /// A packed run is ready for the disk when the chunk disk is idle, one
@@ -1802,6 +1814,10 @@ impl StorageModule {
             || pending
                 .get(&offset)
                 .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
+            || pending
+                .written_ahead
+                .get(&offset)
+                .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
     }
 
     /// Bytes of chunk data queued in memory awaiting flush. Background body
@@ -1813,7 +1829,14 @@ impl StorageModule {
             .values()
             .map(|(bytes, _)| bytes.len() as u64)
             .sum::<u64>();
-        packed.saturating_add(pending.queued_unpacked_bytes)
+        let ahead = pending
+            .written_ahead
+            .values()
+            .map(|(bytes, _)| bytes.len() as u64)
+            .sum::<u64>();
+        packed
+            .saturating_add(ahead)
+            .saturating_add(pending.queued_unpacked_bytes)
     }
 
     /// Number of submodules (independent disks) backing this module.
@@ -1982,9 +2005,11 @@ impl StorageModule {
     /// Returns true only when the offset is on disk as transaction data and no
     /// buffered write currently supersedes it.
     pub fn is_data_chunk_durable_at(&self, offset: PartitionChunkOffset) -> bool {
-        if self.pending_writes.read().unwrap().contains_key(&offset) {
+        let pending = self.pending_writes.read().unwrap();
+        if pending.contains_key(&offset) || pending.written_ahead.contains_key(&offset) {
             return false;
         }
+        drop(pending);
         self.intervals
             .read()
             .unwrap()
@@ -2060,6 +2085,7 @@ impl StorageModule {
             pending.priorities.clear();
             pending.queued_at.clear();
             pending.proofs.clear();
+            pending.written_ahead.clear();
         }
         self.fail_queued_sweeps();
         self.poll_acks();
@@ -2173,6 +2199,223 @@ impl StorageModule {
         }
     }
 
+    /// Milliseconds configured between durable points. `0` is every point.
+    fn min_durable_interval(&self) -> Duration {
+        Duration::from_millis(self.config.node_config.storage.min_durable_interval_ms)
+    }
+
+    fn has_written_ahead(&self) -> bool {
+        !self.pending_writes.read().unwrap().written_ahead.is_empty()
+    }
+
+    /// Same ceiling the body-migration worker uses. A configured value is
+    /// floored at one flush batch so a small cap cannot stall that worker.
+    fn pending_memory_ceiling_bytes(&self) -> u64 {
+        let storage = &self.config.node_config.storage;
+        let submodules = self.submodule_count() as u64;
+        let chunk = self.config.consensus.chunk_size;
+        let one_batch = storage
+            .num_writes_before_sync
+            .saturating_mul(chunk)
+            .saturating_mul(submodules);
+        match storage.max_pending_write_bytes {
+            Some(configured) => configured.max(one_batch),
+            None => {
+                const BATCHES: u64 = 2;
+                const MIN_CHUNKS: u64 = 256;
+                BATCHES
+                    .saturating_mul(storage.num_writes_before_sync)
+                    .max(MIN_CHUNKS)
+                    .saturating_mul(chunk)
+                    .saturating_mul(submodules)
+            }
+        }
+    }
+
+    fn load_last_durable_at(&self) -> Option<Instant> {
+        *self
+            .last_durable_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn stamp_durable_point(&self) {
+        *self
+            .last_durable_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+    }
+
+    /// True when this window must not fdatasync yet.
+    ///
+    /// Force, a zero interval, the first point, and pending bytes above the
+    /// ceiling all return false. A deferred point returns after the pwrites,
+    /// so an owed recall flush does not wait on it.
+    fn defer_durable_point(&self, force: bool) -> bool {
+        if force || self.min_durable_interval().is_zero() {
+            return false;
+        }
+        if self.pending_write_bytes() > self.pending_memory_ceiling_bytes() {
+            return false;
+        }
+        let Some(last) = self.load_last_durable_at() else {
+            return false;
+        };
+        last.elapsed() < self.min_durable_interval()
+    }
+
+    /// Time until parked bytes may take a durable point. `None` when the
+    /// interval is off or nothing is parked. Zero when the point is due.
+    fn durable_point_remaining(&self) -> Option<Duration> {
+        if self.min_durable_interval().is_zero() || !self.has_written_ahead() {
+            return None;
+        }
+        if !self.defer_durable_point(false) {
+            return Some(Duration::ZERO);
+        }
+        let last = self.load_last_durable_at()?;
+        Some(self.min_durable_interval().saturating_sub(last.elapsed()))
+    }
+
+    /// Run a due durable point that an earlier window parked. No new pwrite.
+    fn finish_deferred_durable_point(&self) -> eyre::Result<()> {
+        if self.durable_point_remaining() != Some(Duration::ZERO) {
+            return Ok(());
+        }
+        let _sync_guard = self
+            .sync_in_progress
+            .lock()
+            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        if self.durable_point_remaining() != Some(Duration::ZERO) {
+            return Ok(());
+        }
+        self.finish_durable_point(false, &[], Vec::new(), &BTreeSet::new())
+    }
+
+    fn park_written_ahead(
+        &self,
+        batch: &[(
+            PartitionChunkOffset,
+            (ChunkBytes, ChunkType),
+            disk_lane::WritePriority,
+        )],
+    ) {
+        let mut pending = self.pending_writes.write().unwrap();
+        for (offset, state, _) in batch {
+            if pending.get(offset) == Some(state) {
+                let parked = pending.remove(offset).expect("pending state matched");
+                pending.priorities.remove(offset);
+                pending.queued_at.remove(offset);
+                pending.written_ahead.insert(*offset, parked);
+            }
+        }
+    }
+
+    fn snapshot_written_ahead(
+        &self,
+    ) -> Vec<(
+        PartitionChunkOffset,
+        (ChunkBytes, ChunkType),
+        disk_lane::WritePriority,
+    )> {
+        let pending = self.pending_writes.read().unwrap();
+        pending
+            .written_ahead
+            .iter()
+            .map(|(offset, state)| {
+                let priority = match state.1 {
+                    ChunkType::Entropy => disk_lane::WritePriority::Packing,
+                    _ => disk_lane::WritePriority::Ingress,
+                };
+                (*offset, state.clone(), priority)
+            })
+            .collect()
+    }
+
+    /// Fdatasync, presence commit, interval completion, then drop the fence.
+    /// `write_batch` was pwritten by this call. Parked bytes from earlier
+    /// windows join the same point. The caller holds `sync_in_progress`.
+    fn finish_durable_point(
+        &self,
+        force: bool,
+        write_batch: &[(
+            PartitionChunkOffset,
+            (ChunkBytes, ChunkType),
+            disk_lane::WritePriority,
+        )],
+        mut runs: Vec<WriteRun>,
+        touched_starts: &BTreeSet<PartitionChunkOffset>,
+    ) -> eyre::Result<()> {
+        let ahead = self.snapshot_written_ahead();
+        if write_batch.is_empty() && ahead.is_empty() {
+            return Ok(());
+        }
+        let mut durable_batch = write_batch.to_vec();
+        durable_batch.extend(ahead.iter().cloned());
+        let ahead_runs = self.plan_write_runs(&ahead, self.config.consensus.chunk_size.max(1));
+        runs.extend(ahead_runs);
+        let durable_runs = runs;
+        let mut touched = touched_starts.clone();
+        for (offset, _, _) in &ahead {
+            let (interval, _) = self.get_submodule_for_offset(*offset)?;
+            touched.insert(interval.start());
+        }
+
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::BeforeDataFsync)?;
+
+        // fdatasync this write batch before any row that says the chunk is
+        // present. A crash after the bytes land and before that row is safe:
+        // intervals and the index still say the chunk is absent.
+        // A recall window syncs only the files it wrote.
+        for (interval, submodule) in self.submodules.iter() {
+            if !touched.contains(&interval.start()) {
+                continue;
+            }
+            self.disk.yield_to_recall();
+            let file_arc = Arc::clone(&submodule.file);
+            let file = self.disk.lock_chunks(&file_arc);
+            file.sync_data()
+                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+        }
+
+        // One durable index batch per submodule in this gap. It holds the
+        // data-path rows for the chunks just synced. A synced RocksDB write
+        // also covers registrations still waiting on group commit.
+        self.commit_presence_rows(&durable_batch)?;
+
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::BeforeIntervalCommit)?;
+
+        // Completions are true only after the fdatasync and the presence
+        // commit above. A batched completion waits for the persist period
+        // unless this sync was forced. Period 0 writes the live map now.
+        self.persist_interval_completion(force, &durable_runs, &touched)
+            .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
+
+        // Remove only the exact values written by this snapshot. A concurrent
+        // producer may have replaced an entry while the disk I/O was running;
+        // that newer value must remain queued for the next batch.
+        let mut pending = self.pending_writes.write().unwrap();
+        for (chunk_offset, state, _) in write_batch {
+            if pending.get(chunk_offset) == Some(state) {
+                pending.remove(chunk_offset);
+                pending.priorities.remove(chunk_offset);
+                pending.queued_at.remove(chunk_offset);
+                pending.proofs.remove(chunk_offset);
+            }
+        }
+        for (chunk_offset, state, _) in &ahead {
+            if pending.written_ahead.get(chunk_offset) == Some(state) {
+                pending.written_ahead.remove(chunk_offset);
+                pending.proofs.remove(chunk_offset);
+            }
+        }
+        drop(pending);
+        self.stamp_durable_point();
+        Ok(())
+    }
+
     /// `max_runs` commits at most that many pwrites and leaves the rest pending.
     /// `None` commits every run that meets the threshold.
     /// `coalesce` sorts a reorder buffer and joins adjacent chunks up to the
@@ -2274,6 +2517,9 @@ impl StorageModule {
         };
 
         if write_batch.is_empty() {
+            if !self.defer_durable_point(force) {
+                self.finish_durable_point(force, &[], Vec::new(), &BTreeSet::new())?;
+            }
             return self.flush_forced_interval_completions(force);
         }
 
@@ -2286,6 +2532,9 @@ impl StorageModule {
             runs.truncate(limit);
         }
         if runs.is_empty() {
+            if !self.defer_durable_point(force) {
+                self.finish_durable_point(force, &[], Vec::new(), &BTreeSet::new())?;
+            }
             return self.flush_forced_interval_completions(force);
         }
         if max_runs.is_some() {
@@ -2343,50 +2592,15 @@ impl StorageModule {
             }
         }
 
-        #[cfg(test)]
-        self.inject_sync_failure(SyncFailurePoint::BeforeDataFsync)?;
-
-        // fdatasync this write batch before any row that says the chunk is
-        // present. A crash after the bytes land and before that row is safe:
-        // intervals and the index still say the chunk is absent.
-        // A recall window syncs only the files it wrote.
-        for (interval, submodule) in self.submodules.iter() {
-            if !touched_starts.contains(&interval.start()) {
-                continue;
-            }
-            self.disk.yield_to_recall();
-            let file_arc = Arc::clone(&submodule.file);
-            let file = self.disk.lock_chunks(&file_arc);
-            file.sync_data()
-                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+        // Hold the fdatasync and the presence commit when the previous point
+        // is younger than `min_durable_interval_ms`. The pwrites above already
+        // ran. Force, the pending-byte ceiling, and a zero interval do not
+        // hold the pair. `0` is every point: the previous behaviour.
+        if self.defer_durable_point(force) {
+            self.park_written_ahead(&write_batch);
+            return Ok(());
         }
-
-        // One durable index batch per submodule in this gap. It holds the
-        // data-path rows for the chunks just synced. A synced RocksDB write
-        // also covers registrations still waiting on group commit.
-        self.commit_presence_rows(&write_batch)?;
-
-        #[cfg(test)]
-        self.inject_sync_failure(SyncFailurePoint::BeforeIntervalCommit)?;
-
-        // Completions are true only after the fdatasync and the presence
-        // commit above. A batched completion waits for the persist period
-        // unless this sync was forced. Period 0 writes the live map now.
-        self.persist_interval_completion(force, &runs, &touched_starts)
-            .wrap_err("Could not update submodule interval files, if this is a component test with storage_module that drops after the test, this error is benign")?;
-
-        // Remove only the exact values written by this snapshot. A concurrent
-        // producer may have replaced an entry while the disk I/O was running;
-        // that newer value must remain queued for the next batch.
-        let mut pending = self.pending_writes.write().unwrap();
-        for (chunk_offset, state, _) in &write_batch {
-            if pending.get(chunk_offset) == Some(state) {
-                pending.remove(chunk_offset);
-                pending.priorities.remove(chunk_offset);
-                pending.queued_at.remove(chunk_offset);
-                pending.proofs.remove(chunk_offset);
-            }
-        }
+        self.finish_durable_point(force, &write_batch, runs, &touched_starts)?;
 
         debug!(
             "sync_pending_chunks took {:.3}s for {} chunks",
@@ -3408,6 +3622,7 @@ impl StorageModule {
             ChunkType::Entropy => disk_lane::WritePriority::Packing,
             _ => disk_lane::WritePriority::Ingress,
         };
+        pending.written_ahead.remove(&chunk_offset);
         pending.insert(chunk_offset, (bytes, chunk_type));
         pending.priorities.insert(chunk_offset, priority);
         pending.queued_at.insert(chunk_offset, Instant::now());
@@ -3458,6 +3673,9 @@ impl StorageModule {
                 .retain(|offset, _| *offset < start || *offset > end);
             pending
                 .proofs
+                .retain(|offset, _| *offset < start || *offset > end);
+            pending
+                .written_ahead
                 .retain(|offset, _| *offset < start || *offset > end);
         }
         self.cancel_sweep_range(start, end);
@@ -5088,13 +5306,20 @@ impl StorageModule {
     #[cfg(feature = "bench")]
     pub fn bench_queue_snapshot(&self) -> BenchQueueSnapshot {
         let pending = self.pending_writes.read().unwrap();
-        let pending_chunks = pending.len();
+        let pending_chunks = pending.len().saturating_add(pending.written_ahead.len());
         let occupancy = pending.occupancy.len();
         let packed = pending
             .values()
             .map(|(bytes, _)| bytes.len() as u64)
             .sum::<u64>();
-        let pending_bytes = packed.saturating_add(pending.queued_unpacked_bytes);
+        let ahead = pending
+            .written_ahead
+            .values()
+            .map(|(bytes, _)| bytes.len() as u64)
+            .sum::<u64>();
+        let pending_bytes = packed
+            .saturating_add(ahead)
+            .saturating_add(pending.queued_unpacked_bytes);
         drop(pending);
         BenchQueueSnapshot {
             pending_chunks,
@@ -7141,6 +7366,7 @@ mod tests {
                 drop_recall_page_cache: false,
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                min_durable_interval_ms: 0,
             },
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
@@ -9565,5 +9791,251 @@ mod tests {
             &config,
         )?;
         Ok((tmp_dir, storage))
+    }
+
+    /// One submodule, one chunk per sync, completion files rewritten immediately.
+    fn durable_spacing_module(
+        prefix: &str,
+        min_durable_interval_ms: u64,
+        max_pending_write_bytes: Option<u64>,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 16,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                max_pending_write_bytes,
+                entropy_sweep_interval_millis: 60_000,
+                entropy_sweep_max_bytes: chunk_size,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![(partition_chunk_offset_ii!(0, 15), "chunks".into())],
+            },
+            &config,
+        )?;
+        Ok((tmp_dir, storage))
+    }
+
+    fn write_spacing_chunk(storage: &StorageModule, offset: u32, byte: u8) {
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(offset),
+            vec![byte; 32],
+            ChunkType::Data,
+        ));
+    }
+
+    /// Sleep on the monotonic clock until `start` is at least `interval` old.
+    fn wait_monotonic(start: Instant, interval: Duration) {
+        let deadline = start + interval;
+        while Instant::now() < deadline {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    #[test]
+    fn zero_durable_interval_syncs_every_batch() -> eyre::Result<()> {
+        let (_tmp, storage) = durable_spacing_module("durable_interval_zero", 0, None)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        assert!(!storage.has_pending_writes());
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert!(!storage.has_pending_writes());
+        let written = read_intervals_file(&submodule_interval_path(&storage, 0))?;
+        assert_eq!(
+            written.get_at_point(PartitionChunkOffset::from(1)).copied(),
+            Some(ChunkType::Data)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_points_stay_at_least_the_interval_apart() -> eyre::Result<()> {
+        let interval = Duration::from_millis(1_000);
+        let (_tmp, storage) = durable_spacing_module("durable_interval_space", 1_000, None)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        let stamped = Instant::now();
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        let deferred = PartitionChunkOffset::from(1);
+        assert!(!storage.is_data_chunk_durable_at(deferred));
+        assert!(storage.pending_write_bytes() > 0);
+        assert_eq!(storage.read_chunk_internal(deferred)?, vec![2_u8; 32]);
+        let intervals = read_intervals_file(&submodule_interval_path(&storage, 0))?;
+        assert_eq!(
+            intervals.get_at_point(deferred).copied(),
+            Some(ChunkType::Interrupted)
+        );
+
+        wait_monotonic(stamped, interval);
+        storage.sync_pending_chunks()?;
+        assert!(stamped.elapsed() >= interval);
+        assert!(storage.is_data_chunk_durable_at(deferred));
+        assert!(!storage.has_pending_writes());
+        let completed = read_intervals_file(&submodule_interval_path(&storage, 0))?;
+        assert_eq!(
+            completed.get_at_point(deferred).copied(),
+            Some(ChunkType::Data)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn force_sync_bypasses_the_durable_interval() -> eyre::Result<()> {
+        let (_tmp, storage) = durable_spacing_module("durable_interval_force", 60_000, None)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        let deferred = PartitionChunkOffset::from(1);
+        assert!(!storage.is_data_chunk_durable_at(deferred));
+        let started = Instant::now();
+        storage.force_sync_pending_chunks()?;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "force sync waited out the durable interval"
+        );
+        assert!(storage.is_data_chunk_durable_at(deferred));
+        assert!(!storage.has_pending_writes());
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_bypasses_the_durable_interval() -> eyre::Result<()> {
+        let (_tmp, storage) = durable_spacing_module("durable_interval_stop", 60_000, None)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        let storage = Arc::new(storage);
+        let deferred = PartitionChunkOffset::from(1);
+        {
+            let lane = LaneGuard::start(Arc::clone(&storage))?;
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!lane.module.is_data_chunk_durable_at(deferred));
+        }
+        assert!(storage.is_data_chunk_durable_at(deferred));
+        assert!(!storage.has_pending_writes());
+        Ok(())
+    }
+
+    #[test]
+    fn drop_bypasses_the_durable_interval() -> eyre::Result<()> {
+        let (_tmp, storage) = durable_spacing_module("durable_interval_drop", 60_000, None)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        let deferred = PartitionChunkOffset::from(1);
+        assert!(!storage.is_data_chunk_durable_at(deferred));
+        let path = submodule_interval_path(&storage, 0);
+        let started = Instant::now();
+        drop(storage);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "drop waited out the durable interval"
+        );
+        let written = read_intervals_file(&path)?;
+        assert_eq!(
+            written.get_at_point(deferred).copied(),
+            Some(ChunkType::Data)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reset_discards_a_deferred_durable_point() -> eyre::Result<()> {
+        let (_tmp, storage) = durable_spacing_module("durable_interval_reset", 60_000, None)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        let deferred = PartitionChunkOffset::from(1);
+        assert!(!storage.is_data_chunk_durable_at(deferred));
+        assert!(storage.pending_write_bytes() > 0);
+        let started = Instant::now();
+        storage.reset()?;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "reset waited out the durable interval"
+        );
+        assert!(!storage.has_pending_writes());
+        assert!(!storage.is_data_chunk_durable_at(deferred));
+        assert_eq!(
+            storage.get_chunk_type(&deferred),
+            Some(ChunkType::Uninitialized)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_byte_ceiling_bypasses_the_durable_interval() -> eyre::Result<()> {
+        // One chunk is the ceiling (`num_writes_before_sync` × chunk size).
+        // The bypass is strict `>`, so one parked chunk stays deferred and
+        // the next chunk pushes the total over.
+        let (_tmp, storage) = durable_spacing_module("durable_interval_ceiling", 60_000, Some(32))?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+
+        write_spacing_chunk(&storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        assert!(!storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert_eq!(storage.pending_write_bytes(), 32);
+
+        write_spacing_chunk(&storage, 2, 3);
+        let started = Instant::now();
+        storage.sync_pending_chunks()?;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the pending-byte ceiling waited out the durable interval"
+        );
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(2)));
+        assert!(!storage.has_pending_writes());
+        Ok(())
+    }
+
+    #[test]
+    fn recall_does_not_wait_on_a_deferred_durable_point() -> eyre::Result<()> {
+        let (_tmp, storage) = durable_spacing_module("durable_interval_recall", 60_000, None)?;
+        write_spacing_chunk(&storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        write_spacing_chunk(&storage, 1, 2);
+        let storage = Arc::new(storage);
+        let waiter = Arc::clone(&storage);
+        storage.disk.arm_recall_flush();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _hold = waiter.disk.begin_recall();
+            let _ = tx.send(());
+        });
+        let lane = LaneGuard::start(Arc::clone(&storage))?;
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("recall waited on a deferred durable point");
+        let deferred = PartitionChunkOffset::from(1);
+        assert!(!lane.module.is_data_chunk_durable_at(deferred));
+        assert_eq!(lane.module.read_chunk_internal(deferred)?, vec![2_u8; 32]);
+        Ok(())
     }
 }
