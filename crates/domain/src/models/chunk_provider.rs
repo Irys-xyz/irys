@@ -924,7 +924,7 @@ mod tests {
 
         let db = create_test_db(&tmp.path().join("db"));
         cache_one(&db, &hole_tx, &hole_data);
-        let provider = make_provider(config.clone(), vec![Arc::new(hole), Arc::new(good)], db);
+        let provider = make_provider(config, vec![Arc::new(hole), Arc::new(good)], db);
         let span = provider
             .get_unpacked_chunks_by_ledger_span(
                 DataLedger::Publish,
