@@ -90,6 +90,9 @@ pub struct Collected {
     pub test_executables: Vec<PathBuf>,
     /// Every artifact file and build-script output dir.
     pub artifacts: Vec<PathBuf>,
+    /// Cargo reported a successful build. A failed build lists only the units it reached, so its
+    /// artifacts must not replace a complete usage record.
+    pub build_succeeded: bool,
 }
 
 /// Run a cargo command with its JSON on stdout: echo every other stdout line, and collect what
@@ -140,6 +143,9 @@ pub fn run_collecting(cmd: Cmd<'_>) -> eyre::Result<(Collected, eyre::Result<()>
             Ok(Message::BuildScriptExecuted(script)) => {
                 collected.artifacts.push(script.out_dir.into_std_path_buf());
             }
+            Ok(Message::BuildFinished(finished)) => {
+                collected.build_succeeded = finished.success;
+            }
             Ok(Message::TextLine(_)) | Err(_) => {
                 echo_ok = echo_ok && out.write_all(&line).is_ok();
             }
@@ -156,10 +162,12 @@ pub fn run_collecting(cmd: Cmd<'_>) -> eyre::Result<(Collected, eyre::Result<()>
 }
 
 /// Run a cargo build command through [`run_collecting`] and record what it used, so the unit
-/// prune keeps it. A failed record only warns.
+/// prune keeps it. A failed build keeps the previous record; a failed record only warns.
 pub fn run_recorded(cmd: Cmd<'_>, invocation: &str) -> eyre::Result<()> {
     let (collected, result) = run_collecting(cmd)?;
-    record_run(invocation, &collected.artifacts);
+    if collected.build_succeeded {
+        record_run(invocation, &collected.artifacts);
+    }
     result
 }
 

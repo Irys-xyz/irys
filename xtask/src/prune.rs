@@ -273,11 +273,12 @@ fn live_usage(usage_dir: &Path, unused_before: SystemTime) -> io::Result<HashSet
     Ok(used)
 }
 
-/// `<name>-<16 hex>` for a file in `deps/`: rlibs, rmetas and proc-macro `.so` files carry a `lib`
-/// prefix, and `.d` / `.dwo` siblings extend the unit name after a dot.
+/// `<name>-<16 hex>` for a file in `deps/`: rlibs, rmetas, static libs and proc-macro shared
+/// objects (`.so` on Linux, `.dylib` on macOS) carry a `lib` prefix, and `.d` / `.dwo` siblings
+/// extend the unit name after a dot.
 fn unit_id(name: &str) -> Option<&str> {
     let (base, ext) = name.split_once('.').unwrap_or((name, ""));
-    let base = if ext == "rlib" || ext == "rmeta" || ext == "so" {
+    let base = if matches!(ext, "rlib" | "rmeta" | "so" | "dylib" | "a") {
         base.strip_prefix("lib")?
     } else {
         base
@@ -701,6 +702,8 @@ mod tests {
                 "libfoo-0123456789abcdef.rlib",
                 "libfoo-0123456789abcdef.rmeta",
                 "libfoo-0123456789abcdef.so",
+                "libfoo-0123456789abcdef.dylib",
+                "libfoo-0123456789abcdef.a",
                 "foo-0123456789abcdef.d",
                 "foo-0123456789abcdef.foo.1a2b-cgu.0.rcgu.dwo",
                 "foo-0123456789abcdef",

@@ -493,30 +493,38 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             let run_started = SystemTime::now();
             let test_result = if prune {
                 let (collected, result) = run_collecting(cmd!(sh, "cargo {nextest_args...}"))?;
-                // Keyed by what selects the build, not by the generated config file's path.
-                record_run(
-                    &format!("test {} {}", heap_profile, args.join(" ")),
-                    &collected.artifacts,
-                );
-                let ago = |secs: u64| {
-                    SystemTime::now()
-                        .checked_sub(Duration::from_secs(secs))
-                        .unwrap_or(SystemTime::UNIX_EPOCH)
-                };
-                let keep_after = run_started.min(ago(prune_grace_minutes.saturating_mul(60)));
-                let unused_before = keep_after.min(ago(prune_unused_days.saturating_mul(86_400)));
-                // `cargo xtask` is `cargo run -p xtask`, a build nothing else records; without this
-                // record its dependencies read as duplicates and every xtask call rebuilds them.
-                if let Err(e) = run_recorded(
-                    cmd!(
-                        sh,
-                        "cargo build --message-format json-render-diagnostics -p xtask"
-                    ),
-                    "xtask",
-                ) {
-                    eprintln!("Warning: xtask build not recorded: {e}");
+                if collected.build_succeeded {
+                    // Keyed by what selects the build, not by the generated config file's path.
+                    record_run(
+                        &format!("test {} {}", heap_profile, args.join(" ")),
+                        &collected.artifacts,
+                    );
+                    let ago = |secs: u64| {
+                        SystemTime::now()
+                            .checked_sub(Duration::from_secs(secs))
+                            .unwrap_or(SystemTime::UNIX_EPOCH)
+                    };
+                    let keep_after = run_started.min(ago(prune_grace_minutes.saturating_mul(60)));
+                    let unused_before =
+                        keep_after.min(ago(prune_unused_days.saturating_mul(86_400)));
+                    // `cargo xtask` is `cargo run -p xtask`, a build nothing else records; without
+                    // this record its dependencies read as duplicates and every xtask call
+                    // rebuilds them.
+                    if let Err(e) = run_recorded(
+                        cmd!(
+                            sh,
+                            "cargo build --message-format json-render-diagnostics -p xtask"
+                        ),
+                        "xtask",
+                    ) {
+                        eprintln!("Warning: xtask build not recorded: {e}");
+                    }
+                    prune_after_run(&collected.test_executables, keep_after, unused_before);
+                } else {
+                    // A failed build reached only part of the graph: its record would be partial,
+                    // and a prune against it would delete units the next build needs.
+                    tracing::debug!("build did not succeed; usage record and prune skipped");
                 }
-                prune_after_run(&collected.test_executables, keep_after, unused_before);
                 result
             } else {
                 cmd!(sh, "cargo {nextest_args...}")
