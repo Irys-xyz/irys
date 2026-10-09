@@ -43,7 +43,9 @@ use rocksdb::{
 };
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
-use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
+use super::interval::{
+    IntervalEdit, IntervalRow, combine_hashes, coverage_gaps, dropped_tx_hashes, plan_coverage,
+};
 use super::store::PresenceReconcile;
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
@@ -2832,10 +2834,10 @@ impl<'a> Batch<'a> {
         }
         let existing = self.rows().intervals_touching(start, end)?;
         let edit = plan_coverage(&existing, start, end, tx_path_hash);
-        for key in edit.delete {
-            self.delete(Cf::Interval, &encode_key(key));
+        for key in &edit.delete {
+            self.delete(Cf::Interval, &encode_key(*key));
         }
-        for row in edit.put {
+        for row in &edit.put {
             self.put(
                 Cf::Interval,
                 &encode_key(row.start),
@@ -2844,6 +2846,38 @@ impl<'a> Batch<'a> {
                     tx_path_hash: row.tx_path_hash,
                 },
             );
+        }
+        self.drop_unreferenced_tx_paths(&existing, &edit)
+    }
+
+    /// Delete a tx path and its leaf binding when no interval names that hash.
+    ///
+    /// The candidate set is the hashes that left the edit window. An empty set
+    /// skips the scan. A hash that another interval still names stays.
+    fn drop_unreferenced_tx_paths(
+        &mut self,
+        existing: &[IntervalRow],
+        edit: &IntervalEdit,
+    ) -> eyre::Result<()> {
+        let mut dropped = dropped_tx_hashes(existing, edit);
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        {
+            let rows = self.rows();
+            let mut cursor = rows.cursor(Cf::Interval, None)?;
+            while let Some((_, value)) = cursor.next_kv()? {
+                let interval = TxPathInterval::decompress(&value)?;
+                dropped.retain(|hash| *hash != interval.tx_path_hash);
+                if dropped.is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+        for hash in dropped {
+            let key = encode_key(hash);
+            self.delete(Cf::TxPath, &key);
+            self.delete(Cf::TxLeaf, &key);
         }
         Ok(())
     }
@@ -3760,7 +3794,12 @@ impl SubmoduleWrite for Batch<'_> {
         data_root: DataRoot,
         infos: DataRootInfos,
     ) -> eyre::Result<()> {
-        self.put(Cf::DataRoots, &encode_key(data_root), &infos);
+        let key = encode_key(data_root);
+        if infos.0.is_empty() {
+            self.delete(Cf::DataRoots, &key);
+        } else {
+            self.put(Cf::DataRoots, &key, &infos);
+        }
         Ok(())
     }
 

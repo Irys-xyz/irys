@@ -233,9 +233,7 @@ fn data_size_for_offset(
         let mut loaded = tx
             .get_data_root_infos_for_data_root(data_root)
             .expect("Database read should succeed")
-            .expect(
-                "there should be at least one start_offset for any data_root stored in the submodule",
-            );
+            .unwrap_or_default();
         loaded.0.sort_unstable();
         loaded
     });
@@ -3518,7 +3516,8 @@ impl StorageModule {
     }
 
     /// Drop tx intervals, data-root placements, and pending jobs under
-    /// `Uninitialized` spans.
+    /// `Uninitialized` spans. A tx path and its leaf binding are deleted when
+    /// no interval in that submodule still names the hash.
     ///
     /// `Entropy` is not included. A tx can be indexed there before its bytes
     /// are stored. Presence under `Entropy` is still removed by
@@ -6798,18 +6797,24 @@ mod tests {
         Ok(())
     }
 
-    /// A fully `Uninitialized` span drops intervals, placements, and pending jobs.
-    /// Tx-path blobs are not coverage.
+    /// A fully `Uninitialized` span drops intervals, placements, pending jobs,
+    /// and the tx path once nothing in the submodule names it.
     fn assert_uninitialized_coverage_dropped(
         module: &StorageModule,
         seeded: &SeededIndex,
     ) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        assert_eq!(
+        assert!(
             submodule
                 .db
-                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?,
-            Some(seeded.tx_path.clone())
+                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?
+                .is_none()
+        );
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?
+                .is_none()
         );
         for offset in [2_u32, 3, 6] {
             assert!(

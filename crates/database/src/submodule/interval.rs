@@ -167,6 +167,38 @@ fn diff(existing: &[IntervalRow], merged: &[IntervalRow]) -> IntervalEdit {
     IntervalEdit { delete, put }
 }
 
+/// Hashes that this edit removed from its window.
+///
+/// A hash is included when no `edit.put` row and no unchanged `existing` row
+/// still names it. An interval outside `existing` can still name the hash.
+/// The caller scans the submodule before it deletes the path.
+pub(super) fn dropped_tx_hashes(existing: &[IntervalRow], edit: &IntervalEdit) -> Vec<H256> {
+    let mut dropped = Vec::new();
+    for row in existing {
+        let replaced_with_other = edit
+            .put
+            .iter()
+            .any(|put| put.start == row.start && put.tx_path_hash != row.tx_path_hash);
+        let removed = edit.delete.contains(&row.start) || replaced_with_other;
+        if !removed || dropped.contains(&row.tx_path_hash) {
+            continue;
+        }
+        let kept_here = edit
+            .put
+            .iter()
+            .any(|put| put.tx_path_hash == row.tx_path_hash)
+            || existing.iter().any(|other| {
+                other.tx_path_hash == row.tx_path_hash
+                    && !edit.delete.contains(&other.start)
+                    && edit.put.iter().all(|put| put.start != other.start)
+            });
+        if !kept_here {
+            dropped.push(row.tx_path_hash);
+        }
+    }
+    dropped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +273,56 @@ mod tests {
         );
         assert_eq!(coverage_gaps(at(5), at(10), &[]), vec![(at(5), at(10))]);
         assert!(coverage_gaps(at(5), at(10), &[row(0, 9, 1)]).is_empty());
+    }
+
+    #[test]
+    fn a_cleared_span_drops_its_hash() {
+        let existing = [row(0, 4, 1)];
+        let edit = plan_coverage(&existing, at(0), at(4), None);
+        assert_eq!(
+            dropped_tx_hashes(&existing, &edit),
+            vec![H256::repeat_byte(1)]
+        );
+    }
+
+    #[test]
+    fn a_split_keeps_the_old_hash_on_the_remnants() {
+        let existing = [row(0, 4, 1)];
+        let middle = plan_coverage(&existing, at(2), at(2), Some(H256::repeat_byte(2)));
+        assert!(dropped_tx_hashes(&existing, &middle).is_empty());
+        let left = plan_coverage(&existing, at(0), at(1), None);
+        assert!(dropped_tx_hashes(&existing, &left).is_empty());
+    }
+
+    #[test]
+    fn replacing_the_span_drops_the_old_hash_only() {
+        let existing = [row(0, 4, 1)];
+        let edit = plan_coverage(&existing, at(0), at(4), Some(H256::repeat_byte(2)));
+        assert_eq!(
+            dropped_tx_hashes(&existing, &edit),
+            vec![H256::repeat_byte(1)]
+        );
+    }
+
+    #[test]
+    fn a_second_row_in_the_window_keeps_the_shared_hash() {
+        let existing = [row(0, 1, 1), row(3, 4, 1)];
+        let edit = plan_coverage(&existing, at(0), at(1), None);
+        assert!(dropped_tx_hashes(&existing, &edit).is_empty());
+        let merged = plan_coverage(&existing, at(2), at(2), Some(H256::repeat_byte(1)));
+        assert!(dropped_tx_hashes(&existing, &merged).is_empty());
+    }
+
+    #[test]
+    fn a_hash_missing_from_the_window_is_still_a_candidate() {
+        // The far interval is not in `existing`. The scan, not this list,
+        // decides whether the path stays.
+        let existing = [row(0, 1, 1)];
+        let edit = plan_coverage(&existing, at(0), at(1), None);
+        assert_eq!(
+            dropped_tx_hashes(&existing, &edit),
+            vec![H256::repeat_byte(1)]
+        );
     }
 
     #[test]

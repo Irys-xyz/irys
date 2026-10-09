@@ -23,7 +23,9 @@ pub use super::migrate::{
     require_submodule_index_copy,
 };
 
-use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
+use super::interval::{
+    IntervalEdit, IntervalRow, combine_hashes, coverage_gaps, dropped_tx_hashes, plan_coverage,
+};
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos, Metadata,
     PendingBodyMigration, PendingBodyMigrationsByOffset, SubmoduleTables, TxLeafBinding,
@@ -448,11 +450,17 @@ pub fn get_data_root_infos_for_data_root<T: DbTx>(
 }
 
 /// set (overwrite) the DataRootInfos for the `data_root`
+///
+/// An empty list deletes the row. A missing row is an empty list.
 pub fn set_data_root_infos_for_data_root<T: DbTxMut>(
     tx: &T,
     data_root: DataRoot,
     infos: DataRootInfos,
 ) -> eyre::Result<()> {
+    if infos.0.is_empty() {
+        tx.delete::<DataRootInfosByDataRoot>(data_root, None)?;
+        return Ok(());
+    }
     Ok(tx.put::<DataRootInfosByDataRoot>(data_root, infos)?)
 }
 
@@ -777,10 +785,10 @@ fn assign_tx_interval<T: DbTxMut + DbTx>(
     }
     let existing = intervals_touching(tx, start, end)?;
     let edit = plan_coverage(&existing, start, end, tx_path_hash);
-    for key in edit.delete {
-        tx.delete::<TxPathIntervalByStart>(key, None)?;
+    for key in &edit.delete {
+        tx.delete::<TxPathIntervalByStart>(*key, None)?;
     }
-    for row in edit.put {
+    for row in &edit.put {
         tx.put::<TxPathIntervalByStart>(
             row.start,
             TxPathInterval {
@@ -788,6 +796,34 @@ fn assign_tx_interval<T: DbTxMut + DbTx>(
                 tx_path_hash: row.tx_path_hash,
             },
         )?;
+    }
+    drop_unreferenced_tx_paths(tx, &existing, &edit)
+}
+
+/// Delete a tx path and its leaf binding when no interval names that hash.
+///
+/// The candidate set is the hashes that left the edit window. An empty set
+/// skips the scan. A hash that another interval still names stays.
+fn drop_unreferenced_tx_paths<T: DbTxMut + DbTx>(
+    tx: &T,
+    existing: &[IntervalRow],
+    edit: &IntervalEdit,
+) -> eyre::Result<()> {
+    let mut dropped = dropped_tx_hashes(existing, edit);
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
+    for row in cursor.walk(None)? {
+        let (_, interval) = row?;
+        dropped.retain(|hash| *hash != interval.tx_path_hash);
+        if dropped.is_empty() {
+            return Ok(());
+        }
+    }
+    for hash in dropped {
+        tx.delete::<TxPathByTxPathHash>(hash, None)?;
+        tx.delete::<TxLeafBindingByTxPathHash>(hash, None)?;
     }
     Ok(())
 }
