@@ -143,9 +143,10 @@ pub struct ChunkRequest {
     pub retry_round: u32,
     /// Monotonic time this offset most recently joined the FIFO ready queue.
     pub ready_since: Instant,
-    /// A local-cache lookup already missed. Later retries of this request skip
-    /// the cache until the request is dropped (the offset is no longer Entropy,
-    /// the delayed map trims it, or the process restarts).
+    /// A local-cache lookup already missed during this attempt cycle. Later
+    /// pops skip the cache until the request is dropped, or until a delayed
+    /// retry becomes pending. A body that arrives during the backoff is read
+    /// on that next cycle. A same-cycle peer rotation does not clear this.
     pub local_cache_miss: bool,
 }
 
@@ -561,8 +562,9 @@ impl ChunkOrchestrator {
         });
 
         // A delayed offset becomes ready only after its monotonic deadline.
-        // Peer exclusions are cleared here, at the beginning of a new attempt
-        // cycle, never in the same transition that handled a 404.
+        // Peer exclusions and the cache-miss memo are cleared here, at the
+        // beginning of a new attempt cycle, never in the same transition that
+        // handled a 404. The next pop reads the cache once.
         let due: Vec<_> = self
             .chunk_requests
             .iter()
@@ -574,6 +576,7 @@ impl ChunkOrchestrator {
         for offset in due {
             if let Some(request) = self.chunk_requests.get_mut(&offset) {
                 request.excluded.clear();
+                request.local_cache_miss = false;
                 request.request_state = ChunkRequestState::Pending;
                 request.ready_since = now;
                 self.ready_offsets.push_back(offset);

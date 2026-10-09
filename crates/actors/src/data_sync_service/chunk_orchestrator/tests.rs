@@ -1431,7 +1431,7 @@ async fn local_cache_contiguous_run_writes_hits_around_a_hole() {
 }
 
 #[test_log::test(tokio::test)]
-async fn local_cache_miss_falls_through_and_a_later_body_stays_memoized() {
+async fn local_cache_miss_sticks_for_one_peer_cycle_then_retries_the_cache() {
     let tmp = TempDirBuilder::new().with_tracing().build();
     let config = test_config(tmp.path().to_path_buf(), 4);
     let sm = packed_sm(&config, 4);
@@ -1478,6 +1478,33 @@ async fn local_cache_miss_falls_through_and_a_later_body_stays_memoized() {
         ChunkRequestState::Requested(_, _)
     ));
     assert!(orch.chunk_requests[&offset].local_cache_miss);
+
+    let requested = match orch.chunk_requests[&offset].request_state {
+        ChunkRequestState::Requested(addr, _) => addr,
+        ref other => panic!("expected Requested, got {other:?}"),
+    };
+    orch.on_chunk_failed(offset, requested, ChunkFetchFailureKind::NotFound)
+        .expect("second peer failure");
+    let retry_at = match orch.chunk_requests[&offset].request_state {
+        ChunkRequestState::Delayed { retry_at } => retry_at,
+        ref other => panic!("expected Delayed, got {other:?}"),
+    };
+    assert!(
+        orch.chunk_requests[&offset].local_cache_miss,
+        "the backoff itself keeps the memo"
+    );
+
+    orch.populate_request_queue_at(retry_at);
+    assert!(!orch.chunk_requests[&offset].local_cache_miss);
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Pending
+    ));
+    assert!(orch.dispatch_next());
+    assert!(
+        sm.is_data_write_pending_at(offset),
+        "a body cached during the backoff is written on the next cycle"
+    );
 }
 
 #[test_log::test(tokio::test)]
