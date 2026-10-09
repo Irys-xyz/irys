@@ -6206,14 +6206,17 @@ fn validate_term_ledger_expiry(
 
 /// Bytes for one ingress-proof chunk from the local cache or a storage module.
 ///
-/// A cache row with `chunk: None` is a miss. A storage-module body is accepted
-/// only when the unpacked chunk names this data root and tx offset. `Ok(None)`
-/// means both sources missed, so the caller tries peers.
+/// A cache row with `chunk: None` is a miss. A storage-module body must name
+/// this data root and tx offset, and it must pass the same content checks as
+/// a body copied out of the cache (path, byte range, length, leaf hash).
+/// A mismatch is a miss. `Ok(None)` means both sources missed, so the caller
+/// tries peers.
 fn ingress_proof_chunk_bytes_from_local(
     db: &DatabaseProvider,
     storage_modules: &StorageModulesReadGuard,
     config: &Config,
     data_root: H256,
+    data_size: u64,
     tx_offset: irys_types::TxChunkOffset,
 ) -> Result<Option<Vec<u8>>, PreValidationError> {
     let cached = db
@@ -6227,8 +6230,9 @@ fn ingress_proof_chunk_bytes_from_local(
         return Ok(Some(bytes.0));
     }
 
-    let modules = storage_modules.read();
-    for module in modules.iter() {
+    // Copy the module list so the read guard is not held across unpack.
+    let modules = storage_modules.read().clone();
+    for module in &modules {
         let offsets = match module.partition_offsets_for_data_root_chunk(data_root, tx_offset) {
             Ok(Some(offsets)) => offsets,
             Ok(None) => continue,
@@ -6261,8 +6265,25 @@ fn ingress_proof_chunk_bytes_from_local(
                 config.consensus.chunk_size as usize,
                 config.consensus.chain_id,
             );
-            if unpacked.data_root == data_root && unpacked.tx_offset == tx_offset {
-                return Ok(Some(unpacked.bytes.0));
+            if unpacked.data_root != data_root || unpacked.tx_offset != tx_offset {
+                continue;
+            }
+            match crate::chunk_migration_service::validate_chunk_parts_for_migration(
+                unpacked.data_path,
+                unpacked.bytes,
+                data_root,
+                data_size,
+                tx_offset,
+                config.consensus.chunk_size as usize,
+            ) {
+                Ok(checked) => return Ok(Some(checked.bytes.0)),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        partition.offset = offset.0,
+                        "storage module body failed content checks; trying the next offset"
+                    );
+                }
             }
         }
     }
@@ -6786,6 +6807,7 @@ pub async fn data_txs_are_valid(
                         storage_modules,
                         config,
                         tx_header.data_root,
+                        tx_header.data_size,
                         tx_chunk_offset,
                     )?;
 
@@ -6899,6 +6921,7 @@ pub async fn data_txs_are_valid(
                                 storage_modules,
                                 config,
                                 tx_header.data_root,
+                                tx_header.data_size,
                                 tx_chunk_offset,
                             )?;
                             if chunk_bytes.is_some() {
@@ -9538,6 +9561,7 @@ mod ingress_proof_local_bytes_tests {
             modules,
             config,
             tx.header.data_root,
+            tx.header.data_size,
             TxChunkOffset::from(0_u32),
         )
         .unwrap()
@@ -9640,6 +9664,94 @@ mod ingress_proof_local_bytes_tests {
         assert_eq!(
             local_bytes(&db, &modules, &config, &tx).as_deref(),
             Some(data.as_slice())
+        );
+    }
+
+    fn store_indexed_body(
+        config: &Config,
+        tx: &DataTransaction,
+        bytes: &[u8],
+        id: usize,
+    ) -> Arc<StorageModule> {
+        let assignment = PartitionAssignment {
+            partition_hash: H256::repeat_byte(u8::try_from(id).unwrap_or(1).saturating_add(1)),
+            miner_address: config.node_config.miner_address(),
+            ..PartitionAssignment::default()
+        };
+        let sm = StorageModule::new(
+            &StorageModuleInfo {
+                id,
+                partition_assignment: Some(assignment),
+                submodules: vec![(partition_chunk_offset_ie!(0, 4), format!("hdd{id}").into())],
+            },
+            config,
+        )
+        .unwrap();
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )
+        .unwrap();
+        let chunk_size = config.consensus.chunk_size as usize;
+        let mut entropy = Vec::with_capacity(chunk_size);
+        irys_packing::capacity_single::compute_entropy_chunk(
+            config.node_config.miner_address(),
+            0,
+            sm.partition_hash().unwrap().0,
+            config.consensus.entropy_packing_iterations,
+            chunk_size,
+            &mut entropy,
+            config.consensus.chain_id,
+        );
+        assert!(sm.write_chunk(
+            PartitionChunkOffset::from(0_u32),
+            entropy,
+            ChunkType::Entropy,
+        ));
+        sm.sync_pending_chunks().unwrap();
+        sm.write_data_chunk(&UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[0].proof.clone()),
+            bytes: Base64(bytes.to_vec()),
+            tx_offset: TxChunkOffset::from(0_u32),
+        })
+        .unwrap();
+        sm.sync_pending_chunks().unwrap();
+        Arc::new(sm)
+    }
+
+    #[test]
+    fn corrupt_storage_module_body_falls_through_to_the_next_module() {
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress-corrupt-sm")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf());
+        let (tx, data) = one_chunk(&config);
+        let mut corrupt = data.clone();
+        corrupt[0] ^= 0xff;
+        let bad = store_indexed_body(&config, &tx, &corrupt, 0);
+        let good = store_indexed_body(&config, &tx, &data, 1);
+
+        let db = open_db(&tmp.path().join("db"));
+        cache_body(&db, &tx, &data);
+        strip_body(&db, &tx);
+
+        let only_bad = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![Arc::clone(&bad)])));
+        assert!(
+            local_bytes(&db, &only_bad, &config, &tx).is_none(),
+            "a body that fails the leaf check is a miss"
+        );
+
+        let both = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![bad, good])));
+        assert_eq!(
+            local_bytes(&db, &both, &config, &tx).as_deref(),
+            Some(data.as_slice()),
+            "the next module's valid body is used"
         );
     }
 }

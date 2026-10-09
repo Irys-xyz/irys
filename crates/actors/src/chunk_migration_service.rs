@@ -805,7 +805,7 @@ pub(crate) fn validate_chunk_for_migration(
     )
 }
 
-fn validate_chunk_parts_for_migration(
+pub(crate) fn validate_chunk_parts_for_migration(
     data_path: Base64,
     bytes: Base64,
     data_root: DataRoot,
