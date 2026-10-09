@@ -205,7 +205,7 @@ fn run(args: &Args) -> eyre::Result<i32> {
         u8::from(args.warm)
     );
     println!(
-        "cold uses posix_fadvise(DONTNEED). Mapped pages can stay resident. A RocksDB block cache is not dropped. Device counters show real reads."
+        "cold closes every environment, uses posix_fadvise(DONTNEED), then reopens untimed for each sample. The RocksDB baseline reopens with a private block cache. Device counters show real reads."
     );
     if args.threads > 1 {
         println!(
@@ -214,15 +214,23 @@ fn run(args: &Args) -> eyre::Result<i32> {
         );
     }
 
+    // Every environment that maps the file must be closed before a cold
+    // sample, or fadvise keeps the mapped pages. Phases reopen as needed.
+    drop(db);
+    if args.cold && args.threads > 1 {
+        eyre::bail!(
+            "cold samples reopen the environment so no mapping pins pages; run cold with --threads 1 (warm may use more)"
+        );
+    }
     let mut attempted = 0_usize;
     let mut succeeded = 0_usize;
     if wants_real(args.mode) {
-        let (tried, ok) = run_real(&db, db_path, args)?;
+        let (tried, ok) = run_real(db_path, args)?;
         attempted += tried;
         succeeded += ok;
     }
     if wants_synthetic(args.mode) {
-        let (tried, ok) = run_synthetic(&db, db_path, args)?;
+        let (tried, ok) = run_synthetic(db_path, args)?;
         attempted += tried;
         succeeded += ok;
     }
@@ -262,9 +270,12 @@ fn wants_baseline(mode: Mode, has_index: bool) -> eyre::Result<bool> {
     }
 }
 
-fn run_real(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
+fn run_real(db_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
     println!("collecting migrated data spans");
-    let spans = collect_data_spans(db)?;
+    let spans = {
+        let db = open_consensus_ro(db_path)?;
+        collect_data_spans(&db)?
+    };
     let selected = select_spans(&spans, &args.ledgers);
     if selected.is_empty() {
         eyre::bail!("no migrated data txs in the selected ledgers");
@@ -272,7 +283,7 @@ fn run_real(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<(usiz
     let disk = device_for(db_path);
     let mut attempted = 0_usize;
     let mut succeeded = 0_usize;
-    let phase = |cold: bool| {
+    let phase = |cold: bool, shared: Option<&DatabaseEnv>| {
         let selected = &selected;
         let chunk_size = args.chunk_size;
         measure(
@@ -285,6 +296,14 @@ fn run_real(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<(usiz
             true,
             move |rng| {
                 let (ledger, offset) = pick_offset(rng, selected)?;
+                let fresh;
+                let db = match shared {
+                    Some(db) => db,
+                    None => {
+                        fresh = open_consensus_ro(db_path)?;
+                        &fresh
+                    }
+                };
                 let derived = derive_tx_path_at_offset(db, ledger, offset, chunk_size)?;
                 std::hint::black_box(derived.proof.proof.len());
                 Ok(core_from_derive(&derived))
@@ -292,12 +311,13 @@ fn run_real(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<(usiz
         )
     };
     if args.cold {
-        let stats = phase(true);
+        let stats = phase(true, None);
         attempted += stats.attempted;
         succeeded += stats.succeeded;
     }
     if args.warm {
-        let stats = phase(false);
+        let db = open_consensus_ro(db_path)?;
+        let stats = phase(false, Some(&db));
         attempted += stats.attempted;
         succeeded += stats.succeeded;
     }
@@ -326,14 +346,16 @@ fn select_spans(spans: &[LedgerSpan], ledgers: &[DataLedger]) -> Vec<LedgerSpan>
     selected
 }
 
-fn run_synthetic(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
+fn run_synthetic(db_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
     println!("scanning tx header ids");
-    let ids = load_tx_ids(db)?;
+    let (ids, block_hash) = {
+        let db = open_consensus_ro(db_path)?;
+        (load_tx_ids(&db)?, one_block_hash(&db)?)
+    };
     if ids.is_empty() {
         eyre::bail!("consensus DB has no tx headers");
     }
     println!("tx headers available: {}", ids.len());
-    let block_hash = one_block_hash(db)?;
     let disk = device_for(db_path);
     let mut attempted = 0_usize;
     let mut succeeded = 0_usize;
@@ -349,7 +371,7 @@ fn run_synthetic(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<
         }
         let leaf_index = width / 2;
         println!("derive-synthetic N={width}: leaf_index={leaf_index} (fixed)");
-        let phase = |cold: bool| {
+        let phase = |cold: bool, shared: Option<&DatabaseEnv>| {
             let chosen = &chosen;
             measure(
                 &format!("derive-synthetic-N={width}"),
@@ -360,6 +382,14 @@ fn run_synthetic(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<
                 disk.as_ref(),
                 true,
                 move |_rng| {
+                    let fresh;
+                    let db = match shared {
+                        Some(db) => db,
+                        None => {
+                            fresh = open_consensus_ro(db_path)?;
+                            &fresh
+                        }
+                    };
                     let derived = derive_tx_path_synthetic(db, chosen, &block_hash, leaf_index)?;
                     std::hint::black_box(derived.proof.proof.len());
                     Ok(core_from_derive(&derived))
@@ -367,12 +397,13 @@ fn run_synthetic(db: &DatabaseEnv, db_path: &Path, args: &Args) -> eyre::Result<
             )
         };
         if args.cold {
-            let stats = phase(true);
+            let stats = phase(true, None);
             attempted += stats.attempted;
             succeeded += stats.succeeded;
         }
         if args.warm {
-            let stats = phase(false);
+            let db = open_consensus_ro(db_path)?;
+            let stats = phase(false, Some(&db));
             attempted += stats.attempted;
             succeeded += stats.succeeded;
         }
@@ -392,8 +423,10 @@ fn run_baseline(index_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> 
     } else {
         Vec::new()
     };
-    let index = open_index(index_path, engine, args.migrate_index)?;
-    let offsets = harvest_offsets(&index, engine, args, &mdbx_intervals)?;
+    let offsets = {
+        let index = open_index(index_path, engine, args.migrate_index)?;
+        harvest_offsets(&index, engine, args, &mdbx_intervals)?
+    };
     if offsets.is_empty() {
         eyre::bail!(
             "no offset has both a tx path and a data path. Migration writes the tx path first. The body worker writes the data path later. Baseline needs both."
@@ -410,8 +443,7 @@ fn run_baseline(index_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> 
     let disk = device_for(index_path);
     let mut attempted = 0_usize;
     let mut succeeded = 0_usize;
-    let phase = |cold: bool| {
-        let index = &index;
+    let phase = |cold: bool, shared: Option<&SubmoduleIndex>| {
         let offsets = &offsets;
         measure(
             "baseline-stored",
@@ -423,6 +455,14 @@ fn run_baseline(index_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> 
             false,
             move |rng| {
                 let offset = offsets[rng.below(offsets.len())];
+                let fresh;
+                let index = match shared {
+                    Some(index) => index,
+                    None => {
+                        fresh = open_index_cold(index_path, engine)?;
+                        &fresh
+                    }
+                };
                 let started = Instant::now();
                 let (tx_path, data_path) =
                     read_stored_tx_data_path(index, PartitionChunkOffset(offset))?;
@@ -445,12 +485,13 @@ fn run_baseline(index_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> 
         )
     };
     if args.cold {
-        let stats = phase(true);
+        let stats = phase(true, None);
         attempted += stats.attempted;
         succeeded += stats.succeeded;
     }
     if args.warm {
-        let stats = phase(false);
+        let index = open_index(index_path, engine, false)?;
+        let stats = phase(false, Some(&index));
         attempted += stats.attempted;
         succeeded += stats.succeeded;
     }
@@ -840,6 +881,16 @@ fn classify_mdbx(row: Option<Vec<u8>>) -> MdbxSchema {
         }
         Some(_) => MdbxSchema::Foreign,
         None => MdbxSchema::V1,
+    }
+}
+
+/// Fresh open for one cold sample. RocksDB gets a private 64 MiB block cache
+/// that dies with the handle, so the process-wide cache cannot serve it.
+fn open_index_cold(path: &Path, engine: Engine) -> eyre::Result<SubmoduleIndex> {
+    match engine {
+        #[cfg(feature = "rocksdb")]
+        Engine::Rocks => SubmoduleIndex::open_rocks_with_block_cache(path, 64 * 1024 * 1024),
+        _ => open_index(path, engine, false),
     }
 }
 
