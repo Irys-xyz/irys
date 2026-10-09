@@ -51,39 +51,6 @@ fn unpack_packed(config: &Config, packed: &PackedChunk) -> UnpackedChunk {
     )
 }
 
-/// Pack `unpacked` the way this module would store it, so a ledger client that
-/// decodes [`PackedChunk`] can unpack the cache hit.
-fn pack_for_module(
-    config: &Config,
-    partition_offset: PartitionChunkOffset,
-    partition_hash: irys_types::partition::PartitionHash,
-    unpacked: UnpackedChunk,
-) -> PackedChunk {
-    let consensus = &config.consensus;
-    let chunk_size = consensus.chunk_size as usize;
-    let mut entropy = Vec::with_capacity(chunk_size);
-    irys_packing::capacity_single::compute_entropy_chunk(
-        config.node_config.miner_address(),
-        u64::from(partition_offset.0),
-        partition_hash.0,
-        consensus.entropy_packing_iterations,
-        chunk_size,
-        &mut entropy,
-        consensus.chain_id,
-    );
-    let bytes = irys_packing::packing_xor_vec_u8(entropy, &unpacked.bytes.0);
-    PackedChunk {
-        data_root: unpacked.data_root,
-        data_size: unpacked.data_size,
-        data_path: unpacked.data_path,
-        bytes: irys_types::Base64(bytes),
-        packing_address: config.node_config.miner_address(),
-        partition_offset,
-        tx_offset: unpacked.tx_offset,
-        partition_hash,
-    }
-}
-
 /// Provides chunks to `actix::web` front end (mostly)
 #[derive(Debug, Clone)]
 pub struct ChunkProvider {
@@ -112,9 +79,8 @@ impl ChunkProvider {
     /// Packed chunk for one ledger offset.
     ///
     /// `Ok(None)` when no storage module covers the offset, or the module has
-    /// no body and the cache does not either. A cache hit is packed with this
-    /// module's entropy so the ledger response stays a [`PackedChunk`].
-    /// `Err` is a real read failure, not a hole.
+    /// no body on disk. This route does not read the chunk cache and does not
+    /// compute packing entropy. `Err` is a real read failure, not a hole.
     pub fn get_chunk_by_ledger_offset(
         &self,
         ledger: DataLedger,
@@ -141,14 +107,18 @@ impl ChunkProvider {
                 note_chunk_read(SERVE_LEDGER, "storage_module", "hit");
                 Ok(Some(packed))
             }
-            Ok(None) => self.ledger_cache_as_packed(&module, ledger_offset),
+            Ok(None) => {
+                note_chunk_read(SERVE_LEDGER, "storage_module", "miss");
+                Ok(None)
+            }
             Err(error) if missing_on_disk(&error) => {
                 debug!(
                     error = %error,
                     ledger.offset = *ledger_offset,
                     "ledger chunk indexed without a body"
                 );
-                self.ledger_cache_as_packed(&module, ledger_offset)
+                note_chunk_read(SERVE_LEDGER, "storage_module", "miss");
+                Ok(None)
             }
             Err(error) => {
                 note_chunk_read(SERVE_LEDGER, "storage_module", "error");
@@ -157,41 +127,9 @@ impl ChunkProvider {
         }
     }
 
-    /// The covering module has no body. Pack a cached body with that module's
-    /// entropy, or return `Ok(None)` when the cache has none.
-    fn ledger_cache_as_packed(
-        &self,
-        module: &crate::StorageModule,
-        ledger_offset: LedgerChunkOffset,
-    ) -> eyre::Result<Option<PackedChunk>> {
-        note_chunk_read(SERVE_LEDGER, "storage_module", "miss");
-        let range = module.get_storage_module_ledger_offsets()?;
-        let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
-        let Some((data_root, tx_offset)) = module.data_root_and_tx_offset_at(partition_offset)?
-        else {
-            return Ok(None);
-        };
-        let Some(unpacked) = self.cached_unpacked(SERVE_LEDGER, data_root, tx_offset)? else {
-            return Ok(None);
-        };
-        let Some(partition_hash) = module.partition_hash() else {
-            debug!(
-                ledger.offset = *ledger_offset,
-                "cache hit has no partition hash to pack with"
-            );
-            return Ok(None);
-        };
-        Ok(Some(pack_for_module(
-            &self.config,
-            partition_offset,
-            partition_hash,
-            unpacked,
-        )))
-    }
-
     /// Retrieves a chunk from a ledger and unpacks it (entropy recompute + XOR + tail trim).
     ///
-    /// `Ok(None)` when no body is stored and the cache has none.
+    /// `Ok(None)` when no body is stored. This does not read the chunk cache.
     pub fn get_unpacked_chunk_by_ledger_offset(
         &self,
         ledger: DataLedger,
@@ -895,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn ledger_and_span_use_the_cache_when_the_module_has_no_body() {
+    fn span_uses_the_cache_when_the_module_has_no_body() {
         let tmp = TempDirBuilder::new()
             .prefix("ledger-cache-fallback")
             .with_tracing()
@@ -909,11 +847,13 @@ mod tests {
         let db = create_test_db(&tmp.path().join("db"));
         cache_one(&db, &tx, &data);
         let provider = make_provider(config.clone(), vec![Arc::clone(&sm)], db);
-        let packed = provider
-            .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(0))
-            .unwrap()
-            .expect("cached body");
-        assert_eq!(unpack_packed(&config, &packed).bytes.0, data);
+        assert!(
+            provider
+                .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(0))
+                .unwrap()
+                .is_none(),
+            "the ledger route does not pack a cached body"
+        );
 
         let span = provider
             .get_unpacked_chunks_by_ledger_span(
@@ -1004,10 +944,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let packed = provider
-            .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(3))
-            .unwrap()
-            .expect("ledger cache hit");
-        assert_eq!(unpack_packed(&config, &packed).bytes.0, hole_data);
+        assert!(
+            provider
+                .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(3))
+                .unwrap()
+                .is_none(),
+            "the ledger route does not pack a cached body"
+        );
     }
 }
