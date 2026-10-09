@@ -162,8 +162,11 @@ pub fn run_collecting(cmd: Cmd<'_>) -> eyre::Result<(Collected, eyre::Result<()>
 }
 
 /// Run a cargo build command through [`run_collecting`] and record what it used, so the unit
-/// prune keeps it. A failed build keeps the previous record; a failed record only warns.
+/// prune keeps it. A failed build keeps the previous record; a failed record only warns. The
+/// shared run lock is held from before the build until the record is written, so no prune runs
+/// while the build's units are in use but not yet recorded.
 pub fn run_recorded(cmd: Cmd<'_>, invocation: &str) -> eyre::Result<()> {
+    let _run_lock = lock_target_dir();
     let (collected, result) = run_collecting(cmd)?;
     if collected.build_succeeded {
         record_run(invocation, &collected.artifacts);

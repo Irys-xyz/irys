@@ -226,7 +226,16 @@ pub fn record_usage(target_dir: &Path, invocation: &str, artifacts: &[PathBuf]) 
         body.push_str(&path.to_string_lossy());
         body.push('\n');
     }
-    fs::write(dir.join(format!("{:016x}.txt", hasher.finish())), body)
+    // Written aside and renamed over the record, so a concurrent prune reads the old record or
+    // the new one, never a truncated one. A prune that reads the aside file too only keeps more.
+    let record = dir.join(format!("{:016x}.txt", hasher.finish()));
+    let aside = dir.join(format!(
+        "{:016x}.txt.{}",
+        hasher.finish(),
+        std::process::id()
+    ));
+    fs::write(&aside, body)?;
+    fs::rename(&aside, &record)
 }
 
 /// What one unit prune pass removed.

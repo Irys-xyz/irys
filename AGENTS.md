@@ -42,10 +42,11 @@ Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp
   another build sharing this target dir fails on a missing artifact — nextest
   `No such file or directory` launching a test binary, rustc `can't find crate` or
   `extern location ... does not exist`, or a build that keeps recompiling the same dependencies
-  (e.g. Reth) — a prune removed something that build still used. `xtask test` and `xtask flaky`
-  hold a shared lock on the target dir, and a prune is skipped while another run holds it; plain
-  `cargo` commands do not take that lock. Run with `XTASK_NO_PRUNE=1` (or `--no-prune`), and set it
-  for every agent that runs plain `cargo` in a target dir shared with others.
+  (e.g. Reth) — a prune removed something that build still used. `xtask test`, `flaky`, `check`,
+  `full-check` and `clippy` hold a shared lock on the target dir, and a prune is skipped while
+  another run holds it; plain `cargo` commands do not take that lock. Run with
+  `XTASK_NO_PRUNE=1` (or `--no-prune`), and set it for every agent that runs plain `cargo` in a
+  target dir shared with others.
   `RUST_LOG=xtask=debug` logs why each file was kept or removed; the rules are in
   `xtask/src/prune.rs`.
 - Do not set `RUSTFLAGS`: that replaces `.cargo/config.toml`
