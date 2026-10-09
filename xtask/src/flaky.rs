@@ -31,9 +31,10 @@ use xshell::{Shell, cmd};
 use crate::failures::{
     FailuresFile, build_failure_filter, generate_nextest_config, get_monitor_dir,
 };
+use crate::prune;
 use crate::util::{
     NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, remove_ring_env_vars,
-    run_recorded, shell_quote,
+    run_recorded, shell_quote, target_dir,
 };
 
 /// Options for the flaky-detection run, parsed from the CLI.
@@ -526,6 +527,15 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     .run();
 
     if opts.clean {
+        // `cargo clean` deletes the whole target dir: another xtask run's binaries and the run
+        // lock file too. Clean only while no other run holds that lock.
+        let dir = target_dir()?;
+        let Some(_clean_lock) = prune::try_lock_run_exclusive(&dir)? else {
+            eyre::bail!(
+                "--clean: another xtask run is using {}; cargo clean would delete its files",
+                dir.display()
+            );
+        };
         println!("Cleaning workspace...");
         cmd!(sh, "cargo clean").run()?;
     }
@@ -718,6 +728,13 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             ];
             run_teed(sh, &args, &stats_base, &log_path)?;
             let outcomes = load_outcomes(&stats_base);
+            // As in phase 1: no results means nextest failed, not that nothing failed.
+            if outcomes.is_empty() {
+                eyre::bail!(
+                    "stress iteration {i} recorded no test results; see {}",
+                    log_path.display()
+                );
+            }
             for (name, outcome) in outcomes {
                 stress.entry(name).or_default().record(outcome);
             }
@@ -856,10 +873,11 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let genuine_count = genuine.len();
 
     // Feed genuine flakes into failures.json so `xtask test --rerun-failures`
-    // can pick them up. Always rewrite it for the current run — when there are no
-    // genuine flakes, clear it so `--rerun-failures` doesn't re-run stale entries
-    // from a previous run.
-    if genuine_count > 0 {
+    // can pick them up. Only a full-suite discovery run replaces the file: a
+    // verify or targeted run saw only the tests it was given, so it must not
+    // drop the failures that `xtask test` recorded for others.
+    let discovery = !verify_mode && !targeted;
+    if discovery && genuine_count > 0 {
         let mut failures = FailuresFile {
             failed_tests: genuine.iter().map(|r| r.name.clone()).collect(),
         };
@@ -867,7 +885,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
         if let Err(e) = failures.save() {
             eprintln!("warning: failed to update failures.json: {e}");
         }
-    } else if let Err(e) = FailuresFile::clear() {
+    } else if discovery && let Err(e) = FailuresFile::clear() {
         eprintln!("warning: failed to clear failures.json: {e}");
     }
 
