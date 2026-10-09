@@ -421,7 +421,8 @@ pub enum DataSyncServiceMessage {
     },
     GetActivePeersList(oneshot::Sender<Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>>),
     /// Entropy offsets a retired body-migration job left behind. The local-cache
-    /// miss memo is cleared and the offsets are queued ahead of other work.
+    /// miss memo is cleared. Holes join the tail of the ready queue, and only
+    /// while a hot slot is free. A blocked offset stays blocked.
     BodyMigrationHoles {
         storage_module_id: usize,
         chunk_offsets: Vec<PartitionChunkOffset>,

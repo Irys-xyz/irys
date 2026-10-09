@@ -428,6 +428,14 @@ impl ChunkOrchestrator {
                         slot.expired = false;
                     }
                 }
+                // Already expired, and the key has not moved. Try again. The
+                // first expiry is the only one counted. A full queue must not
+                // make this offset wait another timeout.
+                (true, Some((start, _)), Some(hold)) if hold.expired && start <= hold.anchor => {
+                    if self.is_entropy(offset) {
+                        promote.push(offset);
+                    }
+                }
                 (true, Some((start, _)), hold)
                     if hold.is_none_or(|hold| {
                         now.saturating_duration_since(hold.since) >= timeout
@@ -461,11 +469,19 @@ impl ChunkOrchestrator {
         }
         self.body_holds
             .retain(|offset, _| self.chunk_requests.contains_key(offset));
+        // Held offsets are not hot. Promoting all of them would skip the
+        // pending budget and bury the write head. The rest stay Held and this
+        // function takes another batch when a slot is free.
+        let mut slots = self.free_hot_slots();
         for offset in promote {
+            if slots == 0 {
+                break;
+            }
             if let Some(request) = self.chunk_requests.get_mut(&offset) {
                 request.request_state = ChunkRequestState::Pending;
                 request.ready_since = now;
                 self.ready_offsets.push_back(offset);
+                slots -= 1;
             }
         }
     }
@@ -563,18 +579,7 @@ impl ChunkOrchestrator {
         // Ready and in-flight work share the configured hot-work budget.
         // Delayed entries do not consume it, otherwise a sparse prefix could
         // prevent discovery of later Entropy forever.
-        let hot_count = self
-            .chunk_requests
-            .values()
-            .filter(|request| {
-                matches!(
-                    request.request_state,
-                    ChunkRequestState::Pending
-                        | ChunkRequestState::Requested(..)
-                        | ChunkRequestState::AwaitingDurability(..)
-                )
-            })
-            .count();
+        let hot_count = self.hot_request_count();
 
         let max_chunk_offset = self.get_max_chunk_offset();
         let pa = self.storage_module.partition_assignment().unwrap();
@@ -910,13 +915,37 @@ impl ChunkOrchestrator {
         }
     }
 
-    /// Queue entropy holes from a retired body-migration job at the front.
+    /// Offsets in Pending, Requested, or AwaitingDurability. Held, Delayed, and
+    /// Blocked do not consume the hot budget.
+    fn hot_request_count(&self) -> usize {
+        self.chunk_requests
+            .values()
+            .filter(|request| {
+                matches!(
+                    request.request_state,
+                    ChunkRequestState::Pending
+                        | ChunkRequestState::Requested(..)
+                        | ChunkRequestState::AwaitingDurability(..)
+                )
+            })
+            .count()
+    }
+
+    fn free_hot_slots(&self) -> usize {
+        (self.config.data_sync.max_pending_chunk_requests as usize)
+            .saturating_sub(self.hot_request_count())
+    }
+
+    /// Queue entropy holes from a retired body-migration job at the tail.
     ///
-    /// Clears a local-cache miss memo so the next dispatch reads the cache
-    /// once more. An in-flight fetch is left alone. An offset that is not
-    /// entropy is skipped.
+    /// Clears a local-cache miss memo so a later dispatch reads the cache once
+    /// more. An in-flight fetch is left alone. A blocked offset keeps its
+    /// reason. New holes are inserted only while a hot slot is free; the hole
+    /// scan picks up the rest. An offset already in the ready queue keeps its
+    /// place, so this does not pass the term-ledger write head.
     pub(crate) fn queue_body_migration_holes(&mut self, offsets: &[PartitionChunkOffset]) {
         let now = Instant::now();
+        let mut slots = self.free_hot_slots();
         let mut queued = Vec::new();
         for &offset in offsets {
             if !matches!(
@@ -935,16 +964,27 @@ impl ChunkOrchestrator {
                 {
                     continue;
                 }
+                Some(request) if matches!(request.request_state, ChunkRequestState::Blocked(_)) => {
+                    request.local_cache_miss = false;
+                }
                 Some(request) => {
                     request.local_cache_miss = false;
                     if !matches!(request.request_state, ChunkRequestState::Pending) {
+                        if slots == 0 {
+                            continue;
+                        }
                         request.request_state = ChunkRequestState::Pending;
                         request.ready_since = now;
+                        slots -= 1;
                     }
                     queued.push(offset);
                 }
                 None => {
+                    if slots == 0 {
+                        continue;
+                    }
                     if self.enqueue_pending(offset, now, false) {
+                        slots -= 1;
                         queued.push(offset);
                     }
                 }
@@ -953,10 +993,11 @@ impl ChunkOrchestrator {
         if queued.is_empty() {
             return;
         }
-        let front: HashSet<_> = queued.iter().copied().collect();
-        self.ready_offsets.retain(|offset| !front.contains(offset));
-        for offset in queued.into_iter().rev() {
-            self.ready_offsets.push_front(offset);
+        let already: HashSet<_> = self.ready_offsets.iter().copied().collect();
+        for offset in queued {
+            if !already.contains(&offset) {
+                self.ready_offsets.push_back(offset);
+            }
         }
     }
 

@@ -1503,9 +1503,9 @@ async fn local_cache_index_only_row_is_a_miss() {
     assert!(metrics::test_fetch_by_source_count("local_cache", "not_found") > before);
 }
 
-/// A retired body job clears the cache-miss memo and puts the hole at the
-/// front of the queue. The next dispatch writes the cached body. An offset
-/// that is not entropy, and a fetch already in flight, are left alone.
+/// A retired body job clears the cache-miss memo and leaves the hole in its
+/// queue place. The next dispatch writes the cached body. An offset that is
+/// not entropy, and a fetch already in flight, are left alone.
 #[test_log::test(tokio::test)]
 async fn retired_holes_clear_the_cache_memo_and_are_written_locally() {
     let tmp = TempDirBuilder::new().with_tracing().build();
@@ -1537,7 +1537,8 @@ async fn retired_holes_clear_the_cache_memo_and_are_written_locally() {
         orch.chunk_requests[&offset].request_state,
         ChunkRequestState::Pending
     ));
-    assert_eq!(orch.ready_offsets.front(), Some(&offset));
+    assert_eq!(orch.ready_offsets.front(), Some(&later));
+    assert!(orch.ready_offsets.contains(&offset));
     assert!(matches!(
         orch.chunk_requests[&later].request_state,
         ChunkRequestState::Requested(_, _)
@@ -1783,4 +1784,119 @@ async fn pending_body_coverage_read_error_does_not_spin() {
     orch.fail_coverage_read = false;
     orch.prepare_tick();
     assert_eq!(orch.coverage_reads, 2);
+}
+
+/// Retired holes join the tail and stop at the hot budget. The offset already
+/// at the front stays there. Offsets past the budget are not tracked.
+#[test_log::test(tokio::test)]
+async fn retired_holes_keep_the_write_head_and_the_hot_budget() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 4, 2);
+    let sm = packed_sm_for_ledger(&config, 4, DataLedger::Submit);
+    let (mut orch, _fetcher) = make_orchestrator_with_db(sm, &config, open_test_db(&config));
+    let head = PartitionChunkOffset::from(3);
+    insert_pending(&mut orch, head);
+
+    orch.queue_body_migration_holes(&[
+        PartitionChunkOffset::from(0),
+        PartitionChunkOffset::from(1),
+        PartitionChunkOffset::from(2),
+    ]);
+
+    assert_eq!(orch.ready_offsets.front(), Some(&head));
+    assert_eq!(
+        orch.ready_offsets.back(),
+        Some(&PartitionChunkOffset::from(0))
+    );
+    assert_eq!(orch.ready_offsets.len(), 2);
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0))
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(1))
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(2))
+    );
+}
+
+/// A blocked offset keeps its reason. The handoff only clears the cache memo.
+#[test_log::test(tokio::test)]
+async fn retired_hole_does_not_unblock_a_missing_index() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let (mut orch, _fetcher) = make_orchestrator_with_db(sm, &config, open_test_db(&config));
+    let offset = PartitionChunkOffset::from(0);
+    insert_pending(&mut orch, offset);
+    orch.chunk_requests.get_mut(&offset).unwrap().request_state =
+        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex);
+    orch.chunk_requests
+        .get_mut(&offset)
+        .unwrap()
+        .local_cache_miss = true;
+    orch.ready_offsets.clear();
+
+    orch.queue_body_migration_holes(&[offset]);
+
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+    ));
+    assert!(!orch.chunk_requests[&offset].local_cache_miss);
+    assert!(!orch.ready_offsets.contains(&offset));
+}
+
+/// After the job is gone, only as many held offsets as free hot slots become
+/// Pending. A later tick takes the next one once a slot is free.
+#[test_log::test(tokio::test)]
+async fn release_promotes_held_offsets_only_up_to_the_hot_budget() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 4, 1);
+    let sm = packed_sm(&config, 4);
+    let (tx, _data) = signed_tx(&config, 3);
+    index_tx(&sm, &tx, 2);
+    let (mut orch, _fetcher) =
+        make_orchestrator_with_db(sm.clone(), &config, open_test_db(&config));
+    for value in 0..3_u32 {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+    assert!(!orch.dispatch_next());
+
+    for (key, job) in sm.pending_body_migrations().expect("pending rows") {
+        assert!(
+            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+                .expect("settle")
+        );
+    }
+    orch.prepare_tick();
+    assert_eq!(count_state(&orch, &ChunkRequestState::Pending), 1);
+    assert_eq!(count_state(&orch, &ChunkRequestState::HeldByBodyWorker), 2);
+
+    orch.prepare_tick();
+    assert_eq!(count_state(&orch, &ChunkRequestState::Pending), 1);
+    assert_eq!(count_state(&orch, &ChunkRequestState::HeldByBodyWorker), 2);
+
+    let pending = orch
+        .chunk_requests
+        .iter()
+        .find(|(_, request)| matches!(request.request_state, ChunkRequestState::Pending))
+        .map(|(offset, _)| *offset)
+        .expect("one pending offset");
+    orch.chunk_requests.get_mut(&pending).unwrap().request_state = ChunkRequestState::Completed;
+    orch.prepare_tick();
+    assert_eq!(count_state(&orch, &ChunkRequestState::Pending), 1);
+    assert_eq!(count_state(&orch, &ChunkRequestState::HeldByBodyWorker), 1);
+}
+
+fn count_state(orch: &ChunkOrchestrator, state: &ChunkRequestState) -> usize {
+    orch.chunk_requests
+        .values()
+        .filter(|request| &request.request_state == state)
+        .count()
 }
