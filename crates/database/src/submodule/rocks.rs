@@ -31,7 +31,7 @@
 //! keep a private cache. `max_open_files` stays `-1`: a finite cap drops
 //! table readers and reloads the filter on the next read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -58,10 +58,11 @@ use super::interval::{
 use super::store::PresenceReconcile;
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
-    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, SUBMODULE_SCHEMA,
-    TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
-    TxPathIntervalByStart,
+    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, Placement,
+    SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, TxLeafBinding, TxLeafBindingByTxPathHash,
+    TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
 };
+use super::v3::{self, IndexLayout};
 use super::{
     SubmoduleRead, SubmoduleStore as _, SubmoduleWrite, tables::Metadata as MetadataTable,
 };
@@ -734,17 +735,6 @@ impl Cf {
         Self::Metadata,
     ];
 
-    /// Index families. `clear` deletes these and leaves the schema row in place.
-    const INDEX: [Self; 7] = [
-        Self::PathHashes,
-        Self::DataPath,
-        Self::TxPath,
-        Self::DataRoots,
-        Self::TxLeaf,
-        Self::Pending,
-        Self::Interval,
-    ];
-
     fn index(self) -> usize {
         match self {
             Self::PathHashes => 0,
@@ -759,15 +749,46 @@ impl Cf {
     }
 
     fn name(self) -> &'static str {
+        self.name_in(IndexLayout::V2)
+    }
+
+    /// On-disk family name for this layout. v3 renames the placement families.
+    fn name_in(self, layout: IndexLayout) -> &'static str {
+        match (layout, self) {
+            (IndexLayout::V3, Self::Interval) => "PlacementIntervals",
+            (IndexLayout::V3, Self::DataRoots) => "DataRootPlacements",
+            (IndexLayout::V3, Self::Pending) => "PendingBodyMigrations",
+            _ => match self {
+                Self::PathHashes => <ChunkPathHashesByOffset as Table>::NAME,
+                Self::DataPath => <ChunkDataPathByOffset as Table>::NAME,
+                Self::TxPath => <TxPathByTxPathHash as Table>::NAME,
+                Self::DataRoots => <DataRootInfosByDataRoot as Table>::NAME,
+                Self::TxLeaf => <TxLeafBindingByTxPathHash as Table>::NAME,
+                Self::Pending => <PendingBodyMigrationsByOffset as Table>::NAME,
+                Self::Interval => <TxPathIntervalByStart as Table>::NAME,
+                Self::Metadata => <MetadataTable as Table>::NAME,
+            },
+        }
+    }
+
+    /// Names `cf_handle` may find. A directory has only one of each pair.
+    fn lookup_names(self) -> &'static [&'static str] {
         match self {
-            Self::PathHashes => <ChunkPathHashesByOffset as Table>::NAME,
-            Self::DataPath => <ChunkDataPathByOffset as Table>::NAME,
-            Self::TxPath => <TxPathByTxPathHash as Table>::NAME,
-            Self::DataRoots => <DataRootInfosByDataRoot as Table>::NAME,
-            Self::TxLeaf => <TxLeafBindingByTxPathHash as Table>::NAME,
-            Self::Pending => <PendingBodyMigrationsByOffset as Table>::NAME,
-            Self::Interval => <TxPathIntervalByStart as Table>::NAME,
-            Self::Metadata => <MetadataTable as Table>::NAME,
+            Self::Interval => &["TxPathIntervalByStart", "PlacementIntervals"],
+            Self::DataRoots => &["DataRootInfosByDataRoot", "DataRootPlacements"],
+            Self::Pending => &["PendingBodyMigrationsByOffset", "PendingBodyMigrations"],
+            Self::PathHashes => &["ChunkPathHashesByOffset"],
+            Self::DataPath => &["ChunkDataPathByOffset"],
+            Self::TxPath => &["TxPathByTxPathHash"],
+            Self::TxLeaf => &["TxLeafBindingByTxPathHash"],
+            Self::Metadata => &["Metadata"],
+        }
+    }
+
+    fn opened_by(self, layout: IndexLayout) -> bool {
+        match layout {
+            IndexLayout::V2 => true,
+            IndexLayout::V3 => !matches!(self, Self::PathHashes | Self::TxPath | Self::TxLeaf),
         }
     }
 
@@ -830,7 +851,12 @@ impl CompactState {
 }
 
 impl SmallFileCompactor {
-    fn start(db: Arc<DB>, threshold: usize, submodule: String) -> eyre::Result<Arc<Self>> {
+    fn start(
+        db: Arc<DB>,
+        threshold: usize,
+        submodule: String,
+        layout: IndexLayout,
+    ) -> eyre::Result<Arc<Self>> {
         let state = Arc::new(CompactState::new());
         let this = Arc::new(Self {
             state: Arc::clone(&state),
@@ -841,7 +867,7 @@ impl SmallFileCompactor {
         }
         let join = std::thread::Builder::new()
             .name("irys-idx-compact".into())
-            .spawn(move || run_small_file_compact(&state, &db, threshold, &submodule))
+            .spawn(move || run_small_file_compact(&state, &db, threshold, &submodule, layout))
             .wrap_err("spawn submodule index small-file compact thread")?;
         {
             let mut slot = this
@@ -871,12 +897,18 @@ impl Drop for SmallFileCompactor {
     }
 }
 
-fn run_small_file_compact(state: &CompactState, db: &DB, threshold: usize, submodule: &str) {
+fn run_small_file_compact(
+    state: &CompactState,
+    db: &DB,
+    threshold: usize,
+    submodule: &str,
+    layout: IndexLayout,
+) {
     loop {
         if state.stop.load(Ordering::Acquire) {
             return;
         }
-        compact_small_files(state, db, threshold, submodule);
+        compact_small_files(state, db, threshold, submodule, layout);
         if state.stop.load(Ordering::Acquire) {
             return;
         }
@@ -894,12 +926,18 @@ fn run_small_file_compact(state: &CompactState, db: &DB, threshold: usize, submo
     }
 }
 
-fn compact_small_files(state: &CompactState, db: &DB, threshold: usize, submodule: &str) {
+fn compact_small_files(
+    state: &CompactState,
+    db: &DB,
+    threshold: usize,
+    submodule: &str,
+    layout: IndexLayout,
+) {
     if threshold == 0 {
         return;
     }
     let limit = threshold as u64;
-    for cf in Cf::ALL {
+    for cf in families(layout) {
         if state.stop.load(Ordering::Acquire) {
             return;
         }
@@ -925,7 +963,7 @@ fn compact_small_files(state: &CompactState, db: &DB, threshold: usize, submodul
         state.files_after.fetch_add(after, Ordering::Relaxed);
         tracing::info!(
             submodule,
-            cf = cf.name(),
+            cf = cf.name_in(layout),
             files_before = before,
             files_after = after,
             bytes,
@@ -972,6 +1010,8 @@ pub struct RocksSubmoduleStore {
     stats: Option<Arc<Options>>,
     /// Submodule directory name. Metric label. Not an absolute path.
     submodule: String,
+    /// Chosen from the SCHEMA file before `DB::open`. An empty directory is v3.
+    layout: IndexLayout,
 }
 
 /// Background work visible around one bench read shape.
@@ -997,7 +1037,7 @@ impl std::fmt::Debug for RocksSubmoduleStore {
 
 impl RocksSubmoduleStore {
     pub fn open(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_inner(path, RocksTuning::baseline(), true, false, None, true)
+        Self::open_inner(path, RocksTuning::baseline(), true, false, None, true, None)
     }
 
     /// Same open as [`Self::open`], with a private block cache.
@@ -1017,7 +1057,24 @@ impl RocksSubmoduleStore {
 
     /// Open with an explicit preset. [`Self::open`] stays on the baseline.
     pub fn open_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, false, false, None, true)
+        Self::open_inner(path, tuning, false, false, None, true, None)
+    }
+
+    /// Open or create a schema-v2 directory.
+    ///
+    /// An empty directory gets the Compact families. A directory whose schema
+    /// file is already v3 is refused. Tests that still exercise stored tx
+    /// paths use this. Production [`Self::open`] creates schema v3.
+    pub fn open_v2_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        Self::open_inner(
+            path,
+            tuning,
+            false,
+            false,
+            None,
+            true,
+            Some(IndexLayout::V2),
+        )
     }
 
     /// Bench open. Same table cache as [`Self::open`], and it skips the
@@ -1025,7 +1082,7 @@ impl RocksSubmoduleStore {
     ///
     /// Histograms and timers stay off.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Self::open_inner(path, tuning, true, true, None, true)
+        Self::open_inner(path, tuning, true, true, None, true, None)
     }
 
     /// Baseline open on an explicit resource set.
@@ -1043,6 +1100,7 @@ impl RocksSubmoduleStore {
             false,
             Some(resources),
             true,
+            None,
         )
     }
 
@@ -1058,7 +1116,15 @@ impl RocksSubmoduleStore {
     /// durable. A crash before that leaves `CURRENT` and no SCHEMA file.
     /// [`Self::open`] refuses that directory.
     pub(super) fn open_converting(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_inner(path, RocksTuning::baseline(), true, false, None, false)
+        Self::open_inner(
+            path,
+            RocksTuning::baseline(),
+            true,
+            false,
+            None,
+            false,
+            Some(IndexLayout::V2),
+        )
     }
 
     /// Open a schema-v1 directory for point reads of `ChunkPathHashesByOffset`.
@@ -1077,7 +1143,12 @@ impl RocksSubmoduleStore {
         let submodule = submodule_label(&path);
         Ok(Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
-            compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone())?,
+            compact: SmallFileCompactor::start(
+                Arc::clone(&db),
+                0,
+                submodule.clone(),
+                IndexLayout::V2,
+            )?,
             db,
             resources,
             write: Arc::new(Mutex::new(())),
@@ -1085,6 +1156,7 @@ impl RocksSubmoduleStore {
             submodule,
             path,
             stats,
+            layout: IndexLayout::V2,
         })
     }
 
@@ -1202,19 +1274,24 @@ impl RocksSubmoduleStore {
         preload_tables: bool,
         resources: Option<Arc<RocksResources>>,
         stamp_schema: bool,
+        force: Option<IndexLayout>,
     ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        if stamp_schema {
+        let layout = if stamp_schema {
             // A directory with CURRENT and no SCHEMA is a crashed conversion
             // or a crashed first open. Stamping it here would hide missing rows.
             refuse_incomplete_directory(&path)?;
-            check_schema_file(&path)?;
-        } else if path.join(SCHEMA_FILE).is_file() {
-            eyre::bail!(
-                "refusing to convert into completed rocks index {}",
-                path.display()
-            );
-        }
+            resolve_layout(&path, force)?
+        } else {
+            if path.join(SCHEMA_FILE).is_file() {
+                eyre::bail!(
+                    "refusing to convert into completed rocks index {}",
+                    path.display()
+                );
+            }
+            // The v2 converter copies Compact rows. Schema v3 is a later copy.
+            force.unwrap_or(IndexLayout::V2)
+        };
         let resources = shared_resources_for(tuning, resources)?;
         let (db, stats) = open_db(
             &path,
@@ -1222,12 +1299,13 @@ impl RocksSubmoduleStore {
             collect_stats,
             preload_tables,
             resources.as_deref(),
+            layout,
         )?;
         if stamp_schema {
-            ensure_schema_row(&db)?;
+            ensure_schema_row(&db, layout)?;
             let marker = path.join(SCHEMA_FILE);
             if !marker.exists() {
-                fs::write(&marker, SCHEMA_TEXT).wrap_err("write schema marker")?;
+                fs::write(&marker, schema_text(layout)).wrap_err("write schema marker")?;
             }
         }
         let group = GroupCommit::new();
@@ -1239,6 +1317,7 @@ impl RocksSubmoduleStore {
                 Arc::clone(&db),
                 tuning.small_file_compact_threshold,
                 submodule.clone(),
+                layout,
             )?,
             db,
             resources,
@@ -1247,6 +1326,7 @@ impl RocksSubmoduleStore {
             submodule,
             path,
             stats,
+            layout,
         })
     }
 
@@ -1258,15 +1338,15 @@ impl RocksSubmoduleStore {
         self.db
             .flush_wal(true)
             .wrap_err("sync wal before schema marker")?;
-        ensure_schema_row(&self.db)?;
-        write_schema_marker_file(&self.path)
+        ensure_schema_row(&self.db, self.layout)?;
+        write_schema_marker_file(&self.path, schema_text(self.layout))
     }
 
     pub(super) fn schema_bytes(&self) -> eyre::Result<Option<Vec<u8>>> {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let key = encode_key(MetadataKey::DBSchemaVersion);
         match self.db.get_cf(&handle, key).wrap_err("read schema row")? {
-            Some(bytes) => Ok(Some(Vec::<u8>::decompress(&bytes)?)),
+            Some(bytes) => decode_schema_payload(self.layout, &bytes).map(Some),
             None => Ok(None),
         }
     }
@@ -1525,6 +1605,10 @@ impl RocksSubmoduleStore {
             db: &self.db,
             snap: &snap,
             overlay: Overlay::default(),
+            layout: self.layout,
+            bindings: HashMap::new(),
+            unfilled: Vec::new(),
+            origin: None,
         };
         let result = f(&mut batch)?;
         batch.commit(sync, &self.submodule)?;
@@ -1620,11 +1704,11 @@ impl RocksSubmoduleStore {
             "irys.rocksdb.memtable_bytes",
             submodule,
         );
-        for cf in Cf::ALL {
+        for cf in families(self.layout) {
             let Ok(handle) = cf_handle(&self.db, cf) else {
                 continue;
             };
-            let name = cf.name();
+            let name = cf.name_in(self.layout);
             set_cf_gauge(
                 &self.db,
                 handle,
@@ -1787,7 +1871,7 @@ impl RocksSubmoduleStore {
             .write
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for cf in Cf::ALL {
+        for cf in families(self.layout) {
             let handle = cf_handle(&self.db, cf)?;
             self.db.flush_cf(&handle).wrap_err("flush column family")?;
             self.db
@@ -1817,7 +1901,7 @@ impl RocksSubmoduleStore {
             .ok_or_else(|| eyre::eyre!("rocksdb.dbstats has no cumulative stall line"))?;
         let mut pending_compaction_bytes = 0_u64;
         let mut flushes = 0_u64;
-        for cf in Cf::ALL {
+        for cf in families(self.layout) {
             let handle = cf_handle(&self.db, cf)?;
             pending_compaction_bytes = pending_compaction_bytes.saturating_add(int_property_cf(
                 &self.db,
@@ -1903,7 +1987,11 @@ impl RocksSubmoduleStore {
             if start > end {
                 continue;
             }
-            let path_count = count_presence_keys(&self.db, &snap, Cf::PathHashes, start, end)?;
+            let path_count = if self.layout == IndexLayout::V2 {
+                count_presence_keys(&self.db, &snap, Cf::PathHashes, start, end)?
+            } else {
+                0
+            };
             let data_count = count_presence_keys(&self.db, &snap, Cf::DataPath, start, end)?;
             path_hash_rows = path_hash_rows.saturating_add(path_count);
             data_path_rows = data_path_rows.saturating_add(data_count);
@@ -1942,7 +2030,7 @@ impl RocksSubmoduleStore {
     #[cfg(test)]
     fn flush_memtables(&self) -> eyre::Result<()> {
         let _guard = self.lock_write();
-        for cf in Cf::ALL {
+        for cf in families(self.layout) {
             let handle = cf_handle(&self.db, cf)?;
             self.db.flush_cf(&handle).wrap_err("flush column family")?;
         }
@@ -1980,7 +2068,7 @@ impl RocksSubmoduleStore {
     /// Keep flushed L0 files in place so a test can pile up tiny SSTs.
     #[cfg(test)]
     fn disable_auto_compaction(&self) -> eyre::Result<()> {
-        for cf in Cf::ALL {
+        for cf in families(self.layout) {
             let handle = cf_handle(&self.db, cf)?;
             self.db
                 .set_options_cf(handle, &[("disable_auto_compactions", "true")])
@@ -2001,9 +2089,74 @@ impl RocksSubmoduleStore {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let key = encode_key(MetadataKey::DBSchemaVersion);
         match self.db.get_cf(&handle, key).wrap_err("read schema row")? {
-            Some(bytes) => Ok(Some(Vec::<u8>::decompress(&bytes)?)),
+            Some(bytes) => decode_schema_payload(self.layout, &bytes).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Rows that do not belong to a live placement interval.
+    ///
+    /// A data-path or pending key must fall inside some interval. A data-root
+    /// point key must be the start of an interval with that data root. An
+    /// info written before its interval, or a data path written before its
+    /// interval, is outside this check's callers.
+    #[cfg(test)]
+    fn rows_outside_live_intervals(&self) -> eyre::Result<Vec<String>> {
+        if self.layout != IndexLayout::V3 {
+            return Ok(Vec::new());
+        }
+        let snap = self.db.snapshot();
+        let mut intervals = Vec::new();
+        {
+            let handle = cf_handle(&self.db, Cf::Interval)?;
+            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+                let (key, value) = item.wrap_err("scan placement intervals")?;
+                let start = PartitionChunkOffset::decode(&key)?.0;
+                intervals.push((start, v3::decode_placement(&value)?));
+            }
+        }
+        let covers = |offset: u32| {
+            intervals
+                .iter()
+                .any(|(start, record)| *start <= offset && record.end >= offset)
+        };
+        let mut orphans = Vec::new();
+        {
+            let handle = cf_handle(&self.db, Cf::DataPath)?;
+            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+                let (key, _) = item.wrap_err("scan data paths")?;
+                let offset = PartitionChunkOffset::decode(&key)?.0;
+                if !covers(offset) {
+                    orphans.push(format!("data path {offset} is outside every interval"));
+                }
+            }
+        }
+        {
+            let handle = cf_handle(&self.db, Cf::Pending)?;
+            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+                let (key, _) = item.wrap_err("scan pending body migrations")?;
+                let offset = PartitionChunkOffset::decode(&key)?.0;
+                if !covers(offset) {
+                    orphans.push(format!("pending job {offset} is outside every interval"));
+                }
+            }
+        }
+        {
+            let handle = cf_handle(&self.db, Cf::DataRoots)?;
+            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+                let (key, _) = item.wrap_err("scan data-root placements")?;
+                let (root, start) = v3::decode_data_root_key(&key)?;
+                let matched = intervals.iter().any(|(interval_start, record)| {
+                    *interval_start == start && H256(record.data_root) == root
+                });
+                if !matched {
+                    orphans.push(format!(
+                        "data-root placement {root} at {start} has no interval"
+                    ));
+                }
+            }
+        }
+        Ok(orphans)
     }
 
     /// Visible keys. Does not read values. A range tombstone hides its span.
@@ -2042,6 +2195,7 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
             db: &self.db,
             snap: &snap,
             overlay: None,
+            layout: self.layout,
         };
         f(&mut rows)
     }
@@ -2087,6 +2241,69 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
 }
 
 impl RocksSubmoduleStore {
+    pub fn stores_tx_paths(&self) -> bool {
+        self.layout == IndexLayout::V2
+    }
+
+    /// First write stores the value. A different stored value refuses.
+    ///
+    /// Schema v2 does not keep these rows. `partition` of `None` leaves the
+    /// partition key absent, so a later assignment can bind it. `clear`
+    /// deletes that key and keeps the packing hash.
+    pub fn bind_packing_identity(
+        &self,
+        partition: Option<H256>,
+        packing_hash: &[u8; 32],
+    ) -> eyre::Result<()> {
+        if self.layout != IndexLayout::V3 {
+            return Ok(());
+        }
+        self.bind_metadata(
+            MetadataKey::PackingParamsHash,
+            packing_hash,
+            "packing identity",
+        )?;
+        if let Some(partition) = partition {
+            self.bind_metadata(MetadataKey::PartitionHash, &partition.0, "partition")?;
+        }
+        Ok(())
+    }
+
+    fn bind_metadata(&self, key: MetadataKey, value: &[u8], label: &str) -> eyre::Result<()> {
+        match self.read_raw_metadata(key)? {
+            Some(existing) if existing.as_slice() == value => Ok(()),
+            Some(_) => eyre::bail!(
+                "submodule index {label} does not match this storage module at {}. Refusing to open. Reset the storage module before rebinding. `submodule-index-convert` changes the schema and does not rebind this value.",
+                self.path.display()
+            ),
+            None => self.write_raw_metadata(key, value),
+        }
+    }
+
+    fn read_raw_metadata(&self, key: MetadataKey) -> eyre::Result<Option<Vec<u8>>> {
+        let handle = cf_handle(&self.db, Cf::Metadata)?;
+        self.db
+            .get_cf(&handle, encode_key(key))
+            .wrap_err("read submodule metadata")
+    }
+
+    fn write_raw_metadata(&self, key: MetadataKey, value: &[u8]) -> eyre::Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.lock_write();
+        self.ensure_writable()?;
+        let handle = cf_handle(&self.db, Cf::Metadata)?;
+        let mut batch = WriteBatch::new();
+        batch.put_cf(&handle, encode_key(key), value);
+        let mut opts = WriteOptions::default();
+        opts.set_sync(true);
+        self.db
+            .write_opt(batch, &opts)
+            .wrap_err("write submodule metadata")?;
+        self.group.note_wal_sync();
+        self.group.cover_durable();
+        Ok(())
+    }
+
     /// Synced metadata write. Same WAL barrier as `update`. Not part of `clear`.
     fn write_metadata(&self, key: MetadataKey, value: Option<Vec<u8>>) -> eyre::Result<()> {
         self.ensure_writable()?;
@@ -2414,6 +2631,7 @@ fn open_db(
     collect_stats: bool,
     preload_tables: bool,
     resources: Option<&RocksResources>,
+    layout: IndexLayout,
 ) -> eyre::Result<(DB, Option<Arc<Options>>)> {
     let cache = open_cache(tuning, resources);
     let mut db_opts = Options::default();
@@ -2462,7 +2680,7 @@ fn open_db(
         apply_shared_limits(&mut db_opts, resources)?;
     }
 
-    let families = user_column_families(&cache, tuning);
+    let families = user_column_families(&cache, tuning, layout);
     let db = DB::open_cf_descriptors(&db_opts, path, families)
         .wrap_err("open rocksdb submodule index")?;
     let stats = collect_stats.then(|| Arc::new(db_opts));
@@ -2496,11 +2714,14 @@ fn open_cache(tuning: &RocksTuning, resources: Option<&RocksResources>) -> rocks
 fn user_column_families(
     cache: &rocksdb::Cache,
     tuning: &RocksTuning,
+    layout: IndexLayout,
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
-    let mut families: Vec<_> = Cf::ALL
-        .into_iter()
+    let mut families: Vec<_> = families(layout)
         .map(|cf| {
-            rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(cache, cf, tuning))
+            rocksdb::ColumnFamilyDescriptor::new(
+                cf.name_in(layout),
+                column_options(cache, cf, tuning),
+            )
         })
         .collect();
     // The binding opens "default" with a private 32 MiB cache when this list
@@ -2646,16 +2867,49 @@ fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
-fn check_schema_file(path: &Path) -> eyre::Result<()> {
+fn schema_text(layout: IndexLayout) -> &'static str {
+    match layout {
+        IndexLayout::V2 => SCHEMA_TEXT,
+        IndexLayout::V3 => SUBMODULE_SCHEMA_V3,
+    }
+}
+
+/// Schema file already on disk, or v3 for an empty directory.
+///
+/// `force` creates that layout when the file is absent. A file that names a
+/// different layout is refused. v1 and any other text is refused and names
+/// the converter.
+fn resolve_layout(path: &Path, force: Option<IndexLayout>) -> eyre::Result<IndexLayout> {
     let marker = path.join(SCHEMA_FILE);
     if !marker.exists() {
-        return Ok(());
+        return Ok(force.unwrap_or(IndexLayout::V3));
     }
-    check_schema_text(path, SCHEMA_TEXT)
+    let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
+    let found = if text == SCHEMA_TEXT {
+        IndexLayout::V2
+    } else if text == SUBMODULE_SCHEMA_V3 {
+        IndexLayout::V3
+    } else {
+        eyre::bail!(
+            "schema file {} does not match this index engine ({text:?}). Run `submodule-index-convert` to move a v1 or v2 index to schema 3, or to roll a schema 3 index back to MDBX v2.",
+            marker.display()
+        );
+    };
+    if let Some(force) = force
+        && force != found
+    {
+        eyre::bail!(
+            "schema file {} is {} and this open asked for {}",
+            marker.display(),
+            schema_text(found),
+            schema_text(force)
+        );
+    }
+    Ok(found)
 }
 
 /// Writes SCHEMA via a temp file and a rename, after the bytes are synced.
-fn write_schema_marker_file(dir: &Path) -> eyre::Result<()> {
+fn write_schema_marker_file(dir: &Path, text: &str) -> eyre::Result<()> {
     let tmp = dir.join("SCHEMA.tmp");
     let final_path = dir.join(SCHEMA_FILE);
     {
@@ -2665,7 +2919,7 @@ fn write_schema_marker_file(dir: &Path) -> eyre::Result<()> {
             .truncate(true)
             .open(&tmp)
             .wrap_err("create schema marker")?;
-        file.write_all(SCHEMA_TEXT.as_bytes())
+        file.write_all(text.as_bytes())
             .wrap_err("write schema marker")?;
         file.sync_all().wrap_err("sync schema marker")?;
     }
@@ -2744,13 +2998,15 @@ fn open_existing_db(
     Ok((db, Some(Arc::new(db_opts))))
 }
 
-fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
+fn ensure_schema_row(db: &DB, layout: IndexLayout) -> eyre::Result<()> {
     let handle = cf_handle(db, Cf::Metadata)?;
     let key = encode_key(MetadataKey::DBSchemaVersion);
-    let expected = schema_value();
+    let expected = schema_value(layout);
     match db.get_cf(&handle, &key).wrap_err("read schema row")? {
         Some(found) if found == expected => Ok(()),
-        Some(_) => eyre::bail!("schema row does not match this index engine"),
+        Some(_) => eyre::bail!(
+            "schema row does not match this index engine. Run `submodule-index-convert` to move a v1 or v2 index to schema 3, or to roll a schema 3 index back to MDBX v2."
+        ),
         None => {
             let mut batch = WriteBatch::new();
             batch.put_cf(&handle, key, expected);
@@ -2761,8 +3017,24 @@ fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
     }
 }
 
-fn schema_value() -> Vec<u8> {
-    compress_value(&SCHEMA_TEXT.as_bytes().to_vec())
+fn schema_value(layout: IndexLayout) -> Vec<u8> {
+    match layout {
+        IndexLayout::V2 => compress_value(&SCHEMA_TEXT.as_bytes().to_vec()),
+        IndexLayout::V3 => SCHEMA_V3_BYTES.to_vec(),
+    }
+}
+
+const SCHEMA_V3_BYTES: &[u8] = SUBMODULE_SCHEMA_V3.as_bytes();
+
+fn decode_schema_payload(layout: IndexLayout, bytes: &[u8]) -> eyre::Result<Vec<u8>> {
+    match layout {
+        IndexLayout::V2 => Ok(Vec::<u8>::decompress(bytes)?),
+        IndexLayout::V3 => Ok(bytes.to_vec()),
+    }
+}
+
+fn families(layout: IndexLayout) -> impl Iterator<Item = Cf> {
+    Cf::ALL.into_iter().filter(move |cf| cf.opened_by(layout))
 }
 
 /// Counters a bench step can subtract. Stall time, flush count, WAL syncs,
@@ -2824,8 +3096,12 @@ fn parse_hms_micros(stamp: &str) -> Option<u64> {
 }
 
 fn cf_handle(db: &DB, cf: Cf) -> eyre::Result<&rocksdb::ColumnFamily> {
-    db.cf_handle(cf.name())
-        .ok_or_else(|| eyre::eyre!("missing column family {}", cf.name()))
+    for name in cf.lookup_names() {
+        if let Some(handle) = db.cf_handle(name) {
+            return Ok(handle);
+        }
+    }
+    eyre::bail!("missing column family {}", cf.name())
 }
 
 fn encode_key<K: Encode>(key: K) -> Vec<u8> {
@@ -2858,7 +3134,8 @@ fn full_cf_end(cf: Cf) -> Vec<u8> {
             exclusive_end_key(PartitionChunkOffset(u32::MAX))
         }
         Cf::TxPath | Cf::DataRoots | Cf::TxLeaf | Cf::Metadata => {
-            let mut key = vec![0xFF; 32];
+            // v3 data-root keys are 36 bytes. A 32-byte end sorts before them.
+            let mut key = vec![0xFF; 36];
             key.push(0);
             key
         }
@@ -2933,12 +3210,19 @@ struct Rows<'a> {
     db: &'a DB,
     snap: &'a rocksdb::Snapshot<'a>,
     overlay: Option<&'a Overlay>,
+    layout: IndexLayout,
 }
 
 struct Batch<'a> {
     db: &'a DB,
     snap: &'a rocksdb::Snapshot<'a>,
     overlay: Overlay,
+    layout: IndexLayout,
+    /// Leaf bindings seen in this batch. Schema v3 does not store them.
+    bindings: HashMap<H256, TxLeafBinding>,
+    /// Interval starts in this batch that still need a data-root info.
+    unfilled: Vec<(u32, H256)>,
+    origin: Option<v3::PlacementOrigin>,
 }
 
 impl<'a> Batch<'a> {
@@ -2947,11 +3231,16 @@ impl<'a> Batch<'a> {
             db: self.db,
             snap: self.snap,
             overlay: Some(&self.overlay),
+            layout: self.layout,
         }
     }
 
     fn put<V: Compress>(&mut self, cf: Cf, key: &[u8], value: &V) {
         self.overlay.maps[cf.index()].insert(key.to_vec(), Some(compress_value(value)));
+    }
+
+    fn put_bytes(&mut self, cf: Cf, key: &[u8], value: Vec<u8>) {
+        self.overlay.maps[cf.index()].insert(key.to_vec(), Some(value));
     }
 
     fn delete(&mut self, cf: Cf, key: &[u8]) {
@@ -2963,6 +3252,10 @@ impl<'a> Batch<'a> {
         offset: PartitionChunkOffset,
         path_hash: Option<ChunkPathHash>,
     ) {
+        // Schema v3 has no path-hash family. A data-path row is the presence bit.
+        if self.layout == IndexLayout::V3 {
+            return;
+        }
         let key = encode_key(offset);
         match path_hash {
             Some(data_path_hash) => self.put(
@@ -2983,6 +3276,9 @@ impl<'a> Batch<'a> {
         end: PartitionChunkOffset,
         tx_path_hash: Option<H256>,
     ) -> eyre::Result<()> {
+        if self.layout == IndexLayout::V3 {
+            return self.assign_v3(start, end, tx_path_hash);
+        }
         if start > end {
             return Ok(());
         }
@@ -3004,6 +3300,184 @@ impl<'a> Batch<'a> {
         self.drop_unreferenced_tx_paths(&existing, &edit)
     }
 
+    fn assign_v3(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        tx_path_hash: Option<H256>,
+    ) -> eyre::Result<()> {
+        if start > end {
+            return Ok(());
+        }
+        let existing = self.rows().v3_intervals_touching(start, end)?;
+        let next = tx_path_hash.map(|hash| {
+            let data_root = self
+                .bindings
+                .get(&hash)
+                .map(|binding| binding.data_root)
+                .unwrap_or(hash);
+            v3::fresh_placement(end.0, data_root, self.origin)
+        });
+        let (delete, put) = v3::plan_v3(&existing, start.0, end.0, next);
+        let touched: Vec<u32> = delete
+            .iter()
+            .copied()
+            .chain(put.iter().map(|row| row.start))
+            .collect();
+        self.unfilled.retain(|(start, _)| !touched.contains(start));
+        for start_at in &delete {
+            if let Some(old) = existing.iter().find(|row| row.start == *start_at) {
+                self.delete_data_root_point(&H256(old.value.data_root), *start_at);
+            }
+            self.delete(Cf::Interval, &encode_key(PartitionChunkOffset(*start_at)));
+        }
+        for row in &put {
+            if let Some(old) = existing
+                .iter()
+                .find(|candidate| candidate.start == row.start)
+                && old.value.data_root != row.value.data_root
+            {
+                self.delete_data_root_point(&H256(old.value.data_root), row.start);
+            }
+            self.put_bytes(
+                Cf::Interval,
+                &encode_key(PartitionChunkOffset(row.start)),
+                v3::encode_placement(&row.value).to_vec(),
+            );
+            if v3::awaits_info(&row.value) {
+                self.unfilled.push((row.start, H256(row.value.data_root)));
+            } else {
+                self.put_data_root_point(row);
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_data_root_point(&mut self, data_root: &H256, start: u32) {
+        self.delete(Cf::DataRoots, &v3::data_root_key(data_root, start));
+    }
+
+    fn put_data_root_point(&mut self, row: &v3::V3Interval) {
+        let value = v3::DataRootPlacement {
+            end: row.value.end,
+            tx_start: row.value.tx_start,
+            data_size: row.value.data_size,
+        };
+        self.put_bytes(
+            Cf::DataRoots,
+            &v3::data_root_key(&H256(row.value.data_root), row.start),
+            v3::encode_data_root(&value).to_vec(),
+        );
+    }
+
+    fn retarget_v3_root(&mut self, from: H256, to: H256) -> eyre::Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        let keys: Vec<Vec<u8>> = self.overlay.maps[Cf::Interval.index()]
+            .keys()
+            .filter(|key| key.len() == 4)
+            .cloned()
+            .collect();
+        for key in keys {
+            let Some(Some(bytes)) = self.overlay.maps[Cf::Interval.index()].get(&key).cloned()
+            else {
+                continue;
+            };
+            let mut value = v3::decode_placement(&bytes)?;
+            if value.data_root != from.0 {
+                continue;
+            }
+            let start = PartitionChunkOffset::decode(&key)?.0;
+            self.delete_data_root_point(&from, start);
+            value.data_root = to.0;
+            self.put_bytes(Cf::Interval, &key, v3::encode_placement(&value).to_vec());
+            if !v3::awaits_info(&value) {
+                self.put_data_root_point(&v3::V3Interval { start, value });
+            }
+        }
+        for (_, root) in &mut self.unfilled {
+            if *root == from {
+                *root = to;
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_v3_info(&mut self, data_root: H256, info: &DataRootInfo) -> eyre::Result<()> {
+        let mut starts: Vec<u32> = self
+            .unfilled
+            .iter()
+            .filter(|(_, root)| *root == data_root)
+            .map(|(start, _)| *start)
+            .collect();
+        if starts.is_empty() {
+            starts = self.rows().v3_unfilled_starts(data_root)?;
+        }
+        self.unfilled.retain(|(_, root)| *root != data_root);
+        if starts.is_empty() {
+            let start = u32::try_from(info.start_offset.0).unwrap_or(0);
+            let value = v3::DataRootPlacement {
+                end: start,
+                tx_start: info.start_offset.0,
+                data_size: info.data_size,
+            };
+            self.put_bytes(
+                Cf::DataRoots,
+                &v3::data_root_key(&data_root, start),
+                v3::encode_data_root(&value).to_vec(),
+            );
+            return Ok(());
+        }
+        for start in starts {
+            let key = encode_key(PartitionChunkOffset(start));
+            let Some(bytes) = self.rows().get_raw(Cf::Interval, &key)? else {
+                continue;
+            };
+            let mut value = v3::decode_placement(&bytes)?;
+            value.tx_start = info.start_offset.0;
+            value.data_size = info.data_size;
+            self.put_bytes(Cf::Interval, &key, v3::encode_placement(&value).to_vec());
+            self.put_data_root_point(&v3::V3Interval { start, value });
+        }
+        Ok(())
+    }
+
+    fn replace_v3_infos(&mut self, data_root: DataRoot, infos: &DataRootInfos) -> eyre::Result<()> {
+        // Keep a point whose identity is still in `infos`. Its key is the
+        // interval start, which `info.start_offset` is not (that field is the
+        // tx start and can be negative). Rewriting the key would orphan it.
+        let existing = self.rows().data_root_rows(&data_root)?;
+        for (start, point) in &existing {
+            let kept = infos.0.iter().any(|info| {
+                info.start_offset.0 == point.tx_start && info.data_size == point.data_size
+            });
+            if !kept {
+                self.delete_data_root_point(&data_root, *start);
+            }
+        }
+        for info in &infos.0 {
+            let present = existing.iter().any(|(_, point)| {
+                point.tx_start == info.start_offset.0 && point.data_size == info.data_size
+            });
+            if present {
+                continue;
+            }
+            let start = u32::try_from(info.start_offset.0).unwrap_or(0);
+            let value = v3::DataRootPlacement {
+                end: start,
+                tx_start: info.start_offset.0,
+                data_size: info.data_size,
+            };
+            self.put_bytes(
+                Cf::DataRoots,
+                &v3::data_root_key(&data_root, start),
+                v3::encode_data_root(&value).to_vec(),
+            );
+        }
+        Ok(())
+    }
+
     /// Delete a tx path and its leaf binding when no interval names that hash.
     ///
     /// The candidate set is the hashes that left the edit window. An empty set
@@ -3013,6 +3487,9 @@ impl<'a> Batch<'a> {
         existing: &[IntervalRow],
         edit: &IntervalEdit,
     ) -> eyre::Result<()> {
+        if self.layout == IndexLayout::V3 {
+            return Ok(());
+        }
         let mut dropped = dropped_tx_hashes(existing, edit);
         if dropped.is_empty() {
             return Ok(());
@@ -3062,7 +3539,7 @@ impl<'a> Batch<'a> {
 
     fn commit(&self, sync: bool, submodule: &str) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
-        for cf in Cf::ALL {
+        for cf in families(self.layout) {
             let handle = cf_handle(self.db, cf)?;
             // One range tombstone covers the family. A point delete per key
             // would read every value, including blobs, into this batch.
@@ -3414,13 +3891,25 @@ impl Rows<'_> {
         let Some((key, value)) = self.floor_raw(Cf::Interval, &encode_key(offset))? else {
             return Ok(None);
         };
-        let start = PartitionChunkOffset::decode(&key)?;
-        let value = TxPathInterval::decompress(&value)?;
-        Ok(Some(IntervalRow {
+        Ok(Some(self.interval_row(&key, &value)?))
+    }
+
+    fn interval_row(&self, key: &[u8], value: &[u8]) -> eyre::Result<IntervalRow> {
+        let start = PartitionChunkOffset::decode(key)?;
+        if self.layout == IndexLayout::V3 {
+            let record = v3::decode_placement(value)?;
+            return Ok(IntervalRow {
+                start,
+                end: PartitionChunkOffset(record.end),
+                tx_path_hash: H256(record.data_root),
+            });
+        }
+        let value = TxPathInterval::decompress(value)?;
+        Ok(IntervalRow {
             start,
             end: value.end,
             tx_path_hash: value.tx_path_hash,
-        }))
+        })
     }
 
     fn intervals_touching(
@@ -3452,23 +3941,277 @@ impl Rows<'_> {
         let mut rows = Vec::new();
         while let Some((key, value)) = cursor.next_kv()? {
             let offset = PartitionChunkOffset::decode(&key)?;
-            let interval = TxPathInterval::decompress(&value)?;
+            let interval = self.interval_row(&key, &value)?;
             if interval.end.0 < left_limit && offset < start {
                 continue;
             }
             if offset.0 > right_limit {
                 break;
             }
-            rows.push(IntervalRow {
-                start: offset,
-                end: interval.end,
-                tx_path_hash: interval.tx_path_hash,
-            });
+            rows.push(interval);
             if offset.0 >= right_limit {
                 break;
             }
         }
         Ok(rows)
+    }
+
+    fn v3_intervals_touching(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<v3::V3Interval>> {
+        let rows = self.intervals_touching(start, end)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let Some(bytes) = self.get_raw(Cf::Interval, &encode_key(row.start))? else {
+                continue;
+            };
+            out.push(v3::V3Interval {
+                start: row.start.0,
+                value: v3::decode_placement(&bytes)?,
+            });
+        }
+        Ok(out)
+    }
+
+    fn v3_unfilled_starts(&self, data_root: H256) -> eyre::Result<Vec<u32>> {
+        let mut cursor = self.cursor(Cf::Interval, None)?;
+        let mut starts = Vec::new();
+        while let Some((key, value)) = cursor.next_kv()? {
+            let record = v3::decode_placement(&value)?;
+            if record.data_root == data_root.0 && v3::awaits_info(&record) {
+                starts.push(PartitionChunkOffset::decode(&key)?.0);
+            }
+        }
+        Ok(starts)
+    }
+
+    fn data_root_rows(&self, data_root: &H256) -> eyre::Result<Vec<(u32, v3::DataRootPlacement)>> {
+        let prefix = data_root.0;
+        let raw = self.collect_raw(Cf::DataRoots, Some(&prefix), |key| {
+            key.len() < 32 || key[..32] != prefix
+        })?;
+        let mut rows = Vec::new();
+        for (key, value) in raw {
+            let (root, start) = v3::decode_data_root_key(&key)?;
+            if root != *data_root {
+                break;
+            }
+            rows.push((start, v3::decode_data_root(&value)?));
+        }
+        Ok(rows)
+    }
+
+    fn collect_raw(
+        &self,
+        cf: Cf,
+        start: Option<&[u8]>,
+        mut stop: impl FnMut(&[u8]) -> bool,
+    ) -> eyre::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut cursor = self.cursor(cf, start)?;
+        let mut rows = Vec::new();
+        while let Some((key, value)) = cursor.next_kv()? {
+            if stop(&key) {
+                break;
+            }
+            rows.push((key, value));
+        }
+        Ok(rows)
+    }
+
+    fn v3_placement(&self, start: u32, value: &v3::V3Placement) -> Placement {
+        use super::tables::Placement;
+        Placement {
+            data_root: H256(value.data_root),
+            tx_start_offset: irys_types::RelativeChunkOffset(value.tx_start),
+            data_size: value.data_size,
+            ledger: v3::optional_u32(value.ledger),
+            start: PartitionChunkOffset(start),
+            end: PartitionChunkOffset(value.end),
+            block_height: v3::optional_u64(value.block_height),
+            tx_index: v3::optional_u32(value.tx_index),
+        }
+    }
+
+    fn v3_placement_at(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<super::tables::Placement>> {
+        let Some(row) = self.interval_covering(offset)? else {
+            return Ok(None);
+        };
+        let Some(bytes) = self.get_raw(Cf::Interval, &encode_key(row.start))? else {
+            return Ok(None);
+        };
+        let value = v3::decode_placement(&bytes)?;
+        Ok(Some(self.v3_placement(row.start.0, &value)))
+    }
+
+    fn v3_placements_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<super::tables::Placement>> {
+        if start > end {
+            return Ok(Vec::new());
+        }
+        let intervals = self.v3_intervals_touching(start, end)?;
+        Ok(intervals
+            .into_iter()
+            .filter(|row| row.start <= end.0 && row.value.end >= start.0)
+            .map(|row| self.v3_placement(row.start, &row.value))
+            .collect())
+    }
+
+    fn v3_placements_for_data_root(
+        &self,
+        data_root: DataRoot,
+    ) -> eyre::Result<Vec<super::tables::Placement>> {
+        let mut out = Vec::new();
+        for (start, point) in self.data_root_rows(&data_root)? {
+            if let Some(bytes) =
+                self.get_raw(Cf::Interval, &encode_key(PartitionChunkOffset(start)))?
+                && let Ok(value) = v3::decode_placement(&bytes)
+                && value.data_root == data_root.0
+            {
+                out.push(self.v3_placement(start, &value));
+                continue;
+            }
+            out.push(super::tables::Placement {
+                data_root,
+                tx_start_offset: irys_types::RelativeChunkOffset(point.tx_start),
+                data_size: point.data_size,
+                ledger: None,
+                start: PartitionChunkOffset(start),
+                end: PartitionChunkOffset(point.end),
+                block_height: None,
+                tx_index: None,
+            });
+        }
+        out.sort_by_key(|placement| placement.start);
+        Ok(out)
+    }
+
+    fn v3_infos(&self, data_root: DataRoot) -> eyre::Result<Option<DataRootInfos>> {
+        let rows = self.data_root_rows(&data_root)?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let mut infos: Vec<DataRootInfo> = rows
+            .into_iter()
+            .map(|(_, point)| DataRootInfo {
+                start_offset: irys_types::RelativeChunkOffset(point.tx_start),
+                data_size: point.data_size,
+            })
+            .collect();
+        infos.sort_unstable();
+        infos.dedup();
+        Ok(Some(DataRootInfos(infos)))
+    }
+
+    fn v3_tx_hash_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
+        let Some(row) = self.interval_covering(offset)? else {
+            return Ok(None);
+        };
+        Ok((row.tx_path_hash != H256::zero()).then_some(row.tx_path_hash))
+    }
+
+    fn v3_path_hashes_at(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<ChunkPathHashes>> {
+        let data_path_hash = self
+            .get_raw(Cf::DataPath, &encode_key(offset))?
+            .map(|bytes| H256(irys_types::hash_sha256(&bytes)));
+        let tx_path_hash = self.v3_tx_hash_at(offset)?;
+        Ok(combine_hashes(
+            data_path_hash.map(|hash| ChunkPathHashes {
+                data_path_hash: Some(hash),
+                tx_path_hash: None,
+            }),
+            tx_path_hash,
+        ))
+    }
+
+    fn v3_path_hashes_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
+        let intervals = self.intervals_touching(start, end)?;
+        let start_key = encode_key(start);
+        let stored = self.collect_raw(Cf::DataPath, Some(&start_key), |key| {
+            PartitionChunkOffset::decode(key)
+                .map(|offset| offset > end)
+                .unwrap_or(true)
+        })?;
+        let mut index = 0;
+        let mut rows = Vec::new();
+        for (key, bytes) in stored {
+            let offset = PartitionChunkOffset::decode(&key)?;
+            while index < intervals.len() && intervals[index].end < offset {
+                index += 1;
+            }
+            let tx_path_hash = intervals.get(index).and_then(|interval| {
+                (interval.start <= offset && interval.end >= offset)
+                    .then_some(interval.tx_path_hash)
+            });
+            let tx_path_hash = tx_path_hash.filter(|hash| *hash != H256::zero());
+            rows.push((
+                offset,
+                ChunkPathHashes {
+                    data_path_hash: Some(H256(irys_types::hash_sha256(&bytes))),
+                    tx_path_hash,
+                },
+            ));
+        }
+        Ok(rows)
+    }
+
+    fn v3_pending_from(
+        &self,
+        start: Option<PartitionChunkOffset>,
+        limit: Option<usize>,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
+        let start_key = start.map(encode_key);
+        let mut remaining = limit.unwrap_or(usize::MAX);
+        let raw = self.collect_raw(Cf::Pending, start_key.as_deref(), |_| {
+            if remaining == 0 {
+                return true;
+            }
+            remaining -= 1;
+            false
+        })?;
+        let mut rows = Vec::new();
+        for (key, value) in raw {
+            rows.push((
+                PartitionChunkOffset::decode(&key)?,
+                v3::decode_pending(&value)?,
+            ));
+        }
+        Ok(rows)
+    }
+
+    fn v3_all_data_roots(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+        let raw = self.collect_raw(Cf::DataRoots, None, |_| false)?;
+        let mut grouped: BTreeMap<H256, Vec<DataRootInfo>> = BTreeMap::new();
+        for (key, value) in raw {
+            let (root, _) = v3::decode_data_root_key(&key)?;
+            let point = v3::decode_data_root(&value)?;
+            grouped.entry(root).or_default().push(DataRootInfo {
+                start_offset: irys_types::RelativeChunkOffset(point.tx_start),
+                data_size: point.data_size,
+            });
+        }
+        Ok(grouped
+            .into_iter()
+            .map(|(root, mut infos)| {
+                infos.sort_unstable();
+                infos.dedup();
+                (root, DataRootInfos(infos))
+            })
+            .collect())
     }
 }
 
@@ -3593,10 +4336,17 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkDataPath>> {
-        self.get_value(Cf::DataPath, &encode_key(offset))
+        let key = encode_key(offset);
+        if self.layout == IndexLayout::V3 {
+            return self.get_raw(Cf::DataPath, &key);
+        }
+        self.get_value(Cf::DataPath, &key)
     }
 
     fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
+        if self.layout == IndexLayout::V3 {
+            return Ok(None);
+        }
         let Some(hash) = self
             .get_path_hashes_by_offset(offset)?
             .and_then(|hashes| hashes.tx_path_hash)
@@ -3610,6 +4360,9 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkPathHashes>> {
+        if self.layout == IndexLayout::V3 {
+            return self.v3_path_hashes_at(offset);
+        }
         let stored = self.get_value(Cf::PathHashes, &encode_key(offset))?;
         let tx_path_hash = self.tx_hash_at(offset)?;
         Ok(combine_hashes(stored, tx_path_hash))
@@ -3622,6 +4375,9 @@ impl SubmoduleRead for Rows<'_> {
     ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
         if start > end {
             return Ok(Vec::new());
+        }
+        if self.layout == IndexLayout::V3 {
+            return self.v3_path_hashes_in_range(start, end);
         }
         let intervals = self.intervals_touching(start, end)?;
         let start_key = encode_key(start);
@@ -3679,10 +4435,16 @@ impl SubmoduleRead for Rows<'_> {
     }
 
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
+        if self.layout == IndexLayout::V3 {
+            return Ok(None);
+        }
         self.get_value(Cf::TxPath, &encode_key(path_hash))
     }
 
     fn get_tx_leaf_binding(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>> {
+        if self.layout == IndexLayout::V3 {
+            return Ok(None);
+        }
         self.get_value(Cf::TxLeaf, &encode_key(path_hash))
     }
 
@@ -3690,6 +4452,9 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         data_root: DataRoot,
     ) -> eyre::Result<Option<DataRootInfos>> {
+        if self.layout == IndexLayout::V3 {
+            return self.v3_infos(data_root);
+        }
         self.get_value(Cf::DataRoots, &encode_key(data_root))
     }
 
@@ -3697,7 +4462,14 @@ impl SubmoduleRead for Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<PendingBodyMigration>> {
-        self.get_value(Cf::Pending, &encode_key(offset))
+        let key = encode_key(offset);
+        if self.layout == IndexLayout::V3 {
+            return Ok(match self.get_raw(Cf::Pending, &key)? {
+                Some(bytes) => Some(v3::decode_pending(&bytes)?),
+                None => None,
+            });
+        }
+        self.get_value(Cf::Pending, &key)
     }
 
     fn pending_body_migrations_from(
@@ -3705,6 +4477,9 @@ impl SubmoduleRead for Rows<'_> {
         start: Option<PartitionChunkOffset>,
         limit: Option<usize>,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
+        if self.layout == IndexLayout::V3 {
+            return self.v3_pending_from(start, limit);
+        }
         let start_key = start.map(encode_key);
         let mut remaining = limit.unwrap_or(usize::MAX);
         // `collect_until` asks before each row. Stop once `limit` rows are in.
@@ -3749,7 +4524,35 @@ impl SubmoduleRead for Rows<'_> {
         self.intervals_overlapping(start, end)
     }
 
+    fn placement_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<Placement>> {
+        if self.layout == IndexLayout::V3 {
+            return self.v3_placement_at(offset);
+        }
+        super::placement::read_placement_at(self, offset)
+    }
+
+    fn placements_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<Placement>> {
+        if self.layout == IndexLayout::V3 {
+            return self.v3_placements_in_range(start, end);
+        }
+        super::placement::read_placements_in_range(self, start, end)
+    }
+
+    fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
+        if self.layout == IndexLayout::V3 {
+            return self.v3_placements_for_data_root(data_root);
+        }
+        super::placement::read_placements_for_data_root(self, data_root)
+    }
+
     fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
+        if self.layout == IndexLayout::V3 {
+            return self.v3_all_data_roots();
+        }
         // The key is a hash. It has no offset order. The value lists
         // placements, so the scan reads it. `fill_cache` stays off.
         let cleared = self
@@ -3895,6 +4698,22 @@ impl SubmoduleRead for Batch<'_> {
     fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
         self.rows().data_root_entries()
     }
+
+    fn placement_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<Placement>> {
+        self.rows().placement_at(offset)
+    }
+
+    fn placements_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<Placement>> {
+        self.rows().placements_in_range(start, end)
+    }
+
+    fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
+        self.rows().placements_for_data_root(data_root)
+    }
 }
 
 impl SubmoduleWrite for Batch<'_> {
@@ -3903,11 +4722,19 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         data_path: ChunkDataPath,
     ) -> eyre::Result<()> {
-        self.put(Cf::DataPath, &encode_key(offset), &data_path);
+        let key = encode_key(offset);
+        if self.layout == IndexLayout::V3 {
+            self.put_bytes(Cf::DataPath, &key, data_path);
+        } else {
+            self.put(Cf::DataPath, &key, &data_path);
+        }
         Ok(())
     }
 
     fn add_full_tx_path(&mut self, path_hash: TxPathHash, tx_path: TxPath) -> eyre::Result<()> {
+        if self.layout == IndexLayout::V3 {
+            return Ok(());
+        }
         self.put(Cf::TxPath, &encode_key(path_hash), &tx_path);
         Ok(())
     }
@@ -3917,6 +4744,10 @@ impl SubmoduleWrite for Batch<'_> {
         path_hash: TxPathHash,
         binding: &TxLeafBinding,
     ) -> eyre::Result<()> {
+        if self.layout == IndexLayout::V3 {
+            self.bindings.insert(path_hash, binding.clone());
+            return self.retarget_v3_root(path_hash, binding.data_root);
+        }
         self.put(Cf::TxLeaf, &encode_key(path_hash), binding);
         Ok(())
     }
@@ -3981,7 +4812,9 @@ impl SubmoduleWrite for Batch<'_> {
             return Ok(());
         }
         self.assign_tx_interval(start, end, None)?;
-        self.delete_offset_range(Cf::PathHashes, start, end)?;
+        if self.layout == IndexLayout::V2 {
+            self.delete_offset_range(Cf::PathHashes, start, end)?;
+        }
         self.delete_offset_range(Cf::DataPath, start, end)?;
         Ok(())
     }
@@ -3991,6 +4824,9 @@ impl SubmoduleWrite for Batch<'_> {
         data_root: DataRoot,
         infos: DataRootInfos,
     ) -> eyre::Result<()> {
+        if self.layout == IndexLayout::V3 {
+            return self.replace_v3_infos(data_root, &infos);
+        }
         let key = encode_key(data_root);
         if infos.0.is_empty() {
             self.delete(Cf::DataRoots, &key);
@@ -4001,6 +4837,9 @@ impl SubmoduleWrite for Batch<'_> {
     }
 
     fn add_data_root_info(&mut self, data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()> {
+        if self.layout == IndexLayout::V3 {
+            return self.fill_v3_info(data_root, info);
+        }
         let mut infos = self
             .rows()
             .get_data_root_infos_for_data_root(data_root)?
@@ -4016,7 +4855,12 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         job: &PendingBodyMigration,
     ) -> eyre::Result<()> {
-        self.put(Cf::Pending, &encode_key(offset), job);
+        let key = encode_key(offset);
+        if self.layout == IndexLayout::V3 {
+            self.put_bytes(Cf::Pending, &key, v3::encode_pending(job).to_vec());
+        } else {
+            self.put(Cf::Pending, &key, job);
+        }
         Ok(())
     }
 
@@ -4043,10 +4887,34 @@ impl SubmoduleWrite for Batch<'_> {
     }
 
     fn clear(&mut self) -> eyre::Result<()> {
-        for cf in Cf::INDEX {
+        for cf in families(self.layout) {
+            if matches!(cf, Cf::Metadata) {
+                continue;
+            }
             self.overlay.cleared[cf.index()] = true;
             self.overlay.maps[cf.index()].clear();
             self.overlay.deleted_ranges[cf.index()].clear();
+        }
+        if self.layout == IndexLayout::V3 {
+            // The next assignment may name a different partition. The packing
+            // hash stays: reset does not change the miner or the chain.
+            self.delete(Cf::Metadata, &encode_key(MetadataKey::PartitionHash));
+        }
+        Ok(())
+    }
+
+    fn note_placement_origin(
+        &mut self,
+        ledger: u32,
+        block_height: u64,
+        tx_index: u32,
+    ) -> eyre::Result<()> {
+        if self.layout == IndexLayout::V3 {
+            self.origin = Some(v3::PlacementOrigin {
+                ledger,
+                block_height,
+                tx_index,
+            });
         }
         Ok(())
     }
@@ -4071,7 +4939,7 @@ mod tests {
             tx_path_hash: Some(H256::repeat_byte(2)),
         };
         {
-            let store = RocksSubmoduleStore::open(&path)?;
+            let store = RocksSubmoduleStore::open_v2_with(&path, RocksTuning::baseline())?;
             store.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
         }
         {
@@ -4161,7 +5029,6 @@ mod tests {
             tx.add_full_data_path(PartitionChunkOffset::from(0), vec![7_u8; 256 * 1024])?;
             Ok(())
         })?;
-        assert!(store.cf_key_count(Cf::PathHashes)? >= usize::try_from(ROWS)?);
         assert!(store.cf_key_count(Cf::DataPath)? >= usize::try_from(ROWS)?);
 
         let started = std::time::Instant::now();
@@ -4172,12 +5039,15 @@ mod tests {
             "clear took {elapsed:?}"
         );
 
-        for cf in Cf::INDEX {
-            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name());
+        for cf in families(store.layout) {
+            if matches!(cf, Cf::Metadata) {
+                continue;
+            }
+            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
         let payload = store.schema_payload()?.expect("schema row");
-        assert_eq!(payload, SCHEMA_TEXT.as_bytes());
+        assert_eq!(payload, SUBMODULE_SCHEMA_V3.as_bytes());
         assert!(
             store
                 .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(50_000)))?
@@ -4203,12 +5073,205 @@ mod tests {
         drop(store);
 
         let store = RocksSubmoduleStore::open(&path)?;
-        assert_eq!(store.cf_key_count(Cf::PathHashes)?, 0);
+        assert_eq!(store.cf_key_count(Cf::DataPath)?, 0);
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
         assert_eq!(
             store.schema_payload()?.expect("schema row"),
-            SCHEMA_TEXT.as_bytes()
+            SUBMODULE_SCHEMA_V3.as_bytes()
         );
+        Ok(())
+    }
+
+    fn assert_no_orphans(store: &RocksSubmoduleStore) -> eyre::Result<()> {
+        let orphans = store.rows_outside_live_intervals()?;
+        assert!(orphans.is_empty(), "{orphans:?}");
+        Ok(())
+    }
+
+    fn place_span(
+        store: &RocksSubmoduleStore,
+        start: u32,
+        end: u32,
+        data_root: H256,
+        ledger: u32,
+        block_height: u64,
+        tx_index: u32,
+        data_at: &[u32],
+        pending_at: Option<u32>,
+    ) -> eyre::Result<()> {
+        let path_hash = H256::repeat_byte(data_root.0[0]);
+        store.update(|tx| {
+            tx.note_placement_origin(ledger, block_height, tx_index)?;
+            tx.add_tx_leaf_binding(
+                path_hash,
+                &TxLeafBinding {
+                    data_root,
+                    prefix_hash: H256::repeat_byte(1),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(start),
+                PartitionChunkOffset::from(end),
+                Some(path_hash),
+            )?;
+            tx.add_data_root_info(
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
+                    data_size: u64::from(end - start + 1) * 32,
+                },
+            )?;
+            for offset in data_at {
+                tx.add_full_data_path(PartitionChunkOffset::from(*offset), vec![*offset as u8])?;
+            }
+            if let Some(offset) = pending_at {
+                tx.add_pending_body_migration(
+                    PartitionChunkOffset::from(offset),
+                    &PendingBodyMigration {
+                        data_root,
+                        data_size: 32,
+                        start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
+                        block_height,
+                        attempts: 0,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Overwrite, uninitialized rollback, expiry, and reset leave no row
+    /// outside a live interval.
+    #[test]
+    fn v3_rows_stay_inside_live_intervals() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_no_leak")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        let root_a = H256::repeat_byte(4);
+        let root_b = H256::repeat_byte(5);
+        place_span(&store, 0, 19, root_a, 1, 42, 3, &[0, 8, 19], Some(2))?;
+        assert_no_orphans(&store)?;
+        let at_zero = store
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+            .expect("placement");
+        assert_eq!(at_zero.data_root, root_a);
+        assert_eq!(at_zero.ledger, Some(1));
+        assert_eq!(at_zero.block_height, Some(42));
+        assert_eq!(at_zero.tx_index, Some(3));
+        assert_eq!(at_zero.end, PartitionChunkOffset::from(19));
+
+        place_span(&store, 8, 11, root_b, 0, 7, 1, &[8], None)?;
+        assert_no_orphans(&store)?;
+        let left = store
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+            .expect("left remnant");
+        assert_eq!(left.data_root, root_a);
+        assert_eq!(left.end, PartitionChunkOffset::from(7));
+        assert_eq!(left.block_height, Some(42));
+        let middle = store
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(9)))?
+            .expect("overwrite");
+        assert_eq!(middle.data_root, root_b);
+        assert_eq!(middle.ledger, Some(0));
+        assert_eq!(middle.tx_index, Some(1));
+        assert_eq!(middle.start, PartitionChunkOffset::from(8));
+        assert_eq!(middle.end, PartitionChunkOffset::from(11));
+        let right = store
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(15)))?
+            .expect("right remnant");
+        assert_eq!(right.data_root, root_a);
+        assert_eq!(right.start, PartitionChunkOffset::from(12));
+        assert_eq!(right.tx_index, Some(3));
+
+        let hole = [(PartitionChunkOffset::from(4), PartitionChunkOffset::from(6))];
+        store.drop_presence_in_ranges(&hole)?;
+        store.drop_uninitialized_coverage(&hole, 32)?;
+        assert_no_orphans(&store)?;
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(0)))?
+                .is_some()
+        );
+        assert!(
+            store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(5)))?
+                .is_none()
+        );
+        assert!(
+            store
+                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(2)))?
+                .is_some()
+        );
+        let for_b = store.view(|tx| tx.placements_for_data_root(root_b))?;
+        assert_eq!(for_b.len(), 1);
+        assert_eq!(for_b[0].start, PartitionChunkOffset::from(8));
+
+        let expired = [(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(19),
+        )];
+        store.drop_presence_in_ranges(&expired)?;
+        store.drop_uninitialized_coverage(&expired, 32)?;
+        assert_no_orphans(&store)?;
+        for cf in [Cf::Interval, Cf::DataPath, Cf::DataRoots, Cf::Pending] {
+            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
+        }
+
+        place_span(&store, 1, 2, root_a, 1, 9, 0, &[1], Some(1))?;
+        assert_no_orphans(&store)?;
+        store.update(|tx| tx.clear())?;
+        assert_no_orphans(&store)?;
+        for cf in [Cf::Interval, Cf::DataPath, Cf::DataRoots, Cf::Pending] {
+            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
+        }
+        assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn packing_identity_binds_once_and_clear_releases_the_partition() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_packing")
+            .build();
+        let path = dir.path().join("index");
+        let partition = H256::repeat_byte(1);
+        let other = H256::repeat_byte(2);
+        let packing = [9_u8; 32];
+        let other_packing = [8_u8; 32];
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            store.bind_packing_identity(None, &packing)?;
+            store.bind_packing_identity(Some(partition), &packing)?;
+            store.bind_packing_identity(Some(partition), &packing)?;
+            let err = store
+                .bind_packing_identity(Some(other), &packing)
+                .unwrap_err();
+            assert!(err.to_string().contains("does not match"), "{err}");
+            let err = store
+                .bind_packing_identity(Some(partition), &other_packing)
+                .unwrap_err();
+            assert!(err.to_string().contains("does not match"), "{err}");
+            assert!(err.to_string().contains("submodule-index-convert"), "{err}");
+        }
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            let err = store
+                .bind_packing_identity(Some(other), &packing)
+                .unwrap_err();
+            assert!(err.to_string().contains("does not match"), "{err}");
+            store.update(|tx| tx.clear())?;
+            store.bind_packing_identity(Some(other), &packing)?;
+            let err = store
+                .bind_packing_identity(Some(other), &other_packing)
+                .unwrap_err();
+            assert!(err.to_string().contains("does not match"), "{err}");
+        }
+
+        let store =
+            RocksSubmoduleStore::open_v2_with(dir.path().join("v2"), RocksTuning::baseline())?;
+        store.bind_packing_identity(Some(partition), &packing)?;
+        store.bind_packing_identity(Some(other), &other_packing)?;
         Ok(())
     }
 
@@ -4465,34 +5528,24 @@ mod tests {
             Some("1.000000"),
             "{baseline_opts}"
         );
-        assert_eq!(
-            cf_option(
-                &baseline_opts,
-                <TxPathByTxPathHash as Table>::NAME,
-                "enable_blob_files"
-            )
-            .as_deref(),
-            Some("false"),
+        assert!(
+            baseline_opts.contains("[CFOptions \"PlacementIntervals\"]"),
             "{baseline_opts}"
         );
-        assert_eq!(
-            cf_option(
-                &baseline_opts,
-                <TxPathByTxPathHash as Table>::NAME,
-                "blob_garbage_collection_age_cutoff"
-            )
-            .as_deref(),
-            Some("1.000000"),
+        assert!(
+            baseline_opts.contains("[CFOptions \"DataRootPlacements\"]"),
             "{baseline_opts}"
         );
-        assert_eq!(
-            cf_option(
-                &baseline_opts,
-                <ChunkPathHashesByOffset as Table>::NAME,
-                "enable_blob_garbage_collection"
-            )
-            .as_deref(),
-            Some("false"),
+        assert!(
+            baseline_opts.contains("[CFOptions \"PendingBodyMigrations\"]"),
+            "{baseline_opts}"
+        );
+        assert!(
+            !baseline_opts.contains("TxPathByTxPathHash"),
+            "{baseline_opts}"
+        );
+        assert!(
+            !baseline_opts.contains("ChunkPathHashesByOffset"),
             "{baseline_opts}"
         );
         let blobs_opts = persisted_options(&dir.path().join("blobs"))?;
@@ -4630,7 +5683,8 @@ mod tests {
             attempts: 0,
         };
         {
-            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::preset("all-blooms")?)?;
+            let store =
+                RocksSubmoduleStore::open_v2_with(&path, RocksTuning::preset("all-blooms")?)?;
             store.update(|tx| {
                 tx.add_full_data_path(offset, path_bytes.clone())?;
                 tx.add_full_tx_path(tx_hash, tx_bytes.clone())?;
@@ -4771,7 +5825,7 @@ mod tests {
         let removed = [0_u32, LEGACY_PATHS];
 
         {
-            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::preset("blobs")?)?;
+            let store = RocksSubmoduleStore::open_v2_with(&path, RocksTuning::preset("blobs")?)?;
             write_large_paths(&store, 0, LEGACY_PATHS)?;
             store.update(|tx| tx.add_full_tx_path(legacy_tx, large_path(0)))?;
             store.flush_memtables()?;
@@ -4866,7 +5920,7 @@ mod tests {
             .prefix("submodule_rocks_compact_off")
             .build();
         let store =
-            RocksSubmoduleStore::open_with(dir.path().join("index"), RocksTuning::baseline())?;
+            RocksSubmoduleStore::open_v2_with(dir.path().join("index"), RocksTuning::baseline())?;
         store.disable_auto_compaction()?;
         let rows = 20_u32;
         for offset in 0..rows {
@@ -4902,7 +5956,7 @@ mod tests {
         let path = dir.path().join("index");
         let rows = 20_u32;
         let files = {
-            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
+            let store = RocksSubmoduleStore::open_v2_with(&path, RocksTuning::baseline())?;
             store.disable_auto_compaction()?;
             for offset in 0..rows {
                 put_offset(&store, offset, offset as u8)?;
@@ -4963,7 +6017,7 @@ mod tests {
         let durable = [(1_u32, 11_u8), (2, 22), (3, 33), (4, 44)];
         let wal_only = (5_u32, 55_u8);
         {
-            let store = RocksSubmoduleStore::open_with(&path, preset)?;
+            let store = RocksSubmoduleStore::open_v2_with(&path, preset)?;
             for (offset, byte) in durable {
                 put_offset(&store, offset, byte)?;
                 store.flush_and_compact()?;

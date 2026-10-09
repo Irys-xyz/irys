@@ -9,6 +9,8 @@ mod placement;
 pub mod rocks;
 pub mod store;
 pub mod tables;
+#[cfg(feature = "rocksdb")]
+mod v3;
 mod verify;
 
 #[cfg(feature = "rocksdb")]

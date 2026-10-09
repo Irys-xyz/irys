@@ -690,6 +690,22 @@ impl PackingParams {
 
 pub static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 
+/// Address, iterations, chunk size, and chain id. The schema-v3 index stores
+/// this at open and refuses a later mismatch.
+fn packing_identity_hash(
+    address: &IrysAddress,
+    iterations: u32,
+    chunk_size: u64,
+    chain_id: u64,
+) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(40);
+    bytes.extend_from_slice(address.as_slice());
+    bytes.extend_from_slice(&iterations.to_be_bytes());
+    bytes.extend_from_slice(&chunk_size.to_be_bytes());
+    bytes.extend_from_slice(&chain_id.to_be_bytes());
+    irys_types::hash_sha256(&bytes)
+}
+
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
 pub struct StorageSubmodule {
@@ -1455,6 +1471,18 @@ impl StorageModule {
                     params.write_to_disk(&params_path);
                 }
             }
+
+            let params = PackingParams::from_toml(&params_path)
+                .wrap_err_with(|| format!("packing params at {}", params_path.display()))?;
+            submodule_db.bind_packing_identity(
+                params.partition_hash,
+                &packing_identity_hash(
+                    &params.packing_address,
+                    config.consensus.entropy_packing_iterations,
+                    config.consensus.chunk_size,
+                    config.consensus.chain_id,
+                ),
+            )?;
 
             let intervals_file_path = sub_base_path.join("intervals.json");
 
@@ -4174,11 +4202,31 @@ impl StorageModule {
         chunk_range: LedgerChunkRange,
         block_height: u64,
     ) -> eyre::Result<()> {
+        self.index_transaction_data_in(data_tx, tx_path, chunk_range, block_height, None, None)
+    }
+
+    /// [`Self::index_transaction_data`], plus the ledger placement that owns this copy.
+    ///
+    /// `ledger` and `tx_index` locate the tx in the block whose ledger tree
+    /// covers this placement. Publish uses the promotion block, not the Submit
+    /// inclusion. `None` leaves those fields unset. Schema v2 ignores them.
+    pub fn index_transaction_data_in(
+        &self,
+        data_tx: &DataTransactionHeader,
+        tx_path: &TxPath,
+        chunk_range: LedgerChunkRange,
+        block_height: u64,
+        ledger: Option<DataLedger>,
+        tx_index: Option<u32>,
+    ) -> eyre::Result<()> {
         let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
         let (partition_overlap, start_offset) = self.partition_overlap_for(chunk_range)?;
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
             submodule.db.update_registration(|tx| -> eyre::Result<()> {
+                if let (Some(ledger), Some(tx_index)) = (ledger, tx_index) {
+                    tx.note_placement_origin(ledger.get_id(), block_height, tx_index)?;
+                }
                 // Because each submodule index receives a copy of the path, we need to clone it
                 tx.add_full_tx_path(tx_path_hash, tx_path.clone())?;
                 // Record the (data_root, prefix_hash) this tx_path leaf folds from, so the
@@ -6525,17 +6573,23 @@ mod tests {
         let index =
             open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
         let schema = fs::read_to_string(module_dir.join("rocks").join("SCHEMA"))?;
-        assert_eq!(schema, "irys-submodule-index 2\n");
+        assert_eq!(schema, "irys-submodule-index 3\n");
         assert!(!module_dir.join("db").join("mdbx.dat").exists());
 
         let offset = PartitionChunkOffset::from(7);
-        let hashes = ChunkPathHashes {
-            data_path_hash: Some(H256::repeat_byte(3)),
-            tx_path_hash: None,
-        };
-        index.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
-        let got = index.view(|tx| tx.get_path_hashes_by_offset(offset))?;
-        assert_eq!(got, Some(hashes));
+        index.update(|tx| tx.add_full_data_path(offset, vec![3]))?;
+        let got = index
+            .view(|tx| tx.get_path_hashes_by_offset(offset))?
+            .expect("data-path bytes are the presence row");
+        assert_eq!(
+            got.data_path_hash,
+            Some(H256(irys_types::hash_sha256(&[3])))
+        );
+        assert!(got.tx_path_hash.is_none());
+        assert_eq!(
+            index.view(|tx| tx.get_data_path_by_offset(offset))?,
+            Some(vec![3])
+        );
         Ok(())
     }
 
@@ -6888,18 +6942,34 @@ mod tests {
     /// Entropy `[6, 7]` keeps the tx remnant. The data-root extent is `[1, 2]`.
     fn assert_entropy_hole_kept(module: &StorageModule, seeded: &SeededIndex) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        assert_eq!(
-            submodule
-                .db
-                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?,
-            Some(seeded.tx_path.clone())
-        );
-        assert_eq!(
-            submodule
-                .db
-                .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?,
-            Some(seeded.leaf.clone())
-        );
+        let stored_paths = submodule.db.stores_tx_paths();
+        if stored_paths {
+            assert_eq!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?,
+                Some(seeded.tx_path.clone())
+            );
+            assert_eq!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?,
+                Some(seeded.leaf.clone())
+            );
+        } else {
+            assert!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?
+                    .is_none()
+            );
+            assert!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?
+                    .is_none()
+            );
+        }
         assert_eq!(
             submodule
                 .db
@@ -6918,24 +6988,48 @@ mod tests {
                 .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?
                 .is_none()
         );
-        assert_eq!(
-            submodule
-                .db
-                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?,
-            Some(seeded.tx_path.clone())
-        );
-        assert_eq!(
-            submodule
-                .db
-                .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(6)))?,
-            Some(seeded.tx_path.clone())
-        );
+        if stored_paths {
+            assert_eq!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?,
+                Some(seeded.tx_path.clone())
+            );
+            assert_eq!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(6)))?,
+                Some(seeded.tx_path.clone())
+            );
+        } else {
+            assert!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(2)))?
+                    .is_none()
+            );
+            assert!(
+                submodule
+                    .db
+                    .view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(6)))?
+                    .is_none()
+            );
+        }
         let at_two = submodule
             .db
             .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(2)))?
             .expect("data span keeps the row");
-        assert_eq!(at_two.tx_path_hash, Some(seeded.tx_hash));
-        assert!(at_two.data_path_hash.is_some());
+        if stored_paths {
+            assert_eq!(at_two.tx_path_hash, Some(seeded.tx_hash));
+            assert!(at_two.data_path_hash.is_some());
+        } else {
+            // The interval stores the data root. The data-path hash is the bytes.
+            assert_eq!(at_two.tx_path_hash, Some(seeded.data_root));
+            assert_eq!(
+                at_two.data_path_hash,
+                Some(H256(irys_types::hash_sha256(&[2])))
+            );
+        }
         assert!(
             submodule
                 .db
@@ -6946,7 +7040,11 @@ mod tests {
             .db
             .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?
             .expect("entropy keeps tx coverage");
-        assert_eq!(at_six.tx_path_hash, Some(seeded.tx_hash));
+        if stored_paths {
+            assert_eq!(at_six.tx_path_hash, Some(seeded.tx_hash));
+        } else {
+            assert_eq!(at_six.tx_path_hash, Some(seeded.data_root));
+        }
         assert!(at_six.data_path_hash.is_none());
         assert!(module.is_data_root_index_ready_at(PartitionChunkOffset::from(2)));
         assert!(!module.is_data_root_index_ready_at(PartitionChunkOffset::from(3)));

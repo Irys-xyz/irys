@@ -17,6 +17,10 @@ use std::fmt;
 /// only when the new rows are complete. Any other row is refused.
 pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 
+/// Schema file and metadata row for a RocksDB index that stores placements
+/// and derives tx paths. MDBX stays on [`SUBMODULE_SCHEMA`].
+pub const SUBMODULE_SCHEMA_V3: &str = "irys-submodule-index 3\n";
+
 /// Metadata row written while a conversion into MDBX is still copying.
 ///
 /// Open refuses this value. The converter replaces it with

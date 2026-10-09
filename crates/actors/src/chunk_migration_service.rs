@@ -365,7 +365,9 @@ pub fn process_ledger_transactions(
     let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index);
     let mut prev_chunk_offset = block_offsets.start();
 
-    for ((_txid, tx_path), tx) in path_pairs {
+    for (tx_index, ((_txid, tx_path), tx)) in path_pairs.into_iter().enumerate() {
+        let tx_index = u32::try_from(tx_index)
+            .map_err(|_| MigrationError::Other(format!("tx index {tx_index} does not fit u32")))?;
         let num_chunks_in_tx: u32 = tx
             .data_size
             .div_ceil(config.consensus.chunk_size)
@@ -389,6 +391,7 @@ pub fn process_ledger_transactions(
             ledger,
             storage_modules_guard,
             block.height,
+            tx_index,
             touched,
         )?;
 
@@ -712,6 +715,7 @@ fn update_storage_module_indexes(
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
     block_height: u64,
+    tx_index: u32,
     touched: &mut Vec<Arc<StorageModule>>,
 ) -> Result<(), MigrationError> {
     let overlapped_modules =
@@ -719,11 +723,13 @@ fn update_storage_module_indexes(
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(
+            .index_transaction_data_in(
                 data_tx,
                 &tx_path_proof.to_vec(),
                 tx_chunk_range,
                 block_height,
+                Some(ledger),
+                Some(tx_index),
             )
             .map_err(|e| {
                 error!(

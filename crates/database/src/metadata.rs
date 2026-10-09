@@ -11,6 +11,12 @@ pub enum MetadataKey {
     /// Set before a storage-module reset clears the index. Open finishes the
     /// clear while this row is present. It is not a schema version.
     SubmoduleResetInProgress = 2,
+    /// Partition this schema-v3 index was bound to. Absent until the module
+    /// is assigned. A later different hash refuses to open.
+    PartitionHash = 3,
+    /// Hash of the packing address, iterations, chunk size, and chain id.
+    /// A mismatch refuses to open a schema-v3 index.
+    PackingParamsHash = 4,
 }
 
 impl Encode for MetadataKey {
@@ -33,6 +39,8 @@ impl Decode for MetadataKey {
         match u32::from_le_bytes(arr) {
             1 => Ok(Self::DBSchemaVersion),
             2 => Ok(Self::SubmoduleResetInProgress),
+            3 => Ok(Self::PartitionHash),
+            4 => Ok(Self::PackingParamsHash),
             _ => Err(DatabaseError::Decode),
         }
     }
@@ -71,7 +79,7 @@ mod tests {
     proptest! {
         #[test]
         fn metadata_key_decode_rejects_invalid_discriminants(val in any::<u32>()) {
-            prop_assume!(val != 1 && val != 2);
+            prop_assume!(val != 1 && val != 2 && val != 3 && val != 4);
             let bytes = val.to_le_bytes();
             prop_assert!(MetadataKey::decode(&bytes).is_err());
         }

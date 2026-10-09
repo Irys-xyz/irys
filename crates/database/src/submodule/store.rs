@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::mdbx::ffi;
 use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
@@ -272,6 +272,19 @@ pub trait SubmoduleWrite: SubmoduleRead {
 
     /// Delete index rows. Does not delete the schema-version metadata row.
     fn clear(&mut self) -> eyre::Result<()>;
+
+    /// Ledger, height, and tx index for intervals assigned later in this batch.
+    ///
+    /// Schema v2 ignores this. Schema v3 copies it onto each new placement.
+    /// A writer that does not call it leaves those fields unset.
+    fn note_placement_origin(
+        &mut self,
+        _ledger: u32,
+        _block_height: u64,
+        _tx_index: u32,
+    ) -> eyre::Result<()> {
+        Ok(())
+    }
 }
 
 /// Rows removed from the two presence families.
@@ -1114,6 +1127,36 @@ impl SubmoduleIndex {
         Ok(Self::Rocks(RocksSubmoduleStore::open(path)?))
     }
 
+    /// `true` when this index stores tx-path bytes.
+    ///
+    /// MDBX and a RocksDB schema-v2 directory do. Schema v3 derives them.
+    pub fn stores_tx_paths(&self) -> bool {
+        match self {
+            Self::Mdbx(_) => true,
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.stores_tx_paths(),
+        }
+    }
+
+    /// Bind a schema-v3 index to one partition and one packing identity.
+    ///
+    /// The first call writes a missing value. A later different value refuses.
+    /// MDBX and schema v2 ignore this. `clear` drops the partition binding.
+    pub fn bind_packing_identity(
+        &self,
+        partition: Option<H256>,
+        packing_hash: &[u8; 32],
+    ) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(_) => {
+                let _ = (partition, packing_hash);
+                Ok(())
+            }
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.bind_packing_identity(partition, packing_hash),
+        }
+    }
+
     /// Bench entry. Production uses [`Self::open_rocks`] and the shared cache size.
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with_block_cache(
@@ -1512,14 +1555,25 @@ mod tests {
 
     fn put_registration(store: &SubmoduleIndex, offset: u32, byte: u8) -> eyre::Result<()> {
         store.update_registration(|tx| {
+            let at = PartitionChunkOffset::from(offset);
+            // Schema v3 presence is the data-path bytes. The hash row is v2.
+            tx.add_full_data_path(at, vec![byte])?;
             tx.set_path_hashes_by_offset(
-                PartitionChunkOffset::from(offset),
+                at,
                 ChunkPathHashes {
                     data_path_hash: Some(H256::repeat_byte(byte)),
                     tx_path_hash: None,
                 },
             )
         })
+    }
+
+    fn expect_data_hash(store: &SubmoduleIndex, stored: H256, bytes: &[u8]) -> H256 {
+        if store.stores_tx_paths() {
+            stored
+        } else {
+            H256(irys_types::hash_sha256(bytes))
+        }
     }
 
     fn path_at(store: &SubmoduleIndex, offset: u32) -> eyre::Result<Option<ChunkPathHashes>> {
@@ -1685,7 +1739,14 @@ mod tests {
                         data_size: 262_144,
                     },
                 )?;
-                assert!(tx.placement_at(PartitionChunkOffset::from(30))?.is_none());
+                let at_30 = tx.placement_at(PartitionChunkOffset::from(30))?;
+                if !store.stores_tx_paths() {
+                    let at_30 = at_30.expect("schema v3 keeps the placement without a tx path");
+                    assert_eq!(at_30.data_root, root_a);
+                    assert_eq!(at_30.tx_start_offset, RelativeChunkOffset(30));
+                    return Ok(());
+                }
+                assert!(at_30.is_none());
                 let (hash, proof) = leaf_proof(root_a, prefix_a);
                 tx.add_full_tx_path(hash, proof)?;
                 tx.add_tx_leaf_binding(
@@ -1719,8 +1780,15 @@ mod tests {
                 tx_path_hash: Some(H256::repeat_byte(2)),
             };
             store.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
-            let got = store.view(|tx| tx.get_path_hashes_by_offset(offset))?;
-            assert_eq!(got, Some(hashes));
+            let got = store
+                .view(|tx| tx.get_path_hashes_by_offset(offset))?
+                .expect("committed row");
+            if store.stores_tx_paths() {
+                assert_eq!(got, hashes);
+            } else {
+                assert_eq!(got.tx_path_hash, hashes.tx_path_hash);
+                assert!(got.data_path_hash.is_none());
+            }
             Ok(())
         })
     }
@@ -1783,10 +1851,12 @@ mod tests {
     fn tx_range_preserves_data_path_hashes_and_appends() -> eyre::Result<()> {
         each_engine("submodule_store_tx_range", |store| {
             let data_hash = H256::repeat_byte(4);
+            let data_bytes = vec![4_u8, 5, 6];
             let old_tx = H256::repeat_byte(5);
             let new_tx = H256::repeat_byte(6);
             let tail_tx = H256::repeat_byte(7);
             store.update(|tx| {
+                tx.add_full_data_path(PartitionChunkOffset::from(2), data_bytes.clone())?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
                     ChunkPathHashes {
@@ -1806,7 +1876,10 @@ mod tests {
                 )
             })?;
             let at_two = path_at(store, 2)?.expect("offset 2");
-            assert_eq!(at_two.data_path_hash, Some(data_hash));
+            assert_eq!(
+                at_two.data_path_hash,
+                Some(expect_data_hash(store, data_hash, &data_bytes))
+            );
             assert_eq!(at_two.tx_path_hash, Some(new_tx));
             let at_zero = path_at(store, 0)?.expect("offset 0");
             assert_eq!(at_zero.data_path_hash, None);
@@ -1825,7 +1898,10 @@ mod tests {
             assert_eq!(at_six.data_path_hash, None);
             assert_eq!(at_six.tx_path_hash, Some(tail_tx));
             let at_two = path_at(store, 2)?.expect("offset 2 after append");
-            assert_eq!(at_two.data_path_hash, Some(data_hash));
+            assert_eq!(
+                at_two.data_path_hash,
+                Some(expect_data_hash(store, data_hash, &data_bytes))
+            );
             Ok(())
         })
     }
@@ -1921,14 +1997,19 @@ mod tests {
                     None,
                 )
             })?;
-            assert_eq!(
-                store.view(|tx| tx.get_full_tx_path(shared))?,
-                Some(vec![shared.0[0]])
-            );
-            assert_eq!(
-                store.view(|tx| tx.get_tx_leaf_binding(shared))?,
-                Some(leaf_for(shared))
-            );
+            if store.stores_tx_paths() {
+                assert_eq!(
+                    store.view(|tx| tx.get_full_tx_path(shared))?,
+                    Some(vec![shared.0[0]])
+                );
+                assert_eq!(
+                    store.view(|tx| tx.get_tx_leaf_binding(shared))?,
+                    Some(leaf_for(shared))
+                );
+            } else {
+                assert!(store.view(|tx| tx.get_full_tx_path(shared))?.is_none());
+                assert!(store.view(|tx| tx.get_tx_leaf_binding(shared))?.is_none());
+            }
             let far = store
                 .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(10)))?
                 .expect("far interval");
@@ -1969,14 +2050,19 @@ mod tests {
             })?;
             assert!(store.view(|tx| tx.get_full_tx_path(old))?.is_none());
             assert!(store.view(|tx| tx.get_tx_leaf_binding(old))?.is_none());
-            assert_eq!(
-                store.view(|tx| tx.get_full_tx_path(new))?,
-                Some(vec![new.0[0]])
-            );
-            assert_eq!(
-                store.view(|tx| tx.get_tx_leaf_binding(new))?,
-                Some(leaf_for(new))
-            );
+            if store.stores_tx_paths() {
+                assert_eq!(
+                    store.view(|tx| tx.get_full_tx_path(new))?,
+                    Some(vec![new.0[0]])
+                );
+                assert_eq!(
+                    store.view(|tx| tx.get_tx_leaf_binding(new))?,
+                    Some(leaf_for(new))
+                );
+            } else {
+                assert!(store.view(|tx| tx.get_full_tx_path(new))?.is_none());
+                assert!(store.view(|tx| tx.get_tx_leaf_binding(new))?.is_none());
+            }
             let at_zero = store
                 .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(0)))?
                 .expect("replacement interval");
@@ -2035,7 +2121,10 @@ mod tests {
                 .view(|tx| tx.get_path_hashes_by_offset(offset))?
                 .expect("offset row");
             assert_eq!(hashes.tx_path_hash, Some(tx_hash));
-            assert_eq!(hashes.data_path_hash, Some(data_hash));
+            assert_eq!(
+                hashes.data_path_hash,
+                Some(expect_data_hash(store, data_hash, &[1, 2, 3]))
+            );
             let path = store.view(|tx| tx.get_data_path_by_offset(offset))?;
             assert_eq!(path, Some(vec![1, 2, 3]));
             Ok(())
@@ -2296,12 +2385,14 @@ mod tests {
                 tx_path_hash: None,
             };
             store.update(|tx| {
+                tx.add_full_data_path(PartitionChunkOffset::from(5), vec![5])?;
                 tx.set_path_hashes_by_offset(PartitionChunkOffset::from(5), hashes.clone())?;
                 tx.clear()?;
                 assert!(
                     tx.get_path_hashes_by_offset(PartitionChunkOffset::from(5))?
                         .is_none()
                 );
+                tx.add_full_data_path(PartitionChunkOffset::from(6), vec![5])?;
                 tx.set_path_hashes_by_offset(PartitionChunkOffset::from(6), hashes.clone())?;
                 Ok(())
             })?;
@@ -2310,10 +2401,18 @@ mod tests {
                     .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(5)))?
                     .is_none()
             );
-            assert_eq!(
-                store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?,
-                Some(hashes)
-            );
+            let kept = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?
+                .expect("row written after clear");
+            if store.stores_tx_paths() {
+                assert_eq!(kept, hashes);
+            } else {
+                assert_eq!(
+                    kept.data_path_hash,
+                    Some(H256(irys_types::hash_sha256(&[5])))
+                );
+                assert!(kept.tx_path_hash.is_none());
+            }
             Ok(())
         })
     }
@@ -2369,7 +2468,7 @@ mod tests {
                 path_at(store, 3)?
                     .expect("visible before sync")
                     .data_path_hash,
-                Some(H256::repeat_byte(4))
+                Some(expect_data_hash(store, H256::repeat_byte(4), &[4]))
             );
             store.sync_group()?;
             assert_eq!(store.group_sync_count(), 1);
@@ -2446,6 +2545,8 @@ mod tests {
             put_registration(store, 1, 1)?;
             assert_eq!(store.group_sync_count(), 0);
             store.update(|tx| {
+                // Schema v3 presence is the data-path bytes. The hash row is v2.
+                tx.add_full_data_path(PartitionChunkOffset::from(2), vec![2])?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
                     ChunkPathHashes {
@@ -2518,7 +2619,11 @@ mod tests {
                 (PartitionChunkOffset::from(3), PartitionChunkOffset::from(3)),
                 (max, max),
             ])?;
-            assert_eq!(stats.path_hash_rows, 2);
+            if store.stores_tx_paths() {
+                assert_eq!(stats.path_hash_rows, 2);
+            } else {
+                assert_eq!(stats.path_hash_rows, 0);
+            }
             assert_eq!(stats.data_path_rows, 2);
             assert!(store.committed_sequence()? > before);
 
@@ -2536,18 +2641,27 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![1]
             );
-            assert_eq!(
-                store.view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?,
-                Some(tx_path.clone())
-            );
-            assert_eq!(
-                store.view(|tx| tx.get_full_tx_path(tx_hash))?,
-                Some(tx_path)
-            );
-            assert_eq!(
-                store.view(|tx| tx.get_tx_leaf_binding(tx_hash))?,
-                Some(leaf)
-            );
+            if store.stores_tx_paths() {
+                assert_eq!(
+                    store.view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?,
+                    Some(tx_path.clone())
+                );
+                assert_eq!(
+                    store.view(|tx| tx.get_full_tx_path(tx_hash))?,
+                    Some(tx_path)
+                );
+                assert_eq!(
+                    store.view(|tx| tx.get_tx_leaf_binding(tx_hash))?,
+                    Some(leaf)
+                );
+            } else {
+                let placement = store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(3)))?
+                    .expect("the interval stays when only presence is dropped");
+                assert_eq!(placement.data_root, data_root);
+                assert!(store.view(|tx| tx.get_full_tx_path(tx_hash))?.is_none());
+                assert!(store.view(|tx| tx.get_tx_leaf_binding(tx_hash))?.is_none());
+            }
             assert_eq!(
                 store.view(|tx| tx.get_data_root_infos_for_data_root(data_root))?,
                 Some(DataRootInfos(vec![info]))
@@ -2638,6 +2752,7 @@ mod tests {
             let published = store.published_generation();
             assert!(published > store.durable_generation());
             store.update(|tx| {
+                tx.add_full_data_path(PartitionChunkOffset::from(2), vec![2])?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
                     ChunkPathHashes {
