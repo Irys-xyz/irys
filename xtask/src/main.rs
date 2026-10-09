@@ -661,23 +661,28 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             test_result?;
         }
         Commands::Check { args } => {
-            println!("cargo check --workspace");
             let invocation = format!("check {}", args.join(" "));
+            let args = with_workspace(args);
+            println!("cargo check {}", args.join(" "));
             run_recorded(
                 cmd!(
                     sh,
-                    "cargo check --message-format json-render-diagnostics --workspace {args...}"
+                    "cargo check --message-format json-render-diagnostics {args...}"
                 ),
                 &invocation,
             )?;
         }
         Commands::FullCheck { args } => {
-            println!("cargo check --workspace --all-features --all-targets");
             let invocation = format!("full-check {}", args.join(" "));
+            let args = with_workspace(args);
+            println!(
+                "cargo check --all-features --all-targets {}",
+                args.join(" ")
+            );
             run_recorded(
                 cmd!(
                     sh,
-                    "cargo check --message-format json-render-diagnostics --workspace --all-features --all-targets {args...}"
+                    "cargo check --message-format json-render-diagnostics --all-features --all-targets {args...}"
                 ),
                 &invocation,
             )?;
@@ -1003,6 +1008,26 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
     };
     Ok(())
+}
+
+/// Prepend `--workspace` unless `args` already select packages: cargo accepts `--workspace` with
+/// `-p` and then checks every member, so `check -- -p foo` would no longer narrow the check.
+fn with_workspace(args: Vec<String>) -> Vec<String> {
+    let selects_packages = args.iter().any(|a| {
+        a == "-p"
+            || a == "--package"
+            || a == "--workspace"
+            || a == "--all"
+            || a.starts_with("--package=")
+            || (a.starts_with("-p") && a.len() > 2)
+    });
+    if selects_packages {
+        args
+    } else {
+        std::iter::once("--workspace".to_string())
+            .chain(args)
+            .collect()
+    }
 }
 
 /// Prune never fails a run: a failure to delete leaves disk as it was.
@@ -1488,5 +1513,35 @@ mod coverage_mismatch_tests {
         let crate_names = vec!["my_crate".to_owned()];
         let result = collect_executed_from_profdata(output, &crate_names);
         assert!(result.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod with_workspace_tests {
+    use super::with_workspace;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn adds_workspace_without_a_package_selection() {
+        assert_eq!(
+            with_workspace(strings(&["--tests"])),
+            ["--workspace", "--tests"]
+        );
+    }
+
+    #[test]
+    fn keeps_a_package_selection() {
+        for args in [
+            &["-p", "xtask"][..],
+            &["-pxtask"],
+            &["--package", "xtask"],
+            &["--package=xtask"],
+            &["--workspace"],
+        ] {
+            assert_eq!(with_workspace(strings(args)), strings(args), "{args:?}");
+        }
     }
 }
