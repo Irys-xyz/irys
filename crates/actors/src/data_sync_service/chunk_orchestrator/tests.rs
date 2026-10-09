@@ -1503,6 +1503,57 @@ async fn local_cache_index_only_row_is_a_miss() {
     assert!(metrics::test_fetch_by_source_count("local_cache", "not_found") > before);
 }
 
+/// A retired body job clears the cache-miss memo and puts the hole at the
+/// front of the queue. The next dispatch writes the cached body. An offset
+/// that is not entropy, and a fetch already in flight, are left alone.
+#[test_log::test(tokio::test)]
+async fn retired_holes_clear_the_cache_memo_and_are_written_locally() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 1);
+    index_and_settle(&sm, &tx, 0);
+    cache_bodies_at(&db, &tx, &data, &[0]);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    let offset = PartitionChunkOffset::from(0);
+    let later = PartitionChunkOffset::from(2);
+    insert_pending(&mut orch, later);
+    insert_pending(&mut orch, offset);
+    orch.chunk_requests
+        .get_mut(&offset)
+        .unwrap()
+        .local_cache_miss = true;
+    orch.chunk_requests.get_mut(&later).unwrap().request_state =
+        ChunkRequestState::Requested(IrysAddress::ZERO, Instant::now());
+    orch.chunk_requests
+        .get_mut(&later)
+        .unwrap()
+        .local_cache_miss = true;
+
+    orch.queue_body_migration_holes(&[later, offset, PartitionChunkOffset::from(100)]);
+    assert!(!orch.chunk_requests[&offset].local_cache_miss);
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Pending
+    ));
+    assert_eq!(orch.ready_offsets.front(), Some(&offset));
+    assert!(matches!(
+        orch.chunk_requests[&later].request_state,
+        ChunkRequestState::Requested(_, _)
+    ));
+    assert!(orch.chunk_requests[&later].local_cache_miss);
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(100))
+    );
+
+    assert!(orch.dispatch_next());
+    assert!(fetcher.request_log.read().unwrap().is_empty());
+    assert!(sm.is_data_write_pending_at(offset));
+}
+
 /// A live body-migration job covers every offset in its span, not only the
 /// row key. Data sync holds those offsets and still asks a peer for a hole
 /// the job does not own. After the job is settled, the held offsets are

@@ -420,6 +420,12 @@ pub enum DataSyncServiceMessage {
         peer_address: IrysAddress,
     },
     GetActivePeersList(oneshot::Sender<Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>>),
+    /// Entropy offsets a retired body-migration job left behind. The local-cache
+    /// miss memo is cleared and the offsets are queued ahead of other work.
+    BodyMigrationHoles {
+        storage_module_id: usize,
+        chunk_offsets: Vec<PartitionChunkOffset>,
+    },
 }
 
 impl DataSyncServiceInner {
@@ -501,6 +507,20 @@ impl DataSyncServiceInner {
                 peer_address: peer_addr,
             } => self.handle_peer_disconnection(peer_addr),
             DataSyncServiceMessage::GetActivePeersList(tx) => self.handle_get_active_peers_list(tx),
+            DataSyncServiceMessage::BodyMigrationHoles {
+                storage_module_id,
+                chunk_offsets,
+            } => {
+                if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+                    orchestrator.queue_body_migration_holes(&chunk_offsets);
+                } else {
+                    debug!(
+                        storage_module.id = storage_module_id,
+                        holes = chunk_offsets.len(),
+                        "retired body holes have no data sync orchestrator"
+                    );
+                }
+            }
         }
         Ok(())
     }

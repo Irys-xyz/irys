@@ -774,6 +774,56 @@ impl ChunkOrchestrator {
         }
     }
 
+    /// Queue entropy holes from a retired body-migration job at the front.
+    ///
+    /// Clears a local-cache miss memo so the next dispatch reads the cache
+    /// once more. An in-flight fetch is left alone. An offset that is not
+    /// entropy is skipped.
+    pub(crate) fn queue_body_migration_holes(&mut self, offsets: &[PartitionChunkOffset]) {
+        let now = Instant::now();
+        let mut queued = Vec::new();
+        for &offset in offsets {
+            if !matches!(
+                self.storage_module.get_chunk_type(&offset),
+                Some(ChunkType::Entropy)
+            ) {
+                continue;
+            }
+            match self.chunk_requests.get_mut(&offset) {
+                Some(request)
+                    if matches!(
+                        request.request_state,
+                        ChunkRequestState::Requested(_, _)
+                            | ChunkRequestState::AwaitingDurability(_)
+                    ) =>
+                {
+                    continue;
+                }
+                Some(request) => {
+                    request.local_cache_miss = false;
+                    if !matches!(request.request_state, ChunkRequestState::Pending) {
+                        request.request_state = ChunkRequestState::Pending;
+                        request.ready_since = now;
+                    }
+                    queued.push(offset);
+                }
+                None => {
+                    if self.enqueue_pending(offset, now, false) {
+                        queued.push(offset);
+                    }
+                }
+            }
+        }
+        if queued.is_empty() {
+            return;
+        }
+        let front: HashSet<_> = queued.iter().copied().collect();
+        self.ready_offsets.retain(|offset| !front.contains(offset));
+        for offset in queued.into_iter().rev() {
+            self.ready_offsets.push_front(offset);
+        }
+    }
+
     /// Put `offset` back on the FIFO tail without recording a cache miss.
     /// A write that did not land can succeed on a later tick.
     fn requeue_pending_without_memo(&mut self, offset: PartitionChunkOffset) {

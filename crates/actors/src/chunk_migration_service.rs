@@ -890,6 +890,7 @@ impl ChunkMigrationService {
                 config.clone(),
                 body_wakeup.clone(),
                 shutdown_rx.clone(),
+                service_senders.data_sync.clone(),
             )
             .run(),
         );
@@ -1128,12 +1129,21 @@ mod tests {
 
         /// A fresh worker over the same modules and DB — also what a restart looks like.
         fn worker(&self) -> BodyMigrationWorker {
+            let (senders, _receivers) = crate::services::ServiceSenders::new();
+            self.worker_sending_to(senders)
+        }
+
+        fn worker_sending_to(
+            &self,
+            senders: crate::services::ServiceSenders,
+        ) -> BodyMigrationWorker {
             BodyMigrationWorker::new(
                 self.guard.clone(),
                 self.db.clone(),
                 self.config.clone(),
                 Arc::new(Notify::new()),
                 self.shutdown.clone(),
+                senders.data_sync.clone(),
             )
         }
 
@@ -1325,6 +1335,52 @@ mod tests {
             )?
             .is_some()
         );
+        Ok(())
+    }
+
+    /// Retirement hands the entropy holes to data sync. A stall that has not
+    /// reached the limit sends nothing.
+    #[tokio::test]
+    async fn worker_retirement_hands_entropy_holes_to_data_sync() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.index()?;
+        let (senders, mut receivers) = crate::services::ServiceSenders::new();
+        let worker = f.worker_sending_to(senders);
+
+        let pass = worker.drain_pass().await;
+        assert_eq!(pass.retired, 0);
+        assert!(receivers.data_sync.try_recv().is_err());
+
+        for _ in 2..MAX_BODY_MIGRATION_ATTEMPTS {
+            assert_eq!(worker.drain_pass().await.retired, 0);
+        }
+        let pass = worker.drain_pass().await;
+        assert_eq!(pass.retired, 1);
+        assert!(f.rows()?.is_empty());
+
+        let traced = receivers
+            .data_sync
+            .try_recv()
+            .expect("retired holes are handed to data sync");
+        match traced.inner {
+            crate::DataSyncServiceMessage::BodyMigrationHoles {
+                storage_module_id,
+                chunk_offsets,
+            } => {
+                assert_eq!(storage_module_id, f.sm.id);
+                assert_eq!(
+                    chunk_offsets,
+                    vec![
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(1),
+                        PartitionChunkOffset::from(2),
+                    ]
+                );
+            }
+            _ => panic!("expected body migration holes"),
+        }
+        assert!(receivers.data_sync.try_recv().is_err());
         Ok(())
     }
 

@@ -12,11 +12,12 @@
 //! so a pass fans out one blocking task per submodule with outstanding rows.
 
 use super::{MigrationError, load_chunks_for_migration, write_chunks_to_module};
+use crate::DataSyncServiceMessage;
 use irys_database::submodule::tables::PendingBodyMigration;
 use irys_domain::{BatchEnqueueItem, ChunkType, StorageModule, StorageModulesReadGuard};
 use irys_types::{
-    Config, DataLedger, PartitionChunkOffset, TxChunkOffset, UnpackedChunk,
-    app_state::DatabaseProvider,
+    Config, DataLedger, PartitionChunkOffset, SendTraced as _, Traced, TxChunkOffset,
+    UnpackedChunk, app_state::DatabaseProvider,
 };
 use nodit::Interval;
 use reth::tasks::shutdown::Shutdown;
@@ -25,7 +26,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc::UnboundedSender};
 use tracing::{debug, info, warn};
 
 /// Fallback wake-up so a missed notification only costs latency.
@@ -90,6 +91,8 @@ pub(crate) struct BodyMigrationWorker {
     /// Modules already warned that a configured `max_pending_write_bytes` was
     /// raised to one flush batch, so the warning fires once, not every pass.
     ceiling_floor_warned: Mutex<HashSet<usize>>,
+    /// Retired jobs hand their remaining entropy holes to data sync here.
+    data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
 }
 
 /// What one pass did, summed over every submodule it touched.
@@ -151,6 +154,7 @@ impl BodyMigrationWorker {
         config: Config,
         wakeup: Arc<Notify>,
         shutdown: Shutdown,
+        data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
     ) -> Self {
         Self {
             storage_modules_guard,
@@ -160,6 +164,7 @@ impl BodyMigrationWorker {
             shutdown,
             writes_per_pass: BODY_WRITES_PER_PASS,
             ceiling_floor_warned: Mutex::new(HashSet::new()),
+            data_sync,
         }
     }
 
@@ -273,6 +278,7 @@ impl BodyMigrationWorker {
                     budget: self.writes_per_pass,
                     ceiling,
                     throttled_jobs: 0,
+                    data_sync: self.data_sync.clone(),
                 };
                 tasks.push(tokio::task::spawn_blocking(move || drain.run()));
             }
@@ -315,6 +321,7 @@ struct SubmoduleDrain {
     ceiling: u64,
     /// Jobs this task cut short at the ceiling (for `PassStats::throttled`).
     throttled_jobs: usize,
+    data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
 }
 
 impl SubmoduleDrain {
@@ -399,6 +406,7 @@ impl SubmoduleDrain {
                 );
                 if self.settle(key, job) {
                     stats.retired += 1;
+                    self.hand_retired_holes_to_data_sync(key, job);
                 }
             }
             Ok(_) => {}
@@ -408,6 +416,69 @@ impl SubmoduleDrain {
                 ?error,
                 "failed to record body migration attempt"
             ),
+        }
+    }
+
+    /// Entropy offsets in this job's span. Data sync may still hold a cache
+    /// miss memo for them. Offsets that already store a body are omitted.
+    fn entropy_holes(
+        &self,
+        key: PartitionChunkOffset,
+        job: &PendingBodyMigration,
+    ) -> Vec<PartitionChunkOffset> {
+        let chunk_size = self.config.consensus.chunk_size;
+        if chunk_size == 0 {
+            return Vec::new();
+        }
+        let Ok(num_chunks) = i64::try_from(job.data_size.div_ceil(chunk_size)) else {
+            return Vec::new();
+        };
+        if num_chunks == 0 {
+            return Vec::new();
+        }
+        let first = i64::from(*key);
+        let tx_start = i64::from(*job.start_offset);
+        let last = (tx_start + num_chunks - 1).min(i64::from(*self.interval.end()));
+        if last < first {
+            return Vec::new();
+        }
+        let mut holes = Vec::new();
+        let mut cursor = first;
+        while cursor <= last {
+            let Ok(offset) = u32::try_from(cursor) else {
+                break;
+            };
+            let offset = PartitionChunkOffset::from(offset);
+            if matches!(self.sm.get_chunk_type(&offset), Some(ChunkType::Entropy)) {
+                holes.push(offset);
+            }
+            cursor += 1;
+        }
+        holes
+    }
+
+    fn hand_retired_holes_to_data_sync(
+        &self,
+        key: PartitionChunkOffset,
+        job: &PendingBodyMigration,
+    ) {
+        let chunk_offsets = self.entropy_holes(key, job);
+        if chunk_offsets.is_empty() {
+            return;
+        }
+        if self
+            .data_sync
+            .send_traced(DataSyncServiceMessage::BodyMigrationHoles {
+                storage_module_id: self.sm.id,
+                chunk_offsets,
+            })
+            .is_err()
+        {
+            warn!(
+                storage_module.id = self.sm.id,
+                partition.offset = %key,
+                "data sync is not running; retired body holes were not queued"
+            );
         }
     }
 
