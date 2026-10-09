@@ -47,6 +47,10 @@ name = "submodule-index-convert"
 path = "src/bin/submodule_index_convert.rs"
 required-features = ["rocksdb"]
 
+[[bin]]
+name = "tx-path-derive-bench"
+path = "src/bin/tx_path_derive_bench.rs"
+
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
