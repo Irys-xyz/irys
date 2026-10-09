@@ -1041,6 +1041,17 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         u32::from(DataLedger::OneYear) as usize
     ));
 
+    let db = {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_types::app_state::DatabaseProvider;
+        let env = open_or_create_db(
+            config.node_config.base_directory.join("orchestrator-db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("open orchestrator test db");
+        DatabaseProvider(Arc::new(env))
+    };
     let orchestrator = ChunkOrchestrator::new(
         storage_module.clone(),
         Arc::new(RwLock::new(HashMap::new())),
@@ -1049,6 +1060,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         mock_fetcher,
         config.node_config.clone(),
         tokio::runtime::Handle::current(),
+        db.clone(),
     );
 
     // Before the fix this panics: "should be able to look up data_ledger by id".
@@ -1107,6 +1119,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         )),
         cascade_node_config,
         tokio::runtime::Handle::current(),
+        db,
     );
     assert_eq!(anomaly_orchestrator.get_max_chunk_offset(), None);
 }

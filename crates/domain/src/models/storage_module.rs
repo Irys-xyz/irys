@@ -4829,52 +4829,114 @@ impl StorageModule {
     ) -> eyre::Result<Option<(DataRoot, TxChunkOffset)>> {
         let chunk_size = self.config.consensus.chunk_size;
         self.query_submodule_db_by_offset(partition_offset, |tx| {
-            // data_path_hash may be None — that is the residual-hole case we support.
-            let Some((data_root, _data_path_hash)) =
-                recover_tx_path_data_root(tx, partition_offset)?
-            else {
-                return Ok(None);
-            };
-
-            let Some(mut data_root_infos) = tx.get_data_root_infos_for_data_root(data_root)? else {
-                return Ok(None);
-            };
-            if data_root_infos.0.is_empty() {
-                return Ok(None);
-            }
-
-            // Same placement selection as generate_full_chunk: last start_offset that is
-            // still ≤ partition_offset (handles multi-placement of the same data_root).
-            data_root_infos.0.sort_unstable();
-            let partition_rel = RelativeChunkOffset::from(partition_offset);
-            let index = data_root_infos
-                .0
-                .partition_point(|info| info.start_offset <= partition_rel)
-                .saturating_sub(1);
-            if index >= data_root_infos.0.len() {
-                return Ok(None);
-            }
-            let info = &data_root_infos.0[index];
-            if info.start_offset > partition_rel {
-                return Ok(None);
-            }
-
-            // partition_offset = start_offset + tx_offset (write path); invert it.
-            // start_offset can be negative when a multi-partition tx straddles modules.
-            let tx_offset_i32 = *partition_rel - *info.start_offset;
-            if tx_offset_i32 < 0 {
-                return Ok(None);
-            }
-            let tx_offset_u32 = tx_offset_i32 as u32;
-
-            // Funded extent: last valid byte is data_size - 1; reject offsets past it.
-            let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
-            if chunk_byte_offset >= info.data_size {
-                return Ok(None);
-            }
-
-            Ok(Some((data_root, TxChunkOffset::from(tx_offset_u32))))
+            Ok(Self::resolve_placement(tx, partition_offset, chunk_size)?
+                .map(|(data_root, tx_offset, _data_size)| (data_root, tx_offset)))
         })
+    }
+
+    /// Same resolution as [`Self::data_root_and_tx_offset_at`] for every offset in
+    /// the inclusive range `[start, end]`. One submodule view covers each
+    /// contiguous slice. `data_size` is the covering placement's funded size.
+    ///
+    /// `Ok(None)` at an index has the same meaning as `data_root_and_tx_offset_at`.
+    pub fn data_root_and_tx_offset_span(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<Option<(DataRoot, TxChunkOffset, u64)>>> {
+        if start > end {
+            return Ok(Vec::new());
+        }
+        let chunk_size = self.config.consensus.chunk_size;
+        let len = usize::try_from(u64::from(end.0 - start.0) + 1)
+            .map_err(|_| eyre!("placement span does not fit in memory"))?;
+        let mut out = vec![None; len];
+        let mut offset = start;
+        loop {
+            let (interval, submodule) = self.get_submodule_for_offset(offset)?;
+            let sub_last = PartitionChunkOffset(std::cmp::min(end.0, interval.end().0));
+            let group_start = offset;
+            submodule.db.view(|tx| {
+                let mut cur = group_start;
+                loop {
+                    let idx = usize::try_from(cur.0 - start.0)?;
+                    out[idx] = Self::resolve_placement(tx, cur, chunk_size)?;
+                    if cur == sub_last {
+                        break;
+                    }
+                    cur = PartitionChunkOffset(cur.0 + 1);
+                }
+                Ok(())
+            })?;
+            if sub_last == end {
+                break;
+            }
+            let Some(next) = sub_last.0.checked_add(1) else {
+                break;
+            };
+            offset = PartitionChunkOffset(next);
+        }
+        Ok(out)
+    }
+
+    /// Placement of one partition offset: `(data_root, tx_offset, data_size)`.
+    ///
+    /// `data_path_hash` may be absent. That is the residual hole after the index
+    /// is written and before the body is. `tx_offset` is
+    /// `partition_offset - DataRootInfo.start_offset` for the placement that covers
+    /// the offset, and the offset must fall inside `data_size`.
+    fn resolve_placement(
+        tx: &mut dyn SubmoduleRead,
+        partition_offset: PartitionChunkOffset,
+        chunk_size: u64,
+    ) -> eyre::Result<Option<(DataRoot, TxChunkOffset, u64)>> {
+        let Some((data_root, _data_path_hash)) = recover_tx_path_data_root(tx, partition_offset)?
+        else {
+            return Ok(None);
+        };
+
+        let Some(mut data_root_infos) = tx.get_data_root_infos_for_data_root(data_root)? else {
+            return Ok(None);
+        };
+        if data_root_infos.0.is_empty() {
+            return Ok(None);
+        }
+
+        // Same placement selection as generate_full_chunk: last start_offset that is
+        // still ≤ partition_offset (handles multi-placement of the same data_root).
+        data_root_infos.0.sort_unstable();
+        let partition_rel = RelativeChunkOffset::from(partition_offset);
+        let index = data_root_infos
+            .0
+            .partition_point(|info| info.start_offset <= partition_rel)
+            .saturating_sub(1);
+        if index >= data_root_infos.0.len() {
+            return Ok(None);
+        }
+        let info = &data_root_infos.0[index];
+        if info.start_offset > partition_rel {
+            return Ok(None);
+        }
+
+        // partition_offset = start_offset + tx_offset (write path); invert it.
+        // start_offset can be negative when a multi-partition tx straddles modules.
+        let tx_offset_i32 = *partition_rel - *info.start_offset;
+        if tx_offset_i32 < 0 {
+            return Ok(None);
+        }
+        let tx_offset_u32 = tx_offset_i32 as u32;
+
+        // Funded extent: last valid byte is data_size - 1; reject offsets past it.
+        let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
+        if chunk_byte_offset >= info.data_size {
+            return Ok(None);
+        }
+
+        Ok(Some((
+            data_root,
+            TxChunkOffset::from(tx_offset_u32),
+            info.data_size,
+        )))
     }
 
     /// Whether the local index can resolve `data_root` + placement for `partition_offset`.

@@ -37,9 +37,9 @@ const MAX_INGRESS_PROOF_SIGNER_PEERS: usize = 2;
 /// Max residual entropy offsets sampled when collecting data_roots for proof lookup.
 const MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN: usize = 16;
 
-/// Local write outcome after a successful peer fetch.
+/// Local write outcome after a successful peer fetch or a local-cache hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum DataSyncWriteOutcome {
+pub(crate) enum DataSyncWriteOutcome {
     /// Another writer already made the requested offset durably `Data`.
     AlreadyDurable,
     /// Offset is buffered as [`ChunkType::Data`] and awaits a completed fsync.
@@ -254,7 +254,7 @@ fn dispatch_term_then_publish<T: Copy>(
     (next_term, next_publish)
 }
 
-fn classify_synced_chunk(
+pub(crate) fn classify_synced_chunk(
     sm: &StorageModule,
     unpacked: &UnpackedChunk,
     expected_offset: PartitionChunkOffset,
@@ -1306,6 +1306,7 @@ impl DataSyncServiceInner {
                 chunk_fetcher,
                 self.config.node_config.clone(),
                 self.runtime_handle.clone(),
+                self.db.clone(),
             );
 
             self.chunk_orchestrators.insert(sm_id, orchestrator);

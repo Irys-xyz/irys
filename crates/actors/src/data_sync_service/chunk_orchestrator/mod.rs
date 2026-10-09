@@ -1,12 +1,17 @@
 use crate::{
     DataSyncServiceMessage, chunk_fetcher::ChunkFetcher,
+    chunk_migration_service::validate_chunk_for_migration,
     data_sync_service::peer_bandwidth_manager::PeerBandwidthManager, metrics,
     services::ServiceSenders,
 };
-use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
+use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
+use irys_domain::{
+    BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule,
+    WriteDataChunkError,
+};
 use irys_types::{
     DataLedger, IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
-    hardfork_config::DataLedgerLookup,
+    UnpackedChunk, app_state::DatabaseProvider, hardfork_config::DataLedgerLookup,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map},
@@ -120,6 +125,30 @@ pub struct ChunkRequest {
     pub retry_round: u32,
     /// Monotonic time this offset most recently joined the FIFO ready queue.
     pub ready_since: Instant,
+    /// A local-cache lookup already missed. Later retries of this request skip
+    /// the cache until the request is dropped (the offset is no longer Entropy,
+    /// the delayed map trims it, or the process restarts).
+    pub local_cache_miss: bool,
+}
+
+/// Result of one local-cache attempt for the offset `dispatch_next` popped.
+enum LocalCacheStep {
+    /// The start offset was accepted locally (buffered, durable, or blocked).
+    Done,
+    /// The start offset missed. The caller may ask a peer.
+    Miss,
+    /// The start offset was requeued after a write failure. Do not ask a peer
+    /// on this tick, or the same write is retried immediately.
+    Stop,
+}
+
+fn write_error_label(error: &WriteDataChunkError) -> &'static str {
+    match error {
+        WriteDataChunkError::WritesPaused => "writes_paused",
+        WriteDataChunkError::Backpressure => "backpressure",
+        WriteDataChunkError::DataRootNotFound => "missing_data_root_index",
+        WriteDataChunkError::Other(_) => "other",
+    }
 }
 
 /// Orchestrates efficient chunk downloading for a StorageModule's assigned data partition.
@@ -151,6 +180,9 @@ pub struct ChunkOrchestrator {
     chunk_fetcher: Arc<dyn ChunkFetcher>,
     config: NodeConfig,
     runtime_handle: tokio::runtime::Handle,
+    /// Main node DB. Holds validated chunk bodies that have not reached this
+    /// storage module yet.
+    db: DatabaseProvider,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -161,6 +193,7 @@ impl ChunkOrchestrator {
         chunk_fetcher: Arc<dyn ChunkFetcher>,
         config: NodeConfig,
         runtime_handle: tokio::runtime::Handle,
+        db: DatabaseProvider,
     ) -> Self {
         let ledger_id = storage_module
             .partition_assignment()
@@ -186,6 +219,7 @@ impl ChunkOrchestrator {
             chunk_fetcher, // Store the chunk fetcher
             config,
             runtime_handle,
+            db,
         }
     }
 
@@ -497,6 +531,7 @@ impl ChunkOrchestrator {
             attempt_count: 0,
             retry_round: 0,
             ready_since: now,
+            local_cache_miss: false,
         });
         if at_front {
             self.ready_offsets.push_front(chunk_offset);
@@ -516,7 +551,7 @@ impl ChunkOrchestrator {
         }
 
         while let Some(chunk_offset) = self.ready_offsets.pop_front() {
-            let Some((excluded, all_peers_exhausted)) = self
+            let Some((excluded, all_peers_exhausted, cache_miss)) = self
                 .chunk_requests
                 .get_mut(&chunk_offset)
                 .and_then(|chunk_request| {
@@ -532,11 +567,27 @@ impl ChunkOrchestrator {
                             .current_peers
                             .iter()
                             .all(|peer| chunk_request.excluded.contains(peer));
-                    Some((chunk_request.excluded.clone(), exhausted))
+                    Some((
+                        chunk_request.excluded.clone(),
+                        exhausted,
+                        chunk_request.local_cache_miss,
+                    ))
                 })
             else {
                 continue;
             };
+
+            // The cache is tried before peer selection. A node that already
+            // holds the body must write it even when every peer is exhausted
+            // or none is connected. A recorded miss skips this until the
+            // request is dropped.
+            if !cache_miss {
+                match self.try_local_cache(chunk_offset) {
+                    LocalCacheStep::Done => return true,
+                    LocalCacheStep::Stop => return false,
+                    LocalCacheStep::Miss => {}
+                }
+            }
 
             if all_peers_exhausted {
                 self.delay_request(chunk_offset, Instant::now());
@@ -556,6 +607,316 @@ impl ChunkOrchestrator {
         }
 
         false
+    }
+
+    /// How many contiguous offsets one local-cache read may cover.
+    /// Matches the ingress sweep so one enqueue is one disk span.
+    fn local_cache_run_limit(&self) -> usize {
+        let chunk = self.config.consensus_config().chunk_size.max(1);
+        let sweep = self.config.storage.entropy_sweep_max_bytes.max(chunk);
+        usize::try_from(sweep / chunk).unwrap_or(1).max(1)
+    }
+
+    /// `start` is already popped and Pending. Append following Pending offsets
+    /// that continue the run, are not cache-miss memoized, and sit at the queue
+    /// head. Stale non-pending heads are dropped, same as [`Self::dispatch_next`].
+    fn take_local_cache_run(&mut self, start: PartitionChunkOffset) -> Vec<PartitionChunkOffset> {
+        let mut run = vec![start];
+        let limit = self.local_cache_run_limit();
+        while run.len() < limit {
+            let Some(last) = run.last().copied() else {
+                break;
+            };
+            let Some(next_u32) = last.0.checked_add(1) else {
+                break;
+            };
+            let next_expected = PartitionChunkOffset(next_u32);
+            let Some(&front) = self.ready_offsets.front() else {
+                break;
+            };
+            let Some(request) = self.chunk_requests.get(&front) else {
+                self.ready_offsets.pop_front();
+                continue;
+            };
+            if !matches!(request.request_state, ChunkRequestState::Pending) {
+                self.ready_offsets.pop_front();
+                continue;
+            }
+            if front != next_expected || request.local_cache_miss {
+                break;
+            }
+            self.ready_offsets.pop_front();
+            run.push(front);
+        }
+        run
+    }
+
+    fn push_front_offsets(&mut self, offsets: &[PartitionChunkOffset]) {
+        for offset in offsets.iter().rev() {
+            self.ready_offsets.push_front(*offset);
+        }
+    }
+
+    fn memo_local_cache_miss(&mut self, offset: PartitionChunkOffset) {
+        if let Some(request) = self.chunk_requests.get_mut(&offset) {
+            request.local_cache_miss = true;
+        }
+    }
+
+    /// Put `offset` back on the FIFO tail without recording a cache miss.
+    /// A write that did not land can succeed on a later tick.
+    fn requeue_pending_without_memo(&mut self, offset: PartitionChunkOffset) {
+        let Some(request) = self.chunk_requests.get_mut(&offset) else {
+            return;
+        };
+        request.request_state = ChunkRequestState::Pending;
+        request.ready_since = Instant::now();
+        self.ready_offsets.push_back(offset);
+    }
+
+    fn note_local_cache_error(
+        &mut self,
+        start: PartitionChunkOffset,
+        tail: &[PartitionChunkOffset],
+    ) {
+        metrics::record_data_sync_fetch_by_source("local_cache", "error");
+        self.push_front_offsets(tail);
+        debug!(
+            chunk.offset = %start,
+            "local cache lookup failed; falling through to peers"
+        );
+    }
+
+    /// Read the main-db chunk cache for `start` and a contiguous Pending run.
+    ///
+    /// Hits skip ingress (the leaf is already committed) and go to the disk
+    /// lane. Misses, including an index row with no body, are memoized.
+    /// [`LocalCacheStep::Stop`] means the start offset was requeued after a
+    /// write failure so this tick does not spin.
+    fn try_local_cache(&mut self, start: PartitionChunkOffset) -> LocalCacheStep {
+        let run = self.take_local_cache_run(start);
+        let Some(last) = run.last().copied() else {
+            return LocalCacheStep::Miss;
+        };
+        let placements = irys_domain::trace_index_read(irys_domain::DATA_SYNC, || {
+            self.storage_module
+                .data_root_and_tx_offset_span(start, last)
+        });
+        let placements = match placements {
+            Ok(placements) if placements.len() == run.len() => placements,
+            Ok(_) => {
+                warn!(
+                    chunk.offset = %start,
+                    "local cache placement span length mismatch"
+                );
+                self.note_local_cache_error(start, &run[1..]);
+                return LocalCacheStep::Miss;
+            }
+            Err(error) => {
+                warn!(
+                    chunk.offset = %start,
+                    error = %error,
+                    "local cache placement read failed"
+                );
+                self.note_local_cache_error(start, &run[1..]);
+                return LocalCacheStep::Miss;
+            }
+        };
+
+        let looked_up = self.db.view_eyre(|tx| {
+            let mut rows = Vec::with_capacity(placements.len());
+            for placement in &placements {
+                let row = match placement {
+                    Some((data_root, tx_offset, _)) => {
+                        cached_chunk_by_chunk_offset(tx, *data_root, *tx_offset)?
+                            .map(|(_, chunk)| chunk)
+                    }
+                    None => None,
+                };
+                rows.push(row);
+            }
+            Ok(rows)
+        });
+        let looked_up = match looked_up {
+            Ok(rows) if rows.len() == run.len() => rows,
+            Ok(_) => {
+                warn!(chunk.offset = %start, "local cache row count mismatch");
+                self.note_local_cache_error(start, &run[1..]);
+                return LocalCacheStep::Miss;
+            }
+            Err(error) => {
+                warn!(
+                    chunk.offset = %start,
+                    error = %error,
+                    "local cache body read failed"
+                );
+                self.note_local_cache_error(start, &run[1..]);
+                return LocalCacheStep::Miss;
+            }
+        };
+
+        let Ok(chunk_size) = usize::try_from(self.config.consensus_config().chunk_size) else {
+            warn!(chunk.offset = %start, "configured chunk size does not fit usize");
+            self.note_local_cache_error(start, &run[1..]);
+            return LocalCacheStep::Miss;
+        };
+
+        let mut hits = Vec::new();
+        let mut tail_misses = Vec::new();
+        for (index, offset) in run.iter().copied().enumerate() {
+            let miss = match (&placements[index], &looked_up[index]) {
+                (Some((data_root, tx_offset, data_size)), Some(cached))
+                    if cached.chunk.is_some() =>
+                {
+                    match validate_chunk_for_migration(
+                        cached.clone(),
+                        *data_root,
+                        *data_size,
+                        *tx_offset,
+                        chunk_size,
+                    ) {
+                        Ok(unpacked) => {
+                            hits.push((offset, unpacked));
+                            None
+                        }
+                        Err(error) => {
+                            debug!(
+                                chunk.offset = %offset,
+                                error = %error,
+                                "local cache chunk failed migration checks"
+                            );
+                            metrics::record_data_sync_fetch_by_source("local_cache", "invalid");
+                            Some(())
+                        }
+                    }
+                }
+                _ => {
+                    metrics::record_data_sync_fetch_by_source("local_cache", "not_found");
+                    Some(())
+                }
+            };
+            if miss.is_some() {
+                self.memo_local_cache_miss(offset);
+                if index > 0 {
+                    tail_misses.push(offset);
+                }
+            }
+        }
+
+        debug!(
+            chunk.offset = %start,
+            local_cache.run = run.len(),
+            local_cache.hits = hits.len(),
+            "data sync local cache lookup"
+        );
+
+        let start_was_hit = hits.iter().any(|(offset, _)| *offset == start);
+        match self.publish_cached_bodies(&hits) {
+            Err(()) => {
+                self.push_front_offsets(&tail_misses);
+                if start_was_hit {
+                    LocalCacheStep::Stop
+                } else {
+                    LocalCacheStep::Miss
+                }
+            }
+            Ok(accepted) => {
+                self.push_front_offsets(&tail_misses);
+                if accepted.contains(&start) {
+                    LocalCacheStep::Done
+                } else if start_was_hit {
+                    LocalCacheStep::Stop
+                } else {
+                    LocalCacheStep::Miss
+                }
+            }
+        }
+    }
+
+    /// Enqueue validated cache bodies. `Err` means the whole batch was refused
+    /// and every hit was requeued. `Ok` is the set of offsets that left `Pending`.
+    fn publish_cached_bodies(
+        &mut self,
+        hits: &[(PartitionChunkOffset, UnpackedChunk)],
+    ) -> Result<HashSet<PartitionChunkOffset>, ()> {
+        if hits.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let chunks: Vec<UnpackedChunk> = hits.iter().map(|(_, chunk)| chunk.clone()).collect();
+        let items = match self.storage_module.enqueue_ingress_batch(&chunks) {
+            Ok(items) => items,
+            Err(error) => {
+                warn!(error = %error, "local cache ingress enqueue failed");
+                let reason = write_error_label(&error);
+                for (offset, _) in hits {
+                    self.requeue_pending_without_memo(*offset);
+                    metrics::record_data_sync_fetch_by_source("local_cache", "write_failed");
+                    metrics::record_data_sync_chunk_write_failed(reason);
+                }
+                return Err(());
+            }
+        };
+
+        let mut accepted = HashSet::new();
+        for ((offset, chunk), item) in hits.iter().zip(items.iter()) {
+            let outcome = super::classify_synced_chunk(&self.storage_module, chunk, *offset, item);
+            if self.apply_local_cache_write(*offset, &outcome) {
+                accepted.insert(*offset);
+            } else {
+                let reason = match &outcome {
+                    super::DataSyncWriteOutcome::NoWriteableOffset => "no_writeable_offset",
+                    super::DataSyncWriteOutcome::Other(_) => "other",
+                    super::DataSyncWriteOutcome::AlreadyDurable
+                    | super::DataSyncWriteOutcome::AwaitingDurability
+                    | super::DataSyncWriteOutcome::MissingDataRootIndex => "other",
+                };
+                self.requeue_pending_without_memo(*offset);
+                metrics::record_data_sync_fetch_by_source("local_cache", "write_failed");
+                metrics::record_data_sync_chunk_write_failed(reason);
+            }
+        }
+        for (offset, _) in hits.iter().skip(items.len()) {
+            self.requeue_pending_without_memo(*offset);
+            metrics::record_data_sync_fetch_by_source("local_cache", "write_failed");
+            metrics::record_data_sync_chunk_write_failed("other");
+        }
+        Ok(accepted)
+    }
+
+    /// Returns true when `offset` is no longer Pending.
+    fn apply_local_cache_write(
+        &mut self,
+        offset: PartitionChunkOffset,
+        outcome: &super::DataSyncWriteOutcome,
+    ) -> bool {
+        let Some(request) = self.chunk_requests.get_mut(&offset) else {
+            return false;
+        };
+        match outcome {
+            super::DataSyncWriteOutcome::AlreadyDurable => {
+                request.request_state = ChunkRequestState::Completed;
+                metrics::record_data_sync_chunk_stored();
+                metrics::record_data_sync_fetch_by_source("local_cache", "success");
+                true
+            }
+            super::DataSyncWriteOutcome::AwaitingDurability => {
+                request.request_state = ChunkRequestState::AwaitingDurability(Instant::now());
+                metrics::record_data_sync_fetch_by_source("local_cache", "success");
+                true
+            }
+            super::DataSyncWriteOutcome::MissingDataRootIndex => {
+                request.request_state =
+                    ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex);
+                request.excluded.clear();
+                metrics::record_data_sync_chunk_blocked(
+                    ChunkBlockReason::MissingDataRootIndex.as_metric_label(),
+                );
+                metrics::record_data_sync_fetch_by_source("local_cache", "write_failed");
+                true
+            }
+            super::DataSyncWriteOutcome::NoWriteableOffset
+            | super::DataSyncWriteOutcome::Other(_) => false,
+        }
     }
 
     fn retry_delay(chunk_offset: PartitionChunkOffset, retry_round: u32) -> Duration {

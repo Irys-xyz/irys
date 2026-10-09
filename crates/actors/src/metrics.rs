@@ -38,7 +38,7 @@ irys_utils::define_metrics! {
     counter BODY_MIGRATION_THROTTLED("irys.chunk_migration.body_throttled_total", "Body-migration jobs cut short by a storage module's pending-write ceiling");
     counter DATA_SYNC_DURABILITY_STALLED("irys.data_sync.durability_stalled_total", "Data sync writes that did not become durable before the monotonic durability deadline");
     counter DATA_INDEX_HEAL_UNREPAIRED("irys.storage.index_heal_unrepaired_total", "Ledger SMs still gapped/uncertain after a heal pass (labelled by reason)");
-    counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync peer fetches by source and classified outcome");
+    counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync chunk fetches by source (assigned, ingress_proof, local_cache) and classified outcome");
     counter DATA_SYNC_FETCH_FAILURES("irys.data_sync.fetch_failures_total", "Data sync fetch failures by ledger, peer, and failure class");
     counter DATA_SYNC_ATTEMPTS("irys.data_sync.attempts_total", "Data sync scheduling attempts by ledger and fresh/retry class");
     counter DATA_SYNC_UNIQUE_OFFSETS_ATTEMPTED("irys.data_sync.unique_offsets_attempted_total", "Offsets attempted for the first time in the current in-memory scheduler lifecycle");
@@ -351,8 +351,9 @@ pub(crate) fn record_data_sync_active_peers(count: u64) {
     DATA_SYNC_ACTIVE_PEERS.record(count, &[]);
 }
 
-/// `source`: `assigned` | `ingress_proof`. `outcome`: `success` or a
-/// [`crate::chunk_fetcher::ChunkFetchFailureKind`] metric label.
+/// `source`: `assigned` | `ingress_proof` | `local_cache`.
+/// `outcome`: `success`, a [`crate::chunk_fetcher::ChunkFetchFailureKind`] label,
+/// or a local-cache label (`not_found`, `invalid`, `error`, `write_failed`).
 pub(crate) fn record_data_sync_fetch_by_source(source: &'static str, outcome: &'static str) {
     DATA_SYNC_FETCH_BY_SOURCE.add(
         1,
@@ -361,7 +362,32 @@ pub(crate) fn record_data_sync_fetch_by_source(source: &'static str, outcome: &'
             KeyValue::new("outcome", outcome),
         ],
     );
+    #[cfg(test)]
+    {
+        let mut counts = FETCH_BY_SOURCE_TEST
+            .lock()
+            .expect("fetch-by-source test log");
+        *counts.entry((source, outcome)).or_insert(0) += 1;
+    }
 }
+
+/// Process-wide count of [`record_data_sync_fetch_by_source`] calls.
+///
+/// Crate tests share one process. Compare a delta, not an absolute total.
+#[cfg(test)]
+pub(crate) fn test_fetch_by_source_count(source: &'static str, outcome: &'static str) -> u64 {
+    FETCH_BY_SOURCE_TEST
+        .lock()
+        .expect("fetch-by-source test log")
+        .get(&(source, outcome))
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+static FETCH_BY_SOURCE_TEST: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(&'static str, &'static str), u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 pub(crate) fn record_data_sync_fetch_failure(
     ledger_id: u32,

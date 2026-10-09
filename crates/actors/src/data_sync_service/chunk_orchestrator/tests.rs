@@ -1,12 +1,23 @@
 use super::*;
-use crate::{chunk_fetcher::MockChunkFetcher, test_helpers::build_test_service_senders};
+use crate::{
+    chunk_fetcher::{ChunkFetchFailureKind, MockChunkFetcher},
+    metrics,
+    test_helpers::build_test_service_senders,
+};
+use irys_database::{
+    IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
+};
 use irys_domain::ChunkType;
 use irys_domain::{BlockTree, StorageModuleInfo};
 use irys_testing_utils::TempDirBuilder;
 use irys_types::{
-    Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PeerAddress, PeerListItem,
-    partition::PartitionAssignment, partition_chunk_offset_ie,
+    Base64, Config, ConsensusConfig, DataLedger, DataTransaction, DataTransactionLedger, H256,
+    IrysAddress, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PeerAddress, PeerListItem,
+    TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider, irys::IrysSigner,
+    ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
 };
+use nodit::interval::ii;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn test_config(base_directory: std::path::PathBuf, num_chunks: u64) -> Config {
     test_config_with_pending_limit(base_directory, num_chunks, 1_000)
@@ -63,21 +74,49 @@ fn packed_sm_for_ledger(
     sm
 }
 
+fn open_test_db(config: &Config) -> DatabaseProvider {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = config
+        .node_config
+        .base_directory
+        .join(format!("orchestrator-db-{n}"));
+    let env = open_or_create_db(
+        path,
+        IrysTables::ALL,
+        reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+    )
+    .expect("open orchestrator test db");
+    DatabaseProvider(Arc::new(env))
+}
+
 fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrator {
+    let db = open_test_db(config);
+    make_orchestrator_with_db(sm, config, db).0
+}
+
+fn make_orchestrator_with_db(
+    sm: Arc<StorageModule>,
+    config: &Config,
+    db: DatabaseProvider,
+) -> (ChunkOrchestrator, Arc<MockChunkFetcher>) {
     let genesis = irys_testing_utils::new_mock_signed_header();
     let block_tree = BlockTree::new(&genesis, config.consensus.clone());
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
     let (service_senders, _receivers) = build_test_service_senders();
     let ledger_id: u32 = DataLedger::Publish.into();
-    ChunkOrchestrator::new(
+    let fetcher = Arc::new(MockChunkFetcher::new(ledger_id as usize));
+    let orchestrator = ChunkOrchestrator::new(
         sm,
         Arc::new(RwLock::new(HashMap::new())),
         block_tree_guard,
         &service_senders,
-        Arc::new(MockChunkFetcher::new(ledger_id as usize)),
+        fetcher.clone(),
         config.node_config.clone(),
         tokio::runtime::Handle::current(),
-    )
+        db,
+    );
+    (orchestrator, fetcher)
 }
 
 fn make_orchestrator_with_ledger_chunks(
@@ -102,6 +141,7 @@ fn make_orchestrator_with_ledger_total(
     let block_tree = BlockTree::new(&genesis, config.consensus.clone());
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
     let (service_senders, _receivers) = build_test_service_senders();
+    let db = open_test_db(config);
     ChunkOrchestrator::new(
         sm,
         Arc::new(RwLock::new(HashMap::new())),
@@ -110,6 +150,7 @@ fn make_orchestrator_with_ledger_total(
         Arc::new(MockChunkFetcher::new(ledger as usize)),
         config.node_config.clone(),
         tokio::runtime::Handle::current(),
+        db,
     )
 }
 
@@ -137,6 +178,7 @@ fn insert_requested(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, 
         offset,
         ChunkRequest {
             excluded: HashSet::new(),
+            local_cache_miss: false,
             request_state: ChunkRequestState::Requested(peer, Instant::now()),
             attempt_count: 1,
             retry_round: 0,
@@ -151,6 +193,7 @@ fn insert_pending(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset) {
         offset,
         ChunkRequest {
             excluded: HashSet::new(),
+            local_cache_miss: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -216,6 +259,7 @@ async fn mark_helpers_require_valid_source_state() {
         offset,
         ChunkRequest {
             excluded: HashSet::new(),
+            local_cache_miss: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -494,6 +538,7 @@ async fn blocked_excluded_from_pending_budget_and_dispatch_selection() {
         offset3,
         ChunkRequest {
             excluded: HashSet::new(),
+            local_cache_miss: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -535,6 +580,7 @@ async fn unblock_missing_data_root_index_requeues_only_that_reason() {
         pending,
         ChunkRequest {
             excluded: HashSet::new(),
+            local_cache_miss: false,
             request_state: ChunkRequestState::Pending,
             attempt_count: 0,
             retry_round: 0,
@@ -922,6 +968,7 @@ async fn delayed_retry_metadata_discards_soonest_deadline_within_bound() {
             offset,
             ChunkRequest {
                 excluded: HashSet::new(),
+                local_cache_miss: false,
                 request_state: ChunkRequestState::Delayed {
                     retry_at: now + Duration::from_secs(u64::from(value) + 1),
                 },
@@ -1218,4 +1265,235 @@ async fn term_ledger_reverse_scan_visits_the_prefix_after_the_frontier() {
             .contains_key(&PartitionChunkOffset::from(0_u32)),
         "the prefix must still wait until higher offsets have been scanned"
     );
+}
+
+fn signed_tx(config: &Config, num_chunks: u64) -> (DataTransaction, Vec<u8>) {
+    let chunk_size = usize::try_from(config.consensus.chunk_size).expect("chunk size");
+    let data = vec![7_u8; chunk_size * usize::try_from(num_chunks).expect("chunk count")];
+    let signer = IrysSigner::random_signer(&config.consensus);
+    let tx = signer
+        .create_transaction(data.clone(), H256::zero())
+        .expect("transaction");
+    let tx = signer.sign_transaction(tx).expect("signed transaction");
+    (tx, data)
+}
+
+/// Index the tx onto slot 0 and delete the body-migration row the index write
+/// creates. The row's absence is what lets data sync own the hole.
+fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u64) {
+    let (_root, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+    sm.index_transaction_data(
+        &tx.header,
+        &proofs[0].proof,
+        LedgerChunkRange(ledger_chunk_offset_ii!(0, last_inclusive)),
+        0,
+    )
+    .expect("index tx");
+    for (key, job) in sm.pending_body_migrations().expect("pending rows") {
+        assert!(
+            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+                .expect("settle")
+        );
+    }
+}
+
+fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], offsets: &[usize]) {
+    db.update_eyre(|wtx| {
+        cache_data_root(wtx, &tx.header, None)?;
+        for &i in offsets {
+            let node = &tx.chunks[i];
+            let chunk = UnpackedChunk {
+                data_root: tx.header.data_root,
+                data_size: tx.header.data_size,
+                data_path: Base64(tx.proofs[i].proof.clone()),
+                bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
+                tx_offset: TxChunkOffset::from(u32::try_from(i).expect("tx offset")),
+            };
+            cache_chunk(wtx, &chunk)?;
+        }
+        Ok(())
+    })
+    .expect("cache bodies");
+}
+
+fn strip_cached_body(db: &DatabaseProvider, tx: &DataTransaction) {
+    use irys_database::db_cache::CachedChunk;
+    use irys_database::tables::CachedChunks;
+    use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+    let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+    db.update_eyre(|wtx| {
+        let existing = wtx
+            .get::<CachedChunks>(path_hash)?
+            .expect("cached chunk row");
+        wtx.put::<CachedChunks>(
+            path_hash,
+            CachedChunk {
+                chunk: None,
+                data_path: existing.data_path,
+            },
+        )?;
+        Ok(())
+    })
+    .expect("strip cached body");
+}
+
+async fn wait_for_ledger_requests(fetcher: &MockChunkFetcher, n: usize) {
+    for _ in 0..100 {
+        if fetcher.request_log.read().unwrap().len() >= n {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("timed out waiting for {n} peer chunk requests");
+}
+
+#[test_log::test(tokio::test)]
+async fn local_cache_hit_writes_without_a_peer_request() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 1);
+    index_and_settle(&sm, &tx, 0);
+    cache_bodies_at(&db, &tx, &data, &[0]);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    add_assigned_peer(&mut orch, &config, 11, 9111);
+    let offset = PartitionChunkOffset::from(0);
+    insert_pending(&mut orch, offset);
+
+    let before = metrics::test_fetch_by_source_count("local_cache", "success");
+    assert!(orch.dispatch_next());
+    assert!(
+        fetcher.request_log.read().unwrap().is_empty(),
+        "a cached body must not ask a peer"
+    );
+    assert!(fetcher.data_root_request_log.read().unwrap().is_empty());
+    assert!(sm.is_data_write_pending_at(offset));
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::AwaitingDurability(_)
+    ));
+    assert!(!orch.chunk_requests[&offset].local_cache_miss);
+    assert!(metrics::test_fetch_by_source_count("local_cache", "success") > before);
+}
+
+#[test_log::test(tokio::test)]
+async fn local_cache_hit_writes_when_no_peer_is_connected() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 1);
+    index_and_settle(&sm, &tx, 0);
+    cache_bodies_at(&db, &tx, &data, &[0]);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    let offset = PartitionChunkOffset::from(0);
+    insert_pending(&mut orch, offset);
+
+    assert!(orch.dispatch_next());
+    assert!(fetcher.request_log.read().unwrap().is_empty());
+    assert!(sm.is_data_write_pending_at(offset));
+}
+
+#[test_log::test(tokio::test)]
+async fn local_cache_contiguous_run_writes_hits_around_a_hole() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 3);
+    index_and_settle(&sm, &tx, 2);
+    cache_bodies_at(&db, &tx, &data, &[0, 2]);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    add_assigned_peer(&mut orch, &config, 12, 9112);
+    for value in 0..3_u32 {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+
+    let before = metrics::test_fetch_by_source_count("local_cache", "success");
+    assert!(orch.dispatch_next());
+    assert!(fetcher.request_log.read().unwrap().is_empty());
+    assert!(sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+    assert!(!sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+    assert!(sm.is_data_write_pending_at(PartitionChunkOffset::from(2)));
+    assert!(orch.chunk_requests[&PartitionChunkOffset::from(1)].local_cache_miss);
+    assert_eq!(
+        orch.ready_offsets.front(),
+        Some(&PartitionChunkOffset::from(1))
+    );
+    assert!(metrics::test_fetch_by_source_count("local_cache", "success") >= before + 2);
+}
+
+#[test_log::test(tokio::test)]
+async fn local_cache_miss_falls_through_and_a_later_body_stays_memoized() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 1);
+    index_and_settle(&sm, &tx, 0);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db.clone());
+    add_assigned_peer(&mut orch, &config, 13, 9113);
+    add_assigned_peer(&mut orch, &config, 14, 9114);
+    let offset = PartitionChunkOffset::from(0);
+    insert_pending(&mut orch, offset);
+
+    let before = metrics::test_fetch_by_source_count("local_cache", "not_found");
+    assert!(orch.dispatch_next());
+    wait_for_ledger_requests(&fetcher, 1).await;
+    assert!(orch.chunk_requests[&offset].local_cache_miss);
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Requested(_, _)
+    ));
+    assert!(metrics::test_fetch_by_source_count("local_cache", "not_found") > before);
+    assert!(!sm.is_data_write_pending_at(offset));
+
+    let requested = match orch.chunk_requests[&offset].request_state {
+        ChunkRequestState::Requested(addr, _) => addr,
+        ref other => panic!("expected Requested, got {other:?}"),
+    };
+    orch.on_chunk_failed(offset, requested, ChunkFetchFailureKind::NotFound)
+        .expect("peer failure");
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Pending
+    ));
+
+    cache_bodies_at(&db, &tx, &data, &[0]);
+    assert!(orch.dispatch_next());
+    wait_for_ledger_requests(&fetcher, 2).await;
+    assert!(
+        !sm.is_data_write_pending_at(offset),
+        "a memoized miss must not read the cache again"
+    );
+    assert!(matches!(
+        orch.chunk_requests[&offset].request_state,
+        ChunkRequestState::Requested(_, _)
+    ));
+    assert!(orch.chunk_requests[&offset].local_cache_miss);
+}
+
+#[test_log::test(tokio::test)]
+async fn local_cache_index_only_row_is_a_miss() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 1);
+    index_and_settle(&sm, &tx, 0);
+    cache_bodies_at(&db, &tx, &data, &[0]);
+    strip_cached_body(&db, &tx);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    add_assigned_peer(&mut orch, &config, 15, 9115);
+    let offset = PartitionChunkOffset::from(0);
+    insert_pending(&mut orch, offset);
+
+    let before = metrics::test_fetch_by_source_count("local_cache", "not_found");
+    assert!(orch.dispatch_next());
+    wait_for_ledger_requests(&fetcher, 1).await;
+    assert!(orch.chunk_requests[&offset].local_cache_miss);
+    assert!(!sm.is_data_write_pending_at(offset));
+    assert!(metrics::test_fetch_by_source_count("local_cache", "not_found") > before);
 }

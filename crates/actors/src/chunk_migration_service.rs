@@ -782,7 +782,7 @@ fn write_chunks_to_module(
         })
 }
 
-fn validate_chunk_for_migration(
+pub(crate) fn validate_chunk_for_migration(
     cached: CachedChunk,
     data_root: DataRoot,
     data_size: u64,
