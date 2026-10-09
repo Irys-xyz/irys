@@ -14,8 +14,8 @@ use xtask::failures::{
 use xtask::flaky::{FlakyOptions, run_flaky};
 use xtask::prune;
 use xtask::util::{
-    CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, record_run, run_collecting,
-    run_recorded, with_deny_warnings,
+    CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, record_run,
+    run_collecting, run_recorded, with_deny_warnings,
 };
 
 const LLVM_COV_VERSION: &str = "0.6.16";
@@ -489,6 +489,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             // Add user-provided args (by reference — args is needed later for coverage scope)
             nextest_args.extend(args.iter().cloned());
 
+            // Held until the prune: a concurrent run's prune must not remove what this run uses.
+            let run_lock = lock_target_dir();
+
             // Run nextest
             let run_started = SystemTime::now();
             let test_result = if prune {
@@ -519,7 +522,12 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     ) {
                         eprintln!("Warning: xtask build not recorded: {e}");
                     }
-                    prune_after_run(&collected.test_executables, keep_after, unused_before);
+                    prune_after_run(
+                        &collected.test_executables,
+                        keep_after,
+                        unused_before,
+                        run_lock,
+                    );
                 } else {
                     // A failed build reached only part of the graph: its record would be partial,
                     // and a prune against it would delete units the next build needs.
@@ -1030,8 +1038,14 @@ fn with_workspace(args: Vec<String>) -> Vec<String> {
     }
 }
 
-/// Prune never fails a run: a failure to delete leaves disk as it was.
-fn prune_after_run(built: &[PathBuf], keep_after: SystemTime, unused_before: SystemTime) {
+/// Prune never fails a run: a failure to delete leaves disk as it was. It runs only when no other
+/// xtask run holds the target dir's run lock, so it cannot remove files another run still uses.
+fn prune_after_run(
+    built: &[PathBuf],
+    keep_after: SystemTime,
+    unused_before: SystemTime,
+    run_lock: Option<fs::File>,
+) {
     tracing::debug!(built = built.len(), "test executables reported by cargo");
     let metadata = match MetadataCommand::new().no_deps().exec() {
         Ok(metadata) => metadata,
@@ -1041,6 +1055,23 @@ fn prune_after_run(built: &[PathBuf], keep_after: SystemTime, unused_before: Sys
         }
     };
     let workspace_root = metadata.workspace_root.as_std_path();
+    let target_dir = metadata.target_directory.as_std_path();
+    // This run's own shared lock would block the exclusive one.
+    drop(run_lock);
+    let _prune_lock = match prune::try_lock_run_exclusive(target_dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            println!(
+                "Prune skipped: another xtask run is using {}",
+                target_dir.display()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("Warning: prune skipped, target dir lock failed: {e}");
+            return;
+        }
+    };
     match prune::prune_stale_executables(workspace_root, built, keep_after) {
         Ok(report) if report.removed_executables > 0 => println!(
             "Pruned {} stale test executable(s), {} MiB (XTASK_NO_PRUNE=1 keeps them)",
@@ -1050,7 +1081,6 @@ fn prune_after_run(built: &[PathBuf], keep_after: SystemTime, unused_before: Sys
         Ok(_) => {}
         Err(e) => eprintln!("Warning: stale executable prune failed: {e}"),
     }
-    let target_dir = metadata.target_directory.as_std_path();
     match prune::prune_unused_units(target_dir, workspace_root, keep_after, unused_before) {
         Ok(report) if report.removed_units + report.removed_build_dirs > 0 => println!(
             "Pruned {} unused compilation unit(s) and {} build-script dir(s), {} MiB \

@@ -32,7 +32,8 @@ use crate::failures::{
     FailuresFile, build_failure_filter, generate_nextest_config, get_monitor_dir,
 };
 use crate::util::{
-    NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, remove_ring_env_vars, shell_quote,
+    NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, remove_ring_env_vars,
+    run_recorded, shell_quote,
 };
 
 /// Options for the flaky-detection run, parsed from the CLI.
@@ -534,13 +535,18 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     // must abort, otherwise every phase fails confusingly downstream.
     // Same target set as phases 1 and 2, so a compile error stops the run here
     // instead of inside a teed phase, where nextest's exit code is not checked.
+    // A flaky run can last hours. The shared run lock keeps a concurrent `xtask test` from
+    // pruning its binaries meanwhile, and the record keeps them after the run.
+    let _run_lock = lock_target_dir();
     println!("Prebuilding tests (cargo nextest run --no-run)...");
-    remove_ring_env_vars(cmd!(
-        sh,
-        "cargo nextest run --workspace --tests --all-targets --no-run"
-    ))
-    .env("RUST_BACKTRACE", "1")
-    .run()?;
+    run_recorded(
+        cmd!(
+            sh,
+            "cargo nextest run --workspace --tests --all-targets --no-run --cargo-message-format json-render-diagnostics"
+        )
+        .env("RUST_BACKTRACE", "1"),
+        "flaky",
+    )?;
 
     // Build the wrapper and generate the phase-1 config (default profile with
     // the monitoring run-wrapper attached). Every nextest call here passes

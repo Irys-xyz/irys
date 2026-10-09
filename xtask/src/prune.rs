@@ -179,6 +179,39 @@ fn remove_with_siblings(dir: &Path, exe: &Path, report: &mut PruneReport) -> io:
 /// Where recorded invocations list the artifacts they used, one file per invocation.
 const USAGE_DIR: &str = "xtask-usage";
 
+/// Lock file that xtask runs share while they use the target dir. It is outside [`USAGE_DIR`]
+/// because expired records there are deleted, and a deleted lock file locks nothing.
+const RUN_LOCK: &str = "xtask-run.lock";
+
+fn open_run_lock(target_dir: &Path) -> io::Result<fs::File> {
+    fs::create_dir_all(target_dir)?;
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(target_dir.join(RUN_LOCK))
+}
+
+/// Hold a shared lock on the target dir for as long as the returned file lives. A run holds it
+/// while it builds and runs tests, so no other run prunes the files it uses. It waits while
+/// another run prunes.
+pub fn lock_run_shared(target_dir: &Path) -> io::Result<fs::File> {
+    let file = open_run_lock(target_dir)?;
+    file.lock_shared()?;
+    Ok(file)
+}
+
+/// The exclusive lock a prune holds, or `None` when another run holds the shared lock. The
+/// caller must first drop its own shared lock: a second handle conflicts with it too.
+pub fn try_lock_run_exclusive(target_dir: &Path) -> io::Result<Option<fs::File>> {
+    let file = open_run_lock(target_dir)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e),
+    }
+}
+
 /// Record that `invocation` used `artifacts`, so [`prune_unused_units`] keeps them while the
 /// record is live. A record's age is its file's mtime, refreshed by each run of the same
 /// invocation.
@@ -613,6 +646,18 @@ mod tests {
             None
         );
         assert_eq!(executable_stem(Path::new("deps/it-xyz")), None);
+    }
+
+    #[test]
+    fn a_shared_run_lock_blocks_the_exclusive_prune_lock() {
+        let f = Fixture::new();
+        let target = f.root.path().join("target");
+
+        let run = lock_run_shared(&target).unwrap();
+        assert!(try_lock_run_exclusive(&target).unwrap().is_none());
+
+        drop(run);
+        assert!(try_lock_run_exclusive(&target).unwrap().is_some());
     }
 
     mod units {

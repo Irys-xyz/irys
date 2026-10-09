@@ -171,6 +171,27 @@ pub fn run_recorded(cmd: Cmd<'_>, invocation: &str) -> eyre::Result<()> {
     result
 }
 
+/// Hold the shared run lock on this workspace's target dir (see [`prune::lock_run_shared`]), so
+/// no other xtask run prunes what this one builds and runs. A run that cannot take it only warns.
+pub fn lock_target_dir() -> Option<std::fs::File> {
+    let locked = MetadataCommand::new()
+        .no_deps()
+        .exec()
+        .map_err(eyre::Report::from)
+        .and_then(|m| {
+            prune::lock_run_shared(m.target_directory.as_std_path()).map_err(eyre::Report::from)
+        });
+    match locked {
+        Ok(lock) => Some(lock),
+        Err(e) => {
+            eprintln!(
+                "Warning: target dir not locked; a concurrent prune may remove its files: {e}"
+            );
+            None
+        }
+    }
+}
+
 pub fn record_run(invocation: &str, artifacts: &[PathBuf]) {
     if artifacts.is_empty() {
         return;
