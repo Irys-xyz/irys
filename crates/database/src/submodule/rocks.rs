@@ -3496,9 +3496,18 @@ impl SubmoduleRead for Rows<'_> {
     fn pending_body_migrations_from(
         &self,
         start: Option<PartitionChunkOffset>,
+        limit: Option<usize>,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
         let start_key = start.map(encode_key);
-        self.collect_until(Cf::Pending, start_key.as_deref(), |_| false)
+        let mut remaining = limit.unwrap_or(usize::MAX);
+        // `collect_until` asks before each row. Stop once `limit` rows are in.
+        self.collect_until(Cf::Pending, start_key.as_deref(), |_| {
+            if remaining == 0 {
+                return true;
+            }
+            remaining -= 1;
+            false
+        })
     }
 
     fn has_pending_in_inclusive_range(
@@ -3631,8 +3640,9 @@ impl SubmoduleRead for Batch<'_> {
     fn pending_body_migrations_from(
         &self,
         start: Option<PartitionChunkOffset>,
+        limit: Option<usize>,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
-        self.rows().pending_body_migrations_from(start)
+        self.rows().pending_body_migrations_from(start, limit)
     }
 
     fn has_pending_in_inclusive_range(

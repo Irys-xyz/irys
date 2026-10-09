@@ -41,6 +41,11 @@ pub(crate) const MAX_BODY_MIGRATION_ATTEMPTS: u32 = 8;
 /// storage-service flushes.
 pub(crate) const BODY_WRITES_PER_PASS: usize = 512;
 
+/// Pending rows read per page. A pass holds one page and reads the next key
+/// only while write budget remains. The pending key moves to the first offset
+/// that is not durable, so the next pass does not walk that prefix.
+pub(crate) const BODY_ROWS_PER_PASS: usize = 64;
+
 /// Default pending-write ceiling, in flush batches per submodule: one batch
 /// the storage service is flushing plus one the worker is filling. Overridden
 /// by `storage.max_pending_write_bytes`.
@@ -87,6 +92,7 @@ pub(crate) struct BodyMigrationWorker {
     wakeup: Arc<Notify>,
     shutdown: Shutdown,
     writes_per_pass: usize,
+    rows_per_pass: usize,
     /// Modules already warned that a configured `max_pending_write_bytes` was
     /// raised to one flush batch, so the warning fires once, not every pass.
     ceiling_floor_warned: Mutex<HashSet<usize>>,
@@ -95,7 +101,8 @@ pub(crate) struct BodyMigrationWorker {
 /// What one pass did, summed over every submodule it touched.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PassStats {
-    /// Rows outstanding when the pass started.
+    /// Jobs this pass started. A pass that stops on the write budget has not
+    /// read the jobs past that page, so this is not the full backlog.
     pub rows: usize,
     /// Chunk bodies enqueued to `pending_writes`.
     pub written: usize,
@@ -108,6 +115,9 @@ pub(crate) struct PassStats {
     /// Offsets skipped because they hold no entropy yet (module still packing,
     /// or a range recovery just re-marked). They wait; they are not failures.
     pub unwritable: usize,
+    /// Lowest block height among the jobs this pass read. `None` when it
+    /// read none. A pass that stops early has not seen later keys.
+    pub oldest_pending_height: Option<u64>,
 }
 
 impl std::ops::AddAssign for PassStats {
@@ -118,6 +128,12 @@ impl std::ops::AddAssign for PassStats {
         self.retired += other.retired;
         self.throttled += other.throttled;
         self.unwritable += other.unwritable;
+        self.oldest_pending_height = match (self.oldest_pending_height, other.oldest_pending_height)
+        {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(height), None) | (None, Some(height)) => Some(height),
+            (None, None) => None,
+        };
     }
 }
 
@@ -127,20 +143,29 @@ enum JobOutcome {
     /// Every offset is durable; delete the row.
     Settled,
     /// Bodies were enqueued or are awaiting flush; keep the row, no penalty.
-    Progressed { written: usize },
+    /// `resume` is the first offset that is not durable.
+    Progressed {
+        written: usize,
+        resume: PartitionChunkOffset,
+    },
     /// The pass budget or the pending-write ceiling stopped this job before
-    /// its first write; keep the row.
-    Deferred,
+    /// its first write; keep the row. `resume` is the first offset that is
+    /// not durable.
+    Deferred { resume: PartitionChunkOffset },
     /// `unwritable` offsets hold no entropy yet (module packing, or a range
     /// recovery re-marked), so nothing could be written. Wait for the tick;
     /// this is not a stall and never counts against the job.
-    Unpacked { unwritable: usize },
+    Unpacked {
+        unwritable: usize,
+        resume: PartitionChunkOffset,
+    },
     /// Attempted and nothing was written or in flight: `unavailable` offsets
     /// had no local source and `failed` errored (last error kept for the log).
     Stalled {
         unavailable: usize,
         failed: usize,
         last_error: Option<MigrationError>,
+        resume: PartitionChunkOffset,
     },
 }
 
@@ -159,6 +184,7 @@ impl BodyMigrationWorker {
             wakeup,
             shutdown,
             writes_per_pass: BODY_WRITES_PER_PASS,
+            rows_per_pass: BODY_ROWS_PER_PASS,
             ceiling_floor_warned: Mutex::new(HashSet::new()),
         }
     }
@@ -166,6 +192,12 @@ impl BodyMigrationWorker {
     #[cfg(test)]
     pub(crate) fn with_writes_per_pass(mut self, writes_per_pass: usize) -> Self {
         self.writes_per_pass = writes_per_pass;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_rows_per_pass(mut self, rows_per_pass: usize) -> Self {
+        self.rows_per_pass = rows_per_pass.max(1);
         self
     }
 
@@ -210,9 +242,6 @@ impl BodyMigrationWorker {
     pub(crate) async fn drain_pass(&self) -> PassStats {
         let modules: Vec<Arc<StorageModule>> = self.storage_modules_guard.read().clone();
         let mut tasks = Vec::new();
-        // Lowest block height among the rows this pass starts from: its distance
-        // to the tip is how far the body worker lags the index path.
-        let mut oldest_pending_height: Option<u64> = None;
         for sm in modules {
             let Some(ledger) = sm
                 .partition_assignment()
@@ -230,17 +259,6 @@ impl BodyMigrationWorker {
                 );
                 continue;
             }
-            let batches = match sm.pending_body_migration_batches() {
-                Ok(batches) => batches,
-                Err(error) => {
-                    warn!(
-                        storage_module.id = sm.id,
-                        ?error,
-                        "failed to read pending body migrations"
-                    );
-                    continue;
-                }
-            };
             let ceiling = pending_write_ceiling_bytes(&self.config, &sm);
             if let Some(configured) = self.config.node_config.storage.max_pending_write_bytes
                 && configured < ceiling
@@ -255,12 +273,25 @@ impl BodyMigrationWorker {
                      on the storage service's idle flush)"
                 );
             }
-            for (interval, rows) in batches {
-                if rows.is_empty() {
+            for interval in sm.submodule_intervals() {
+                // One row tells us the submodule has work. The task pages the rest.
+                let nonempty = match sm.pending_body_migrations_page(
+                    PartitionChunkOffset::from(*interval.start()),
+                    None,
+                    1,
+                ) {
+                    Ok(rows) => !rows.is_empty(),
+                    Err(error) => {
+                        warn!(
+                            storage_module.id = sm.id,
+                            ?error,
+                            "failed to read pending body migrations"
+                        );
+                        continue;
+                    }
+                };
+                if !nonempty {
                     continue;
-                }
-                if let Some(min) = rows.iter().map(|(_, job)| job.block_height).min() {
-                    oldest_pending_height = Some(oldest_pending_height.map_or(min, |h| h.min(min)));
                 }
                 let drain = SubmoduleDrain {
                     storage_modules_guard: self.storage_modules_guard.clone(),
@@ -269,7 +300,7 @@ impl BodyMigrationWorker {
                     sm: sm.clone(),
                     ledger,
                     interval,
-                    rows,
+                    rows_per_pass: self.rows_per_pass,
                     budget: self.writes_per_pass,
                     ceiling,
                     throttled_jobs: 0,
@@ -294,7 +325,7 @@ impl BodyMigrationWorker {
             total.retired as u64,
             total.throttled as u64,
             total.rows.saturating_sub(total.settled + total.retired) as u64,
-            oldest_pending_height.unwrap_or(0),
+            total.oldest_pending_height.unwrap_or(0),
         );
         total
     }
@@ -308,7 +339,8 @@ struct SubmoduleDrain {
     sm: Arc<StorageModule>,
     ledger: DataLedger,
     interval: Interval<PartitionChunkOffset>,
-    rows: Vec<(PartitionChunkOffset, PendingBodyMigration)>,
+    /// Pending rows this task loads per read.
+    rows_per_pass: usize,
     /// Bodies this task may still enqueue in this pass.
     budget: usize,
     /// `pending_write_bytes` level at which this task stops enqueueing.
@@ -319,60 +351,144 @@ struct SubmoduleDrain {
 
 impl SubmoduleDrain {
     fn run(mut self) -> PassStats {
-        let rows = std::mem::take(&mut self.rows);
-        let mut stats = PassStats {
-            rows: rows.len(),
-            ..PassStats::default()
-        };
-        for (key, job) in rows {
-            match self.drain_job(key, &job) {
-                Ok(JobOutcome::Settled) => {
-                    if self.settle(key, &job) {
-                        stats.settled += 1;
-                    }
-                }
-                Ok(JobOutcome::Progressed { written }) => stats.written += written,
-                Ok(JobOutcome::Deferred) => {}
-                Ok(JobOutcome::Unpacked { unwritable }) => {
-                    stats.unwritable += unwritable;
-                    debug!(
-                        storage_module.id = self.sm.id,
-                        partition.offset = %key,
-                        data_root = %job.data_root,
-                        unwritable,
-                        "body migration job is waiting for entropy at its offsets; no penalty"
-                    );
-                }
-                Ok(JobOutcome::Stalled {
-                    unavailable,
-                    failed,
-                    last_error,
-                }) => {
-                    debug!(
-                        storage_module.id = self.sm.id,
-                        partition.offset = %key,
-                        data_root = %job.data_root,
-                        unavailable,
-                        failed,
-                        ?last_error,
-                        "body migration job made no progress; leaving offsets for data sync"
-                    );
-                    self.record_stall(key, &job, &mut stats);
-                }
+        let mut stats = PassStats::default();
+        // A move inside this pass puts the same job at a later key. Skip it
+        // when a later page reads that key; this pass already walked it.
+        let mut seen = HashSet::new();
+        let mut cursor = None;
+        loop {
+            if self.budget == 0 {
+                break;
+            }
+            let page = match self.sm.pending_body_migrations_page(
+                PartitionChunkOffset::from(*self.interval.start()),
+                cursor,
+                self.rows_per_pass,
+            ) {
+                Ok(page) => page,
                 Err(error) => {
                     warn!(
                         storage_module.id = self.sm.id,
-                        partition.offset = %key,
-                        data_root = %job.data_root,
                         ?error,
-                        "body migration job failed; counting as a stalled pass"
+                        "failed to read pending body migrations"
                     );
-                    self.record_stall(key, &job, &mut stats);
+                    break;
+                }
+            };
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            let last_key = page.last().expect("page is not empty").0;
+            for (mut key, job) in page {
+                if self.budget == 0 {
+                    break;
+                }
+                if !seen.insert((job.data_root, job.block_height, job.start_offset.0)) {
+                    continue;
+                }
+                stats.rows += 1;
+                stats.oldest_pending_height = Some(
+                    stats
+                        .oldest_pending_height
+                        .map_or(job.block_height, |height| height.min(job.block_height)),
+                );
+                match self.drain_job(key, &job) {
+                    Ok(outcome) => {
+                        key = self.persisted_key(key, &job, &outcome);
+                        match outcome {
+                            JobOutcome::Settled => {
+                                if self.settle(key, &job) {
+                                    stats.settled += 1;
+                                }
+                            }
+                            JobOutcome::Progressed { written, .. } => stats.written += written,
+                            JobOutcome::Deferred { .. } => {}
+                            JobOutcome::Unpacked { unwritable, .. } => {
+                                stats.unwritable += unwritable;
+                                debug!(
+                                    storage_module.id = self.sm.id,
+                                    partition.offset = %key,
+                                    data_root = %job.data_root,
+                                    unwritable,
+                                    "body migration job is waiting for entropy at its offsets; no penalty"
+                                );
+                            }
+                            JobOutcome::Stalled {
+                                unavailable,
+                                failed,
+                                last_error,
+                                ..
+                            } => {
+                                debug!(
+                                    storage_module.id = self.sm.id,
+                                    partition.offset = %key,
+                                    data_root = %job.data_root,
+                                    unavailable,
+                                    failed,
+                                    ?last_error,
+                                    "body migration job made no progress; leaving offsets for data sync"
+                                );
+                                self.record_stall(key, &job, &mut stats);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            storage_module.id = self.sm.id,
+                            partition.offset = %key,
+                            data_root = %job.data_root,
+                            ?error,
+                            "body migration job failed; counting as a stalled pass"
+                        );
+                        self.record_stall(key, &job, &mut stats);
+                    }
                 }
             }
+            if self.budget == 0 || page_len < self.rows_per_pass {
+                break;
+            }
+            let Some(next) = last_key.0.checked_add(1) else {
+                break;
+            };
+            cursor = Some(PartitionChunkOffset::from(next));
         }
         stats.throttled = self.throttled_jobs;
         stats
+    }
+
+    /// Move the row to the first offset that is not durable, in one batch.
+    /// `Settled` keeps the key so the delete hits the row that is still there.
+    /// A failed move leaves the old key; the next pass repeats the prefix.
+    fn persisted_key(
+        &self,
+        key: PartitionChunkOffset,
+        job: &PendingBodyMigration,
+        outcome: &JobOutcome,
+    ) -> PartitionChunkOffset {
+        let resume = match outcome {
+            JobOutcome::Settled => return key,
+            JobOutcome::Progressed { resume, .. }
+            | JobOutcome::Deferred { resume }
+            | JobOutcome::Unpacked { resume, .. }
+            | JobOutcome::Stalled { resume, .. } => *resume,
+        };
+        if resume == key {
+            return key;
+        }
+        match self.sm.advance_pending_body_migration(key, resume, job) {
+            Ok(stored) => stored,
+            Err(error) => {
+                warn!(
+                    storage_module.id = self.sm.id,
+                    partition.offset = %key,
+                    resume.offset = %resume,
+                    ?error,
+                    "failed to advance body migration job; the next pass repeats the prefix"
+                );
+                key
+            }
+        }
     }
 
     /// One no-progress pass on `job`: bump its attempts and retire it once the
@@ -455,6 +571,10 @@ impl SubmoduleDrain {
         }
 
         let (mut durable, mut in_flight, mut unwritable) = (0_usize, 0_usize, 0_usize);
+        // First offset that is not durable. The row moves here when the
+        // prefix before it is durable. In-flight writes are not durable, so
+        // the key does not pass them.
+        let mut first_incomplete: Option<PartitionChunkOffset> = None;
         let mut progress = JobProgress {
             written: 0,
             // Snapshot the module's pending-write level once and track this
@@ -488,6 +608,9 @@ impl SubmoduleDrain {
                 durable += 1;
                 cursor += 1;
                 continue;
+            }
+            if first_incomplete.is_none() {
+                first_incomplete = Some(offset);
             }
             if self.sm.is_data_write_pending_at(offset) {
                 if self.flush_run(&mut run, &mut progress)? {
@@ -535,8 +658,8 @@ impl SubmoduleDrain {
             );
             if next_level > self.ceiling {
                 // Backpressure: the storage service has not flushed what is
-                // already queued. Stop for this pass; the row stays and the
-                // next pass resumes from the first non-durable offset.
+                // already queued. Stop for this pass. The row's key moves to
+                // the first offset that is not durable.
                 if self.flush_run(&mut run, &mut progress)? {
                     cut_short = true;
                     break;
@@ -672,19 +795,23 @@ impl SubmoduleDrain {
         let failed = progress.failed;
         let last_error = progress.last_error;
         let total = usize::try_from(last - first + 1).unwrap_or(usize::MAX);
-        Ok(if durable == total {
+        let resume = first_incomplete.unwrap_or(key);
+        // `first_incomplete` stays empty only when every offset in the span
+        // was durable. A stop in the middle has already recorded the hole.
+        Ok(if durable == total && first_incomplete.is_none() {
             JobOutcome::Settled
         } else if written > 0 || in_flight > 0 {
-            JobOutcome::Progressed { written }
+            JobOutcome::Progressed { written, resume }
         } else if cut_short {
-            JobOutcome::Deferred
+            JobOutcome::Deferred { resume }
         } else if unavailable == 0 && failed == 0 {
-            JobOutcome::Unpacked { unwritable }
+            JobOutcome::Unpacked { unwritable, resume }
         } else {
             JobOutcome::Stalled {
                 unavailable,
                 failed,
                 last_error,
+                resume,
             }
         })
     }

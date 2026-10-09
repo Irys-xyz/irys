@@ -4279,7 +4279,7 @@ impl StorageModule {
         for (interval, submodule) in self.submodules.iter() {
             let rows = submodule
                 .db
-                .view(|tx| tx.pending_body_migrations_from(None))?;
+                .view(|tx| tx.pending_body_migrations_from(None, None))?;
             batches.push((*interval, rows));
         }
         Ok(batches)
@@ -4295,6 +4295,31 @@ impl StorageModule {
             .into_iter()
             .flat_map(|(_, rows)| rows)
             .collect())
+    }
+
+    /// Partition intervals of this module's submodules, ascending.
+    pub fn submodule_intervals(&self) -> Vec<Interval<PartitionChunkOffset>> {
+        self.submodules
+            .iter()
+            .map(|(interval, _)| *interval)
+            .collect()
+    }
+
+    /// At most `limit` jobs at or after `start` in the submodule that contains
+    /// `submodule_at`. `start` of `None` is that submodule's first key.
+    ///
+    /// The body worker pages with this. [`Self::pending_body_migrations`]
+    /// still returns every row.
+    pub fn pending_body_migrations_page(
+        &self,
+        submodule_at: PartitionChunkOffset,
+        start: Option<PartitionChunkOffset>,
+        limit: usize,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
+        let (_interval, submodule) = self.get_submodule_for_offset(submodule_at)?;
+        submodule
+            .db
+            .view(|tx| tx.pending_body_migrations_from(start, Some(limit)))
     }
 
     /// Delete the job at `key` once every offset it covers is durable (or the
@@ -4331,6 +4356,63 @@ impl StorageModule {
         // the job row, and the body worker retries the same data_root and
         // block_height. MDBX commits this durably.
         Ok(removed)
+    }
+
+    /// Move the job at `from` to `to` once a prefix of its offsets is durable.
+    ///
+    /// The value is unchanged. The delete and the put commit in one batch, so
+    /// a crash keeps the old key or the new key. A lost move repeats the
+    /// durable prefix. Returns the key the job lives at after the call:
+    /// `to` when the move landed, `from` when the row is gone, writes are
+    /// paused, `to` is another submodule, or `to` already holds a different job.
+    pub fn advance_pending_body_migration(
+        &self,
+        from: PartitionChunkOffset,
+        to: PartitionChunkOffset,
+        job: &PendingBodyMigration,
+    ) -> eyre::Result<PartitionChunkOffset> {
+        if self.data_writes_paused() || from == to {
+            return Ok(from);
+        }
+        let from_submodule = {
+            let (interval, _) = self.get_submodule_for_offset(from)?;
+            *interval.start()
+        };
+        let to_submodule = {
+            let (interval, _) = self.get_submodule_for_offset(to)?;
+            *interval.start()
+        };
+        if from_submodule != to_submodule {
+            return Ok(from);
+        }
+        let (_interval, submodule) = self.get_submodule_for_offset(from)?;
+        submodule.db.update_covered(|tx| {
+            match tx.get_pending_body_migration(from)? {
+                Some(existing) if Self::same_pending_job(&existing, job) => {}
+                _ => return Ok(from),
+            }
+            match tx.get_pending_body_migration(to)? {
+                Some(existing) if Self::same_pending_job(&existing, job) => {
+                    tx.del_pending_body_migration(from)?;
+                    Ok(to)
+                }
+                Some(_) => Ok(from),
+                None => {
+                    tx.del_pending_body_migration(from)?;
+                    tx.add_pending_body_migration(to, job)?;
+                    Ok(to)
+                }
+            }
+        })
+    }
+
+    /// Identity of a placement. Attempts change as the worker stalls, so they
+    /// do not decide whether two rows are the same job.
+    fn same_pending_job(left: &PendingBodyMigration, right: &PendingBodyMigration) -> bool {
+        left.data_root == right.data_root
+            && left.block_height == right.block_height
+            && left.data_size == right.data_size
+            && left.start_offset == right.start_offset
     }
 
     /// Delete outstanding body-migration jobs keyed in `[start, end]` (partition
@@ -7261,6 +7343,112 @@ mod tests {
             data_root,
             block_height
         )?);
+        Ok(())
+    }
+
+    /// Moving a job re-keys the same value. A different job at the destination
+    /// stays, and so does the source. A paused module does not move the row.
+    #[test]
+    fn advance_pending_body_migration_rekeys_and_refuses_a_conflict() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("pending_body_advance_test")
+            .with_tracing()
+            .build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 20,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0".into())],
+            },
+            &config,
+        )?;
+        let height = 4_u64;
+        let place = |root: H256, at: u64| {
+            let header =
+                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        data_root: root,
+                        data_size: chunk_size,
+                        ..Default::default()
+                    },
+                    metadata: irys_types::DataTransactionMetadata::new(),
+                });
+            storage_module.index_transaction_data(
+                &header,
+                &vec![at as u8],
+                LedgerChunkRange(ledger_chunk_offset_ii!(at, at)),
+                height,
+            )
+        };
+        let root_a = H256::repeat_byte(1);
+        let root_b = H256::repeat_byte(2);
+        place(root_a, 0)?;
+        place(root_b, 1)?;
+        let jobs = storage_module.pending_body_migrations()?;
+        let job_a = jobs[0].1.clone();
+        assert_eq!(jobs[0].0, PartitionChunkOffset::from(0));
+
+        let stayed = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(0),
+            &job_a,
+        )?;
+        assert_eq!(stayed, PartitionChunkOffset::from(0));
+
+        let moved = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(4),
+            &job_a,
+        )?;
+        assert_eq!(moved, PartitionChunkOffset::from(4));
+        let jobs = storage_module.pending_body_migrations()?;
+        assert_eq!(
+            jobs.iter().map(|(key, _)| key.0).collect::<Vec<_>>(),
+            vec![1, 4]
+        );
+        assert_eq!(jobs[1].1, job_a);
+
+        let job_b = jobs[0].1.clone();
+        let refused = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(1),
+            PartitionChunkOffset::from(4),
+            &job_b,
+        )?;
+        assert_eq!(refused, PartitionChunkOffset::from(1));
+        assert_eq!(
+            storage_module
+                .pending_body_migrations()?
+                .iter()
+                .map(|(key, job)| (key.0, job.data_root))
+                .collect::<Vec<_>>(),
+            vec![(1, root_b), (4, root_a)]
+        );
+
+        storage_module.pause_data_writes();
+        let paused = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(1),
+            PartitionChunkOffset::from(3),
+            &job_b,
+        )?;
+        assert_eq!(paused, PartitionChunkOffset::from(1));
+        storage_module.resume_data_writes();
+        assert_eq!(storage_module.pending_body_migrations()?.len(), 2);
         Ok(())
     }
 

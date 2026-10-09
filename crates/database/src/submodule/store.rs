@@ -99,10 +99,13 @@ pub trait SubmoduleRead {
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<PendingBodyMigration>>;
 
-    /// Jobs at or after `start` (`None` is every job), in ascending offset order.
+    /// Jobs at or after `start` (`None` is the first key), in ascending offset
+    /// order. `limit` stops the cursor after that many rows. `None` reads the
+    /// rest.
     fn pending_body_migrations_from(
         &self,
         start: Option<PartitionChunkOffset>,
+        limit: Option<usize>,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>>;
 
     /// `true` when a pending-job key lies in `[start, end]`.
@@ -711,8 +714,9 @@ macro_rules! impl_submodule_read {
             fn pending_body_migrations_from(
                 &self,
                 start: Option<PartitionChunkOffset>,
+                limit: Option<usize>,
             ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
-                pending_body_migrations_from(self.tx, start)
+                pending_body_migrations_from(self.tx, start, limit)
             }
 
             fn has_pending_in_inclusive_range(
@@ -1719,6 +1723,42 @@ mod tests {
             block_height: 1,
             attempts: 0,
         }
+    }
+
+    /// A page is a prefix of the ascending walk. The next page starts at the
+    /// key after the last one this page returned. `None` still returns every row.
+    #[test]
+    fn pending_body_migration_page_stops_at_the_limit() -> eyre::Result<()> {
+        each_engine("submodule_pending_page", |store| {
+            let root = H256::repeat_byte(6);
+            store.update(|tx| {
+                for key in [0_u32, 4, 9] {
+                    tx.add_pending_body_migration(
+                        PartitionChunkOffset::from(key),
+                        &pending_job(root),
+                    )?;
+                }
+                Ok(())
+            })?;
+            let all = store.view(|tx| tx.pending_body_migrations_from(None, None))?;
+            assert_eq!(all.len(), 3);
+            let page = store.view(|tx| tx.pending_body_migrations_from(None, Some(2)))?;
+            assert_eq!(
+                page.iter().map(|(key, _)| key.0).collect::<Vec<_>>(),
+                vec![0, 4]
+            );
+            let next = page.last().expect("page").0;
+            let rest = store.view(|tx| {
+                tx.pending_body_migrations_from(Some(PartitionChunkOffset(next.0 + 1)), Some(2))
+            })?;
+            assert_eq!(
+                rest.iter().map(|(key, _)| key.0).collect::<Vec<_>>(),
+                vec![9]
+            );
+            let none = store.view(|tx| tx.pending_body_migrations_from(None, Some(0)))?;
+            assert!(none.is_empty());
+            Ok(())
+        })
     }
 
     /// Inclusive range delete drops both ends and keeps the neighbors.

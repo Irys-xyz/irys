@@ -501,15 +501,25 @@ pub fn del_pending_body_migration<T: DbTxMut>(
     Ok(tx.delete::<PendingBodyMigrationsByOffset>(offset, None)?)
 }
 
-/// Every outstanding body-migration job at or after `start` (all of them for
+/// Outstanding body-migration jobs at or after `start` (all of them for
 /// `None`), in ascending offset order — the order the body worker drains them so
 /// disk access stays sequential.
+///
+/// `limit` stops the cursor after that many rows. `None` reads the rest.
+/// The body worker pages with a limit so a pass that still has write budget
+/// does not load every job.
 pub fn pending_body_migrations_from<T: DbTx>(
     tx: &T,
     start: Option<PartitionChunkOffset>,
+    limit: Option<usize>,
 ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
     let mut cursor = tx.cursor_read::<PendingBodyMigrationsByOffset>()?;
-    Ok(cursor.walk(start)?.collect::<Result<Vec<_>, _>>()?)
+    let walker = cursor.walk(start)?;
+    let rows = match limit {
+        Some(limit) => walker.take(limit).collect::<Result<Vec<_>, _>>()?,
+        None => walker.collect::<Result<Vec<_>, _>>()?,
+    };
+    Ok(rows)
 }
 
 /// Delete every job whose key (clipped tx start) lies in `[start, end]`. Used
@@ -943,11 +953,11 @@ mod tests {
             Ok(())
         })?;
 
-        let all = db.view_eyre(|tx| pending_body_migrations_from(tx, None))?;
+        let all = db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?;
         assert_eq!(
             all,
             vec![
-                (PartitionChunkOffset::from(0), b),
+                (PartitionChunkOffset::from(0), b.clone()),
                 (PartitionChunkOffset::from(7), c.clone()),
                 (PartitionChunkOffset::from(100), a.clone()),
             ]
@@ -955,8 +965,17 @@ mod tests {
 
         // Resumable drain: walking from a key starts at that key, inclusive.
         let from_seven = db.view_eyre(|tx| {
-            pending_body_migrations_from(tx, Some(PartitionChunkOffset::from(7)))
+            pending_body_migrations_from(tx, Some(PartitionChunkOffset::from(7)), None)
         })?;
+        let first_only = db.view_eyre(|tx| pending_body_migrations_from(tx, None, Some(1)))?;
+        assert_eq!(first_only, vec![(PartitionChunkOffset::from(0), b)]);
+        let one_from_seven = db.view_eyre(|tx| {
+            pending_body_migrations_from(tx, Some(PartitionChunkOffset::from(7)), Some(1))
+        })?;
+        assert_eq!(
+            one_from_seven,
+            vec![(PartitionChunkOffset::from(7), c.clone())]
+        );
         assert_eq!(
             from_seven,
             vec![
@@ -976,7 +995,7 @@ mod tests {
 
         // Resolve one job; the rest are untouched.
         db.update_eyre(|tx| del_pending_body_migration(tx, PartitionChunkOffset::from(7)))?;
-        let remaining = db.view_eyre(|tx| pending_body_migrations_from(tx, None))?;
+        let remaining = db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?;
         assert_eq!(remaining.len(), 2);
         assert!(
             remaining
@@ -1012,7 +1031,7 @@ mod tests {
         })?;
         assert_eq!(removed, 3);
         let remaining: Vec<_> = db
-            .view_eyre(|tx| pending_body_migrations_from(tx, None))?
+            .view_eyre(|tx| pending_body_migrations_from(tx, None, None))?
             .into_iter()
             .map(|(offset, _)| *offset)
             .collect();
@@ -1044,14 +1063,14 @@ mod tests {
             )
         })?;
         assert_eq!(
-            db.view_eyre(|tx| pending_body_migrations_from(tx, None))?
+            db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?
                 .len(),
             1
         );
 
         db.update_eyre(clear_submodule_database)?;
         assert!(
-            db.view_eyre(|tx| pending_body_migrations_from(tx, None))?
+            db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?
                 .is_empty()
         );
 
