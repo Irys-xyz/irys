@@ -518,6 +518,10 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let verify_mode = !opts.verify.is_empty();
     let target_tests = resolve_target_tests(&opts)?;
     let targeted = !target_tests.is_empty();
+    // Only a run over the whole suite may replace failures.json: a verify or
+    // targeted run, or phase-1 passthrough args (`-p`, `-E`, ...), see only part
+    // of it and must not drop the failures that `xtask test` recorded for others.
+    let full_suite = !verify_mode && !targeted && opts.args.is_empty();
 
     // Ensure nextest is available (matches the version pinned by `xtask test`).
     let _ = cmd!(
@@ -670,7 +674,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 println!("No flaky tests detected. 🎉");
                 // No genuine flakes → clear stale failures so `--rerun-failures`
                 // doesn't re-run a previous run's entries.
-                if let Err(e) = FailuresFile::clear() {
+                if full_suite && let Err(e) = FailuresFile::clear() {
                     eprintln!("warning: failed to clear failures.json: {e}");
                 }
                 // Only phase 1 ran on this path.
@@ -873,11 +877,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let genuine_count = genuine.len();
 
     // Feed genuine flakes into failures.json so `xtask test --rerun-failures`
-    // can pick them up. Only a full-suite discovery run replaces the file: a
-    // verify or targeted run saw only the tests it was given, so it must not
-    // drop the failures that `xtask test` recorded for others.
-    let discovery = !verify_mode && !targeted;
-    if discovery && genuine_count > 0 {
+    // can pick them up. Only a full-suite run replaces the file (see `full_suite`).
+    if full_suite && genuine_count > 0 {
         let mut failures = FailuresFile {
             failed_tests: genuine.iter().map(|r| r.name.clone()).collect(),
         };
@@ -885,7 +886,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
         if let Err(e) = failures.save() {
             eprintln!("warning: failed to update failures.json: {e}");
         }
-    } else if discovery && let Err(e) = FailuresFile::clear() {
+    } else if full_suite && let Err(e) = FailuresFile::clear() {
         eprintln!("warning: failed to clear failures.json: {e}");
     }
 

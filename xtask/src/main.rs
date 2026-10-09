@@ -793,6 +793,14 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         Commands::CleanWorkspace => {
             // get workspace metadata
             let metadata = MetadataCommand::new().exec()?;
+            // `cargo clean -p` deletes artifacts another xtask run may be using.
+            let target = metadata.target_directory.as_std_path();
+            let Some(_clean_lock) = prune::try_lock_run_exclusive(target)? else {
+                eyre::bail!(
+                    "another xtask run is using {}; cleaning would delete its files",
+                    target.display()
+                );
+            };
 
             // filter for just workspace member packages
             let workspace_packages: Vec<&Package> = metadata
@@ -957,7 +965,10 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 test_args.push(f.clone());
             }
             test_args.extend(runner_passthrough);
+            // The test build shares the target dir: keep a concurrent prune off it.
+            let run_lock = lock_target_dir();
             let result = cmd!(sh, "cargo {test_args...}").remove_and_run();
+            drop(run_lock);
             let test_data_dir = multiversion_dir.join("test-data").join(&run_id);
 
             // Aggregate per-test .status marker files into a summary.
