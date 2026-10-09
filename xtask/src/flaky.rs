@@ -34,7 +34,7 @@ use crate::failures::{
 use crate::prune;
 use crate::util::{
     NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, remove_ring_env_vars,
-    run_recorded, shell_quote, target_dir,
+    run_recorded, shell_quote, target_dir, with_workspace,
 };
 
 /// Options for the flaky-detection run, parsed from the CLI.
@@ -521,7 +521,9 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     // Only a run over the whole suite may replace failures.json: a verify or
     // targeted run, or phase-1 passthrough args (`-p`, `-E`, ...), see only part
     // of it and must not drop the failures that `xtask test` recorded for others.
-    let full_suite = !verify_mode && !targeted && opts.args.is_empty();
+    // A run with no phase-1 iterations saw nothing at all.
+    let full_suite = !verify_mode && !targeted && opts.args.is_empty() && opts.iterations > 0;
+    let isolation_runs = !opts.no_isolation && opts.isolation_iterations > 0;
 
     // Ensure nextest is available (matches the version pinned by `xtask test`).
     let _ = cmd!(
@@ -615,10 +617,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             let stats_base = run_dir.join(format!("phase1/iter-{i}/stats"));
             let log_path = run_dir.join(format!("phase1/iter-{i}/output.log"));
 
-            let mut args = vec![
-                "nextest".to_string(),
-                "run".to_string(),
-                "--workspace".to_string(),
+            let mut tail = vec![
                 "--tests".to_string(),
                 "--all-targets".to_string(),
                 "--no-fail-fast".to_string(),
@@ -628,13 +627,18 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 phase1_config_path.clone(),
             ];
             if let Some(ref filter) = scope_filter {
-                args.push("-E".to_string());
-                args.push(filter.clone());
+                tail.push("-E".to_string());
+                tail.push(filter.clone());
             }
             if let Some(ref t) = threads_arg {
-                args.extend(t.clone());
+                tail.extend(t.clone());
             }
-            args.extend(opts.args.iter().cloned());
+            tail.extend(opts.args.iter().cloned());
+            // `--workspace` only when the passthrough args select no packages.
+            let args: Vec<String> = ["nextest".to_string(), "run".to_string()]
+                .into_iter()
+                .chain(with_workspace(tail))
+                .collect();
 
             run_teed(sh, &args, &stats_base, &log_path)?;
 
@@ -753,7 +757,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let mut log_dirs: HashMap<String, PathBuf> = HashMap::new();
     // Distinct failure fingerprints per test, so the report explains the "why".
     let mut sig_map: HashMap<String, Vec<FailureSignature>> = HashMap::new();
-    if !opts.no_isolation && opts.isolation_iterations > 0 {
+    if isolation_runs {
         println!(
             "\n=== Phase 3: isolation × {} per test ({} suspects) ===",
             opts.isolation_iterations,
@@ -877,8 +881,11 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let genuine_count = genuine.len();
 
     // Feed genuine flakes into failures.json so `xtask test --rerun-failures`
-    // can pick them up. Only a full-suite run replaces the file (see `full_suite`).
-    if full_suite && genuine_count > 0 {
+    // can pick them up. Only a full-suite run replaces the file (see `full_suite`),
+    // and only when isolation ran: without it every suspect is unverified, so
+    // "no genuine flakes" says nothing about the failures phase 1 saw.
+    let replace_failures = full_suite && isolation_runs;
+    if replace_failures && genuine_count > 0 {
         let mut failures = FailuresFile {
             failed_tests: genuine.iter().map(|r| r.name.clone()).collect(),
         };
@@ -886,7 +893,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
         if let Err(e) = failures.save() {
             eprintln!("warning: failed to update failures.json: {e}");
         }
-    } else if full_suite && let Err(e) = FailuresFile::clear() {
+    } else if replace_failures && let Err(e) = FailuresFile::clear() {
         eprintln!("warning: failed to clear failures.json: {e}");
     }
 

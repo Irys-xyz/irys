@@ -15,7 +15,7 @@ use xtask::flaky::{FlakyOptions, run_flaky};
 use xtask::prune;
 use xtask::util::{
     CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, record_run,
-    run_collecting, run_recorded, with_deny_warnings,
+    run_collecting, run_recorded, with_deny_warnings, with_workspace,
 };
 
 const LLVM_COV_VERSION: &str = "0.6.16";
@@ -1029,26 +1029,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Prepend `--workspace` unless `args` already select packages: cargo accepts `--workspace` with
-/// `-p` and then checks every member, so `check -- -p foo` would no longer narrow the check.
-fn with_workspace(args: Vec<String>) -> Vec<String> {
-    let selects_packages = args.iter().any(|a| {
-        a == "-p"
-            || a == "--package"
-            || a == "--workspace"
-            || a == "--all"
-            || a.starts_with("--package=")
-            || (a.starts_with("-p") && a.len() > 2)
-    });
-    if selects_packages {
-        args
-    } else {
-        std::iter::once("--workspace".to_string())
-            .chain(args)
-            .collect()
-    }
-}
-
 /// Prune never fails a run: a failure to delete leaves disk as it was. It runs only when no other
 /// xtask run holds the target dir's run lock, so it cannot remove files another run still uses.
 fn prune_after_run(
@@ -1554,35 +1534,5 @@ mod coverage_mismatch_tests {
         let crate_names = vec!["my_crate".to_owned()];
         let result = collect_executed_from_profdata(output, &crate_names);
         assert!(result.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod with_workspace_tests {
-    use super::with_workspace;
-
-    fn strings(args: &[&str]) -> Vec<String> {
-        args.iter().map(|a| (*a).to_string()).collect()
-    }
-
-    #[test]
-    fn adds_workspace_without_a_package_selection() {
-        assert_eq!(
-            with_workspace(strings(&["--tests"])),
-            ["--workspace", "--tests"]
-        );
-    }
-
-    #[test]
-    fn keeps_a_package_selection() {
-        for args in [
-            &["-p", "xtask"][..],
-            &["-pxtask"],
-            &["--package", "xtask"],
-            &["--package=xtask"],
-            &["--workspace"],
-        ] {
-            assert_eq!(with_workspace(strings(args)), strings(args), "{args:?}");
-        }
     }
 }

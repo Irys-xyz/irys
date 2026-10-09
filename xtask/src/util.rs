@@ -76,6 +76,27 @@ impl CmdExt for Cmd<'_> {
     }
 }
 
+/// Prepend `--workspace` unless `args` already select packages: cargo accepts `--workspace` with
+/// `-p` and then checks every member, so `-p foo` passed through to
+/// `check` or `flaky` would no longer narrow the run.
+pub fn with_workspace(args: Vec<String>) -> Vec<String> {
+    let selects_packages = args.iter().any(|a| {
+        a == "-p"
+            || a == "--package"
+            || a == "--workspace"
+            || a == "--all"
+            || a.starts_with("--package=")
+            || (a.starts_with("-p") && a.len() > 2)
+    });
+    if selects_packages {
+        args
+    } else {
+        std::iter::once("--workspace".to_string())
+            .chain(args)
+            .collect()
+    }
+}
+
 /// Quote a string for safe inclusion in a `bash -c` command line.
 /// Wraps in single quotes; embedded single quotes become `'\''`.
 pub fn shell_quote(s: &str) -> String {
@@ -253,7 +274,7 @@ pub fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf
 
 #[cfg(test)]
 mod tests {
-    use super::with_deny_warnings;
+    use super::{with_deny_warnings, with_workspace};
 
     #[test]
     fn adds_deny_when_empty() {
@@ -278,5 +299,30 @@ mod tests {
             ]),
             ["--all-features", "--", "-Dwarnings"]
         );
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn adds_workspace_without_a_package_selection() {
+        assert_eq!(
+            with_workspace(strings(&["--tests"])),
+            ["--workspace", "--tests"]
+        );
+    }
+
+    #[test]
+    fn keeps_a_package_selection() {
+        for args in [
+            &["-p", "xtask"][..],
+            &["-pxtask"],
+            &["--package", "xtask"],
+            &["--package=xtask"],
+            &["--workspace"],
+        ] {
+            assert_eq!(with_workspace(strings(args)), strings(args), "{args:?}");
+        }
     }
 }
