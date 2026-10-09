@@ -109,6 +109,11 @@ pub enum ChunkRequestState {
     /// offset ([`ChunkOrchestrator::unblock_missing_data_root_index_where`]), or
     /// on process restart.
     Blocked(ChunkBlockReason),
+
+    /// A live body-migration job covers this offset. Data sync does not fetch
+    /// or write it. A later tick returns it to [`Self::Pending`] once the job
+    /// is gone and the offset is still Entropy.
+    HeldByBodyWorker,
 }
 
 type ExcludedPeerAddresses = HashSet<IrysAddress>;
@@ -183,6 +188,13 @@ pub struct ChunkOrchestrator {
     /// Main node DB. Holds validated chunk bodies that have not reached this
     /// storage module yet.
     db: DatabaseProvider,
+    /// Inclusive partition offsets a live body-migration job covers.
+    /// Refreshed in [`Self::prepare_tick`], and on the first dispatch if that
+    /// tick has not run yet.
+    pending_body_ranges: Vec<(u32, u32)>,
+    /// Set after a successful coverage read. A failed read stays false and
+    /// skips nothing, so the next dispatch tries again.
+    coverage_loaded: bool,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -220,6 +232,8 @@ impl ChunkOrchestrator {
             config,
             runtime_handle,
             db,
+            pending_body_ranges: Vec::new(),
+            coverage_loaded: false,
         }
     }
 
@@ -238,7 +252,86 @@ impl ChunkOrchestrator {
             .partition_assignment()
             .is_some_and(|pa| pa.ledger_id.is_some())
         {
+            self.reload_pending_body_coverage();
+            self.release_body_worker_holds(Instant::now());
             self.populate_request_queue();
+        }
+    }
+
+    fn reload_pending_body_coverage(&mut self) {
+        match self.storage_module.pending_body_coverage_ranges() {
+            Ok(ranges) => {
+                self.pending_body_ranges = ranges;
+                self.coverage_loaded = true;
+            }
+            Err(error) => {
+                // A read error must not hide holes from peers.
+                self.pending_body_ranges.clear();
+                self.coverage_loaded = false;
+                warn!(
+                    error = %error,
+                    "pending body coverage read failed; data sync will not skip offsets"
+                );
+            }
+        }
+    }
+
+    fn pending_body_covers(&self, offset: PartitionChunkOffset) -> bool {
+        let offset = *offset;
+        self.pending_body_ranges
+            .binary_search_by(|range| {
+                if range.1 < offset {
+                    std::cmp::Ordering::Less
+                } else if range.0 > offset {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+
+    fn hold_for_body_worker(&mut self, offset: PartitionChunkOffset) {
+        let Some(request) = self.chunk_requests.get_mut(&offset) else {
+            return;
+        };
+        if matches!(request.request_state, ChunkRequestState::HeldByBodyWorker) {
+            return;
+        }
+        request.request_state = ChunkRequestState::HeldByBodyWorker;
+        metrics::record_data_sync_pending_body_skipped();
+        debug!(
+            chunk.offset = %offset,
+            "data sync left offset to the body worker"
+        );
+    }
+
+    /// Return holds whose job is gone. Only an offset that is still Entropy
+    /// becomes Pending; a stored offset is dropped by the next queue rebuild.
+    fn release_body_worker_holds(&mut self, now: Instant) {
+        let ready: Vec<PartitionChunkOffset> = self
+            .chunk_requests
+            .iter()
+            .filter_map(|(&offset, request)| {
+                if !matches!(request.request_state, ChunkRequestState::HeldByBodyWorker) {
+                    return None;
+                }
+                if self.pending_body_covers(offset) {
+                    return None;
+                }
+                matches!(
+                    self.storage_module.get_chunk_type(&offset),
+                    Some(ChunkType::Entropy)
+                )
+                .then_some(offset)
+            })
+            .collect();
+        for offset in ready {
+            if let Some(request) = self.chunk_requests.get_mut(&offset) {
+                request.request_state = ChunkRequestState::Pending;
+                request.ready_since = now;
+                self.ready_offsets.push_back(offset);
+            }
         }
     }
 
@@ -550,6 +643,10 @@ impl ChunkOrchestrator {
             return false;
         }
 
+        if !self.coverage_loaded {
+            self.reload_pending_body_coverage();
+        }
+
         while let Some(chunk_offset) = self.ready_offsets.pop_front() {
             let Some((excluded, all_peers_exhausted, cache_miss)) = self
                 .chunk_requests
@@ -576,6 +673,13 @@ impl ChunkOrchestrator {
             else {
                 continue;
             };
+
+            // A live body job owns this offset. Hold it before the cache read
+            // so a miss is not memoized and the disk lane is not raced.
+            if self.pending_body_covers(chunk_offset) {
+                self.hold_for_body_worker(chunk_offset);
+                continue;
+            }
 
             // The cache is tried before peer selection. A node that already
             // holds the body must write it even when every peer is exhausted
@@ -634,15 +738,22 @@ impl ChunkOrchestrator {
             let Some(&front) = self.ready_offsets.front() else {
                 break;
             };
-            let Some(request) = self.chunk_requests.get(&front) else {
-                self.ready_offsets.pop_front();
-                continue;
+            let (pending, cache_miss) = {
+                let Some(request) = self.chunk_requests.get(&front) else {
+                    self.ready_offsets.pop_front();
+                    continue;
+                };
+                (
+                    matches!(request.request_state, ChunkRequestState::Pending),
+                    request.local_cache_miss,
+                )
             };
-            if !matches!(request.request_state, ChunkRequestState::Pending) {
+            if !pending {
                 self.ready_offsets.pop_front();
                 continue;
             }
-            if front != next_expected || request.local_cache_miss {
+            // Stop before an offset a body job still owns. The next pop holds it.
+            if front != next_expected || cache_miss || self.pending_body_covers(front) {
                 break;
             }
             self.ready_offsets.pop_front();
@@ -1316,7 +1427,8 @@ impl ChunkOrchestrator {
             | ChunkRequestState::AwaitingDurability(..)
             | ChunkRequestState::Completed
             | ChunkRequestState::Delayed { .. }
-            | ChunkRequestState::Blocked(_)) => {
+            | ChunkRequestState::Blocked(_)
+            | ChunkRequestState::HeldByBodyWorker) => {
                 return Err(eyre::eyre!(
                     "Invalid state for chunk fetch at offset {}: expected Requested, got {:?}",
                     chunk_offset,
@@ -1558,7 +1670,8 @@ impl ChunkOrchestrator {
                 | ChunkRequestState::AwaitingDurability(..)
                 | ChunkRequestState::Completed
                 | ChunkRequestState::Delayed { .. }
-                | ChunkRequestState::Blocked(_) => {
+                | ChunkRequestState::Blocked(_)
+                | ChunkRequestState::HeldByBodyWorker => {
                     return Err(eyre::eyre!(
                         "Invalid request state for chunk failure: {:?}",
                         chunk_offset
@@ -1645,6 +1758,8 @@ impl ChunkOrchestrator {
                     ChunkRequestState::Completed => (r, a, w, c + 1, d, b),
                     ChunkRequestState::Delayed { .. } => (r, a, w, c, d + 1, b),
                     ChunkRequestState::Blocked(_) => (r, a, w, c, d, b + 1),
+                    // Held work is neither ready nor blocked. Discovery continues.
+                    ChunkRequestState::HeldByBodyWorker => (r, a, w, c, d, b),
                 },
             );
 

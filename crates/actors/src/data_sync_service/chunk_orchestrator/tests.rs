@@ -1278,9 +1278,8 @@ fn signed_tx(config: &Config, num_chunks: u64) -> (DataTransaction, Vec<u8>) {
     (tx, data)
 }
 
-/// Index the tx onto slot 0 and delete the body-migration row the index write
-/// creates. The row's absence is what lets data sync own the hole.
-fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u64) {
+/// Index the tx onto slot 0. Leaves the body-migration row the index write creates.
+fn index_tx(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u64) {
     let (_root, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
     sm.index_transaction_data(
         &tx.header,
@@ -1289,6 +1288,12 @@ fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u6
         0,
     )
     .expect("index tx");
+}
+
+/// Index the tx onto slot 0 and delete the body-migration row the index write
+/// creates. The row's absence is what lets data sync own the hole.
+fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u64) {
+    index_tx(sm, tx, last_inclusive);
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
         assert!(
             sm.settle_pending_body_migration(key, job.data_root, job.block_height)
@@ -1496,4 +1501,87 @@ async fn local_cache_index_only_row_is_a_miss() {
     assert!(orch.chunk_requests[&offset].local_cache_miss);
     assert!(!sm.is_data_write_pending_at(offset));
     assert!(metrics::test_fetch_by_source_count("local_cache", "not_found") > before);
+}
+
+/// A live body-migration job covers every offset in its span, not only the
+/// row key. Data sync holds those offsets and still asks a peer for a hole
+/// the job does not own. After the job is settled, the held offsets are
+/// written from the cache.
+#[test_log::test(tokio::test)]
+async fn pending_body_offsets_are_skipped_until_the_job_settles() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 3);
+    index_tx(&sm, &tx, 2);
+    cache_bodies_at(&db, &tx, &data, &[0, 1, 2]);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    add_assigned_peer(&mut orch, &config, 16, 9116);
+    for value in 0..4_u32 {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+
+    let before = metrics::test_pending_body_skipped_count();
+    assert!(orch.dispatch_next());
+    for value in 0..3_u32 {
+        let offset = PartitionChunkOffset::from(value);
+        assert!(
+            matches!(
+                orch.chunk_requests[&offset].request_state,
+                ChunkRequestState::HeldByBodyWorker
+            ),
+            "offset {value} is inside the live job"
+        );
+        assert_eq!(orch.chunk_requests[&offset].attempt_count, 0);
+        assert!(!orch.chunk_requests[&offset].local_cache_miss);
+        assert!(!sm.is_data_write_pending_at(offset));
+    }
+    assert_eq!(
+        metrics::test_pending_body_skipped_count(),
+        before + 3,
+        "each covered offset is counted once"
+    );
+    wait_for_ledger_requests(&fetcher, 1).await;
+    {
+        let log = fetcher.request_log.read().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(*log[0].0, 3, "only the uncovered hole asks a peer");
+    }
+    assert!(fetcher.data_root_request_log.read().unwrap().is_empty());
+
+    assert!(!orch.dispatch_next());
+    assert_eq!(metrics::test_pending_body_skipped_count(), before + 3);
+    assert_eq!(fetcher.request_log.read().unwrap().len(), 1);
+
+    for (key, job) in sm.pending_body_migrations().expect("pending rows") {
+        assert!(
+            sm.settle_pending_body_migration(key, job.data_root, job.block_height)
+                .expect("settle")
+        );
+    }
+    orch.prepare_tick();
+    for _ in 0..3 {
+        let waiting = (0..3_u32).all(|value| {
+            matches!(
+                orch.chunk_requests[&PartitionChunkOffset::from(value)].request_state,
+                ChunkRequestState::AwaitingDurability(_)
+            )
+        });
+        if waiting {
+            break;
+        }
+        assert!(orch.dispatch_next());
+    }
+    for value in 0..3_u32 {
+        let offset = PartitionChunkOffset::from(value);
+        assert!(sm.is_data_write_pending_at(offset));
+        assert!(matches!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::AwaitingDurability(_)
+        ));
+        assert!(!orch.chunk_requests[&offset].local_cache_miss);
+    }
+    assert_eq!(fetcher.request_log.read().unwrap().len(), 1);
+    assert_eq!(metrics::test_pending_body_skipped_count(), before + 3);
 }

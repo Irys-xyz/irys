@@ -4297,6 +4297,25 @@ impl StorageModule {
             .collect())
     }
 
+    /// Inclusive partition offsets a live body-migration job still owns.
+    ///
+    /// The row key is the clipped tx start, not every covered offset. The span
+    /// matches the body worker: `[key, min(tx end, submodule end)]`. Touching
+    /// spans are merged.
+    pub fn pending_body_coverage_ranges(&self) -> eyre::Result<Vec<(u32, u32)>> {
+        let chunk_size = self.config.consensus.chunk_size;
+        let mut ranges = Vec::new();
+        for (interval, rows) in self.pending_body_migration_batches()? {
+            let interval_end = i64::from(*interval.end());
+            for (key, job) in rows {
+                if let Some(range) = body_job_coverage(key, &job, interval_end, chunk_size) {
+                    ranges.push(range);
+                }
+            }
+        }
+        Ok(merge_inclusive_ranges(ranges))
+    }
+
     /// Delete the job at `key` once every offset it covers is durable (or the
     /// job is being retired). Returns whether a row was removed.
     ///
@@ -6044,6 +6063,45 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
     );
 
     Ok(out == chunk)
+}
+
+/// Inclusive `[key, min(tx end, submodule end)]` for one body-migration job.
+/// Same span the body worker drains. `None` when the job covers no offset.
+fn body_job_coverage(
+    key: PartitionChunkOffset,
+    job: &PendingBodyMigration,
+    interval_end: i64,
+    chunk_size: u64,
+) -> Option<(u32, u32)> {
+    if chunk_size == 0 {
+        return None;
+    }
+    let num_chunks = i64::try_from(job.data_size.div_ceil(chunk_size)).ok()?;
+    if num_chunks == 0 {
+        return None;
+    }
+    let tx_start = i64::from(*job.start_offset);
+    let first = i64::from(*key);
+    let last = (tx_start + num_chunks - 1).min(interval_end);
+    if last < first {
+        return None;
+    }
+    Some((u32::try_from(first).ok()?, u32::try_from(last).ok()?))
+}
+
+fn merge_inclusive_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1.saturating_add(1)
+        {
+            last.1 = last.1.max(end);
+            continue;
+        }
+        merged.push((start, end));
+    }
+    merged
 }
 
 //==============================================================================

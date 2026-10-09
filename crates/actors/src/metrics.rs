@@ -39,6 +39,7 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_DURABILITY_STALLED("irys.data_sync.durability_stalled_total", "Data sync writes that did not become durable before the monotonic durability deadline");
     counter DATA_INDEX_HEAL_UNREPAIRED("irys.storage.index_heal_unrepaired_total", "Ledger SMs still gapped/uncertain after a heal pass (labelled by reason)");
     counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync chunk fetches by source (assigned, ingress_proof, local_cache) and classified outcome");
+    counter DATA_SYNC_PENDING_BODY_SKIPPED("irys.data_sync.pending_body_skipped_total", "Data sync offsets left to a live body-migration job, counted once when the hold starts");
     counter DATA_SYNC_FETCH_FAILURES("irys.data_sync.fetch_failures_total", "Data sync fetch failures by ledger, peer, and failure class");
     counter DATA_SYNC_ATTEMPTS("irys.data_sync.attempts_total", "Data sync scheduling attempts by ledger and fresh/retry class");
     counter DATA_SYNC_UNIQUE_OFFSETS_ATTEMPTED("irys.data_sync.unique_offsets_attempted_total", "Offsets attempted for the first time in the current in-memory scheduler lifecycle");
@@ -388,6 +389,27 @@ pub(crate) fn test_fetch_by_source_count(source: &'static str, outcome: &'static
 static FETCH_BY_SOURCE_TEST: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<(&'static str, &'static str), u64>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// An offset moved to `HeldByBodyWorker`. Counted once per transition, not per tick.
+pub(crate) fn record_data_sync_pending_body_skipped() {
+    DATA_SYNC_PENDING_BODY_SKIPPED.add(1, &[]);
+    #[cfg(test)]
+    {
+        PENDING_BODY_SKIPPED_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Process-wide count of [`record_data_sync_pending_body_skipped`] calls.
+///
+/// Crate tests share one process. Compare a delta, not an absolute total.
+#[cfg(test)]
+pub(crate) fn test_pending_body_skipped_count() -> u64 {
+    PENDING_BODY_SKIPPED_TEST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+static PENDING_BODY_SKIPPED_TEST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn record_data_sync_fetch_failure(
     ledger_id: u32,
