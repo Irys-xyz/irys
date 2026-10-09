@@ -123,6 +123,16 @@ pub struct LegacySstSpan {
     pub end: Option<u32>,
 }
 
+/// Live files in one column family after a bench settle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnFileUsage {
+    pub name: String,
+    pub sst_files: u64,
+    pub sst_bytes: u64,
+    pub blob_files: u64,
+    pub blob_bytes: u64,
+}
+
 fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
     let bytes = bytes?;
     let raw: [u8; 4] = bytes.try_into().ok()?;
@@ -1131,6 +1141,52 @@ impl RocksSubmoduleStore {
                 .then_with(|| left.name.cmp(&right.name))
         });
         Ok(files)
+    }
+
+    /// SST and blob files per column family. Blob counts use live files when
+    /// RocksDB lists them, and the blob-file properties otherwise.
+    pub fn column_file_usage(&self) -> eyre::Result<Vec<ColumnFileUsage>> {
+        let mut by_name: BTreeMap<String, ColumnFileUsage> = BTreeMap::new();
+        for file in self.db.live_files().wrap_err("list live files")? {
+            let entry = by_name
+                .entry(file.column_family_name.clone())
+                .or_insert_with(|| ColumnFileUsage {
+                    name: file.column_family_name.clone(),
+                    sst_files: 0,
+                    sst_bytes: 0,
+                    blob_files: 0,
+                    blob_bytes: 0,
+                });
+            let bytes = u64::try_from(file.size).unwrap_or(u64::MAX);
+            if file.name.ends_with(".blob") {
+                entry.blob_files = entry.blob_files.saturating_add(1);
+                entry.blob_bytes = entry.blob_bytes.saturating_add(bytes);
+            } else {
+                entry.sst_files = entry.sst_files.saturating_add(1);
+                entry.sst_bytes = entry.sst_bytes.saturating_add(bytes);
+            }
+        }
+        let names = DB::list_cf(&Options::default(), &self.path).unwrap_or_default();
+        for name in names {
+            let Some(handle) = self.db.cf_handle(&name) else {
+                continue;
+            };
+            let entry = by_name
+                .entry(name.clone())
+                .or_insert_with(|| ColumnFileUsage {
+                    name: name.clone(),
+                    sst_files: 0,
+                    sst_bytes: 0,
+                    blob_files: 0,
+                    blob_bytes: 0,
+                });
+            if entry.blob_files == 0 {
+                entry.blob_files = cf_property_u64(&self.db, handle, "rocksdb.num-blob-files");
+                entry.blob_bytes =
+                    cf_property_u64(&self.db, handle, "rocksdb.total-blob-file-size");
+            }
+        }
+        Ok(by_name.into_values().collect())
     }
 
     fn legacy_path_hash_cf(&self) -> eyre::Result<&rocksdb::ColumnFamily> {
@@ -2455,6 +2511,13 @@ fn user_column_families(
         column_options(cache, Cf::Metadata, tuning),
     ));
     families
+}
+
+fn cf_property_u64(db: &DB, handle: &impl rocksdb::AsColumnFamilyRef, name: &str) -> u64 {
+    db.property_int_value_cf(handle, name)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
 fn property_u64(db: &DB, name: impl rocksdb::CStrLike) -> eyre::Result<u64> {

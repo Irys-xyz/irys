@@ -13,9 +13,11 @@
 //!
 //! `--worst-case` stores a max-size data proof on every chunk. A full
 //! partition is `--chunks 75534400` and needs `IRYS_INDEX_BENCH_LARGE=1`.
+//! `--small-txs N` fills the same span with N-chunk transactions, each with
+//! its own data root. `--mid-txs` uses transactions of 257 to 4096 chunks.
 //! `--mid` writes 1_000_000 chunks of 4096-byte paths, past an HDD cache.
 //! It needs the same variable. `--profile filled|mid|worst` selects the
-//! same workloads. `--rocks <preset>` changes one RocksDB setting.
+//! older workloads. `--rocks <preset>` changes one RocksDB setting.
 //! `--engine rocks` skips MDBX.
 //!
 //! After the writes, each engine drops its file cache with `posix_fadvise`
@@ -86,6 +88,12 @@ const DATA_PROOF_BYTES: usize = proof_bytes(DATA_PROOF_LAYERS);
 /// Deepest tx proof of a full block: 7 branches + one leaf.
 const TX_PROOF_LAYERS: usize = pairing_layers(MAX_DATA_TXS_PER_BLOCK);
 const TX_PROOF_BYTES: usize = proof_bytes(TX_PROOF_LAYERS);
+/// `--mid-txs` draws a size from this inclusive range.
+const MID_TX_MIN: u32 = 257;
+const MID_TX_MAX: u32 = 4096;
+const MID_TX_SEED: u64 = 0x5EED_71E5;
+/// Seed for the `--shuffle-paths` run order.
+const SHUFFLE_SEED: u64 = 0x5EED_5A1F;
 
 /// Workload shape. `mid` and `worst` are also the old flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +109,10 @@ enum Workload {
     OffsetRows,
     /// Point reads of a schema-v1 `ChunkPathHashesByOffset` SST.
     FilterReuse,
+    /// `N` chunks per transaction. Each transaction has its own data root.
+    SmallTxs,
+    /// Transactions of [`MID_TX_MIN`] to [`MID_TX_MAX`] chunks, one root each.
+    MidTxs,
 }
 
 impl Workload {
@@ -113,6 +125,8 @@ impl Workload {
             Self::IndexSpan => "index-span",
             Self::OffsetRows => "offset-rows",
             Self::FilterReuse => "filter-reuse",
+            Self::SmallTxs => "small-txs",
+            Self::MidTxs => "mid-txs",
         }
     }
 
@@ -131,6 +145,23 @@ impl Workload {
     fn is_worst(self) -> bool {
         matches!(self, Self::Worst)
     }
+
+    /// Proof bytes come from one data tree per transaction.
+    fn is_tree(self) -> bool {
+        matches!(self, Self::Worst | Self::SmallTxs | Self::MidTxs)
+    }
+
+    /// Many data roots. The per-transaction rows are the bulk of the cost.
+    fn is_many_tx(self) -> bool {
+        matches!(self, Self::SmallTxs | Self::MidTxs)
+    }
+}
+
+/// One transaction's stored span. `leaves` is the full data tree.
+struct TxPlace {
+    start: u32,
+    stored: u32,
+    leaves: u64,
 }
 
 /// Which engines to write. A preset sweep uses `Rocks` so MDBX is not repeated.
@@ -180,6 +211,16 @@ struct Args {
     group_commit: bool,
     /// Compact the v1 path-hash family before the timed reads.
     rewrite_filters: bool,
+    /// Chunks in each `--small-txs` transaction. Zero for other workloads.
+    small_tx_chunks: u32,
+    /// `(start, stored)` for `--mid-txs`. Empty otherwise.
+    mid_spans: Vec<(u32, u32)>,
+    /// Data paths arrive as runs of this many chunks in a seeded random
+    /// order, like scattered data sync. `None` writes them in offset order.
+    shuffle_run: Option<u32>,
+    /// Overrides the transaction rows per commit. Production commits one
+    /// block's transactions together.
+    txs_per_commit: Option<u32>,
 }
 
 fn main() -> eyre::Result<()> {
@@ -187,7 +228,7 @@ fn main() -> eyre::Result<()> {
     refuse_large_payload(&args)?;
     prepare_dir(&args.dir, args.workload.is_filter_reuse())?;
     println!(
-        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} dbs={} group_commit={} allocator=system jemalloc=off",
+        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} dbs={} group_commit={} shuffle_run={} allocator=system jemalloc=off",
         args.chunks,
         args.tx_chunks,
         args.batch,
@@ -198,6 +239,7 @@ fn main() -> eyre::Result<()> {
         args.engines.name(),
         args.dbs,
         u8::from(args.group_commit),
+        args.shuffle_run.unwrap_or(0),
     );
     if args.workload.is_filter_reuse() {
         println!(
@@ -223,6 +265,17 @@ fn main() -> eyre::Result<()> {
     } else if args.workload.is_memory() {
         println!("mode={} {}", args.workload.name(), memory_predict(&args));
         return run_memory(&args);
+    } else if args.workload == Workload::SmallTxs {
+        println!(
+            "mode=small-txs tx_chunks={} txs={} tx_proof_bytes={TX_PROOF_BYTES}",
+            args.small_tx_chunks,
+            tx_count(&args),
+        );
+    } else if args.workload == Workload::MidTxs {
+        println!(
+            "mode=mid-txs tx_chunks={MID_TX_MIN}..={MID_TX_MAX} txs={} tx_proof_bytes={TX_PROOF_BYTES}",
+            tx_count(&args),
+        );
     } else {
         println!("mode=filled");
     }
@@ -230,8 +283,12 @@ fn main() -> eyre::Result<()> {
     if args.engines.includes_mdbx() {
         let mdbx_dir = args.dir.join("mdbx");
         fs::create_dir_all(&mdbx_dir)?;
-        let map_bytes = mdbx_map_bytes(args.chunks, args.path_bytes, args.workload.is_worst());
-        let mdbx_commits = commits_for(args.workload.is_mid(), args.batch, true, args.group_commit);
+        let map_bytes = engine_map_bytes(&args);
+        let mut mdbx_commits =
+            commits_for(args.workload.is_mid(), args.batch, true, args.group_commit);
+        if let Some(n) = args.txs_per_commit {
+            mdbx_commits.txs_per_commit = n;
+        }
         println!(
             "engine=mdbx sync=durable geometry_max_bytes={map_bytes} txs_per_commit={} path_batch={}",
             mdbx_commits.txs_per_commit, mdbx_commits.path_batch
@@ -248,8 +305,11 @@ fn main() -> eyre::Result<()> {
     if args.engines.includes_rocks() {
         let rocks_dir = args.dir.join("rocks");
         fs::create_dir_all(&rocks_dir)?;
-        let rocks_commits =
+        let mut rocks_commits =
             commits_for(args.workload.is_mid(), args.batch, false, args.group_commit);
+        if let Some(n) = args.txs_per_commit {
+            rocks_commits.txs_per_commit = n;
+        }
         let tuning = args.rocks;
         println!(
             "engine=rocks sync=wal_fsync {} max_open_files=-1 file_opening_threads=16 txs_per_commit={} path_batch={}",
@@ -315,7 +375,12 @@ fn memory_predict(args: &Args) -> String {
                 args.batch
             )
         }
-        Workload::Filled | Workload::Mid | Workload::Worst | Workload::FilterReuse => String::new(),
+        Workload::Filled
+        | Workload::Mid
+        | Workload::Worst
+        | Workload::FilterReuse
+        | Workload::SmallTxs
+        | Workload::MidTxs => String::new(),
     }
 }
 
@@ -324,7 +389,12 @@ fn run_memory(args: &Args) -> eyre::Result<()> {
         Workload::MemDbs => run_mem_dbs(args),
         Workload::IndexSpan => run_index_span(args),
         Workload::OffsetRows => run_offset_rows(args),
-        Workload::Filled | Workload::Mid | Workload::Worst | Workload::FilterReuse => {
+        Workload::Filled
+        | Workload::Mid
+        | Workload::Worst
+        | Workload::FilterReuse
+        | Workload::SmallTxs
+        | Workload::MidTxs => {
             eyre::bail!("not a memory profile")
         }
     }
@@ -589,6 +659,9 @@ fn measure(
     note_mem(engine, "after_data_path", &watch);
     let settle_ms = timed(|| store.settle_files())?;
     note_mem(engine, "after_settle", &watch);
+    if engine == "rocks" {
+        print_column_files(&store)?;
+    }
     drop(store);
     note_mem(engine, "after_write_drop", &watch);
 
@@ -743,17 +816,23 @@ fn write_tx_index(store: &SubmoduleIndex, args: &Args, txs_per_commit: u32) -> e
             if offset >= args.chunks {
                 break;
             }
-            let count = args.tx_chunks.min(args.chunks - offset);
-            let start = PartitionChunkOffset::from(offset);
-            let end = PartitionChunkOffset::from(offset + count - 1);
+            let place = place_tx(args, offset);
+            eyre::ensure!(
+                place.start == offset,
+                "transaction cursor {offset} is inside the span at {}",
+                place.start
+            );
+            let count = place.stored;
+            let start = PartitionChunkOffset::from(place.start);
+            let end = PartitionChunkOffset::from(place.start + count - 1);
             group.push(IndexTx {
                 start,
                 end,
-                tx_hash: hash_at(u64::from(offset)),
-                data_root: hash_at(u64::from(offset) + 0x1000_0000),
-                tx_path: tx_path_bytes(args, offset),
-                start_offset: RelativeChunkOffset(i32::try_from(offset)?),
-                data_size: indexed_data_size(args, count),
+                tx_hash: hash_at(u64::from(place.start)),
+                data_root: hash_at(u64::from(place.start) + 0x1000_0000),
+                tx_path: tx_path_bytes(args, place.start),
+                start_offset: RelativeChunkOffset(i32::try_from(place.start)?),
+                data_size: place.leaves.saturating_mul(CHUNK_SIZE),
             });
             offset += count;
         }
@@ -793,6 +872,9 @@ fn write_tx_index(store: &SubmoduleIndex, args: &Args, txs_per_commit: u32) -> e
 }
 
 fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyre::Result<()> {
+    if let Some(run) = args.shuffle_run {
+        return write_shuffled_data_paths(store, args, path_batch, run);
+    }
     let mut offset = 0_u32;
     while offset < args.chunks {
         let count = path_batch.min(args.chunks - offset);
@@ -809,6 +891,50 @@ fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyr
         offset += count;
     }
     Ok(())
+}
+
+/// Each commit takes `path_batch` chunks from runs of `run` offsets visited
+/// in a seeded Fisher-Yates order, so most commits touch keys spread over
+/// the whole partition.
+fn write_shuffled_data_paths(
+    store: &SubmoduleIndex,
+    args: &Args,
+    path_batch: u32,
+    run: u32,
+) -> eyre::Result<()> {
+    let runs = shuffled_runs(args.chunks, run);
+    let mut updates = Vec::with_capacity(path_batch as usize);
+    for start in runs {
+        let end = start.saturating_add(run).min(args.chunks);
+        for at in start..end {
+            updates.push((
+                PartitionChunkOffset::from(at),
+                hash_at(u64::from(at) + 0x2000_0000),
+                data_path_bytes(args, at),
+            ));
+            if updates.len() >= path_batch as usize {
+                let batch = std::mem::take(&mut updates);
+                store.update(|tx| tx.write_data_path_updates(batch))?;
+            }
+        }
+    }
+    if !updates.is_empty() {
+        store.update(|tx| tx.write_data_path_updates(updates))?;
+    }
+    Ok(())
+}
+
+/// Start offsets of `run`-sized runs covering `0..chunks`, shuffled.
+fn shuffled_runs(chunks: u32, run: u32) -> Vec<u32> {
+    let step = usize::try_from(run.max(1)).unwrap_or(usize::MAX);
+    let mut runs: Vec<u32> = (0..chunks).step_by(step).collect();
+    let mut state = SHUFFLE_SEED;
+    for i in (1..runs.len()).rev() {
+        state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        let j = usize::try_from((state >> 1) % (i as u64 + 1)).unwrap_or(0);
+        runs.swap(i, j);
+    }
+    runs
 }
 
 /// Cold lookups. Each shape reopens the engine and drops the OS file cache.
@@ -1305,6 +1431,23 @@ fn timed(f: impl FnOnce() -> eyre::Result<()>) -> eyre::Result<u128> {
     Ok(started.elapsed().as_millis())
 }
 
+fn print_column_files(store: &SubmoduleIndex) -> eyre::Result<()> {
+    let mut files = store.column_file_usage()?;
+    files.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut sst_files = 0_u64;
+    let mut blob_files = 0_u64;
+    for cf in &files {
+        sst_files = sst_files.saturating_add(cf.sst_files);
+        blob_files = blob_files.saturating_add(cf.blob_files);
+        println!(
+            "  cf name={} sst_files={} sst_bytes={} blob_files={} blob_bytes={}",
+            cf.name, cf.sst_files, cf.sst_bytes, cf.blob_files, cf.blob_bytes
+        );
+    }
+    println!("  files sst={sst_files} blob={blob_files}");
+    Ok(())
+}
+
 fn mdbx_map_bytes(chunks: u32, path_bytes: usize, worst_case: bool) -> usize {
     let estimate = u64::from(chunks)
         .saturating_mul(path_bytes as u64)
@@ -1320,6 +1463,98 @@ fn mdbx_map_bytes(chunks: u32, path_bytes: usize, worst_case: bool) -> usize {
     };
     let cap = estimate.clamp(1 << 30, ceiling);
     usize::try_from(cap).unwrap_or(usize::MAX)
+}
+
+/// Map size for one engine. The pinned estimate stays in [`mdbx_map_bytes`].
+/// Many-root shapes add the tx-path and binding bytes that estimate omits.
+fn engine_map_bytes(args: &Args) -> usize {
+    let base = mdbx_map_bytes(args.chunks, args.path_bytes, args.workload.is_worst());
+    if !args.workload.is_many_tx() {
+        return base;
+    }
+    let extra = tx_count(args).saturating_mul((TX_PROOF_BYTES + 256) as u64);
+    base.saturating_add(usize::try_from(extra).unwrap_or(usize::MAX))
+}
+
+fn tx_count(args: &Args) -> u64 {
+    match args.workload {
+        Workload::SmallTxs => {
+            u64::from(args.chunks).div_ceil(u64::from(args.small_tx_chunks.max(1)))
+        }
+        Workload::MidTxs => args.mid_spans.len() as u64,
+        Workload::Worst => u64::from(args.chunks).div_ceil(MAX_DATA_TX_CHUNKS),
+        _ => u64::from(args.chunks).div_ceil(u64::from(args.tx_chunks.max(1))),
+    }
+}
+
+/// Transaction that owns `offset`. Tree workloads use the full leaf count.
+fn place_tx(args: &Args, offset: u32) -> TxPlace {
+    match args.workload {
+        Workload::Worst => {
+            let span = u32::try_from(MAX_DATA_TX_CHUNKS).unwrap_or(u32::MAX);
+            let start = offset / span * span;
+            let stored = span.min(args.chunks - start);
+            TxPlace {
+                start,
+                stored,
+                leaves: MAX_DATA_TX_CHUNKS,
+            }
+        }
+        Workload::SmallTxs => {
+            let span = args.small_tx_chunks.max(1);
+            let start = offset / span * span;
+            let stored = span.min(args.chunks - start);
+            TxPlace {
+                start,
+                stored,
+                leaves: u64::from(stored),
+            }
+        }
+        Workload::MidTxs => {
+            let idx = args
+                .mid_spans
+                .partition_point(|(start, _)| *start <= offset)
+                .saturating_sub(1);
+            let (start, stored) = args.mid_spans[idx];
+            TxPlace {
+                start,
+                stored,
+                leaves: u64::from(stored),
+            }
+        }
+        _ => {
+            let span = args.tx_chunks.max(1);
+            let start = offset / span * span;
+            let stored = span.min(args.chunks - start);
+            TxPlace {
+                start,
+                stored,
+                leaves: u64::from(stored),
+            }
+        }
+    }
+}
+
+/// Seeded sizes in [`MID_TX_MIN`]..=[`MID_TX_MAX`]. A remainder under the
+/// minimum is one short tail transaction.
+fn mid_spans(chunks: u32) -> Vec<(u32, u32)> {
+    let mut state = MID_TX_SEED;
+    let mut spans = Vec::new();
+    let mut at = 0_u32;
+    let width = u64::from(MID_TX_MAX - MID_TX_MIN + 1);
+    while at < chunks {
+        state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        let size = MID_TX_MIN + u32::try_from(state % width).unwrap_or(0);
+        let remain = chunks - at;
+        let stored = if remain < MID_TX_MIN {
+            remain
+        } else {
+            size.min(remain)
+        };
+        spans.push((at, stored));
+        at += stored;
+    }
+    spans
 }
 
 fn indexed_data_size(args: &Args, count: u32) -> u64 {
@@ -1342,6 +1577,15 @@ fn rewritten_data_path(args: &Args, offset: u32) -> Vec<u8> {
 }
 
 fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
+    if args.workload.is_many_tx() {
+        // Node bytes depend on `(data_root, level, index)`, so two chunks under
+        // one branch store the same 96 bytes. `--worst-case` stays a uniform
+        // max proof so its size stays comparable with earlier runs.
+        let place = place_tx(args, offset);
+        let root = hash_at(u64::from(place.start).wrapping_add(0x1000_0000));
+        let leaf = u64::from(offset.saturating_sub(place.start));
+        return shared_data_proof(&root.0, place.leaves, leaf, CHUNK_SIZE);
+    }
     if !args.workload.is_worst() {
         return fill(args.path_bytes, u64::from(offset));
     }
@@ -1357,14 +1601,20 @@ fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
 }
 
 fn tx_path_bytes(args: &Args, tx_start: u32) -> Vec<u8> {
-    if !args.workload.is_worst() {
+    if !args.workload.is_tree() {
         return fill(args.path_bytes, u64::from(tx_start));
     }
-    let ordinal = u64::from(tx_start) / MAX_DATA_TX_CHUNKS;
-    let leaf_end = ordinal
-        .saturating_add(1)
-        .saturating_mul(MAX_DATA_TX_CHUNKS)
-        .saturating_mul(CHUNK_SIZE);
+    let leaf_end = if args.workload.is_worst() {
+        let ordinal = u64::from(tx_start) / MAX_DATA_TX_CHUNKS;
+        ordinal
+            .saturating_add(1)
+            .saturating_mul(MAX_DATA_TX_CHUNKS)
+            .saturating_mul(CHUNK_SIZE)
+    } else {
+        u64::from(tx_start)
+            .saturating_add(1)
+            .saturating_mul(CHUNK_SIZE)
+    };
     shaped_proof(
         TX_PROOF_LAYERS,
         leaf_end,
@@ -1380,7 +1630,7 @@ fn tx_path_bytes(args: &Args, tx_start: u32) -> Vec<u8> {
 /// be incompressible so compression sees the same mix as a real proof.
 fn shaped_proof(layers: usize, leaf_end: u64, seed: u64) -> Vec<u8> {
     let mut out = vec![0_u8; proof_bytes(layers)];
-    let mut state = seed | 1;
+    let mut state = mix_seed(seed);
     for level in 0..layers {
         let at = level * BRANCH_SIZE;
         fill_span(&mut out[at..at + HASH_SIZE], &mut state);
@@ -1419,13 +1669,8 @@ fn fill_span(out: &mut [u8], state: &mut u64) {
 }
 
 fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
-    let raw = u64::from(args.chunks)
-        * if args.workload.is_worst() {
-            DATA_PROOF_BYTES as u64
-        } else {
-            args.path_bytes as u64
-        };
-    let worst_over = args.workload.is_worst() && raw > LARGE_RAW_BYTES;
+    let raw = gated_raw_bytes(args);
+    let tree_over = args.workload.is_tree() && raw > LARGE_RAW_BYTES;
     let memory_over = match args.workload {
         // 8 databases of 1_000_000 rows is the default and stays under this.
         Workload::MemDbs => u64::from(args.chunks).saturating_mul(u64::from(args.dbs)) > 8_000_000,
@@ -1433,9 +1678,14 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
         Workload::IndexSpan => args.chunks > 1_000_000,
         // A bloom that still fits in the 64 MiB cache is under this.
         Workload::OffsetRows => args.chunks > 2_000_000,
-        Workload::Filled | Workload::Mid | Workload::Worst | Workload::FilterReuse => false,
+        Workload::Filled
+        | Workload::Mid
+        | Workload::Worst
+        | Workload::FilterReuse
+        | Workload::SmallTxs
+        | Workload::MidTxs => false,
     };
-    if !args.workload.is_mid() && !worst_over && !memory_over {
+    if !args.workload.is_mid() && !tree_over && !memory_over {
         return Ok(());
     }
     let allowed = std::env::var("IRYS_INDEX_BENCH_LARGE").ok().as_deref() == Some("1");
@@ -1453,10 +1703,33 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
             args.workload.name()
         );
     }
+    if !args.workload.is_worst() {
+        eyre::bail!(
+            "{} raw upper bound is {raw} bytes ({} transactions). Set IRYS_INDEX_BENCH_LARGE=1 to write them. A full partition is --chunks {PARTITION_CHUNKS}.",
+            args.workload.name(),
+            tx_count(args),
+        );
+    }
     eyre::bail!(
         "worst-case raw data proofs are {raw} bytes. Set IRYS_INDEX_BENCH_LARGE=1 to write them. A full partition is --chunks {PARTITION_CHUNKS} ({full} raw bytes per engine).",
         full = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64
     );
+}
+
+/// Upper bound used by the large-run gate. Worst-case stays
+/// `chunks * DATA_PROOF_BYTES`. Many-root shapes also count tx proofs.
+fn gated_raw_bytes(args: &Args) -> u64 {
+    let per = if args.workload.is_tree() {
+        DATA_PROOF_BYTES as u64
+    } else {
+        args.path_bytes as u64
+    };
+    let proofs = u64::from(args.chunks).saturating_mul(per);
+    if args.workload.is_many_tx() {
+        proofs.saturating_add(tx_count(args).saturating_mul(TX_PROOF_BYTES as u64))
+    } else {
+        proofs
+    }
 }
 
 fn dir_usage(path: &Path) -> eyre::Result<(u64, u64)> {
@@ -1490,14 +1763,147 @@ fn hash_at(n: u64) -> H256 {
     H256(raw)
 }
 
+/// SplitMix64 finaliser. `seed | 1` maps seeds 2k and 2k+1 to one stream,
+/// which made adjacent 1-chunk transactions share tx-path bytes and let LZ4
+/// store each pair once.
+fn mix_seed(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) | 1
+}
+
 fn fill(len: usize, seed: u64) -> Vec<u8> {
     let mut out = vec![0_u8; len];
-    let mut state = seed | 1;
+    let mut state = mix_seed(seed);
     for byte in &mut out {
         state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
         *byte = (state >> 33) as u8;
     }
     out
+}
+
+/// One node in a synthetic data proof. Level 0 is the leaf.
+struct ProofNode {
+    level: u32,
+    index: u64,
+}
+
+fn layer_widths(mut n: u64) -> Vec<u64> {
+    let mut widths = Vec::new();
+    if n == 0 {
+        return widths;
+    }
+    widths.push(n);
+    while n > 1 {
+        n = n / 2 + n % 2;
+        widths.push(n);
+    }
+    widths
+}
+
+/// Proof nodes in stored order: root branch first, leaf last.
+///
+/// A promoted odd node is not a proof record. The walk skips it, which is
+/// the same rule a merkle build uses when it lifts an unpaired child.
+fn proof_nodes(widths: &[u64], leaf: u64) -> Vec<ProofNode> {
+    let mut branches = Vec::new();
+    let mut index = leaf;
+    for layer in 0..widths.len().saturating_sub(1) {
+        let parent = index / 2;
+        let real = parent * 2 + 1 < widths[layer];
+        if real {
+            branches.push(ProofNode {
+                level: (layer as u32) + 1,
+                index: parent,
+            });
+        }
+        index = parent;
+    }
+    branches.reverse();
+    branches.push(ProofNode {
+        level: 0,
+        index: leaf,
+    });
+    branches
+}
+
+fn rightmost_leaf(widths: &[u64], level: u32, index: u64) -> u64 {
+    let mut idx = index;
+    for layer in (1..=level).rev() {
+        let below = widths[(layer as usize) - 1];
+        if idx * 2 + 1 < below {
+            idx = idx * 2 + 1;
+        } else {
+            idx *= 2;
+        }
+    }
+    idx
+}
+
+/// Data proof whose node bytes depend only on `(data_root, level, index)`.
+///
+/// Ids are not hashes. They are incompressible and stable, so two chunks
+/// under one branch store the same 96 bytes. This is the full-path layout.
+/// It does not store tiles.
+fn shared_data_proof(
+    data_root: &[u8; 32],
+    num_leaves: u64,
+    leaf: u64,
+    chunk_bytes: u64,
+) -> Vec<u8> {
+    if num_leaves == 0 || leaf >= num_leaves {
+        return Vec::new();
+    }
+    let widths = layer_widths(num_leaves);
+    let nodes = proof_nodes(&widths, leaf);
+    let mut out = Vec::new();
+    for node in nodes {
+        if node.level == 0 {
+            let end = leaf
+                .saturating_add(1)
+                .saturating_mul(chunk_bytes)
+                .min(num_leaves.saturating_mul(chunk_bytes));
+            fill_id(&mut out, data_root, 0, leaf, 3, 32);
+            push_note(&mut out, end);
+        } else {
+            let pivot_leaf = rightmost_leaf(&widths, node.level - 1, node.index * 2);
+            let pivot = pivot_leaf
+                .saturating_add(1)
+                .saturating_mul(chunk_bytes)
+                .min(num_leaves.saturating_mul(chunk_bytes));
+            fill_id(&mut out, data_root, node.level, node.index, 1, 32);
+            fill_id(&mut out, data_root, node.level, node.index, 2, 32);
+            push_note(&mut out, pivot);
+        }
+    }
+    out
+}
+
+fn fill_id(out: &mut Vec<u8>, root: &[u8; 32], level: u32, index: u64, tag: u8, len: usize) {
+    let mut state = 0x6A09_E667_F3BC_C908_u64;
+    for chunk in root.chunks(8) {
+        let mut wide = [0_u8; 8];
+        wide[..chunk.len()].copy_from_slice(chunk);
+        state = state
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(u64::from_be_bytes(wide));
+    }
+    state ^= u64::from(level).wrapping_mul(0x9E37_79B9);
+    state ^= index.wrapping_mul(0xBF58_4E1D);
+    state ^= u64::from(tag).wrapping_mul(0x94D0_49BB);
+    if state == 0 {
+        state = 1;
+    }
+    for _ in 0..len {
+        state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        out.push((state >> 33) as u8);
+    }
+}
+
+fn push_note(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&[0_u8; 24]);
+    out.extend_from_slice(&value.to_be_bytes());
 }
 
 fn prepare_dir(path: &Path, reuse: bool) -> eyre::Result<()> {
@@ -1559,6 +1965,10 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     let mut block_cache: Option<usize> = None;
     let mut group_commit = false;
     let mut rewrite_filters = false;
+    let mut small_txs: Option<u32> = None;
+    let mut mid_txs = false;
+    let mut shuffle_run: Option<u32> = None;
+    let mut txs_per_commit: Option<u32> = None;
     let mut it = args.into_iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -1599,6 +2009,10 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             }
             "--worst-case" => worst_case = true,
             "--mid" => mid = true,
+            "--small-txs" => small_txs = Some(required(&mut it, &flag)?.parse()?),
+            "--mid-txs" => mid_txs = true,
+            "--shuffle-paths" => shuffle_run = Some(required(&mut it, &flag)?.parse()?),
+            "--txs-per-commit" => txs_per_commit = Some(required(&mut it, &flag)?.parse()?),
             "--group-commit" => group_commit = true,
             "--rewrite-filters" => rewrite_filters = true,
             other => eyre::bail!("unknown argument {other}"),
@@ -1608,7 +2022,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         print_help();
         eyre::bail!("--dir is required");
     };
-    let workload = resolve_workload(profile, mid, worst_case)?;
+    let workload = resolve_workload(profile, mid, worst_case, small_txs.is_some(), mid_txs)?;
     if group_commit && (workload.is_memory() || workload.is_filter_reuse()) {
         eyre::bail!(
             "--group-commit does not apply to --profile {}",
@@ -1644,11 +2058,32 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     }
     let mid = workload.is_mid();
     let worst_case = workload.is_worst();
-    if worst_case && path_bytes.is_some() {
-        eyre::bail!("--path-bytes does not apply to --worst-case");
+    if workload.is_tree() && path_bytes.is_some() {
+        eyre::bail!(
+            "--path-bytes does not apply to --profile {}",
+            workload.name()
+        );
     }
-    if worst_case && tx_chunks.is_some() {
-        eyre::bail!("--tx-chunks does not apply to --worst-case");
+    if workload.is_tree() && tx_chunks.is_some() {
+        eyre::bail!(
+            "--tx-chunks does not apply to --profile {}",
+            workload.name()
+        );
+    }
+    if let Some(n) = small_txs {
+        eyre::ensure!(n > 0, "--small-txs must be > 0");
+    }
+    if let Some(n) = txs_per_commit {
+        eyre::ensure!(n > 0, "--txs-per-commit must be > 0");
+    }
+    if let Some(run) = shuffle_run {
+        eyre::ensure!(run > 0, "--shuffle-paths must be > 0");
+        if workload.is_memory() || workload.is_filter_reuse() {
+            eyre::bail!(
+                "--shuffle-paths does not apply to --profile {}",
+                workload.name()
+            );
+        }
     }
     if mid && path_bytes.is_some() {
         eyre::bail!("--path-bytes does not apply to --mid");
@@ -1662,15 +2097,38 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     if mid {
         chunks = MID_CHUNKS;
     }
-    let path_bytes = if worst_case {
-        DATA_PROOF_BYTES
+    let small_tx_chunks = small_txs.unwrap_or(0);
+    let tree_leaves = if worst_case {
+        MAX_DATA_TX_CHUNKS
+    } else if workload == Workload::SmallTxs {
+        u64::from(small_tx_chunks.min(chunks).max(1))
+    } else if workload == Workload::MidTxs {
+        u64::from(MID_TX_MAX)
+    } else {
+        0
+    };
+    let path_bytes = if tree_leaves > 0 {
+        if worst_case {
+            DATA_PROOF_BYTES
+        } else {
+            shared_data_proof(&[0_u8; 32], tree_leaves, 0, CHUNK_SIZE).len()
+        }
     } else {
         path_bytes.unwrap_or(4096)
     };
     let tx_chunks = if worst_case {
         u32::try_from(MAX_DATA_TX_CHUNKS)?
+    } else if workload == Workload::SmallTxs {
+        small_tx_chunks
+    } else if workload == Workload::MidTxs {
+        MID_TX_MAX
     } else {
         tx_chunks.unwrap_or(32)
+    };
+    let mid_spans = if workload == Workload::MidTxs {
+        mid_spans(chunks)
+    } else {
+        Vec::new()
     };
     let mut rocks = rocks.unwrap_or_else(RocksTuning::baseline);
     if let Some(bytes) = block_cache {
@@ -1697,6 +2155,10 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         dbs,
         group_commit,
         rewrite_filters,
+        small_tx_chunks,
+        mid_spans,
+        shuffle_run,
+        txs_per_commit,
     })
 }
 
@@ -1724,15 +2186,32 @@ fn parse_engines(value: &str) -> eyre::Result<Engines> {
     }
 }
 
-fn resolve_workload(profile: Option<Workload>, mid: bool, worst: bool) -> eyre::Result<Workload> {
-    match (profile, mid, worst) {
-        (None, false, false) => Ok(Workload::Filled),
-        (None, true, false) => Ok(Workload::Mid),
-        (None, false, true) => Ok(Workload::Worst),
-        (Some(profile), false, false) => Ok(profile),
-        (Some(Workload::Mid), true, false) => Ok(Workload::Mid),
-        (Some(Workload::Worst), false, true) => Ok(Workload::Worst),
-        _ => eyre::bail!("--profile, --mid, and --worst-case disagree"),
+fn resolve_workload(
+    profile: Option<Workload>,
+    mid: bool,
+    worst: bool,
+    small_txs: bool,
+    mid_txs: bool,
+) -> eyre::Result<Workload> {
+    let picked = [mid, worst, small_txs, mid_txs]
+        .into_iter()
+        .filter(|flag| *flag)
+        .count();
+    if picked > 1 {
+        eyre::bail!("--profile, --mid, --worst-case, --small-txs, and --mid-txs disagree");
+    }
+    match (profile, mid, worst, small_txs, mid_txs) {
+        (None, false, false, false, false) => Ok(Workload::Filled),
+        (None, true, false, false, false) => Ok(Workload::Mid),
+        (None, false, true, false, false) => Ok(Workload::Worst),
+        (None, false, false, true, false) => Ok(Workload::SmallTxs),
+        (None, false, false, false, true) => Ok(Workload::MidTxs),
+        (Some(profile), false, false, false, false) => Ok(profile),
+        (Some(Workload::Mid), true, false, false, false) => Ok(Workload::Mid),
+        (Some(Workload::Worst), false, true, false, false) => Ok(Workload::Worst),
+        (Some(Workload::SmallTxs), false, false, true, false) => Ok(Workload::SmallTxs),
+        (Some(Workload::MidTxs), false, false, false, true) => Ok(Workload::MidTxs),
+        _ => eyre::bail!("--profile, --mid, --worst-case, --small-txs, and --mid-txs disagree"),
     }
 }
 
@@ -1749,7 +2228,7 @@ fn print_rocks() {
 fn print_help() {
     let presets = RocksTuning::preset_names();
     eprintln!(
-        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--rocks <preset>] [--mid] [--group-commit] [--worst-case] [--list-rocks]\n\
+        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--rocks <preset>] [--mid] [--group-commit] [--worst-case] [--small-txs N] [--mid-txs] [--shuffle-paths RUN] [--txs-per-commit N] [--list-rocks]\n\
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
 --profile selects the workload. filled is the default. mid is --mid. worst is --worst-case and still takes --chunks.\n\
@@ -1767,6 +2246,9 @@ Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, a
 --rewrite-filters forces a bottommost compaction of ChunkPathHashesByOffset so the existing SST is rewritten with this open's filter. A plain compact can trivial-move the file and keep the old filter. The run prints one sst line per live path-hash file and sst_cover for the sampled offsets. \
 Default --chunks is 20971520, the first max transaction in the stuck worst-case run.\n\
 --list-rocks prints the presets and exits.\n\
+--shuffle-paths RUN writes the data paths as runs of RUN consecutive chunks in a seeded random order, like scattered data sync. Each commit still holds the data-path batch size. RUN=1 is fully random. Transaction rows stay in offset order.\n\
+--txs-per-commit N overrides the transaction rows per durable commit. Production commits one block's transactions together, so --small-txs 1 should use the block's transaction count (100 at the expected cap).\n\
+--small-txs N stores one data root every N chunks. Sibling chunks in one transaction share branch bytes. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
 --reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
@@ -1791,12 +2273,38 @@ mod tests {
     use super::{
         Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, Engines, FILLED_MAP_CEILING, HASH_SIZE,
         HEAD_SAMPLES, LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH,
-        MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE, PARTITION_CHUNKS, TX_PROOF_BYTES, TX_PROOF_LAYERS,
-        Workload, bloom_bytes, commits_for, data_path_bytes, head_tail, mdbx_map_bytes,
-        memory_predict, pairing_layers, parse_arg_list, parse_diskstats, parse_mount_line,
-        parse_proc_status, percentile, proof_bytes, ranks, rewritten_data_path, sample_offset,
-        seq_offset, shaped_proof,
+        MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE, PARTITION_CHUNKS, SubmoduleIndex, TX_PROOF_BYTES,
+        TX_PROOF_LAYERS, Workload, bloom_bytes, commits_for, data_path_bytes, hash_at, head_tail,
+        mdbx_map_bytes, memory_predict, mid_spans, pairing_layers, parse_arg_list, parse_diskstats,
+        parse_mount_line, parse_proc_status, percentile, place_tx, proof_bytes, ranks,
+        rewritten_data_path, sample_offset, seq_offset, shaped_proof, shuffled_runs, tx_count,
+        tx_path_bytes, write_data_paths, write_tx_index,
     };
+
+    #[test]
+    fn adjacent_seeds_fill_distinct_bytes() {
+        assert_ne!(super::fill(64, 2), super::fill(64, 3));
+        assert_ne!(super::fill(64, 0), super::fill(64, 1));
+    }
+
+    #[test]
+    fn shuffled_runs_cover_every_offset_once() {
+        for (chunks, run) in [(1_u32, 1_u32), (10, 3), (1000, 1), (1000, 64), (4097, 512)] {
+            let runs = shuffled_runs(chunks, run);
+            let mut seen = vec![false; chunks as usize];
+            for start in runs {
+                let end = start.saturating_add(run).min(chunks);
+                for at in start..end {
+                    assert!(!seen[at as usize], "offset {at} visited twice");
+                    seen[at as usize] = true;
+                }
+            }
+            assert!(seen.iter().all(|hit| *hit));
+        }
+        let runs = shuffled_runs(1000, 1);
+        assert_ne!(runs, (0..1000).collect::<Vec<_>>());
+        assert_eq!(runs, shuffled_runs(1000, 1));
+    }
 
     #[test]
     fn max_proofs_match_the_merkle_layout() {
@@ -1918,6 +2426,10 @@ VmHWM:\t   8600000 kB
             dbs: 1,
             group_commit: false,
             rewrite_filters: false,
+            small_tx_chunks: 0,
+            mid_spans: Vec::new(),
+            shuffle_run: None,
+            txs_per_commit: None,
         };
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
@@ -2006,6 +2518,29 @@ VmHWM:\t   8600000 kB
         assert_eq!(worst.workload, Workload::Worst);
         assert_eq!(worst.chunks, 8);
         assert_eq!(worst.path_bytes, DATA_PROOF_BYTES);
+
+        let shuffled = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "128",
+            "--shuffle-paths",
+            "64",
+        ])
+        .unwrap();
+        assert_eq!(shuffled.shuffle_run, Some(64));
+        assert!(parse(&["--dir", "index-bench", "--shuffle-paths", "0"]).is_err());
+        let per_block = parse(&[
+            "--dir",
+            "index-bench",
+            "--small-txs",
+            "1",
+            "--txs-per-commit",
+            "100",
+        ])
+        .unwrap();
+        assert_eq!(per_block.txs_per_commit, Some(100));
+        assert_eq!(per_block.workload, Workload::SmallTxs);
 
         assert!(parse(&["--dir", "index-bench", "--profile", "filled", "--mid"]).is_err());
         assert!(parse(&["--dir", "index-bench", "--profile", "mid", "--chunks", "10"]).is_err());
@@ -2176,5 +2711,163 @@ VmHWM:\t   8600000 kB
         assert_eq!(snap.writes, 4);
         assert_eq!(snap.write_sectors, 8);
         assert!(parse_diskstats(stats, 8, 0).is_none());
+    }
+
+    #[test]
+    fn tree_shapes_keep_unique_roots_and_a_shared_branch() {
+        let small = parse(&["--dir", "index-bench", "--chunks", "10", "--small-txs", "3"]).unwrap();
+        assert_eq!(small.workload, Workload::SmallTxs);
+        assert_eq!(tx_count(&small), 4);
+        let mut starts = Vec::new();
+        let mut at = 0_u32;
+        while at < small.chunks {
+            let place = place_tx(&small, at);
+            assert_eq!(place.start, at);
+            starts.push(place.start);
+            assert_eq!(tx_path_bytes(&small, at).len(), TX_PROOF_BYTES);
+            at += place.stored;
+        }
+        assert_eq!(starts, vec![0, 3, 6, 9]);
+        assert_eq!(place_tx(&small, 9).leaves, 1);
+        let left = data_path_bytes(&small, 0);
+        let right = data_path_bytes(&small, 1);
+        assert_eq!(&left[..96], &right[..96]);
+        assert_ne!(left, right);
+        let other = data_path_bytes(&small, 3);
+        assert_ne!(&left[..96], &other[..96]);
+        assert_ne!(tx_path_bytes(&small, 0), tx_path_bytes(&small, 1));
+
+        let spans = mid_spans(10_000);
+        let mut covered = 0_u32;
+        for (index, (start, stored)) in spans.iter().enumerate() {
+            assert_eq!(*start, covered);
+            if index + 1 < spans.len() {
+                assert!((257..=4096).contains(stored), "{stored}");
+            }
+            covered += stored;
+        }
+        assert_eq!(covered, 10_000);
+        let mid = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "10000",
+            "--mid-txs",
+            "--engine",
+            "rocks",
+        ])
+        .unwrap();
+        assert_eq!(mid.mid_spans, spans);
+        assert_eq!(tx_count(&mid), spans.len() as u64);
+
+        let worst = parse(&[
+            "--dir",
+            "index-bench",
+            "--worst-case",
+            "--chunks",
+            "8",
+            "--engine",
+            "rocks",
+        ])
+        .unwrap();
+        assert_eq!(worst.engines, Engines::Rocks);
+        assert_eq!(place_tx(&worst, 3).leaves, MAX_DATA_TX_CHUNKS);
+        assert_eq!(data_path_bytes(&worst, 0).len(), DATA_PROOF_BYTES);
+        assert_eq!(data_path_bytes(&worst, 1).len(), DATA_PROOF_BYTES);
+
+        assert!(parse(&["--dir", "index-bench", "--small-txs", "1", "--worst-case"]).is_err());
+        assert!(parse(&["--dir", "index-bench", "--small-txs", "0"]).is_err());
+        assert!(parse(&["--dir", "index-bench", "--txs-per-commit", "0"]).is_err());
+        assert!(
+            parse(&[
+                "--dir",
+                "index-bench",
+                "--mid-txs",
+                "--chunks",
+                "10",
+                "--path-bytes",
+                "8"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn small_txs_write_one_row_set_per_data_root() -> eyre::Result<()> {
+        use irys_database::submodule::SubmoduleStore as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::PartitionChunkOffset;
+
+        let args = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "5",
+            "--small-txs",
+            "2",
+            "--engine",
+            "rocks",
+            "--reads",
+            "0",
+            "--batch",
+            "5",
+        ])
+        .unwrap();
+        let dir = TempDirBuilder::new()
+            .prefix("index_bench_small_txs")
+            .build();
+        let store = SubmoduleIndex::open_rocks_with(dir.path().join("rocks"), args.rocks)?;
+        write_tx_index(&store, &args, 8)?;
+        write_data_paths(&store, &args, 5)?;
+        let mut at = 0_u32;
+        let mut roots = Vec::new();
+        while at < args.chunks {
+            let place = place_tx(&args, at);
+            let tx_hash = hash_at(u64::from(place.start));
+            let root = hash_at(u64::from(place.start) + 0x1000_0000);
+            roots.push(root);
+            let tx_path = store
+                .view(|tx| tx.get_full_tx_path(tx_hash))?
+                .expect("tx path");
+            assert_eq!(tx_path.len(), TX_PROOF_BYTES);
+            let binding = store
+                .view(|tx| tx.get_tx_leaf_binding(tx_hash))?
+                .expect("binding");
+            assert_eq!(binding.data_root, root);
+            let infos = store
+                .view(|tx| tx.get_data_root_infos_for_data_root(root))?
+                .expect("infos");
+            assert_eq!(infos.0.len(), 1);
+            assert_eq!(infos.0[0].data_size, place.leaves * 256 * 1024);
+            assert_eq!(
+                infos.0[0].start_offset.0,
+                i32::try_from(place.start).unwrap()
+            );
+            let job = store
+                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(place.start)))?
+                .expect("pending job");
+            assert_eq!(job.data_root, root);
+            assert_eq!(job.data_size, place.leaves * 256 * 1024);
+            assert_eq!(job.attempts, 0);
+            assert_eq!(job.block_height, 1);
+            for step in 0..place.stored {
+                let offset = place.start + step;
+                let got = store
+                    .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?
+                    .expect("proof");
+                assert_eq!(got, data_path_bytes(&args, offset));
+                let hashes = store
+                    .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset)))?
+                    .expect("hashes");
+                assert_eq!(hashes.tx_path_hash, Some(tx_hash));
+            }
+            at += place.stored;
+        }
+        assert_eq!(roots.len(), 3);
+        assert_eq!(
+            roots.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+        Ok(())
     }
 }

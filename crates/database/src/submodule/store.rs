@@ -1072,6 +1072,15 @@ impl SubmoduleIndex {
         )?))
     }
 
+    /// SST and blob files per column family. Empty on MDBX.
+    #[cfg(feature = "rocksdb")]
+    pub fn column_file_usage(&self) -> eyre::Result<Vec<crate::submodule::ColumnFileUsage>> {
+        match self {
+            Self::Mdbx(_) => Ok(Vec::new()),
+            Self::Rocks(store) => store.column_file_usage(),
+        }
+    }
+
     /// Bench entry for a schema-v1 Rocks directory. Does not rewrite the marker.
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks_v1_probe(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {

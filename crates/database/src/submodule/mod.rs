@@ -18,8 +18,8 @@ pub use convert::{
 pub use db::*;
 #[cfg(feature = "rocksdb")]
 pub use rocks::{
-    BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, LegacySstSpan, RocksBackground, RocksIngestStats,
-    RocksResourceLimits, RocksResources, RocksSubmoduleStore, RocksTuning,
+    BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, ColumnFileUsage, LegacySstSpan, RocksBackground,
+    RocksIngestStats, RocksResourceLimits, RocksResources, RocksSubmoduleStore, RocksTuning,
     install_process_rocks_resources,
 };
 pub use store::{
