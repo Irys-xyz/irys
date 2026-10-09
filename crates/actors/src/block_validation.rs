@@ -8118,6 +8118,7 @@ mod tests {
                     &mut poa_chunk,
                     poa_tx_num,
                     poa_chunk_num,
+                    poa_tx_num * 3 + poa_chunk_num,
                     9,
                     chunk_size,
                 );
@@ -8155,6 +8156,7 @@ mod tests {
                 &mut poa_chunk,
                 poa_tx_num,
                 poa_chunk_num,
+                poa_chunk_num,
                 2,
                 chunk_size,
             );
@@ -8188,6 +8190,7 @@ mod tests {
             &mut poa_chunk,
             0,
             poa_chunk_num,
+            poa_chunk_num,
             2,
             chunk_size,
         );
@@ -8215,6 +8218,62 @@ mod tests {
         ));
     }
 
+    /// The block index places every tx on a whole-chunk boundary
+    /// (`BlockIndex::push_block` rounds each `data_size` up to a chunk), but
+    /// the tx_root tree gives each tx a byte range of its raw `data_size`.
+    /// PoA validation looks up `block_chunk_offset * chunk_size` in that tree,
+    /// so the rounding gap of earlier txs shifts the lookup past the end of a
+    /// later tx. Here tx0 is 40 bytes (chunks 0-1, 24 bytes of padding) and
+    /// tx1 is 40 bytes (chunks 2-3, tree bytes 40..80). tx1's last chunk is
+    /// looked up at byte 3 * 32 = 96, outside 40..=80, so its PoA is rejected
+    /// although it carries the block's own tx_path and data_path.
+    #[tokio::test]
+    async fn poa_validates_every_chunk_after_an_unaligned_tx() {
+        let (_tmp, mut context) = init().await;
+        let chunk_size = context.consensus_config.chunk_size as usize;
+        assert_eq!(
+            chunk_size, 32,
+            "the offsets below assume 32-byte test chunks"
+        );
+
+        let signer = IrysSigner::random_signer(&context.consensus_config);
+        let data = [vec![3_u8; 40], vec![5_u8; 40]];
+        let txs: Vec<DataTransaction> = data
+            .iter()
+            .map(|bytes| {
+                let tx = signer
+                    .create_transaction(bytes.clone(), H256::zero())
+                    .expect("Expected to create a transaction");
+                signer
+                    .sign_transaction(tx)
+                    .expect("Expected to sign the transaction")
+            })
+            .collect();
+
+        // (tx, chunk within the tx, ledger chunk offset)
+        for (poa_tx_num, poa_chunk_num, poa_offset) in [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)]
+        {
+            let bytes = &data[poa_tx_num];
+            let mut poa_chunk = bytes[poa_chunk_num * chunk_size
+                ..std::cmp::min((poa_chunk_num + 1) * chunk_size, bytes.len())]
+                .to_vec();
+            let poa_valid = poa_test(
+                &mut context,
+                &txs,
+                &mut poa_chunk,
+                poa_tx_num,
+                poa_chunk_num,
+                poa_offset,
+                4,
+                chunk_size,
+            );
+            assert!(
+                poa_valid.is_ok(),
+                "PoA for tx {poa_tx_num} chunk {poa_chunk_num} at ledger offset {poa_offset} should be valid: {poa_valid:?}"
+            );
+        }
+    }
+
     fn poa_test(
         context: &mut TestContext,
         txs: &[DataTransaction],
@@ -8225,6 +8284,7 @@ mod tests {
         poa_chunk: &mut Vec<u8>,
         poa_tx_num: usize,
         poa_chunk_num: usize,
+        poa_offset: usize,
         total_chunks_in_tx: usize,
         chunk_size: usize,
     ) -> Result<(), PreValidationError> {
@@ -8234,7 +8294,7 @@ mod tests {
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
             context.miner_address,
-            (poa_tx_num * 3 /* tx's size in chunks */  + poa_chunk_num) as u64,
+            poa_offset as u64,
             context.partition_hash.into(),
             context.consensus_config.entropy_packing_iterations,
             chunk_size,
@@ -8257,9 +8317,7 @@ mod tests {
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Some(Base64(poa_chunk.clone())),
             ledger_id: Some(DataLedger::Submit.into()),
-            partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
-                .try_into()
-                .expect("Value exceeds u32::MAX"),
+            partition_chunk_offset: poa_offset.try_into().expect("Value exceeds u32::MAX"),
 
             partition_hash: context.partition_hash,
         };
@@ -8291,7 +8349,7 @@ mod tests {
                     ledger_id: DataLedger::Submit.into(),
                     tx_root,
                     tx_ids: H256List(data_tx_ids),
-                    total_chunks: 9,
+                    total_chunks: total_chunks_in_tx as u64,
                     expires: Some(1622543200),
                     proofs: None,
                     required_proof_count: None,
@@ -8338,11 +8396,10 @@ mod tests {
             .expect("Expected to have a slot index in the assignment")
             as u64
             * context.consensus_config.num_chunks_in_partition
-            + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
+            + poa_offset as u64;
 
         assert_eq!(
-            ledger_chunk_offset,
-            (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64,
+            ledger_chunk_offset, poa_offset as u64,
             "ledger_chunk_offset mismatch"
         );
 
