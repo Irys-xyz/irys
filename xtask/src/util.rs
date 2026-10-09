@@ -1,7 +1,10 @@
 //! Shared helpers used across xtask commands.
 
-use cargo_metadata::MetadataCommand;
+use crate::prune;
+use cargo_metadata::{Message, MetadataCommand, TargetKind};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
+use std::process::Stdio;
 use xshell::{Cmd, Shell, cmd};
 
 /// Pinned cargo-nextest version, shared by `xtask test` and `xtask flaky` so the
@@ -79,12 +82,148 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// What one cargo invocation reported building or reusing.
+#[derive(Default)]
+pub struct Collected {
+    /// Test executables, bin targets left out: a bin's unit-test executable shares its crate
+    /// root with the bin itself, which the run still needs.
+    pub test_executables: Vec<PathBuf>,
+    /// Every artifact file and build-script output dir.
+    pub artifacts: Vec<PathBuf>,
+    /// Cargo reported a successful build. A failed build lists only the units it reached, so its
+    /// artifacts must not replace a complete usage record.
+    pub build_succeeded: bool,
+}
+
+/// Run a cargo command with its JSON on stdout: echo every other stdout line, and collect what
+/// cargo reports.
+pub fn run_collecting(cmd: Cmd<'_>) -> eyre::Result<(Collected, eyre::Result<()>)> {
+    let mut command: std::process::Command = remove_ring_env_vars(cmd).into();
+    let display = format!("{command:?}");
+    eprintln!("$ {display}");
+    let mut child = command.stdout(Stdio::piped()).spawn()?;
+    let mut reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
+    let mut collected = Collected::default();
+    let mut out = std::io::stdout().lock();
+    // Lines are bytes, not strings: test output under `--no-capture` need not be UTF-8. After a
+    // failed echo (stdout closed, as under `| head`) keep draining, so nextest never hits a full
+    // or broken pipe.
+    let mut echo_ok = true;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                // Nothing drains the pipe any more, so waiting alone could block forever.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+        }
+        match serde_json::from_slice::<Message>(&line) {
+            Ok(Message::CompilerArtifact(artifact)) => {
+                let test_exe = artifact.profile.test && !artifact.target.is_kind(TargetKind::Bin);
+                if let Some(exe) = artifact.executable {
+                    if test_exe {
+                        collected
+                            .test_executables
+                            .push(exe.clone().into_std_path_buf());
+                    }
+                    collected.artifacts.push(exe.into_std_path_buf());
+                }
+                collected.artifacts.extend(
+                    artifact
+                        .filenames
+                        .into_iter()
+                        .map(cargo_metadata::camino::Utf8PathBuf::into_std_path_buf),
+                );
+            }
+            Ok(Message::BuildScriptExecuted(script)) => {
+                collected.artifacts.push(script.out_dir.into_std_path_buf());
+            }
+            Ok(Message::BuildFinished(finished)) => {
+                collected.build_succeeded = finished.success;
+            }
+            Ok(Message::TextLine(_)) | Err(_) => {
+                echo_ok = echo_ok && out.write_all(&line).is_ok();
+            }
+            Ok(_) => {}
+        }
+    }
+    let status = child.wait()?;
+    let result = if status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("command exited with {status}: {display}"))
+    };
+    Ok((collected, result))
+}
+
+/// Run a cargo build command through [`run_collecting`] and record what it used, so the unit
+/// prune keeps it. A failed build keeps the previous record; a failed record only warns. The
+/// shared run lock is held from before the build until the record is written, so no prune runs
+/// while the build's units are in use but not yet recorded.
+pub fn run_recorded(cmd: Cmd<'_>, invocation: &str) -> eyre::Result<()> {
+    let _run_lock = lock_target_dir();
+    let (collected, result) = run_collecting(cmd)?;
+    if collected.build_succeeded {
+        record_run(invocation, &collected.artifacts);
+    }
+    result
+}
+
+/// This workspace's target dir, as cargo resolves it.
+pub fn target_dir() -> eyre::Result<PathBuf> {
+    Ok(MetadataCommand::new()
+        .no_deps()
+        .exec()?
+        .target_directory
+        .into_std_path_buf())
+}
+
+/// Hold the shared run lock on this workspace's target dir (see [`prune::lock_run_shared`]), so
+/// no other xtask run prunes what this one builds and runs. A run that cannot take it only warns.
+pub fn lock_target_dir() -> Option<std::fs::File> {
+    let locked =
+        target_dir().and_then(|dir| prune::lock_run_shared(&dir).map_err(eyre::Report::from));
+    match locked {
+        Ok(lock) => Some(lock),
+        Err(e) => {
+            eprintln!(
+                "Warning: target dir not locked; a concurrent prune may remove its files: {e}"
+            );
+            None
+        }
+    }
+}
+
+pub fn record_run(invocation: &str, artifacts: &[PathBuf]) {
+    if artifacts.is_empty() {
+        return;
+    }
+    let recorded = MetadataCommand::new()
+        .no_deps()
+        .exec()
+        .map_err(eyre::Report::from)
+        .and_then(|m| {
+            prune::record_usage(m.target_directory.as_std_path(), invocation, artifacts)
+                .map_err(eyre::Report::from)
+        });
+    if let Err(e) = recorded {
+        eprintln!("Warning: artifact usage not recorded: {e}");
+    }
+}
+
 /// Build the nextest-wrapper binary, optionally with additional features.
 /// Returns the path to the built binary.
 pub fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf> {
     println!("Building nextest-wrapper...");
     let mut build_args = vec![
         "build".to_string(),
+        "--message-format".to_string(),
+        "json-render-diagnostics".to_string(),
         "--package".to_string(),
         "nextest-monitor".to_string(),
         "--bin".to_string(),
@@ -94,7 +233,8 @@ pub fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf
         build_args.push("--features".to_string());
         build_args.push(feat.to_string());
     }
-    cmd!(sh, "cargo {build_args...}").remove_and_run()?;
+    let invocation = format!("nextest-wrapper {}", features.unwrap_or_default());
+    run_recorded(cmd!(sh, "cargo {build_args...}"), &invocation)?;
 
     // Get the target directory
     let metadata = MetadataCommand::new().exec()?;

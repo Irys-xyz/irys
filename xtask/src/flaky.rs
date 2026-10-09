@@ -31,8 +31,10 @@ use xshell::{Shell, cmd};
 use crate::failures::{
     FailuresFile, build_failure_filter, generate_nextest_config, get_monitor_dir,
 };
+use crate::prune;
 use crate::util::{
-    NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, remove_ring_env_vars, shell_quote,
+    NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, remove_ring_env_vars,
+    run_recorded, shell_quote, target_dir,
 };
 
 /// Options for the flaky-detection run, parsed from the CLI.
@@ -303,7 +305,7 @@ fn load_outcomes(base: &Path) -> HashMap<String, Outcome> {
     let mut map = HashMap::new();
     for t in stats.tests {
         if let Some(name) = t.test_name {
-            // With retries=0 there should be one entry per test; last wins.
+            // `--retries 0` gives one entry per test.
             map.insert(
                 name,
                 Outcome {
@@ -373,7 +375,9 @@ fn run_teed(
 
 /// Result of a single isolated test invocation.
 enum IsoResult {
-    Passed,
+    Passed {
+        duration_ms: u64,
+    },
     Failed {
         timed_out: bool,
         duration_ms: u64,
@@ -402,11 +406,17 @@ fn run_isolated(
     cmd.args([
         "nextest",
         "run",
+        // Same target set as phases 1 and 2: without these, a workspace with
+        // `default-members` searches only those members and the filter matches nothing.
+        "--workspace",
+        "--all-targets",
         "-E",
         &filter,
         "--test-threads",
         "1",
         "--no-fail-fast",
+        "--retries",
+        "0",
         // Stream the test's own stdout/stderr (panics, tracing) into our capture
         // instead of letting nextest buffer it — this is what makes the isolated
         // failure logs actually useful.
@@ -441,7 +451,7 @@ fn run_isolated(
     }
 
     if output.status.success() {
-        Ok(IsoResult::Passed)
+        Ok(IsoResult::Passed { duration_ms })
     } else {
         // A SIGTERM-driven timeout shows up in nextest output; best-effort tag.
         let timed_out = text.contains("SIGTERM") || text.contains("timed out");
@@ -508,6 +518,10 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let verify_mode = !opts.verify.is_empty();
     let target_tests = resolve_target_tests(&opts)?;
     let targeted = !target_tests.is_empty();
+    // Only a run over the whole suite may replace failures.json: a verify or
+    // targeted run, or phase-1 passthrough args (`-p`, `-E`, ...), see only part
+    // of it and must not drop the failures that `xtask test` recorded for others.
+    let full_suite = !verify_mode && !targeted && opts.args.is_empty();
 
     // Ensure nextest is available (matches the version pinned by `xtask test`).
     let _ = cmd!(
@@ -517,21 +531,41 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     .run();
 
     if opts.clean {
-        println!("Cleaning workspace...");
-        cmd!(sh, "cargo clean").run()?;
+        // Cleaning deletes another xtask run's binaries, so it runs only while this run holds
+        // the run lock exclusively, and it keeps the lock file (see `prune::clean_target_dir`).
+        let dir = target_dir()?;
+        let Some(_clean_lock) = prune::try_lock_run_exclusive(&dir)? else {
+            eyre::bail!(
+                "--clean: another xtask run is using {}; cleaning would delete its files",
+                dir.display()
+            );
+        };
+        println!("Cleaning {}...", dir.display());
+        prune::clean_target_dir(&dir)?;
     }
 
     // Build tests once up front so compile time doesn't pollute iteration 1 and
     // every iteration measures pure test time. Fail fast: a compile error here
     // must abort, otherwise every phase fails confusingly downstream.
+    // Same target set as phases 1 and 2, so a compile error stops the run here
+    // instead of inside a teed phase, where nextest's exit code is not checked.
+    // A flaky run can last hours. The shared run lock keeps a concurrent `xtask test` from
+    // pruning its binaries meanwhile, and the record keeps them after the run.
+    let _run_lock = lock_target_dir();
     println!("Prebuilding tests (cargo nextest run --no-run)...");
-    remove_ring_env_vars(cmd!(sh, "cargo nextest run --workspace --no-run"))
-        .env("RUST_BACKTRACE", "1")
-        .run()?;
+    run_recorded(
+        cmd!(
+            sh,
+            "cargo nextest run --workspace --tests --all-targets --no-run --cargo-message-format json-render-diagnostics"
+        )
+        .env("RUST_BACKTRACE", "1"),
+        "flaky",
+    )?;
 
     // Build the wrapper and generate the phase-1 config (default profile with
-    // the monitoring run-wrapper attached — retries stay at the profile default
-    // of 0 so a nextest-level retry never masks a flake).
+    // the monitoring run-wrapper attached). Every nextest call here passes
+    // `--retries 0`: a retry that passes would hide the failure this command
+    // looks for, whatever the profile's own `retries` is.
     let wrapper_path = build_wrapper(sh, None)?;
     let wrapper_str = wrapper_path.to_string_lossy().to_string();
     let phase1_config = generate_nextest_config(&wrapper_str, None, false)?;
@@ -588,6 +622,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 "--tests".to_string(),
                 "--all-targets".to_string(),
                 "--no-fail-fast".to_string(),
+                "--retries".to_string(),
+                "0".to_string(),
                 "--config-file".to_string(),
                 phase1_config_path.clone(),
             ];
@@ -603,6 +639,15 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             run_teed(sh, &args, &stats_base, &log_path)?;
 
             let outcomes = load_outcomes(&stats_base);
+            // The teed run hides nextest errors (no tests, build or setup
+            // failure), so an iteration with no results is a broken run, not a
+            // clean one.
+            if outcomes.is_empty() {
+                eyre::bail!(
+                    "phase 1 iteration {i} recorded no test results; see {}",
+                    log_path.display()
+                );
+            }
             for (name, outcome) in outcomes {
                 phase1.entry(name).or_default().record(outcome);
             }
@@ -629,7 +674,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 println!("No flaky tests detected. 🎉");
                 // No genuine flakes → clear stale failures so `--rerun-failures`
                 // doesn't re-run a previous run's entries.
-                if let Err(e) = FailuresFile::clear() {
+                if full_suite && let Err(e) = FailuresFile::clear() {
                     eprintln!("warning: failed to clear failures.json: {e}");
                 }
                 // Only phase 1 ran on this path.
@@ -676,6 +721,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 "--tests".to_string(),
                 "--all-targets".to_string(),
                 "--no-fail-fast".to_string(),
+                "--retries".to_string(),
+                "0".to_string(),
                 "--config-file".to_string(),
                 stress_config_path.clone(),
                 "--profile".to_string(),
@@ -685,6 +732,13 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             ];
             run_teed(sh, &args, &stats_base, &log_path)?;
             let outcomes = load_outcomes(&stats_base);
+            // As in phase 1: no results means nextest failed, not that nothing failed.
+            if outcomes.is_empty() {
+                eyre::bail!(
+                    "stress iteration {i} recorded no test results; see {}",
+                    log_path.display()
+                );
+            }
             for (name, outcome) in outcomes {
                 stress.entry(name).or_default().record(outcome);
             }
@@ -724,11 +778,11 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 let tmp_log = test_dir.join(format!("run-{i}.log"));
                 let result = run_isolated(test, &tmp_log, opts.isolation_log.as_deref())?;
                 match result {
-                    IsoResult::Passed => {
+                    IsoResult::Passed { duration_ms } => {
                         counts.record(Outcome {
                             passed: true,
                             timed_out: false,
-                            duration_ms: 0,
+                            duration_ms,
                         });
                         let _ = fs::rename(&tmp_log, test_dir.join(format!("run-{i}.pass.log")));
                         summary.push_str(&format!("run {i}: PASS\n"));
@@ -823,10 +877,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let genuine_count = genuine.len();
 
     // Feed genuine flakes into failures.json so `xtask test --rerun-failures`
-    // can pick them up. Always rewrite it for the current run — when there are no
-    // genuine flakes, clear it so `--rerun-failures` doesn't re-run stale entries
-    // from a previous run.
-    if genuine_count > 0 {
+    // can pick them up. Only a full-suite run replaces the file (see `full_suite`).
+    if full_suite && genuine_count > 0 {
         let mut failures = FailuresFile {
             failed_tests: genuine.iter().map(|r| r.name.clone()).collect(),
         };
@@ -834,7 +886,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
         if let Err(e) = failures.save() {
             eprintln!("warning: failed to update failures.json: {e}");
         }
-    } else if let Err(e) = FailuresFile::clear() {
+    } else if full_suite && let Err(e) = FailuresFile::clear() {
         eprintln!("warning: failed to clear failures.json: {e}");
     }
 
