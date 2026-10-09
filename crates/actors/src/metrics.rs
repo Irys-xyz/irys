@@ -394,23 +394,7 @@ static FETCH_BY_SOURCE_TEST: std::sync::LazyLock<
 /// An offset moved to `HeldByBodyWorker`. Counted once per transition, not per tick.
 pub(crate) fn record_data_sync_pending_body_skipped() {
     DATA_SYNC_PENDING_BODY_SKIPPED.add(1, &[]);
-    #[cfg(test)]
-    {
-        PENDING_BODY_SKIPPED_TEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
 }
-
-/// Process-wide count of [`record_data_sync_pending_body_skipped`] calls.
-///
-/// Crate tests share one process. Compare a delta, not an absolute total.
-#[cfg(test)]
-pub(crate) fn test_pending_body_skipped_count() -> u64 {
-    PENDING_BODY_SKIPPED_TEST.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-#[cfg(test)]
-static PENDING_BODY_SKIPPED_TEST: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 
 /// An offset left a body-worker hold because the hold timed out.
 pub(crate) fn record_data_sync_pending_body_hold_expired() {

@@ -216,6 +216,9 @@ pub struct ChunkOrchestrator {
     /// Coverage reads this orchestrator has attempted, including failures.
     #[cfg(test)]
     coverage_reads: u32,
+    /// Holds this orchestrator started. Not the process-wide metric.
+    #[cfg(test)]
+    holds_started: u64,
     /// When set, the next coverage read fails without touching the database.
     #[cfg(test)]
     fail_coverage_read: bool,
@@ -265,6 +268,8 @@ impl ChunkOrchestrator {
             hold_expired: 0,
             #[cfg(test)]
             coverage_reads: 0,
+            #[cfg(test)]
+            holds_started: 0,
             #[cfg(test)]
             fail_coverage_read: false,
             cache_lookups_this_tick: 0,
@@ -380,6 +385,10 @@ impl ChunkOrchestrator {
             },
         );
         metrics::record_data_sync_pending_body_skipped();
+        #[cfg(test)]
+        {
+            self.holds_started = self.holds_started.saturating_add(1);
+        }
         debug!(
             chunk.offset = %offset,
             "data sync left offset to the body worker"

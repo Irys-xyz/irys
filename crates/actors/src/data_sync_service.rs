@@ -2073,3 +2073,127 @@ mod write_outcome_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod body_migration_holes_routing_tests {
+    use super::chunk_orchestrator::ChunkRequestState;
+    use super::{DataSyncServiceInner, DataSyncServiceMessage};
+    use crate::chunk_fetcher::MockChunkFetcher;
+    use crate::services::ServiceSenders;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, NodeConfig,
+        PartitionChunkOffset, app_state::DatabaseProvider, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
+    };
+    use std::sync::{Arc, RwLock};
+
+    /// The service message reaches the orchestrator for that storage-module id.
+    /// An unknown id is ignored.
+    #[tokio::test]
+    async fn body_migration_holes_message_queues_on_that_storage_module() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 3,
+                    partition_assignment: Some(PartitionAssignment {
+                        ledger_id: Some(DataLedger::Publish.into()),
+                        slot_index: Some(0),
+                        miner_address: IrysAddress::from([1_u8; 20]),
+                        partition_hash: H256::random(),
+                    }),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+                },
+                &config,
+            )
+            .expect("storage module"),
+        );
+        sm.pack_with_zeros();
+
+        let env = open_or_create_db(
+            tmp.path().join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("db");
+        let db = DatabaseProvider(Arc::new(env));
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        {
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            genesis.test_sign();
+        }
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let peer_list = PeerList::from_peers(
+            Vec::new(),
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+        let factory: crate::chunk_fetcher::ChunkFetcherFactory =
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize)));
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            Arc::new(RwLock::new(vec![sm.clone()])),
+            peer_list,
+            db,
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+
+        let orchestrator = inner
+            .chunk_orchestrators
+            .get(&sm.id)
+            .expect("orchestrator for the assigned module");
+        assert!(orchestrator.chunk_requests.is_empty());
+
+        inner
+            .handle_message(DataSyncServiceMessage::BodyMigrationHoles {
+                storage_module_id: 99,
+                chunk_offsets: vec![PartitionChunkOffset::from(0)],
+            })
+            .await
+            .expect("unknown storage module is ignored");
+        assert!(!inner.chunk_orchestrators.contains_key(&99));
+        assert!(inner.chunk_orchestrators[&sm.id].chunk_requests.is_empty());
+
+        inner
+            .handle_message(DataSyncServiceMessage::BodyMigrationHoles {
+                storage_module_id: sm.id,
+                chunk_offsets: vec![PartitionChunkOffset::from(0), PartitionChunkOffset::from(1)],
+            })
+            .await
+            .expect("holes are routed");
+        let orchestrator = &inner.chunk_orchestrators[&sm.id];
+        assert!(matches!(
+            orchestrator.chunk_requests[&PartitionChunkOffset::from(0)].request_state,
+            ChunkRequestState::Pending
+        ));
+        assert!(matches!(
+            orchestrator.chunk_requests[&PartitionChunkOffset::from(1)].request_state,
+            ChunkRequestState::Pending
+        ));
+    }
+}

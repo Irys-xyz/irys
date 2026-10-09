@@ -1369,6 +1369,9 @@ async fn local_cache_hit_writes_without_a_peer_request() {
 
     let before = metrics::test_fetch_by_source_count("local_cache", "success");
     assert!(orch.dispatch_next());
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
     assert!(
         fetcher.request_log.read().unwrap().is_empty(),
         "a cached body must not ask a peer"
@@ -1418,6 +1421,9 @@ async fn local_cache_contiguous_run_writes_hits_around_a_hole() {
 
     let before = metrics::test_fetch_by_source_count("local_cache", "success");
     assert!(orch.dispatch_next());
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
     assert!(fetcher.request_log.read().unwrap().is_empty());
     assert!(sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
     assert!(!sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
@@ -1601,7 +1607,6 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
         insert_pending(&mut orch, PartitionChunkOffset::from(value));
     }
 
-    let before = metrics::test_pending_body_skipped_count();
     assert!(orch.dispatch_next());
     for value in 0..3_u32 {
         let offset = PartitionChunkOffset::from(value);
@@ -1616,11 +1621,7 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
         assert!(!orch.chunk_requests[&offset].local_cache_miss);
         assert!(!sm.is_data_write_pending_at(offset));
     }
-    assert_eq!(
-        metrics::test_pending_body_skipped_count(),
-        before + 3,
-        "each covered offset is counted once"
-    );
+    assert_eq!(orch.holds_started, 3, "each covered offset is counted once");
     wait_for_ledger_requests(&fetcher, 1).await;
     {
         let log = fetcher.request_log.read().unwrap();
@@ -1630,7 +1631,7 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
     assert!(fetcher.data_root_request_log.read().unwrap().is_empty());
 
     assert!(!orch.dispatch_next());
-    assert_eq!(metrics::test_pending_body_skipped_count(), before + 3);
+    assert_eq!(orch.holds_started, 3);
     assert_eq!(fetcher.request_log.read().unwrap().len(), 1);
 
     for (key, job) in sm.pending_body_migrations().expect("pending rows") {
@@ -1662,7 +1663,7 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
         assert!(!orch.chunk_requests[&offset].local_cache_miss);
     }
     assert_eq!(fetcher.request_log.read().unwrap().len(), 1);
-    assert_eq!(metrics::test_pending_body_skipped_count(), before + 3);
+    assert_eq!(orch.holds_started, 3);
 }
 
 /// A hold that sees no row-key movement is released to peers. The clock is
