@@ -402,6 +402,10 @@ fn run_isolated(
     cmd.args([
         "nextest",
         "run",
+        // Same target set as phases 1 and 2: without these, a workspace with
+        // `default-members` searches only those members and the filter matches nothing.
+        "--workspace",
+        "--all-targets",
         "-E",
         &filter,
         "--test-threads",
