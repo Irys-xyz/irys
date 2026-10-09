@@ -1413,6 +1413,120 @@ mod tests {
         Ok(())
     }
 
+    /// A flush of the written prefix moves the pending key to the first offset
+    /// that is not durable. The value stays the same. A fresh worker starts at
+    /// that key, so the durable prefix is not walked again. Offsets still in
+    /// `pending_writes` stay under the old key until they are durable.
+    #[tokio::test]
+    async fn worker_advances_the_pending_key_after_a_durable_prefix() -> eyre::Result<()> {
+        let f = fixture(6, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+        let original = f.rows()?[0].1.clone();
+
+        let pass = f.worker().with_writes_per_pass(2).drain_pass().await;
+        assert_eq!((pass.written, pass.settled), (2, 0));
+        assert_eq!(
+            f.rows()?[0].0,
+            PartitionChunkOffset::from(0),
+            "in-flight writes are not durable, so the key stays"
+        );
+
+        f.sm.force_sync_pending_chunks()?;
+        let pass = f.worker().with_writes_per_pass(2).drain_pass().await;
+        assert_eq!((pass.written, pass.settled), (2, 0));
+        let rows = f.rows()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, PartitionChunkOffset::from(2));
+        assert_eq!(rows[0].1, original);
+        assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(2)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+
+        // Restart. The key is 2, so this pass does not enqueue 0 or 1 again.
+        let pass = f.worker().with_writes_per_pass(2).drain_pass().await;
+        assert_eq!((pass.written, pass.settled), (2, 0));
+        assert_eq!(f.rows()?[0].0, PartitionChunkOffset::from(2));
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(4)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+
+        f.sm.force_sync_pending_chunks()?;
+        assert_eq!(f.worker().drain_pass().await.settled, 1);
+        assert!(f.rows()?.is_empty());
+        for offset in 0..6 {
+            assert_eq!(f.chunk_type(offset), Some(ChunkType::Data));
+        }
+        Ok(())
+    }
+
+    /// One page per read, and a spent write budget stops the pass. Later jobs
+    /// still drain on later passes. The full list API keeps every row.
+    #[tokio::test]
+    async fn worker_pages_pending_jobs_and_drains_them_all() -> eyre::Result<()> {
+        let f = fixture(1, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        let chunk_size = f.config.consensus.chunk_size as usize;
+        for at in 0_u64..3 {
+            let data = vec![9_u8.wrapping_add(at as u8); chunk_size];
+            let signer = IrysSigner::random_signer(&f.config.consensus);
+            let tx =
+                signer.sign_transaction(signer.create_transaction(data.clone(), H256::zero())?)?;
+            f.db.update_eyre(|wtx| {
+                cache_data_root(wtx, &tx.header, None)?;
+                let node = &tx.chunks[0];
+                cache_chunk(
+                    wtx,
+                    &UnpackedChunk {
+                        data_root: tx.header.data_root,
+                        data_size: tx.header.data_size,
+                        data_path: Base64(tx.proofs[0].proof.clone()),
+                        bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
+                        tx_offset: TxChunkOffset::from(0),
+                    },
+                )?;
+                Ok(())
+            })?;
+            f.sm.index_transaction_data(
+                &tx.header,
+                &vec![at as u8, 1, 2, 3],
+                LedgerChunkRange(ie(
+                    LedgerChunkOffset::from(at),
+                    LedgerChunkOffset::from(at + 1),
+                )),
+                1,
+            )?;
+        }
+        assert_eq!(f.rows()?.len(), 3, "the full list still returns every job");
+
+        let worker = || f.worker().with_writes_per_pass(1).with_rows_per_pass(1);
+        let pass = worker().drain_pass().await;
+        assert_eq!((pass.rows, pass.written, pass.settled), (1, 1, 0));
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+        assert_eq!(f.rows()?.len(), 3);
+
+        f.sm.force_sync_pending_chunks()?;
+        let pass = worker().drain_pass().await;
+        assert_eq!((pass.settled, pass.written), (1, 1));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(2)));
+        assert_eq!(f.rows()?.len(), 2);
+
+        f.sm.force_sync_pending_chunks()?;
+        let pass = worker().drain_pass().await;
+        assert_eq!((pass.settled, pass.written), (1, 1));
+        assert_eq!(f.rows()?.len(), 1);
+
+        f.sm.force_sync_pending_chunks()?;
+        assert_eq!(worker().drain_pass().await.settled, 1);
+        assert!(f.rows()?.is_empty());
+        for offset in 0..3 {
+            assert_eq!(f.chunk_type(offset), Some(ChunkType::Data));
+        }
+        Ok(())
+    }
+
     /// The pending-write ceiling is backpressure, not a budget: once the module
     /// holds `ceiling` bytes awaiting flush the pass stops writing, the row
     /// survives with no attempt penalty, and writing resumes only after the

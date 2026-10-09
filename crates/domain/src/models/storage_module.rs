@@ -233,9 +233,7 @@ fn data_size_for_offset(
         let mut loaded = tx
             .get_data_root_infos_for_data_root(data_root)
             .expect("Database read should succeed")
-            .expect(
-                "there should be at least one start_offset for any data_root stored in the submodule",
-            );
+            .unwrap_or_default();
         loaded.0.sort_unstable();
         loaded
     });
@@ -3518,7 +3516,8 @@ impl StorageModule {
     }
 
     /// Drop tx intervals, data-root placements, and pending jobs under
-    /// `Uninitialized` spans.
+    /// `Uninitialized` spans. A tx path and its leaf binding are deleted when
+    /// no interval in that submodule still names the hash.
     ///
     /// `Entropy` is not included. A tx can be indexed there before its bytes
     /// are stored. Presence under `Entropy` is still removed by
@@ -4279,7 +4278,7 @@ impl StorageModule {
         for (interval, submodule) in self.submodules.iter() {
             let rows = submodule
                 .db
-                .view(|tx| tx.pending_body_migrations_from(None))?;
+                .view(|tx| tx.pending_body_migrations_from(None, None))?;
             batches.push((*interval, rows));
         }
         Ok(batches)
@@ -4297,16 +4296,59 @@ impl StorageModule {
             .collect())
     }
 
+    /// Partition intervals of this module's submodules, ascending.
+    pub fn submodule_intervals(&self) -> Vec<Interval<PartitionChunkOffset>> {
+        self.submodules
+            .iter()
+            .map(|(interval, _)| *interval)
+            .collect()
+    }
+
+    /// At most `limit` jobs at or after `start` in the submodule that contains
+    /// `submodule_at`. `start` of `None` is that submodule's first key.
+    ///
+    /// The body worker pages with this. [`Self::pending_body_migrations`]
+    /// still returns every row.
+    pub fn pending_body_migrations_page(
+        &self,
+        submodule_at: PartitionChunkOffset,
+        start: Option<PartitionChunkOffset>,
+        limit: usize,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
+        let (_interval, submodule) = self.get_submodule_for_offset(submodule_at)?;
+        submodule
+            .db
+            .view(|tx| tx.pending_body_migrations_from(start, Some(limit)))
+    }
+
     /// Inclusive partition offsets a live body-migration job still owns.
     ///
-    /// The row key is the clipped tx start, not every covered offset. The span
-    /// matches the body worker: `[key, min(tx end, submodule end)]`. Touching
-    /// spans are merged.
+    /// The span starts at the **current row key**. A resume moves that key
+    /// forward, so the durable prefix is not part of the span. The end matches
+    /// the body worker: `min(tx end, submodule end)`. Touching spans are merged.
+    ///
+    /// Each submodule contributes at most [`PENDING_BODY_COVERAGE_ROWS`] rows,
+    /// the same page the body worker reads. Jobs past that page are not held;
+    /// data sync fetches them from peers. This does not call
+    /// [`Self::pending_body_migration_batches`].
     pub fn pending_body_coverage_ranges(&self) -> eyre::Result<Vec<(u32, u32)>> {
+        self.pending_body_coverage_ranges_limited(PENDING_BODY_COVERAGE_ROWS)
+    }
+
+    fn pending_body_coverage_ranges_limited(
+        &self,
+        row_cap: usize,
+    ) -> eyre::Result<Vec<(u32, u32)>> {
         let chunk_size = self.config.consensus.chunk_size;
+        let row_cap = row_cap.max(1);
         let mut ranges = Vec::new();
-        for (interval, rows) in self.pending_body_migration_batches()? {
+        for interval in self.submodule_intervals() {
             let interval_end = i64::from(*interval.end());
+            let rows = self.pending_body_migrations_page(
+                PartitionChunkOffset::from(*interval.start()),
+                None,
+                row_cap,
+            )?;
             for (key, job) in rows {
                 if let Some(range) = body_job_coverage(key, &job, interval_end, chunk_size) {
                     ranges.push(range);
@@ -4315,7 +4357,6 @@ impl StorageModule {
         }
         Ok(merge_inclusive_ranges(ranges))
     }
-
     /// Delete the job at `key` once every offset it covers is durable (or the
     /// job is being retired). Returns whether a row was removed.
     ///
@@ -4350,6 +4391,63 @@ impl StorageModule {
         // the job row, and the body worker retries the same data_root and
         // block_height. MDBX commits this durably.
         Ok(removed)
+    }
+
+    /// Move the job at `from` to `to` once a prefix of its offsets is durable.
+    ///
+    /// The value is unchanged. The delete and the put commit in one batch, so
+    /// a crash keeps the old key or the new key. A lost move repeats the
+    /// durable prefix. Returns the key the job lives at after the call:
+    /// `to` when the move landed, `from` when the row is gone, writes are
+    /// paused, `to` is another submodule, or `to` already holds a different job.
+    pub fn advance_pending_body_migration(
+        &self,
+        from: PartitionChunkOffset,
+        to: PartitionChunkOffset,
+        job: &PendingBodyMigration,
+    ) -> eyre::Result<PartitionChunkOffset> {
+        if self.data_writes_paused() || from == to {
+            return Ok(from);
+        }
+        let from_submodule = {
+            let (interval, _) = self.get_submodule_for_offset(from)?;
+            *interval.start()
+        };
+        let to_submodule = {
+            let (interval, _) = self.get_submodule_for_offset(to)?;
+            *interval.start()
+        };
+        if from_submodule != to_submodule {
+            return Ok(from);
+        }
+        let (_interval, submodule) = self.get_submodule_for_offset(from)?;
+        submodule.db.update_covered(|tx| {
+            match tx.get_pending_body_migration(from)? {
+                Some(existing) if Self::same_pending_job(&existing, job) => {}
+                _ => return Ok(from),
+            }
+            match tx.get_pending_body_migration(to)? {
+                Some(existing) if Self::same_pending_job(&existing, job) => {
+                    tx.del_pending_body_migration(from)?;
+                    Ok(to)
+                }
+                Some(_) => Ok(from),
+                None => {
+                    tx.del_pending_body_migration(from)?;
+                    tx.add_pending_body_migration(to, job)?;
+                    Ok(to)
+                }
+            }
+        })
+    }
+
+    /// Identity of a placement. Attempts change as the worker stalls, so they
+    /// do not decide whether two rows are the same job.
+    fn same_pending_job(left: &PendingBodyMigration, right: &PendingBodyMigration) -> bool {
+        left.data_root == right.data_root
+            && left.block_height == right.block_height
+            && left.data_size == right.data_size
+            && left.start_offset == right.start_offset
     }
 
     /// Delete outstanding body-migration jobs keyed in `[start, end]` (partition
@@ -6065,8 +6163,16 @@ pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::R
     Ok(out == chunk)
 }
 
+/// Pending-body rows one coverage read decodes per submodule.
+///
+/// Matches the body worker's page. A data-sync tick must not load the rest
+/// of the table.
+const PENDING_BODY_COVERAGE_ROWS: usize = 64;
+
 /// Inclusive `[key, min(tx end, submodule end)]` for one body-migration job.
 /// Same span the body worker drains. `None` when the job covers no offset.
+///
+/// `key` is the current row key. After a resume it is past the durable prefix.
 fn body_job_coverage(
     key: PartitionChunkOffset,
     job: &PendingBodyMigration,
@@ -6836,18 +6942,24 @@ mod tests {
         Ok(())
     }
 
-    /// A fully `Uninitialized` span drops intervals, placements, and pending jobs.
-    /// Tx-path blobs are not coverage.
+    /// A fully `Uninitialized` span drops intervals, placements, pending jobs,
+    /// and the tx path once nothing in the submodule names it.
     fn assert_uninitialized_coverage_dropped(
         module: &StorageModule,
         seeded: &SeededIndex,
     ) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        assert_eq!(
+        assert!(
             submodule
                 .db
-                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?,
-            Some(seeded.tx_path.clone())
+                .view(|tx| tx.get_full_tx_path(seeded.tx_hash))?
+                .is_none()
+        );
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.get_tx_leaf_binding(seeded.tx_hash))?
+                .is_none()
         );
         for offset in [2_u32, 3, 6] {
             assert!(
@@ -7381,6 +7493,209 @@ mod tests {
             data_root,
             block_height
         )?);
+        Ok(())
+    }
+
+    /// Moving a job re-keys the same value. A different job at the destination
+    /// stays, and so does the source. A paused module does not move the row.
+    #[test]
+    fn advance_pending_body_migration_rekeys_and_refuses_a_conflict() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("pending_body_advance_test")
+            .with_tracing()
+            .build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 20,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0".into())],
+            },
+            &config,
+        )?;
+        let height = 4_u64;
+        let place = |root: H256, at: u64| {
+            let header =
+                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        data_root: root,
+                        data_size: chunk_size,
+                        ..Default::default()
+                    },
+                    metadata: irys_types::DataTransactionMetadata::new(),
+                });
+            storage_module.index_transaction_data(
+                &header,
+                &vec![at as u8],
+                LedgerChunkRange(ledger_chunk_offset_ii!(at, at)),
+                height,
+            )
+        };
+        let root_a = H256::repeat_byte(1);
+        let root_b = H256::repeat_byte(2);
+        place(root_a, 0)?;
+        place(root_b, 1)?;
+        let jobs = storage_module.pending_body_migrations()?;
+        let job_a = jobs[0].1.clone();
+        assert_eq!(jobs[0].0, PartitionChunkOffset::from(0));
+
+        let stayed = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(0),
+            &job_a,
+        )?;
+        assert_eq!(stayed, PartitionChunkOffset::from(0));
+
+        let moved = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(4),
+            &job_a,
+        )?;
+        assert_eq!(moved, PartitionChunkOffset::from(4));
+        let jobs = storage_module.pending_body_migrations()?;
+        assert_eq!(
+            jobs.iter().map(|(key, _)| key.0).collect::<Vec<_>>(),
+            vec![1, 4]
+        );
+        assert_eq!(jobs[1].1, job_a);
+
+        let job_b = jobs[0].1.clone();
+        let refused = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(1),
+            PartitionChunkOffset::from(4),
+            &job_b,
+        )?;
+        assert_eq!(refused, PartitionChunkOffset::from(1));
+        assert_eq!(
+            storage_module
+                .pending_body_migrations()?
+                .iter()
+                .map(|(key, job)| (key.0, job.data_root))
+                .collect::<Vec<_>>(),
+            vec![(1, root_b), (4, root_a)]
+        );
+
+        storage_module.pause_data_writes();
+        let paused = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(1),
+            PartitionChunkOffset::from(3),
+            &job_b,
+        )?;
+        assert_eq!(paused, PartitionChunkOffset::from(1));
+        storage_module.resume_data_writes();
+        assert_eq!(storage_module.pending_body_migrations()?.len(), 2);
+        Ok(())
+    }
+
+    /// Coverage starts at the current row key. A resume drops the durable
+    /// prefix. A read stops after `row_cap` rows in that submodule.
+    #[test]
+    fn coverage_follows_the_advanced_key_and_stops_at_the_page() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("pending_body_coverage_key_test")
+            .with_tracing()
+            .build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 20,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0".into())],
+            },
+            &config,
+        )?;
+        let height = 9_u64;
+        let root = H256::repeat_byte(7);
+        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root: root,
+                data_size: chunk_size * 6,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &header,
+            &vec![1, 2, 3, 4, 5, 6],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 5)),
+            height,
+        )?;
+        assert_eq!(
+            storage_module.pending_body_coverage_ranges()?,
+            vec![(0, 5)],
+            "the row key is the span start"
+        );
+
+        let job = storage_module.pending_body_migrations()?[0].1.clone();
+        let moved = storage_module.advance_pending_body_migration(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(3),
+            &job,
+        )?;
+        assert_eq!(moved, PartitionChunkOffset::from(3));
+        assert_eq!(
+            storage_module.pending_body_coverage_ranges()?,
+            vec![(3, 5)],
+            "the durable prefix is outside the span"
+        );
+
+        // A later job is visible when the cap includes it, and absent when the
+        // cap is the first row only.
+        let later = H256::repeat_byte(8);
+        let later_header =
+            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    data_root: later,
+                    data_size: chunk_size,
+                    ..Default::default()
+                },
+                metadata: irys_types::DataTransactionMetadata::new(),
+            });
+        storage_module.index_transaction_data(
+            &later_header,
+            &vec![9],
+            LedgerChunkRange(ledger_chunk_offset_ii!(8, 8)),
+            height,
+        )?;
+        assert_eq!(
+            storage_module.pending_body_coverage_ranges()?,
+            vec![(3, 5), (8, 8)]
+        );
+        assert_eq!(
+            storage_module.pending_body_coverage_ranges_limited(1)?,
+            vec![(3, 5)],
+            "rows past the page are not loaded"
+        );
         Ok(())
     }
 

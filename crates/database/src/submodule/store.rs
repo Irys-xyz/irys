@@ -99,10 +99,13 @@ pub trait SubmoduleRead {
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<PendingBodyMigration>>;
 
-    /// Jobs at or after `start` (`None` is every job), in ascending offset order.
+    /// Jobs at or after `start` (`None` is the first key), in ascending offset
+    /// order. `limit` stops the cursor after that many rows. `None` reads the
+    /// rest.
     fn pending_body_migrations_from(
         &self,
         start: Option<PartitionChunkOffset>,
+        limit: Option<usize>,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>>;
 
     /// `true` when a pending-job key lies in `[start, end]`.
@@ -269,9 +272,10 @@ pub trait SubmoduleStore: Send + Sync {
     ///
     /// Callers pass `Uninitialized` spans only. An `Entropy` span keeps its
     /// tx index: those rows name bytes that are not stored yet. An empty
-    /// list, or spans with no such rows, does not commit. Tx-path blobs and
-    /// leaf bindings are not coverage. A tx interval that starts before the
-    /// span is split, not deleted as a key range.
+    /// list, or spans with no such rows, does not commit. A tx-path blob and
+    /// its leaf binding stay while any interval in this submodule names that
+    /// hash. The last such interval deletes both rows. A tx interval that
+    /// starts before the span is split, not deleted as a key range.
     fn drop_uninitialized_coverage(
         &self,
         spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -711,8 +715,9 @@ macro_rules! impl_submodule_read {
             fn pending_body_migrations_from(
                 &self,
                 start: Option<PartitionChunkOffset>,
+                limit: Option<usize>,
             ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
-                pending_body_migrations_from(self.tx, start)
+                pending_body_migrations_from(self.tx, start, limit)
             }
 
             fn has_pending_in_inclusive_range(
@@ -1633,6 +1638,139 @@ mod tests {
         })
     }
 
+    fn index_tx_span(
+        tx: &mut dyn SubmoduleWrite,
+        hash: H256,
+        start: u32,
+        end: u32,
+    ) -> eyre::Result<()> {
+        tx.add_full_tx_path(hash, vec![hash.0[0]])?;
+        tx.add_tx_leaf_binding(
+            hash,
+            &TxLeafBinding {
+                data_root: hash,
+                prefix_hash: H256::repeat_byte(1),
+            },
+        )?;
+        tx.add_tx_path_hash_to_offset_range(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+            Some(hash),
+        )
+    }
+
+    fn leaf_for(hash: H256) -> TxLeafBinding {
+        TxLeafBinding {
+            data_root: hash,
+            prefix_hash: H256::repeat_byte(1),
+        }
+    }
+
+    #[test]
+    fn a_shared_tx_path_stays_until_the_last_interval_is_gone() -> eyre::Result<()> {
+        each_engine("submodule_tx_path_gc", |store| {
+            let shared = H256::repeat_byte(3);
+            store.update(|tx| {
+                index_tx_span(tx, shared, 0, 1)?;
+                index_tx_span(tx, shared, 10, 11)?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(1),
+                    None,
+                )
+            })?;
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(shared))?,
+                Some(vec![shared.0[0]])
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_tx_leaf_binding(shared))?,
+                Some(leaf_for(shared))
+            );
+            let far = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(10)))?
+                .expect("far interval");
+            assert_eq!(far.tx_path_hash, Some(shared));
+            assert!(
+                store
+                    .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(0)))?
+                    .is_none()
+            );
+
+            store.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(10),
+                    PartitionChunkOffset::from(11),
+                    None,
+                )
+            })?;
+            assert!(store.view(|tx| tx.get_full_tx_path(shared))?.is_none());
+            assert!(store.view(|tx| tx.get_tx_leaf_binding(shared))?.is_none());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn replacing_a_span_drops_the_old_tx_path() -> eyre::Result<()> {
+        each_engine("submodule_tx_path_replace", |store| {
+            let old = H256::repeat_byte(4);
+            let new = H256::repeat_byte(8);
+            store.update(|tx| index_tx_span(tx, old, 0, 4))?;
+            store.update(|tx| {
+                tx.add_full_tx_path(new, vec![new.0[0]])?;
+                tx.add_tx_leaf_binding(new, &leaf_for(new))?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(4),
+                    Some(new),
+                )
+            })?;
+            assert!(store.view(|tx| tx.get_full_tx_path(old))?.is_none());
+            assert!(store.view(|tx| tx.get_tx_leaf_binding(old))?.is_none());
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(new))?,
+                Some(vec![new.0[0]])
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_tx_leaf_binding(new))?,
+                Some(leaf_for(new))
+            );
+            let at_zero = store
+                .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(0)))?
+                .expect("replacement interval");
+            assert_eq!(at_zero.tx_path_hash, Some(new));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn empty_data_root_infos_delete_the_row() -> eyre::Result<()> {
+        each_engine("submodule_empty_data_root", |store| {
+            let root = H256::repeat_byte(5);
+            let info = DataRootInfo {
+                start_offset: RelativeChunkOffset(1),
+                data_size: 32,
+            };
+            store.update(|tx| tx.add_data_root_info(root, &info))?;
+            assert_eq!(
+                store.view(|tx| tx.get_data_root_infos_for_data_root(root))?,
+                Some(DataRootInfos(vec![info.clone()]))
+            );
+            store.update(|tx| tx.set_data_root_infos_for_data_root(root, DataRootInfos(vec![])))?;
+            assert!(
+                store
+                    .view(|tx| tx.get_data_root_infos_for_data_root(root))?
+                    .is_none()
+            );
+            store.update(|tx| tx.add_data_root_info(root, &info))?;
+            assert_eq!(
+                store.view(|tx| tx.get_data_root_infos_for_data_root(root))?,
+                Some(DataRootInfos(vec![info]))
+            );
+            Ok(())
+        })
+    }
+
     #[test]
     fn data_path_batch_keeps_an_existing_tx_path_hash() -> eyre::Result<()> {
         each_engine("submodule_store_data_path_batch", |store| {
@@ -1719,6 +1857,42 @@ mod tests {
             block_height: 1,
             attempts: 0,
         }
+    }
+
+    /// A page is a prefix of the ascending walk. The next page starts at the
+    /// key after the last one this page returned. `None` still returns every row.
+    #[test]
+    fn pending_body_migration_page_stops_at_the_limit() -> eyre::Result<()> {
+        each_engine("submodule_pending_page", |store| {
+            let root = H256::repeat_byte(6);
+            store.update(|tx| {
+                for key in [0_u32, 4, 9] {
+                    tx.add_pending_body_migration(
+                        PartitionChunkOffset::from(key),
+                        &pending_job(root),
+                    )?;
+                }
+                Ok(())
+            })?;
+            let all = store.view(|tx| tx.pending_body_migrations_from(None, None))?;
+            assert_eq!(all.len(), 3);
+            let page = store.view(|tx| tx.pending_body_migrations_from(None, Some(2)))?;
+            assert_eq!(
+                page.iter().map(|(key, _)| key.0).collect::<Vec<_>>(),
+                vec![0, 4]
+            );
+            let next = page.last().expect("page").0;
+            let rest = store.view(|tx| {
+                tx.pending_body_migrations_from(Some(PartitionChunkOffset(next.0 + 1)), Some(2))
+            })?;
+            assert_eq!(
+                rest.iter().map(|(key, _)| key.0).collect::<Vec<_>>(),
+                vec![9]
+            );
+            let none = store.view(|tx| tx.pending_body_migrations_from(None, Some(0)))?;
+            assert!(none.is_empty());
+            Ok(())
+        })
     }
 
     /// Inclusive range delete drops both ends and keeps the neighbors.

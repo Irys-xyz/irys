@@ -30,8 +30,8 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_CHUNK_WRITE_FAILED("irys.data_sync.chunk_write_failed_total", "Data sync local write failures after a successful fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_BLOCKED("irys.data_sync.chunk_blocked_total", "Data sync offsets blocked from hot re-fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync Blocked offsets re-queued after local index-ready probe (MissingDataRootIndex → Pending)");
-    gauge BODY_MIGRATION_PENDING_JOBS("irys.chunk_migration.body_pending_jobs", "Outstanding chunk-body migration jobs across all storage modules after the last worker pass");
-    gauge BODY_MIGRATION_OLDEST_PENDING_HEIGHT("irys.chunk_migration.body_oldest_pending_height", "Lowest block height with an outstanding chunk-body migration job before the last pass (0 when none); its distance to the tip is the worker's lag");
+    gauge BODY_MIGRATION_PENDING_JOBS("irys.chunk_migration.body_pending_jobs", "Body-migration jobs the last pass left open. A pass that stops on the write budget has not read every job, so this is a lower bound until a pass reaches the last key");
+    gauge BODY_MIGRATION_OLDEST_PENDING_HEIGHT("irys.chunk_migration.body_oldest_pending_height", "Lowest block height among body-migration jobs the last pass read (0 when it read none). A pass that stops early has not seen later keys");
     counter BODY_MIGRATION_CHUNKS_WRITTEN("irys.chunk_migration.body_chunks_written_total", "Chunk bodies the body worker enqueued to storage modules");
     counter BODY_MIGRATION_JOBS_SETTLED("irys.chunk_migration.body_jobs_settled_total", "Body-migration jobs completed with every offset durable");
     counter BODY_MIGRATION_JOBS_RETIRED("irys.chunk_migration.body_jobs_retired_total", "Body-migration jobs abandoned to data sync after repeated passes with no local source");

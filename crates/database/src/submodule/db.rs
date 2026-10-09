@@ -23,7 +23,9 @@ pub use super::migrate::{
     require_submodule_index_copy,
 };
 
-use super::interval::{IntervalRow, combine_hashes, coverage_gaps, plan_coverage};
+use super::interval::{
+    IntervalEdit, IntervalRow, combine_hashes, coverage_gaps, dropped_tx_hashes, plan_coverage,
+};
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos, Metadata,
     PendingBodyMigration, PendingBodyMigrationsByOffset, SubmoduleTables, TxLeafBinding,
@@ -448,11 +450,17 @@ pub fn get_data_root_infos_for_data_root<T: DbTx>(
 }
 
 /// set (overwrite) the DataRootInfos for the `data_root`
+///
+/// An empty list deletes the row. A missing row is an empty list.
 pub fn set_data_root_infos_for_data_root<T: DbTxMut>(
     tx: &T,
     data_root: DataRoot,
     infos: DataRootInfos,
 ) -> eyre::Result<()> {
+    if infos.0.is_empty() {
+        tx.delete::<DataRootInfosByDataRoot>(data_root, None)?;
+        return Ok(());
+    }
     Ok(tx.put::<DataRootInfosByDataRoot>(data_root, infos)?)
 }
 
@@ -501,15 +509,25 @@ pub fn del_pending_body_migration<T: DbTxMut>(
     Ok(tx.delete::<PendingBodyMigrationsByOffset>(offset, None)?)
 }
 
-/// Every outstanding body-migration job at or after `start` (all of them for
+/// Outstanding body-migration jobs at or after `start` (all of them for
 /// `None`), in ascending offset order — the order the body worker drains them so
 /// disk access stays sequential.
+///
+/// `limit` stops the cursor after that many rows. `None` reads the rest.
+/// The body worker pages with a limit so a pass that still has write budget
+/// does not load every job.
 pub fn pending_body_migrations_from<T: DbTx>(
     tx: &T,
     start: Option<PartitionChunkOffset>,
+    limit: Option<usize>,
 ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
     let mut cursor = tx.cursor_read::<PendingBodyMigrationsByOffset>()?;
-    Ok(cursor.walk(start)?.collect::<Result<Vec<_>, _>>()?)
+    let walker = cursor.walk(start)?;
+    let rows = match limit {
+        Some(limit) => walker.take(limit).collect::<Result<Vec<_>, _>>()?,
+        None => walker.collect::<Result<Vec<_>, _>>()?,
+    };
+    Ok(rows)
 }
 
 /// Delete every job whose key (clipped tx start) lies in `[start, end]`. Used
@@ -767,10 +785,10 @@ fn assign_tx_interval<T: DbTxMut + DbTx>(
     }
     let existing = intervals_touching(tx, start, end)?;
     let edit = plan_coverage(&existing, start, end, tx_path_hash);
-    for key in edit.delete {
-        tx.delete::<TxPathIntervalByStart>(key, None)?;
+    for key in &edit.delete {
+        tx.delete::<TxPathIntervalByStart>(*key, None)?;
     }
-    for row in edit.put {
+    for row in &edit.put {
         tx.put::<TxPathIntervalByStart>(
             row.start,
             TxPathInterval {
@@ -778,6 +796,34 @@ fn assign_tx_interval<T: DbTxMut + DbTx>(
                 tx_path_hash: row.tx_path_hash,
             },
         )?;
+    }
+    drop_unreferenced_tx_paths(tx, &existing, &edit)
+}
+
+/// Delete a tx path and its leaf binding when no interval names that hash.
+///
+/// The candidate set is the hashes that left the edit window. An empty set
+/// skips the scan. A hash that another interval still names stays.
+fn drop_unreferenced_tx_paths<T: DbTxMut + DbTx>(
+    tx: &T,
+    existing: &[IntervalRow],
+    edit: &IntervalEdit,
+) -> eyre::Result<()> {
+    let mut dropped = dropped_tx_hashes(existing, edit);
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
+    for row in cursor.walk(None)? {
+        let (_, interval) = row?;
+        dropped.retain(|hash| *hash != interval.tx_path_hash);
+        if dropped.is_empty() {
+            return Ok(());
+        }
+    }
+    for hash in dropped {
+        tx.delete::<TxPathByTxPathHash>(hash, None)?;
+        tx.delete::<TxLeafBindingByTxPathHash>(hash, None)?;
     }
     Ok(())
 }
@@ -943,11 +989,11 @@ mod tests {
             Ok(())
         })?;
 
-        let all = db.view_eyre(|tx| pending_body_migrations_from(tx, None))?;
+        let all = db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?;
         assert_eq!(
             all,
             vec![
-                (PartitionChunkOffset::from(0), b),
+                (PartitionChunkOffset::from(0), b.clone()),
                 (PartitionChunkOffset::from(7), c.clone()),
                 (PartitionChunkOffset::from(100), a.clone()),
             ]
@@ -955,8 +1001,17 @@ mod tests {
 
         // Resumable drain: walking from a key starts at that key, inclusive.
         let from_seven = db.view_eyre(|tx| {
-            pending_body_migrations_from(tx, Some(PartitionChunkOffset::from(7)))
+            pending_body_migrations_from(tx, Some(PartitionChunkOffset::from(7)), None)
         })?;
+        let first_only = db.view_eyre(|tx| pending_body_migrations_from(tx, None, Some(1)))?;
+        assert_eq!(first_only, vec![(PartitionChunkOffset::from(0), b)]);
+        let one_from_seven = db.view_eyre(|tx| {
+            pending_body_migrations_from(tx, Some(PartitionChunkOffset::from(7)), Some(1))
+        })?;
+        assert_eq!(
+            one_from_seven,
+            vec![(PartitionChunkOffset::from(7), c.clone())]
+        );
         assert_eq!(
             from_seven,
             vec![
@@ -976,7 +1031,7 @@ mod tests {
 
         // Resolve one job; the rest are untouched.
         db.update_eyre(|tx| del_pending_body_migration(tx, PartitionChunkOffset::from(7)))?;
-        let remaining = db.view_eyre(|tx| pending_body_migrations_from(tx, None))?;
+        let remaining = db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?;
         assert_eq!(remaining.len(), 2);
         assert!(
             remaining
@@ -1012,7 +1067,7 @@ mod tests {
         })?;
         assert_eq!(removed, 3);
         let remaining: Vec<_> = db
-            .view_eyre(|tx| pending_body_migrations_from(tx, None))?
+            .view_eyre(|tx| pending_body_migrations_from(tx, None, None))?
             .into_iter()
             .map(|(offset, _)| *offset)
             .collect();
@@ -1044,14 +1099,14 @@ mod tests {
             )
         })?;
         assert_eq!(
-            db.view_eyre(|tx| pending_body_migrations_from(tx, None))?
+            db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?
                 .len(),
             1
         );
 
         db.update_eyre(clear_submodule_database)?;
         assert!(
-            db.view_eyre(|tx| pending_body_migrations_from(tx, None))?
+            db.view_eyre(|tx| pending_body_migrations_from(tx, None, None))?
                 .is_empty()
         );
 
