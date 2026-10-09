@@ -11,6 +11,7 @@ test-utils = []
 rocksdb = ["dep:rocksdb"]
 
 [dependencies]
+rayon.workspace = true
 alloy-primitives.workspace = true
 irys-config.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }

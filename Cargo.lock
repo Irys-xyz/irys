@@ -5256,6 +5256,7 @@ dependencies = [
  "paste",
  "proptest",
  "rand 0.8.5",
+ "rayon",
  "reth-codecs",
  "reth-db",
  "reth-db-api",

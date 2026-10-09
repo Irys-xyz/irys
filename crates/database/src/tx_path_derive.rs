@@ -122,10 +122,25 @@ pub fn derive_tx_path_at_offset(
     chunk_offset: u64,
     chunk_size: u64,
 ) -> eyre::Result<DerivedTxPath> {
+    derive_tx_path_at_offset_with(db, ledger, chunk_offset, chunk_size, None)
+}
+
+/// [`derive_tx_path_at_offset`] with the tx-header reads spread over `pool`.
+///
+/// A cold tx-header read is a page fault on the memory map, so one thread pays
+/// them one after another. Each pool thread reads its share in its own read
+/// transaction so the device sees them in parallel. `None` reads serially.
+pub fn derive_tx_path_at_offset_with(
+    db: &DatabaseEnv,
+    ledger: DataLedger,
+    chunk_offset: u64,
+    chunk_size: u64,
+    pool: Option<&rayon::ThreadPool>,
+) -> eyre::Result<DerivedTxPath> {
     eyre::ensure!(chunk_size > 0, "chunk size must be non-zero");
     let started = Instant::now();
-    let mut cpu_nanos = 0_u64;
-    let built = db.view_eyre(|tx| {
+    let cpu_nanos;
+    let (bounds, header) = db.view_eyre(|tx| {
         let bounds = locate_block(tx, ledger, chunk_offset)?;
         let header = block_header_by_hash(tx, &bounds.block_hash, false)?.ok_or_else(|| {
             eyre!(
@@ -134,7 +149,21 @@ pub fn derive_tx_path_at_offset(
                 bounds.height
             )
         })?;
-        let headers = block_ledger_tx_headers(tx, &header, ledger)?;
+        Ok((bounds, header))
+    })?;
+    let headers = match pool {
+        None => db.view_eyre(|tx| block_ledger_tx_headers(tx, &header, ledger))?,
+        Some(pool) => {
+            let ids = header
+                .data_ledgers
+                .iter()
+                .find(|item| item.ledger_id == ledger.get_id())
+                .map(|item| item.tx_ids.0.clone())
+                .unwrap_or_default();
+            fetch_tx_headers(db, &ids, Some(pool))?
+        }
+    };
+    let built = {
         let cpu_at = Instant::now();
         let tx_index = assign_tx_index(&headers, &bounds, chunk_offset, chunk_size)?;
         let (tx_root, proof) = proof_for_headers(&headers, tx_index)?;
@@ -150,7 +179,7 @@ pub fn derive_tx_path_at_offset(
         );
         cpu_nanos = fit_nanos(cpu_at.elapsed())?;
         let chosen = &headers[tx_index];
-        Ok(BuiltPath {
+        BuiltPath {
             height: bounds.height,
             block_hash: bounds.block_hash,
             ledger,
@@ -160,9 +189,40 @@ pub fn derive_tx_path_at_offset(
             data_root: chosen.data_root,
             tx_root,
             proof,
-        })
-    })?;
+        }
+    };
     finish(started, cpu_nanos, built)
+}
+
+/// Tx headers for `ids`, in order. With a pool the ids are cut into one
+/// contiguous share per pool thread; each share is one read transaction.
+pub fn fetch_tx_headers(
+    db: &DatabaseEnv,
+    ids: &[H256],
+    pool: Option<&rayon::ThreadPool>,
+) -> eyre::Result<Vec<DataTransactionHeader>> {
+    let read_share = |share: &[H256]| -> eyre::Result<Vec<DataTransactionHeader>> {
+        db.view_eyre(|tx| {
+            share
+                .iter()
+                .map(|tx_id| {
+                    tx_header_by_txid(tx, tx_id)?.ok_or_else(|| eyre!("tx header {tx_id} missing"))
+                })
+                .collect()
+        })
+    };
+    let Some(pool) = pool.filter(|pool| pool.current_num_threads() > 1 && ids.len() > 1) else {
+        return read_share(ids);
+    };
+    use rayon::prelude::*;
+    let share = ids.len().div_ceil(pool.current_num_threads()).max(1);
+    let parts: Vec<eyre::Result<Vec<DataTransactionHeader>>> =
+        pool.install(|| ids.par_chunks(share).map(read_share).collect());
+    let mut headers = Vec::with_capacity(ids.len());
+    for part in parts {
+        headers.extend(part?);
+    }
+    Ok(headers)
 }
 
 /// Read `tx_ids` and one block header, then build one proof.
@@ -176,23 +236,30 @@ pub fn derive_tx_path_synthetic(
     block_hash: &H256,
     leaf_index: usize,
 ) -> eyre::Result<DerivedTxPath> {
+    derive_tx_path_synthetic_with(db, tx_ids, block_hash, leaf_index, None)
+}
+
+/// [`derive_tx_path_synthetic`] with the tx-header reads spread over `pool`.
+pub fn derive_tx_path_synthetic_with(
+    db: &DatabaseEnv,
+    tx_ids: &[H256],
+    block_hash: &H256,
+    leaf_index: usize,
+    pool: Option<&rayon::ThreadPool>,
+) -> eyre::Result<DerivedTxPath> {
     eyre::ensure!(!tx_ids.is_empty(), "synthetic tx set is empty");
     let started = Instant::now();
-    let mut cpu_nanos = 0_u64;
-    let built = db.view_eyre(|tx| {
-        let mut headers = Vec::with_capacity(tx_ids.len());
-        for tx_id in tx_ids {
-            let header =
-                tx_header_by_txid(tx, tx_id)?.ok_or_else(|| eyre!("tx header {tx_id} missing"))?;
-            headers.push(header);
-        }
-        let block = block_header_by_hash(tx, block_hash, false)?
-            .ok_or_else(|| eyre!("block header {block_hash} missing"))?;
+    let cpu_nanos;
+    let block = db
+        .view_eyre(|tx| block_header_by_hash(tx, block_hash, false))?
+        .ok_or_else(|| eyre!("block header {block_hash} missing"))?;
+    let headers = fetch_tx_headers(db, tx_ids, pool)?;
+    let built = {
         let cpu_at = Instant::now();
         let (tx_root, proof) = proof_for_headers(&headers, leaf_index)?;
         cpu_nanos = fit_nanos(cpu_at.elapsed())?;
         let chosen = &headers[leaf_index];
-        Ok(BuiltPath {
+        BuiltPath {
             height: block.height,
             block_hash: *block_hash,
             ledger: DataLedger::Publish,
@@ -202,8 +269,8 @@ pub fn derive_tx_path_synthetic(
             data_root: chosen.data_root,
             tx_root,
             proof,
-        })
-    })?;
+        }
+    };
     finish(started, cpu_nanos, built)
 }
 
@@ -789,6 +856,39 @@ mod tests {
         let (tx_path, data) = read_stored_tx_data_path(&index, start).expect("mining read");
         assert_eq!(tx_path.expect("tx path"), proofs[1].proof);
         assert_eq!(data.expect("data path"), data_path);
+    }
+
+    #[test]
+    fn parallel_header_fetch_matches_serial_order() {
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open db");
+        let headers: Vec<_> = (1..=37).map(|id| tx_at(id, 32)).collect();
+        db.update_eyre(|tx| {
+            for header in &headers {
+                insert_tx_header(tx, header)?;
+            }
+            Ok(())
+        })
+        .expect("write headers");
+        let ids: Vec<_> = headers.iter().map(|header| header.id).collect();
+        let serial = super::fetch_tx_headers(&db, &ids, None).expect("serial");
+        for threads in [2, 4, 8, 64] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("pool");
+            let parallel = super::fetch_tx_headers(&db, &ids, Some(&pool)).expect("parallel");
+            assert_eq!(
+                parallel.iter().map(|h| h.id).collect::<Vec<_>>(),
+                serial.iter().map(|h| h.id).collect::<Vec<_>>(),
+                "threads={threads}"
+            );
+        }
     }
 
     #[test]

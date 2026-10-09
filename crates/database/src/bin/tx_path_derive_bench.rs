@@ -25,7 +25,7 @@ use irys_database::submodule::tables::{
 use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
 use irys_database::tables::{IrysDataTxHeaders, IrysTables, MigratedBlockHashes};
 use irys_database::tx_path_derive::{
-    LedgerSpan, collect_data_spans, derive_tx_path_at_offset, derive_tx_path_synthetic,
+    LedgerSpan, collect_data_spans, derive_tx_path_at_offset_with, derive_tx_path_synthetic_with,
     read_stored_tx_data_path, tx_header_schema, tx_path_hash,
 };
 use irys_database::{
@@ -52,6 +52,7 @@ stored read. Mining does not call this binary.
                           all runs baseline-stored only when --index is set.
 --samples K               Samples per phase. Default 1000.
 --threads T               Concurrent samples. Default 1.
+--prefetch LIST           Tx-header read threads per derive (rayon pool), e.g. 1,4,16,32. Default 1 (serial).
                           T>1 cold numbers are contention, not isolated cold reads.
 --chunk-size N            Ledger chunk size in bytes. Default 262144.
 --ledgers LIST            publish,submit,one_year,thirty_day. Aliases: 0,1,10,20,one_month.
@@ -120,6 +121,8 @@ struct Args {
     chunk_size: u64,
     ledgers: Vec<DataLedger>,
     synthetic: Vec<usize>,
+    /// Tx-header read threads per derive. 1 reads serially.
+    prefetch: Vec<usize>,
     warm: bool,
     cold: bool,
     index_span: Option<(u32, u32)>,
@@ -145,6 +148,7 @@ impl Default for Args {
                 DataLedger::ThirtyDay,
             ],
             synthetic: vec![10, 100, 1000, 10_000],
+            prefetch: vec![1],
             warm: true,
             cold: true,
             index_span: None,
@@ -283,45 +287,65 @@ fn run_real(db_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
     let disk = device_for(db_path);
     let mut attempted = 0_usize;
     let mut succeeded = 0_usize;
-    let phase = |cold: bool, shared: Option<&DatabaseEnv>| {
-        let selected = &selected;
-        let chunk_size = args.chunk_size;
-        measure(
-            "derive-real",
-            cold,
-            args.threads,
-            args.samples,
-            Some(db_path),
-            disk.as_ref(),
-            true,
-            move |rng| {
-                let (ledger, offset) = pick_offset(rng, selected)?;
-                let fresh;
-                let db = match shared {
-                    Some(db) => db,
-                    None => {
-                        fresh = open_consensus_ro(db_path)?;
-                        &fresh
-                    }
-                };
-                let derived = derive_tx_path_at_offset(db, ledger, offset, chunk_size)?;
-                std::hint::black_box(derived.proof.proof.len());
-                Ok(core_from_derive(&derived))
-            },
-        )
-    };
-    if args.cold {
-        let stats = phase(true, None);
-        attempted += stats.attempted;
-        succeeded += stats.succeeded;
-    }
-    if args.warm {
-        let db = open_consensus_ro(db_path)?;
-        let stats = phase(false, Some(&db));
-        attempted += stats.attempted;
-        succeeded += stats.succeeded;
+    for &prefetch in &args.prefetch {
+        let pool = prefetch_pool(prefetch)?;
+        let pool = pool.as_ref();
+        let label = format!("derive-real prefetch={prefetch}");
+        let phase = |cold: bool, shared: Option<&DatabaseEnv>| {
+            let selected = &selected;
+            let chunk_size = args.chunk_size;
+            measure(
+                &label,
+                cold,
+                args.threads,
+                args.samples,
+                Some(db_path),
+                disk.as_ref(),
+                true,
+                move |rng| {
+                    let (ledger, offset) = pick_offset(rng, selected)?;
+                    let fresh;
+                    let db = match shared {
+                        Some(db) => db,
+                        None => {
+                            fresh = open_consensus_ro(db_path)?;
+                            &fresh
+                        }
+                    };
+                    let derived =
+                        derive_tx_path_at_offset_with(db, ledger, offset, chunk_size, pool)?;
+                    std::hint::black_box(derived.proof.proof.len());
+                    Ok(core_from_derive(&derived))
+                },
+            )
+        };
+        if args.cold {
+            let stats = phase(true, None);
+            attempted += stats.attempted;
+            succeeded += stats.succeeded;
+        }
+        if args.warm {
+            let db = open_consensus_ro(db_path)?;
+            let stats = phase(false, Some(&db));
+            attempted += stats.attempted;
+            succeeded += stats.succeeded;
+        }
     }
     Ok((attempted, succeeded))
+}
+
+/// `None` for 1 (serial reads); otherwise a pool with that many threads.
+fn prefetch_pool(threads: usize) -> eyre::Result<Option<rayon::ThreadPool>> {
+    eyre::ensure!(threads > 0, "--prefetch values must be > 0");
+    if threads == 1 {
+        return Ok(None);
+    }
+    Ok(Some(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("txpath-prefetch-{i}"))
+            .build()?,
+    ))
 }
 
 fn select_spans(spans: &[LedgerSpan], ledgers: &[DataLedger]) -> Vec<LedgerSpan> {
@@ -371,41 +395,51 @@ fn run_synthetic(db_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
         }
         let leaf_index = width / 2;
         println!("derive-synthetic N={width}: leaf_index={leaf_index} (fixed)");
-        let phase = |cold: bool, shared: Option<&DatabaseEnv>| {
-            let chosen = &chosen;
-            measure(
-                &format!("derive-synthetic-N={width}"),
-                cold,
-                args.threads,
-                args.samples,
-                Some(db_path),
-                disk.as_ref(),
-                true,
-                move |_rng| {
-                    let fresh;
-                    let db = match shared {
-                        Some(db) => db,
-                        None => {
-                            fresh = open_consensus_ro(db_path)?;
-                            &fresh
-                        }
-                    };
-                    let derived = derive_tx_path_synthetic(db, chosen, &block_hash, leaf_index)?;
-                    std::hint::black_box(derived.proof.proof.len());
-                    Ok(core_from_derive(&derived))
-                },
-            )
-        };
-        if args.cold {
-            let stats = phase(true, None);
-            attempted += stats.attempted;
-            succeeded += stats.succeeded;
-        }
-        if args.warm {
-            let db = open_consensus_ro(db_path)?;
-            let stats = phase(false, Some(&db));
-            attempted += stats.attempted;
-            succeeded += stats.succeeded;
+        for &prefetch in &args.prefetch {
+            let pool = prefetch_pool(prefetch)?;
+            let pool = pool.as_ref();
+            let phase = |cold: bool, shared: Option<&DatabaseEnv>| {
+                let chosen = &chosen;
+                measure(
+                    &format!("derive-synthetic-N={width} prefetch={prefetch}"),
+                    cold,
+                    args.threads,
+                    args.samples,
+                    Some(db_path),
+                    disk.as_ref(),
+                    true,
+                    move |_rng| {
+                        let fresh;
+                        let db = match shared {
+                            Some(db) => db,
+                            None => {
+                                fresh = open_consensus_ro(db_path)?;
+                                &fresh
+                            }
+                        };
+                        let derived = derive_tx_path_synthetic_with(
+                            db,
+                            chosen,
+                            &block_hash,
+                            leaf_index,
+                            pool,
+                        )?;
+                        std::hint::black_box(derived.proof.proof.len());
+                        Ok(core_from_derive(&derived))
+                    },
+                )
+            };
+            if args.cold {
+                let stats = phase(true, None);
+                attempted += stats.attempted;
+                succeeded += stats.succeeded;
+            }
+            if args.warm {
+                let db = open_consensus_ro(db_path)?;
+                let stats = phase(false, Some(&db));
+                attempted += stats.attempted;
+                succeeded += stats.succeeded;
+            }
         }
     }
     Ok((attempted, succeeded))
@@ -1528,6 +1562,7 @@ struct PartialArgs {
     chunk_size: Option<u64>,
     ledgers: Option<Vec<DataLedger>>,
     synthetic: Option<Vec<usize>>,
+    prefetch: Option<Vec<usize>>,
     span: Option<(u32, u32)>,
     prepare: Option<PathBuf>,
     temperature: Option<bool>,
@@ -1552,6 +1587,7 @@ impl PartialArgs {
             chunk_size: self.chunk_size.unwrap_or(defaults.chunk_size),
             ledgers: self.ledgers.unwrap_or(defaults.ledgers),
             synthetic: self.synthetic.unwrap_or(defaults.synthetic),
+            prefetch: self.prefetch.unwrap_or(defaults.prefetch),
             warm,
             cold,
             index_span: self.span,
@@ -1627,6 +1663,11 @@ fn apply_flag(
         ),
         "--synthetic" => set_once(
             &mut partial.synthetic,
+            parse_synthetic(next_value(raw, index_at, flag)?)?,
+            flag,
+        ),
+        "--prefetch" => set_once(
+            &mut partial.prefetch,
             parse_synthetic(next_value(raw, index_at, flag)?)?,
             flag,
         ),
