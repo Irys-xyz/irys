@@ -303,7 +303,7 @@ fn load_outcomes(base: &Path) -> HashMap<String, Outcome> {
     let mut map = HashMap::new();
     for t in stats.tests {
         if let Some(name) = t.test_name {
-            // With retries=0 there should be one entry per test; last wins.
+            // `--retries 0` gives one entry per test.
             map.insert(
                 name,
                 Outcome {
@@ -373,7 +373,9 @@ fn run_teed(
 
 /// Result of a single isolated test invocation.
 enum IsoResult {
-    Passed,
+    Passed {
+        duration_ms: u64,
+    },
     Failed {
         timed_out: bool,
         duration_ms: u64,
@@ -411,6 +413,8 @@ fn run_isolated(
         "--test-threads",
         "1",
         "--no-fail-fast",
+        "--retries",
+        "0",
         // Stream the test's own stdout/stderr (panics, tracing) into our capture
         // instead of letting nextest buffer it — this is what makes the isolated
         // failure logs actually useful.
@@ -445,7 +449,7 @@ fn run_isolated(
     }
 
     if output.status.success() {
-        Ok(IsoResult::Passed)
+        Ok(IsoResult::Passed { duration_ms })
     } else {
         // A SIGTERM-driven timeout shows up in nextest output; best-effort tag.
         let timed_out = text.contains("SIGTERM") || text.contains("timed out");
@@ -528,14 +532,20 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     // Build tests once up front so compile time doesn't pollute iteration 1 and
     // every iteration measures pure test time. Fail fast: a compile error here
     // must abort, otherwise every phase fails confusingly downstream.
+    // Same target set as phases 1 and 2, so a compile error stops the run here
+    // instead of inside a teed phase, where nextest's exit code is not checked.
     println!("Prebuilding tests (cargo nextest run --no-run)...");
-    remove_ring_env_vars(cmd!(sh, "cargo nextest run --workspace --no-run"))
-        .env("RUST_BACKTRACE", "1")
-        .run()?;
+    remove_ring_env_vars(cmd!(
+        sh,
+        "cargo nextest run --workspace --tests --all-targets --no-run"
+    ))
+    .env("RUST_BACKTRACE", "1")
+    .run()?;
 
     // Build the wrapper and generate the phase-1 config (default profile with
-    // the monitoring run-wrapper attached — retries stay at the profile default
-    // of 0 so a nextest-level retry never masks a flake).
+    // the monitoring run-wrapper attached). Every nextest call here passes
+    // `--retries 0`: a retry that passes would hide the failure this command
+    // looks for, whatever the profile's own `retries` is.
     let wrapper_path = build_wrapper(sh, None)?;
     let wrapper_str = wrapper_path.to_string_lossy().to_string();
     let phase1_config = generate_nextest_config(&wrapper_str, None, false)?;
@@ -592,6 +602,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 "--tests".to_string(),
                 "--all-targets".to_string(),
                 "--no-fail-fast".to_string(),
+                "--retries".to_string(),
+                "0".to_string(),
                 "--config-file".to_string(),
                 phase1_config_path.clone(),
             ];
@@ -607,6 +619,15 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             run_teed(sh, &args, &stats_base, &log_path)?;
 
             let outcomes = load_outcomes(&stats_base);
+            // The teed run hides nextest errors (no tests, build or setup
+            // failure), so an iteration with no results is a broken run, not a
+            // clean one.
+            if outcomes.is_empty() {
+                eyre::bail!(
+                    "phase 1 iteration {i} recorded no test results; see {}",
+                    log_path.display()
+                );
+            }
             for (name, outcome) in outcomes {
                 phase1.entry(name).or_default().record(outcome);
             }
@@ -680,6 +701,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 "--tests".to_string(),
                 "--all-targets".to_string(),
                 "--no-fail-fast".to_string(),
+                "--retries".to_string(),
+                "0".to_string(),
                 "--config-file".to_string(),
                 stress_config_path.clone(),
                 "--profile".to_string(),
@@ -728,11 +751,11 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 let tmp_log = test_dir.join(format!("run-{i}.log"));
                 let result = run_isolated(test, &tmp_log, opts.isolation_log.as_deref())?;
                 match result {
-                    IsoResult::Passed => {
+                    IsoResult::Passed { duration_ms } => {
                         counts.record(Outcome {
                             passed: true,
                             timed_out: false,
-                            duration_ms: 0,
+                            duration_ms,
                         });
                         let _ = fs::rename(&tmp_log, test_dir.join(format!("run-{i}.pass.log")));
                         summary.push_str(&format!("run {i}: PASS\n"));
