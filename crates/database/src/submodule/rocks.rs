@@ -119,10 +119,14 @@ fn u32_user_key(bytes: Option<&[u8]>) -> Option<u32> {
 /// `full-filters` turn it off so the private cache size is the one that
 /// opens. `no-wal-recycle` turns WAL file reuse off (baseline reuses 4).
 /// `fdatasync-wal` keeps every other baseline field and selects `fdatasync`.
-/// The rotate presets cap the live WAL at [`WAL_ROTATE_BYTES`]. Options are
-/// fixed at open. A new block size or a filter change needs an empty
-/// directory. An existing SST keeps the filter it was built with until a
-/// compaction rewrites the file.
+/// The rotate presets cap the live WAL at [`WAL_ROTATE_BYTES`]. `all-blooms`
+/// puts the 10-bit bloom on every column family. Baseline puts it only on
+/// families whose point lookups miss. Options are fixed at open. A new block
+/// size or a switch between partitioned and full filters needs an empty
+/// directory for a fair read. An existing SST keeps the filter it was built
+/// with until a compaction rewrites it. Opening that directory with the other
+/// bloom scope is safe: a family with no filter policy skips a stored filter,
+/// and a family whose policy name matches uses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
@@ -208,6 +212,12 @@ pub struct RocksTuning {
     /// dedicated thread, off the write lock, and at most one compact is in
     /// flight per database.
     pub small_file_compact_threshold: usize,
+    /// `false` (baseline): 10-bit bloom only on families whose point lookups
+    /// can miss. `true` (`all-blooms`): the same bloom on every family.
+    ///
+    /// Does not change `partition_filters`. An existing SST keeps its own
+    /// filter until compaction rewrites the file.
+    pub bloom_all_families: bool,
     /// Use the process-wide block cache, write-buffer manager, and Env pools.
     ///
     /// `false` builds a private cache of `block_cache_bytes` and does not
@@ -236,12 +246,13 @@ impl RocksTuning {
             use_fsync: true,
             max_total_wal_size: 0,
             small_file_compact_threshold: 0,
+            bloom_all_families: false,
             share_resources: true,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 14] {
+    pub const fn presets() -> [Self; 15] {
         let base = Self::baseline();
         [
             base,
@@ -336,6 +347,13 @@ impl RocksTuning {
                 small_file_compact_threshold: SMALL_FILE_COMPACT_THRESHOLD,
                 ..base
             },
+            // Same partitioned filter as baseline, on every column family.
+            // Baseline leaves offset families that never miss without one.
+            Self {
+                name: "all-blooms",
+                bloom_all_families: true,
+                ..base
+            },
         ]
     }
 
@@ -384,9 +402,14 @@ impl RocksTuning {
         } else {
             "full"
         };
+        let blooms = if self.bloom_all_families {
+            "all"
+        } else {
+            "miss"
+        };
         let shared = if self.share_resources { "on" } else { "off" };
         format!(
-            "rocks={} recycle_log_file_num={} use_fsync={} max_total_wal_size={} small_file_compact_threshold={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={} shared_resources={shared}",
+            "rocks={} recycle_log_file_num={} use_fsync={} max_total_wal_size={} small_file_compact_threshold={} compression={compression} block_bytes={} blob={blob} direct_io={direct_io} compaction={compaction} filters={filters} blooms={blooms} jobs={} target_file_bytes={} block_cache_bytes={} cache_shard_bits={} shared_resources={shared}",
             self.name,
             self.recycle_log_file_num,
             self.use_fsync,
@@ -418,6 +441,7 @@ impl RocksTuning {
             + usize::from(self.use_fsync != other.use_fsync)
             + usize::from(self.max_total_wal_size != other.max_total_wal_size)
             + usize::from(self.small_file_compact_threshold != other.small_file_compact_threshold)
+            + usize::from(self.bloom_all_families != other.bloom_all_families)
     }
 }
 
@@ -705,6 +729,17 @@ impl Cf {
 
     fn uses_blobs(self) -> bool {
         matches!(self, Self::DataPath | Self::TxPath)
+    }
+
+    /// Point lookups on this family can miss, so a bloom can reject a block.
+    ///
+    /// `bloom_all_families` forces the filter on the other families too.
+    fn uses_bloom(self, tuning: &RocksTuning) -> bool {
+        tuning.bloom_all_families
+            || matches!(
+                self,
+                Self::PathHashes | Self::TxPath | Self::DataRoots | Self::TxLeaf
+            )
     }
 }
 
@@ -2373,12 +2408,34 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
     let mut table = BlockBasedOptions::default();
     table.set_block_size(tuning.block_bytes);
     // Full filter, 10 bits per key. `false` is not a block-based filter.
-    // Partitioned filters are the production open. One filter for a large
-    // SST does not fit a cache shard. See `RocksTuning::partition_filters`.
-    table.set_bloom_filter(10.0, false);
+    // Only families whose point Gets can miss pay for one. A hit still
+    // reads the value, and an iterator seek never consults a filter, so
+    // the filter is a second I/O and a cache resident on those families.
+    //
+    // DataPath Gets run only after the offset row already names a data-path
+    // hash. Interval reads are floor seeks and range scans. Pending point
+    // Gets use a key the pending scan just returned; that scan is itself
+    // an iterator. `optimize_filters_for_hits` would still build a filter
+    // for every non-bottom SST and pin the L0 copy. That is the resident
+    // set this skips, including while the rows are still in L0.
+    //
+    // PathHashes misses when no data-path row is stored yet (an indexed
+    // offset whose body is absent). TxPath, TxLeaf, and DataRoots are
+    // hash keys a caller may not have stored. Those four keep the bloom.
+    // Partitioned filters are the production shape. See
+    // `RocksTuning::partition_filters`. `all-blooms` restores the filter
+    // on the other families.
+    let bloom = cf.uses_bloom(tuning);
+    if bloom {
+        table.set_bloom_filter(10.0, false);
+    }
     if tuning.partition_filters {
         table.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
-        table.set_partition_filters(true);
+        // Partitioned filters require a filter policy. The two-level index
+        // stays either way: it is the index, not the bloom.
+        if bloom {
+            table.set_partition_filters(true);
+        }
         table.set_pin_top_level_index_and_filter(true);
     }
     table.set_cache_index_and_filter_blocks(true);
@@ -4018,6 +4075,12 @@ mod tests {
         assert!(base.use_fsync);
         assert_eq!(base.max_total_wal_size, 0);
         assert_eq!(base.small_file_compact_threshold, 0);
+        assert!(!base.bloom_all_families);
+        assert!(base.describe().contains("blooms=miss"));
+        let all_blooms = RocksTuning::preset("all-blooms")?;
+        assert!(all_blooms.bloom_all_families);
+        assert!(all_blooms.partition_filters);
+        assert!(all_blooms.describe().contains("blooms=all"));
         let no_recycle = RocksTuning::preset("no-wal-recycle")?;
         assert_eq!(no_recycle.recycle_log_file_num, 0);
         assert!(base.describe().contains("recycle_log_file_num=4"));
@@ -4189,6 +4252,113 @@ mod tests {
             "{rotate_compact_opts}"
         );
         Ok(())
+    }
+
+    /// An SST written with a bloom on every family still opens and reads when
+    /// the next open leaves the always-hit families without a filter policy.
+    /// The reverse open reads the same rows. New SSTs take the open's policy.
+    #[test]
+    fn bloom_scope_change_reopens_an_existing_db() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_bloom_scope")
+            .build();
+        let path = dir.path().join("index");
+        let offset = PartitionChunkOffset::from(4);
+        let path_bytes = b"data-path".to_vec();
+        let tx_hash = H256::repeat_byte(9);
+        let tx_bytes = b"tx-path".to_vec();
+        let root = H256::repeat_byte(3);
+        let job = PendingBodyMigration {
+            data_root: root,
+            data_size: 32,
+            start_offset: RelativeChunkOffset(0),
+            block_height: 1,
+            attempts: 0,
+        };
+        {
+            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::preset("all-blooms")?)?;
+            store.update(|tx| {
+                tx.add_full_data_path(offset, path_bytes.clone())?;
+                tx.add_full_tx_path(tx_hash, tx_bytes.clone())?;
+                tx.add_pending_body_migration(offset, &job)?;
+                Ok(())
+            })?;
+            store.flush_memtables()?;
+        }
+        let written = persisted_options(&path)?;
+        assert!(
+            table_options_have_bloom(&written, <ChunkDataPathByOffset as Table>::NAME),
+            "{written}"
+        );
+        assert!(
+            table_options_have_bloom(&written, <TxPathByTxPathHash as Table>::NAME),
+            "{written}"
+        );
+
+        {
+            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
+            assert_eq!(
+                store.view(|tx| tx.get_data_path_by_offset(offset))?,
+                Some(path_bytes.clone())
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(tx_hash))?,
+                Some(tx_bytes.clone())
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_pending_body_migration(offset))?,
+                Some(job.clone())
+            );
+            // Touch the memtables so the following flush writes an SST under
+            // the baseline policy. The rows above already live in the old SST.
+            store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(5), vec![1]))?;
+            store.flush_memtables()?;
+        }
+        let reopened = persisted_options(&path)?;
+        assert!(
+            !table_options_have_bloom(&reopened, <ChunkDataPathByOffset as Table>::NAME),
+            "{reopened}"
+        );
+        assert!(
+            !table_options_have_bloom(&reopened, <PendingBodyMigrationsByOffset as Table>::NAME),
+            "{reopened}"
+        );
+        assert!(
+            table_options_have_bloom(&reopened, <TxPathByTxPathHash as Table>::NAME),
+            "{reopened}"
+        );
+        assert!(
+            table_options_have_bloom(&reopened, <ChunkPathHashesByOffset as Table>::NAME),
+            "{reopened}"
+        );
+
+        let store = RocksSubmoduleStore::open_with(&path, RocksTuning::preset("all-blooms")?)?;
+        assert_eq!(
+            store.view(|tx| tx.get_data_path_by_offset(offset))?,
+            Some(path_bytes)
+        );
+        assert_eq!(
+            store.view(|tx| tx.get_full_tx_path(tx_hash))?,
+            Some(tx_bytes)
+        );
+        assert_eq!(
+            store.view(|tx| tx.get_pending_body_migration(offset))?,
+            Some(job)
+        );
+        Ok(())
+    }
+
+    fn table_options_have_bloom(opts: &str, cf: &str) -> bool {
+        let header = format!("[TableOptions/BlockBasedTable \"{cf}\"]");
+        let Some(start) = opts.find(&header) else {
+            return false;
+        };
+        let rest = &opts[start + header.len()..];
+        let section = match rest.find("\n[") {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+        section.contains("filter_policy=bloomfilter")
     }
 
     #[test]

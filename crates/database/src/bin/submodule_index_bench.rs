@@ -1756,7 +1756,7 @@ index-span writes --chunks offsets in one update. A max transaction is --chunks 
 offset-rows writes --chunks offset rows and no data paths, then does cold point reads. A full partition is --chunks 75534400.\n\
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
-Baseline uses partitioned filters. full-filters is one full filter per SST, one cache shard, and a 128 MiB cache. \
+Baseline uses partitioned filters and a 10-bit bloom only on families whose point lookups miss. all-blooms keeps that shape and puts the bloom on every family. full-filters is one full filter per SST, one cache shard, and a 128 MiB cache. \
 Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, and fdatasync-wal-rotate-compact changes one setting. \
 --rocks-block-cache overrides that preset's cache size and does not change the shard count. A new block size or a switch between baseline and full-filters needs an empty directory. An existing SST keeps its filter until --rewrite-filters.\n\
 --profile filter-reuse opens an existing schema-v1 rocks/ directory. It refuses a directory that also contains mdbx/. \
