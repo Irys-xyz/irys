@@ -176,6 +176,29 @@ fn remove_with_siblings(dir: &Path, exe: &Path, report: &mut PruneReport) -> io:
     Ok(())
 }
 
+/// Delete everything in `target_dir` except the run lock file. The caller holds that lock
+/// exclusively: `cargo clean` would unlink the lock file too, and a run that started meanwhile
+/// would lock a new file and build into the directory being deleted.
+pub fn clean_target_dir(target_dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(target_dir)? {
+        let entry = entry?;
+        if entry.file_name() == RUN_LOCK {
+            continue;
+        }
+        let removed = if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())
+        } else {
+            fs::remove_file(entry.path())
+        };
+        match removed {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Where recorded invocations list the artifacts they used, one file per invocation.
 const USAGE_DIR: &str = "xtask-usage";
 
@@ -667,6 +690,30 @@ mod tests {
 
         drop(run);
         assert!(try_lock_run_exclusive(&target).unwrap().is_some());
+    }
+
+    #[test]
+    fn clean_target_dir_keeps_only_the_held_run_lock() {
+        let f = Fixture::new();
+        let target = f.root.path().join("target");
+        fs::write(target.join("CACHEDIR.TAG"), "").unwrap();
+        let lock = try_lock_run_exclusive(&target).unwrap().unwrap();
+
+        clean_target_dir(&target).unwrap();
+
+        let left: Vec<_> = fs::read_dir(&target)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [RUN_LOCK]);
+        // The lock file is the same inode, so the lock still excludes other runs.
+        assert!(lock_run_shared_nonblocking(&target).is_none());
+        drop(lock);
+    }
+
+    fn lock_run_shared_nonblocking(target: &Path) -> Option<fs::File> {
+        let file = open_run_lock(target).unwrap();
+        file.try_lock_shared().ok().map(|()| file)
     }
 
     mod units {

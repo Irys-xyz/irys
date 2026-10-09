@@ -527,17 +527,17 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     .run();
 
     if opts.clean {
-        // `cargo clean` deletes the whole target dir: another xtask run's binaries and the run
-        // lock file too. Clean only while no other run holds that lock.
+        // Cleaning deletes another xtask run's binaries, so it runs only while this run holds
+        // the run lock exclusively, and it keeps the lock file (see `prune::clean_target_dir`).
         let dir = target_dir()?;
         let Some(_clean_lock) = prune::try_lock_run_exclusive(&dir)? else {
             eyre::bail!(
-                "--clean: another xtask run is using {}; cargo clean would delete its files",
+                "--clean: another xtask run is using {}; cleaning would delete its files",
                 dir.display()
             );
         };
-        println!("Cleaning workspace...");
-        cmd!(sh, "cargo clean").run()?;
+        println!("Cleaning {}...", dir.display());
+        prune::clean_target_dir(&dir)?;
     }
 
     // Build tests once up front so compile time doesn't pollute iteration 1 and
