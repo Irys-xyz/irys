@@ -42,7 +42,7 @@ enum Commands {
         )]
         coverage: bool,
         /// Only run tests that failed in the previous run
-        #[clap(long, default_value_t = false)]
+        #[clap(long, default_value_t = false, conflicts_with = "clean")]
         rerun_failures: bool,
         /// Clear the failures file and run all tests clean
         #[clap(long, default_value_t = false)]
@@ -715,14 +715,13 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Doc { args } => {
             println!("cargo doc");
-            cmd!(sh, "cargo doc --workspace --no-deps {args...}").remove_and_run()?;
-
+            // Outside CI, also open the generated docs in the browser. `--open`
+            // lets cargo pick the right index page rather than hardcoding a
+            // crate name.
             if std::env::var("CI").is_err() {
-                #[cfg(target_os = "macos")]
-                cmd!(sh, "open target/doc/irys/index.html").remove_and_run()?;
-
-                #[cfg(target_os = "linux")]
-                cmd!(sh, "xdg-open target/doc/irys/index.html").remove_and_run()?;
+                cmd!(sh, "cargo doc --workspace --no-deps --open {args...}").remove_and_run()?;
+            } else {
+                cmd!(sh, "cargo doc --workspace --no-deps {args...}").remove_and_run()?;
             }
         }
         Commands::Typos => {
