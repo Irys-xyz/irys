@@ -2019,6 +2019,7 @@ impl IrysNode {
             &service_senders,
             reth_node_adapter.clone(),
             irys_db.clone(),
+            storage_modules_guard.clone(),
             execution_payload_cache.clone(),
             receivers.validation_service,
             runtime_handle.clone(),

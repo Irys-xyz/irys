@@ -18,7 +18,7 @@ use crate::{
     services::ServiceSenders,
 };
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache,
+    BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, StorageModulesReadGuard,
     chain_sync_state::ChainSyncState,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -269,6 +269,9 @@ pub(crate) struct ValidationServiceInner {
     pub validation_enabled: Arc<AtomicBool>,
     /// Chain sync state for recording diagnostic info
     pub(crate) chain_sync_state: ChainSyncState,
+    /// Local partitions. Full ingress-proof validation reads a body from here
+    /// when the cache row has no bytes.
+    pub(crate) storage_modules_guard: StorageModulesReadGuard,
 }
 
 impl ValidationService {
@@ -283,6 +286,7 @@ impl ValidationService {
         service_senders: &ServiceSenders,
         reth_node_adapter: IrysRethNodeAdapter,
         db: DatabaseProvider,
+        storage_modules_guard: StorageModulesReadGuard,
         execution_payload_provider: ExecutionPayloadCache,
         rx: UnboundedReceiver<Traced<ValidationServiceMessage>>,
         runtime_handle: tokio::runtime::Handle,
@@ -316,6 +320,7 @@ impl ValidationService {
                         reth_node_adapter,
                         db,
                         execution_payload_provider,
+                        storage_modules_guard,
                         validation_enabled: validation_enabled_clone,
                         chain_sync_state,
                     }),

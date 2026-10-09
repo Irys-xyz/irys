@@ -802,6 +802,7 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
         transactions,
         parent_epoch_snapshot,
         parent_ema_snapshot,
+        &ctx.node.node_ctx.storage_modules_guard,
     )
     .await;
 
@@ -1072,6 +1073,7 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
         bad_block.transactions(),
         parent_epoch_snapshot,
         parent_ema_snapshot,
+        &ctx.node.node_ctx.storage_modules_guard,
     )
     .await;
 
@@ -1276,6 +1278,7 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
         bad_block.transactions(),
         parent_epoch_snapshot,
         parent_ema_snapshot,
+        &ctx.node.node_ctx.storage_modules_guard,
     )
     .await;
 
@@ -1518,6 +1521,7 @@ async fn test_prevalidation_ignores_content_verified_row_inside_walk_window() ->
         bad_block.transactions(),
         parent_epoch_snapshot,
         parent_ema_snapshot,
+        &ctx.node.node_ctx.storage_modules_guard,
     )
     .await;
 

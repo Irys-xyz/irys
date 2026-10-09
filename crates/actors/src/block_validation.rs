@@ -18,7 +18,7 @@ use irys_database::{
 use irys_domain::{
     BlockBounds, BlockBoundsError, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard,
     CommitmentSnapshot, CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
-    HardforkConfigExt as _,
+    HardforkConfigExt as _, StorageModulesReadGuard,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
@@ -6204,6 +6204,71 @@ fn validate_term_ledger_expiry(
     Ok(())
 }
 
+/// Bytes for one ingress-proof chunk from the local cache or a storage module.
+///
+/// A cache row with `chunk: None` is a miss. A storage-module body is accepted
+/// only when the unpacked chunk names this data root and tx offset. `Ok(None)`
+/// means both sources missed, so the caller tries peers.
+fn ingress_proof_chunk_bytes_from_local(
+    db: &DatabaseProvider,
+    storage_modules: &StorageModulesReadGuard,
+    config: &Config,
+    data_root: H256,
+    tx_offset: irys_types::TxChunkOffset,
+) -> Result<Option<Vec<u8>>, PreValidationError> {
+    let cached = db
+        .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_root, tx_offset))
+        .map_err(|error| PreValidationError::DatabaseError {
+            error: error.to_string(),
+        })?;
+    if let Some((_meta, cached_chunk)) = cached
+        && let Some(bytes) = cached_chunk.chunk
+    {
+        return Ok(Some(bytes.0));
+    }
+
+    let modules = storage_modules.read();
+    for module in modules.iter() {
+        let offsets = match module.partition_offsets_for_data_root_chunk(data_root, tx_offset) {
+            Ok(Some(offsets)) => offsets,
+            Ok(None) => continue,
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    %data_root,
+                    %tx_offset,
+                    "storage module placement lookup failed; trying the next module"
+                );
+                continue;
+            }
+        };
+        for offset in offsets {
+            let packed = match module.generate_full_chunk(offset) {
+                Ok(Some(packed)) => packed,
+                Ok(None) => continue,
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        partition.offset = offset.0,
+                        "storage module chunk read failed; trying the next offset"
+                    );
+                    continue;
+                }
+            };
+            let unpacked = irys_packing::unpack(
+                &packed,
+                config.consensus.entropy_packing_iterations,
+                config.consensus.chunk_size as usize,
+                config.consensus.chain_id,
+            );
+            if unpacked.data_root == data_root && unpacked.tx_offset == tx_offset {
+                return Ok(Some(unpacked.bytes.0));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Validates that data transactions in a block are correctly placed and have valid properties
 /// based on their ledger placement (Submit or Publish) and ingress proof availability.
 /// - Transactions in Publish ledger must have prior inclusion in Submit ledger
@@ -6223,6 +6288,7 @@ pub async fn data_txs_are_valid(
     transactions: &BlockTransactions,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_ema_snapshot: Arc<EmaSnapshot>,
+    storage_modules: &StorageModulesReadGuard,
 ) -> Result<(), PreValidationError> {
     // Extract transaction slices from BlockTransactions
     let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
@@ -6680,10 +6746,6 @@ pub async fn data_txs_are_valid(
                 let expected_chunk_count =
                     tx_header.data_size.div_ceil(config.consensus.chunk_size);
 
-                let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
-                    error: e.to_string(),
-                })?;
-
                 let mut chunks: Vec<irys_types::ChunkBytes> =
                     Vec::with_capacity(expected_chunk_count as usize);
 
@@ -6717,18 +6779,17 @@ pub async fn data_txs_are_valid(
                         })?;
                     let tx_chunk_offset = irys_types::TxChunkOffset::from(tx_offset_u32);
 
-                    // Try local cache first
-                    let mut maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
-                        &ro_tx,
+                    // Cache body, then a local storage module. An index row with
+                    // no body is a miss. Peers run only when both miss.
+                    let mut chunk_bytes = ingress_proof_chunk_bytes_from_local(
+                        db,
+                        storage_modules,
+                        config,
                         tx_header.data_root,
                         tx_chunk_offset,
-                    )
-                    .map_err(|e| PreValidationError::DatabaseError {
-                        error: e.to_string(),
-                    })?;
+                    )?;
 
-                    // If missing locally, attempt fetch-on-miss from pre-selected peers and ingest
-                    if maybe_chunk.is_none() {
+                    if chunk_bytes.is_none() {
                         for api_addr in api_addrs.iter() {
                             // Build data_root/offset fetch URL using peer API address
                             let url = format!(
@@ -6831,47 +6892,30 @@ pub async fn data_txs_are_valid(
                                 },
                             }
 
-                            // Re-open a fresh read tx to observe the write
-                            let ro_tx2 =
-                                db.tx().map_err(|e| PreValidationError::DatabaseError {
-                                    error: e.to_string(),
-                                })?;
-                            maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
-                                &ro_tx2,
+                            // Ingest writes the body into the cache. An index-only
+                            // row is still a miss, so try the next peer.
+                            chunk_bytes = ingress_proof_chunk_bytes_from_local(
+                                db,
+                                storage_modules,
+                                config,
                                 tx_header.data_root,
                                 tx_chunk_offset,
-                            )
-                            .map_err(|e| {
-                                PreValidationError::DatabaseError {
-                                    error: format!(
-                                        "Failed to fetch chunk for tx {} (data_root: {:?}, chunk_offset: {}): {}",
-                                        tx_header.id, tx_header.data_root, tx_chunk_offset, e
-                                    ),
-                                }
-                            })?;
-
-                            if maybe_chunk.is_some() {
+                            )?;
+                            if chunk_bytes.is_some() {
                                 break;
                             }
                         }
                     }
 
-                    let (_meta, cached_chunk) =
-                        maybe_chunk.ok_or_else(|| PreValidationError::InvalidIngressProof {
+                    let chunk_bytes =
+                        chunk_bytes.ok_or_else(|| PreValidationError::InvalidIngressProof {
                             tx_id: tx_header.id,
                             reason: format!(
                                 "Data unavailable: missing chunk at offset {} for data_root {:?}",
                                 i, tx_header.data_root
                             ),
                         })?;
-
-                    let chunk_bytes = cached_chunk.chunk.ok_or_else(|| {
-                        PreValidationError::InvalidIngressProof {
-                            tx_id: tx_header.id,
-                            reason: "Missing chunk body bytes".to_string(),
-                        }
-                    })?;
-                    chunks.push(chunk_bytes.0);
+                    chunks.push(chunk_bytes);
                 }
 
                 // Verify each ingress proof against the actual chunks
@@ -9390,5 +9434,212 @@ mod commitment_version_tests {
                 prop_assert!(result.is_some());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ingress_proof_local_bytes_tests {
+    use super::*;
+    use irys_database::{
+        IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
+    };
+    use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Base64, ConsensusConfig, DataTransaction, DataTransactionLedger, LedgerChunkOffset,
+        NodeConfig, PartitionChunkOffset, TxChunkOffset, UnpackedChunk, irys::IrysSigner,
+        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+    use std::sync::{Arc, RwLock};
+
+    fn testing_config(base: std::path::PathBuf) -> Config {
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base,
+            ..NodeConfig::testing()
+        };
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    fn open_db(path: &std::path::Path) -> DatabaseProvider {
+        let env = open_or_create_db(
+            path,
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        DatabaseProvider(Arc::new(env))
+    }
+
+    fn one_chunk(config: &Config) -> (DataTransaction, Vec<u8>) {
+        let data = vec![7_u8; config.consensus.chunk_size as usize];
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .create_transaction(data.clone(), H256::zero())
+            .unwrap();
+        (signer.sign_transaction(tx).unwrap(), data)
+    }
+
+    fn cache_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
+        db.update_eyre(|wtx| {
+            cache_data_root(wtx, &tx.header, None)?;
+            cache_chunk(
+                wtx,
+                &UnpackedChunk {
+                    data_root: tx.header.data_root,
+                    data_size: tx.header.data_size,
+                    data_path: Base64(tx.proofs[0].proof.clone()),
+                    bytes: Base64(data.to_vec()),
+                    tx_offset: TxChunkOffset::from(0_u32),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn strip_body(db: &DatabaseProvider, tx: &DataTransaction) {
+        use irys_database::db_cache::CachedChunk;
+        use irys_database::tables::CachedChunks;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
+        db.update_eyre(|wtx| {
+            let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
+            wtx.put::<CachedChunks>(
+                path_hash,
+                CachedChunk {
+                    chunk: None,
+                    data_path: existing.data_path,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn empty_modules() -> StorageModulesReadGuard {
+        StorageModulesReadGuard::new(Arc::new(RwLock::new(Vec::new())))
+    }
+
+    fn local_bytes(
+        db: &DatabaseProvider,
+        modules: &StorageModulesReadGuard,
+        config: &Config,
+        tx: &DataTransaction,
+    ) -> Option<Vec<u8>> {
+        ingress_proof_chunk_bytes_from_local(
+            db,
+            modules,
+            config,
+            tx.header.data_root,
+            TxChunkOffset::from(0_u32),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cache_body_is_used_when_no_storage_module_is_assigned() {
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress-cache-body")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf());
+        let db = open_db(&tmp.path().join("db"));
+        let (tx, data) = one_chunk(&config);
+        cache_body(&db, &tx, &data);
+        let modules = empty_modules();
+        assert_eq!(
+            local_bytes(&db, &modules, &config, &tx).as_deref(),
+            Some(data.as_slice())
+        );
+    }
+
+    #[test]
+    fn index_only_row_with_no_local_body_is_a_miss() {
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress-index-only-miss")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf());
+        let db = open_db(&tmp.path().join("db"));
+        let (tx, data) = one_chunk(&config);
+        cache_body(&db, &tx, &data);
+        strip_body(&db, &tx);
+        let modules = empty_modules();
+        assert!(local_bytes(&db, &modules, &config, &tx).is_none());
+    }
+
+    #[test]
+    fn index_only_row_uses_the_storage_module_body() {
+        let tmp = TempDirBuilder::new()
+            .prefix("ingress-index-only-sm")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf());
+        let (tx, data) = one_chunk(&config);
+        let assignment = PartitionAssignment {
+            partition_hash: H256::repeat_byte(1),
+            miner_address: config.node_config.miner_address(),
+            ..PartitionAssignment::default()
+        };
+        let sm = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(assignment),
+                submodules: vec![(partition_chunk_offset_ie!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )
+        .unwrap();
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )
+        .unwrap();
+
+        let chunk_size = config.consensus.chunk_size as usize;
+        let mut entropy = Vec::with_capacity(chunk_size);
+        irys_packing::capacity_single::compute_entropy_chunk(
+            config.node_config.miner_address(),
+            0,
+            sm.partition_hash().unwrap().0,
+            config.consensus.entropy_packing_iterations,
+            chunk_size,
+            &mut entropy,
+            config.consensus.chain_id,
+        );
+        assert!(sm.write_chunk(
+            PartitionChunkOffset::from(0_u32),
+            entropy,
+            ChunkType::Entropy,
+        ));
+        sm.sync_pending_chunks().unwrap();
+        sm.write_data_chunk(&UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[0].proof.clone()),
+            bytes: Base64(data.clone()),
+            tx_offset: TxChunkOffset::from(0_u32),
+        })
+        .unwrap();
+        sm.sync_pending_chunks().unwrap();
+
+        let db = open_db(&tmp.path().join("db"));
+        cache_body(&db, &tx, &data);
+        strip_body(&db, &tx);
+        let modules = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![Arc::new(sm)])));
+        assert_eq!(
+            local_bytes(&db, &modules, &config, &tx).as_deref(),
+            Some(data.as_slice())
+        );
     }
 }

@@ -984,6 +984,7 @@ impl BlockValidationTask {
                 txs,
                 data_txs_epoch_snapshot,
                 data_txs_ema_snapshot,
+                &self.service_inner.storage_modules_guard,
             )
             .instrument(tracing::info_span!(
                 "data_txs_validation",
