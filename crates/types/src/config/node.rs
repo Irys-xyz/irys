@@ -70,12 +70,18 @@ pub enum SubmoduleIndexEngine {
 /// loaded and dropped on every lookup. 1 GiB is 16 MiB per shard. The
 /// write-buffer manager charges memtables to this cache, so this value must
 /// be at least [`DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES`].
+///
+/// Inline data-path and tx-path blocks live here too. There is no separate
+/// blob cache for new values. A directory that still has blob files reads
+/// them through this same cache until compaction inlines them.
 pub const DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Memtable budget for every RocksDB submodule index in the process.
 ///
 /// An idle column family holds about 1 MiB. Forty databases and nine
 /// families are about 360 MiB, which fits in 512 MiB. The cache must be at
-/// least this large because the charge lives in the block cache.
+/// least this large because the charge lives in the block cache. A path
+/// value sits in the memtable until flush whether or not blob files are
+/// enabled, so this budget does not grow when values stay inline.
 pub const DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
 /// High-priority Env threads. Flushes use this pool. The pool is process-wide.
 ///

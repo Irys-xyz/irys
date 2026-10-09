@@ -10,17 +10,26 @@
 //! is indexed. RocksDB has no O(1) count once the overlay hides keys, so a
 //! heal scan reads the intervals that touch the window.
 //!
-//! Large data-path and tx-path values go to blob files so compaction does
-//! not rewrite them. Small offset rows stay in SST blocks. rust-rocksdb
-//! 0.24 has no `set_allow_fallocate` (the RocksDB default stays on). WAL
-//! recycle, `wal_bytes_per_sync`, `use_fsync`, and `max_total_wal_size` are
-//! the durability knobs this binding exposes. Every open keeps SST readers
-//! (`max_open_files=-1`, 16 opening threads). Blob readers stay lazy.
+//! Data-path and tx-path values stay in SST blocks. LZ4 compresses
+//! neighbouring proofs inside one block. The `blobs` preset still extracts
+//! values at or above [`BLOB_MIN_BYTES`] into blob files. A directory that
+//! already has blob files keeps reading them. A compaction that rewrites
+//! the SST stores those values inline, including the bottommost compaction
+//! a normal open schedules once no snapshot still needs the old sequence
+//! numbers. A trivial move does not rewrite the SST, so that blob file
+//! stays until a later compaction reads it. rust-rocksdb 0.24 has no
+//! `set_allow_fallocate` (the RocksDB default stays on). WAL recycle,
+//! `wal_bytes_per_sync`,
+//! `use_fsync`, and `max_total_wal_size` are the durability knobs this
+//! binding exposes. Every open keeps SST readers (`max_open_files=-1`,
+//! 16 opening threads). Legacy blob readers stay lazy.
 //!
 //! A production open shares one block cache, one write-buffer manager, and
-//! the process Env thread pools. A bench preset can opt out and keep a
-//! private cache. `max_open_files` stays `-1`: a finite cap drops table
-//! readers and reloads the filter on the next read.
+//! the process Env thread pools. Inline path blocks use that cache. There
+//! is no separate blob cache for new values. Legacy blob reads use the same
+//! cache until compaction drops the files. A bench preset can opt out and
+//! keep a private cache. `max_open_files` stays `-1`: a finite cap drops
+//! table readers and reloads the filter on the next read.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -61,10 +70,20 @@ use crate::metadata::MetadataKey;
 /// User-data block size. Uncompressed. Reads of the offset index pull this much.
 const BLOCK_BYTES: usize = 64 * 1024;
 /// Private block cache for an open that opts out of [`RocksResources`].
-/// Production baseline does not use this size.
+/// Production baseline does not use this size. Inline path blocks use this
+/// cache on that open. It is not a separate blob-cache budget.
 pub const BLOCK_CACHE_BYTES: usize = 64 * 1024 * 1024;
-/// Values at or above this size move into blob files on the path column families.
+/// Uncompressed size at or above which the `blobs` preset writes a path
+/// value to a blob file. Baseline stores that value in the SST.
 pub const BLOB_MIN_BYTES: u64 = 2048;
+/// Age cutoff for blob GC when new blob files are off.
+///
+/// 1.0 marks every existing blob file old, so a compaction that rewrites
+/// the SST stores each value inline. A trivial move does not read the
+/// value, so that file stays until a later compaction rewrites it.
+/// Bottommost compaction is one of those rewrites: a normal open runs it
+/// for a file whose sequence numbers no snapshot still needs.
+const LEGACY_BLOB_GC_AGE_CUTOFF: f64 = 1.0;
 /// Per-database background-job cap. The process Env pools are separate.
 /// The bench can select another preset.
 const BACKGROUND_JOBS: i32 = 2;
@@ -142,9 +161,15 @@ pub struct RocksTuning {
     /// inserted and dropped. `full-filters` uses one shard and 128 MiB so
     /// that block can stay.
     pub cache_shard_bits: i32,
-    /// `true` is LZ4 on SST and blob files. `false` stores both uncompressed.
+    /// `true` is LZ4 on SST blocks and, when blob files are on, on blob files.
+    /// `false` stores both uncompressed.
     pub compress: bool,
-    /// Blob files on the data-path and tx-path families.
+    /// Blob files for new data-path and tx-path values.
+    ///
+    /// `false` (baseline) stores those values in SST blocks. A family that
+    /// already has blob files still reads them, and compaction inlines them.
+    /// `true` (`blobs`) writes values at or above [`BLOB_MIN_BYTES`] to blob
+    /// files.
     pub blobs: bool,
     /// Direct I/O for flush and compaction. Reads stay buffered.
     pub direct_io: bool,
@@ -238,7 +263,7 @@ impl RocksTuning {
             block_cache_bytes: BLOCK_CACHE_BYTES,
             cache_shard_bits: -1,
             compress: true,
-            blobs: true,
+            blobs: false,
             direct_io: false,
             background_jobs: BACKGROUND_JOBS,
             target_file_bytes: TARGET_FILE_BYTES,
@@ -274,9 +299,10 @@ impl RocksTuning {
                 share_resources: false,
                 ..base
             },
+            // Blob files for new path values. Baseline stores them in the SST.
             Self {
-                name: "no-blob",
-                blobs: false,
+                name: "blobs",
+                blobs: true,
                 ..base
             },
             Self {
@@ -537,6 +563,12 @@ impl RocksResourceLimits {
 /// replaces it with another arena, so a stall cannot reclaim that floor.
 /// Forty databases and nine families are about 360 MiB. That fits in the
 /// 512 MiB budget. Above that floor, raise both this budget and the cache.
+///
+/// A path value sits in the memtable until flush whether or not blob files
+/// are enabled, so this floor does not change when values stay inline.
+/// After flush those bytes are SST blocks in the block cache, not a second
+/// blob cache. Legacy blob reads use the same cache until compaction
+/// inlines them.
 pub struct RocksResources {
     limits: RocksResourceLimits,
     cache: rocksdb::Cache,
@@ -729,6 +761,8 @@ impl Cf {
         }
     }
 
+    /// Path families. Baseline stores new values inline and garbage-collects
+    /// an existing blob file. The `blobs` preset still writes one.
     fn uses_blobs(self) -> bool {
         matches!(self, Self::DataPath | Self::TxPath)
     }
@@ -1009,9 +1043,10 @@ impl RocksSubmoduleStore {
 
     /// Opens a conversion target. Does not write the SCHEMA file or the schema row.
     ///
-    /// [`Self::stamp_schema_marker`] writes both after the copy is durable.
-    /// A crash before that leaves `CURRENT` and no SCHEMA file. [`Self::open`]
-    /// refuses that directory.
+    /// Uses [`RocksTuning::baseline`], so copied path values are inline.
+    /// [`Self::stamp_schema_marker`] writes both markers after the copy is
+    /// durable. A crash before that leaves `CURRENT` and no SCHEMA file.
+    /// [`Self::open`] refuses that directory.
     pub(super) fn open_converting(path: impl AsRef<Path>) -> eyre::Result<Self> {
         Self::open_inner(path, RocksTuning::baseline(), true, false, None, false)
     }
@@ -1858,6 +1893,34 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
+    /// Live blob files in one column family. `0` when the version has none.
+    #[cfg(test)]
+    fn blob_file_count(&self, cf: Cf) -> eyre::Result<u64> {
+        let handle = cf_handle(&self.db, cf)?;
+        self.db
+            .property_int_value_cf(&handle, "rocksdb.num-blob-files")
+            .wrap_err("read rocksdb.num-blob-files")?
+            .ok_or_else(|| eyre::eyre!("rocksdb.num-blob-files missing for {}", cf.name()))
+    }
+
+    /// Flush, then compact one family and rewrite the bottom level.
+    ///
+    /// A plain `compact_range` can trivial-move an SST and leave its blob
+    /// indexes in place. Forcing the bottom level runs the compaction
+    /// iterator, which inlines a legacy blob when blob files are off.
+    #[cfg(test)]
+    fn compact_column_force(&self, cf: Cf) -> eyre::Result<()> {
+        let _guard = self.lock_write();
+        let handle = cf_handle(&self.db, cf)?;
+        self.db.flush_cf(&handle).wrap_err("flush column family")?;
+        let mut opts = rocksdb::CompactOptions::default();
+        opts.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::Force);
+        opts.set_exclusive_manual_compaction(true);
+        self.db
+            .compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
+        Ok(())
+    }
+
     /// Keep flushed L0 files in place so a test can pile up tiny SSTs.
     #[cfg(test)]
     fn disable_auto_compaction(&self) -> eyre::Result<()> {
@@ -2320,8 +2383,10 @@ fn open_db(
     // See `RocksTuning::max_total_wal_size`.
     db_opts.set_max_total_wal_size(tuning.max_total_wal_size);
     // A 512 cap evicts SST readers. The next Get then reads the footer,
-    // index, and filter. -1 keeps every table open. Blob readers stay lazy.
-    // A full submodule is a few dozen SST files plus lazy blob files.
+    // index, and filter. -1 keeps every table open. Legacy blob readers
+    // stay lazy. A full submodule is a few dozen SST files. A directory
+    // that still has blob files adds those, and they go away as compaction
+    // inlines them.
     // Forty of those stay under a normal nofile limit. A finite cap brings
     // the table-reader reload cliff back, so this stays -1.
     db_opts.set_max_open_files(-1);
@@ -2465,16 +2530,42 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
     opts.set_use_direct_io_for_flush_and_compaction(tuning.direct_io);
     opts.set_write_buffer_size(64 * 1024 * 1024);
     opts.set_max_write_buffer_number(2);
-    if tuning.blobs && cf.uses_blobs() {
-        opts.set_enable_blob_files(true);
-        opts.set_min_blob_size(BLOB_MIN_BYTES);
-        opts.set_blob_file_size(256 * 1024 * 1024);
-        opts.set_blob_compression_type(compression);
-        opts.set_enable_blob_gc(true);
-        opts.set_blob_compaction_readahead_size(2 * 1024 * 1024);
+    if cf.uses_blobs() {
+        // One cache for SST blocks and for any blob file this family still
+        // has. New inline values do not get a second cache.
         opts.set_blob_cache(cache);
+        opts.set_blob_compaction_readahead_size(2 * 1024 * 1024);
+        if tuning.blobs {
+            opts.set_enable_blob_files(true);
+            opts.set_min_blob_size(BLOB_MIN_BYTES);
+            opts.set_blob_file_size(256 * 1024 * 1024);
+            opts.set_blob_compression_type(compression);
+            opts.set_enable_blob_gc(true);
+        } else {
+            // `enable_blob_files` stays off, so a flushed value is an SST
+            // record. GC still runs: a compaction that rewrites an old blob
+            // index stores the bytes inline. Cutoff 1.0 selects every blob
+            // file. A trivial move does not rewrite, so that file stays
+            // until a later compaction reads it.
+            opts.set_enable_blob_files(false);
+            opts.set_enable_blob_gc(true);
+            opts.set_blob_gc_age_cutoff(LEGACY_BLOB_GC_AGE_CUTOFF);
+        }
+    }
+    #[cfg(test)]
+    if OPEN_DISABLE_AUTO_COMPACTION.with(std::cell::Cell::get) {
+        // A normal open schedules bottommost compaction, which rewrites a
+        // blob SST and inlines it. Tests that must read the blob file set
+        // this before open. Manual compaction still runs.
+        opts.set_disable_auto_compactions(true);
     }
     opts
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPEN_DISABLE_AUTO_COMPACTION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// `CURRENT` without SCHEMA is an unfinished conversion. Open must not
@@ -3904,7 +3995,7 @@ mod tests {
     }
 
     /// `clear` is one range tombstone per non-empty index family. It does not
-    /// read values. 100k rows plus one blob must finish well under a scan.
+    /// read values. 100k rows plus one large value must finish well under a scan.
     #[test]
     fn clear_of_a_large_index_leaves_only_metadata() -> eyre::Result<()> {
         const ROWS: u32 = 100_000;
@@ -4092,11 +4183,12 @@ mod tests {
         assert_eq!(base.block_cache_bytes, BLOCK_CACHE_BYTES);
         assert!(
             base.compress
-                && base.blobs
+                && !base.blobs
                 && !base.direct_io
                 && !base.universal
                 && base.partition_filters
         );
+        assert!(base.describe().contains("blob=off"));
         assert_eq!(base.background_jobs, BACKGROUND_JOBS);
         assert_eq!(base.target_file_bytes, TARGET_FILE_BYTES);
         assert!(base.share_resources);
@@ -4110,7 +4202,12 @@ mod tests {
         assert_eq!(cache.block_cache_bytes, 1 << 30);
         assert!(!cache.share_resources);
         assert!(cache.describe().contains("shared_resources=off"));
-        assert!(!RocksTuning::preset("no-blob")?.blobs);
+        assert!(RocksTuning::preset("blobs")?.blobs);
+        assert!(
+            RocksTuning::preset("blobs")?
+                .describe()
+                .contains(&format!("blob=on blob_min_bytes={BLOB_MIN_BYTES}"))
+        );
         assert!(!RocksTuning::preset("no-compress")?.compress);
         assert!(RocksTuning::preset("direct-io")?.direct_io);
         assert!(RocksTuning::preset("universal")?.universal);
@@ -4231,6 +4328,108 @@ mod tests {
         assert!(
             baseline_opts.contains("pin_top_level_index_and_filter=true"),
             "{baseline_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &baseline_opts,
+                <ChunkDataPathByOffset as Table>::NAME,
+                "enable_blob_files"
+            )
+            .as_deref(),
+            Some("false"),
+            "{baseline_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &baseline_opts,
+                <ChunkDataPathByOffset as Table>::NAME,
+                "enable_blob_garbage_collection"
+            )
+            .as_deref(),
+            Some("true"),
+            "{baseline_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &baseline_opts,
+                <ChunkDataPathByOffset as Table>::NAME,
+                "blob_garbage_collection_age_cutoff"
+            )
+            .as_deref(),
+            Some("1.000000"),
+            "{baseline_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &baseline_opts,
+                <TxPathByTxPathHash as Table>::NAME,
+                "enable_blob_files"
+            )
+            .as_deref(),
+            Some("false"),
+            "{baseline_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &baseline_opts,
+                <TxPathByTxPathHash as Table>::NAME,
+                "blob_garbage_collection_age_cutoff"
+            )
+            .as_deref(),
+            Some("1.000000"),
+            "{baseline_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &baseline_opts,
+                <ChunkPathHashesByOffset as Table>::NAME,
+                "enable_blob_garbage_collection"
+            )
+            .as_deref(),
+            Some("false"),
+            "{baseline_opts}"
+        );
+        let blobs_opts = persisted_options(&dir.path().join("blobs"))?;
+        let min_blob = BLOB_MIN_BYTES.to_string();
+        assert_eq!(
+            cf_option(
+                &blobs_opts,
+                <ChunkDataPathByOffset as Table>::NAME,
+                "enable_blob_files"
+            )
+            .as_deref(),
+            Some("true"),
+            "{blobs_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &blobs_opts,
+                <ChunkDataPathByOffset as Table>::NAME,
+                "min_blob_size"
+            )
+            .as_deref(),
+            Some(min_blob.as_str()),
+            "{blobs_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &blobs_opts,
+                <ChunkDataPathByOffset as Table>::NAME,
+                "enable_blob_garbage_collection"
+            )
+            .as_deref(),
+            Some("true"),
+            "{blobs_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &blobs_opts,
+                <ChunkDataPathByOffset as Table>::NAME,
+                "blob_garbage_collection_age_cutoff"
+            )
+            .as_deref(),
+            Some("0.250000"),
+            "{blobs_opts}"
         );
         // An external block cache is not written to the OPTIONS file.
         // `cache_shard_bits` is checked on the preset above.
@@ -4408,6 +4607,151 @@ mod tests {
             None => rest,
         };
         section.contains("filter_policy=bloomfilter")
+    }
+
+    fn cf_option(opts: &str, cf: &str, key: &str) -> Option<String> {
+        let header = format!("[CFOptions \"{cf}\"]");
+        let start = opts.find(&header)? + header.len();
+        let rest = &opts[start..];
+        let section = match rest.find("\n[") {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+        let prefix = format!("{key}=");
+        section
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix).map(ToString::to_string))
+    }
+
+    /// Keeps the next opens in this thread from scheduling compaction.
+    ///
+    /// `SetOptions` after open loses the race with bottommost compaction.
+    /// That job rewrites the blob SST and inlines it. The flag is read while
+    /// the column options are built, including the opens inside convert and
+    /// verify.
+    struct HoldAutoCompaction;
+    impl HoldAutoCompaction {
+        fn enter() -> Self {
+            OPEN_DISABLE_AUTO_COMPACTION.with(|flag| flag.set(true));
+            Self
+        }
+    }
+    impl Drop for HoldAutoCompaction {
+        fn drop(&mut self) {
+            OPEN_DISABLE_AUTO_COMPACTION.with(|flag| flag.set(false));
+        }
+    }
+
+    /// Blob files from the `blobs` preset stay readable under baseline.
+    /// Forced compaction inlines them. Reconcile and converter verify run
+    /// while legacy blob values and new inline values are both present.
+    #[test]
+    fn legacy_blob_values_reopen_inline_and_compact_away() -> eyre::Result<()> {
+        use crate::IrysDatabaseArgs as _;
+        use crate::submodule::{ConvertOptions, convert_rocks_to_mdbx, verify_mdbx_and_rocks};
+        use reth_db::mdbx::DatabaseArguments;
+
+        let _hold = HoldAutoCompaction::enter();
+        const LEGACY_PATHS: u32 = 4_096;
+        const INLINE_PATHS: u32 = 256;
+
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_legacy_blob")
+            .build();
+        let path = dir.path().join("index");
+        let legacy_tx = H256::repeat_byte(1);
+        let inline_tx = H256::repeat_byte(2);
+        let total = LEGACY_PATHS + INLINE_PATHS;
+        let removed = [0_u32, LEGACY_PATHS];
+
+        {
+            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::preset("blobs")?)?;
+            write_large_paths(&store, 0, LEGACY_PATHS)?;
+            store.update(|tx| tx.add_full_tx_path(legacy_tx, large_path(0)))?;
+            store.flush_memtables()?;
+            assert!(
+                store.blob_file_count(Cf::DataPath)? > 0,
+                "data paths did not reach blob files"
+            );
+            assert!(
+                store.blob_file_count(Cf::TxPath)? > 0,
+                "tx path did not reach a blob file"
+            );
+        }
+
+        {
+            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
+            assert!(store.blob_file_count(Cf::DataPath)? > 0);
+            assert!(store.blob_file_count(Cf::TxPath)? > 0);
+            assert_data_paths(&store, LEGACY_PATHS, &[])?;
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(legacy_tx))?,
+                Some(large_path(0))
+            );
+
+            write_large_paths(&store, LEGACY_PATHS, INLINE_PATHS)?;
+            store.update(|tx| tx.add_full_tx_path(inline_tx, large_path(1)))?;
+            store.flush_memtables()?;
+            assert!(
+                store.blob_file_count(Cf::DataPath)? > 0,
+                "flush of inline values dropped legacy blob files"
+            );
+            assert!(store.blob_file_count(Cf::TxPath)? > 0);
+            assert_data_paths(&store, total, &[])?;
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(inline_tx))?,
+                Some(large_path(1))
+            );
+
+            let stats = store.drop_presence_in_ranges(&[
+                (
+                    PartitionChunkOffset::from(removed[0]),
+                    PartitionChunkOffset::from(removed[0]),
+                ),
+                (
+                    PartitionChunkOffset::from(removed[1]),
+                    PartitionChunkOffset::from(removed[1]),
+                ),
+            ])?;
+            assert_eq!(stats.data_path_rows, 2);
+            assert_eq!(stats.path_hash_rows, 0);
+            assert_data_paths(&store, total, &removed)?;
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(legacy_tx))?,
+                Some(large_path(0))
+            );
+        }
+
+        let mdbx = dir.path().join("db");
+        let options = ConvertOptions::new(DatabaseArguments::irys_testing()?);
+        let copied = convert_rocks_to_mdbx(&path, &mdbx, &options)?;
+        assert_eq!(copied.data_paths, u64::from(total - 2));
+        assert_eq!(copied.tx_paths, 2);
+        let report = verify_mdbx_and_rocks(&mdbx, &path, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(report.offsets_checked, u64::from(total - 2), "{report}");
+        assert_eq!(report.tx_paths_checked, 2, "{report}");
+
+        let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
+        assert!(
+            store.blob_file_count(Cf::DataPath)? > 0,
+            "verify open compacted legacy blobs away"
+        );
+        assert!(store.blob_file_count(Cf::TxPath)? > 0);
+        store.compact_column_force(Cf::DataPath)?;
+        store.compact_column_force(Cf::TxPath)?;
+        assert_eq!(store.blob_file_count(Cf::DataPath)?, 0);
+        assert_eq!(store.blob_file_count(Cf::TxPath)?, 0);
+        assert_data_paths(&store, total, &removed)?;
+        assert_eq!(
+            store.view(|tx| tx.get_full_tx_path(legacy_tx))?,
+            Some(large_path(0))
+        );
+        assert_eq!(
+            store.view(|tx| tx.get_full_tx_path(inline_tx))?,
+            Some(large_path(1))
+        );
+        Ok(())
     }
 
     #[test]
@@ -4779,6 +5123,56 @@ mod tests {
     fn put_offset(store: &RocksSubmoduleStore, offset: u32, byte: u8) -> eyre::Result<()> {
         store.update(|tx| {
             tx.set_path_hashes_by_offset(PartitionChunkOffset::from(offset), hashes_for(byte))
+        })
+    }
+
+    /// Path bytes at the blob threshold. The offset is in the first four
+    /// bytes so two rows cannot compare equal.
+    fn large_path(offset: u32) -> Vec<u8> {
+        let mut bytes = vec![0_u8; BLOB_MIN_BYTES as usize];
+        bytes[..4].copy_from_slice(&offset.to_le_bytes());
+        for (index, byte) in bytes.iter_mut().enumerate().skip(4) {
+            *byte = (index as u8).wrapping_add(offset as u8);
+        }
+        bytes
+    }
+
+    fn write_large_paths(store: &RocksSubmoduleStore, start: u32, count: u32) -> eyre::Result<()> {
+        const BATCH: u32 = 512;
+        let end = start + count;
+        let mut offset = start;
+        while offset < end {
+            let batch_end = offset.saturating_add(BATCH).min(end);
+            store.update(|tx| {
+                for raw in offset..batch_end {
+                    tx.add_full_data_path(PartitionChunkOffset::from(raw), large_path(raw))?;
+                }
+                Ok(())
+            })?;
+            offset = batch_end;
+        }
+        Ok(())
+    }
+
+    fn assert_data_paths(
+        store: &RocksSubmoduleStore,
+        end: u32,
+        removed: &[u32],
+    ) -> eyre::Result<()> {
+        store.view(|tx| {
+            for raw in 0..end {
+                let got = tx.get_data_path_by_offset(PartitionChunkOffset::from(raw))?;
+                if removed.contains(&raw) {
+                    assert!(got.is_none(), "offset {raw} should be gone");
+                } else {
+                    assert_eq!(
+                        got.as_deref(),
+                        Some(large_path(raw).as_slice()),
+                        "offset {raw}"
+                    );
+                }
+            }
+            Ok(())
         })
     }
 

@@ -1292,7 +1292,7 @@ mod tests {
             "--index-engine",
             "rocks",
             "--rocks-preset",
-            "no-blob",
+            "blobs",
             "--rocks-block-cache",
             "1048576",
         ]);
@@ -1305,8 +1305,8 @@ mod tests {
         .unwrap() else {
             panic!("expected rocks");
         };
-        assert_eq!(tuning.name, "no-blob");
-        assert!(!tuning.blobs);
+        assert_eq!(tuning.name, "blobs");
+        assert!(tuning.blobs);
         assert_eq!(tuning.block_cache_bytes, 1_048_576);
         assert!(!tuning.share_resources);
     }
