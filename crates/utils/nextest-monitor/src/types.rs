@@ -135,7 +135,7 @@ impl AggregatedStats {
 /// Directory that holds one JSON file per test stat entry.
 ///
 /// Given a base path like `stats`, returns `stats.d/`.
-fn stats_dir(path: &Path) -> PathBuf {
+pub fn stats_dir(path: &Path) -> PathBuf {
     let mut dir_name = path.file_name().unwrap_or_default().to_os_string();
     dir_name.push(".d");
     path.with_file_name(dir_name)
