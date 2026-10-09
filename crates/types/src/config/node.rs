@@ -605,6 +605,14 @@ pub struct StorageSyncConfig {
     /// wakes. MDBX ignores this key and keeps its own 50 ms group.
     #[serde(default = "default_index_wal_backstop_ms")]
     pub index_wal_backstop_ms: u64,
+    /// Threads that prefetch tx headers when a data solution has no stored tx path.
+    ///
+    /// The derive starts when the solution is found. Block production awaits it
+    /// when it builds the PoA, so parent selection, mempool selection, and the
+    /// Reth payload build run while the headers are read. `1` reads headers on
+    /// the derive thread. `0` is raised to 1. The default is 16.
+    #[serde(default = "default_tx_path_derive_threads")]
+    pub tx_path_derive_threads: usize,
     /// Minimum milliseconds between durable points.
     ///
     /// The default is 250. On HDD storage modules that cap keeps a
@@ -664,6 +672,7 @@ impl Default for StorageSyncConfig {
             drop_recall_page_cache: false,
             intervals_persist_secs: default_intervals_persist_secs(),
             index_wal_backstop_ms: default_index_wal_backstop_ms(),
+            tx_path_derive_threads: default_tx_path_derive_threads(),
             min_durable_interval_ms: default_min_durable_interval_ms(),
             durable_headroom_permille: default_durable_headroom_permille(),
         }
@@ -675,6 +684,9 @@ pub const DEFAULT_INTERVALS_PERSIST_SECS: u64 = 30;
 
 /// Default RocksDB index WAL backstop. See [`StorageSyncConfig::index_wal_backstop_ms`].
 pub const DEFAULT_INDEX_WAL_BACKSTOP_MS: u64 = 1000;
+
+/// Default tx-header prefetch threads. See [`StorageSyncConfig::tx_path_derive_threads`].
+pub const DEFAULT_TX_PATH_DERIVE_THREADS: usize = 16;
 
 /// Default gap between durable points, in milliseconds.
 ///
@@ -693,6 +705,10 @@ fn default_intervals_persist_secs() -> u64 {
 
 fn default_index_wal_backstop_ms() -> u64 {
     DEFAULT_INDEX_WAL_BACKSTOP_MS
+}
+
+fn default_tx_path_derive_threads() -> usize {
+    DEFAULT_TX_PATH_DERIVE_THREADS
 }
 
 fn default_min_durable_interval_ms() -> u64 {
@@ -1547,6 +1563,7 @@ impl NodeConfig {
                 // Tests read `intervals.json` as soon as `sync` returns.
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
                 // Tests read durability as soon as `sync` returns. 0 does not defer.
                 min_durable_interval_ms: 0,
                 durable_headroom_permille: DEFAULT_DURABLE_HEADROOM_PERMILLE,
@@ -1752,6 +1769,7 @@ impl NodeConfig {
                 drop_recall_page_cache: false,
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
                 min_durable_interval_ms: DEFAULT_MIN_DURABLE_INTERVAL_MS,
                 durable_headroom_permille: DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
@@ -1973,6 +1991,12 @@ mod run_mode_tests {
         assert_eq!(parsed.index_wal_backstop_ms, DEFAULT_INDEX_WAL_BACKSTOP_MS);
         let backstop: StorageSyncConfig = toml::from_str("index_wal_backstop_ms = 0").unwrap();
         assert_eq!(backstop.index_wal_backstop_ms, 0);
+        assert_eq!(
+            parsed.tx_path_derive_threads,
+            DEFAULT_TX_PATH_DERIVE_THREADS
+        );
+        let threads: StorageSyncConfig = toml::from_str("tx_path_derive_threads = 4").unwrap();
+        assert_eq!(threads.tx_path_derive_threads, 4);
         assert_eq!(
             parsed.min_durable_interval_ms,
             DEFAULT_MIN_DURABLE_INTERVAL_MS

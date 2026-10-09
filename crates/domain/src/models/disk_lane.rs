@@ -2848,6 +2848,7 @@ mod tests {
                 drop_recall_page_cache: false,
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
+                tx_path_derive_threads: irys_types::DEFAULT_TX_PATH_DERIVE_THREADS,
                 min_durable_interval_ms: 0,
                 durable_headroom_permille: irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },

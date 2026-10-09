@@ -1,8 +1,13 @@
-//! Prototype rebuild of one ledger tx path from the consensus tables.
+//! Rebuild of one ledger tx path from the consensus tables.
 //!
-//! Mining does not call this module. The bench binary is the only caller.
-//! The bytes are the folded tree from [`DataTransactionLedger::merklize_tx_root`],
-//! with only the requested leaf encoded.
+//! Mining calls [`derive_tx_path_at_offset_with`] when a submodule index has no
+//! stored tx path. The bench binary times the same function. The bytes are the
+//! folded tree from [`DataTransactionLedger::merklize_tx_root`], with only the
+//! requested leaf encoded.
+//!
+//! The leaf is [`DataTransactionLedger::tx_root_leaf_value`] at every height.
+//! PoA validation uses that function with no height gate, so a block from
+//! before the prefix-hash fold and a block from after it take the same leaf.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -131,6 +136,27 @@ pub fn derive_tx_path_at_offset(
 /// them one after another. Each pool thread reads its share in its own read
 /// transaction so the device sees them in parallel. `None` reads serially.
 pub fn derive_tx_path_at_offset_with(
+    db: &DatabaseEnv,
+    ledger: DataLedger,
+    chunk_offset: u64,
+    chunk_size: u64,
+    pool: Option<&rayon::ThreadPool>,
+) -> eyre::Result<DerivedTxPath> {
+    let span = tracing::info_span!(
+        "tx_path.derive",
+        %ledger,
+        chunk_offset,
+        db_nanos = tracing::field::Empty,
+        cpu_nanos = tracing::field::Empty,
+    );
+    let _entered = span.enter();
+    let derived = derive_tx_path_at_offset_timed(db, ledger, chunk_offset, chunk_size, pool)?;
+    span.record("db_nanos", derived.db_nanos);
+    span.record("cpu_nanos", derived.cpu_nanos);
+    Ok(derived)
+}
+
+fn derive_tx_path_at_offset_timed(
     db: &DatabaseEnv,
     ledger: DataLedger,
     chunk_offset: u64,
@@ -621,6 +647,16 @@ fn fit_u64(value: u128) -> eyre::Result<u64> {
     u64::try_from(value).map_err(|_| eyre!("nanoseconds exceed u64"))
 }
 
+/// Pool for the tx-header prefetch. `threads` below 1 is raised to 1.
+/// [`fetch_tx_headers`] still reads serially when the pool has one thread.
+pub fn tx_path_derive_pool(threads: usize) -> eyre::Result<rayon::ThreadPool> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .thread_name(|index| format!("tx-path-{index}"))
+        .build()
+        .map_err(|error| eyre!("tx path derive pool: {error}"))
+}
+
 /// Tx-path hash migration stores for a proof. `SHA-256` of the proof bytes.
 pub fn tx_path_hash(proof: &[u8]) -> H256 {
     H256::from(hash_sha256(proof))
@@ -944,5 +980,156 @@ mod tests {
         block.block_hash = hid(99);
         let missing = derive_tx_path_synthetic(&db, &ids, &block.block_hash, 0);
         assert!(missing.is_err());
+    }
+
+    #[test]
+    fn derived_equals_stored_equals_merklize() {
+        let headers = [tx_at(1, 32), tx_at(2, 64), tx_at(3, 32)];
+        let (root, proofs) = DataTransactionLedger::merklize_tx_root(&headers);
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open db");
+        let blocks = [
+            block_with(0, &[], 0, &[], 0),
+            block_with(1, &headers, 4, &[], 0),
+        ];
+        db.update_eyre(|tx| {
+            for header in &headers {
+                insert_tx_header(tx, header)?;
+            }
+            for block in &blocks {
+                insert_block_header(tx, block)?;
+                insert_block_index_items_for_block(tx, block)?;
+            }
+            Ok(())
+        })
+        .expect("write chain");
+
+        let index_dir = dir.path().join("submodule-db.copy");
+        std::fs::create_dir_all(&index_dir).expect("index dir");
+        let index = SubmoduleIndex::open_mdbx(
+            &index_dir,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open index");
+        let start = PartitionChunkOffset(1);
+        let path_hash = tx_path_hash(&proofs[1].proof);
+        let data_path = vec![7_u8, 8, 9];
+        let data_hash = H256::from(irys_types::hash_sha256(&data_path));
+        index
+            .update(|write| {
+                write.add_full_tx_path(path_hash, proofs[1].proof.clone())?;
+                write.add_tx_path_hash_to_offset_range(start, start, Some(path_hash))?;
+                write.add_full_data_path(start, data_path)?;
+                write.add_data_path_hash_to_offset_index(start, Some(data_hash))?;
+                Ok(())
+            })
+            .expect("write stored path");
+
+        let derived = derive_tx_path_at_offset(&db, DataLedger::Publish, 1, 32).expect("derive");
+        let (stored, _) = read_stored_tx_data_path(&index, start).expect("stored");
+        assert_eq!(derived.tx_root, root);
+        assert_eq!(derived.proof.proof, proofs[1].proof);
+        assert_eq!(stored.expect("stored tx path"), proofs[1].proof);
+    }
+
+    #[test]
+    fn derive_span_records_db_and_cpu() {
+        let header = tx_at(1, 32);
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open db");
+        let blocks = [
+            block_with(0, &[], 0, &[], 0),
+            block_with(1, std::slice::from_ref(&header), 1, &[], 0),
+        ];
+        db.update_eyre(|tx| {
+            insert_tx_header(tx, &header)?;
+            for block in &blocks {
+                insert_block_header(tx, block)?;
+                insert_block_index_items_for_block(tx, block)?;
+            }
+            Ok(())
+        })
+        .expect("write chain");
+
+        let seen = SpanCapture::default();
+        tracing::subscriber::with_default(seen.clone(), || {
+            derive_tx_path_at_offset(&db, DataLedger::Publish, 0, 32).expect("derive");
+        });
+        let names = seen.names.lock().expect("names");
+        assert!(
+            names.iter().any(|name| name == "tx_path.derive"),
+            "{names:?}"
+        );
+        assert!(seen.db_nanos.lock().expect("db").is_some());
+        assert!(seen.cpu_nanos.lock().expect("cpu").is_some());
+    }
+
+    #[derive(Clone, Default)]
+    struct SpanCapture {
+        names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        db_nanos: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+        cpu_nanos: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+    }
+
+    impl tracing::Subscriber for SpanCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            self.names
+                .lock()
+                .expect("names")
+                .push(span.metadata().name().to_owned());
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            values.record(&mut FieldVisit {
+                db_nanos: &self.db_nanos,
+                cpu_nanos: &self.cpu_nanos,
+            });
+        }
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, _event: &tracing::Event<'_>) {}
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    struct FieldVisit<'a> {
+        db_nanos: &'a std::sync::Mutex<Option<u64>>,
+        cpu_nanos: &'a std::sync::Mutex<Option<u64>>,
+    }
+
+    impl tracing::field::Visit for FieldVisit<'_> {
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            match field.name() {
+                "db_nanos" => *self.db_nanos.lock().expect("db") = Some(value),
+                "cpu_nanos" => *self.cpu_nanos.lock().expect("cpu") = Some(value),
+                _ => {}
+            }
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            if let Ok(value) = u64::try_from(value) {
+                self.record_u64(field, value);
+            }
+        }
+
+        fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
     }
 }

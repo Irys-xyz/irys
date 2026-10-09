@@ -1,6 +1,8 @@
 use crate::{ChunkDataPath, H256, H256List, IrysAddress, TxPath, partition::PartitionHash};
 
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Seed(pub H256);
@@ -17,13 +19,190 @@ pub struct SolutionContext {
     pub chunk_offset: u32,
 
     pub mining_address: IrysAddress,
-    pub tx_path: Option<TxPath>, // capacity partitions have no tx_path nor data_path
+    /// Capacity chunks use [`TxPathSource::Stored`]`(None)`. A data chunk uses
+    /// the stored path when the index has one, and a shared derive otherwise.
+    pub tx_path: TxPathSource,
     pub data_path: Option<ChunkDataPath>,
     pub chunk: Vec<u8>,
     pub vdf_step: u64,
     pub checkpoints: H256List,
     pub seed: Seed,
     pub solution_hash: H256,
+}
+
+/// Where the PoA tx path comes from.
+///
+/// Schema v2 stores the bytes. An index with no stored path carries one job,
+/// started when the solution is found. Every block rebuild awaits that job.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TxPathSource {
+    /// The index stored the path. `None` is a capacity chunk.
+    Stored(Option<TxPath>),
+    /// One derive shared by every rebuild of this solution.
+    Derive(TxPathJob),
+}
+
+impl Default for TxPathSource {
+    fn default() -> Self {
+        Self::Stored(None)
+    }
+}
+
+impl TxPathSource {
+    /// Bytes already in memory. A running derive returns `None`.
+    pub fn stored_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Stored(Some(bytes)) => Some(bytes),
+            Self::Stored(None) | Self::Derive(_) => None,
+        }
+    }
+
+    /// Stored bytes, or the derive result. The derive runs once.
+    pub fn resolve(&self, timeout: Duration) -> Result<Option<TxPath>, TxPathError> {
+        match self {
+            Self::Stored(path) => Ok(path.clone()),
+            Self::Derive(job) => job.wait(timeout).map(Some),
+        }
+    }
+}
+
+/// A derive that has not finished, or its cached result.
+#[derive(Clone)]
+pub struct TxPathJob {
+    slot: Arc<TxPathSlot>,
+}
+
+#[derive(Debug)]
+struct TxPathSlot {
+    state: Mutex<TxPathState>,
+    ready: Condvar,
+}
+
+#[derive(Debug)]
+enum TxPathState {
+    Pending,
+    Done(Result<TxPath, String>),
+}
+
+impl std::fmt::Debug for TxPathJob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            TxPathState::Pending => formatter.write_str("TxPathJob(pending)"),
+            TxPathState::Done(Ok(path)) => {
+                write!(formatter, "TxPathJob(ready {} bytes)", path.len())
+            }
+            TxPathState::Done(Err(reason)) => write!(formatter, "TxPathJob(failed {reason})"),
+        }
+    }
+}
+
+impl PartialEq for TxPathJob {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.slot, &other.slot)
+    }
+}
+
+/// The derive did not produce a path that can go into a PoA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxPathError {
+    /// Missing header, root mismatch, leaf mismatch, or a panic in the job.
+    Failed(String),
+    /// The job was still running when the wait ended.
+    TimedOut,
+}
+
+impl std::fmt::Display for TxPathError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(reason) => write!(formatter, "{reason}"),
+            Self::TimedOut => write!(formatter, "tx path derive timed out"),
+        }
+    }
+}
+
+impl TxPathError {
+    /// Label for the drop counter. The log carries the full reason.
+    pub fn metric_reason(&self) -> &'static str {
+        match self {
+            Self::Failed(_) => "failed",
+            Self::TimedOut => "timeout",
+        }
+    }
+}
+
+impl TxPathJob {
+    /// Run `work` on its own thread. The result stays in the job.
+    pub fn spawn<F>(work: F) -> Self
+    where
+        F: FnOnce() -> eyre::Result<TxPath> + Send + 'static,
+    {
+        let slot = Arc::new(TxPathSlot {
+            state: Mutex::new(TxPathState::Pending),
+            ready: Condvar::new(),
+        });
+        let worker = Arc::clone(&slot);
+        let started = std::thread::Builder::new()
+            .name("tx-path-derive".to_owned())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+                let done = match result {
+                    Ok(Ok(path)) => Ok(path),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Err("tx path derive panicked".to_owned()),
+                };
+                finish_job(&worker, done);
+            });
+        if let Err(error) = started {
+            finish_job(&slot, Err(error.to_string()));
+        }
+        Self { slot }
+    }
+
+    /// Block until the job finishes or `timeout` elapses. Uses monotonic time.
+    pub fn wait(&self, timeout: Duration) -> Result<TxPath, TxPathError> {
+        let mut guard = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let deadline = Instant::now() + timeout;
+        loop {
+            match &*guard {
+                TxPathState::Done(result) => {
+                    return result.clone().map_err(TxPathError::Failed);
+                }
+                TxPathState::Pending => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(TxPathError::TimedOut);
+                    }
+                    let (next, wait) = self
+                        .slot
+                        .ready
+                        .wait_timeout(guard, deadline.saturating_duration_since(now))
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard = next;
+                    if wait.timed_out() && matches!(*guard, TxPathState::Pending) {
+                        return Err(TxPathError::TimedOut);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn finish_job(slot: &TxPathSlot, done: Result<TxPath, String>) {
+    let mut guard = slot
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = TxPathState::Done(done);
+    slot.ready.notify_all();
 }
 #[derive(Debug, Clone)]
 pub struct Partition {
@@ -47,6 +226,57 @@ impl Partition {
         Self {
             id,
             mining_address: IrysAddress::random(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TxPathError, TxPathJob};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    #[test]
+    fn wait_returns_the_same_bytes_twice() {
+        let job = TxPathJob::spawn(|| Ok(vec![1, 2, 3]));
+        let first = job.wait(Duration::from_secs(2)).expect("first");
+        let second = job.wait(Duration::from_secs(2)).expect("second");
+        assert_eq!(first, second);
+        assert_eq!(first, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn wait_times_out_and_the_worker_can_still_finish() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::clone(&gate);
+        let job = TxPathJob::spawn(move || {
+            let (lock, ready) = &*release;
+            let mut open = lock.lock().expect("gate");
+            while !*open {
+                open = ready.wait(open).expect("gate wait");
+            }
+            Ok(vec![9])
+        });
+        let error = job
+            .wait(Duration::from_millis(30))
+            .expect_err("still blocked");
+        assert_eq!(error, TxPathError::TimedOut);
+        {
+            let (lock, ready) = &*gate;
+            *lock.lock().expect("gate") = true;
+            ready.notify_one();
+        }
+        let path = job.wait(Duration::from_secs(2)).expect("released");
+        assert_eq!(path, vec![9]);
+    }
+
+    #[test]
+    fn a_failed_job_reports_the_reason() {
+        let job = TxPathJob::spawn(|| Err(eyre::eyre!("header missing")));
+        let error = job.wait(Duration::from_secs(2)).expect_err("failed");
+        match error {
+            TxPathError::Failed(reason) => assert!(reason.contains("header missing"), "{reason}"),
+            TxPathError::TimedOut => panic!("the job finished"),
         }
     }
 }

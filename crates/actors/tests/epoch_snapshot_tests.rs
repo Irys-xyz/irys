@@ -733,6 +733,8 @@ async fn partition_expiration_and_repacking_test() {
             should_mine,
             vdf_steps_guard.clone(),
             U256::zero(),
+            None,
+            None,
         );
 
         let (controller, handle) =

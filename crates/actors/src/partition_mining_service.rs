@@ -14,9 +14,10 @@ use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
 use irys_types::{
-    Base64, ChunkDataPath, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
-    PartitionChunkRange, ProofDeserialize as _, SendTraced as _, TokioServiceHandle, TxPath, U256,
-    block_production::{Seed, SolutionContext},
+    Base64, ChunkDataPath, Config, DataLedger, H256List, PartitionChunkOffset, PartitionChunkRange,
+    ProofDeserialize as _, SendTraced as _, TokioServiceHandle, U256,
+    app_state::DatabaseProvider,
+    block_production::{Seed, SolutionContext, TxPathJob, TxPathSource},
     get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -57,12 +58,51 @@ pub struct PartitionMiningServiceInner {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStateReadonly,
+    /// Consensus database for a tx path the index does not store.
+    tx_path_db: Option<DatabaseProvider>,
+    /// Header prefetch pool. `None` in tests that never derive.
+    tx_path_pool: Option<TxPathPool>,
     /// Expiry `reset` did not finish. Retried until it does. Packing waits.
     expiry_reset_pending: bool,
     /// Path lookups this miner issued. Proves a non-winning recall does not
     /// open the index.
     #[cfg(test)]
     data_path_lookups: std::sync::atomic::AtomicU64,
+}
+
+/// Rayon pool. The pool type has no `Debug`, and the miner struct does.
+#[derive(Clone)]
+struct TxPathPool(Arc<rayon::ThreadPool>);
+
+impl std::fmt::Debug for TxPathPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TxPathPool")
+            .field("threads", &self.0.current_num_threads())
+            .finish()
+    }
+}
+
+impl std::ops::Deref for TxPathPool {
+    type Target = rayon::ThreadPool;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Ledger chunk offset of one partition offset.
+///
+/// `slot_index * num_chunks_in_partition + partition_offset`, the same sum PoA
+/// validation uses. `None` when the partition has no slot or the sum overflows.
+fn ledger_chunk_offset(
+    slot_index: Option<usize>,
+    chunks_in_partition: u64,
+    partition_offset: u32,
+) -> Option<u64> {
+    let slot = u64::try_from(slot_index?).ok()?;
+    slot.checked_mul(chunks_in_partition)?
+        .checked_add(u64::from(partition_offset))
 }
 
 /// Fresh recall-range rotation state sized for the partition.
@@ -83,6 +123,8 @@ impl PartitionMiningServiceInner {
         start_mining: bool,
         steps_guard: VdfStateReadonly,
         initial_difficulty: U256,
+        tx_path_db: Option<DatabaseProvider>,
+        tx_path_pool: Option<Arc<rayon::ThreadPool>>,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -92,6 +134,8 @@ impl PartitionMiningServiceInner {
             difficulty: initial_difficulty,
             ranges: fresh_ranges(&config.consensus),
             steps_guard,
+            tx_path_db,
+            tx_path_pool: tx_path_pool.map(TxPathPool),
             expiry_reset_pending: false,
             #[cfg(test)]
             data_path_lookups: std::sync::atomic::AtomicU64::new(0),
@@ -344,16 +388,24 @@ impl PartitionMiningServiceInner {
                 else {
                     continue;
                 };
-                (Some(tx_path), Some(data_path))
+                (tx_path, Some(data_path))
             } else {
-                (None, None)
+                (TxPathSource::Stored(None), None)
             };
 
+            let ledger_offset = ledger_chunk_offset(
+                self.storage_module
+                    .partition_assignment()
+                    .and_then(|assignment| assignment.slot_index),
+                self.config.consensus.num_chunks_in_partition,
+                *partition_chunk_offset,
+            );
             info!(
-                "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{} difficulty {}",
+                "Solution Found - partition_id: {}, partition_offset: {}/{}, ledger_offset: {:?}, range_offset: {}/{} difficulty {}",
                 self.storage_module.id,
                 partition_chunk_offset,
                 self.config.consensus.num_chunks_in_partition,
+                ledger_offset,
                 *partition_chunk_offset - start_chunk_offset,
                 self.config.consensus.num_chunks_in_recall_range,
                 self.difficulty
@@ -381,36 +433,38 @@ impl PartitionMiningServiceInner {
     }
 
     /// One index read for a winning data offset. `None` means do not submit
-    /// this chunk: the lookup failed, a path is missing, or the `data_path`
-    /// leaf does not bind `chunk_bytes`. The caller keeps scanning the range.
+    /// this chunk: the lookup failed, the data path is missing or does not
+    /// bind `chunk_bytes`, or a missing tx path cannot be derived. The caller
+    /// keeps scanning the range.
     fn paths_for_winning_data_chunk(
         &self,
         offset: PartitionChunkOffset,
         chunk_bytes: &[u8],
-    ) -> Option<(TxPath, ChunkDataPath)> {
+    ) -> Option<(TxPathSource, ChunkDataPath)> {
         #[cfg(test)]
         self.data_path_lookups
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let (tx_path, data_path) = match self
-            .storage_module
-            .read_tx_data_path(LedgerChunkOffset::from(*offset))
-        {
-            Ok(paths) => paths,
-            Err(error) => {
-                warn!(
-                    storage_module.id = self.storage_module.id,
-                    chunk_offset = offset.0,
-                    %error,
-                    "winning data chunk path lookup failed"
-                );
-                return None;
-            }
-        };
-        let (Some(tx_path), Some(data_path)) = (tx_path, data_path) else {
+        // The index is keyed by the partition offset. The old call wrapped
+        // that offset as a ledger offset and the read treated the number as
+        // a partition offset again.
+        let (stored_tx_path, data_path) =
+            match self.storage_module.read_tx_data_paths(offset, offset) {
+                Ok(paths) => paths.get(&offset).cloned().unwrap_or((None, None)),
+                Err(error) => {
+                    warn!(
+                        storage_module.id = self.storage_module.id,
+                        chunk_offset = offset.0,
+                        %error,
+                        "winning data chunk path lookup failed"
+                    );
+                    return None;
+                }
+            };
+        let Some(data_path) = data_path else {
             warn!(
                 storage_module.id = self.storage_module.id,
                 chunk_offset = offset.0,
-                "winning data chunk has no stored path"
+                "winning data chunk has no stored data path"
             );
             return None;
         };
@@ -422,7 +476,53 @@ impl PartitionMiningServiceInner {
             );
             return None;
         }
+        let tx_path = if let Some(stored) = stored_tx_path {
+            TxPathSource::Stored(Some(stored))
+        } else {
+            match self.spawn_tx_path_derive(offset) {
+                Some(job) => TxPathSource::Derive(job),
+                None => {
+                    warn!(
+                        storage_module.id = self.storage_module.id,
+                        chunk_offset = offset.0,
+                        "winning data chunk has no stored tx path and tx path derive is unavailable"
+                    );
+                    return None;
+                }
+            }
+        };
         Some((tx_path, data_path))
+    }
+
+    /// Start a derive for `offset`. `None` when this miner has no consensus
+    /// database or the partition has no ledger slot.
+    fn spawn_tx_path_derive(&self, offset: PartitionChunkOffset) -> Option<TxPathJob> {
+        let (ledger, ledger_offset) = self.assigned_ledger_offset(offset)?;
+        let db = self.tx_path_db.clone()?;
+        let pool = self.tx_path_pool.clone();
+        let chunk_size = self.config.consensus.chunk_size;
+        Some(TxPathJob::spawn(move || {
+            irys_database::tx_path_derive::derive_tx_path_at_offset_with(
+                db.0.as_ref(),
+                ledger,
+                ledger_offset,
+                chunk_size,
+                pool.as_deref(),
+            )
+            .map(|derived| derived.proof.proof)
+        }))
+    }
+
+    fn assigned_ledger_offset(&self, offset: PartitionChunkOffset) -> Option<(DataLedger, u64)> {
+        let assignment = self.storage_module.partition_assignment()?;
+        let ledger_id = assignment.ledger_id?;
+        let ledger = DataLedger::try_from(ledger_id).ok()?;
+        let ledger_offset = ledger_chunk_offset(
+            assignment.slot_index,
+            self.config.consensus.num_chunks_in_partition,
+            *offset,
+        )?;
+        Some((ledger, ledger_offset))
     }
 
     /// True when `data_path`'s leaf hash equals the sha256 of the unpacked
@@ -756,6 +856,8 @@ mod tests {
             false,
             VdfStateReadonly::new(vdf_state),
             U256::zero(),
+            None,
+            None,
         );
 
         inner.handle_partitions_expiration(&H256List(vec![H256::repeat_byte(0x01)]));
@@ -833,6 +935,8 @@ mod tests {
             false,
             VdfStateReadonly::new(Arc::clone(&vdf_state)),
             U256::zero(),
+            None,
+            None,
         );
 
         // Prime the rotation across the poisoned era (consecutive-step fast path).
@@ -931,6 +1035,8 @@ mod tests {
             false,
             VdfStateReadonly::new(Arc::clone(&vdf_state)),
             U256::zero(),
+            None,
+            None,
         );
         for step in 1..=3_u64 {
             inner.test_get_recall_range(step, H256::repeat_byte(step as u8), partition_hash);
@@ -947,6 +1053,8 @@ mod tests {
             false,
             VdfStateReadonly::new(Arc::clone(&vdf_state)),
             U256::zero(),
+            None,
+            None,
         );
         oracle.test_get_recall_range(1, H256::repeat_byte(0x01), partition_hash);
         let expected = oracle.test_get_recall_range(2, H256::repeat_byte(0x02), partition_hash);
@@ -1036,6 +1144,8 @@ mod tests {
             false,
             VdfStateReadonly::new(Arc::clone(&vdf_state)),
             U256::zero(), // difficulty 0 → the first chunk wins
+            None,
+            None,
         );
 
         let seed = H256::repeat_byte(0x11);
@@ -1073,6 +1183,7 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
         Arc<StorageModule>,
         PartitionMiningServiceInner,
+        Option<irys_types::DataTransactionHeader>,
     ) {
         open_data_miner_with_tx_data(difficulty, indexed, None)
     }
@@ -1087,6 +1198,7 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
         Arc<StorageModule>,
         PartitionMiningServiceInner,
+        Option<irys_types::DataTransactionHeader>,
     ) {
         let tmp_dir = TempDirBuilder::new().build();
         let chunks = DATA_CHUNKS;
@@ -1121,6 +1233,7 @@ mod tests {
         let storage_module =
             Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
         let chunk_size = config.consensus.chunk_size as usize;
+        let mut indexed_header = None;
         if indexed {
             for offset in 0..chunks {
                 let mut entropy = Vec::with_capacity(chunk_size);
@@ -1176,6 +1289,7 @@ mod tests {
                     .write_data_chunk(chunk)
                     .expect("write data chunk");
             }
+            indexed_header = Some(tx.header);
         } else {
             let bytes = vec![0_u8; chunk_size];
             for offset in 0..chunks {
@@ -1202,8 +1316,10 @@ mod tests {
             false,
             VdfStateReadonly::new(vdf_state),
             difficulty,
+            None,
+            None,
         );
-        (tmp_dir, storage_module, inner)
+        (tmp_dir, storage_module, inner, indexed_header)
     }
 
     fn mine_once(inner: &mut PartitionMiningServiceInner) -> Option<SolutionContext> {
@@ -1212,7 +1328,7 @@ mod tests {
 
     #[test]
     fn data_recall_with_no_solution_reads_no_proof_path() {
-        let (_tmp, _storage, mut inner) = open_data_miner(U256::MAX, true);
+        let (_tmp, _storage, mut inner, _header) = open_data_miner(U256::MAX, true);
         inner.clear_data_path_lookups();
         assert!(
             mine_once(&mut inner).is_none(),
@@ -1223,7 +1339,7 @@ mod tests {
 
     #[test]
     fn winning_data_chunk_reads_its_own_paths() {
-        let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), true);
+        let (_tmp, storage, mut inner, _header) = open_data_miner(U256::zero(), true);
         let offset = PartitionChunkOffset::from(0);
         let (expected_tx, expected_data) = storage
             .read_tx_data_path(LedgerChunkOffset::from(*offset))
@@ -1234,7 +1350,10 @@ mod tests {
 
         let solution = mine_once(&mut inner).expect("difficulty 0 finds the first chunk");
         assert_eq!(solution.chunk_offset, 0);
-        assert_eq!(solution.tx_path.as_deref(), Some(expected_tx.as_slice()));
+        assert_eq!(
+            solution.tx_path.stored_bytes(),
+            Some(expected_tx.as_slice())
+        );
         assert_eq!(
             solution.data_path.as_deref(),
             Some(expected_data.as_slice())
@@ -1248,7 +1367,7 @@ mod tests {
 
     #[test]
     fn winning_data_chunk_with_no_stored_path_submits_nothing() {
-        let (_tmp, _storage, mut inner) = open_data_miner(U256::zero(), false);
+        let (_tmp, _storage, mut inner, _header) = open_data_miner(U256::zero(), false);
         inner.clear_data_path_lookups();
         assert!(
             mine_once(&mut inner).is_none(),
@@ -1263,7 +1382,7 @@ mod tests {
 
     #[test]
     fn winning_data_chunk_whose_leaf_does_not_bind_submits_nothing() {
-        let (_tmp, storage, mut inner) = open_data_miner(U256::zero(), true);
+        let (_tmp, storage, mut inner, _header) = open_data_miner(U256::zero(), true);
         let end = PartitionChunkOffset::from(DATA_CHUNKS - 1);
         let mut before = Vec::new();
         for offset in 0..=*end {
@@ -1315,7 +1434,8 @@ mod tests {
             data.extend(std::iter::repeat_n(byte, chunk_size));
         }
         data.extend(std::iter::repeat_n(0x5A, tail));
-        let (_tmp, storage, inner) = open_data_miner_with_tx_data(U256::zero(), true, Some(data));
+        let (_tmp, storage, inner, _header) =
+            open_data_miner_with_tx_data(U256::zero(), true, Some(data));
         let offset = PartitionChunkOffset::from(3);
         let read = storage
             .read_chunks(partition_chunk_offset_ie!(3, 4))
@@ -1346,5 +1466,141 @@ mod tests {
             inner.data_path_binds_chunk(offset, &past_span, &data_path),
             "a byte past the short span is not part of the leaf"
         );
+    }
+
+    #[test]
+    fn ledger_offset_includes_the_slot() {
+        assert_eq!(ledger_chunk_offset(Some(3), 100, 7).expect("offset"), 307);
+        assert!(ledger_chunk_offset(None, 100, 7).is_none());
+        assert!(ledger_chunk_offset(Some(usize::MAX), u64::MAX, 1).is_none());
+    }
+
+    #[test]
+    fn missing_tx_path_without_a_database_submits_nothing() {
+        let (_tmp, storage, mut inner, _header) = open_data_miner(U256::zero(), true);
+        clear_stored_tx_paths(&storage);
+        let (tx_path, data_path) = storage
+            .read_tx_data_paths(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))
+            .expect("read")
+            .remove(&PartitionChunkOffset::from(0))
+            .expect("row");
+        assert!(tx_path.is_none());
+        assert!(data_path.is_some());
+        inner.clear_data_path_lookups();
+        assert!(
+            mine_once(&mut inner).is_none(),
+            "a data win whose tx path cannot be derived is not submitted"
+        );
+    }
+
+    #[test]
+    fn missing_stored_tx_path_derives_the_merkle_proof() {
+        let (tmp, storage, _inner, header) = open_data_miner(U256::zero(), true);
+        let header = header.expect("indexed header");
+        let expected = storage
+            .read_tx_data_path(LedgerChunkOffset::from(0))
+            .expect("stored read")
+            .0
+            .expect("stored tx path");
+        clear_stored_tx_paths(&storage);
+        let db_dir = tmp.path().join("consensus");
+        std::fs::create_dir_all(&db_dir).expect("consensus dir");
+        let db = write_submit_chain(&db_dir, &header, storage.config.consensus.chunk_size);
+        let pool =
+            Arc::new(irys_database::tx_path_derive::tx_path_derive_pool(2).expect("tx path pool"));
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &storage.config,
+            service_senders,
+            Arc::clone(&storage),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            Some(db),
+            Some(pool),
+        );
+        let solution = mine_once(&mut inner).expect("difficulty 0 finds the first chunk");
+        let derived = solution
+            .tx_path
+            .resolve(std::time::Duration::from_secs(5))
+            .expect("derive")
+            .expect("derived path");
+        assert_eq!(derived, expected);
+    }
+
+    fn clear_stored_tx_paths(storage: &StorageModule) {
+        use irys_database::submodule::SubmoduleStore as _;
+        let end = PartitionChunkOffset::from((DATA_CHUNKS - 1) as u32);
+        let submodule = storage
+            .get_submodule(PartitionChunkOffset::from(0))
+            .expect("submodule");
+        submodule
+            .db
+            .update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(PartitionChunkOffset::from(0), end, None)
+            })
+            .expect("clear tx paths");
+    }
+
+    fn write_submit_chain(
+        dir: &std::path::Path,
+        header: &irys_types::DataTransactionHeader,
+        chunk_size: u64,
+    ) -> DatabaseProvider {
+        use irys_database::db::IrysDatabaseExt as _;
+        use irys_database::tables::IrysTables;
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_block_header, insert_block_index_items_for_block,
+            insert_tx_header, open_or_create_db,
+        };
+        use irys_types::IrysBlockHeader;
+        use reth_db::mdbx::DatabaseArguments;
+
+        let chunks = header.data_size.div_ceil(chunk_size);
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.block_hash = H256::repeat_byte(1);
+        set_submit(&mut genesis, &[], 0);
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.height = 1;
+        block.block_hash = H256::repeat_byte(2);
+        set_submit(&mut block, std::slice::from_ref(header), chunks);
+        let db = open_or_create_db(
+            dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open consensus db");
+        db.update_eyre(|tx| {
+            insert_tx_header(tx, header)?;
+            for block in [&genesis, &block] {
+                insert_block_header(tx, block)?;
+                insert_block_index_items_for_block(tx, block)?;
+            }
+            Ok(())
+        })
+        .expect("write chain");
+        DatabaseProvider(Arc::new(db))
+    }
+
+    fn set_submit(
+        block: &mut irys_types::IrysBlockHeader,
+        txs: &[irys_types::DataTransactionHeader],
+        total: u64,
+    ) {
+        let (root, _) = DataTransactionLedger::merklize_tx_root(txs);
+        let slot = block
+            .data_ledgers
+            .iter_mut()
+            .find(|item| item.ledger_id == DataLedger::Submit.get_id())
+            .expect("submit ledger");
+        slot.tx_ids = H256List(txs.iter().map(|header| header.id).collect());
+        slot.tx_root = root;
+        slot.total_chunks = total;
     }
 }

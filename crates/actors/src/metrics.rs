@@ -53,6 +53,10 @@ irys_utils::define_metrics! {
     gauge DATA_SYNC_SCAN_CURSOR("irys.data_sync.scan_cursor", "Partition-relative data sync discovery cursor by ledger and storage module");
     gauge DATA_SYNC_ACTIVE_PEERS("irys.data_sync.active_peers", "Number of active data sync peers");
     counter MINING_SOLUTIONS_FOUND("irys.mining.solutions_found_total", "Mining solutions found");
+    counter TX_PATH_DERIVE_FAILED(
+        "irys.mining.tx_path_derive_failed_total",
+        "Data solutions dropped because the tx path could not be derived"
+    );
     gauge PACKING_ACTIVE_WORKERS("irys.packing.active_workers", "Number of active packing workers");
     gauge PACKING_SEMAPHORE_AVAILABLE("irys.packing.semaphore_available", "Available packing semaphore permits");
     counter DATA_TX_INGESTED("irys.mempool.data_tx_ingested_total", "Data transactions ingested into mempool");
@@ -460,6 +464,10 @@ pub(crate) fn record_data_sync_scheduler_state(
 
 pub(crate) fn record_mining_solution_found() {
     MINING_SOLUTIONS_FOUND.add(1, &[]);
+}
+
+pub(crate) fn record_tx_path_derive_failed(reason: &'static str) {
+    TX_PATH_DERIVE_FAILED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
 pub(crate) fn record_packing_workers(active: u64, semaphore_available: u64) {

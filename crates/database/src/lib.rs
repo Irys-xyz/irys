@@ -25,7 +25,8 @@ pub mod snapshot;
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables
 pub mod tables;
-/// Prototype tx-path rebuild. Mining does not call this module.
+/// Tx-path rebuild from consensus tables. Mining derives a path when the index
+/// does not store one.
 pub mod tx_path_derive;
 
 pub use data_ledger::*;

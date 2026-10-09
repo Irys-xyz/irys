@@ -2129,6 +2129,7 @@ impl IrysNode {
             &vdf_state_readonly,
             &service_senders,
             latest_block.diff,
+            &irys_db,
             runtime_handle.clone(),
         );
 
@@ -2490,10 +2491,16 @@ impl IrysNode {
         vdf_steps_guard: &VdfStateReadonly,
         service_senders: &ServiceSenders,
         initial_difficulty: U256,
+        irys_db: &DatabaseProvider,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Vec<PartitionMiningController>, Vec<TokioServiceHandle>) {
         let mut controllers = Vec::new();
         let mut handles = Vec::new();
+        let tx_path_threads = config.node_config.storage.tx_path_derive_threads;
+        let tx_path_pool = Arc::new(
+            irys_database::tx_path_derive::tx_path_derive_pool(tx_path_threads)
+                .expect("tx path derive pool"),
+        );
         for sm in storage_modules_guard.read().iter() {
             let inner = PartitionMiningServiceInner::new(
                 config,
@@ -2502,6 +2509,8 @@ impl IrysNode {
                 false, // do not start mining automatically
                 vdf_steps_guard.clone(),
                 initial_difficulty,
+                Some(irys_db.clone()),
+                Some(Arc::clone(&tx_path_pool)),
             );
             let (controller, handle) =
                 PartitionMiningService::spawn_service(inner, runtime_handle.clone());

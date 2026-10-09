@@ -74,6 +74,41 @@ pub enum BlockProductionError {
     },
 }
 
+/// Cold header reads finish in a few milliseconds. This bound only stops a
+/// stuck read from holding block production after the overlap window.
+const TX_PATH_DERIVE_WAIT: Duration = Duration::from_secs(2);
+
+/// Build PoA fields from a solution. `Ok(None)` means the tx path is not safe
+/// to publish.
+fn assemble_poa(
+    solution: &SolutionContext,
+    ledger_id: Option<u32>,
+) -> eyre::Result<Option<(PoaData, H256)>> {
+    let tx_path = match solution.tx_path.resolve(TX_PATH_DERIVE_WAIT) {
+        Ok(path) => path,
+        Err(error) => {
+            warn!(
+                solution.hash = %solution.solution_hash,
+                error = %error,
+                "dropping solution: tx path derive failed"
+            );
+            metrics::record_tx_path_derive_failed(error.metric_reason());
+            return Ok(None);
+        }
+    };
+    let poa_chunk = Base64(solution.chunk.clone());
+    let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
+    let poa = PoaData {
+        tx_path: tx_path.map(Base64),
+        data_path: solution.data_path.clone().map(Base64),
+        chunk: Some(poa_chunk),
+        ledger_id,
+        partition_chunk_offset: solution.chunk_offset,
+        partition_hash: solution.partition_hash,
+    };
+    Ok(Some((poa, poa_chunk_hash)))
+}
+
 impl From<eyre::Report> for BlockProductionError {
     fn from(source: eyre::Report) -> Self {
         Self::Irrecoverable { source }
@@ -466,25 +501,17 @@ impl BlockProducerService {
 pub trait BlockProdStrategy {
     fn inner(&self) -> &BlockProducerInner;
 
-    /// Creates PoA data from the solution context
-    /// Returns (PoaData, chunk_hash)
+    /// Creates PoA data from the solution context.
+    ///
+    /// `Ok(None)` drops the solution: the tx path derive failed or timed out.
+    /// A stored path is returned as it was read. A derive is awaited here, so
+    /// the parent wait, mempool selection, and the Reth payload build overlap it.
     fn create_poa_data(
         &self,
         solution: &SolutionContext,
         ledger_id: Option<u32>,
-    ) -> eyre::Result<(PoaData, H256)> {
-        let poa_chunk = Base64(solution.chunk.clone());
-        let poa_chunk_hash = H256(sha::sha256(&poa_chunk.0));
-        let poa = PoaData {
-            tx_path: solution.tx_path.clone().map(Base64),
-            data_path: solution.data_path.clone().map(Base64),
-            chunk: Some(poa_chunk),
-
-            ledger_id,
-            partition_chunk_offset: solution.chunk_offset,
-            partition_hash: solution.partition_hash,
-        };
-        Ok((poa, poa_chunk_hash))
+    ) -> eyre::Result<Option<(PoaData, H256)>> {
+        assemble_poa(solution, ledger_id)
     }
 
     /// Fetches a block header from mempool or database
@@ -1173,8 +1200,11 @@ pub trait BlockProdStrategy {
             .get_data_partition_assignment(solution.partition_hash)
             .and_then(|pa| pa.ledger_id);
 
-        // Create PoA data using the trait method
-        let (poa, poa_chunk_hash) = self.create_poa_data(solution, ledger_id)?;
+        // Create PoA data using the trait method. A failed derive drops the
+        // solution instead of sealing a PoA with an unverified tx path.
+        let Some((poa, poa_chunk_hash)) = self.create_poa_data(solution, ledger_id)? else {
+            return Ok(None);
+        };
 
         let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1
             > solution.vdf_step - 1
@@ -2179,5 +2209,55 @@ mod current_timestamp_tests {
 
         assert!(ts.as_millis() >= before);
         assert!(ts.to_secs().as_secs() > parent.timestamp.to_secs().as_secs());
+    }
+}
+
+#[cfg(test)]
+mod tx_path_poa_tests {
+    use super::assemble_poa;
+    use irys_types::{
+        H256,
+        block_production::{SolutionContext, TxPathJob, TxPathSource},
+    };
+
+    #[test]
+    fn failed_derive_does_not_build_a_poa() {
+        let job = TxPathJob::spawn(|| Err(eyre::eyre!("header missing at height 3")));
+        let solution = SolutionContext {
+            tx_path: TxPathSource::Derive(job),
+            data_path: Some(vec![1, 2, 3]),
+            chunk: vec![4, 5],
+            solution_hash: H256::repeat_byte(0x11),
+            ..SolutionContext::default()
+        };
+        let built = assemble_poa(&solution, Some(1)).expect("a drop is Ok");
+        assert!(built.is_none());
+    }
+
+    #[test]
+    fn derive_result_is_reused_by_a_second_build() {
+        let job = TxPathJob::spawn(|| Ok(vec![1, 2, 3, 4]));
+        let solution = SolutionContext {
+            tx_path: TxPathSource::Derive(job),
+            chunk: vec![9],
+            ..SolutionContext::default()
+        };
+        let (first, _) = assemble_poa(&solution, None).expect("ok").expect("path");
+        let (second, _) = assemble_poa(&solution, None).expect("ok").expect("path");
+        assert_eq!(first.tx_path.expect("first").0, vec![1, 2, 3, 4]);
+        assert_eq!(second.tx_path.expect("second").0, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn stored_path_is_copied_into_the_poa() {
+        let bytes = vec![9, 8, 7];
+        let solution = SolutionContext {
+            tx_path: TxPathSource::Stored(Some(bytes.clone())),
+            data_path: Some(vec![1]),
+            chunk: vec![2],
+            ..SolutionContext::default()
+        };
+        let (poa, _) = assemble_poa(&solution, None).expect("ok").expect("poa");
+        assert_eq!(poa.tx_path.expect("tx path").0, bytes);
     }
 }

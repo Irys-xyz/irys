@@ -57,8 +57,8 @@ use irys_types::{
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
     NetworkConfigWithDefaults as _, SealedBlock, SyncMode, SystemLedger, U256,
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment,
+    block_production::Seed, block_production::SolutionContext, block_production::TxPathSource,
+    irys::IrysSigner, partition::PartitionAssignment,
 };
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
@@ -4021,7 +4021,7 @@ pub async fn solution_context_with_poa_chunk(
             partition_hash,
             chunk_offset: partition_chunk_offset,
             mining_address: node_ctx.config.node_config.miner_address(),
-            tx_path: None,
+            tx_path: TxPathSource::Stored(None),
             data_path: None,
             chunk: poa_chunk,
             vdf_step: step,
