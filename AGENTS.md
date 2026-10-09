@@ -37,6 +37,15 @@ Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp
 
 - macOS: Increase open file limit (default 256 is too low for some tests) — see README.md
 - `IRYS_CUSTOM_TMP_DIR` env var overrides the `./.tmp` test temp directory
+- `cargo xtask test` prunes `target/` after each run: it deletes superseded test executables and
+  compilation units that no recent xtask run (`test`, `check`, `full-check`, `clippy`) used. If
+  another build sharing this target dir fails on a missing artifact — nextest
+  `No such file or directory` launching a test binary, rustc `can't find crate` or
+  `extern location ... does not exist`, or a build that keeps recompiling the same dependencies
+  (e.g. Reth) — a prune removed something that build still used. Run with `XTASK_NO_PRUNE=1`
+  (or `--no-prune`), and set it for every agent that shares a target dir with others.
+  `RUST_LOG=xtask=debug` logs why each file was kept or removed; the rules are in
+  `xtask/src/prune.rs`.
 - Do not set `RUSTFLAGS`: that replaces `.cargo/config.toml`
   (`-C target-cpu=native`) and rebuilds the Reth graph. Warnings are denied by
   `cargo xtask clippy` (`-- -D warnings`), not rustflags. rust-analyzer

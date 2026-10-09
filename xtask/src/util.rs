@@ -1,7 +1,10 @@
 //! Shared helpers used across xtask commands.
 
-use cargo_metadata::MetadataCommand;
+use crate::prune;
+use cargo_metadata::{Message, MetadataCommand, TargetKind};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
+use std::process::Stdio;
 use xshell::{Cmd, Shell, cmd};
 
 /// Pinned cargo-nextest version, shared by `xtask test` and `xtask flaky` so the
@@ -79,12 +82,112 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// What one cargo invocation reported building or reusing.
+#[derive(Default)]
+pub struct Collected {
+    /// Test executables, bin targets left out: a bin's unit-test executable shares its crate
+    /// root with the bin itself, which the run still needs.
+    pub test_executables: Vec<PathBuf>,
+    /// Every artifact file and build-script output dir.
+    pub artifacts: Vec<PathBuf>,
+}
+
+/// Run a cargo command with its JSON on stdout: echo every other stdout line, and collect what
+/// cargo reports.
+pub fn run_collecting(cmd: Cmd<'_>) -> eyre::Result<(Collected, eyre::Result<()>)> {
+    let mut command: std::process::Command = remove_ring_env_vars(cmd).into();
+    let display = format!("{command:?}");
+    eprintln!("$ {display}");
+    let mut child = command.stdout(Stdio::piped()).spawn()?;
+    let mut reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
+    let mut collected = Collected::default();
+    let mut out = std::io::stdout().lock();
+    // Lines are bytes, not strings: test output under `--no-capture` need not be UTF-8. After a
+    // failed echo (stdout closed, as under `| head`) keep draining, so nextest never hits a full
+    // or broken pipe.
+    let mut echo_ok = true;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => {
+                // Nothing drains the pipe any more, so waiting alone could block forever.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.into());
+            }
+        }
+        match serde_json::from_slice::<Message>(&line) {
+            Ok(Message::CompilerArtifact(artifact)) => {
+                let test_exe = artifact.profile.test && !artifact.target.is_kind(TargetKind::Bin);
+                if let Some(exe) = artifact.executable {
+                    if test_exe {
+                        collected
+                            .test_executables
+                            .push(exe.clone().into_std_path_buf());
+                    }
+                    collected.artifacts.push(exe.into_std_path_buf());
+                }
+                collected.artifacts.extend(
+                    artifact
+                        .filenames
+                        .into_iter()
+                        .map(cargo_metadata::camino::Utf8PathBuf::into_std_path_buf),
+                );
+            }
+            Ok(Message::BuildScriptExecuted(script)) => {
+                collected.artifacts.push(script.out_dir.into_std_path_buf());
+            }
+            Ok(Message::TextLine(_)) | Err(_) => {
+                echo_ok = echo_ok && out.write_all(&line).is_ok();
+            }
+            Ok(_) => {}
+        }
+    }
+    let status = child.wait()?;
+    let result = if status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("command exited with {status}: {display}"))
+    };
+    Ok((collected, result))
+}
+
+/// Run a cargo build command through [`run_collecting`] and record what it used, so the unit
+/// prune keeps it. A failed record only warns.
+pub fn run_recorded(cmd: Cmd<'_>, invocation: &str) -> eyre::Result<()> {
+    let (collected, result) = run_collecting(cmd)?;
+    record_run(invocation, &collected.artifacts);
+    result
+}
+
+pub fn record_run(invocation: &str, artifacts: &[PathBuf]) {
+    if artifacts.is_empty() {
+        return;
+    }
+    let recorded = MetadataCommand::new()
+        .no_deps()
+        .exec()
+        .map_err(eyre::Report::from)
+        .and_then(|m| {
+            prune::record_usage(m.target_directory.as_std_path(), invocation, artifacts)
+                .map_err(eyre::Report::from)
+        });
+    if let Err(e) = recorded {
+        eprintln!("Warning: artifact usage not recorded: {e}");
+    }
+}
+
 /// Build the nextest-wrapper binary, optionally with additional features.
 /// Returns the path to the built binary.
 pub fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf> {
     println!("Building nextest-wrapper...");
     let mut build_args = vec![
         "build".to_string(),
+        "--message-format".to_string(),
+        "json-render-diagnostics".to_string(),
         "--package".to_string(),
         "nextest-monitor".to_string(),
         "--bin".to_string(),
@@ -94,7 +197,8 @@ pub fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf
         build_args.push("--features".to_string());
         build_args.push(feat.to_string());
     }
-    cmd!(sh, "cargo {build_args...}").remove_and_run()?;
+    let invocation = format!("nextest-wrapper {}", features.unwrap_or_default());
+    run_recorded(cmd!(sh, "cargo {build_args...}"), &invocation)?;
 
     // Get the target directory
     let metadata = MetadataCommand::new().exec()?;

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 use xshell::{Shell, cmd};
 
 use xtask::failures::{
@@ -11,9 +12,15 @@ use xtask::failures::{
     get_stats_file_path,
 };
 use xtask::flaky::{FlakyOptions, run_flaky};
-use xtask::util::{CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, with_deny_warnings};
+use xtask::prune;
+use xtask::util::{
+    CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, record_run, run_collecting,
+    run_recorded, with_deny_warnings,
+};
 
 const LLVM_COV_VERSION: &str = "0.6.16";
+const DEFAULT_PRUNE_GRACE_MINUTES: u64 = 30;
+const DEFAULT_PRUNE_UNUSED_DAYS: u64 = 1;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -49,8 +56,29 @@ enum Commands {
         /// Enable heap profiling via heaptrack for individual tests (Linux only)
         #[clap(long, default_value_t = false)]
         heap_profile: bool,
-        /// Arbitrary passthrough args
-        #[clap(last = true)]
+        /// Keep old copies of test executables. By default a run deletes every other build of a
+        /// test target it built, and executables whose crate root is gone. `RUST_LOG=xtask=debug`
+        /// logs each decision.
+        #[clap(
+            long,
+            env = "XTASK_NO_PRUNE",
+            value_parser = clap::builder::BoolishValueParser::new(),
+            default_value_t = false
+        )]
+        no_prune: bool,
+        /// Keep an old copy whose mtime or atime is within this many minutes; with 0, only copies
+        /// touched since this run started are kept.
+        #[clap(long, env = "XTASK_PRUNE_GRACE_MINUTES", default_value_t = DEFAULT_PRUNE_GRACE_MINUTES)]
+        prune_grace_minutes: u64,
+        /// Keep a compilation unit that no recent `xtask test`, `clippy` or `check` used, and that
+        /// is not a duplicate of one they used, for this many days after it was last touched.
+        #[clap(long, env = "XTASK_PRUNE_UNUSED_DAYS", default_value_t = DEFAULT_PRUNE_UNUSED_DAYS)]
+        prune_unused_days: u64,
+        /// Args after `--` go to nextest.
+        ///
+        /// Package filter: `cargo xtask test -- -p irys-actors`.
+        /// Do not pass `-p` before `--`.
+        #[clap(last = true, verbatim_doc_comment)]
         args: Vec<String>,
     },
     Check {
@@ -221,6 +249,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             no_update_failures,
             monitor,
             heap_profile,
+            no_prune,
+            prune_grace_minutes,
+            prune_unused_days,
         } => {
             if coverage && heap_profile {
                 return Err(eyre::eyre!(
@@ -437,11 +468,61 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 nextest_args.push("heap-profile".to_string());
             }
 
+            // Coverage builds into llvm-cov's own target dir and cleans it on every run.
+            let user_has_message_format =
+                args.iter().any(|a| a.starts_with("--cargo-message-format"));
+            let prune = !no_prune && !coverage && !user_has_message_format;
+            if !prune {
+                tracing::debug!(
+                    no_prune,
+                    coverage,
+                    user_has_message_format,
+                    "stale executable prune skipped"
+                );
+            }
+            if prune {
+                // Cargo's JSON names every executable this run built; diagnostics stay human.
+                nextest_args.push("--cargo-message-format".to_string());
+                nextest_args.push("json-render-diagnostics".to_string());
+            }
+
             // Add user-provided args (by reference — args is needed later for coverage scope)
             nextest_args.extend(args.iter().cloned());
 
             // Run nextest
-            let test_result = cmd!(sh, "cargo {nextest_args...}").remove_and_run();
+            let run_started = SystemTime::now();
+            let test_result = if prune {
+                let (collected, result) = run_collecting(cmd!(sh, "cargo {nextest_args...}"))?;
+                // Keyed by what selects the build, not by the generated config file's path.
+                record_run(
+                    &format!("test {} {}", heap_profile, args.join(" ")),
+                    &collected.artifacts,
+                );
+                let ago = |secs: u64| {
+                    SystemTime::now()
+                        .checked_sub(Duration::from_secs(secs))
+                        .unwrap_or(SystemTime::UNIX_EPOCH)
+                };
+                let keep_after = run_started.min(ago(prune_grace_minutes.saturating_mul(60)));
+                let unused_before = keep_after.min(ago(prune_unused_days.saturating_mul(86_400)));
+                // `cargo xtask` is `cargo run -p xtask`, a build nothing else records; without this
+                // record its dependencies read as duplicates and every xtask call rebuilds them.
+                if let Err(e) = run_recorded(
+                    cmd!(
+                        sh,
+                        "cargo build --message-format json-render-diagnostics -p xtask"
+                    ),
+                    "xtask",
+                ) {
+                    eprintln!("Warning: xtask build not recorded: {e}");
+                }
+                prune_after_run(&collected.test_executables, keep_after, unused_before);
+                result
+            } else {
+                cmd!(sh, "cargo {nextest_args...}")
+                    .remove_and_run()
+                    .map_err(eyre::Report::from)
+            };
 
             // Keep config file alive until after the command runs
             drop(config_file);
@@ -572,12 +653,26 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             test_result?;
         }
         Commands::Check { args } => {
-            println!("cargo check");
-            cmd!(sh, "cargo check {args...}").remove_and_run()?;
+            println!("cargo check --workspace");
+            let invocation = format!("check {}", args.join(" "));
+            run_recorded(
+                cmd!(
+                    sh,
+                    "cargo check --message-format json-render-diagnostics --workspace {args...}"
+                ),
+                &invocation,
+            )?;
         }
         Commands::FullCheck { args } => {
-            println!("cargo check --all-features --all-targets");
-            cmd!(sh, "cargo check --all-features --all-targets {args...}").remove_and_run()?;
+            println!("cargo check --workspace --all-features --all-targets");
+            let invocation = format!("full-check {}", args.join(" "));
+            run_recorded(
+                cmd!(
+                    sh,
+                    "cargo check --message-format json-render-diagnostics --workspace --all-features --all-targets {args...}"
+                ),
+                &invocation,
+            )?;
         }
         Commands::FullBacon { args } => {
             let _ = cmd!(sh, "cargo install --locked --version 3.16.0 bacon").remove_and_run();
@@ -587,11 +682,14 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         Commands::Clippy { args } => {
             println!("cargo clippy");
             let args = with_deny_warnings(args);
-            cmd!(
-                sh,
-                "cargo clippy --workspace --tests --all-targets --locked {args...}"
-            )
-            .remove_and_run()?;
+            let invocation = format!("clippy {}", args.join(" "));
+            run_recorded(
+                cmd!(
+                    sh,
+                    "cargo clippy --message-format json-render-diagnostics --workspace --tests --all-targets --locked {args...}"
+                ),
+                &invocation,
+            )?;
         }
         Commands::Fmt {
             check_only: only_check,
@@ -667,18 +765,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             run_command(Commands::UnusedDeps, sh)?;
             run_command(Commands::Typos, sh)?;
             if with_tests {
-                run_command(
-                    Commands::Test {
-                        coverage: false,
-                        rerun_failures: false,
-                        clean: false,
-                        no_update_failures: false,
-                        monitor: false,
-                        heap_profile: false,
-                        args: vec![],
-                    },
-                    sh,
-                )?
+                // Parsed, not built by hand, so the `XTASK_*` env vars apply exactly as they do to
+                // `cargo xtask test`.
+                run_command(Args::try_parse_from(["xtask", "test"])?.command, sh)?
             }
         }
         Commands::CleanWorkspace => {
@@ -909,8 +998,46 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Prune never fails a run: a failure to delete leaves disk as it was.
+fn prune_after_run(built: &[PathBuf], keep_after: SystemTime, unused_before: SystemTime) {
+    tracing::debug!(built = built.len(), "test executables reported by cargo");
+    let metadata = match MetadataCommand::new().no_deps().exec() {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            eprintln!("Warning: stale artifact prune skipped: {e}");
+            return;
+        }
+    };
+    let workspace_root = metadata.workspace_root.as_std_path();
+    match prune::prune_stale_executables(workspace_root, built, keep_after) {
+        Ok(report) if report.removed_executables > 0 => println!(
+            "Pruned {} stale test executable(s), {} MiB (XTASK_NO_PRUNE=1 keeps them)",
+            report.removed_executables,
+            report.removed_bytes / (1024 * 1024)
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("Warning: stale executable prune failed: {e}"),
+    }
+    let target_dir = metadata.target_directory.as_std_path();
+    match prune::prune_unused_units(target_dir, workspace_root, keep_after, unused_before) {
+        Ok(report) if report.removed_units + report.removed_build_dirs > 0 => println!(
+            "Pruned {} unused compilation unit(s) and {} build-script dir(s), {} MiB \
+             (XTASK_NO_PRUNE=1 keeps them)",
+            report.removed_units,
+            report.removed_build_dirs,
+            report.removed_bytes / (1024 * 1024)
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("Warning: unused unit prune failed: {e}"),
+    }
+}
+
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
     let sh = Shell::new()?;
     let args = Args::parse();
     run_command(args.command, &sh)
