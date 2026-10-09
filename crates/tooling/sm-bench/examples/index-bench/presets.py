@@ -1,6 +1,6 @@
 import re, sys, os
 os.chdir(sys.argv[1])
-names = ["baseline", "block-16k", "block-256k", "cache-1g", "no-blob", "no-compress", "direct-io", "universal"]
+names = ["baseline", "block-16k", "block-256k", "cache-1g", "blobs", "no-compress", "direct-io", "universal"]
 
 def shape(t, s):
     m = re.search(r"shape=" + s + r" .*?p50_us=(\d+) p99_us=(\d+).*?disk_reads=(\d+).*?disk_writes=(\d+).*?per_lookup_read_bytes=(\d+)", t)

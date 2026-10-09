@@ -281,6 +281,9 @@ fn memory_predict(args: &Args) -> String {
     let shared = args.rocks.share_resources;
     // A shared open uses the process cache, not the private preset field.
     // The bench does not install a custom size, so that cache is the default.
+    // Inline data-path blocks use this cache. There is no separate blob
+    // cache. These profiles store offset rows, so the figure is the bloom
+    // against that one cache.
     let cache = if shared {
         irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
     } else {
@@ -396,7 +399,7 @@ fn run_index_span(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Offset rows and no data-path blobs. The cold read is one family.
+/// Offset rows and no data paths. The cold read is one family.
 fn run_offset_rows(args: &Args) -> eyre::Result<()> {
     let watch = MemWatch::start();
     let dir = args.dir.join("rocks");
@@ -1756,6 +1759,7 @@ index-span writes --chunks offsets in one update. A max transaction is --chunks 
 offset-rows writes --chunks offset rows and no data paths, then does cold point reads. A full partition is --chunks 75534400.\n\
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
+Baseline stores data-path and tx-path values in SST blocks. The blobs preset writes values at or above the blob threshold into blob files. \
 Baseline uses partitioned filters and a 10-bit bloom only on families whose point lookups miss. all-blooms keeps that shape and puts the bloom on every family. full-filters is one full filter per SST, one cache shard, and a 128 MiB cache. \
 Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, and fdatasync-wal-rotate-compact changes one setting. \
 --rocks-block-cache overrides that preset's cache size and does not change the shard count. A new block size or a switch between baseline and full-filters needs an empty directory. An existing SST keeps its filter until --rewrite-filters.\n\
