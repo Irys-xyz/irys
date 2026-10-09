@@ -1691,7 +1691,8 @@ async fn pending_body_hold_expires_and_fetches_from_a_peer() {
     }
 
     let timeout = config.node_config.data_sync.pending_body_hold_timeout;
-    orch.release_body_worker_holds(Instant::now() + timeout - Duration::from_secs(1));
+    // Subtract from the timeout, not from Instant. Clippy denies the latter.
+    orch.release_body_worker_holds(Instant::now() + timeout.saturating_sub(Duration::from_secs(1)));
     assert_eq!(orch.hold_expired, 0);
     for value in 0..3_u32 {
         assert!(
