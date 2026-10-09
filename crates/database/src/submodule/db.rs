@@ -712,10 +712,35 @@ fn put_data_path_hash<T: DbTxMut>(
 }
 
 fn tx_hash_at<T: DbTx>(tx: &T, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
+    Ok(tx_interval_at(tx, offset)?.map(|row| row.tx_path_hash))
+}
+
+/// Interval that covers `offset`, if one does.
+pub(super) fn tx_interval_at<T: DbTx>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+) -> eyre::Result<Option<IntervalRow>> {
     let Some(row) = floor_interval(tx, offset)? else {
         return Ok(None);
     };
-    Ok((row.start <= offset && row.end >= offset).then_some(row.tx_path_hash))
+    Ok((row.start <= offset && row.end >= offset).then_some(row))
+}
+
+/// Intervals that overlap the inclusive span. A neighbor that only touches
+/// `start - 1` or `end + 1` is not included.
+pub(super) fn tx_intervals_in_range<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<Vec<IntervalRow>> {
+    if start > end {
+        return Ok(Vec::new());
+    }
+    let rows = intervals_touching(tx, start, end)?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| row.start <= end && row.end >= start)
+        .collect())
 }
 
 fn floor_interval<T: DbTx>(

@@ -7,8 +7,9 @@ use irys_types::{H256, PartitionChunkOffset};
 
 use super::tables::ChunkPathHashes;
 
+/// Inclusive tx-path coverage in one submodule, and the hash of the stored path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct IntervalRow {
+pub struct IntervalRow {
     pub start: PartitionChunkOffset,
     pub end: PartitionChunkOffset,
     pub tx_path_hash: H256,

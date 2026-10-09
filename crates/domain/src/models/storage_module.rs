@@ -45,7 +45,7 @@ use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 use irys_database::submodule::RocksTuning;
 use irys_database::submodule::{
     SubmoduleIndex, SubmoduleRead, SubmoduleStore as _, install_process_rocks_resources,
-    tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
+    tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, Placement, TxLeafBinding},
 };
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
@@ -93,37 +93,6 @@ mod split_backing;
 pub use split_backing::SplitBacking;
 
 type SubmodulePath = PathBuf;
-
-/// Recover the verified real `data_root` and this offset's `data_path` hash in a single
-/// offset-index read.
-///
-/// After the `prefix_hash` softfork, the tx_path leaf stores the folded
-/// `hash_all_sha256([data_root, prefix_hash])` (the ledger `tx_root` leaf value), so the
-/// raw `data_root` can no longer be read out of the proof leaf. The real `data_root` comes
-/// from the stored `TxLeafBinding` and is cross-checked against the proof leaf via the same
-/// fold — so the binding and the proof can never silently disagree; a mismatch is surfaced
-/// as corruption rather than served.
-///
-/// Returns `Ok(None)` if no tx_path is indexed at this offset. The returned
-/// `data_path_hash` (the chunk's own path hash, `None` if its chunk hasn't been written)
-/// lets the caller fetch the `data_path` directly without re-reading the offset index.
-fn recover_tx_path_data_root(
-    tx: &dyn SubmoduleRead,
-    partition_offset: PartitionChunkOffset,
-) -> eyre::Result<Option<(DataRoot, Option<ChunkPathHash>)>> {
-    // Single read of the offset index; both the tx_path_hash (for data_root recovery) and
-    // the data_path_hash (returned to the caller) come from this one lookup.
-    let Some(path_hashes) = tx.get_path_hashes_by_offset(partition_offset)? else {
-        return Ok(None);
-    };
-    let Some(tx_path_hash) = path_hashes.tx_path_hash else {
-        return Ok(None);
-    };
-    let Some(data_root) = data_root_for_tx_path_hash(tx, tx_path_hash)? else {
-        return Ok(None);
-    };
-    Ok(Some((data_root, path_hashes.data_path_hash)))
-}
 
 /// Real `data_root` for a stored tx path, checked against the proof leaf.
 ///
@@ -174,25 +143,48 @@ fn metas_in_tx(
 ) -> eyre::Result<BTreeMap<PartitionChunkOffset, (DataRoot, u64, Base64, TxChunkOffset)>> {
     index_read_metrics::note("offset_walk");
     let rows = tx.path_hashes_in_inclusive_range(start, end)?;
+    let placements = tx.placements_in_range(start, end)?;
+    let mut noted_roots: HashMap<DataRoot, ()> = HashMap::new();
+    for placement in &placements {
+        index_read_metrics::note("tx_path");
+        index_read_metrics::note("tx_leaf");
+        if noted_roots.insert(placement.data_root, ()).is_none() {
+            index_read_metrics::note("data_root");
+        }
+    }
     let mut tx_roots: HashMap<irys_types::TxPathHash, Option<DataRoot>> = HashMap::new();
     let mut infos: HashMap<DataRoot, DataRootInfos> = HashMap::new();
     let mut data_paths: HashMap<ChunkPathHash, Option<Base64>> = HashMap::new();
     let mut out = BTreeMap::new();
+    let mut placement_index = 0;
     for (offset, hashes) in rows {
         let Some(tx_path_hash) = hashes.tx_path_hash else {
             continue;
         };
-        let data_root = if let Some(cached) = tx_roots.get(&tx_path_hash) {
-            *cached
+        while placement_index < placements.len() && placements[placement_index].end < offset {
+            placement_index += 1;
+        }
+        let covered = placements
+            .get(placement_index)
+            .filter(|placement| placement.start <= offset && placement.end >= offset);
+        let (data_root, data_size) = if let Some(placement) = covered {
+            (placement.data_root, placement.data_size)
         } else {
-            let loaded = data_root_for_tx_path_hash(tx, tx_path_hash)?;
-            tx_roots.insert(tx_path_hash, loaded);
-            loaded
+            // No placement: the path bytes are missing (skip) or the data root
+            // has no info (the same error as before).
+            let data_root = if let Some(cached) = tx_roots.get(&tx_path_hash) {
+                *cached
+            } else {
+                let loaded = data_root_for_tx_path_hash(tx, tx_path_hash)?;
+                tx_roots.insert(tx_path_hash, loaded);
+                loaded
+            };
+            let Some(data_root) = data_root else {
+                continue;
+            };
+            let data_size = data_size_for_offset(tx, data_root, offset, &mut infos)?;
+            (data_root, data_size)
         };
-        let Some(data_root) = data_root else {
-            continue;
-        };
-        let data_size = data_size_for_offset(tx, data_root, offset, &mut infos)?;
         let Some(data_path_hash) = hashes.data_path_hash else {
             continue;
         };
@@ -4906,18 +4898,29 @@ impl StorageModule {
     ) -> Result<Option<(DataRoot, Base64)>> {
         index_read_metrics::note_view(1);
         self.query_submodule_db_by_offset(partition_offset, |tx| {
-            // Recover the real data_root from the stored tx-leaf binding (verified against
-            // the tx_path leaf via the (data_root, prefix_hash) fold) plus this offset's
-            // data_path hash, from a single offset-index read.
-            let Some((data_root, data_path_hash)) =
-                recover_tx_path_data_root(tx, partition_offset)?
-            else {
+            let hashes = tx.get_path_hashes_by_offset(partition_offset)?;
+            let Some(hashes) = hashes else {
                 return Ok(None);
             };
-
-            if data_path_hash.is_none() {
+            if hashes.data_path_hash.is_none() {
                 return Ok(None);
             }
+            // The data root comes from the placement. A tx path with no
+            // covering info still resolves through the leaf binding, which is
+            // what this read did before the placement API.
+            let data_root = if let Some(placement) = tx.placement_at(partition_offset)? {
+                index_read_metrics::note("tx_path");
+                index_read_metrics::note("tx_leaf");
+                placement.data_root
+            } else {
+                let Some(tx_path_hash) = hashes.tx_path_hash else {
+                    return Ok(None);
+                };
+                let Some(data_root) = data_root_for_tx_path_hash(tx, tx_path_hash)? else {
+                    return Ok(None);
+                };
+                data_root
+            };
             index_read_metrics::note("data_path");
             let Some(data_path) = tx.get_data_path_by_offset(partition_offset)? else {
                 return Ok(None);
@@ -4974,10 +4977,26 @@ impl StorageModule {
             let sub_last = PartitionChunkOffset(std::cmp::min(end.0, interval.end().0));
             let group_start = offset;
             submodule.db.view(|tx| {
+                let placements = tx.placements_in_range(group_start, sub_last)?;
+                for _placement in &placements {
+                    index_read_metrics::note("tx_path");
+                    index_read_metrics::note("tx_leaf");
+                }
+                let mut placement_index = 0;
                 let mut cur = group_start;
                 loop {
                     let idx = usize::try_from(cur.0 - start.0)?;
-                    out[idx] = Self::resolve_placement(tx, cur, chunk_size)?;
+                    while placement_index < placements.len()
+                        && placements[placement_index].end < cur
+                    {
+                        placement_index += 1;
+                    }
+                    out[idx] = placements
+                        .get(placement_index)
+                        .filter(|placement| placement.start <= cur && placement.end >= cur)
+                        .and_then(|placement| {
+                            Self::tx_offset_in_placement(placement, cur, chunk_size)
+                        });
                     if cur == sub_last {
                         break;
                     }
@@ -4996,6 +5015,35 @@ impl StorageModule {
         Ok(out)
     }
 
+    /// `tx_offset` is `partition_offset - placement.tx_start_offset`.
+    ///
+    /// The offset must fall inside `data_size`. The start can be negative when
+    /// the tx begins before this module.
+    fn tx_offset_in_placement(
+        placement: &Placement,
+        partition_offset: PartitionChunkOffset,
+        chunk_size: u64,
+    ) -> Option<(DataRoot, TxChunkOffset, u64)> {
+        let partition_rel = RelativeChunkOffset::from(partition_offset);
+        if placement.tx_start_offset > partition_rel {
+            return None;
+        }
+        let tx_offset_i32 = *partition_rel - *placement.tx_start_offset;
+        if tx_offset_i32 < 0 {
+            return None;
+        }
+        let tx_offset_u32 = tx_offset_i32 as u32;
+        let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
+        if chunk_byte_offset >= placement.data_size {
+            return None;
+        }
+        Some((
+            placement.data_root,
+            TxChunkOffset::from(tx_offset_u32),
+            placement.data_size,
+        ))
+    }
+
     /// Placement of one partition offset: `(data_root, tx_offset, data_size)`.
     ///
     /// `data_path_hash` may be absent. That is the residual hole after the index
@@ -5007,53 +5055,16 @@ impl StorageModule {
         partition_offset: PartitionChunkOffset,
         chunk_size: u64,
     ) -> eyre::Result<Option<(DataRoot, TxChunkOffset, u64)>> {
-        let Some((data_root, _data_path_hash)) = recover_tx_path_data_root(tx, partition_offset)?
-        else {
+        let Some(placement) = tx.placement_at(partition_offset)? else {
             return Ok(None);
         };
-
-        let Some(mut data_root_infos) = tx.get_data_root_infos_for_data_root(data_root)? else {
-            return Ok(None);
-        };
-        if data_root_infos.0.is_empty() {
-            return Ok(None);
-        }
-
-        // Same placement selection as generate_full_chunk: last start_offset that is
-        // still ≤ partition_offset (handles multi-placement of the same data_root).
-        data_root_infos.0.sort_unstable();
-        let partition_rel = RelativeChunkOffset::from(partition_offset);
-        let index = data_root_infos
-            .0
-            .partition_point(|info| info.start_offset <= partition_rel)
-            .saturating_sub(1);
-        if index >= data_root_infos.0.len() {
-            return Ok(None);
-        }
-        let info = &data_root_infos.0[index];
-        if info.start_offset > partition_rel {
-            return Ok(None);
-        }
-
-        // partition_offset = start_offset + tx_offset (write path); invert it.
-        // start_offset can be negative when a multi-partition tx straddles modules.
-        let tx_offset_i32 = *partition_rel - *info.start_offset;
-        if tx_offset_i32 < 0 {
-            return Ok(None);
-        }
-        let tx_offset_u32 = tx_offset_i32 as u32;
-
-        // Funded extent: last valid byte is data_size - 1; reject offsets past it.
-        let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
-        if chunk_byte_offset >= info.data_size {
-            return Ok(None);
-        }
-
-        Ok(Some((
-            data_root,
-            TxChunkOffset::from(tx_offset_u32),
-            info.data_size,
-        )))
+        index_read_metrics::note("tx_path");
+        index_read_metrics::note("tx_leaf");
+        Ok(Self::tx_offset_in_placement(
+            &placement,
+            partition_offset,
+            chunk_size,
+        ))
     }
 
     /// Whether the local index can resolve `data_root` + placement for `partition_offset`.

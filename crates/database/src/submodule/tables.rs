@@ -102,6 +102,24 @@ tables! {
 
 }
 
+/// One tx placement as a reader sees it.
+///
+/// Schema v2 leaves `ledger`, `block_height`, and `tx_index` empty. The data
+/// root comes from the tx-path leaf binding, and the unclipped start and
+/// `data_size` come from [`DataRootInfo`]. `start` and `end` are the clipped
+/// interval stored for this submodule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub data_root: DataRoot,
+    pub tx_start_offset: RelativeChunkOffset,
+    pub data_size: u64,
+    pub ledger: Option<u32>,
+    pub start: PartitionChunkOffset,
+    pub end: PartitionChunkOffset,
+    pub block_height: Option<u64>,
+    pub tx_index: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 /// Inclusive end offset and the tx-path hash for the placement that starts at the key.
 pub struct TxPathInterval {

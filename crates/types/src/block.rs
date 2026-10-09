@@ -733,8 +733,8 @@ impl DataTransactionLedger {
     /// `prefix_hash == SHA-256(data[..prefix_size])` against the data is left to an
     /// off-chain indexer.)
     /// Every consumer that relates a `data_root`+`prefix_hash` to a tx_path leaf —
-    /// block production, validation's recompute, the PoA leaf binding, and storage's
-    /// `recover_tx_path_data_root` re-verification — goes through here, so the formula
+    /// block production, validation's recompute, the PoA leaf binding, and the
+    /// submodule placement re-verification — goes through here, so the formula
     /// lives in exactly one place and must stay byte-for-byte identical to the gateway's
     /// leaf formula for cross-impl `tx_root` reconstruction.
     pub fn fold_tx_root_leaf(data_root: H256, prefix_hash: H256) -> H256 {

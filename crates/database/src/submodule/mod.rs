@@ -4,6 +4,7 @@ pub mod db;
 mod group;
 mod interval;
 mod migrate;
+mod placement;
 #[cfg(feature = "rocksdb")]
 pub mod rocks;
 pub mod store;
@@ -16,6 +17,7 @@ pub use convert::{
     convert_rocks_to_mdbx, verify_mdbx_and_rocks,
 };
 pub use db::*;
+pub use interval::IntervalRow;
 #[cfg(feature = "rocksdb")]
 pub use rocks::{
     BLOB_MIN_BYTES, BLOCK_CACHE_BYTES, ColumnFileUsage, LegacySstSpan, RocksBackground,

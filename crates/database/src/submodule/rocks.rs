@@ -3385,10 +3385,29 @@ impl Rows<'_> {
     }
 
     fn tx_hash_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<H256>> {
+        Ok(self.interval_covering(offset)?.map(|row| row.tx_path_hash))
+    }
+
+    fn interval_covering(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
         let Some(row) = self.floor_interval(offset)? else {
             return Ok(None);
         };
-        Ok((row.start <= offset && row.end >= offset).then_some(row.tx_path_hash))
+        Ok((row.start <= offset && row.end >= offset).then_some(row))
+    }
+
+    fn intervals_overlapping(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<IntervalRow>> {
+        if start > end {
+            return Ok(Vec::new());
+        }
+        let rows = self.intervals_touching(start, end)?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.start <= end && row.end >= start)
+            .collect())
     }
 
     fn floor_interval(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
@@ -3718,6 +3737,18 @@ impl SubmoduleRead for Rows<'_> {
         Ok(rows.iter().any(|row| row.start <= end && row.end >= start))
     }
 
+    fn tx_interval_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
+        self.interval_covering(offset)
+    }
+
+    fn tx_intervals_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<IntervalRow>> {
+        self.intervals_overlapping(start, end)
+    }
+
     fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
         // The key is a hash. It has no offset order. The value lists
         // placements, so the scan reads it. `fill_cache` stays off.
@@ -3847,6 +3878,18 @@ impl SubmoduleRead for Batch<'_> {
         end: PartitionChunkOffset,
     ) -> eyre::Result<bool> {
         self.rows().tx_interval_overlaps(start, end)
+    }
+
+    fn tx_interval_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
+        self.rows().interval_covering(offset)
+    }
+
+    fn tx_intervals_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<IntervalRow>> {
+        self.rows().intervals_overlapping(start, end)
     }
 
     fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {

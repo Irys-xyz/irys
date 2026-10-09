@@ -29,8 +29,9 @@ use super::group::{EnableStep, EngineLifetime, GroupCommit};
 use super::db::{
     delete_presence_in_ranges, delete_reset_marker, has_pending_body_migration_in_range,
     list_data_root_infos, presence_in_ranges, put_reset_marker, read_reset_marker,
-    trim_data_root_placements, tx_interval_overlaps,
+    trim_data_root_placements, tx_interval_at, tx_interval_overlaps, tx_intervals_in_range,
 };
+use super::interval::IntervalRow;
 #[cfg(feature = "rocksdb")]
 use super::rocks::{
     LegacySstSpan, RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning,
@@ -45,7 +46,10 @@ use super::{
     get_pending_body_migration, get_tx_leaf_binding, get_tx_path_by_offset,
     missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range, pending_body_migrations_from,
     set_data_root_infos_for_data_root, set_path_hashes_by_offset,
-    tables::{ChunkPathHashes, DataRootInfo, DataRootInfos, PendingBodyMigration, TxLeafBinding},
+    tables::{
+        ChunkPathHashes, DataRootInfo, DataRootInfos, PendingBodyMigration, Placement,
+        TxLeafBinding,
+    },
     write_data_path_updates,
 };
 use crate::db::IrysDatabaseExt as _;
@@ -132,6 +136,52 @@ pub trait SubmoduleRead {
     /// The key is a hash. It has no offset order. The value lists placements,
     /// so a span check has to read it. The scan does not fill the block cache.
     fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>>;
+
+    /// Inclusive interval that covers `offset`.
+    fn tx_interval_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>>;
+
+    /// Intervals that overlap the inclusive span `[start, end]`.
+    ///
+    /// A row that only touches a neighbor is not returned.
+    fn tx_intervals_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<IntervalRow>>;
+
+    /// Placement that covers `offset`.
+    ///
+    /// `Ok(None)` when no interval covers the offset, the tx-path bytes are
+    /// absent, or no `DataRootInfo` covers the offset. A missing leaf binding,
+    /// or a leaf that does not match the stored fold, is corruption.
+    ///
+    /// The default reads schema v2 rows. An engine whose index stores the
+    /// placement on the interval overrides this.
+    fn placement_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<Placement>> {
+        super::placement::read_placement_at(self, offset)
+    }
+
+    /// One placement per interval that overlaps the inclusive span.
+    ///
+    /// The data-root info is the one that covers the interval start. The same
+    /// miss and corruption rules as [`Self::placement_at`] apply. An interval
+    /// with no usable path or info is omitted.
+    fn placements_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<Placement>> {
+        super::placement::read_placements_in_range(self, start, end)
+    }
+
+    /// Live placements of `data_root` in this submodule, in start order.
+    ///
+    /// v2 probes each stored info, then scans intervals only when the probe
+    /// offset is not that placement (the tx was clipped to a later start, or
+    /// a later write covered the probe).
+    fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
+        super::placement::read_placements_for_data_root(self, data_root)
+    }
 }
 
 /// Exclusive write batch. Reads inside the batch see its own writes.
@@ -738,6 +788,21 @@ macro_rules! impl_submodule_read {
 
             fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
                 list_data_root_infos(self.tx)
+            }
+
+            fn tx_interval_at(
+                &self,
+                offset: PartitionChunkOffset,
+            ) -> eyre::Result<Option<IntervalRow>> {
+                tx_interval_at(self.tx, offset)
+            }
+
+            fn tx_intervals_in_range(
+                &self,
+                start: PartitionChunkOffset,
+                end: PartitionChunkOffset,
+            ) -> eyre::Result<Vec<IntervalRow>> {
+                tx_intervals_in_range(self.tx, start, end)
             }
         }
     };
@@ -1475,6 +1540,174 @@ mod tests {
             f(&rocks)?;
         }
         Ok(())
+    }
+
+    fn leaf_proof(data_root: H256, prefix: H256) -> (H256, Vec<u8>) {
+        let leaf = irys_types::DataTransactionLedger::fold_tx_root_leaf(data_root, prefix);
+        let mut proof = vec![0_u8; 64];
+        proof[..32].copy_from_slice(leaf.as_bytes());
+        (H256(irys_types::hash_sha256(&proof)), proof)
+    }
+
+    fn install_placement(
+        tx: &mut dyn SubmoduleWrite,
+        start: u32,
+        end: u32,
+        data_root: H256,
+        prefix: H256,
+        start_offset: i32,
+        data_size: u64,
+    ) -> eyre::Result<()> {
+        let (hash, proof) = leaf_proof(data_root, prefix);
+        tx.add_full_tx_path(hash, proof)?;
+        tx.add_tx_leaf_binding(
+            hash,
+            &TxLeafBinding {
+                data_root,
+                prefix_hash: prefix,
+            },
+        )?;
+        tx.add_tx_path_hash_to_offset_range(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+            Some(hash),
+        )?;
+        tx.add_data_root_info(
+            data_root,
+            &DataRootInfo {
+                start_offset: RelativeChunkOffset(start_offset),
+                data_size,
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn placement_reads_follow_the_interval_and_the_leaf_binding() -> eyre::Result<()> {
+        each_engine("submodule_placement", |store| {
+            let root_a = H256::repeat_byte(1);
+            let root_b = H256::repeat_byte(2);
+            let prefix_a = H256::repeat_byte(3);
+            let prefix_b = H256::repeat_byte(4);
+            store.update(|tx| {
+                install_placement(tx, 0, 4, root_a, prefix_a, 0, 5 * 262_144)?;
+                // Clipped: the tx starts before this submodule's first offset.
+                install_placement(tx, 10, 12, root_b, prefix_b, -5, 20 * 262_144)?;
+                install_placement(tx, 50, 51, root_a, H256::repeat_byte(5), 50, 2 * 262_144)?;
+                let seen = tx
+                    .placement_at(PartitionChunkOffset::from(10))?
+                    .expect("uncommitted placement is visible");
+                assert_eq!(seen.data_root, root_b);
+                assert_eq!(seen.tx_start_offset, RelativeChunkOffset(-5));
+                Ok(())
+            })?;
+
+            let at_two = store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(2)))?
+                .expect("interval covers 2");
+            assert_eq!(
+                at_two,
+                Placement {
+                    data_root: root_a,
+                    tx_start_offset: RelativeChunkOffset(0),
+                    data_size: 5 * 262_144,
+                    ledger: None,
+                    start: PartitionChunkOffset::from(0),
+                    end: PartitionChunkOffset::from(4),
+                    block_height: None,
+                    tx_index: None,
+                }
+            );
+            assert!(
+                store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(5)))?
+                    .is_none()
+            );
+            let later = store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(50)))?
+                .expect("second placement of root A");
+            assert_eq!(later.tx_start_offset, RelativeChunkOffset(50));
+            assert_eq!(later.data_size, 2 * 262_144);
+
+            let range = store.view(|tx| {
+                tx.placements_in_range(
+                    PartitionChunkOffset::from(4),
+                    PartitionChunkOffset::from(10),
+                )
+            })?;
+            assert_eq!(
+                range
+                    .iter()
+                    .map(|placement| placement.data_root)
+                    .collect::<Vec<_>>(),
+                vec![root_a, root_b]
+            );
+            let gap = store.view(|tx| {
+                tx.placements_in_range(PartitionChunkOffset::from(6), PartitionChunkOffset::from(9))
+            })?;
+            assert!(gap.is_empty());
+
+            let for_a = store.view(|tx| tx.placements_for_data_root(root_a))?;
+            assert_eq!(
+                for_a
+                    .iter()
+                    .map(|placement| placement.start)
+                    .collect::<Vec<_>>(),
+                vec![
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(50)
+                ]
+            );
+            // Probe offset 0 belongs to root A, so root B is found by the scan.
+            let for_b = store.view(|tx| tx.placements_for_data_root(root_b))?;
+            assert_eq!(for_b.len(), 1);
+            assert_eq!(for_b[0].start, PartitionChunkOffset::from(10));
+            assert_eq!(for_b[0].tx_start_offset, RelativeChunkOffset(-5));
+
+            store.update(|tx| {
+                let hash = H256::repeat_byte(7);
+                tx.add_tx_leaf_binding(
+                    hash,
+                    &TxLeafBinding {
+                        data_root: root_a,
+                        prefix_hash: prefix_a,
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(30),
+                    PartitionChunkOffset::from(30),
+                    Some(hash),
+                )?;
+                tx.add_data_root_info(
+                    root_a,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(30),
+                        data_size: 262_144,
+                    },
+                )?;
+                assert!(tx.placement_at(PartitionChunkOffset::from(30))?.is_none());
+                let (hash, proof) = leaf_proof(root_a, prefix_a);
+                tx.add_full_tx_path(hash, proof)?;
+                tx.add_tx_leaf_binding(
+                    hash,
+                    &TxLeafBinding {
+                        data_root: root_a,
+                        prefix_hash: prefix_b,
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(40),
+                    PartitionChunkOffset::from(40),
+                    Some(hash),
+                )?;
+                let err = tx
+                    .placement_at(PartitionChunkOffset::from(40))
+                    .expect_err("a leaf that does not match the binding is corruption");
+                assert!(err.to_string().contains("submodule corruption"));
+                Ok(())
+            })?;
+            Ok(())
+        })
     }
 
     #[test]
