@@ -112,8 +112,21 @@ pub enum ChunkRequestState {
 
     /// A live body-migration job covers this offset. Data sync does not fetch
     /// or write it. A later tick returns it to [`Self::Pending`] once the job
-    /// is gone and the offset is still Entropy.
+    /// is gone, the hold times out, or the offset is no longer Entropy.
     HeldByBodyWorker,
+}
+
+/// One offset's body-worker hold.
+///
+/// `since` is monotonic time when the hold started, or when the job's row key
+/// last moved forward. `anchor` is the coverage range start at that moment.
+/// `expired` stays set while the same range still covers the offset, so the
+/// hold is not taken again until the key moves or the job is gone.
+#[derive(Clone, Copy, Debug)]
+struct BodyHold {
+    since: Instant,
+    anchor: u32,
+    expired: bool,
 }
 
 type ExcludedPeerAddresses = HashSet<IrysAddress>;
@@ -189,12 +202,22 @@ pub struct ChunkOrchestrator {
     /// storage module yet.
     db: DatabaseProvider,
     /// Inclusive partition offsets a live body-migration job covers.
-    /// Refreshed in [`Self::prepare_tick`], and on the first dispatch if that
-    /// tick has not run yet.
+    /// One read per tick. Empty after a failed read, which fails open.
     pending_body_ranges: Vec<(u32, u32)>,
-    /// Set after a successful coverage read. A failed read stays false and
-    /// skips nothing, so the next dispatch tries again.
+    /// This tick already tried to read coverage. A failed read stays true so
+    /// dispatch does not read the table again. The next `prepare_tick` retries.
     coverage_loaded: bool,
+    /// Holds keyed by partition offset. Absent when this offset was never held.
+    body_holds: HashMap<PartitionChunkOffset, BodyHold>,
+    /// Holds released because the row key did not move before the timeout.
+    #[cfg(test)]
+    hold_expired: u64,
+    /// Coverage reads this orchestrator has attempted, including failures.
+    #[cfg(test)]
+    coverage_reads: u32,
+    /// When set, the next coverage read fails without touching the database.
+    #[cfg(test)]
+    fail_coverage_read: bool,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -234,6 +257,13 @@ impl ChunkOrchestrator {
             db,
             pending_body_ranges: Vec::new(),
             coverage_loaded: false,
+            body_holds: HashMap::new(),
+            #[cfg(test)]
+            hold_expired: 0,
+            #[cfg(test)]
+            coverage_reads: 0,
+            #[cfg(test)]
+            fail_coverage_read: false,
         }
     }
 
@@ -259,26 +289,39 @@ impl ChunkOrchestrator {
     }
 
     fn reload_pending_body_coverage(&mut self) {
+        #[cfg(test)]
+        {
+            self.coverage_reads = self.coverage_reads.saturating_add(1);
+            if self.fail_coverage_read {
+                // A read error must not hide holes from peers, and must not
+                // be retried on every dispatch in this tick.
+                self.pending_body_ranges.clear();
+                self.coverage_loaded = true;
+                warn!("pending body coverage read failed; data sync will not skip offsets");
+                return;
+            }
+        }
         match self.storage_module.pending_body_coverage_ranges() {
             Ok(ranges) => {
                 self.pending_body_ranges = ranges;
-                self.coverage_loaded = true;
             }
             Err(error) => {
-                // A read error must not hide holes from peers.
+                // A read error must not hide holes from peers, and must not
+                // be retried on every dispatch in this tick.
                 self.pending_body_ranges.clear();
-                self.coverage_loaded = false;
                 warn!(
                     error = %error,
                     "pending body coverage read failed; data sync will not skip offsets"
                 );
             }
         }
+        self.coverage_loaded = true;
     }
 
-    fn pending_body_covers(&self, offset: PartitionChunkOffset) -> bool {
+    fn covering_range(&self, offset: PartitionChunkOffset) -> Option<(u32, u32)> {
         let offset = *offset;
-        self.pending_body_ranges
+        let index = self
+            .pending_body_ranges
             .binary_search_by(|range| {
                 if range.1 < offset {
                     std::cmp::Ordering::Less
@@ -288,10 +331,34 @@ impl ChunkOrchestrator {
                     std::cmp::Ordering::Equal
                 }
             })
-            .is_ok()
+            .ok()?;
+        Some(self.pending_body_ranges[index])
+    }
+
+    fn pending_body_covers(&self, offset: PartitionChunkOffset) -> bool {
+        self.covering_range(offset).is_some()
+    }
+
+    /// The body worker still owns `offset`, and the hold has not timed out.
+    fn body_worker_owns(&self, offset: PartitionChunkOffset) -> bool {
+        self.pending_body_covers(offset)
+            && !self
+                .body_holds
+                .get(&offset)
+                .is_some_and(|hold| hold.expired)
     }
 
     fn hold_for_body_worker(&mut self, offset: PartitionChunkOffset) {
+        if self
+            .body_holds
+            .get(&offset)
+            .is_some_and(|hold| hold.expired)
+        {
+            return;
+        }
+        let Some((anchor, _)) = self.covering_range(offset) else {
+            return;
+        };
         let Some(request) = self.chunk_requests.get_mut(&offset) else {
             return;
         };
@@ -299,6 +366,14 @@ impl ChunkOrchestrator {
             return;
         }
         request.request_state = ChunkRequestState::HeldByBodyWorker;
+        self.body_holds.insert(
+            offset,
+            BodyHold {
+                since: Instant::now(),
+                anchor,
+                expired: false,
+            },
+        );
         metrics::record_data_sync_pending_body_skipped();
         debug!(
             chunk.offset = %offset,
@@ -306,27 +381,87 @@ impl ChunkOrchestrator {
         );
     }
 
-    /// Return holds whose job is gone. Only an offset that is still Entropy
-    /// becomes Pending; a stored offset is dropped by the next queue rebuild.
+    fn note_hold_expired(&mut self) {
+        metrics::record_data_sync_pending_body_hold_expired();
+        #[cfg(test)]
+        {
+            self.hold_expired = self.hold_expired.saturating_add(1);
+        }
+    }
+
+    fn is_entropy(&self, offset: PartitionChunkOffset) -> bool {
+        matches!(
+            self.storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Entropy)
+        )
+    }
+
+    /// Release a hold whose job is gone or whose row key stopped moving.
+    ///
+    /// The timer is the monotonic time since the hold started. It restarts
+    /// when the covering range's start moves forward: that is the pending row
+    /// key, so the worker made the prefix durable. Attempt counts do not
+    /// restart it. A deferred job never increments them, and that is the case
+    /// that must expire. Only an offset that is still Entropy becomes Pending.
     fn release_body_worker_holds(&mut self, now: Instant) {
-        let ready: Vec<PartitionChunkOffset> = self
-            .chunk_requests
-            .iter()
-            .filter_map(|(&offset, request)| {
-                if !matches!(request.request_state, ChunkRequestState::HeldByBodyWorker) {
-                    return None;
+        let timeout = self.config.data_sync.pending_body_hold_timeout;
+        let offsets: Vec<PartitionChunkOffset> = self.chunk_requests.keys().copied().collect();
+        let mut promote = Vec::new();
+        for offset in offsets {
+            let covered = self.covering_range(offset);
+            let held = matches!(
+                self.chunk_requests[&offset].request_state,
+                ChunkRequestState::HeldByBodyWorker
+            );
+            let hold = self.body_holds.get(&offset).copied();
+            match (held, covered, hold) {
+                (true, None, _) => {
+                    self.body_holds.remove(&offset);
+                    if self.is_entropy(offset) {
+                        promote.push(offset);
+                    }
                 }
-                if self.pending_body_covers(offset) {
-                    return None;
+                (true, Some((start, _)), Some(hold)) if start > hold.anchor => {
+                    if let Some(slot) = self.body_holds.get_mut(&offset) {
+                        slot.anchor = start;
+                        slot.since = now;
+                        slot.expired = false;
+                    }
                 }
-                matches!(
-                    self.storage_module.get_chunk_type(&offset),
-                    Some(ChunkType::Entropy)
-                )
-                .then_some(offset)
-            })
-            .collect();
-        for offset in ready {
+                (true, Some((start, _)), hold)
+                    if hold.is_none_or(|hold| {
+                        now.saturating_duration_since(hold.since) >= timeout
+                    }) =>
+                {
+                    self.body_holds.insert(
+                        offset,
+                        BodyHold {
+                            since: now,
+                            anchor: start,
+                            expired: true,
+                        },
+                    );
+                    if self.is_entropy(offset) {
+                        promote.push(offset);
+                        self.note_hold_expired();
+                    }
+                }
+                (_, None, Some(_)) => {
+                    self.body_holds.remove(&offset);
+                }
+                (_, Some((start, _)), Some(hold)) if hold.expired && start > hold.anchor => {
+                    if let Some(slot) = self.body_holds.get_mut(&offset) {
+                        slot.anchor = start;
+                        slot.since = now;
+                        slot.expired = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.body_holds
+            .retain(|offset, _| self.chunk_requests.contains_key(offset));
+        for offset in promote {
             if let Some(request) = self.chunk_requests.get_mut(&offset) {
                 request.request_state = ChunkRequestState::Pending;
                 request.ready_since = now;
@@ -675,8 +810,9 @@ impl ChunkOrchestrator {
             };
 
             // A live body job owns this offset. Hold it before the cache read
-            // so a miss is not memoized and the disk lane is not raced.
-            if self.pending_body_covers(chunk_offset) {
+            // so a miss is not memoized and the disk lane is not raced. An
+            // expired hold falls through to the cache and to peers.
+            if self.body_worker_owns(chunk_offset) {
                 self.hold_for_body_worker(chunk_offset);
                 continue;
             }
@@ -753,7 +889,7 @@ impl ChunkOrchestrator {
                 continue;
             }
             // Stop before an offset a body job still owns. The next pop holds it.
-            if front != next_expected || cache_miss || self.pending_body_covers(front) {
+            if front != next_expected || cache_miss || self.body_worker_owns(front) {
                 break;
             }
             self.ready_offsets.pop_front();

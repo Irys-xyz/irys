@@ -709,6 +709,10 @@ fn default_entropy_coalesce_hole_bytes() -> u64 {
     256 * 1024
 }
 
+fn default_pending_body_hold_timeout() -> Duration {
+    Duration::from_secs(10 * 60)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DataSyncServiceConfig {
@@ -724,6 +728,17 @@ pub struct DataSyncServiceConfig {
         serialize_with = "serde_utils::serialize_duration_string"
     )]
     pub chunk_request_timeout: Duration,
+    /// How long data sync leaves an offset to a live body-migration job.
+    ///
+    /// The clock starts when the hold starts. It restarts when that job's row
+    /// key moves forward. A job that makes no progress is fetched from peers
+    /// after this. Monotonic; not wall-clock and not the job's attempt count.
+    #[serde(
+        deserialize_with = "serde_utils::duration_from_string",
+        serialize_with = "serde_utils::serialize_duration_string",
+        default = "default_pending_body_hold_timeout"
+    )]
+    pub pending_body_hold_timeout: Duration,
 }
 
 impl Default for DataSyncServiceConfig {
@@ -733,6 +748,7 @@ impl Default for DataSyncServiceConfig {
             max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
             bandwidth_adjustment_interval: Duration::from_secs(5),
             chunk_request_timeout: Duration::from_secs(10),
+            pending_body_hold_timeout: default_pending_body_hold_timeout(),
         }
     }
 }
@@ -1521,6 +1537,7 @@ impl NodeConfig {
                 max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
+                pending_body_hold_timeout: default_pending_body_hold_timeout(),
             },
             trusted_peers: vec![/* PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
@@ -1723,6 +1740,7 @@ impl NodeConfig {
                 max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
+                pending_body_hold_timeout: default_pending_body_hold_timeout(),
             },
             trusted_peers: vec![],
             // trusted_peers: vec![PeerAddress {

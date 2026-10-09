@@ -445,6 +445,7 @@ impl TestSetup {
                 max_storage_throughput_bps: 1000 * 1024 * 1024, // 100 MB/s as BPS
                 bandwidth_adjustment_interval: Duration::from_secs(1),
                 chunk_request_timeout: timeout,
+                pending_body_hold_timeout: Duration::from_secs(10 * 60),
             },
             base_directory: base_path,
             ..NodeConfig::testing()

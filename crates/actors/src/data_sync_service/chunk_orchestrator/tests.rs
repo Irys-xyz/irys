@@ -1636,3 +1636,151 @@ async fn pending_body_offsets_are_skipped_until_the_job_settles() {
     assert_eq!(fetcher.request_log.read().unwrap().len(), 1);
     assert_eq!(metrics::test_pending_body_skipped_count(), before + 3);
 }
+
+/// A hold that sees no row-key movement is released to peers. The clock is
+/// the monotonic time since the hold started. One second inside the timeout
+/// stays held. Past the timeout, every covered offset is Pending and counted.
+#[test_log::test(tokio::test)]
+async fn pending_body_hold_expires_and_fetches_from_a_peer() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let (tx, _data) = signed_tx(&config, 3);
+    index_tx(&sm, &tx, 2);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm, &config, open_test_db(&config));
+    add_assigned_peer(&mut orch, &config, 17, 9117);
+    for value in 0..3_u32 {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+
+    assert!(!orch.dispatch_next());
+    for value in 0..3_u32 {
+        assert!(matches!(
+            orch.chunk_requests[&PartitionChunkOffset::from(value)].request_state,
+            ChunkRequestState::HeldByBodyWorker
+        ));
+    }
+
+    let timeout = config.node_config.data_sync.pending_body_hold_timeout;
+    orch.release_body_worker_holds(Instant::now() + timeout - Duration::from_secs(1));
+    assert_eq!(orch.hold_expired, 0);
+    for value in 0..3_u32 {
+        assert!(
+            matches!(
+                orch.chunk_requests[&PartitionChunkOffset::from(value)].request_state,
+                ChunkRequestState::HeldByBodyWorker
+            ),
+            "offset {value} is still inside the timeout"
+        );
+    }
+
+    orch.release_body_worker_holds(Instant::now() + timeout + Duration::from_secs(1));
+    assert_eq!(orch.hold_expired, 3);
+    for value in 0..3_u32 {
+        let offset = PartitionChunkOffset::from(value);
+        assert!(matches!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::Pending
+        ));
+        assert!(orch.body_holds[&offset].expired);
+    }
+
+    assert!(orch.dispatch_next());
+    wait_for_ledger_requests(&fetcher, 1).await;
+    assert!(
+        !orch
+            .chunk_requests
+            .values()
+            .any(|request| matches!(request.request_state, ChunkRequestState::HeldByBodyWorker)),
+        "an expired hold is not taken again for the same row key"
+    );
+}
+
+/// Moving the pending row key restarts the hold for the offsets that key
+/// still covers. The prefix the worker already left is fetched. The restart
+/// is the range start, not the job's attempt count.
+#[test_log::test(tokio::test)]
+async fn pending_body_hold_resets_when_the_row_key_advances() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let (tx, _data) = signed_tx(&config, 3);
+    index_tx(&sm, &tx, 2);
+    let (mut orch, _fetcher) =
+        make_orchestrator_with_db(sm.clone(), &config, open_test_db(&config));
+    for value in 0..3_u32 {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+    assert!(!orch.dispatch_next());
+
+    let jobs = sm.pending_body_migrations().expect("pending rows");
+    assert_eq!(jobs.len(), 1);
+    let (key, job) = &jobs[0];
+    assert_eq!(*key, PartitionChunkOffset::from(0));
+    let landed = sm
+        .advance_pending_body_migration(*key, PartitionChunkOffset::from(1), job)
+        .expect("advance");
+    assert_eq!(landed, PartitionChunkOffset::from(1));
+
+    orch.reload_pending_body_coverage();
+    assert_eq!(orch.pending_body_ranges, vec![(1, 2)]);
+    orch.release_body_worker_holds(Instant::now() + Duration::from_secs(60 * 60));
+
+    assert_eq!(orch.hold_expired, 0);
+    assert!(matches!(
+        orch.chunk_requests[&PartitionChunkOffset::from(0)].request_state,
+        ChunkRequestState::Pending
+    ));
+    assert!(!orch.body_holds.contains_key(&PartitionChunkOffset::from(0)));
+    for value in 1..3_u32 {
+        let offset = PartitionChunkOffset::from(value);
+        assert!(
+            matches!(
+                orch.chunk_requests[&offset].request_state,
+                ChunkRequestState::HeldByBodyWorker
+            ),
+            "offset {value} is still covered by the advanced key"
+        );
+        assert_eq!(orch.body_holds[&offset].anchor, 1);
+        assert!(!orch.body_holds[&offset].expired);
+    }
+}
+
+/// A coverage read error is one attempt per tick. Dispatch does not read
+/// again, and the offsets are fetched instead of held.
+#[test_log::test(tokio::test)]
+async fn pending_body_coverage_read_error_does_not_spin() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let (tx, _data) = signed_tx(&config, 3);
+    index_tx(&sm, &tx, 2);
+    let (mut orch, fetcher) = make_orchestrator_with_db(sm, &config, open_test_db(&config));
+    add_assigned_peer(&mut orch, &config, 18, 9118);
+    for value in 0..4_u32 {
+        insert_pending(&mut orch, PartitionChunkOffset::from(value));
+    }
+
+    orch.fail_coverage_read = true;
+    assert!(orch.dispatch_next());
+    assert_eq!(orch.coverage_reads, 1);
+    assert!(orch.pending_body_ranges.is_empty());
+    for value in 0..4_u32 {
+        assert!(
+            !matches!(
+                orch.chunk_requests[&PartitionChunkOffset::from(value)].request_state,
+                ChunkRequestState::HeldByBodyWorker
+            ),
+            "offset {value} is not held when coverage could not be read"
+        );
+    }
+    for _ in 0..5 {
+        let _ = orch.dispatch_next();
+    }
+    assert_eq!(orch.coverage_reads, 1);
+    wait_for_ledger_requests(&fetcher, 1).await;
+
+    orch.fail_coverage_read = false;
+    orch.prepare_tick();
+    assert_eq!(orch.coverage_reads, 2);
+}
