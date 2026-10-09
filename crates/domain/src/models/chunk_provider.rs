@@ -1,11 +1,12 @@
-use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_data_root};
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
-    TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+    PartitionChunkOffset, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
 };
 use nodit::interval::ii;
+use opentelemetry::{KeyValue, global, metrics::Counter};
+use std::sync::LazyLock;
 use tracing::debug;
 
 use crate::models::index_read_metrics::{self, SERVE_DATA_ROOT, SERVE_LEDGER, SERVE_SPAN};
@@ -13,6 +14,75 @@ use crate::{
     StorageModulesReadGuard, checked_add_i32_u64, get_overlapped_storage_modules,
     get_storage_module_at_offset,
 };
+
+static CHUNK_READS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.chunk_read_total")
+        .with_description(
+            "Chunk body reads by caller (serve_ledger, serve_span), source (storage_module, cache), and outcome (hit, miss, error)",
+        )
+        .build()
+});
+
+fn note_chunk_read(caller: &'static str, source: &'static str, outcome: &'static str) {
+    CHUNK_READS.add(
+        1,
+        &[
+            KeyValue::new("caller", caller),
+            KeyValue::new("source", source),
+            KeyValue::new("outcome", outcome),
+        ],
+    );
+}
+
+fn missing_on_disk(error: &eyre::Report) -> bool {
+    error
+        .to_string()
+        .contains("Could not find chunk bytes on disk")
+}
+
+fn unpack_packed(config: &Config, packed: &PackedChunk) -> UnpackedChunk {
+    let consensus = &config.consensus;
+    irys_packing::unpack(
+        packed,
+        consensus.entropy_packing_iterations,
+        consensus.chunk_size as usize,
+        consensus.chain_id,
+    )
+}
+
+/// Pack `unpacked` the way this module would store it, so a ledger client that
+/// decodes [`PackedChunk`] can unpack the cache hit.
+fn pack_for_module(
+    config: &Config,
+    partition_offset: PartitionChunkOffset,
+    partition_hash: irys_types::partition::PartitionHash,
+    unpacked: UnpackedChunk,
+) -> PackedChunk {
+    let consensus = &config.consensus;
+    let chunk_size = consensus.chunk_size as usize;
+    let mut entropy = Vec::with_capacity(chunk_size);
+    irys_packing::capacity_single::compute_entropy_chunk(
+        config.node_config.miner_address(),
+        u64::from(partition_offset.0),
+        partition_hash.0,
+        consensus.entropy_packing_iterations,
+        chunk_size,
+        &mut entropy,
+        consensus.chain_id,
+    );
+    let bytes = irys_packing::packing_xor_vec_u8(entropy, &unpacked.bytes.0);
+    PackedChunk {
+        data_root: unpacked.data_root,
+        data_size: unpacked.data_size,
+        data_path: unpacked.data_path,
+        bytes: irys_types::Base64(bytes),
+        packing_address: config.node_config.miner_address(),
+        partition_offset,
+        tx_offset: unpacked.tx_offset,
+        partition_hash,
+    }
+}
 
 /// Provides chunks to `actix::web` front end (mostly)
 #[derive(Debug, Clone)]
@@ -39,24 +109,89 @@ impl ChunkProvider {
         }
     }
 
-    /// Retrieves a chunk from a ledger
+    /// Packed chunk for one ledger offset.
+    ///
+    /// `Ok(None)` when no storage module covers the offset, or the module has
+    /// no body and the cache does not either. A cache hit is packed with this
+    /// module's entropy so the ledger response stays a [`PackedChunk`].
+    /// `Err` is a real read failure, not a hole.
     pub fn get_chunk_by_ledger_offset(
         &self,
         ledger: DataLedger,
         ledger_offset: LedgerChunkOffset,
     ) -> eyre::Result<Option<PackedChunk>> {
-        // Get basic chunk info
         index_read_metrics::with_caller(SERVE_LEDGER, || {
-            let module =
-                get_storage_module_at_offset(&self.storage_modules_guard, ledger, ledger_offset)
-                    .ok_or_eyre("No storage module contains this chunk")?;
-            module.generate_full_chunk_ledger_offset(ledger_offset)
+            self.ledger_in_caller(ledger, ledger_offset)
         })
+    }
+
+    fn ledger_in_caller(
+        &self,
+        ledger: DataLedger,
+        ledger_offset: LedgerChunkOffset,
+    ) -> eyre::Result<Option<PackedChunk>> {
+        let Some(module) =
+            get_storage_module_at_offset(&self.storage_modules_guard, ledger, ledger_offset)
+        else {
+            note_chunk_read(SERVE_LEDGER, "storage_module", "miss");
+            return Ok(None);
+        };
+        match module.generate_full_chunk_ledger_offset(ledger_offset) {
+            Ok(Some(packed)) => {
+                note_chunk_read(SERVE_LEDGER, "storage_module", "hit");
+                Ok(Some(packed))
+            }
+            Ok(None) => self.ledger_cache_as_packed(&module, ledger_offset),
+            Err(error) if missing_on_disk(&error) => {
+                debug!(
+                    error = %error,
+                    ledger.offset = *ledger_offset,
+                    "ledger chunk indexed without a body"
+                );
+                self.ledger_cache_as_packed(&module, ledger_offset)
+            }
+            Err(error) => {
+                note_chunk_read(SERVE_LEDGER, "storage_module", "error");
+                Err(error)
+            }
+        }
+    }
+
+    /// The covering module has no body. Pack a cached body with that module's
+    /// entropy, or return `Ok(None)` when the cache has none.
+    fn ledger_cache_as_packed(
+        &self,
+        module: &crate::StorageModule,
+        ledger_offset: LedgerChunkOffset,
+    ) -> eyre::Result<Option<PackedChunk>> {
+        note_chunk_read(SERVE_LEDGER, "storage_module", "miss");
+        let range = module.get_storage_module_ledger_offsets()?;
+        let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
+        let Some((data_root, tx_offset)) = module.data_root_and_tx_offset_at(partition_offset)?
+        else {
+            return Ok(None);
+        };
+        let Some(unpacked) = self.cached_unpacked(SERVE_LEDGER, data_root, tx_offset)? else {
+            return Ok(None);
+        };
+        let Some(partition_hash) = module.partition_hash() else {
+            debug!(
+                ledger.offset = *ledger_offset,
+                "cache hit has no partition hash to pack with"
+            );
+            return Ok(None);
+        };
+        Ok(Some(pack_for_module(
+            &self.config,
+            partition_offset,
+            partition_hash,
+            unpacked,
+        )))
     }
 
     /// Retrieves a chunk from a ledger and unpacks it (entropy recompute + XOR + tail trim).
     ///
-    /// `Ok(None)` when the offset holds no stored chunk; `Err` when no storage module covers it.
+    /// `Ok(None)` when no body is stored and the cache has none.
     pub fn get_unpacked_chunk_by_ledger_offset(
         &self,
         ledger: DataLedger,
@@ -96,34 +231,137 @@ impl ChunkProvider {
         let requested = LedgerChunkRange(ii(from, to));
         let modules =
             get_overlapped_storage_modules(&self.storage_modules_guard, ledger, &requested);
-        let consensus = &self.config.consensus;
         let mut out = Vec::new();
         for module in modules {
-            let module_range = module.get_storage_module_ledger_offsets()?;
+            let module_range = match module.get_storage_module_ledger_offsets() {
+                Ok(range) => range,
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "storage module has no ledger range; skipping it"
+                    );
+                    note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                    continue;
+                }
+            };
             let Some(overlap) = nodit::InclusiveInterval::intersection(&module_range, &requested)
             else {
                 continue;
             };
-            let partition_range = module.make_range_partition_relative(overlap)?;
-            let packed =
-                module.generate_full_chunks(partition_range.start(), partition_range.end())?;
+            let partition_range = match module.make_range_partition_relative(overlap) {
+                Ok(range) => range,
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "storage module range is not partition-relative; skipping it"
+                    );
+                    note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                    continue;
+                }
+            };
+            let start = partition_range.start();
+            let end = partition_range.end();
+            // A one-offset overlap errors when the index names a chunk the disk
+            // does not hold. Read that module offset by offset and keep the rest.
+            let mut batch = match module.generate_full_chunks(start, end) {
+                Ok(packed) => Some(packed),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "chunk span read failed; reading each offset"
+                    );
+                    None
+                }
+            };
             let ledger_start = *module_range.start();
-            for (partition_offset, chunk) in packed {
-                let ledger_offset =
-                    LedgerChunkOffset::from(ledger_start + u64::from(partition_offset.0));
-                out.push((
-                    ledger_offset,
-                    irys_packing::unpack(
-                        &chunk,
-                        consensus.entropy_packing_iterations,
-                        consensus.chunk_size as usize,
-                        consensus.chain_id,
-                    ),
-                ));
+            let mut cursor = start.0;
+            loop {
+                let partition_offset = PartitionChunkOffset(cursor);
+                let ledger_offset = LedgerChunkOffset::from(ledger_start + u64::from(cursor));
+                let packed = if let Some(map) = batch.as_mut() {
+                    map.remove(&partition_offset)
+                } else {
+                    match module.generate_full_chunk(partition_offset) {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            debug!(
+                                error = %error,
+                                partition.offset = cursor,
+                                "skipping chunk offset after a storage module read error"
+                            );
+                            note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                            None
+                        }
+                    }
+                };
+                if let Some(packed) = packed {
+                    note_chunk_read(SERVE_SPAN, "storage_module", "hit");
+                    out.push((ledger_offset, unpack_packed(&self.config, &packed)));
+                } else {
+                    // The batch path omitted a hole. The error path already counted it.
+                    if batch.is_some() {
+                        note_chunk_read(SERVE_SPAN, "storage_module", "miss");
+                    }
+                    if let Some(cached) =
+                        self.cached_unpacked_at(SERVE_SPAN, &module, partition_offset)?
+                    {
+                        out.push((ledger_offset, cached));
+                    }
+                }
+                if cursor == end.0 {
+                    break;
+                }
+                cursor += 1;
             }
         }
         out.sort_by_key(|(offset, _)| *offset);
         Ok(out)
+    }
+
+    fn cached_unpacked_at(
+        &self,
+        caller: &'static str,
+        module: &crate::StorageModule,
+        partition_offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<UnpackedChunk>> {
+        let placement = match module.data_root_and_tx_offset_at(partition_offset) {
+            Ok(placement) => placement,
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    partition.offset = partition_offset.0,
+                    "index lookup failed; omitting offset"
+                );
+                note_chunk_read(caller, "storage_module", "error");
+                return Ok(None);
+            }
+        };
+        let Some((data_root, tx_offset)) = placement else {
+            return Ok(None);
+        };
+        self.cached_unpacked(caller, data_root, tx_offset)
+    }
+
+    fn cached_unpacked(
+        &self,
+        caller: &'static str,
+        data_root: DataRoot,
+        tx_offset: TxChunkOffset,
+    ) -> eyre::Result<Option<UnpackedChunk>> {
+        match self.get_chunk_from_cache(data_root, tx_offset) {
+            Ok(Some(ChunkFormat::Unpacked(chunk))) => {
+                note_chunk_read(caller, "cache", "hit");
+                Ok(Some(chunk))
+            }
+            Ok(Some(ChunkFormat::Packed(_)) | None) => {
+                note_chunk_read(caller, "cache", "miss");
+                Ok(None)
+            }
+            Err(error) => {
+                note_chunk_read(caller, "cache", "error");
+                Err(error)
+            }
+        }
     }
 
     /// Retrieves a chunk by [`DataRoot`] + tx-relative offset.
@@ -291,9 +529,10 @@ mod tests {
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        Base64, Config, ConsensusConfig, DataTransactionLedger, H256, LedgerChunkRange, NodeConfig,
-        PartitionChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
-        partition::PartitionAssignment, partition_chunk_offset_ie,
+        Base64, Config, ConsensusConfig, DataTransaction, DataTransactionLedger, H256,
+        LedgerChunkOffset, LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk,
+        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use rand::Rng as _;
@@ -514,5 +753,261 @@ mod tests {
         )
         .unwrap();
         DatabaseProvider(Arc::new(db))
+    }
+
+    fn testing_config(base: std::path::PathBuf, num_chunks: u64) -> Config {
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: num_chunks,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base,
+            ..NodeConfig::testing()
+        };
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    fn one_chunk(config: &Config, byte: u8) -> (DataTransaction, Vec<u8>) {
+        let data = vec![byte; config.consensus.chunk_size as usize];
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .create_transaction(data.clone(), H256::zero())
+            .unwrap();
+        let tx = signer.sign_transaction(tx).unwrap();
+        (tx, data)
+    }
+
+    fn index_one(sm: &StorageModule, tx: &DataTransaction, ledger_offset: u64) {
+        let (_root, proofs) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(ledger_offset, ledger_offset)),
+            0,
+        )
+        .unwrap();
+    }
+
+    /// Name the chunk in the index without writing its bytes. A one-offset read
+    /// then errors instead of reporting a hole.
+    fn remember_data_path(
+        sm: &StorageModule,
+        partition_offset: PartitionChunkOffset,
+        data_path: &Vec<u8>,
+    ) {
+        use irys_database::submodule::SubmoduleStore as _;
+
+        let path_hash = UnpackedChunk::hash_data_path(data_path);
+        let (_, submodule) = sm.get_submodule_for_offset(partition_offset).unwrap();
+        submodule
+            .db
+            .update(|tx| {
+                tx.write_data_path_updates(vec![(partition_offset, path_hash, data_path.clone())])
+            })
+            .unwrap();
+    }
+
+    fn cache_one(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
+        db.update_eyre(|wtx| {
+            cache_data_root(wtx, &tx.header, None)?;
+            cache_chunk(
+                wtx,
+                &UnpackedChunk {
+                    data_root: tx.header.data_root,
+                    data_size: tx.header.data_size,
+                    data_path: Base64(tx.proofs[0].proof.clone()),
+                    bytes: Base64(data.to_vec()),
+                    tx_offset: TxChunkOffset::from(0_u32),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn pack_entropy(sm: &StorageModule, config: &Config, offset: u32) {
+        let chunk_size = config.consensus.chunk_size as usize;
+        let partition_hash = sm.partition_hash().expect("assigned partition");
+        let mut entropy = Vec::with_capacity(chunk_size);
+        irys_packing::capacity_single::compute_entropy_chunk(
+            config.node_config.miner_address(),
+            u64::from(offset),
+            partition_hash.0,
+            config.consensus.entropy_packing_iterations,
+            chunk_size,
+            &mut entropy,
+            config.consensus.chain_id,
+        );
+        assert!(sm.write_chunk(
+            PartitionChunkOffset::from(offset),
+            entropy,
+            crate::models::ChunkType::Entropy,
+        ));
+        sm.sync_pending_chunks().expect("entropy durable");
+    }
+
+    fn assigned(
+        config: &Config,
+        id: usize,
+        slot: usize,
+        name: &str,
+        num_chunks: u32,
+    ) -> StorageModule {
+        let assignment = PartitionAssignment {
+            slot_index: Some(slot),
+            partition_hash: H256::repeat_byte(u8::try_from(slot).unwrap_or(1) + 1),
+            ..PartitionAssignment::default()
+        };
+        let info = StorageModuleInfo {
+            id,
+            partition_assignment: Some(assignment),
+            submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), name.into())],
+        };
+        StorageModule::new(&info, config).unwrap()
+    }
+
+    fn make_provider(
+        config: Config,
+        modules: Vec<Arc<StorageModule>>,
+        db: DatabaseProvider,
+    ) -> ChunkProvider {
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(modules)));
+        ChunkProvider::new(config, guard, db)
+    }
+
+    #[test]
+    fn ledger_offset_without_a_storage_module_is_absent() {
+        let tmp = TempDirBuilder::new()
+            .prefix("ledger-no-sm")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf(), 4);
+        let db = create_test_db(&tmp.path().join("db"));
+        let provider = make_provider(config, Vec::new(), db);
+
+        let chunk = provider
+            .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(0))
+            .unwrap();
+        assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn ledger_and_span_use_the_cache_when_the_module_has_no_body() {
+        let tmp = TempDirBuilder::new()
+            .prefix("ledger-cache-fallback")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf(), 4);
+        let sm = assigned(&config, 0, 0, "hdd0", 4);
+        let (tx, data) = one_chunk(&config, 7);
+        index_one(&sm, &tx, 0);
+        let sm = Arc::new(sm);
+
+        let db = create_test_db(&tmp.path().join("db"));
+        cache_one(&db, &tx, &data);
+        let provider = make_provider(config.clone(), vec![Arc::clone(&sm)], db);
+        let packed = provider
+            .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(0))
+            .unwrap()
+            .expect("cached body");
+        assert_eq!(unpack_packed(&config, &packed).bytes.0, data);
+
+        let span = provider
+            .get_unpacked_chunks_by_ledger_span(
+                DataLedger::Publish,
+                LedgerChunkOffset::from(0),
+                LedgerChunkOffset::from(0),
+            )
+            .unwrap();
+        assert_eq!(span.len(), 1);
+        assert_eq!(span[0].1.bytes.0, data);
+
+        let empty = create_test_db(&tmp.path().join("empty"));
+        let provider = make_provider(config, vec![sm], empty);
+        assert!(
+            provider
+                .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(0))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            provider
+                .get_unpacked_chunks_by_ledger_span(
+                    DataLedger::Publish,
+                    LedgerChunkOffset::from(0),
+                    LedgerChunkOffset::from(0),
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn span_skips_a_module_error_and_keeps_the_other_chunk() {
+        let tmp = TempDirBuilder::new()
+            .prefix("span-skip-module-error")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf(), 4);
+        let (hole_tx, hole_data) = one_chunk(&config, 3);
+        let (good_tx, good_data) = one_chunk(&config, 9);
+
+        let hole = assigned(&config, 0, 0, "hdd0", 4);
+        index_one(&hole, &hole_tx, 3);
+        let hole_offset = PartitionChunkOffset(3);
+        remember_data_path(&hole, hole_offset, &hole_tx.proofs[0].proof);
+        let err = hole
+            .generate_full_chunks(hole_offset, hole_offset)
+            .expect_err("indexed chunk with no bytes");
+        assert!(
+            err.to_string()
+                .contains("Could not find chunk bytes on disk"),
+            "{err}"
+        );
+
+        let good = assigned(&config, 1, 1, "hdd1", 4);
+        // Zero-fill packing does not match the entropy `unpack` recomputes.
+        pack_entropy(&good, &config, 0);
+        index_one(&good, &good_tx, 4);
+        good.write_data_chunk(&UnpackedChunk {
+            data_root: good_tx.header.data_root,
+            data_size: good_tx.header.data_size,
+            data_path: Base64(good_tx.proofs[0].proof.clone()),
+            bytes: Base64(good_data.clone()),
+            tx_offset: TxChunkOffset::from(0_u32),
+        })
+        .expect("write stored chunk");
+        good.sync_pending_chunks().expect("sync");
+
+        let db = create_test_db(&tmp.path().join("db"));
+        cache_one(&db, &hole_tx, &hole_data);
+        let provider = make_provider(config.clone(), vec![Arc::new(hole), Arc::new(good)], db);
+        let span = provider
+            .get_unpacked_chunks_by_ledger_span(
+                DataLedger::Publish,
+                LedgerChunkOffset::from(3),
+                LedgerChunkOffset::from(4),
+            )
+            .expect("a bad offset must not fail the span");
+        assert_eq!(span.len(), 2);
+        assert_eq!(*span[0].0, 3);
+        assert_eq!(span[0].1.bytes.0, hole_data);
+        assert_eq!(*span[1].0, 4);
+        assert_eq!(span[1].1.bytes.0, good_data);
+
+        assert!(
+            provider
+                .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(100))
+                .unwrap()
+                .is_none()
+        );
+        let packed = provider
+            .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(3))
+            .unwrap()
+            .expect("ledger cache hit");
+        assert_eq!(unpack_packed(&config, &packed).bytes.0, hole_data);
     }
 }
