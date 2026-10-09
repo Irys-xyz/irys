@@ -8,7 +8,6 @@
 # *replaces* this list and will rebuild Reth; leave it unset locally.
 [build]
 rustflags = ["-C", "target-cpu=native"]
-incremental = true
 
 [alias]
 xtask = "run --package xtask --"
