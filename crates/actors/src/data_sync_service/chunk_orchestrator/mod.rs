@@ -218,6 +218,8 @@ pub struct ChunkOrchestrator {
     /// When set, the next coverage read fails without touching the database.
     #[cfg(test)]
     fail_coverage_read: bool,
+    /// Local-cache lookups since the last [`Self::prepare_tick`].
+    cache_lookups_this_tick: u32,
 }
 impl ChunkOrchestrator {
     pub fn new(
@@ -264,6 +266,7 @@ impl ChunkOrchestrator {
             coverage_reads: 0,
             #[cfg(test)]
             fail_coverage_read: false,
+            cache_lookups_this_tick: 0,
         }
     }
 
@@ -282,6 +285,7 @@ impl ChunkOrchestrator {
             .partition_assignment()
             .is_some_and(|pa| pa.ledger_id.is_some())
         {
+            self.cache_lookups_this_tick = 0;
             self.reload_pending_body_coverage();
             self.release_body_worker_holds(Instant::now());
             self.populate_request_queue();
@@ -827,6 +831,15 @@ impl ChunkOrchestrator {
             // or none is connected. A recorded miss skips this until the
             // request is dropped.
             if !cache_miss {
+                // Index read, cache read, and hash run on this actor. Stop the
+                // tick at the cap and put the offset back. The next tick starts
+                // the count at zero. A cap of zero is one lookup, so the offset
+                // cannot sit at the front forever.
+                if self.cache_lookups_this_tick >= self.local_cache_lookup_limit() {
+                    self.ready_offsets.push_front(chunk_offset);
+                    return false;
+                }
+                self.cache_lookups_this_tick = self.cache_lookups_this_tick.saturating_add(1);
                 match self.try_local_cache(chunk_offset) {
                     LocalCacheStep::Done => return true,
                     LocalCacheStep::Stop => return false,
@@ -852,6 +865,14 @@ impl ChunkOrchestrator {
         }
 
         false
+    }
+
+    /// Lookups allowed in this tick. At least one, so a zero config still
+    /// makes progress instead of requeuing the same offset every pop.
+    fn local_cache_lookup_limit(&self) -> u32 {
+        u32::try_from(self.config.data_sync.max_local_cache_hits_per_tick)
+            .unwrap_or(u32::MAX)
+            .max(1)
     }
 
     /// How many contiguous offsets one local-cache read may cover.

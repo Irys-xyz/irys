@@ -713,6 +713,10 @@ fn default_pending_body_hold_timeout() -> Duration {
     Duration::from_secs(10 * 60)
 }
 
+fn default_max_local_cache_hits_per_tick() -> u64 {
+    64
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DataSyncServiceConfig {
@@ -739,6 +743,14 @@ pub struct DataSyncServiceConfig {
         default = "default_pending_body_hold_timeout"
     )]
     pub pending_body_hold_timeout: Duration,
+    /// Local-cache lookups one storage module may do in one data-sync tick.
+    ///
+    /// Each lookup reads the submodule index and the chunk cache. A hit also
+    /// hashes the body. The cap keeps that work off an unbounded burst.
+    /// Zero is raised to one so the popped offset is not left in front of
+    /// every peer fetch.
+    #[serde(default = "default_max_local_cache_hits_per_tick")]
+    pub max_local_cache_hits_per_tick: u64,
 }
 
 impl Default for DataSyncServiceConfig {
@@ -749,6 +761,7 @@ impl Default for DataSyncServiceConfig {
             bandwidth_adjustment_interval: Duration::from_secs(5),
             chunk_request_timeout: Duration::from_secs(10),
             pending_body_hold_timeout: default_pending_body_hold_timeout(),
+            max_local_cache_hits_per_tick: default_max_local_cache_hits_per_tick(),
         }
     }
 }
@@ -1538,6 +1551,7 @@ impl NodeConfig {
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
                 pending_body_hold_timeout: default_pending_body_hold_timeout(),
+                max_local_cache_hits_per_tick: default_max_local_cache_hits_per_tick(),
             },
             trusted_peers: vec![/* PeerAddress {
                 api: "127.0.0.1:8080".parse().expect("valid SocketAddr expected"),
@@ -1741,6 +1755,7 @@ impl NodeConfig {
                 bandwidth_adjustment_interval: Duration::from_secs(5),
                 chunk_request_timeout: Duration::from_secs(10),
                 pending_body_hold_timeout: default_pending_body_hold_timeout(),
+                max_local_cache_hits_per_tick: default_max_local_cache_hits_per_tick(),
             },
             trusted_peers: vec![],
             // trusted_peers: vec![PeerAddress {

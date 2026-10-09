@@ -1894,6 +1894,59 @@ async fn release_promotes_held_offsets_only_up_to_the_hot_budget() {
     assert_eq!(count_state(&orch, &ChunkRequestState::HeldByBodyWorker), 1);
 }
 
+/// One tick does at most the configured number of cache lookups. The next
+/// offset is put back and written after the next tick resets the count.
+#[test_log::test(tokio::test)]
+async fn local_cache_lookups_stop_at_the_per_tick_cap() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let mut node_config = NodeConfig {
+        consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 4,
+            num_chunks_in_recall_range: 2,
+            num_partitions_per_slot: 1,
+            entropy_packing_iterations: 1,
+            block_migration_depth: 1,
+            chain_id: 1,
+            ..ConsensusConfig::testing()
+        }),
+        base_directory: tmp.path().to_path_buf(),
+        ..NodeConfig::testing()
+    };
+    node_config.data_sync.max_local_cache_hits_per_tick = 1;
+    let chunk_size = node_config.consensus_config().chunk_size;
+    node_config.storage.entropy_sweep_max_bytes = chunk_size;
+    let config = Config::new_with_random_peer_id(node_config);
+    let sm = packed_sm(&config, 4);
+    let db = open_test_db(&config);
+    let (tx, data) = signed_tx(&config, 2);
+    index_and_settle(&sm, &tx, 1);
+    cache_bodies_at(&db, &tx, &data, &[0, 1]);
+    let (mut orch, _fetcher) = make_orchestrator_with_db(sm.clone(), &config, db);
+    let first = PartitionChunkOffset::from(0);
+    let second = PartitionChunkOffset::from(1);
+    insert_pending(&mut orch, first);
+    insert_pending(&mut orch, second);
+
+    assert!(orch.dispatch_next());
+    assert!(sm.is_data_write_pending_at(first));
+    assert!(!sm.is_data_write_pending_at(second));
+    assert_eq!(orch.cache_lookups_this_tick, 1);
+
+    assert!(!orch.dispatch_next());
+    assert!(!sm.is_data_write_pending_at(second));
+    assert_eq!(orch.ready_offsets.front(), Some(&second));
+    assert!(matches!(
+        orch.chunk_requests[&second].request_state,
+        ChunkRequestState::Pending
+    ));
+
+    orch.prepare_tick();
+    assert_eq!(orch.cache_lookups_this_tick, 0);
+    assert!(orch.dispatch_next());
+    assert!(sm.is_data_write_pending_at(second));
+}
+
 fn count_state(orch: &ChunkOrchestrator, state: &ChunkRequestState) -> usize {
     orch.chunk_requests
         .values()

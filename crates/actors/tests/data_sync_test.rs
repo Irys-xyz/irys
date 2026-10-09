@@ -446,6 +446,7 @@ impl TestSetup {
                 bandwidth_adjustment_interval: Duration::from_secs(1),
                 chunk_request_timeout: timeout,
                 pending_body_hold_timeout: Duration::from_secs(10 * 60),
+                max_local_cache_hits_per_tick: 64,
             },
             base_directory: base_path,
             ..NodeConfig::testing()
