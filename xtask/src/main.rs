@@ -15,7 +15,7 @@ use xtask::flaky::{FlakyOptions, run_flaky};
 use xtask::prune;
 use xtask::util::{
     CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, record_run,
-    run_collecting, run_recorded, with_deny_warnings, with_workspace,
+    run_collecting, run_recorded, target_dir, with_deny_warnings, with_workspace,
 };
 
 const LLVM_COV_VERSION: &str = "0.6.16";
@@ -837,6 +837,20 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 .parent()
                 .expect("xtask CARGO_MANIFEST_DIR must have a parent");
             let multiversion_dir = workspace_root.join("target/multiversion");
+            // Deleting under the target dir may remove another xtask run's files: clean only
+            // while no other run holds the run lock.
+            let clean_lock = if clean || clean_data {
+                let dir = target_dir()?;
+                let Some(lock) = prune::try_lock_run_exclusive(&dir)? else {
+                    eyre::bail!(
+                        "another xtask run is using {}; cleaning would delete its files",
+                        dir.display()
+                    );
+                };
+                Some(lock)
+            } else {
+                None
+            };
             if clean {
                 if multiversion_dir.exists() {
                     println!("Cleaning {}...", multiversion_dir.display());
@@ -855,6 +869,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     println!("Nothing to clean (target/multiversion/test-data does not exist).");
                 }
             }
+            drop(clean_lock);
             let binary_new = binary_new
                 .map(|p| {
                     std::fs::canonicalize(&p)
@@ -965,10 +980,10 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 test_args.push(f.clone());
             }
             test_args.extend(runner_passthrough);
-            // The test build shares the target dir: keep a concurrent prune off it.
+            // The test build and its test data share the target dir: keep a concurrent prune or
+            // clean off them until the run's results are read.
             let run_lock = lock_target_dir();
             let result = cmd!(sh, "cargo {test_args...}").remove_and_run();
-            drop(run_lock);
             let test_data_dir = multiversion_dir.join("test-data").join(&run_id);
 
             // Aggregate per-test .status marker files into a summary.
@@ -986,6 +1001,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     }
                 }
             }
+            drop(run_lock);
             result?;
         }
         Commands::Flaky {
