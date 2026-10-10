@@ -7,8 +7,12 @@ does not match the config.
 
 MDBX stays on schema v2. A fresh RocksDB index is schema v3. A RocksDB
 schema v2 directory still opens until it is converted. Schema v3 stores
-the placement and the data proof. It does not store the tx path. Mining
-derives that path from the consensus database.
+the placement, the data proof, and `ChunkOffsetsByContentHash` (the
+32-byte leaf hash, then the partition offset, with an empty value). It
+does not store the tx path. Mining derives that path from the consensus
+database. A directory whose `SCHEMA` file is `irys-submodule-index 3`
+has no content-hash family. Open refuses it and does not create the
+family empty. Delete that directory and rerun `submodule-index-convert`.
 
 The converter is `submodule-index-convert` in the `irys-database` crate.
 Build it with the `rocksdb` feature. Stop the node before you run it.

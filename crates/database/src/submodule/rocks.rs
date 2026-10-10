@@ -31,7 +31,7 @@
 //! keep a private cache. `max_open_files` stays `-1`: a finite cap drops
 //! table readers and reloads the filter on the next read.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -59,8 +59,8 @@ use super::store::PresenceReconcile;
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
     DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, Placement,
-    SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, TxLeafBinding, TxLeafBindingByTxPathHash,
-    TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
+    SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
+    TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
 };
 use super::v3::{self, IndexLayout};
 use super::{
@@ -234,7 +234,8 @@ pub struct RocksTuning {
     /// is about 4 GiB with these buffers, so a bench step never fills a log.
     /// A non-zero value switches once the live logs pass it. RocksDB applies
     /// the value only when the database has more than one column family.
-    /// This store has the default family plus eight.
+    /// This store has the default family plus the layout's families. Schema
+    /// v3 is six, including `ChunkOffsetsByContentHash`.
     ///
     /// The switch flushes every column family that still references the
     /// oldest log. Each non-empty family writes an L0 SST, and compaction
@@ -252,6 +253,14 @@ pub struct RocksTuning {
     pub small_file_compact_threshold: usize,
     /// `false` (baseline): 10-bit bloom only on families whose point lookups
     /// can miss. `true` (`all-blooms`): the same bloom on every family.
+    ///
+    /// `ChunkOffsetsByContentHash` is not controlled by this flag. A lookup
+    /// seeks the 32-byte content hash. The offset suffix is not known, so a
+    /// whole-key bloom cannot answer it. That family always uses a fixed
+    /// 32-byte prefix extractor and a prefix bloom (`whole_key_filtering`
+    /// off), full filter, 10 bits per prefix. Partitioned filters stay on
+    /// in production so one filter block can be read without the whole SST
+    /// filter.
     ///
     /// Does not change `partition_filters`. An existing SST keeps its own
     /// filter until compaction rewrites the file.
@@ -709,7 +718,7 @@ fn raise_default_env_threads(env: &rocksdb::Env, flush: i32, compaction: i32) {
     }
 }
 
-const CF_COUNT: usize = 8;
+const CF_COUNT: usize = 9;
 
 #[derive(Clone, Copy)]
 enum Cf {
@@ -721,6 +730,9 @@ enum Cf {
     Pending,
     Interval,
     Metadata,
+    /// content_hash (32 bytes) ‖ partition offset (u32 big-endian). Empty value.
+    /// Schema v3 only.
+    Content,
 }
 
 impl Cf {
@@ -733,6 +745,7 @@ impl Cf {
         Self::Pending,
         Self::Interval,
         Self::Metadata,
+        Self::Content,
     ];
 
     fn index(self) -> usize {
@@ -745,6 +758,7 @@ impl Cf {
             Self::Pending => 5,
             Self::Interval => 6,
             Self::Metadata => 7,
+            Self::Content => 8,
         }
     }
 
@@ -758,6 +772,7 @@ impl Cf {
             (IndexLayout::V3, Self::Interval) => "PlacementIntervals",
             (IndexLayout::V3, Self::DataRoots) => "DataRootPlacements",
             (IndexLayout::V3, Self::Pending) => "PendingBodyMigrations",
+            (_, Self::Content) => "ChunkOffsetsByContentHash",
             _ => match self {
                 Self::PathHashes => <ChunkPathHashesByOffset as Table>::NAME,
                 Self::DataPath => <ChunkDataPathByOffset as Table>::NAME,
@@ -767,6 +782,7 @@ impl Cf {
                 Self::Pending => <PendingBodyMigrationsByOffset as Table>::NAME,
                 Self::Interval => <TxPathIntervalByStart as Table>::NAME,
                 Self::Metadata => <MetadataTable as Table>::NAME,
+                Self::Content => "ChunkOffsetsByContentHash",
             },
         }
     }
@@ -782,12 +798,13 @@ impl Cf {
             Self::TxPath => &["TxPathByTxPathHash"],
             Self::TxLeaf => &["TxLeafBindingByTxPathHash"],
             Self::Metadata => &["Metadata"],
+            Self::Content => &["ChunkOffsetsByContentHash"],
         }
     }
 
     fn opened_by(self, layout: IndexLayout) -> bool {
         match layout {
-            IndexLayout::V2 => true,
+            IndexLayout::V2 => !matches!(self, Self::Content),
             IndexLayout::V3 => !matches!(self, Self::PathHashes | Self::TxPath | Self::TxLeaf),
         }
     }
@@ -801,8 +818,11 @@ impl Cf {
     /// Point lookups on this family can miss, so a bloom can reject a block.
     ///
     /// `bloom_all_families` forces the filter on the other families too.
+    /// [`Self::Content`] always has a prefix bloom. See
+    /// [`RocksTuning::bloom_all_families`].
     fn uses_bloom(self, tuning: &RocksTuning) -> bool {
-        tuning.bloom_all_families
+        matches!(self, Self::Content)
+            || tuning.bloom_all_families
             || matches!(
                 self,
                 Self::PathHashes | Self::TxPath | Self::DataRoots | Self::TxLeaf
@@ -1326,6 +1346,7 @@ impl RocksSubmoduleStore {
             force.unwrap_or(IndexLayout::V2)
         };
         let resources = shared_resources_for(tuning, resources)?;
+        require_content_family(&path, layout)?;
         let (db, stats) = open_db(
             &path,
             &tuning,
@@ -2067,9 +2088,11 @@ impl RocksSubmoduleStore {
 
     /// Delete presence rows in each inclusive span.
     ///
-    /// Counts keys only. `DeleteRange` then removes them. A span with no
-    /// presence key does not enter the batch. An empty result does not write,
-    /// so the sequence stays put.
+    /// Counts keys only, then `DeleteRange` removes them. Schema v3 also
+    /// reads each data-proof value in a span that has rows and point-deletes
+    /// its content-hash key in the same batch. A span with no presence key
+    /// does not enter the batch and does not read values. An empty result
+    /// does not write, so the sequence stays put.
     pub(super) fn delete_presence_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -2082,6 +2105,7 @@ impl RocksSubmoduleStore {
         let mut path_hash_rows = 0_u64;
         let mut data_path_rows = 0_u64;
         let mut deletes = Vec::new();
+        let mut content_deletes = Vec::new();
         for &(start, end) in ranges {
             if start > end {
                 continue;
@@ -2099,6 +2123,9 @@ impl RocksSubmoduleStore {
             }
             if data_count > 0 {
                 deletes.push((Cf::DataPath, start, end));
+                if self.layout == IndexLayout::V3 {
+                    content_deletes.extend(content_keys_for_proofs(&self.db, &snap, start, end)?);
+                }
             }
         }
         drop(snap);
@@ -2112,6 +2139,12 @@ impl RocksSubmoduleStore {
         for (cf, start, end) in deletes {
             let handle = cf_handle(&self.db, cf)?;
             batch.delete_range_cf(&handle, encode_key(start), exclusive_end_key(end));
+        }
+        if !content_deletes.is_empty() {
+            let handle = cf_handle(&self.db, Cf::Content)?;
+            for key in &content_deletes {
+                batch.delete_cf(&handle, key);
+            }
         }
         let mut opts = WriteOptions::default();
         opts.set_sync(true);
@@ -2258,14 +2291,71 @@ impl RocksSubmoduleStore {
         Ok(orphans)
     }
 
+    /// Every parseable proof has its reverse row, and every reverse row names
+    /// that proof's leaf. A proof shorter than a leaf is not counted.
+    pub(super) fn audit_content_index(&self) -> eyre::Result<ContentIndexAudit> {
+        if self.layout != IndexLayout::V3 {
+            eyre::bail!("content-hash offset index is not supported on this schema");
+        }
+        let snap = self.db.snapshot();
+        let data = cf_handle(&self.db, Cf::DataPath)?;
+        let content = cf_handle(&self.db, Cf::Content)?;
+        let mut audit = ContentIndexAudit::default();
+        {
+            let mut iter = snap.raw_iterator_cf_opt(&data, full_scan_options());
+            iter.seek_to_first();
+            while let Some(key) = iter.key() {
+                let key_owned = key.to_vec();
+                let value = iter.value().unwrap_or(&[]).to_vec();
+                if let Ok(offset) = PartitionChunkOffset::decode(&key_owned)
+                    && let Some(hash) = content_hash_of(&value)
+                {
+                    audit.proofs_with_leaf = audit.proofs_with_leaf.saturating_add(1);
+                    let reverse = v3::content_key(&hash, offset);
+                    let present = snap
+                        .get_cf(&content, reverse.as_slice())
+                        .wrap_err("read content-hash offset row")?
+                        .is_some();
+                    if !present {
+                        audit.missing_reverse = audit.missing_reverse.saturating_add(1);
+                    }
+                }
+                iter.next();
+            }
+            iter.status().wrap_err("scan data proofs")?;
+        }
+        {
+            let mut iter = snap.raw_iterator_cf_opt(&content, full_scan_options());
+            iter.seek_to_first();
+            while let Some(key) = iter.key() {
+                let key_owned = key.to_vec();
+                audit.reverse_rows = audit.reverse_rows.saturating_add(1);
+                let matches_proof = match v3::decode_content_key(&key_owned) {
+                    Some((hash, offset)) => {
+                        snap.get_cf(&data, encode_key(offset))
+                            .wrap_err("read data proof for content-hash row")?
+                            .as_deref()
+                            .and_then(content_hash_of)
+                            == Some(hash)
+                    }
+                    None => false,
+                };
+                if !matches_proof {
+                    audit.dangling_reverse = audit.dangling_reverse.saturating_add(1);
+                }
+                iter.next();
+            }
+            iter.status().wrap_err("scan content-hash offset index")?;
+        }
+        Ok(audit)
+    }
+
     /// Visible keys. Does not read values. A range tombstone hides its span.
     #[cfg(test)]
     fn cf_key_count(&self, cf: Cf) -> eyre::Result<usize> {
         let handle = cf_handle(&self.db, cf)?;
         let snap = self.db.snapshot();
-        let mut opts = ReadOptions::default();
-        opts.fill_cache(false);
-        let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+        let mut iter = snap.raw_iterator_cf_opt(&handle, full_scan_options());
         iter.seek_to_first();
         let mut count = 0_usize;
         while iter.key().is_some() {
@@ -2879,6 +2969,18 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
     if bloom {
         table.set_bloom_filter(10.0, false);
     }
+    // A content-hash lookup seeks the 32-byte prefix. The offset suffix is
+    // not known. A whole-key bloom stores hash‖offset, so it cannot answer
+    // that seek. This family uses a fixed 32-byte prefix extractor and a
+    // prefix bloom (`whole_key_filtering` off). The filter is a full filter,
+    // 10 bits per prefix, the same density as the other miss families.
+    // Partitioned filters stay on in production so one filter block can be
+    // read without the whole SST filter. An iterator that must see every
+    // prefix sets `total_order_seek`. A prefix seek leaves that off and sets
+    // `prefix_same_as_start`, which is what consults this bloom.
+    if matches!(cf, Cf::Content) {
+        table.set_whole_key_filtering(false);
+    }
     if tuning.partition_filters {
         table.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
         // Partitioned filters require a filter policy. The two-level index
@@ -2899,6 +3001,11 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
     };
     let mut opts = Options::default();
     opts.set_block_based_table_factory(&table);
+    if matches!(cf, Cf::Content) {
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        opts.set_memtable_prefix_bloom_ratio(0.1);
+        opts.set_memtable_whole_key_filtering(false);
+    }
     opts.set_compression_type(compression);
     // Leveled sizing. Universal compaction ignores this flag.
     opts.set_level_compaction_dynamic_level_bytes(true);
@@ -2986,6 +3093,11 @@ fn resolve_layout(path: &Path, force: Option<IndexLayout>) -> eyre::Result<Index
     let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
     let found = if text == SCHEMA_TEXT {
         IndexLayout::V2
+    } else if text == SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX {
+        eyre::bail!(
+            "schema file {} is irys-submodule-index 3, which has no column family ChunkOffsetsByContentHash. This open does not backfill and will not create an empty family: every stored proof would lack its reverse row. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`).",
+            marker.display()
+        );
     } else if text == SUBMODULE_SCHEMA_V3 {
         IndexLayout::V3
     } else {
@@ -3027,6 +3139,28 @@ fn write_schema_marker_file(dir: &Path, text: &str) -> eyre::Result<()> {
         let _ = dir_file.sync_all();
     }
     Ok(())
+}
+
+/// A schema v3 directory that already has `CURRENT` must already contain
+/// `ChunkOffsetsByContentHash`. `create_missing_column_families` would
+/// otherwise add the family empty, and every stored proof would lack its
+/// reverse row. An empty directory has no `CURRENT` and is created with the
+/// family.
+fn require_content_family(path: &Path, layout: IndexLayout) -> eyre::Result<()> {
+    if layout != IndexLayout::V3 || !path.join("CURRENT").is_file() {
+        return Ok(());
+    }
+    let names = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
+    if names
+        .iter()
+        .any(|name| name == Cf::Content.name_in(IndexLayout::V3))
+    {
+        return Ok(());
+    }
+    eyre::bail!(
+        "submodule index {} is schema v3 but column family ChunkOffsetsByContentHash is missing. This open does not backfill and will not create an empty family: every stored proof would lack its reverse row. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`).",
+        path.display()
+    );
 }
 
 fn check_schema_text(path: &Path, expected: &str) -> eyre::Result<()> {
@@ -3232,8 +3366,9 @@ fn full_cf_end(cf: Cf) -> Vec<u8> {
         Cf::PathHashes | Cf::DataPath | Cf::Pending | Cf::Interval => {
             exclusive_end_key(PartitionChunkOffset(u32::MAX))
         }
-        Cf::TxPath | Cf::DataRoots | Cf::TxLeaf | Cf::Metadata => {
-            // v3 data-root keys are 36 bytes. A 32-byte end sorts before them.
+        Cf::TxPath | Cf::DataRoots | Cf::TxLeaf | Cf::Content | Cf::Metadata => {
+            // v3 data-root keys and content-hash keys are 36 bytes. A 32-byte
+            // end sorts before them.
             let mut key = vec![0xFF; 36];
             key.push(0);
             key
@@ -3241,12 +3376,69 @@ fn full_cf_end(cf: Cf) -> Vec<u8> {
     }
 }
 
+/// Counts from [`RocksSubmoduleStore::audit_content_index`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ContentIndexAudit {
+    pub proofs_with_leaf: u64,
+    pub reverse_rows: u64,
+    pub missing_reverse: u64,
+    pub dangling_reverse: u64,
+}
+
+/// Scan every key. A prefix extractor would otherwise stop `Next` at the
+/// first prefix, and a full clear would skip its `DeleteRange`.
+fn full_scan_options() -> ReadOptions {
+    let mut opts = ReadOptions::default();
+    opts.fill_cache(false);
+    opts.set_total_order_seek(true);
+    opts
+}
+
+/// Leaf `data_hash` of a data proof. A value shorter than a leaf is not a
+/// content-addressed proof and has no reverse row. The hash is the leaf
+/// already stored in the proof. Chunk bytes are not hashed again.
+fn content_hash_of(proof: &[u8]) -> Option<H256> {
+    const LEAF_LEN: usize = 64;
+    if proof.len() < LEAF_LEN {
+        return None;
+    }
+    let tail = proof[proof.len() - LEAF_LEN..].to_vec();
+    let leaf = irys_types::get_leaf_proof(&irys_types::Base64(tail)).ok()?;
+    irys_types::ProofDeserialize::hash(&leaf).map(H256)
+}
+
+/// Content-hash keys for parseable proofs in `[start, end]`.
+fn content_keys_for_proofs(
+    db: &DB,
+    snap: &rocksdb::Snapshot<'_>,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<Vec<Vec<u8>>> {
+    let handle = cf_handle(db, Cf::DataPath)?;
+    let mut opts = full_scan_options();
+    opts.set_iterate_upper_bound(exclusive_end_key(end));
+    let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+    iter.seek(encode_key(start));
+    let mut keys = Vec::new();
+    while let Some(key) = iter.key() {
+        let key_owned = key.to_vec();
+        let value = iter.value().unwrap_or(&[]).to_vec();
+        if let Ok(offset) = PartitionChunkOffset::decode(&key_owned)
+            && let Some(hash) = content_hash_of(&value)
+        {
+            keys.push(v3::content_key(&hash, offset).to_vec());
+        }
+        iter.next();
+    }
+    iter.status()
+        .wrap_err("scan data proofs for content-hash keys")?;
+    Ok(keys)
+}
+
 /// `true` when the family has a key. Does not read the value.
 fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<bool> {
     let handle = cf_handle(db, cf)?;
-    let mut opts = ReadOptions::default();
-    opts.fill_cache(false);
-    let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+    let mut iter = snap.raw_iterator_cf_opt(&handle, full_scan_options());
     iter.seek_to_first();
     let present = iter.key().is_some();
     iter.status().wrap_err("seek column family")?;
@@ -3633,6 +3825,35 @@ impl<'a> Batch<'a> {
         let index = cf.index();
         self.overlay.maps[index].retain(|key, _| !offset_key_in_ranges(&[(start.0, end.0)], key));
         self.overlay.deleted_ranges[index].push((start.0, end.0));
+        Ok(())
+    }
+
+    /// Point-delete reverse rows for proofs currently visible in `[start, end]`.
+    ///
+    /// One content hash can name many offsets. This deletes `hash‖offset`
+    /// only. It does not delete the prefix.
+    fn delete_content_rows_for_paths(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let start_key = encode_key(start);
+        let proofs = self
+            .rows()
+            .collect_raw(Cf::DataPath, Some(&start_key), |key| {
+                PartitionChunkOffset::decode(key)
+                    .map(|offset| offset > end)
+                    .unwrap_or(true)
+            })?;
+        for (key, value) in proofs {
+            let Ok(offset) = PartitionChunkOffset::decode(&key) else {
+                continue;
+            };
+            let Some(hash) = content_hash_of(&value) else {
+                continue;
+            };
+            self.delete(Cf::Content, &v3::content_key(&hash, offset));
+        }
         Ok(())
     }
 
@@ -4648,6 +4869,73 @@ impl SubmoduleRead for Rows<'_> {
         super::placement::read_placements_for_data_root(self, data_root)
     }
 
+    fn offsets_for_content_hash(
+        &self,
+        content_hash: H256,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        if self.layout != IndexLayout::V3 {
+            eyre::bail!("content-hash offset index is not supported on this schema");
+        }
+        let prefix = content_hash.0;
+        let mut found = BTreeSet::new();
+        let cleared = self
+            .overlay
+            .is_some_and(|overlay| overlay.cleared[Cf::Content.index()]);
+        if !cleared {
+            let handle = cf_handle(self.db, Cf::Content)?;
+            let mut opts = ReadOptions::default();
+            // Prefix mode consults the prefix bloom. `total_order_seek` stays
+            // off. `prefix_same_as_start` stops the iterator at the next hash.
+            opts.set_prefix_same_as_start(true);
+            opts.fill_cache(true);
+            let mut iter = self.snap.raw_iterator_cf_opt(&handle, opts);
+            iter.seek(prefix.as_slice());
+            while let Some(key) = iter.key() {
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                let key_owned = key.to_vec();
+                let hidden = self.overlay.is_some_and(|overlay| {
+                    matches!(
+                        overlay.maps[Cf::Content.index()].get(key_owned.as_slice()),
+                        Some(None)
+                    )
+                });
+                if !hidden
+                    && let Some((hash, offset)) = v3::decode_content_key(&key_owned)
+                    && hash == content_hash
+                {
+                    found.insert(offset);
+                }
+                iter.next();
+            }
+            iter.status().wrap_err("seek content-hash offset index")?;
+        }
+        if let Some(overlay) = self.overlay {
+            let start = prefix.to_vec();
+            for (key, value) in overlay.maps[Cf::Content.index()].range(start..) {
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                let Some((hash, offset)) = v3::decode_content_key(key) else {
+                    continue;
+                };
+                if hash != content_hash {
+                    continue;
+                }
+                match value {
+                    Some(_) => {
+                        found.insert(offset);
+                    }
+                    None => {
+                        found.remove(&offset);
+                    }
+                }
+            }
+        }
+        Ok(found.into_iter().collect())
+    }
+
     fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
         if self.layout == IndexLayout::V3 {
             return self.v3_all_data_roots();
@@ -4813,6 +5101,13 @@ impl SubmoduleRead for Batch<'_> {
     fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
         self.rows().placements_for_data_root(data_root)
     }
+
+    fn offsets_for_content_hash(
+        &self,
+        content_hash: H256,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        self.rows().offsets_for_content_hash(content_hash)
+    }
 }
 
 impl SubmoduleWrite for Batch<'_> {
@@ -4823,6 +5118,23 @@ impl SubmoduleWrite for Batch<'_> {
     ) -> eyre::Result<()> {
         let key = encode_key(offset);
         if self.layout == IndexLayout::V3 {
+            // Read the previous proof before this put hides it. A different
+            // leaf drops that reverse row. The same leaf puts again, which
+            // repairs a missing row. A short value has no reverse row.
+            let old_hash = self
+                .rows()
+                .get_raw(Cf::DataPath, &key)?
+                .as_deref()
+                .and_then(content_hash_of);
+            let new_hash = content_hash_of(&data_path);
+            if old_hash != new_hash
+                && let Some(old_hash) = old_hash
+            {
+                self.delete(Cf::Content, &v3::content_key(&old_hash, offset));
+            }
+            if let Some(new_hash) = new_hash {
+                self.put_bytes(Cf::Content, &v3::content_key(&new_hash, offset), Vec::new());
+            }
             self.put_bytes(Cf::DataPath, &key, data_path);
         } else {
             self.put(Cf::DataPath, &key, &data_path);
@@ -4913,6 +5225,10 @@ impl SubmoduleWrite for Batch<'_> {
         self.assign_tx_interval(start, end, None)?;
         if self.layout == IndexLayout::V2 {
             self.delete_offset_range(Cf::PathHashes, start, end)?;
+        }
+        if self.layout == IndexLayout::V3 {
+            // `delete_offset_range` hides these keys from a later read.
+            self.delete_content_rows_for_paths(start, end)?;
         }
         self.delete_offset_range(Cf::DataPath, start, end)?;
         Ok(())
@@ -5181,10 +5497,162 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn content_hash_index_tracks_writes_rewrites_and_deletes() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_content_index")
+            .build();
+        let path = dir.path().join("index");
+        let store = RocksSubmoduleStore::open(&path)?;
+        let hash_a = H256::repeat_byte(1);
+        let hash_b = H256::repeat_byte(2);
+        let hash_c = H256::repeat_byte(3);
+        let at4 = PartitionChunkOffset::from(4);
+        let at9 = PartitionChunkOffset::from(9);
+        store.update(|tx| {
+            tx.add_full_data_path(at4, content_leaf(1))?;
+            let seen = tx.offsets_for_content_hash(hash_a)?;
+            assert_eq!(seen, vec![at4]);
+            tx.add_full_data_path(at4, content_leaf(3))?;
+            tx.add_full_data_path(at4, content_leaf(2))?;
+            assert!(tx.offsets_for_content_hash(hash_a)?.is_empty());
+            assert!(tx.offsets_for_content_hash(hash_c)?.is_empty());
+            assert_eq!(tx.offsets_for_content_hash(hash_b)?, vec![at4]);
+            Ok(())
+        })?;
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(hash_b))?,
+            vec![at4]
+        );
+        assert!(
+            store
+                .view(|tx| tx.offsets_for_content_hash(hash_a))?
+                .is_empty()
+        );
+        store.update(|tx| tx.add_full_data_path(at9, content_leaf(1)))?;
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
+            vec![at9]
+        );
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(hash_b))?,
+            vec![at4]
+        );
+        store.update(|tx| tx.add_full_data_path(at4, content_leaf(1)))?;
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
+            vec![at4, at9]
+        );
+        assert!(
+            store
+                .view(|tx| tx.offsets_for_content_hash(hash_b))?
+                .is_empty()
+        );
+        drop(store);
+        let store = RocksSubmoduleStore::open(&path)?;
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
+            vec![at4, at9]
+        );
+        assert_content_index(&store)?;
+        store.update(|tx| tx.clear_paths_in_inclusive_range(at9, at9))?;
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(hash_a))?,
+            vec![at4]
+        );
+        store.drop_presence_in_ranges(&[(at4, at4)])?;
+        assert!(
+            store
+                .view(|tx| tx.offsets_for_content_hash(hash_a))?
+                .is_empty()
+        );
+        store.update(|tx| {
+            tx.add_full_data_path(at4, content_leaf(1))?;
+            tx.add_full_data_path(at9, vec![7_u8])?;
+            Ok(())
+        })?;
+        assert_content_index(&store)?;
+        assert_eq!(store.cf_key_count(Cf::Content)?, 1);
+        store.update(|tx| tx.clear())?;
+        assert_eq!(store.cf_key_count(Cf::Content)?, 0);
+        assert_content_index(&store)?;
+        drop(store);
+
+        let v2_path = dir.path().join("v2");
+        let v2 = RocksSubmoduleStore::open_v2_with(&v2_path, RocksTuning::baseline())?;
+        let err = v2
+            .view(|tx| tx.offsets_for_content_hash(hash_a))
+            .unwrap_err();
+        assert!(err.to_string().contains("not supported"), "{err}");
+        drop(v2);
+        let v2_opts = persisted_options(&v2_path)?;
+        assert!(!v2_opts.contains("ChunkOffsetsByContentHash"), "{v2_opts}");
+        Ok(())
+    }
+
+    #[test]
+    fn old_v3_marker_and_a_missing_content_family_are_refused() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_content_marker")
+            .build();
+        let old = dir.path().join("old");
+        fs::create_dir_all(&old)?;
+        fs::write(old.join(SCHEMA_FILE), SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX)?;
+        let err = RocksSubmoduleStore::open(&old).unwrap_err();
+        assert!(
+            err.to_string().contains("ChunkOffsetsByContentHash"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("does not backfill"), "{err}");
+
+        let missing = dir.path().join("missing");
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        let families = [
+            "default",
+            "ChunkDataPathByOffset",
+            "PlacementIntervals",
+            "DataRootPlacements",
+            "PendingBodyMigrations",
+            "Metadata",
+        ]
+        .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
+        {
+            let _db = DB::open_cf_descriptors(&db_opts, &missing, families)
+                .wrap_err("open schema v3 without the content family")?;
+        }
+        fs::write(missing.join(SCHEMA_FILE), SUBMODULE_SCHEMA_V3)?;
+        let err = RocksSubmoduleStore::open(&missing).unwrap_err();
+        assert!(
+            err.to_string().contains("ChunkOffsetsByContentHash"),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("will not create an empty family"),
+            "{err}"
+        );
+        Ok(())
+    }
+
     fn assert_no_orphans(store: &RocksSubmoduleStore) -> eyre::Result<()> {
         let orphans = store.rows_outside_live_intervals()?;
         assert!(orphans.is_empty(), "{orphans:?}");
+        assert_content_index(store)
+    }
+
+    fn assert_content_index(store: &RocksSubmoduleStore) -> eyre::Result<()> {
+        let audit = store.audit_content_index()?;
+        assert_eq!(audit.missing_reverse, 0, "{audit:?}");
+        assert_eq!(audit.dangling_reverse, 0, "{audit:?}");
         Ok(())
+    }
+
+    /// 64-byte data-proof leaf. The first 32 bytes are the content hash.
+    fn content_leaf(byte: u8) -> Vec<u8> {
+        let mut leaf = vec![0_u8; 64];
+        leaf[..32].fill(byte);
+        leaf
     }
 
     fn place_span(
@@ -5221,7 +5689,10 @@ mod tests {
                 },
             )?;
             for offset in data_at {
-                tx.add_full_data_path(PartitionChunkOffset::from(*offset), vec![*offset as u8])?;
+                tx.add_full_data_path(
+                    PartitionChunkOffset::from(*offset),
+                    content_leaf(*offset as u8),
+                )?;
             }
             if let Some(offset) = pending_at {
                 tx.add_pending_body_migration(
@@ -5251,6 +5722,10 @@ mod tests {
         let root_b = H256::repeat_byte(5);
         place_span(&store, 0, 19, root_a, 1, 42, 3, &[0, 8, 19], Some(2))?;
         assert_no_orphans(&store)?;
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(8)))?,
+            vec![PartitionChunkOffset::from(8)]
+        );
         let at_zero = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
             .expect("placement");
@@ -5313,7 +5788,13 @@ mod tests {
         store.drop_presence_in_ranges(&expired)?;
         store.drop_uninitialized_coverage(&expired, 32)?;
         assert_no_orphans(&store)?;
-        for cf in [Cf::Interval, Cf::DataPath, Cf::DataRoots, Cf::Pending] {
+        for cf in [
+            Cf::Interval,
+            Cf::DataPath,
+            Cf::DataRoots,
+            Cf::Pending,
+            Cf::Content,
+        ] {
             assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
         }
 
@@ -5321,7 +5802,13 @@ mod tests {
         assert_no_orphans(&store)?;
         store.update(|tx| tx.clear())?;
         assert_no_orphans(&store)?;
-        for cf in [Cf::Interval, Cf::DataPath, Cf::DataRoots, Cf::Pending] {
+        for cf in [
+            Cf::Interval,
+            Cf::DataPath,
+            Cf::DataRoots,
+            Cf::Pending,
+            Cf::Content,
+        ] {
             assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
@@ -5640,6 +6127,43 @@ mod tests {
             "{baseline_opts}"
         );
         assert!(
+            baseline_opts.contains("[CFOptions \"ChunkOffsetsByContentHash\"]"),
+            "{baseline_opts}"
+        );
+        assert_eq!(
+            cf_option(
+                &baseline_opts,
+                "ChunkOffsetsByContentHash",
+                "prefix_extractor"
+            )
+            .as_deref(),
+            Some("rocksdb.FixedPrefix.32"),
+            "{baseline_opts}"
+        );
+        assert!(
+            cf_option(
+                &baseline_opts,
+                "ChunkOffsetsByContentHash",
+                "memtable_prefix_bloom_size_ratio"
+            )
+            .is_some_and(|value| value.starts_with("0.100")),
+            "{baseline_opts}"
+        );
+        assert!(
+            table_options_have_bloom(&baseline_opts, "ChunkOffsetsByContentHash"),
+            "{baseline_opts}"
+        );
+        assert_eq!(
+            table_option(
+                &baseline_opts,
+                "ChunkOffsetsByContentHash",
+                "whole_key_filtering"
+            )
+            .as_deref(),
+            Some("false"),
+            "{baseline_opts}"
+        );
+        assert!(
             !baseline_opts.contains("TxPathByTxPathHash"),
             "{baseline_opts}"
         );
@@ -5855,17 +6379,25 @@ mod tests {
         Ok(())
     }
 
-    fn table_options_have_bloom(opts: &str, cf: &str) -> bool {
+    fn table_section<'a>(opts: &'a str, cf: &str) -> Option<&'a str> {
         let header = format!("[TableOptions/BlockBasedTable \"{cf}\"]");
-        let Some(start) = opts.find(&header) else {
-            return false;
-        };
-        let rest = &opts[start + header.len()..];
-        let section = match rest.find("\n[") {
+        let start = opts.find(&header)? + header.len();
+        let rest = &opts[start..];
+        Some(match rest.find("\n[") {
             Some(end) => &rest[..end],
             None => rest,
-        };
-        section.contains("filter_policy=bloomfilter")
+        })
+    }
+
+    fn table_options_have_bloom(opts: &str, cf: &str) -> bool {
+        table_section(opts, cf).is_some_and(|section| section.contains("filter_policy=bloomfilter"))
+    }
+
+    fn table_option(opts: &str, cf: &str, key: &str) -> Option<String> {
+        let prefix = format!("{key}=");
+        table_section(opts, cf)?
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix).map(ToString::to_string))
     }
 
     fn cf_option(opts: &str, cf: &str, key: &str) -> Option<String> {

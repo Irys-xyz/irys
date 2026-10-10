@@ -182,6 +182,18 @@ pub trait SubmoduleRead {
     fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
         super::placement::read_placements_for_data_root(self, data_root)
     }
+
+    /// Partition offsets whose stored data-proof leaf is `content_hash`.
+    ///
+    /// Schema v3 seeks `ChunkOffsetsByContentHash`. The result is sorted.
+    /// An absent hash is an empty vec. Schema v2 and MDBX return an error.
+    /// They do not return an empty vec.
+    fn offsets_for_content_hash(
+        &self,
+        _content_hash: H256,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        eyre::bail!("content-hash offset index is not supported on this schema")
+    }
 }
 
 /// Exclusive write batch. Reads inside the batch see its own writes.
@@ -322,9 +334,11 @@ pub trait SubmoduleStore: Send + Sync {
     /// Presence is the offset path-hash row and the offset data-path row.
     /// An empty list, or spans that hold no presence row, does not commit.
     /// One commit covers every span that has a row. Cost is one seek per span
-    /// per presence family, plus the rows removed. RocksDB deletes with
-    /// `DeleteRange` and does not read values. MDBX walks a cursor inside
-    /// each span.
+    /// per presence family, plus the rows removed. RocksDB deletes the offset
+    /// rows with `DeleteRange`. Schema v3 reads the data-proof values in each
+    /// span that has rows and point-deletes the matching content-hash keys in
+    /// that same batch. A span with no row does not read values. MDBX walks
+    /// a cursor inside each span.
     fn drop_presence_in_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -1594,6 +1608,28 @@ mod tests {
 
     fn path_at(store: &SubmoduleIndex, offset: u32) -> eyre::Result<Option<ChunkPathHashes>> {
         store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset)))
+    }
+
+    #[test]
+    fn content_hash_lookup_follows_the_schema() -> eyre::Result<()> {
+        each_engine("content_hash_lookup", |store| {
+            let hash = H256::repeat_byte(4);
+            let absent = store.view(|tx| tx.offsets_for_content_hash(hash));
+            if store.stores_tx_paths() {
+                let err = absent.unwrap_err();
+                assert!(err.to_string().contains("not supported"), "{err}");
+                return Ok(());
+            }
+            assert!(absent?.is_empty());
+            let mut leaf = vec![0_u8; 64];
+            leaf[..32].fill(4);
+            store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(6), leaf))?;
+            assert_eq!(
+                store.view(|tx| tx.offsets_for_content_hash(hash))?,
+                vec![PartitionChunkOffset::from(6)]
+            );
+            Ok(())
+        })
     }
 
     fn each_engine(

@@ -17,9 +17,16 @@ use std::fmt;
 /// only when the new rows are complete. Any other row is refused.
 pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 
-/// Schema file and metadata row for a RocksDB index that stores placements
-/// and derives tx paths. MDBX stays on [`SUBMODULE_SCHEMA`].
-pub const SUBMODULE_SCHEMA_V3: &str = "irys-submodule-index 3\n";
+/// Schema file and metadata row for a RocksDB index that stores placements,
+/// inline data proofs, and `ChunkOffsetsByContentHash`. MDBX stays on
+/// [`SUBMODULE_SCHEMA`].
+pub const SUBMODULE_SCHEMA_V3: &str = "irys-submodule-index 3.1\n";
+
+/// Schema v3 marker that does not name the content-hash offset index.
+///
+/// Open refuses this file. It does not create `ChunkOffsetsByContentHash`
+/// empty, because every stored proof would then lack its reverse row.
+pub const SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX: &str = "irys-submodule-index 3\n";
 
 /// Metadata row written while a conversion into MDBX is still copying.
 ///

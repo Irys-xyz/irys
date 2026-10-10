@@ -41,8 +41,8 @@ use super::rocks::RocksSubmoduleStore;
 use super::store::{MdbxSubmoduleStore, SubmoduleStore, SubmoduleWrite};
 use super::tables::{
     ChunkDataPathByOffset, DataRootInfo, PendingBodyMigration, PendingBodyMigrationsByOffset,
-    SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, TxLeafBinding,
-    TxPathInterval, TxPathIntervalByStart,
+    SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3,
+    SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding, TxPathInterval, TxPathIntervalByStart,
 };
 
 const VERIFY_KEYS: usize = 256;
@@ -76,6 +76,10 @@ pub struct EngineEquivalenceReport {
     pub pending_mismatches: u64,
     pub reset_marker_mismatch: u64,
     pub schema_mismatch: u64,
+    /// Parseable proof leaves plus reverse rows examined on the schema v3 side.
+    pub content_offsets_checked: u64,
+    /// A proof leaf with no reverse row, or a reverse row whose proof leaf differs.
+    pub content_offset_mismatches: u64,
     pub samples: Vec<EngineMismatch>,
 }
 
@@ -89,6 +93,7 @@ impl EngineEquivalenceReport {
             || self.pending_mismatches > 0
             || self.reset_marker_mismatch > 0
             || self.schema_mismatch > 0
+            || self.content_offset_mismatches > 0
     }
 }
 
@@ -144,6 +149,16 @@ impl std::fmt::Display for EngineEquivalenceReport {
         )?;
         writeln!(f, "reset_marker_mismatch: {}", self.reset_marker_mismatch)?;
         writeln!(f, "schema_mismatch: {}", self.schema_mismatch)?;
+        writeln!(
+            f,
+            "content_offsets_checked: {}",
+            self.content_offsets_checked
+        )?;
+        writeln!(
+            f,
+            "content_offset_mismatches: {}",
+            self.content_offset_mismatches
+        )?;
         for sample in &self.samples {
             writeln!(f, "mismatch: {} {}", sample.kind, sample.at)?;
         }
@@ -449,6 +464,12 @@ pub fn convert_rocks_v2_to_v3(
         Some(text) if text == SUBMODULE_SCHEMA_V3 => {
             eyre::bail!(
                 "source {} is already schema v3. Refusing to convert it again.",
+                v2_dir.display()
+            );
+        }
+        Some(text) if text == SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX => {
+            eyre::bail!(
+                "source {} is schema v3 without column family ChunkOffsetsByContentHash. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`).",
                 v2_dir.display()
             );
         }
@@ -1094,7 +1115,28 @@ where
     verify_placements(v2, v3, db, map, &mut report)?;
     verify_pending_rows(v2, v3, &mut report)?;
     verify_markers(v2, v3, v2_schema, &mut report)?;
+    verify_content_index(v3, &mut report)?;
     Ok(report)
+}
+
+fn verify_content_index(
+    v3: &RocksSubmoduleStore,
+    report: &mut EngineEquivalenceReport,
+) -> eyre::Result<()> {
+    let audit = v3.audit_content_index()?;
+    report.content_offsets_checked = audit.proofs_with_leaf.saturating_add(audit.reverse_rows);
+    report.content_offset_mismatches = audit.missing_reverse.saturating_add(audit.dangling_reverse);
+    if report.content_offset_mismatches > 0 {
+        note(
+            report,
+            "content_offset",
+            format!(
+                "missing_reverse={} dangling_reverse={}",
+                audit.missing_reverse, audit.dangling_reverse
+            ),
+        );
+    }
+    Ok(())
 }
 
 fn verify_data_paths<S>(
@@ -1334,6 +1376,10 @@ fn require_rocks_schema(path: &Path, expected: &str, label: &str) -> eyre::Resul
 fn require_rocks_v3(path: &Path) -> eyre::Result<()> {
     match rocks_schema_text(path)? {
         Some(text) if text == SUBMODULE_SCHEMA_V3 => Ok(()),
+        Some(text) if text == SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX => eyre::bail!(
+            "rocks index {} is schema v3 without column family ChunkOffsetsByContentHash. This open does not backfill and will not create an empty family: every stored proof would lack its reverse row. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`).",
+            path.display()
+        ),
         Some(text) if text == SUBMODULE_SCHEMA => eyre::bail!(
             "rocks index {} is schema v2. Run `submodule-index-convert rocks-to-v3` to write schema v3. `rocks-to-mdbx` rebuilds MDBX from schema v3.",
             path.display()
@@ -1521,7 +1567,14 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
     if dir_is_empty(path)? {
         return Ok(());
     }
-    if rocks_marker_complete(path)? {
+    if rocks_schema_text(path)?.as_deref() == Some(SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX) {
+        if !replace {
+            eyre::bail!(
+                "target {} is schema v3 without column family ChunkOffsetsByContentHash. This converter does not backfill that directory. Pass --replace-incomplete to delete it and start over, or delete it and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`).",
+                path.display()
+            );
+        }
+    } else if rocks_marker_complete(path)? {
         eyre::bail!(
             "target {} is a completed RocksDB index. Refusing to replace it.",
             path.display()
@@ -1627,7 +1680,8 @@ mod tests {
 
     use super::super::store::{MdbxSubmoduleStore, SubmoduleStore};
     use super::super::tables::{
-        ChunkPathHashes, DataRootInfo, PendingBodyMigration, SUBMODULE_SCHEMA_V3, TxLeafBinding,
+        ChunkPathHashes, DataRootInfo, PendingBodyMigration, SUBMODULE_SCHEMA_V3,
+        SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
     };
     use super::{
         ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, convert_rocks_v2_to_v3,
@@ -1769,8 +1823,8 @@ mod tests {
         let pair = derived_pair(consensus)?;
         let hash_a = tx_path_hash(&pair.proof_a);
         let hash_b = tx_path_hash(&pair.proof_b);
-        let data_0 = b"data-0".to_vec();
-        let data_3 = b"data-3".to_vec();
+        let data_0 = indexed_data_leaf(1);
+        let data_3 = indexed_data_leaf(3);
         store.update(|tx| {
             tx.add_full_tx_path(hash_a, pair.proof_a.clone())?;
             tx.add_full_tx_path(hash_b, pair.proof_b.clone())?;
@@ -1864,11 +1918,11 @@ mod tests {
             assert_eq!(tx.get_tx_path_by_offset(PartitionChunkOffset(4))?, None);
             assert_eq!(
                 tx.get_data_path_by_offset(PartitionChunkOffset(0))?,
-                Some(b"data-0".to_vec())
+                Some(indexed_data_leaf(1))
             );
             assert_eq!(
                 tx.get_data_path_by_offset(PartitionChunkOffset(3))?,
-                Some(b"data-3".to_vec())
+                Some(indexed_data_leaf(3))
             );
             let place = tx
                 .placement_at(PartitionChunkOffset(0))?
@@ -1921,12 +1975,21 @@ mod tests {
             assert_eq!(tail.data_size, 32);
             assert_eq!(
                 tx.get_data_path_by_offset(PartitionChunkOffset(0))?,
-                Some(b"data-0".to_vec())
+                Some(indexed_data_leaf(1))
             );
             assert_eq!(
                 tx.get_data_path_by_offset(PartitionChunkOffset(3))?,
-                Some(b"data-3".to_vec())
+                Some(indexed_data_leaf(3))
             );
+            assert_eq!(
+                tx.offsets_for_content_hash(H256([1_u8; 32]))?,
+                vec![PartitionChunkOffset(0)]
+            );
+            assert_eq!(
+                tx.offsets_for_content_hash(H256([3_u8; 32]))?,
+                vec![PartitionChunkOffset(3)]
+            );
+            assert!(tx.offsets_for_content_hash(H256([9_u8; 32]))?.is_empty());
             let job = tx
                 .get_pending_body_migration(PartitionChunkOffset(0))?
                 .expect("pending");
@@ -1967,6 +2030,15 @@ mod tests {
         assert_eq!(report.tx_paths_checked, 2, "{report}");
         assert_eq!(report.data_roots_checked, 2, "{report}");
         assert_eq!(report.pending_checked, 1, "{report}");
+        assert_eq!(report.content_offset_mismatches, 0, "{report}");
+        assert!(report.content_offsets_checked >= 2, "{report}");
+    }
+
+    /// 64-byte data-proof leaf. The first 32 bytes are the content hash.
+    fn indexed_data_leaf(byte: u8) -> Vec<u8> {
+        let mut leaf = vec![0_u8; 64];
+        leaf[..32].fill(byte);
+        leaf
     }
 
     #[test]
@@ -2014,7 +2086,10 @@ mod tests {
         let growth = rss_after.saturating_sub(rss_before);
         eprintln!("convert_round_trip VmRSS_KiB={rss_after} VmHWM_KiB={hwm} growth_KiB={growth}");
         assert!(hwm > 0, "VmHWM was not readable");
-        assert!(growth < 256 * 1024, "round trip grew RSS by {growth} KiB");
+        // VmRSS is the whole process. A parallel `cargo test` counts other
+        // tests that open a schema v3 index while this one runs. The round
+        // trip on its own is far below this bound.
+        assert!(growth < 512 * 1024, "round trip grew RSS by {growth} KiB");
         Ok(())
     }
 
@@ -2073,6 +2148,24 @@ mod tests {
             &MdbxSubmoduleStore::open(&mdbx_back, testing_args()?)?,
             &consensus,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn old_v3_marker_is_replaced_only_when_asked() -> eyre::Result<()> {
+        let root = temp("convert-old-v3");
+        let path = root.path().join("rocks");
+        fs::create_dir_all(&path)?;
+        fs::write(path.join("SCHEMA"), SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX)?;
+        fs::write(path.join("CURRENT"), b"MANIFEST-000001\n")?;
+        let err = super::prepare_rocks_target(&path, false).unwrap_err();
+        assert!(
+            err.to_string().contains("ChunkOffsetsByContentHash"),
+            "{err}"
+        );
+        assert!(path.join("SCHEMA").is_file());
+        super::prepare_rocks_target(&path, true)?;
+        assert!(super::dir_is_empty(&path)?);
         Ok(())
     }
 

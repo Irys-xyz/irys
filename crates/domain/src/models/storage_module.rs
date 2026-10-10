@@ -43,6 +43,8 @@ use derive_more::derive::{Deref, DerefMut};
 use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 #[cfg(feature = "bench")]
 use irys_database::submodule::RocksTuning;
+#[cfg(test)]
+use irys_database::submodule::tables::SUBMODULE_SCHEMA_V3;
 use irys_database::submodule::{
     SubmoduleIndex, SubmoduleRead, SubmoduleStore as _, install_process_rocks_resources,
     tables::{DataRootInfo, DataRootInfos, PendingBodyMigration, Placement, TxLeafBinding},
@@ -5811,6 +5813,33 @@ impl StorageModule {
         per_sec as u64
     }
 
+    /// Ledger offsets whose stored data-proof leaf is `content_hash`.
+    ///
+    /// Each submodule reports partition offsets. This adds the module's
+    /// ledger start. Schema v2 and MDBX return the not-supported error.
+    /// The caller must already have a partition assignment.
+    pub fn ledger_offsets_for_content_hash(
+        &self,
+        content_hash: H256,
+    ) -> eyre::Result<Vec<LedgerChunkOffset>> {
+        let base = *self.get_storage_module_ledger_offsets()?.start();
+        let mut found = Vec::new();
+        for (_, submodule) in self.submodules.iter() {
+            let offsets = submodule
+                .db
+                .view(|tx| tx.offsets_for_content_hash(content_hash))?;
+            for offset in offsets {
+                let ledger = base.checked_add(u64::from(offset.0)).ok_or_else(|| {
+                    eyre::eyre!("ledger offset overflow for partition offset {}", offset.0)
+                })?;
+                found.push(LedgerChunkOffset::from(ledger));
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        Ok(found)
+    }
+
     /// Utility method asking the StorageModule to return its chunk range in
     /// ledger relative coordinates
     pub fn get_storage_module_ledger_offsets(&self) -> eyre::Result<LedgerChunkRange> {
@@ -6573,7 +6602,7 @@ mod tests {
         let index =
             open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
         let schema = fs::read_to_string(module_dir.join("rocks").join("SCHEMA"))?;
-        assert_eq!(schema, "irys-submodule-index 3\n");
+        assert_eq!(schema, SUBMODULE_SCHEMA_V3);
         assert!(!module_dir.join("db").join("mdbx.dat").exists());
 
         let offset = PartitionChunkOffset::from(7);

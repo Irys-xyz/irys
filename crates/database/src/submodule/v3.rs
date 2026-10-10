@@ -4,12 +4,14 @@
 //! one placement: the data-root point key is removed in the same batch as
 //! its interval.
 
-use irys_types::{H256, RelativeChunkOffset};
+use irys_types::{H256, PartitionChunkOffset, RelativeChunkOffset};
 
 use super::tables::PendingBodyMigration;
 
 pub(super) const PLACEMENT_LEN: usize = 64;
 pub(super) const DATA_ROOT_KEY_LEN: usize = 36;
+/// `content_hash` (32 bytes) then partition offset (u32 big-endian).
+pub(super) const CONTENT_KEY_LEN: usize = 36;
 pub(super) const DATA_ROOT_VALUE_LEN: usize = 16;
 pub(super) const PENDING_LEN: usize = 56;
 /// Stored when the writer did not name a ledger, a height, or a tx index.
@@ -94,6 +96,23 @@ pub(super) fn data_root_key(data_root: &H256, start: u32) -> [u8; DATA_ROOT_KEY_
     key[..32].copy_from_slice(&data_root.0);
     key[32..].copy_from_slice(&start.to_be_bytes());
     key
+}
+
+pub(super) fn content_key(hash: &H256, offset: PartitionChunkOffset) -> [u8; CONTENT_KEY_LEN] {
+    let mut key = [0_u8; CONTENT_KEY_LEN];
+    key[..32].copy_from_slice(&hash.0);
+    key[32..].copy_from_slice(&offset.0.to_be_bytes());
+    key
+}
+
+pub(super) fn decode_content_key(bytes: &[u8]) -> Option<(H256, PartitionChunkOffset)> {
+    if bytes.len() != CONTENT_KEY_LEN {
+        return None;
+    }
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(&bytes[..32]);
+    let offset = u32::from_be_bytes(bytes[32..].try_into().expect("4"));
+    Some((H256(hash), PartitionChunkOffset(offset)))
 }
 
 pub(super) fn decode_data_root_key(bytes: &[u8]) -> eyre::Result<(H256, u32)> {

@@ -694,7 +694,7 @@ fn measure(
     let settle_ms = timed(|| store.settle_files())?;
     note_mem(engine, "after_settle", &watch);
     if engine == "rocks" {
-        print_column_files(&store)?;
+        print_column_files(&store, args.chunks)?;
     }
     drop(store);
     note_mem(engine, "after_write_drop", &watch);
@@ -1080,6 +1080,45 @@ fn read_phase(
         );
         Ok(())
     })?;
+    // Before rmw_path rewrites proofs. The leaf hash comes from the bytes
+    // this run stored, not from a data-path read that would warm that family.
+    if engine == "rocks" && args.schema.is_v3() {
+        time_reopen(
+            dir,
+            disk.as_ref(),
+            "content_lookup",
+            args.reads,
+            open,
+            |store, i| {
+                let at = sample_offset(i, args.chunks);
+                let proof = data_path_bytes(args, at);
+                let Some(hash) = content_hash_of_proof(&proof) else {
+                    eyre::bail!("content_lookup needs a proof of at least 64 bytes at offset {at}");
+                };
+                let offsets = store.view(|tx| tx.offsets_for_content_hash(hash))?;
+                eyre::ensure!(
+                    offsets.iter().any(|offset| offset.0 == at),
+                    "content lookup missed offset {at}"
+                );
+                Ok(())
+            },
+        )?;
+        time_reopen(
+            dir,
+            disk.as_ref(),
+            "content_miss",
+            args.reads,
+            open,
+            |store, i| {
+                let mut tagged = b"content-miss".to_vec();
+                tagged.extend(i.to_be_bytes());
+                let hash = H256(irys_types::hash_sha256(&tagged));
+                let offsets = store.view(|tx| tx.offsets_for_content_hash(hash))?;
+                eyre::ensure!(offsets.is_empty(), "absent content hash returned a row");
+                Ok(())
+            },
+        )?;
+    }
     time_reopen(
         dir,
         disk.as_ref(),
@@ -1344,20 +1383,39 @@ fn evict_cache(dir: &Path) -> eyre::Result<u32> {
         let mut files = 0_u32;
         let mut stack = vec![dir.to_path_buf()];
         while let Some(path) = stack.pop() {
-            let meta = fs::symlink_metadata(&path)?;
+            // Compaction can unlink an SST between readdir and this stat.
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            };
             if meta.file_type().is_symlink() {
                 continue;
             }
             if meta.is_dir() {
-                for entry in fs::read_dir(&path)? {
-                    stack.push(entry?.path());
+                let entries = match fs::read_dir(&path) {
+                    Ok(entries) => entries,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err.into()),
+                };
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(err) => return Err(err.into()),
+                    };
+                    stack.push(entry.path());
                 }
                 continue;
             }
             if !meta.is_file() {
                 continue;
             }
-            let file = File::open(&path)?;
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            };
             let rc = unsafe { posix_fadvise(file.as_raw_fd(), 0, 0, POSIX_FADV_DONTNEED) };
             if rc != 0 {
                 eyre::bail!(
@@ -1499,7 +1557,7 @@ fn timed(f: impl FnOnce() -> eyre::Result<()>) -> eyre::Result<u128> {
     Ok(started.elapsed().as_millis())
 }
 
-fn print_column_files(store: &SubmoduleIndex) -> eyre::Result<()> {
+fn print_column_files(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
     let mut files = store.column_file_usage()?;
     files.sort_by(|left, right| left.name.cmp(&right.name));
     let mut sst_files = 0_u64;
@@ -1511,9 +1569,28 @@ fn print_column_files(store: &SubmoduleIndex) -> eyre::Result<()> {
             "  cf name={} sst_files={} sst_bytes={} blob_files={} blob_bytes={}",
             cf.name, cf.sst_files, cf.sst_bytes, cf.blob_files, cf.blob_bytes
         );
+        if cf.name == "ChunkOffsetsByContentHash" && chunks > 0 {
+            let per_chunk = cf.sst_bytes as f64 / f64::from(chunks);
+            println!(
+                "  cf_per_chunk name={} sst_bytes={} bytes_per_chunk={per_chunk:.2}",
+                cf.name, cf.sst_bytes
+            );
+        }
     }
     println!("  files sst={sst_files} blob={blob_files}");
     Ok(())
+}
+
+/// Leaf `data_hash` of a stored proof. `None` when the bytes are shorter
+/// than a leaf. This does not read the index.
+fn content_hash_of_proof(proof: &[u8]) -> Option<H256> {
+    const LEAF_LEN: usize = 64;
+    if proof.len() < LEAF_LEN {
+        return None;
+    }
+    let tail = proof[proof.len() - LEAF_LEN..].to_vec();
+    let leaf = irys_types::get_leaf_proof(&irys_types::Base64(tail)).ok()?;
+    irys_types::ProofDeserialize::hash(&leaf).map(H256)
 }
 
 fn mdbx_map_bytes(chunks: u32, path_bytes: usize, worst_case: bool) -> usize {
@@ -2353,8 +2430,9 @@ Default --chunks is 20971520, the first max transaction in the stuck worst-case 
 --shuffle-paths RUN writes the data paths as runs of RUN consecutive chunks in a seeded random order, like scattered data sync. Each commit still holds the data-path batch size. RUN=1 is fully random. Transaction rows stay in offset order.\n\
 --txs-per-commit N overrides the transaction rows per durable commit. Production commits one block's transactions together, so --small-txs 1 should use the block's transaction count (100 at the expected cap).\n\
 --small-txs N stores one data root every N chunks. Sibling chunks in one transaction share branch bytes. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
---reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root.\n\
+--reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root. Schema v3 RocksDB also times content_lookup and content_miss.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
+content_lookup is a cold prefix seek of a leaf hash that was stored. content_miss seeks a hash that was not stored. Both run only for schema v3 RocksDB, before rmw_path rewrites proofs.\n\
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
 RocksDB prints rocks_bg before and after each shape: running compactions, running flushes, pending flags, and no_file_opens.\n\
 The RocksDB engine line shows max_open_files=-1 file_opening_threads=16. Production open uses the same table cache. The bench open also skips the table-property scan.\n\

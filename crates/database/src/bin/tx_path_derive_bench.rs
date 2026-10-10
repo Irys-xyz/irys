@@ -21,7 +21,7 @@ use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_database::submodule::tables::{
     Metadata, SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3,
-    TxPathIntervalByStart,
+    SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxPathIntervalByStart,
 };
 use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
 use irys_database::tables::{IrysDataTxHeaders, IrysTables, MigratedBlockHashes};
@@ -984,6 +984,11 @@ fn accept_rocks_schema(text: &str) -> eyre::Result<()> {
             "SCHEMA is irys-submodule-rocks 1 (per-offset rows). This bench measures the v2 interval read and does not convert. Release 4.0.8 did not ship this RocksDB engine."
         );
     }
+    if text == SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX {
+        eyre::bail!(
+            "SCHEMA is irys-submodule-index 3, which has no column family ChunkOffsetsByContentHash. Delete the directory and rerun submodule-index-convert (mdbx-to-rocks or rocks-to-v3)."
+        );
+    }
     if text != SUBMODULE_SCHEMA && text != SUBMODULE_SCHEMA_V3 {
         let shown: String = text.chars().take(80).collect();
         eyre::bail!("unrecognized RocksDB SCHEMA: {shown}");
@@ -1935,10 +1940,17 @@ mod tests {
 
     #[test]
     fn rocks_schema_v2_and_v3_open() {
-        use irys_database::submodule::tables::{SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3};
+        use irys_database::submodule::tables::{
+            SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX,
+        };
 
         super::accept_rocks_schema(SUBMODULE_SCHEMA).unwrap();
         super::accept_rocks_schema(SUBMODULE_SCHEMA_V3).unwrap();
+        let old = super::accept_rocks_schema(SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX).unwrap_err();
+        assert!(
+            old.to_string().contains("ChunkOffsetsByContentHash"),
+            "{old}"
+        );
         assert!(super::accept_rocks_schema("irys-submodule-rocks 1\n").is_err());
         assert!(super::accept_rocks_schema("nope").is_err());
     }
