@@ -193,6 +193,12 @@ impl ShadowTransaction {
     }
 
     /// Compose this shadow transaction into an EIP-1559 transaction for inclusion in a block.
+    ///
+    /// `max_priority_fee_per_gas` is charged by the EL as **raw wei** (not × gas) from the
+    /// packet fee-payer to the miner. It is consensus-critical today: CL must match it to
+    /// the generator's `transaction_fee` (interim soft-fork). The fee is **not** in the borsh
+    /// packet — a future hardfork should embed it so compose cannot diverge from the
+    /// validated object. See `design/docs/shadow-tx-priority-fee-in-packet-hardfork.md`.
     #[must_use]
     pub fn compose(&self, chain_id: u64, max_priority_fee_per_gas: u128) -> TxEip1559 {
         let shadow_tx_buf = encode_prefixed_input(self);
