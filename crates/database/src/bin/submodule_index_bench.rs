@@ -1090,6 +1090,31 @@ fn read_phase(
         );
         Ok(())
     })?;
+    // What `paths_in_tx` / `metas_in_tx` do for a span: the range read,
+    // then every proof in it, in one read transaction. Same offsets as range.
+    time_reopen(dir, disk.as_ref(), "span", args.reads, open, |store, i| {
+        let start = sample_offset(i.wrapping_add(2), args.chunks - window + 1);
+        let end = start + window - 1;
+        let proofs = store.view(|tx| {
+            let rows = tx.path_hashes_in_inclusive_range(
+                PartitionChunkOffset::from(start),
+                PartitionChunkOffset::from(end),
+            )?;
+            let mut proofs = 0_usize;
+            for (offset, hashes) in rows {
+                if hashes.data_path_hash.is_some() && tx.get_data_path_by_offset(offset)?.is_some()
+                {
+                    proofs += 1;
+                }
+            }
+            Ok(proofs)
+        })?;
+        eyre::ensure!(
+            proofs == usize::try_from(window)?,
+            "span {start}..={end} read {proofs} proofs"
+        );
+        Ok(())
+    })?;
     // Before rmw_path rewrites proofs. The leaf hash comes from the bytes
     // this run stored, not from a data-path read that would warm that family.
     if engine == "rocks" && args.schema.is_v3() {
@@ -2440,7 +2465,7 @@ Default --chunks is 20971520, the first max transaction in the stuck worst-case 
 --shuffle-paths RUN writes the data paths as runs of RUN consecutive chunks in a seeded random order, like scattered data sync. Each commit still holds the data-path batch size. RUN=1 is fully random. Transaction rows stay in offset order.\n\
 --txs-per-commit N overrides the transaction rows per durable commit. Production commits one block's transactions together, so --small-txs 1 should use the block's transaction count (100 at the expected cap).\n\
 --small-txs N stores one data root every N chunks. Sibling chunks in one transaction share branch bytes. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
---reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, rmw_path, rmw_root. Schema v3 RocksDB also times content_lookup and content_miss.\n\
+--reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), rmw_path, rmw_root. Schema v3 RocksDB also times content_lookup and content_miss.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
 content_lookup is a cold prefix seek of a leaf hash that was stored. content_miss seeks a hash that was not stored. Both run only for schema v3 RocksDB, before rmw_path rewrites proofs.\n\
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
