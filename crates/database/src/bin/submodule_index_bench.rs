@@ -213,6 +213,10 @@ impl Engines {
 }
 
 struct Args {
+    /// `--worst-case` writes one unrelated random proof per chunk (the layout of
+    /// runs before the shared-node generator). Off by default: real proofs of one
+    /// transaction share most tree nodes, which is what inline storage compresses.
+    uniform_proofs: bool,
     dir: PathBuf,
     chunks: u32,
     batch: u32,
@@ -1633,6 +1637,15 @@ fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
     if !args.workload.is_worst() {
         return fill(args.path_bytes, u64::from(offset));
     }
+    if !args.uniform_proofs {
+        // One max transaction per group, nodes shared by `(data_root, level,
+        // index)` like a real tree. A short --chunks prefix is still a leaf of
+        // the full transaction, so the proof keeps the max depth.
+        let place = place_tx(args, offset);
+        let root = hash_at(u64::from(place.start).wrapping_add(0x1000_0000));
+        let leaf = u64::from(offset.saturating_sub(place.start));
+        return shared_data_proof(&root.0, place.leaves, leaf, CHUNK_SIZE);
+    }
     // Local index inside a max transaction. Depth stays at the max proof even
     // when this run writes only a prefix of the transaction.
     let local = u64::from(offset) % MAX_DATA_TX_CHUNKS;
@@ -2010,6 +2023,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     let mut group_commit = false;
     let mut rewrite_filters = false;
     let mut small_txs: Option<u32> = None;
+    let mut uniform_proofs = false;
     let mut mid_txs = false;
     let mut shuffle_run: Option<u32> = None;
     let mut txs_per_commit: Option<u32> = None;
@@ -2056,6 +2070,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             "--worst-case" => worst_case = true,
             "--mid" => mid = true,
             "--small-txs" => small_txs = Some(required(&mut it, &flag)?.parse()?),
+            "--uniform-proofs" => uniform_proofs = true,
             "--mid-txs" => mid_txs = true,
             "--shuffle-paths" => shuffle_run = Some(required(&mut it, &flag)?.parse()?),
             "--txs-per-commit" => txs_per_commit = Some(required(&mut it, &flag)?.parse()?),
@@ -2216,6 +2231,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         shuffle_run,
         txs_per_commit,
         schema,
+        uniform_proofs,
     })
 }
 
@@ -2329,6 +2345,7 @@ Each engine prints mem lines. rss_kb is resident. anon_kb is heap. file_kb is ma
 --mid writes {MID_CHUNKS} chunks of 4096-byte paths (about 4 GiB raw per engine). \
 It needs IRYS_INDEX_BENCH_LARGE=1. Do not combine it with --chunks, --path-bytes, or --worst-case.\n\
 --worst-case stores a {DATA_PROOF_BYTES}-byte max data proof on every chunk \
+(tree nodes shared between chunks of one transaction, like a real proof; --uniform-proofs gives every chunk an unrelated random proof instead, the layout of runs before 2026-10-09) \
 (a max transaction is {MAX_DATA_TX_CHUNKS} chunks). \
 A full partition is --chunks {PARTITION_CHUNKS} and requires IRYS_INDEX_BENCH_LARGE=1."
     );
@@ -2499,6 +2516,7 @@ VmHWM:\t   8600000 kB
             shuffle_run: None,
             txs_per_commit: None,
             schema: IndexSchema::V2,
+            uniform_proofs: false,
         };
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
