@@ -84,7 +84,16 @@ fn assemble_poa(
     solution: &SolutionContext,
     ledger_id: Option<u32>,
 ) -> eyre::Result<Option<(PoaData, H256)>> {
-    let tx_path = match solution.tx_path.resolve(TX_PATH_DERIVE_WAIT) {
+    // `wait` can return timeout in the same instant the worker stores the
+    // path. One non-blocking read keeps that path.
+    let resolved = match solution.tx_path.resolve(TX_PATH_DERIVE_WAIT) {
+        Err(irys_types::block_production::TxPathError::TimedOut) => solution
+            .tx_path
+            .try_get()
+            .unwrap_or(Err(irys_types::block_production::TxPathError::TimedOut)),
+        other => other,
+    };
+    let tx_path = match resolved {
         Ok(path) => path,
         Err(error) => {
             warn!(
@@ -241,6 +250,8 @@ pub struct BlockProducerInner {
     pub reth_node_adapter: IrysRethNodeAdapter,
     /// Shared state handle for chunk ingress (used by tx selection)
     pub chunk_ingress_state: ChunkIngressState,
+    /// Consecutive PoA drops caused by a tx-path derive. Reset when a PoA is built.
+    pub tx_path_fail_streak: std::sync::atomic::AtomicU32,
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
@@ -504,14 +515,44 @@ pub trait BlockProdStrategy {
     /// Creates PoA data from the solution context.
     ///
     /// `Ok(None)` drops the solution: the tx path derive failed or timed out.
-    /// A stored path is returned as it was read. A derive is awaited here, so
-    /// the parent wait, mempool selection, and the Reth payload build overlap it.
-    fn create_poa_data(
+    /// A stored path, or a derive that has already finished, is read on this
+    /// task. A running derive waits on the blocking pool so shutdown can drop
+    /// this future without pinning a tokio worker on the condvar.
+    async fn create_poa_data(
         &self,
         solution: &SolutionContext,
         ledger_id: Option<u32>,
     ) -> eyre::Result<Option<(PoaData, H256)>> {
-        assemble_poa(solution, ledger_id)
+        let built = if solution.tx_path.try_get().is_some() {
+            assemble_poa(solution, ledger_id)?
+        } else {
+            let solution = solution.clone();
+            tokio::task::spawn_blocking(move || assemble_poa(&solution, ledger_id))
+                .await
+                .map_err(|error| eyre!("tx path assemble task failed: {error}"))??
+        };
+        self.note_tx_path_streak(built.is_some());
+        Ok(built)
+    }
+
+    /// Error once a run of derive drops reaches 8, then on every later drop
+    /// in that run. One success clears the run.
+    fn note_tx_path_streak(&self, built: bool) {
+        const REPORT_AT: u32 = 8;
+        let streak = &self.inner().tx_path_fail_streak;
+        if built {
+            streak.store(0, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        let count = streak
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1);
+        if count >= REPORT_AT {
+            error!(
+                streak = count,
+                "tx path derive failed on consecutive solutions"
+            );
+        }
     }
 
     /// Fetches a block header from mempool or database
@@ -641,7 +682,7 @@ pub trait BlockProdStrategy {
 
         // Registered payout for this miner on the parent epoch snapshot must be
         // what we declare on the Irys header and pay via EVM coinbase.
-        let reward_address = {
+        let (reward_address, ledger_id) = {
             let tree = self.inner().block_tree_guard.read();
             let epoch_snapshot = tree
                 .get_epoch_snapshot(&prev_block_header.block_hash)
@@ -651,8 +692,18 @@ pub trait BlockProdStrategy {
                         prev_block_header.block_hash
                     )
                 })?;
-            epoch_snapshot.resolve_reward_address(solution.mining_address)
+            let reward_address = epoch_snapshot.resolve_reward_address(solution.mining_address);
+            let ledger_id = epoch_snapshot
+                .get_data_partition_assignment(solution.partition_hash)
+                .and_then(|assignment| assignment.ledger_id);
+            (reward_address, ledger_id)
         };
+
+        // A failed or late derive must not build a Reth payload. The call
+        // inside `produce_block_without_broadcasting` then reads the finished job.
+        if self.create_poa_data(solution, ledger_id).await?.is_none() {
+            return Ok(None);
+        }
 
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
@@ -1202,7 +1253,7 @@ pub trait BlockProdStrategy {
 
         // Create PoA data using the trait method. A failed derive drops the
         // solution instead of sealing a PoA with an unverified tx path.
-        let Some((poa, poa_chunk_hash)) = self.create_poa_data(solution, ledger_id)? else {
+        let Some((poa, poa_chunk_hash)) = self.create_poa_data(solution, ledger_id).await? else {
             return Ok(None);
         };
 

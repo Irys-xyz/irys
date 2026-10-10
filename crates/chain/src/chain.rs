@@ -2496,10 +2496,24 @@ impl IrysNode {
     ) -> (Vec<PartitionMiningController>, Vec<TokioServiceHandle>) {
         let mut controllers = Vec::new();
         let mut handles = Vec::new();
-        let tx_path_threads = config.node_config.storage.tx_path_derive_threads;
+        let configured = config.node_config.storage.tx_path_derive_threads;
+        let available = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1);
+        let tx_path_threads = configured.min(available).max(1);
         let tx_path_pool = Arc::new(
-            irys_database::tx_path_derive::tx_path_derive_pool(tx_path_threads)
-                .expect("tx path derive pool"),
+            match irys_database::tx_path_derive::tx_path_derive_pool(tx_path_threads) {
+                Ok(pool) => pool,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        threads = tx_path_threads,
+                        "tx path derive pool failed; falling back to one thread"
+                    );
+                    irys_database::tx_path_derive::tx_path_derive_pool(1)
+                        .expect("one-thread tx path derive pool")
+                }
+            },
         );
         for sm in storage_modules_guard.read().iter() {
             let inner = PartitionMiningServiceInner::new(
@@ -2593,6 +2607,7 @@ impl IrysNode {
             block_index,
             reth_node_adapter,
             chunk_ingress_state,
+            tx_path_fail_streak: std::sync::atomic::AtomicU32::new(0),
         });
 
         // Spawn the service and get the handle

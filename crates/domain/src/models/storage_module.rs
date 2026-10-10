@@ -253,12 +253,13 @@ fn paths_in_tx(
     let mut data_paths: HashMap<ChunkPathHash, Option<ChunkDataPath>> = HashMap::new();
     let mut out = BTreeMap::new();
     for (offset, hashes) in rows {
+        // Schema v3 exposes the data root in `tx_path_hash` and stores no tx path.
         let tx_path = match hashes.tx_path_hash {
-            Some(hash) => cached_bytes(&mut tx_paths, hash, || {
+            Some(hash) if tx.stores_tx_paths() => cached_bytes(&mut tx_paths, hash, || {
                 index_read_metrics::note("tx_path");
                 tx.get_full_tx_path(hash)
             })?,
-            None => None,
+            Some(_) | None => None,
         };
         let data_path = match hashes.data_path_hash {
             Some(hash) => cached_bytes(&mut data_paths, hash, || {
@@ -1379,6 +1380,9 @@ impl StorageModule {
         }
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
+        // Bind after a pending reset clears the old partition hash. Binding
+        // first refuses a new partition, or the reset clear drops the new one.
+        let mut pack_binds = Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
         let index_gap = Arc::new(index_drain::IndexGap::new());
@@ -1476,15 +1480,13 @@ impl StorageModule {
 
             let params = PackingParams::from_toml(&params_path)
                 .wrap_err_with(|| format!("packing params at {}", params_path.display()))?;
-            submodule_db.bind_packing_identity(
-                params.partition_hash,
-                &packing_identity_hash(
-                    &params.packing_address,
-                    config.consensus.entropy_packing_iterations,
-                    config.consensus.chunk_size,
-                    config.consensus.chain_id,
-                ),
-            )?;
+            let packing = packing_identity_hash(
+                &params.packing_address,
+                config.consensus.entropy_packing_iterations,
+                config.consensus.chunk_size,
+                config.consensus.chain_id,
+            );
+            let bound_partition = params.partition_hash;
 
             let intervals_file_path = sub_base_path.join("intervals.json");
 
@@ -1507,7 +1509,7 @@ impl StorageModule {
                         db: submodule_db.clone(),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
                         index_drain: index_drain::IndexDrain::spawn(
-                            submodule_db,
+                            submodule_db.clone(),
                             Arc::clone(&index_write_generation),
                             Arc::clone(&index_commit_fail_next),
                             Arc::clone(&index_gap),
@@ -1522,6 +1524,7 @@ impl StorageModule {
                         e
                     )
                 })?;
+            pack_binds.push((submodule_db, bound_partition, packing));
 
             // Initially just mark the global intervals as Uninitialized for this submodules interval
             global_intervals
@@ -1548,7 +1551,12 @@ impl StorageModule {
 
         // A crash during reset leaves the marker set. Finish the clear and
         // rewrite that submodule's intervals before the file is loaded.
+        // The packing bind runs after that clear, so a new partition hash is
+        // the one that stays.
         Self::finish_pending_resets(&submodule_map)?;
+        for (index, partition, packing) in pack_binds {
+            index.bind_packing_identity(partition, &packing)?;
+        }
 
         // Attempt to load a global set of intervals from the submodules
         let loaded_intervals: NoditMap<
@@ -4109,6 +4117,12 @@ impl StorageModule {
                 self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
             let submodule_end = *interval.end();
             submodule.db.update(|tx| {
+                // Schema v3 data-root rows belong to their intervals. Clearing
+                // the interval removes the row. Trimming the info list here
+                // would delete rows whose interval fragments remain.
+                if tx.intervals_own_data_root_rows() {
+                    return Ok(());
+                }
                 for data_root in data_roots {
                     let Some(infos) = tx.get_data_root_infos_for_data_root(*data_root)? else {
                         continue;
@@ -6304,7 +6318,6 @@ fn merge_inclusive_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_database::submodule::tables::ChunkPathHashes;
     use irys_testing_utils::{chunk_bytes_gen, utils::TempDirBuilder};
     use irys_types::{
         ConsensusConfig, DataTransactionHeaderV1, DataTransactionLedger, DbSyncMode, H256,
@@ -6605,8 +6618,29 @@ mod tests {
         assert_eq!(schema, SUBMODULE_SCHEMA_V3);
         assert!(!module_dir.join("db").join("mdbx.dat").exists());
 
+        // Schema v3 drops a data path that no interval covers. The interval
+        // hash is what a later read reports as `tx_path_hash`.
         let offset = PartitionChunkOffset::from(7);
-        index.update(|tx| tx.add_full_data_path(offset, vec![3]))?;
+        let root = H256::repeat_byte(1);
+        index.update(|tx| {
+            tx.add_tx_leaf_binding(
+                root,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))?;
+            tx.add_data_root_info(
+                root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 1,
+                },
+            )?;
+            tx.add_full_data_path(offset, vec![3])?;
+            Ok(())
+        })?;
         let got = index
             .view(|tx| tx.get_path_hashes_by_offset(offset))?
             .expect("data-path bytes are the presence row");
@@ -6614,7 +6648,7 @@ mod tests {
             got.data_path_hash,
             Some(H256(irys_types::hash_sha256(&[3])))
         );
-        assert!(got.tx_path_hash.is_none());
+        assert_eq!(got.tx_path_hash, Some(root));
         assert_eq!(
             index.view(|tx| tx.get_data_path_by_offset(offset))?,
             Some(vec![3])
@@ -6781,7 +6815,21 @@ mod tests {
         submodule.db.set_wal_backstop(Duration::from_secs(60));
         let data_root = H256::repeat_byte(4);
         let syncs_before = submodule.db.wal_sync_count();
+        // Schema v3 stores the data-root row on the interval. A row with no
+        // interval is refused. The registration stays unsynced.
         submodule.db.update_registration(|tx| {
+            tx.add_tx_leaf_binding(
+                data_root,
+                &TxLeafBinding {
+                    data_root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(0),
+                Some(data_root),
+            )?;
             tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
@@ -6807,14 +6855,11 @@ mod tests {
                 .is_empty()
         );
 
+        // A synced write that is not the chunk commit. Schema v3 has no
+        // path-hash family, and clearing the interval here would drop the
+        // registration this write is meant to cover.
         submodule.db.update(|tx| {
-            tx.set_path_hashes_by_offset(
-                offset,
-                ChunkPathHashes {
-                    data_path_hash: Some(H256::repeat_byte(1)),
-                    tx_path_hash: None,
-                },
-            )
+            tx.add_data_path_hash_to_offset_index(offset, Some(H256::repeat_byte(1)))
         })?;
         assert!(submodule.db.durable_generation() >= published);
         assert_eq!(submodule.db.wal_backstop_sync_count(), 0);
@@ -6924,22 +6969,23 @@ mod tests {
         };
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         submodule.db.update(|tx| {
-            tx.write_data_path_updates(vec![
-                (PartitionChunkOffset::from(2), H256::repeat_byte(2), vec![2]),
-                (PartitionChunkOffset::from(3), H256::repeat_byte(3), vec![3]),
-                (PartitionChunkOffset::from(6), H256::repeat_byte(6), vec![6]),
-            ])?;
             tx.add_full_tx_path(tx_hash, tx_path.clone())?;
+            tx.add_tx_leaf_binding(tx_hash, &leaf)?;
             tx.add_tx_path_hash_to_offset_range(
                 PartitionChunkOffset::from(1),
                 PartitionChunkOffset::from(6),
                 Some(tx_hash),
             )?;
-            tx.add_tx_leaf_binding(tx_hash, &leaf)?;
             tx.add_data_root_info(data_root, &info)?;
+            tx.write_data_path_updates(vec![
+                (PartitionChunkOffset::from(2), H256::repeat_byte(2), vec![2]),
+                (PartitionChunkOffset::from(3), H256::repeat_byte(3), vec![3]),
+                (PartitionChunkOffset::from(6), H256::repeat_byte(6), vec![6]),
+            ])?;
             tx.add_pending_body_migration(PartitionChunkOffset::from(3), &pending)?;
             Ok(())
         })?;
+        assert_index_consistent(module)?;
         Ok(SeededIndex {
             tx_hash,
             data_root,
@@ -6965,6 +7011,89 @@ mod tests {
             )
         })?;
         Ok(rows.into_iter().map(|(offset, _)| offset.0).collect())
+    }
+
+    fn assert_index_consistent(module: &StorageModule) -> eyre::Result<()> {
+        for (_, submodule) in module.submodules.iter() {
+            let findings = submodule.db.audit_index()?;
+            eyre::ensure!(
+                findings.is_empty(),
+                "index audit found {} row(s): {findings:?}",
+                findings.len()
+            );
+        }
+        Ok(())
+    }
+
+    /// Schema v3: a filled placement stays consistent across a second
+    /// registration, an in-range pending move, and a settle.
+    #[test]
+    fn rocks_settle_advance_and_reregister_stay_consistent() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("rocks_body_audit")
+            .with_tracing()
+            .build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 20,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0".into())],
+            },
+            &config,
+        )?;
+        let data_root = H256::repeat_byte(4);
+        let data_size = 8 * chunk_size;
+        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        let range = LedgerChunkRange(ledger_chunk_offset_ii!(0, 7));
+        let height = 11_u64;
+        storage_module.index_transaction_data(&header, &vec![1, 2, 3, 4], range, height)?;
+        assert_index_consistent(&storage_module)?;
+        // Same tx again: the interval, data-root row, and pending job stay owned.
+        storage_module.index_transaction_data(&header, &vec![1, 2, 3, 4], range, height)?;
+        assert_index_consistent(&storage_module)?;
+
+        let jobs = storage_module.pending_body_migrations()?;
+        assert_eq!(jobs.len(), 1);
+        let moved = storage_module.advance_pending_body_migration(
+            jobs[0].0,
+            PartitionChunkOffset::from(3),
+            &jobs[0].1,
+        )?;
+        assert_eq!(moved, PartitionChunkOffset::from(3));
+        assert_index_consistent(&storage_module)?;
+
+        assert!(storage_module.settle_pending_body_migration(
+            PartitionChunkOffset::from(3),
+            data_root,
+            height
+        )?);
+        assert!(storage_module.pending_body_migrations()?.is_empty());
+        assert_index_consistent(&storage_module)?;
+        Ok(())
     }
 
     /// Uninitialized `[3, 5]` drops pending and splits the tx interval.
@@ -7177,6 +7306,7 @@ mod tests {
             assert_eq!(data_path_at(&reloaded, 6)?, None);
             assert_eq!(presence_offsets(&reloaded)?, vec![2]);
             assert_entropy_hole_kept(&reloaded, &seeded)?;
+            assert_index_consistent(&reloaded)?;
             Ok(())
         })
     }
@@ -7214,6 +7344,7 @@ mod tests {
             assert_eq!(data_path_at(&reloaded, 6)?, None);
             assert!(presence_offsets(&reloaded)?.is_empty());
             assert_uninitialized_coverage_dropped(&reloaded, &seeded)?;
+            assert_index_consistent(&reloaded)?;
             Ok(())
         })
     }
@@ -7308,6 +7439,7 @@ mod tests {
                 );
                 assert!(!reloaded_sub.db.reset_in_progress()?);
                 assert!(!reloaded.reset_incomplete());
+                assert_index_consistent(&reloaded)?;
                 Ok(())
             })?;
         }
@@ -7325,6 +7457,7 @@ mod tests {
             assert!(!submodule.db.reset_in_progress()?);
             storage.reset()?;
             assert!(!storage.reset_incomplete());
+            assert_index_consistent(&storage)?;
             Ok(())
         })
     }
@@ -7336,6 +7469,7 @@ mod tests {
             drop(storage);
             let reloaded = reopen_presence(config)?;
             assert_eq!(index_sequence(&reloaded)?, seq);
+            assert_index_consistent(&reloaded)?;
             Ok(())
         })
     }
@@ -7631,6 +7765,7 @@ mod tests {
             data_root,
             block_height
         )?);
+        assert_index_consistent(&storage_module)?;
         Ok(())
     }
 
@@ -7688,6 +7823,7 @@ mod tests {
         let root_b = H256::repeat_byte(2);
         place(root_a, 0)?;
         place(root_b, 1)?;
+        assert_index_consistent(&storage_module)?;
         let jobs = storage_module.pending_body_migrations()?;
         let job_a = jobs[0].1.clone();
         assert_eq!(jobs[0].0, PartitionChunkOffset::from(0));

@@ -35,9 +35,7 @@ pub(super) fn read_placements_in_range<R: SubmoduleRead + ?Sized>(
     let intervals = reader.tx_intervals_in_range(start, end)?;
     let mut out = Vec::with_capacity(intervals.len());
     for interval in intervals {
-        if let Some(placement) = placement_for(reader, &interval, interval.start)? {
-            out.push(placement);
-        }
+        out.extend(placements_for_interval(reader, &interval, start, end)?);
     }
     Ok(out)
 }
@@ -113,25 +111,64 @@ fn placement_for<R: SubmoduleRead + ?Sized>(
     interval: &IntervalRow,
     probe: PartitionChunkOffset,
 ) -> eyre::Result<Option<Placement>> {
+    Ok(placements_for_interval(reader, interval, probe, probe)?
+        .into_iter()
+        .next())
+}
+
+/// One placement per data-root info that falls inside `interval`.
+///
+/// Schema v2 merges adjacent rows that share a tx-path hash. Two txs with
+/// the same bytes then occupy one interval. The info start inside that
+/// interval is the next tx. A negative start does not split: the tx began
+/// before this partition, and the first segment keeps that info.
+fn placements_for_interval<R: SubmoduleRead + ?Sized>(
+    reader: &R,
+    interval: &IntervalRow,
+    query_start: PartitionChunkOffset,
+    query_end: PartitionChunkOffset,
+) -> eyre::Result<Vec<Placement>> {
     let Some(data_root) = data_root_for_stored_path(reader, interval.tx_path_hash)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let Some(infos) = reader.get_data_root_infos_for_data_root(data_root)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let Some(info) = covering_info(&infos.0, probe) else {
-        return Ok(None);
-    };
-    Ok(Some(Placement {
-        data_root,
-        tx_start_offset: info.start_offset,
-        data_size: info.data_size,
-        ledger: None,
-        start: interval.start,
-        end: interval.end,
-        block_height: None,
-        tx_index: None,
-    }))
+    let mut cuts = vec![interval.start];
+    for info in &infos.0 {
+        let Ok(at) = u32::try_from(info.start_offset.0) else {
+            continue;
+        };
+        if at > interval.start.0 && at <= interval.end.0 {
+            cuts.push(PartitionChunkOffset(at));
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::new();
+    for (index, cut) in cuts.iter().enumerate() {
+        let seg_end = match cuts.get(index + 1) {
+            Some(next) => PartitionChunkOffset(next.0 - 1),
+            None => interval.end,
+        };
+        if seg_end < query_start || *cut > query_end {
+            continue;
+        }
+        let Some(info) = covering_info(&infos.0, *cut) else {
+            continue;
+        };
+        out.push(Placement {
+            data_root,
+            tx_start_offset: info.start_offset,
+            data_size: info.data_size,
+            ledger: None,
+            start: *cut,
+            end: seg_end,
+            block_height: None,
+            tx_index: None,
+        });
+    }
+    Ok(out)
 }
 
 /// Greatest `start_offset` that is still `<= probe`.

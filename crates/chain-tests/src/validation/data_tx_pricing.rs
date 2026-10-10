@@ -122,6 +122,7 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
                 block_index: genesis_block_prod.block_index.clone(),
                 reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
                 chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
+                tx_path_fail_streak: std::sync::atomic::AtomicU32::new(0),
             }),
         },
     };
@@ -295,6 +296,7 @@ async fn heavy_block_insufficient_perm_fee_pre_validation_only() -> eyre::Result
                 block_index: genesis_block_prod.block_index.clone(),
                 reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
                 chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
+                tx_path_fail_streak: std::sync::atomic::AtomicU32::new(0),
             }),
         },
     };
@@ -433,6 +435,7 @@ async fn block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
                 block_index: genesis_block_prod.block_index.clone(),
                 reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
                 chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
+                tx_path_fail_streak: std::sync::atomic::AtomicU32::new(0),
             }),
         },
     };
@@ -946,6 +949,7 @@ async fn heavy_block_term_ledger_tx_with_perm_fee_gets_rejected() -> eyre::Resul
                 block_index: genesis_block_prod.block_index.clone(),
                 reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
                 chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
+                tx_path_fail_streak: std::sync::atomic::AtomicU32::new(0),
             }),
         },
     };

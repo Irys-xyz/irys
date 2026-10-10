@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use eyre::eyre;
 use irys_types::{
-    ChunkDataPath, DataLedger, DataRootLeaf, DataTransactionHeader, DataTransactionLedger, H256,
-    HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof, ProofDeserialize as _, TxPath,
-    generate_data_root, generate_leaves_from_data_roots, hash_sha256,
+    Base64, ChunkDataPath, DataLedger, DataRootLeaf, DataTransactionHeader, DataTransactionLedger,
+    H256, HASH_SIZE, Helpers as _, Node, PartitionChunkOffset, Proof, ProofDeserialize as _,
+    TxPath, generate_data_root, generate_leaves_from_data_roots, hash_sha256, validate_path,
 };
 use reth_db::DatabaseEnv;
 use reth_db::cursor::DbCursorRO as _;
@@ -58,6 +58,10 @@ pub struct DerivedTxPath {
     pub data_root: H256,
     /// Recomputed ledger `tx_root`.
     pub tx_root: H256,
+    /// Inclusive ledger chunk offset of the block that owns this path.
+    pub ledger_start: u64,
+    /// Inclusive ledger chunk offset of the tx that owns this path.
+    pub tx_ledger_start: u64,
     /// Proof for `tx_index` only.
     pub proof: Proof,
     /// Consensus reads, including the read-transaction commit.
@@ -191,7 +195,8 @@ fn derive_tx_path_at_offset_timed(
     };
     let built = {
         let cpu_at = Instant::now();
-        let tx_index = assign_tx_index(&headers, &bounds, chunk_offset, chunk_size)?;
+        let (tx_index, tx_ledger_start) =
+            assign_tx_index(&headers, &bounds, chunk_offset, chunk_size)?;
         let (tx_root, proof) = proof_for_headers(&headers, tx_index)?;
         let committed = header
             .data_ledgers
@@ -214,10 +219,137 @@ fn derive_tx_path_at_offset_timed(
             tx_count: headers.len(),
             data_root: chosen.data_root,
             tx_root,
+            ledger_start: bounds.start,
+            tx_ledger_start,
             proof,
         }
     };
     finish(started, cpu_nanos, built)
+}
+
+/// One block's tx tree. A later offset in the same block skips the header read
+/// and the tree build.
+pub struct TxPathBlockCache {
+    loaded: Option<LoadedBlock>,
+}
+
+struct LoadedBlock {
+    ledger: DataLedger,
+    bounds: BlockBounds,
+    headers: Vec<DataTransactionHeader>,
+    tx_root: H256,
+    root: Node,
+}
+
+impl TxPathBlockCache {
+    pub fn new() -> Self {
+        Self { loaded: None }
+    }
+}
+
+impl Default for TxPathBlockCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// [`derive_tx_path_at_offset`] that reuses `cache` for the same block.
+pub fn derive_tx_path_at_offset_cached(
+    db: &DatabaseEnv,
+    cache: &mut TxPathBlockCache,
+    ledger: DataLedger,
+    chunk_offset: u64,
+    chunk_size: u64,
+) -> eyre::Result<DerivedTxPath> {
+    eyre::ensure!(chunk_size > 0, "chunk size must be non-zero");
+    let started = Instant::now();
+    let hit = cache.loaded.as_ref().is_some_and(|block| {
+        block.ledger == ledger
+            && chunk_offset >= block.bounds.start
+            && chunk_offset < block.bounds.end
+    });
+    if !hit {
+        cache.loaded = Some(load_block(db, ledger, chunk_offset)?);
+    }
+    let block = cache
+        .loaded
+        .as_ref()
+        .ok_or_else(|| eyre!("tx path block cache is empty"))?;
+    let cpu_at = Instant::now();
+    let (tx_index, tx_ledger_start) =
+        assign_tx_index(&block.headers, &block.bounds, chunk_offset, chunk_size)?;
+    let proof = resolve_proof_at(&block.root, tx_index)?;
+    let chosen = &block.headers[tx_index];
+    let leaf = proof_leaf_hash(&proof)?;
+    let expected = DataTransactionLedger::fold_tx_root_leaf(chosen.data_root, chosen.prefix_hash);
+    eyre::ensure!(
+        leaf == expected,
+        "proof leaf {leaf} != fold of tx {}",
+        chosen.id
+    );
+    let cpu_nanos = fit_nanos(cpu_at.elapsed())?;
+    finish(
+        started,
+        cpu_nanos,
+        BuiltPath {
+            height: block.bounds.height,
+            block_hash: block.bounds.block_hash,
+            ledger,
+            tx_index,
+            tx_id: chosen.id,
+            tx_count: block.headers.len(),
+            data_root: chosen.data_root,
+            tx_root: block.tx_root,
+            ledger_start: block.bounds.start,
+            tx_ledger_start,
+            proof,
+        },
+    )
+}
+
+fn load_block(
+    db: &DatabaseEnv,
+    ledger: DataLedger,
+    chunk_offset: u64,
+) -> eyre::Result<LoadedBlock> {
+    let (bounds, header) = db.view_eyre(|tx| {
+        let bounds = locate_block(tx, ledger, chunk_offset)?;
+        let header = block_header_by_hash(tx, &bounds.block_hash, false)?.ok_or_else(|| {
+            eyre!(
+                "block header {} missing at height {}",
+                bounds.block_hash,
+                bounds.height
+            )
+        })?;
+        Ok((bounds, header))
+    })?;
+    let headers = db.view_eyre(|tx| block_ledger_tx_headers(tx, &header, ledger))?;
+    let (tx_root, root) = tree_for_headers(&headers)?;
+    let committed = header
+        .data_ledgers
+        .iter()
+        .find(|item| item.ledger_id == ledger.get_id())
+        .map(|item| item.tx_root)
+        .ok_or_else(|| eyre!("ledger {ledger} absent on the block header"))?;
+    eyre::ensure!(
+        tx_root == committed,
+        "derived tx_root {tx_root} != header tx_root {committed}"
+    );
+    Ok(LoadedBlock {
+        ledger,
+        bounds,
+        headers,
+        tx_root,
+        root,
+    })
+}
+
+/// `true` when `err` means the consensus database does not contain this offset yet.
+pub fn consensus_is_behind(err: &eyre::Report) -> bool {
+    let text = format!("{err:#}");
+    text.contains("is past ledger")
+        || text.contains("block index is empty")
+        || (text.contains("block header") && text.contains("missing"))
 }
 
 /// Tx headers for `ids`, in order. With a pool the ids are cut into one
@@ -294,6 +426,8 @@ pub fn derive_tx_path_synthetic_with(
             tx_count: headers.len(),
             data_root: chosen.data_root,
             tx_root,
+            ledger_start: 0,
+            tx_ledger_start: 0,
             proof,
         }
     };
@@ -355,20 +489,25 @@ pub fn read_stored_tx_data_path(
 }
 
 /// Proof bytes for one leaf. The root id is the ledger `tx_root`.
+fn tree_for_headers(headers: &[DataTransactionHeader]) -> eyre::Result<(H256, Node)> {
+    eyre::ensure!(!headers.is_empty(), "ledger has no txs");
+    let leaves = folded_leaves(headers)?;
+    let nodes = generate_leaves_from_data_roots(&leaves)?;
+    let root = generate_data_root(nodes)?;
+    let tx_root = H256(root.id);
+    Ok((tx_root, root))
+}
+
 fn proof_for_headers(
     headers: &[DataTransactionHeader],
     index: usize,
 ) -> eyre::Result<(H256, Proof)> {
-    eyre::ensure!(!headers.is_empty(), "ledger has no txs");
     eyre::ensure!(
         index < headers.len(),
         "tx index {index} >= {}",
         headers.len()
     );
-    let leaves = folded_leaves(headers)?;
-    let nodes = generate_leaves_from_data_roots(&leaves)?;
-    let root = generate_data_root(nodes)?;
-    let tx_root = H256(root.id);
+    let (tx_root, root) = tree_for_headers(headers)?;
     let proof = resolve_proof_at(&root, index)?;
     let leaf = proof_leaf_hash(&proof)?;
     let expected = DataTransactionLedger::fold_tx_root_leaf(
@@ -461,6 +600,7 @@ fn folded_leaves(headers: &[DataTransactionHeader]) -> eyre::Result<Vec<DataRoot
     Ok(leaves)
 }
 
+#[derive(Clone, Copy)]
 struct BlockBounds {
     height: u64,
     block_hash: H256,
@@ -527,16 +667,14 @@ fn assign_tx_index(
     bounds: &BlockBounds,
     chunk_offset: u64,
     chunk_size: u64,
-) -> eyre::Result<usize> {
-    let span = bounds
+) -> eyre::Result<(usize, u64)> {
+    // Migration walks each tx's chunk count and does not require the sum to
+    // equal the ledger span. A tail inside the span but past the last tx fails
+    // below. An offset inside a tx resolves even when the two differ.
+    bounds
         .end
         .checked_sub(bounds.start)
         .ok_or_else(|| eyre!("ledger span underflow at height {}", bounds.height))?;
-    let sum = chunk_sum(headers, chunk_size)?;
-    eyre::ensure!(
-        sum == span,
-        "chunk sum {sum} != ledger span {span}; pass the chain chunk size"
-    );
     let mut cursor = bounds.start;
     for (index, header) in headers.iter().enumerate() {
         let chunks = header.data_size.div_ceil(chunk_size);
@@ -544,7 +682,7 @@ fn assign_tx_index(
             .checked_add(chunks)
             .ok_or_else(|| eyre!("chunk cursor overflow"))?;
         if chunks > 0 && chunk_offset >= cursor && chunk_offset < next {
-            return Ok(index);
+            return Ok((index, cursor));
         }
         cursor = next;
     }
@@ -552,16 +690,6 @@ fn assign_tx_index(
         "offset {chunk_offset} is inside height {} but not inside a tx",
         bounds.height
     )
-}
-
-fn chunk_sum(headers: &[DataTransactionHeader], chunk_size: u64) -> eyre::Result<u64> {
-    let mut sum = 0_u64;
-    for header in headers {
-        sum = sum
-            .checked_add(header.data_size.div_ceil(chunk_size))
-            .ok_or_else(|| eyre!("chunk sum overflow"))?;
-    }
-    Ok(sum)
 }
 
 fn spans_from_index(
@@ -618,6 +746,8 @@ struct BuiltPath {
     tx_count: usize,
     data_root: H256,
     tx_root: H256,
+    ledger_start: u64,
+    tx_ledger_start: u64,
     proof: Proof,
 }
 
@@ -633,10 +763,81 @@ fn finish(started: Instant, cpu_nanos: u64, built: BuiltPath) -> eyre::Result<De
         tx_count: built.tx_count,
         data_root: built.data_root,
         tx_root: built.tx_root,
+        ledger_start: built.ledger_start,
+        tx_ledger_start: built.tx_ledger_start,
         proof: built.proof,
         db_nanos: fit_u64(db_nanos)?,
         cpu_nanos,
     })
+}
+
+/// Identity the miner stored for this offset. Schema v2 leaves the last three empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementCheck {
+    pub data_root: H256,
+    pub ledger: Option<u32>,
+    pub block_height: Option<u64>,
+    pub tx_index: Option<u32>,
+}
+
+/// The derived path must prove the same chunk the miner holds.
+///
+/// `placement` is required on schema v3. A mismatch is an error the caller drops.
+pub fn cross_check_derived(
+    derived: &DerivedTxPath,
+    ledger_offset: u64,
+    chunk_size: u64,
+    data_path: &[u8],
+    placement: Option<PlacementCheck>,
+) -> eyre::Result<()> {
+    let block_chunk_offset = ledger_offset
+        .checked_sub(derived.ledger_start)
+        .ok_or_else(|| eyre!("ledger offset {ledger_offset} is before the derived block"))?;
+    let byte_offset = u128::from(block_chunk_offset)
+        .checked_mul(u128::from(chunk_size))
+        .ok_or_else(|| eyre!("block byte offset overflow"))?;
+    let tx_path = validate_path(
+        derived.tx_root.0,
+        &Base64(derived.proof.proof.clone()),
+        byte_offset,
+    )
+    .map_err(|error| eyre!("derived tx path does not prove offset {ledger_offset}: {error}"))?;
+    if !(tx_path.min_byte_range..=tx_path.max_byte_range).contains(&byte_offset) {
+        eyre::bail!("derived tx path range does not contain offset {ledger_offset}");
+    }
+    let tx_chunk_offset = byte_offset - tx_path.min_byte_range;
+    validate_path(
+        derived.data_root.0,
+        &Base64(data_path.to_vec()),
+        tx_chunk_offset,
+    )
+    .map_err(|error| {
+        eyre!(
+            "data_root mismatch: data path is not under derived data root {}: {error}",
+            derived.data_root
+        )
+    })?;
+    let Some(placement) = placement else {
+        return Ok(());
+    };
+    let tx_index = u32::try_from(derived.tx_index).map_err(|_| eyre!("tx index exceeds u32"))?;
+    if placement.data_root != derived.data_root
+        || placement.block_height != Some(derived.height)
+        || placement.tx_index != Some(tx_index)
+        || placement.ledger != Some(derived.ledger.get_id())
+    {
+        eyre::bail!(
+            "placement mismatch: derived data_root {} height {} tx_index {tx_index} ledger {}, placement data_root {} height {:?} tx_index {:?} ledger {:?}",
+            derived.data_root,
+            derived.height,
+            derived.ledger.get_id(),
+            placement.data_root,
+            placement.block_height,
+            placement.tx_index,
+            placement.ledger
+        );
+    }
+    Ok(())
 }
 
 fn fit_nanos(duration: Duration) -> eyre::Result<u64> {
@@ -695,6 +896,99 @@ mod tests {
         header.prefix_hash = hid(n.saturating_add(200));
         header.data_size = size;
         header
+    }
+
+    #[test]
+    fn assign_tx_index_allows_a_chunk_sum_that_differs_from_the_span() {
+        let chunk_size = 32;
+        let headers = vec![tx_at(1, 32), tx_at(2, 32)];
+        let bounds = super::BlockBounds {
+            height: 1,
+            block_hash: hid(1),
+            start: 10,
+            end: 14,
+        };
+        assert_eq!(
+            super::assign_tx_index(&headers, &bounds, 10, chunk_size).expect("first"),
+            (0, 10)
+        );
+        assert_eq!(
+            super::assign_tx_index(&headers, &bounds, 11, chunk_size).expect("second"),
+            (1, 11)
+        );
+        let gap = super::assign_tx_index(&headers, &bounds, 12, chunk_size)
+            .expect_err("tail past the txs");
+        assert!(gap.to_string().contains("not inside a tx"), "{gap}");
+
+        let short = super::BlockBounds {
+            height: 1,
+            block_hash: hid(1),
+            start: 10,
+            end: 11,
+        };
+        assert_eq!(
+            super::assign_tx_index(&headers, &short, 10, chunk_size).expect("inside the span"),
+            (0, 10)
+        );
+    }
+
+    #[test]
+    fn cross_check_accepts_the_miners_data_path_and_rejects_a_mismatch() {
+        let chunk_size = 32_u64;
+        let bytes = vec![7_u8; chunk_size as usize];
+        let root = generate_data_root(
+            irys_types::generate_leaves(std::iter::once(Ok(bytes)), chunk_size as usize)
+                .expect("leaves"),
+        )
+        .expect("data root");
+        let data_root = H256(root.id);
+        let data_path = irys_types::resolve_proofs(root, None)
+            .expect("proofs")
+            .remove(0)
+            .proof;
+        let mut header = tx_at(1, chunk_size);
+        header.data_root = data_root;
+        let (tx_root, proof) =
+            proof_for_headers(std::slice::from_ref(&header), 0).expect("tx path");
+        let derived = super::DerivedTxPath {
+            height: 4,
+            block_hash: hid(4),
+            ledger: DataLedger::Publish,
+            tx_index: 0,
+            tx_id: header.id,
+            tx_count: 1,
+            data_root,
+            tx_root,
+            ledger_start: 8,
+            tx_ledger_start: 8,
+            proof,
+            db_nanos: 0,
+            cpu_nanos: 0,
+        };
+        let placement = super::PlacementCheck {
+            data_root,
+            ledger: Some(DataLedger::Publish.get_id()),
+            block_height: Some(4),
+            tx_index: Some(0),
+        };
+        super::cross_check_derived(&derived, 8, chunk_size, &data_path, Some(placement))
+            .expect("matching path");
+
+        let wrong =
+            super::cross_check_derived(&derived, 8, chunk_size, &[1, 2, 3], Some(placement))
+                .expect_err("bad data path");
+        assert!(wrong.to_string().contains("data_root mismatch"), "{wrong}");
+
+        let moved = super::PlacementCheck {
+            tx_index: Some(1),
+            ..placement
+        };
+        let mismatch = super::cross_check_derived(&derived, 8, chunk_size, &data_path, Some(moved))
+            .expect_err("placement");
+        assert!(
+            mismatch.to_string().contains("placement mismatch"),
+            "{mismatch}"
+        );
     }
 
     fn headers_sized(count: usize) -> Vec<DataTransactionHeader> {
@@ -832,9 +1126,15 @@ mod tests {
 
         let past = derive_tx_path_at_offset(&db, DataLedger::Publish, 5, 32);
         assert!(past.is_err());
-        let wrong_size = derive_tx_path_at_offset(&db, DataLedger::Publish, 0, 64);
-        let message = wrong_size.expect_err("wrong chunk size").to_string();
-        assert!(message.contains("chunk sum"), "{message}");
+        // A larger chunk size shortens the tx walk. Offset 0 is still the
+        // first tx. The span tail, past that walk, is not a tx. The sum is
+        // not required to equal the span.
+        let still_first =
+            derive_tx_path_at_offset(&db, DataLedger::Publish, 0, 64).expect("offset 0");
+        assert_eq!(still_first.tx_index, 0);
+        let tail = derive_tx_path_at_offset(&db, DataLedger::Publish, 3, 64);
+        let message = tail.expect_err("span tail").to_string();
+        assert!(message.contains("not inside a tx"), "{message}");
     }
 
     fn proofs_root(txs: &[DataTransactionHeader]) -> H256 {

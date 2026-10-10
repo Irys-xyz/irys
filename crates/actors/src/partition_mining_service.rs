@@ -70,6 +70,16 @@ pub struct PartitionMiningServiceInner {
     data_path_lookups: std::sync::atomic::AtomicU64,
 }
 
+/// What the derive job must compare against the rebuilt path.
+enum DerivePlacement {
+    /// Schema v2 stores no placement identity.
+    Skip,
+    /// Schema v3 row for this offset.
+    Check(irys_database::tx_path_derive::PlacementCheck),
+    /// Schema v3 has no usable row. The job fails with this text.
+    Missing(String),
+}
+
 /// Rayon pool. The pool type has no `Debug`, and the miner struct does.
 #[derive(Clone)]
 struct TxPathPool(Arc<rayon::ThreadPool>);
@@ -479,7 +489,7 @@ impl PartitionMiningServiceInner {
         let tx_path = if let Some(stored) = stored_tx_path {
             TxPathSource::Stored(Some(stored))
         } else {
-            match self.spawn_tx_path_derive(offset) {
+            match self.spawn_tx_path_derive(offset, &data_path) {
                 Some(job) => TxPathSource::Derive(job),
                 None => {
                     warn!(
@@ -495,22 +505,66 @@ impl PartitionMiningServiceInner {
     }
 
     /// Start a derive for `offset`. `None` when this miner has no consensus
-    /// database or the partition has no ledger slot.
-    fn spawn_tx_path_derive(&self, offset: PartitionChunkOffset) -> Option<TxPathJob> {
+    /// database, the partition has no ledger slot, or the submodule is missing.
+    ///
+    /// The job checks the derived root against `data_path` and, on schema v3,
+    /// against the stored placement. A mismatch fails the job.
+    fn spawn_tx_path_derive(
+        &self,
+        offset: PartitionChunkOffset,
+        data_path: &[u8],
+    ) -> Option<TxPathJob> {
         let (ledger, ledger_offset) = self.assigned_ledger_offset(offset)?;
         let db = self.tx_path_db.clone()?;
         let pool = self.tx_path_pool.clone();
         let chunk_size = self.config.consensus.chunk_size;
+        let data_path = data_path.to_vec();
+        let placement = self.placement_for_derive(offset)?;
         Some(TxPathJob::spawn(move || {
-            irys_database::tx_path_derive::derive_tx_path_at_offset_with(
+            let derived = irys_database::tx_path_derive::derive_tx_path_at_offset_with(
                 db.0.as_ref(),
                 ledger,
                 ledger_offset,
                 chunk_size,
                 pool.as_deref(),
-            )
-            .map(|derived| derived.proof.proof)
+            )?;
+            let placement = match placement {
+                DerivePlacement::Skip => None,
+                DerivePlacement::Check(check) => Some(check),
+                DerivePlacement::Missing(reason) => eyre::bail!("{reason}"),
+            };
+            irys_database::tx_path_derive::cross_check_derived(
+                &derived,
+                ledger_offset,
+                chunk_size,
+                &data_path,
+                placement,
+            )?;
+            Ok(derived.proof.proof)
         }))
+    }
+
+    /// Schema v2 skips the placement check. Schema v3 requires the stored row.
+    fn placement_for_derive(&self, offset: PartitionChunkOffset) -> Option<DerivePlacement> {
+        let (_, submodule) = self.storage_module.get_submodule_for_offset(offset).ok()?;
+        if submodule.db.stores_tx_paths() {
+            return Some(DerivePlacement::Skip);
+        }
+        use irys_database::submodule::SubmoduleStore as _;
+        Some(match submodule.db.view(|tx| tx.placement_at(offset)) {
+            Ok(Some(placement)) => {
+                DerivePlacement::Check(irys_database::tx_path_derive::PlacementCheck {
+                    data_root: placement.data_root,
+                    ledger: placement.ledger,
+                    block_height: placement.block_height,
+                    tx_index: placement.tx_index,
+                })
+            }
+            Ok(None) => DerivePlacement::Missing(
+                "placement mismatch: no placement covers the winning offset".to_owned(),
+            ),
+            Err(error) => DerivePlacement::Missing(format!("placement mismatch: {error}")),
+        })
     }
 
     fn assigned_ledger_offset(&self, offset: PartitionChunkOffset) -> Option<(DataLedger, u64)> {

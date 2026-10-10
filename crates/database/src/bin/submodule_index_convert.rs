@@ -10,12 +10,12 @@
 //! partition offset. The ledger offset is
 //! `slot * chunks_per_partition + partition_offset`.
 //!
-//! The source is not modified, except a schema v1 MDBX directory, which is
-//! migrated to v2 in that same directory before the copy. The completion
-//! marker is written last. A crash leaves no marker. Run the same command
-//! again with `--replace-incomplete`.
+//! The source is never modified, including a schema v1 MDBX directory.
+//! The completion marker is written last. A crash leaves a `CONVERTING`
+//! file and no completion marker. `--replace-incomplete` deletes only a
+//! directory this tool marked with that file.
 //!
-//! See `--help` for the devnet-node-2 steps.
+//! See `--help` for the node steps.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -36,68 +36,69 @@ usage:
   submodule-index-convert verify-rocks  [flags] <rocks-v2-dir> <rocks-v3-dir>
 
 required flags:
-  --consensus-db <dir>           node consensus database (the directory with mdbx.dat)
-  --ledger <id>                  data ledger id. Publish is 0, Submit is 1.
+  --consensus-db <dir>           node consensus database.
+                                 This is <node>/.irys/irys_consensus_data
+                                 (config.toml base_directory plus irys_consensus_data).
+                                 The directory contains mdbx.dat.
+  --ledger <id>                  data ledger id.
+                                 Publish is 0, Submit is 1, OneYear is 10, ThirtyDay is 20.
   --slot <n>                     partition slot from packing_params.toml (`slot`)
   --chunks-per-partition <n>     consensus num_chunks_in_partition
   --chunk-size <bytes>           consensus chunk size (mainnet is 262144)
 
 optional:
-  --replace-incomplete           delete a target that has no completion marker.
-                                 illegal on verify and verify-rocks.
+  --replace-incomplete           delete a target only when it contains a CONVERTING
+                                 file written by this tool, and none of chunks.dat,
+                                 packing_params.toml, intervals.json, a consensus
+                                 database, a v1 or v2 index, or a completed v3 index.
+                                 An older incomplete directory without CONVERTING
+                                 is not deleted. Remove that directory by hand.
+                                 Illegal on verify and verify-rocks.
+  --dry-run                      validate arguments, scan the source, and print the
+                                 same counts a convert would report, including
+                                 orphans and a reset that would write an empty index.
+                                 Does not create the target and does not write
+                                 CONVERTING. Illegal on verify and verify-rocks.
 
 ledger offset = slot * chunks_per_partition + partition offset.
 The tool derives the tx path at that offset and requires the stored bytes to
 be identical. A mismatch aborts and prints the partition offset.
-The source is not modified, except a v1 MDBX index, which is migrated to v2
-in place. rocks-to-mdbx accepts only schema v3. A schema v2 RocksDB index
-uses rocks-to-v3.
+The source is never modified. A schema v1 MDBX index is read as v1.
+rocks-to-mdbx accepts only schema v3. A schema v2 RocksDB index uses rocks-to-v3.
+
+An empty index, or a slot and ledger that contain no indexed chunks, succeeds
+with these flags. The report then shows zero copied rows.
 
 Stop the node first. The tool locks the index and refuses a held lock.
 The completion marker is written last (rocks/SCHEMA, or the MDBX schema row).
-A crash leaves no marker. Rerun the same command with --replace-incomplete.
-Do not start the node on an incomplete directory.
+A crash leaves CONVERTING and no completion marker. Rerun the same command
+with --replace-incomplete. Do not start the node on an incomplete directory.
 
-devnet-node-2 is RocksDB schema v2. For each submodule, after the node is stopped:
+mdbx-to-rocks writes <submodule>/rocks. Set database.submodule_index to rocksdb
+before the next start. Read `ledger` and `slot` from <submodule>/packing_params.toml.
+Read num_chunks_in_partition and the chunk size from the chain config.
 
-  Read `ledger` and `slot` from <submodule>/packing_params.toml.
-  Read num_chunks_in_partition and the chunk size from the chain config.
-  Keep <submodule>/rocks.
-
-  submodule-index-convert rocks-to-v3 \\
-    --consensus-db <node>/db \\
+  submodule-index-convert mdbx-to-rocks \\
+    --consensus-db <node>/.irys/irys_consensus_data \\
     --ledger <id> --slot <slot> \\
     --chunks-per-partition <n> --chunk-size <bytes> \\
-    <submodule>/rocks <submodule>/rocks-v3
-
-  submodule-index-convert verify-rocks \\
-    --consensus-db <node>/db \\
-    --ledger <id> --slot <slot> \\
-    --chunks-per-partition <n> --chunk-size <bytes> \\
-    <submodule>/rocks <submodule>/rocks-v3
-
-  Replace rocks/ with rocks-v3 only when verify-rocks prints no mismatch.
-  database.submodule_index stays rocksdb.
-
-Rollback of schema v3 to MDBX v2, for each submodule, after the node is stopped:
-
-  submodule-index-convert rocks-to-mdbx \\
-    --consensus-db <node>/db \\
-    --ledger <id> --slot <slot> \\
-    --chunks-per-partition <n> --chunk-size <bytes> \\
-    <submodule>/rocks <submodule>/db-v2
+    <submodule>/db <submodule>/rocks
 
   submodule-index-convert verify \\
-    --consensus-db <node>/db \\
+    --consensus-db <node>/.irys/irys_consensus_data \\
     --ledger <id> --slot <slot> \\
     --chunks-per-partition <n> --chunk-size <bytes> \\
-    <submodule>/db-v2 <submodule>/rocks
+    <submodule>/db <submodule>/rocks
 
-  Replace db/ with db-v2 only when verify prints no mismatch.
-  Set database.submodule_index to mdbx.
+A RocksDB schema v2 index uses rocks-to-v3 with the same flags, then
+verify-rocks. Replace rocks/ with the new directory only when verify-rocks
+prints no mismatch. database.submodule_index stays rocksdb.
 
-MDBX v1 or v2 to RocksDB v3 uses mdbx-to-rocks with the same flags, then
-verify. A v1 source is migrated in place first.
+rocks-to-mdbx writes an MDBX schema v2 index. That index is readable by the
+mdbx engine in this build. Release 4.0.8 cannot read it.
+Rollback to 4.0.8 is: keep the original db/ directory. This tool does not
+modify that directory. rocks-to-mdbx is only for a node whose live index is
+already RocksDB schema v2 or v3 and that will keep running this build.
 
 verify and verify-rocks exit 1 when a public read differs.
 ";
@@ -123,6 +124,7 @@ fn run() -> eyre::Result<ExitCode> {
     let mut options = ConvertOptions::new(submodule_db_args(&DatabaseConfig::default())?);
     options.consensus = consensus_db_args(&DatabaseConfig::default())?;
     options.replace_incomplete = tool.replace_incomplete;
+    options.dry_run = tool.dry_run;
     options.consensus_db = Some(tool.consensus_db);
     options.ledger_id = tool.ledger_id;
     options.slot_index = tool.slot_index;
@@ -170,6 +172,7 @@ enum Command {
 struct ToolArgs {
     command: Command,
     replace_incomplete: bool,
+    dry_run: bool,
     consensus_db: PathBuf,
     ledger_id: u32,
     slot_index: u64,
@@ -201,6 +204,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     };
     let raw: Vec<String> = args.collect();
     let mut replace_incomplete = false;
+    let mut dry_run = false;
     let mut consensus_db = None;
     let mut ledger_id = None;
     let mut slot_index = None;
@@ -216,21 +220,28 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
                 replace_incomplete = true;
                 index += 1;
             }
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
             "--consensus-db"
             | "--ledger"
             | "--slot"
             | "--chunks-per-partition"
             | "--chunk-size" => {
                 let Some(value) = raw.get(index + 1) else {
+                    eprintln!("error: {arg} needs a value");
                     eprintln!("{USAGE}");
                     std::process::exit(2);
                 };
                 match arg {
                     "--consensus-db" => consensus_db = Some(PathBuf::from(value)),
-                    "--ledger" => ledger_id = parse_u32(value),
-                    "--slot" => slot_index = parse_u64(value),
-                    "--chunks-per-partition" => chunks_per_partition = parse_u64(value),
-                    "--chunk-size" => chunk_size = parse_u64(value),
+                    "--ledger" => ledger_id = Some(parse_u32(value)?),
+                    "--slot" => slot_index = Some(parse_u64("--slot", value)?),
+                    "--chunks-per-partition" => {
+                        chunks_per_partition = Some(parse_u64("--chunks-per-partition", value)?)
+                    }
+                    "--chunk-size" => chunk_size = Some(parse_u64("--chunk-size", value)?),
                     _ => {
                         eprintln!("{USAGE}");
                         std::process::exit(2);
@@ -253,7 +264,10 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         std::process::exit(2);
     }
     let verify = matches!(command, Command::Verify | Command::VerifyRocks);
-    if replace_incomplete && verify {
+    if (replace_incomplete || dry_run) && verify {
+        eprintln!(
+            "error: --replace-incomplete and --dry-run are not valid for verify or verify-rocks"
+        );
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
@@ -280,6 +294,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     Ok(Some(ToolArgs {
         command,
         replace_incomplete,
+        dry_run,
         consensus_db,
         ledger_id,
         slot_index,
@@ -290,12 +305,14 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     }))
 }
 
-fn parse_u32(text: &str) -> Option<u32> {
-    text.parse().ok()
+fn parse_u32(text: &str) -> eyre::Result<u32> {
+    text.parse::<u32>()
+        .map_err(|err| eyre::eyre!("--ledger {text}: {err}"))
 }
 
-fn parse_u64(text: &str) -> Option<u64> {
-    text.parse().ok()
+fn parse_u64(flag: &str, text: &str) -> eyre::Result<u64> {
+    text.parse::<u64>()
+        .map_err(|err| eyre::eyre!("{flag} {text}: {err}"))
 }
 
 fn paths_are_same(left: &Path, right: &Path) -> bool {

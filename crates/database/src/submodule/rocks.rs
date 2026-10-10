@@ -32,8 +32,9 @@
 //! table readers and reloads the filter on the next read.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write as _;
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -837,14 +838,14 @@ impl Cf {
     /// `bloom_all_families` forces the filter on the other families too.
     /// [`Self::Content`] always has a prefix bloom. See
     /// [`RocksTuning::bloom_all_families`].
-    fn uses_bloom(self, tuning: &RocksTuning) -> bool {
+    fn uses_bloom(self, tuning: &RocksTuning, layout: IndexLayout) -> bool {
+        // v3 data-root reads are prefix seeks. A whole-key bloom cannot answer them.
+        let data_roots = layout != IndexLayout::V3 && matches!(self, Self::DataRoots);
         matches!(self, Self::Content)
             || tuning.bloom_all_families
             || (tuning.data_path_bloom && matches!(self, Self::DataPath))
-            || matches!(
-                self,
-                Self::PathHashes | Self::TxPath | Self::DataRoots | Self::TxLeaf
-            )
+            || matches!(self, Self::PathHashes | Self::TxPath | Self::TxLeaf)
+            || data_roots
     }
 }
 
@@ -1050,6 +1051,15 @@ pub struct RocksSubmoduleStore {
     submodule: String,
     /// Chosen from the SCHEMA file before `DB::open`. An empty directory is v3.
     layout: IndexLayout,
+    /// A read-only open refuses every write, including compaction and the schema stamp.
+    read_only: bool,
+    /// Exclusive lock of the RocksDB `LOCK` file. Drop releases it.
+    ///
+    /// Read-only open does not take that lock itself. The converter holds it
+    /// so a node cannot open the same directory for write during the read.
+    /// The field is read by drop. Nothing else inspects it.
+    #[expect(dead_code, reason = "held only so drop releases the lock")]
+    lock_file: Option<Arc<File>>,
 }
 
 /// Background work visible around one bench read shape.
@@ -1164,24 +1174,6 @@ impl RocksSubmoduleStore {
         self.resources.is_some()
     }
 
-    /// Opens a conversion target. Does not write the SCHEMA file or the schema row.
-    ///
-    /// Uses [`RocksTuning::baseline`], so copied path values are inline.
-    /// [`Self::stamp_schema_marker`] writes both markers after the copy is
-    /// durable. A crash before that leaves `CURRENT` and no SCHEMA file.
-    /// [`Self::open`] refuses that directory.
-    pub(super) fn open_converting(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_inner(
-            path,
-            RocksTuning::baseline(),
-            true,
-            false,
-            None,
-            false,
-            Some(IndexLayout::V2),
-        )
-    }
-
     /// Opens a schema v3 conversion target. Does not write the SCHEMA file.
     ///
     /// [`Self::stamp_schema_marker`] writes the schema 3 marker after the copy
@@ -1228,6 +1220,42 @@ impl RocksSubmoduleStore {
             path,
             stats,
             layout: IndexLayout::V2,
+            read_only: false,
+            lock_file: None,
+        })
+    }
+
+    /// Read-only open of a completed index. Does not create families or write the schema.
+    ///
+    /// Flocks `LOCK` when that file exists and holds it until this store drops.
+    /// A missing `LOCK` means nothing holds it; this function does not create one.
+    pub(super) fn open_read_only(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if !path.join(SCHEMA_FILE).is_file() {
+            eyre::bail!(
+                "rocks index {} has no SCHEMA marker. Refusing a read-only open of an incomplete directory.",
+                path.display()
+            );
+        }
+        let lock_file = hold_rocks_lock(&path)?;
+        let layout = resolve_layout(&path, None)?;
+        let db = open_db_read_only(&path)?;
+        let group = GroupCommit::new();
+        let db = Arc::new(db);
+        let submodule = submodule_label(&path);
+        Ok(Self {
+            lifetime: EngineLifetime::new(Arc::clone(&group)),
+            compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone(), layout)?,
+            db,
+            resources: None,
+            write: Arc::new(Mutex::new(())),
+            group,
+            submodule,
+            path,
+            stats: None,
+            layout,
+            read_only: true,
+            lock_file,
         })
     }
 
@@ -1377,7 +1405,7 @@ impl RocksSubmoduleStore {
             ensure_schema_row(&db, layout)?;
             let marker = path.join(SCHEMA_FILE);
             if !marker.exists() {
-                fs::write(&marker, schema_text(layout)).wrap_err("write schema marker")?;
+                write_schema_marker_file(&path, schema_text(layout))?;
             }
         }
         let group = GroupCommit::new();
@@ -1399,6 +1427,8 @@ impl RocksSubmoduleStore {
             path,
             stats,
             layout,
+            read_only: false,
+            lock_file: None,
         })
     }
 
@@ -1406,6 +1436,7 @@ impl RocksSubmoduleStore {
     ///
     /// The file is last. A crash before the rename leaves no completion marker.
     pub(super) fn stamp_schema_marker(&self) -> eyre::Result<()> {
+        self.ensure_writable()?;
         let _guard = self.lock_write();
         self.db
             .flush_wal(true)
@@ -1700,6 +1731,9 @@ impl RocksSubmoduleStore {
     }
 
     fn ensure_writable(&self) -> eyre::Result<()> {
+        if self.read_only {
+            eyre::bail!("submodule index {} is open read-only", self.path.display());
+        }
         if self.group.wal_failed() {
             eyre::bail!(
                 "submodule index {} is read-only after a WAL sync failure",
@@ -1747,6 +1781,7 @@ impl RocksSubmoduleStore {
             bindings: HashMap::new(),
             unfilled: Vec::new(),
             origin: None,
+            used_placeholder: false,
         };
         let result = f(&mut batch)?;
         batch.commit(sync, &self.submodule)?;
@@ -2244,73 +2279,158 @@ impl RocksSubmoduleStore {
         }
     }
 
-    /// Rows that do not belong to a live placement interval.
+    /// Both directions of every schema v3 family.
     ///
-    /// A data-path or pending key must fall inside some interval. A data-root
-    /// point key must be the start of an interval with that data root. An
-    /// info written before its interval, or a data path written before its
-    /// interval, is outside this check's callers.
-    #[cfg(test)]
-    fn rows_outside_live_intervals(&self) -> eyre::Result<Vec<String>> {
+    /// An interval that is not awaiting info has a data-root row with the
+    /// same end, tx start, and data size, and that row names the interval.
+    /// A pending value names the data root of the interval that covers its
+    /// key. A data-path key lies inside an interval. The content-hash index
+    /// is the set of proof leaves, compared by a key-order scan. An interval
+    /// that still awaits its info is a finding: a finished write fills it.
+    pub fn audit_index(&self) -> eyre::Result<Vec<String>> {
         if self.layout != IndexLayout::V3 {
             return Ok(Vec::new());
         }
         let snap = self.db.snapshot();
-        let mut intervals = Vec::new();
+        let mut intervals = std::collections::BTreeMap::<u32, v3::V3Placement>::new();
         {
             let handle = cf_handle(&self.db, Cf::Interval)?;
             for item in snap.iterator_cf(&handle, IteratorMode::Start) {
                 let (key, value) = item.wrap_err("scan placement intervals")?;
                 let start = PartitionChunkOffset::decode(&key)?.0;
-                intervals.push((start, v3::decode_placement(&value)?));
+                intervals.insert(start, v3::decode_placement(&value)?);
             }
         }
         let covers = |offset: u32| {
             intervals
-                .iter()
-                .any(|(start, record)| *start <= offset && record.end >= offset)
+                .range(..=offset)
+                .next_back()
+                .is_some_and(|(start, record)| *start <= offset && record.end >= offset)
         };
-        let mut orphans = Vec::new();
+        let mut findings = Vec::new();
+        let mut points = std::collections::BTreeMap::<(H256, u32), v3::DataRootPlacement>::new();
+        {
+            let handle = cf_handle(&self.db, Cf::DataRoots)?;
+            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+                let (key, value) = item.wrap_err("scan data-root placements")?;
+                let (root, start) = v3::decode_data_root_key(&key)?;
+                points.insert((root, start), v3::decode_data_root(&value)?);
+            }
+        }
+        for (start, record) in &intervals {
+            if v3::awaits_info(record) {
+                findings.push(format!("interval at {start} still awaits a data-root info"));
+                continue;
+            }
+            let root = H256(record.data_root);
+            match points.get(&(root, *start)) {
+                None => findings.push(format!(
+                    "interval at {start} for {root} has no data-root row"
+                )),
+                Some(point)
+                    if point.end != record.end
+                        || point.tx_start != record.tx_start
+                        || point.data_size != record.data_size =>
+                {
+                    findings.push(format!(
+                        "data-root row {root} at {start} does not match its interval"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        for ((root, start), point) in &points {
+            match intervals.get(start) {
+                Some(record)
+                    if H256(record.data_root) == *root
+                        && record.end == point.end
+                        && record.tx_start == point.tx_start
+                        && record.data_size == point.data_size => {}
+                Some(_) => findings.push(format!(
+                    "data-root placement {root} at {start} does not match its interval"
+                )),
+                None => findings.push(format!(
+                    "data-root placement {root} at {start} has no interval"
+                )),
+            }
+        }
         {
             let handle = cf_handle(&self.db, Cf::DataPath)?;
             for item in snap.iterator_cf(&handle, IteratorMode::Start) {
                 let (key, _) = item.wrap_err("scan data paths")?;
                 let offset = PartitionChunkOffset::decode(&key)?.0;
                 if !covers(offset) {
-                    orphans.push(format!("data path {offset} is outside every interval"));
+                    findings.push(format!("data path {offset} is outside every interval"));
                 }
             }
         }
         {
             let handle = cf_handle(&self.db, Cf::Pending)?;
             for item in snap.iterator_cf(&handle, IteratorMode::Start) {
-                let (key, _) = item.wrap_err("scan pending body migrations")?;
+                let (key, value) = item.wrap_err("scan pending body migrations")?;
                 let offset = PartitionChunkOffset::decode(&key)?.0;
-                if !covers(offset) {
-                    orphans.push(format!("pending job {offset} is outside every interval"));
+                let Some((start, record)) = intervals
+                    .range(..=offset)
+                    .next_back()
+                    .filter(|(start, record)| **start <= offset && record.end >= offset)
+                else {
+                    findings.push(format!("pending job {offset} is outside every interval"));
+                    continue;
+                };
+                let job = v3::decode_pending(&value)?;
+                if job.data_root != H256(record.data_root) {
+                    findings.push(format!(
+                        "pending job {offset} data root {} does not match interval {start}",
+                        job.data_root
+                    ));
                 }
-            }
-        }
-        {
-            let handle = cf_handle(&self.db, Cf::DataRoots)?;
-            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
-                let (key, _) = item.wrap_err("scan data-root placements")?;
-                let (root, start) = v3::decode_data_root_key(&key)?;
-                let matched = intervals.iter().any(|(interval_start, record)| {
-                    *interval_start == start && H256(record.data_root) == root
-                });
-                if !matched {
-                    orphans.push(format!(
-                        "data-root placement {root} at {start} has no interval"
+                if record.data_size != 0 && job.data_size != record.data_size {
+                    findings.push(format!(
+                        "pending job {offset} data size {} does not match interval {start}",
+                        job.data_size
                     ));
                 }
             }
         }
-        Ok(orphans)
+        {
+            let handle = cf_handle(&self.db, Cf::Content)?;
+            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
+                let (key, value) = item.wrap_err("scan content-hash offset index")?;
+                if !value.is_empty() {
+                    findings.push("content-hash row value is not empty".to_string());
+                }
+                match v3::decode_content_key(&key) {
+                    Some((_, offset)) if covers(offset.0) => {}
+                    Some((_, offset)) => findings.push(format!(
+                        "content-hash row at {} is outside every interval",
+                        offset.0
+                    )),
+                    None => findings.push("content-hash key does not decode".to_string()),
+                }
+            }
+        }
+        let content = self.audit_content_index()?;
+        if content.missing_reverse != 0 {
+            findings.push(format!(
+                "content-hash index is missing {} reverse row(s)",
+                content.missing_reverse
+            ));
+        }
+        if content.dangling_reverse != 0 {
+            findings.push(format!(
+                "content-hash index has {} dangling reverse row(s)",
+                content.dangling_reverse
+            ));
+        }
+        Ok(findings)
     }
 
     /// Every parseable proof has its reverse row, and every reverse row names
     /// that proof's leaf. A proof shorter than a leaf is not counted.
+    ///
+    /// Both families are scanned in key order. The sets match when the counts
+    /// match and a key-order checksum of `hash‖offset` matches. This does not
+    /// point-get the other family.
     pub(super) fn audit_content_index(&self) -> eyre::Result<ContentIndexAudit> {
         if self.layout != IndexLayout::V3 {
             eyre::bail!("content-hash offset index is not supported on this schema");
@@ -2319,6 +2439,7 @@ impl RocksSubmoduleStore {
         let data = cf_handle(&self.db, Cf::DataPath)?;
         let content = cf_handle(&self.db, Cf::Content)?;
         let mut audit = ContentIndexAudit::default();
+        let mut from_proofs = (0_u64, 0_u64);
         {
             let mut iter = snap.raw_iterator_cf_opt(&data, full_scan_options());
             iter.seek_to_first();
@@ -2329,41 +2450,30 @@ impl RocksSubmoduleStore {
                     && let Some(hash) = content_hash_of(&value)
                 {
                     audit.proofs_with_leaf = audit.proofs_with_leaf.saturating_add(1);
-                    let reverse = v3::content_key(&hash, offset);
-                    let present = snap
-                        .get_cf(&content, reverse.as_slice())
-                        .wrap_err("read content-hash offset row")?
-                        .is_some();
-                    if !present {
-                        audit.missing_reverse = audit.missing_reverse.saturating_add(1);
-                    }
+                    mix_key(&mut from_proofs, &v3::content_key(&hash, offset));
                 }
                 iter.next();
             }
             iter.status().wrap_err("scan data proofs")?;
         }
+        let mut from_rows = (0_u64, 0_u64);
         {
             let mut iter = snap.raw_iterator_cf_opt(&content, full_scan_options());
             iter.seek_to_first();
             while let Some(key) = iter.key() {
-                let key_owned = key.to_vec();
                 audit.reverse_rows = audit.reverse_rows.saturating_add(1);
-                let matches_proof = match v3::decode_content_key(&key_owned) {
-                    Some((hash, offset)) => {
-                        snap.get_cf(&data, encode_key(offset))
-                            .wrap_err("read data proof for content-hash row")?
-                            .as_deref()
-                            .and_then(content_hash_of)
-                            == Some(hash)
-                    }
-                    None => false,
-                };
-                if !matches_proof {
-                    audit.dangling_reverse = audit.dangling_reverse.saturating_add(1);
-                }
+                mix_key(&mut from_rows, key);
                 iter.next();
             }
             iter.status().wrap_err("scan content-hash offset index")?;
+        }
+        if audit.proofs_with_leaf > audit.reverse_rows {
+            audit.missing_reverse = audit.proofs_with_leaf - audit.reverse_rows;
+        } else if audit.reverse_rows > audit.proofs_with_leaf {
+            audit.dangling_reverse = audit.reverse_rows - audit.proofs_with_leaf;
+        } else if from_proofs != from_rows {
+            audit.missing_reverse = 1;
+            audit.dangling_reverse = 1;
         }
         Ok(audit)
     }
@@ -2832,6 +2942,58 @@ fn shared_resources_for(
     }
 }
 
+/// Exclusive non-blocking lock of `LOCK` when the file exists.
+///
+/// Does not create `LOCK`. A missing file means no process holds it.
+/// RocksDB locks with `fcntl(F_SETLK)`. `flock` does not observe that lock,
+/// so this takes both. The returned file keeps them until it is dropped.
+pub(super) fn hold_rocks_lock(path: &Path) -> eyre::Result<Option<Arc<File>>> {
+    let lock_path = path.join("LOCK");
+    if !lock_path.is_file() {
+        return Ok(None);
+    }
+    // `F_WRLCK` requires a writable descriptor. The bytes are not written.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .wrap_err("open rocksdb LOCK")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        eyre::bail!(
+            "refusing to run because the rocksdb LOCK is held, so the node may be running. Stop the node and retry. {err}"
+        );
+    }
+    let mut range = libc::flock {
+        l_type: libc::F_WRLCK as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0,
+        l_len: 0,
+        l_pid: 0,
+    };
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &mut range) } != 0 {
+        let err = std::io::Error::last_os_error();
+        eyre::bail!(
+            "refusing to run because the rocksdb LOCK is held, so the node may be running. Stop the node and retry. {err}"
+        );
+    }
+    Ok(Some(Arc::new(file)))
+}
+
+fn open_db_read_only(path: &Path) -> eyre::Result<DB> {
+    let mut db_opts = Options::default();
+    db_opts.create_if_missing(false);
+    db_opts.create_missing_column_families(false);
+    db_opts.set_max_open_files(-1);
+    let names = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
+    let families = names
+        .into_iter()
+        .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
+    // `false`: a WAL from the last write must not fail the read.
+    DB::open_cf_descriptors_read_only(&db_opts, path, families, false)
+        .wrap_err("open rocksdb submodule index read-only")
+}
+
 fn open_db(
     path: &Path,
     tuning: &RocksTuning,
@@ -2927,7 +3089,7 @@ fn user_column_families(
         .map(|cf| {
             rocksdb::ColumnFamilyDescriptor::new(
                 cf.name_in(layout),
-                column_options(cache, cf, tuning),
+                column_options(cache, cf, tuning, layout),
             )
         })
         .collect();
@@ -2936,7 +3098,7 @@ fn user_column_families(
     // open's cache and write buffer instead. The family stays empty.
     families.push(rocksdb::ColumnFamilyDescriptor::new(
         rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
-        column_options(cache, Cf::Metadata, tuning),
+        column_options(cache, Cf::Metadata, tuning, layout),
     ));
     families
 }
@@ -2962,7 +3124,12 @@ fn block_cache(tuning: &RocksTuning) -> rocksdb::Cache {
     rocksdb::Cache::new_lru_cache_opts(&opts)
 }
 
-fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
+fn column_options(
+    cache: &rocksdb::Cache,
+    cf: Cf,
+    tuning: &RocksTuning,
+    layout: IndexLayout,
+) -> Options {
     let mut table = BlockBasedOptions::default();
     table.set_block_size(tuning.block_bytes);
     // Full filter, 10 bits per key. `false` is not a block-based filter.
@@ -2978,12 +3145,14 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
     // set this skips, including while the rows are still in L0.
     //
     // PathHashes misses when no data-path row is stored yet (an indexed
-    // offset whose body is absent). TxPath, TxLeaf, and DataRoots are
-    // hash keys a caller may not have stored. Those four keep the bloom.
+    // offset whose body is absent). TxPath, TxLeaf, and a v2 DataRoots
+    // family are hash keys a caller may not have stored. Those keep the
+    // bloom. v3 DataRootPlacements is prefix-seeked and does not. A v3
+    // data-path get is not gated by a path-hash row.
     // Partitioned filters are the production shape. See
     // `RocksTuning::partition_filters`. `all-blooms` restores the filter
     // on the other families.
-    let bloom = cf.uses_bloom(tuning);
+    let bloom = cf.uses_bloom(tuning, layout);
     if bloom {
         table.set_bloom_filter(10.0, false);
     }
@@ -3241,7 +3410,7 @@ fn open_existing_db(
     // Keep "default" in the list. Omitting it makes the binding open that
     // family with a private 32 MiB cache.
     let families = names.into_iter().map(|name| {
-        let opts = column_options(&cache, legacy_cf_kind(&name), tuning);
+        let opts = column_options(&cache, legacy_cf_kind(&name), tuning, IndexLayout::V2);
         rocksdb::ColumnFamilyDescriptor::new(name, opts)
     });
     let db = DB::open_cf_descriptors(&db_opts, path, families)
@@ -3415,6 +3584,18 @@ fn full_scan_options() -> ReadOptions {
 /// Leaf `data_hash` of a data proof. A value shorter than a leaf is not a
 /// content-addressed proof and has no reverse row. The hash is the leaf
 /// already stored in the proof. Chunk bytes are not hashed again.
+/// Order-independent mix of one key. Equal counts plus both accumulators
+/// means the two scans saw the same set.
+fn mix_key(state: &mut (u64, u64), bytes: &[u8]) {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    state.0 ^= hash;
+    state.1 = state.1.wrapping_add(hash);
+}
+
 fn content_hash_of(proof: &[u8]) -> Option<H256> {
     const LEAF_LEN: usize = 64;
     if proof.len() < LEAF_LEN {
@@ -3532,6 +3713,11 @@ struct Batch<'a> {
     /// Interval starts in this batch that still need a data-root info.
     unfilled: Vec<(u32, H256)>,
     origin: Option<v3::PlacementOrigin>,
+    /// A placeholder data root was written. Retarget walks the overlay only then.
+    ///
+    /// Intervals are written after their leaf binding, so this stays false and
+    /// the walk does not run.
+    used_placeholder: bool,
 }
 
 impl<'a> Batch<'a> {
@@ -3619,14 +3805,17 @@ impl<'a> Batch<'a> {
             return Ok(());
         }
         let existing = self.rows().v3_intervals_touching(start, end)?;
-        let next = tx_path_hash.map(|hash| {
-            let data_root = self
-                .bindings
-                .get(&hash)
-                .map(|binding| binding.data_root)
-                .unwrap_or(hash);
-            v3::fresh_placement(end.0, data_root, self.origin)
-        });
+        let next = match tx_path_hash {
+            Some(hash) => {
+                let data_root = self.bindings.get(&hash).map(|binding| binding.data_root).ok_or_else(|| {
+                    eyre::eyre!(
+                        "schema v3 interval requires a tx leaf binding in this batch before the interval is written"
+                    )
+                })?;
+                Some(v3::fresh_placement(end.0, data_root, self.origin))
+            }
+            None => None,
+        };
         let (delete, put) = v3::plan_v3(&existing, start.0, end.0, next);
         let touched: Vec<u32> = delete
             .iter()
@@ -3680,7 +3869,7 @@ impl<'a> Batch<'a> {
     }
 
     fn retarget_v3_root(&mut self, from: H256, to: H256) -> eyre::Result<()> {
-        if from == to {
+        if from == to || !self.used_placeholder {
             return Ok(());
         }
         let keys: Vec<Vec<u8>> = self.overlay.maps[Cf::Interval.index()]
@@ -3713,76 +3902,84 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
+    fn reject_empty_v3_info(info: &DataRootInfo) -> eyre::Result<()> {
+        if info.data_size == 0 {
+            eyre::bail!(
+                "schema v3 rejects a data_size of 0; that value marks an unfilled placement"
+            );
+        }
+        Ok(())
+    }
+
+    /// Write `info` onto the interval at `start` and its one data-root row.
+    fn fill_v3_info_at(&mut self, start: u32, info: &DataRootInfo) -> eyre::Result<()> {
+        Self::reject_empty_v3_info(info)?;
+        let key = encode_key(PartitionChunkOffset(start));
+        let Some(bytes) = self.rows().get_raw(Cf::Interval, &key)? else {
+            eyre::bail!("schema v3 data-root info at {start} has no interval");
+        };
+        let mut value = v3::decode_placement(&bytes)?;
+        value.tx_start = info.start_offset.0;
+        value.data_size = info.data_size;
+        self.put_bytes(Cf::Interval, &key, v3::encode_placement(&value).to_vec());
+        self.put_data_root_point(&v3::V3Interval { start, value });
+        self.unfilled.retain(|(unfilled, _)| *unfilled != start);
+        Ok(())
+    }
+
     fn fill_v3_info(&mut self, data_root: H256, info: &DataRootInfo) -> eyre::Result<()> {
-        let mut starts: Vec<u32> = self
+        Self::reject_empty_v3_info(info)?;
+        let starts: Vec<u32> = self
             .unfilled
             .iter()
             .filter(|(_, root)| *root == data_root)
             .map(|(start, _)| *start)
             .collect();
-        if starts.is_empty() {
-            starts = self.rows().v3_unfilled_starts(data_root)?;
-        }
-        self.unfilled.retain(|(_, root)| *root != data_root);
-        if starts.is_empty() {
-            let start = u32::try_from(info.start_offset.0).unwrap_or(0);
-            let value = v3::DataRootPlacement {
-                end: start,
-                tx_start: info.start_offset.0,
-                data_size: info.data_size,
-            };
-            self.put_bytes(
-                Cf::DataRoots,
-                &v3::data_root_key(&data_root, start),
-                v3::encode_data_root(&value).to_vec(),
-            );
-            return Ok(());
-        }
-        for start in starts {
-            let key = encode_key(PartitionChunkOffset(start));
-            let Some(bytes) = self.rows().get_raw(Cf::Interval, &key)? else {
-                continue;
-            };
-            let mut value = v3::decode_placement(&bytes)?;
-            value.tx_start = info.start_offset.0;
-            value.data_size = info.data_size;
-            self.put_bytes(Cf::Interval, &key, v3::encode_placement(&value).to_vec());
-            self.put_data_root_point(&v3::V3Interval { start, value });
-        }
-        Ok(())
+        let start = match starts.as_slice() {
+            [start] => *start,
+            [] => eyre::bail!(
+                "schema v3 has no unfilled placement for data root {data_root} in this batch"
+            ),
+            _ => eyre::bail!(
+                "schema v3 has more than one unfilled placement for data root {data_root}; name the interval start"
+            ),
+        };
+        self.fill_v3_info_at(start, info)
     }
 
     fn replace_v3_infos(&mut self, data_root: DataRoot, infos: &DataRootInfos) -> eyre::Result<()> {
-        // Keep a point whose identity is still in `infos`. Its key is the
-        // interval start, which `info.start_offset` is not (that field is the
-        // tx start and can be negative). Rewriting the key would orphan it.
+        // A data-root row's key is the interval start. Deleting it while that
+        // interval remains leaves a placement with no secondary row. Adding a
+        // row at `max(tx_start, 0)` invents a key no interval owns.
         let existing = self.rows().data_root_rows(&data_root)?;
         for (start, point) in &existing {
             let kept = infos.0.iter().any(|info| {
                 info.start_offset.0 == point.tx_start && info.data_size == point.data_size
             });
-            if !kept {
-                self.delete_data_root_point(&data_root, *start);
+            if kept {
+                continue;
             }
+            let still_owned = match self
+                .rows()
+                .get_raw(Cf::Interval, &encode_key(PartitionChunkOffset(*start)))?
+            {
+                Some(bytes) => v3::decode_placement(&bytes)?.data_root == data_root.0,
+                None => false,
+            };
+            if still_owned {
+                eyre::bail!(
+                    "schema v3 keeps the data-root row while its interval at {start} exists"
+                );
+            }
+            self.delete_data_root_point(&data_root, *start);
         }
         for info in &infos.0 {
             let present = existing.iter().any(|(_, point)| {
                 point.tx_start == info.start_offset.0 && point.data_size == info.data_size
             });
-            if present {
-                continue;
+            if !present {
+                eyre::bail!("schema v3 will not add a data-root row with no interval");
             }
-            let start = u32::try_from(info.start_offset.0).unwrap_or(0);
-            let value = v3::DataRootPlacement {
-                end: start,
-                tx_start: info.start_offset.0,
-                data_size: info.data_size,
-            };
-            self.put_bytes(
-                Cf::DataRoots,
-                &v3::data_root_key(&data_root, start),
-                v3::encode_data_root(&value).to_vec(),
-            );
         }
         Ok(())
     }
@@ -4080,6 +4277,15 @@ impl Rows<'_> {
         if start > end {
             return Ok(false);
         }
+        if let Some(overlay) = self.overlay
+            && overlay.cleared[cf.index()]
+        {
+            let start_key = encode_key(start);
+            let end_key = encode_key(end);
+            return Ok(overlay.maps[cf.index()]
+                .range(start_key..=end_key)
+                .any(|(_, value)| value.is_some()));
+        }
         if let Some(overlay) = self.overlay {
             let start_key = encode_key(start);
             let end_key = encode_key(end);
@@ -4161,6 +4367,16 @@ impl Rows<'_> {
     ) -> eyre::Result<usize> {
         if start > end {
             return Ok(0);
+        }
+        if let Some(overlay) = self.overlay
+            && overlay.cleared[cf.index()]
+        {
+            let start_key = encode_key(start);
+            let end_key = encode_key(end);
+            return Ok(overlay.maps[cf.index()]
+                .range(start_key..=end_key)
+                .filter(|(_, value)| value.is_some())
+                .count());
         }
         let handle = cf_handle(self.db, cf)?;
         let mut opts = ReadOptions::default();
@@ -4313,18 +4529,6 @@ impl Rows<'_> {
         Ok(out)
     }
 
-    fn v3_unfilled_starts(&self, data_root: H256) -> eyre::Result<Vec<u32>> {
-        let mut cursor = self.cursor(Cf::Interval, None)?;
-        let mut starts = Vec::new();
-        while let Some((key, value)) = cursor.next_kv()? {
-            let record = v3::decode_placement(&value)?;
-            if record.data_root == data_root.0 && v3::awaits_info(&record) {
-                starts.push(PartitionChunkOffset::decode(&key)?.0);
-            }
-        }
-        Ok(starts)
-    }
-
     fn data_root_rows(&self, data_root: &H256) -> eyre::Result<Vec<(u32, v3::DataRootPlacement)>> {
         let prefix = data_root.0;
         let raw = self.collect_raw(Cf::DataRoots, Some(&prefix), |key| {
@@ -4407,25 +4611,14 @@ impl Rows<'_> {
         data_root: DataRoot,
     ) -> eyre::Result<Vec<super::tables::Placement>> {
         let mut out = Vec::new();
-        for (start, point) in self.data_root_rows(&data_root)? {
+        for (start, _) in self.data_root_rows(&data_root)? {
             if let Some(bytes) =
                 self.get_raw(Cf::Interval, &encode_key(PartitionChunkOffset(start)))?
                 && let Ok(value) = v3::decode_placement(&bytes)
                 && value.data_root == data_root.0
             {
                 out.push(self.v3_placement(start, &value));
-                continue;
             }
-            out.push(super::tables::Placement {
-                data_root,
-                tx_start_offset: irys_types::RelativeChunkOffset(point.tx_start),
-                data_size: point.data_size,
-                ledger: None,
-                start: PartitionChunkOffset(start),
-                end: PartitionChunkOffset(point.end),
-                block_height: None,
-                tx_index: None,
-            });
         }
         out.sort_by_key(|placement| placement.start);
         Ok(out)
@@ -4670,6 +4863,10 @@ enum Side {
 }
 
 impl SubmoduleRead for Rows<'_> {
+    fn stores_tx_paths(&self) -> bool {
+        self.layout != IndexLayout::V3
+    }
+
     fn get_data_path_by_offset(
         &self,
         offset: PartitionChunkOffset,
@@ -5000,6 +5197,10 @@ impl SubmoduleRead for Rows<'_> {
 }
 
 impl SubmoduleRead for Batch<'_> {
+    fn stores_tx_paths(&self) -> bool {
+        self.layout != IndexLayout::V3
+    }
+
     fn get_data_path_by_offset(
         &self,
         offset: PartitionChunkOffset,
@@ -5136,6 +5337,11 @@ impl SubmoduleWrite for Batch<'_> {
     ) -> eyre::Result<()> {
         let key = encode_key(offset);
         if self.layout == IndexLayout::V3 {
+            // A proof committed after its interval was cleared would outlive
+            // the placement. Drop it. The batch overlay is visible here.
+            if self.rows().interval_covering(offset)?.is_none() {
+                return Ok(());
+            }
             // Read the previous proof before this put hides it. A different
             // leaf drops that reverse row. The same leaf puts again, which
             // repairs a missing row. A short value has no reverse row.
@@ -5246,7 +5452,9 @@ impl SubmoduleWrite for Batch<'_> {
         }
         if self.layout == IndexLayout::V3 {
             // `delete_offset_range` hides these keys from a later read.
+            // Pending jobs for the cleared placement go in this same batch.
             self.delete_content_rows_for_paths(start, end)?;
+            self.delete_offset_range(Cf::Pending, start, end)?;
         }
         self.delete_offset_range(Cf::DataPath, start, end)?;
         Ok(())
@@ -5267,6 +5475,33 @@ impl SubmoduleWrite for Batch<'_> {
             self.put(Cf::DataRoots, &key, &infos);
         }
         Ok(())
+    }
+
+    fn add_data_root_info_at(
+        &mut self,
+        start: PartitionChunkOffset,
+        data_root: DataRoot,
+        info: &DataRootInfo,
+    ) -> eyre::Result<()> {
+        if self.layout != IndexLayout::V3 {
+            return self.add_data_root_info(data_root, info);
+        }
+        let key = encode_key(start);
+        let Some(bytes) = self.rows().get_raw(Cf::Interval, &key)? else {
+            eyre::bail!("schema v3 data-root info at {} has no interval", start.0);
+        };
+        let value = v3::decode_placement(&bytes)?;
+        if value.data_root != data_root.0 {
+            eyre::bail!(
+                "schema v3 interval at {} belongs to a different data root",
+                start.0
+            );
+        }
+        self.fill_v3_info_at(start.0, info)
+    }
+
+    fn intervals_own_data_root_rows(&self) -> bool {
+        self.layout == IndexLayout::V3
     }
 
     fn add_data_root_info(&mut self, data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()> {
@@ -5413,29 +5648,18 @@ mod tests {
         let store = RocksSubmoduleStore::open(&path)?;
         let tx_hash = H256::repeat_byte(9);
         let data_root = H256::repeat_byte(4);
-        for start in (0..ROWS).step_by(20_000) {
-            let end = start.saturating_add(20_000).min(ROWS);
-            store.update(|tx| {
-                let updates = (start..end)
-                    .map(|offset| {
-                        (
-                            PartitionChunkOffset::from(offset),
-                            H256::repeat_byte((offset % 200) as u8),
-                            vec![offset as u8],
-                        )
-                    })
-                    .collect();
-                tx.write_data_path_updates(updates)
-            })?;
-        }
         store.update(|tx| {
-            tx.add_full_tx_path(tx_hash, vec![9_u8; 64 * 1024])?;
             tx.add_tx_leaf_binding(
                 tx_hash,
                 &TxLeafBinding {
                     data_root,
                     prefix_hash: H256::repeat_byte(1),
                 },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(ROWS - 1),
+                Some(tx_hash),
             )?;
             tx.add_data_root_info(
                 data_root,
@@ -5454,11 +5678,25 @@ mod tests {
                     attempts: 0,
                 },
             )?;
-            tx.add_tx_path_hash_to_offset_range(
-                PartitionChunkOffset::from(0),
-                PartitionChunkOffset::from(10),
-                Some(tx_hash),
-            )?;
+            Ok(())
+        })?;
+        for start in (0..ROWS).step_by(20_000) {
+            let end = start.saturating_add(20_000).min(ROWS);
+            store.update(|tx| {
+                let updates = (start..end)
+                    .map(|offset| {
+                        (
+                            PartitionChunkOffset::from(offset),
+                            H256::repeat_byte((offset % 200) as u8),
+                            vec![offset as u8],
+                        )
+                    })
+                    .collect();
+                tx.write_data_path_updates(updates)
+            })?;
+        }
+        store.update(|tx| {
+            tx.add_full_tx_path(tx_hash, vec![9_u8; 64 * 1024])?;
             tx.add_full_data_path(PartitionChunkOffset::from(0), vec![7_u8; 256 * 1024])?;
             Ok(())
         })?;
@@ -5522,6 +5760,8 @@ mod tests {
             .build();
         let path = dir.path().join("index");
         let store = RocksSubmoduleStore::open(&path)?;
+        // A data path needs a covering interval. Offsets 4 and 9 sit inside it.
+        place_span(&store, 0, 20, H256::repeat_byte(9), 0, 1, 0, &[], None)?;
         let hash_a = H256::repeat_byte(1);
         let hash_b = H256::repeat_byte(2);
         let hash_c = H256::repeat_byte(3);
@@ -5654,7 +5894,7 @@ mod tests {
     }
 
     fn assert_no_orphans(store: &RocksSubmoduleStore) -> eyre::Result<()> {
-        let orphans = store.rows_outside_live_intervals()?;
+        let orphans = store.audit_index()?;
         assert!(orphans.is_empty(), "{orphans:?}");
         assert_content_index(store)
     }
@@ -5699,11 +5939,12 @@ mod tests {
                 PartitionChunkOffset::from(end),
                 Some(path_hash),
             )?;
+            let data_size = u64::from(end - start + 1) * 32;
             tx.add_data_root_info(
                 data_root,
                 &DataRootInfo {
                     start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
-                    data_size: u64::from(end - start + 1) * 32,
+                    data_size,
                 },
             )?;
             for offset in data_at {
@@ -5717,7 +5958,7 @@ mod tests {
                     PartitionChunkOffset::from(offset),
                     &PendingBodyMigration {
                         data_root,
-                        data_size: 32,
+                        data_size,
                         start_offset: RelativeChunkOffset(i32::try_from(start).expect("start")),
                         block_height,
                         attempts: 0,
@@ -5830,6 +6071,120 @@ mod tests {
             assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn v3_refuses_an_unbound_interval_and_an_unowned_info() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_v3_owned")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        let root = H256::repeat_byte(4);
+        let hash = H256::repeat_byte(6);
+        let info = DataRootInfo {
+            start_offset: RelativeChunkOffset(0),
+            data_size: 32,
+        };
+        let err = store
+            .update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(1),
+                    Some(hash),
+                )
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("leaf binding"), "{err}");
+        let err = store
+            .update(|tx| tx.add_data_root_info(root, &info))
+            .unwrap_err();
+        assert!(err.to_string().contains("no unfilled placement"), "{err}");
+        store.update(|tx| {
+            tx.add_tx_leaf_binding(
+                hash,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::repeat_byte(1),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(1),
+                Some(hash),
+            )?;
+            let zero = DataRootInfo {
+                start_offset: RelativeChunkOffset(0),
+                data_size: 0,
+            };
+            let err = tx.add_data_root_info(root, &zero).unwrap_err();
+            assert!(err.to_string().contains("data_size of 0"), "{err}");
+            tx.add_data_root_info(root, &info)?;
+            Ok(())
+        })?;
+        store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(5), content_leaf(5)))?;
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(5)))?
+                .is_none()
+        );
+        store.update(|tx| {
+            tx.add_full_data_path(PartitionChunkOffset::from(0), content_leaf(1))?;
+            tx.add_pending_body_migration(
+                PartitionChunkOffset::from(0),
+                &PendingBodyMigration {
+                    data_root: root,
+                    data_size: 32,
+                    start_offset: RelativeChunkOffset(0),
+                    block_height: 1,
+                    attempts: 0,
+                },
+            )?;
+            Ok(())
+        })?;
+        assert_no_orphans(&store)?;
+        store.update(|tx| {
+            tx.clear_paths_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(1),
+            )
+        })?;
+        assert!(
+            store
+                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(0)))?
+                .is_none()
+        );
+        assert_no_orphans(&store)?;
+        Ok(())
+    }
+
+    #[test]
+    fn clear_in_a_batch_does_not_count_snapshot_keys() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_cleared_count")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        store.update(|tx| {
+            tx.add_pending_body_migration(
+                PartitionChunkOffset::from(3),
+                &PendingBodyMigration {
+                    data_root: H256::repeat_byte(1),
+                    data_size: 32,
+                    start_offset: RelativeChunkOffset(0),
+                    block_height: 1,
+                    attempts: 0,
+                },
+            )
+        })?;
+        store.update(|tx| {
+            tx.clear()?;
+            let removed = tx.del_pending_body_migrations_in_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(10),
+            )?;
+            assert_eq!(removed, 0);
+            Ok(())
+        })?;
         Ok(())
     }
 

@@ -26,7 +26,7 @@ use super::tables::{
     SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, TxPathInterval, TxPathIntervalByStart,
 };
 
-const PROGRESS_PREFIX: &str = "irys-submodule-index migrate-v1 ";
+pub(super) const PROGRESS_PREFIX: &str = "irys-submodule-index migrate-v1 ";
 const PROGRESS_LOG_ROWS: u64 = 100_000;
 const MAX_MARKER_BYTES: usize = 512;
 
@@ -410,7 +410,7 @@ fn apply_copy(ctx: &MigrateCtx<'_>, batch: CopyBatch, progress: &mut Progress) -
     Ok(())
 }
 
-fn absorb(
+pub(super) fn absorb(
     open: &mut Option<OpenRun>,
     offset: u32,
     tx_hash: Option<H256>,
@@ -600,10 +600,10 @@ enum Phase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct OpenRun {
-    start: u32,
-    end: u32,
-    tx_hash: H256,
+pub(super) struct OpenRun {
+    pub(super) start: u32,
+    pub(super) end: u32,
+    pub(super) tx_hash: H256,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

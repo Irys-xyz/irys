@@ -64,6 +64,14 @@ impl TxPathSource {
             Self::Derive(job) => job.wait(timeout).map(Some),
         }
     }
+
+    /// A finished path, or `None` while the derive is still running.
+    pub fn try_get(&self) -> Option<Result<Option<TxPath>, TxPathError>> {
+        match self {
+            Self::Stored(path) => Some(Ok(path.clone())),
+            Self::Derive(job) => job.try_get().map(|result| result.map(Some)),
+        }
+    }
 }
 
 /// A derive that has not finished, or its cached result.
@@ -129,8 +137,10 @@ impl TxPathError {
     /// Label for the drop counter. The log carries the full reason.
     pub fn metric_reason(&self) -> &'static str {
         match self {
-            Self::Failed(_) => "failed",
             Self::TimedOut => "timeout",
+            Self::Failed(reason) if reason.contains("data_root mismatch") => "data_root_mismatch",
+            Self::Failed(reason) if reason.contains("placement mismatch") => "placement_mismatch",
+            Self::Failed(_) => "failed",
         }
     }
 }
@@ -161,6 +171,19 @@ impl TxPathJob {
             finish_job(&slot, Err(error.to_string()));
         }
         Self { slot }
+    }
+
+    /// The finished path, or `None` while the job is still running.
+    pub fn try_get(&self) -> Option<Result<TxPath, TxPathError>> {
+        let guard = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*guard {
+            TxPathState::Done(result) => Some(result.clone().map_err(TxPathError::Failed)),
+            TxPathState::Pending => None,
+        }
     }
 
     /// Block until the job finishes or `timeout` elapses. Uses monotonic time.
@@ -278,5 +301,45 @@ mod tests {
             TxPathError::Failed(reason) => assert!(reason.contains("header missing"), "{reason}"),
             TxPathError::TimedOut => panic!("the job finished"),
         }
+    }
+
+    #[test]
+    fn metric_reason_splits_mismatch_text() {
+        assert_eq!(
+            TxPathError::Failed("data_root mismatch: leaf".into()).metric_reason(),
+            "data_root_mismatch"
+        );
+        assert_eq!(
+            TxPathError::Failed("placement mismatch: height".into()).metric_reason(),
+            "placement_mismatch"
+        );
+        assert_eq!(
+            TxPathError::Failed("header missing".into()).metric_reason(),
+            "failed"
+        );
+        assert_eq!(TxPathError::TimedOut.metric_reason(), "timeout");
+    }
+
+    #[test]
+    fn try_get_is_none_until_the_job_finishes() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::clone(&gate);
+        let job = TxPathJob::spawn(move || {
+            let (lock, ready) = &*release;
+            let mut open = lock.lock().expect("gate");
+            while !*open {
+                open = ready.wait(open).expect("gate wait");
+            }
+            Ok(vec![4])
+        });
+        assert!(job.try_get().is_none());
+        {
+            let (lock, ready) = &*gate;
+            *lock.lock().expect("gate") = true;
+            ready.notify_one();
+        }
+        let path = job.wait(Duration::from_secs(2)).expect("released");
+        assert_eq!(path, vec![4]);
+        assert_eq!(job.try_get().expect("done").expect("path"), vec![4]);
     }
 }

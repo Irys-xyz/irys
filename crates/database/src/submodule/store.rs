@@ -91,6 +91,11 @@ pub trait SubmoduleRead {
 
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
 
+    /// `false` on schema v3. That layout does not store tx-path bytes.
+    fn stores_tx_paths(&self) -> bool {
+        true
+    }
+
     fn get_tx_leaf_binding(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>>;
 
     fn get_data_root_infos_for_data_root(
@@ -161,11 +166,13 @@ pub trait SubmoduleRead {
         super::placement::read_placement_at(self, offset)
     }
 
-    /// One placement per interval that overlaps the inclusive span.
+    /// Placements that overlap the inclusive span.
     ///
-    /// The data-root info is the one that covers the interval start. The same
-    /// miss and corruption rules as [`Self::placement_at`] apply. An interval
-    /// with no usable path or info is omitted.
+    /// A schema v2 interval that merged two identical tx paths yields one
+    /// placement per data-root info inside it. The info is the one that
+    /// covers that segment's start. The same miss and corruption rules as
+    /// [`Self::placement_at`] apply. An interval with no usable path or info
+    /// is omitted.
     fn placements_in_range(
         &self,
         start: PartitionChunkOffset,
@@ -265,6 +272,26 @@ pub trait SubmoduleWrite: SubmoduleRead {
     ) -> eyre::Result<()>;
 
     fn add_data_root_info(&mut self, data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()>;
+
+    /// Fill the placement that starts at `start`.
+    ///
+    /// Schema v2 appends `info` the same way as [`Self::add_data_root_info`].
+    /// Schema v3 updates that one interval and its data-root row. The interval
+    /// must already exist and must name `data_root`.
+    fn add_data_root_info_at(
+        &mut self,
+        _start: PartitionChunkOffset,
+        data_root: DataRoot,
+        info: &DataRootInfo,
+    ) -> eyre::Result<()> {
+        self.add_data_root_info(data_root, info)
+    }
+
+    /// Schema v3 stores a data-root row on its interval. A later info trim
+    /// must not delete those rows while the interval remains.
+    fn intervals_own_data_root_rows(&self) -> bool {
+        false
+    }
 
     fn add_pending_body_migration(
         &mut self,
@@ -382,6 +409,8 @@ pub struct MdbxSubmoduleStore {
     /// the bit is set, so a commit between the two would return `Ok` and
     /// vanish on crash.
     nosync_enable: Arc<Mutex<()>>,
+    /// `false` for a read-only open. `update` and the marker writes refuse.
+    writable: bool,
 }
 
 impl std::fmt::Debug for MdbxSubmoduleStore {
@@ -410,7 +439,7 @@ impl MdbxSubmoduleStore {
             args,
             super::migrate::SubmoduleMigrationOptions::default(),
         )?;
-        Ok((Self::from_env(env), stats))
+        Ok((Self::from_env(env, true), stats))
     }
 
     /// Creates an MDBX directory for conversion and writes the incomplete marker.
@@ -424,7 +453,7 @@ impl MdbxSubmoduleStore {
         args: DatabaseArguments,
     ) -> eyre::Result<Self> {
         let env = crate::open_or_create_db(path, super::tables::SubmoduleTables::ALL, args)?;
-        let store = Self::from_env(env);
+        let store = Self::from_env(env, true);
         match store.schema_bytes()? {
             Some(bytes) if bytes.as_slice() == super::tables::SUBMODULE_SCHEMA.as_bytes() => {
                 eyre::bail!("refusing to convert into a completed MDBX index");
@@ -435,13 +464,25 @@ impl MdbxSubmoduleStore {
         Ok(store)
     }
 
-    fn from_env(env: DatabaseEnv) -> Self {
+    pub(super) fn from_env(env: DatabaseEnv, writable: bool) -> Self {
         let group = GroupCommit::new();
         Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
             env: Arc::new(env),
             group,
             nosync_enable: Arc::new(Mutex::new(())),
+            writable,
+        }
+    }
+
+    fn ensure_mdbx_writable(&self) -> eyre::Result<()> {
+        if self.writable {
+            Ok(())
+        } else {
+            eyre::bail!(
+                "MDBX submodule index {} is open read-only",
+                self.env.path().display()
+            )
         }
     }
 
@@ -452,6 +493,7 @@ impl MdbxSubmoduleStore {
 
     #[cfg(feature = "rocksdb")]
     pub(super) fn put_schema_bytes(&self, bytes: &[u8]) -> eyre::Result<()> {
+        self.ensure_mdbx_writable()?;
         let owned = bytes.to_vec();
         self.env
             .update_eyre(|tx| super::db::write_schema_bytes(tx, &owned))?;
@@ -576,6 +618,7 @@ impl MdbxSubmoduleStore {
         if !self.group.is_enabled() {
             return self.update(f);
         }
+        self.ensure_mdbx_writable()?;
         let result = self.update_unsynced(f)?;
         if self.group.note_visible() {
             sync_if_dirty(&self.env, &self.group)?;
@@ -965,6 +1008,7 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
+        self.ensure_mdbx_writable()?;
         if self.group.is_enabled() {
             let result = self.update_unsynced(f)?;
             finish_durable(&self.env, &self.group)?;
@@ -986,6 +1030,7 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile> {
+        self.ensure_mdbx_writable()?;
         if ranges.iter().all(|(start, end)| start > end) {
             return Ok(PresenceReconcile::default());
         }
@@ -1041,6 +1086,7 @@ impl SubmoduleStore for MdbxSubmoduleStore {
 impl MdbxSubmoduleStore {
     /// Same durability split as `update`. The marker is not a registration.
     fn commit_marker(&self, present: bool) -> eyre::Result<()> {
+        self.ensure_mdbx_writable()?;
         let commit = |tx: &_| {
             if present {
                 put_reset_marker(tx)
@@ -1090,9 +1136,13 @@ fn drop_coverage_rows(
     spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
     chunk_size: u64,
 ) -> eyre::Result<()> {
+    let intervals_own_rows = tx.intervals_own_data_root_rows();
     for &(start, end) in spans {
         tx.add_tx_path_hash_to_offset_range(start, end, None)?;
         tx.del_pending_body_migrations_in_range(start, end)?;
+    }
+    if intervals_own_rows {
+        return Ok(());
     }
     for (root, infos) in tx.data_root_entries()? {
         if let Some(remaining) = trim_data_root_placements(infos, spans, chunk_size) {
@@ -1139,6 +1189,20 @@ impl SubmoduleIndex {
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks(path: impl AsRef<Path>) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open(path)?))
+    }
+
+    /// Rows that are not owned by a live placement.
+    ///
+    /// Schema v3 checks both directions: intervals and data-root rows, pending
+    /// values, data paths, and the content-hash index. MDBX and schema v2
+    /// return an empty list. A non-empty list is a leak or a half-written
+    /// placement, including an interval that still awaits its data-root info.
+    pub fn audit_index(&self) -> eyre::Result<Vec<String>> {
+        match self {
+            Self::Mdbx(_) => Ok(Vec::new()),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.audit_index(),
+        }
     }
 
     /// `true` when this index stores tx-path bytes.
@@ -1586,6 +1650,8 @@ mod tests {
     fn put_registration(store: &SubmoduleIndex, offset: u32, byte: u8) -> eyre::Result<()> {
         store.update_registration(|tx| {
             let at = PartitionChunkOffset::from(offset);
+            // Schema v3 stores a data path only under a live interval.
+            ensure_v3_cover(tx, at)?;
             // Schema v3 presence is the data-path bytes. The hash row is v2.
             tx.add_full_data_path(at, vec![byte])?;
             tx.set_path_hashes_by_offset(
@@ -1596,6 +1662,41 @@ mod tests {
                 },
             )
         })
+    }
+
+    /// Schema v3 names the data root through the leaf binding. v2 stores the hash as given.
+    fn bind_as_root(tx: &mut dyn SubmoduleWrite, hash: H256) -> eyre::Result<()> {
+        if !tx.intervals_own_data_root_rows() {
+            return Ok(());
+        }
+        tx.add_tx_leaf_binding(
+            hash,
+            &TxLeafBinding {
+                data_root: hash,
+                prefix_hash: H256::zero(),
+            },
+        )
+    }
+
+    /// A one-offset interval so a data-path write at `offset` has coverage.
+    /// Schema v3 drops a data path that no interval covers. Other offsets stay untouched.
+    fn ensure_v3_cover(
+        tx: &mut dyn SubmoduleWrite,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        if !tx.intervals_own_data_root_rows() || tx.tx_interval_at(offset)?.is_some() {
+            return Ok(());
+        }
+        let hash = H256::repeat_byte(1);
+        bind_as_root(tx, hash)?;
+        tx.add_tx_path_hash_to_offset_range(offset, offset, Some(hash))?;
+        tx.add_data_root_info(
+            hash,
+            &DataRootInfo {
+                start_offset: RelativeChunkOffset(0),
+                data_size: 1,
+            },
+        )
     }
 
     fn expect_data_hash(store: &SubmoduleIndex, stored: H256, bytes: &[u8]) -> H256 {
@@ -1621,6 +1722,17 @@ mod tests {
                 return Ok(());
             }
             assert!(absent?.is_empty());
+            store.update(|tx| {
+                install_placement(
+                    tx,
+                    0,
+                    10,
+                    H256::repeat_byte(9),
+                    H256::repeat_byte(1),
+                    0,
+                    11 * 32,
+                )
+            })?;
             let mut leaf = vec![0_u8; 64];
             leaf[..32].fill(4);
             store.update(|tx| tx.add_full_data_path(PartitionChunkOffset::from(6), leaf))?;
@@ -1686,6 +1798,71 @@ mod tests {
             },
         )?;
         Ok(())
+    }
+
+    /// Schema v2 merges adjacent copies of one tx path. Each tx start still
+    /// resolves inside that one interval.
+    #[test]
+    fn merged_identical_tx_paths_keep_each_tx_start() -> eyre::Result<()> {
+        each_engine("submodule_merged_identical", |store| {
+            if !store.stores_tx_paths() {
+                return Ok(());
+            }
+            let root = H256::repeat_byte(1);
+            let prefix = H256::repeat_byte(2);
+            store.update(|tx| {
+                let (hash, proof) = leaf_proof(root, prefix);
+                tx.add_full_tx_path(hash, proof)?;
+                tx.add_tx_leaf_binding(
+                    hash,
+                    &TxLeafBinding {
+                        data_root: root,
+                        prefix_hash: prefix,
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(3),
+                    Some(hash),
+                )?;
+                tx.add_data_root_info(
+                    root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(0),
+                        data_size: 4 * 32,
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(4),
+                    PartitionChunkOffset::from(7),
+                    Some(hash),
+                )?;
+                tx.add_data_root_info(
+                    root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(4),
+                        data_size: 4 * 32,
+                    },
+                )?;
+                Ok(())
+            })?;
+            let span = store.view(|tx| {
+                tx.placements_in_range(PartitionChunkOffset::from(0), PartitionChunkOffset::from(7))
+            })?;
+            assert_eq!(span.len(), 2, "{span:?}");
+            assert_eq!(span[0].start, PartitionChunkOffset::from(0));
+            assert_eq!(span[0].end, PartitionChunkOffset::from(3));
+            assert_eq!(span[0].tx_start_offset, RelativeChunkOffset(0));
+            assert_eq!(span[1].start, PartitionChunkOffset::from(4));
+            assert_eq!(span[1].end, PartitionChunkOffset::from(7));
+            assert_eq!(span[1].tx_start_offset, RelativeChunkOffset(4));
+            let at_five = store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(5)))?
+                .expect("second tx");
+            assert_eq!(at_five.tx_start_offset, RelativeChunkOffset(4));
+            assert_eq!(at_five.data_size, 4 * 32);
+            Ok(())
+        })
     }
 
     #[test]
@@ -1831,7 +2008,10 @@ mod tests {
                 data_path_hash: Some(H256::repeat_byte(1)),
                 tx_path_hash: Some(H256::repeat_byte(2)),
             };
-            store.update(|tx| tx.set_path_hashes_by_offset(offset, hashes.clone()))?;
+            store.update(|tx| {
+                bind_as_root(tx, H256::repeat_byte(2))?;
+                tx.set_path_hashes_by_offset(offset, hashes.clone())
+            })?;
             let got = store
                 .view(|tx| tx.get_path_hashes_by_offset(offset))?
                 .expect("committed row");
@@ -1872,21 +2052,34 @@ mod tests {
     fn write_batch_reads_its_own_uncommitted_appends() -> eyre::Result<()> {
         each_engine("submodule_store_ryw", |store| {
             let data_root = H256::repeat_byte(4);
+            let first = DataRootInfo {
+                start_offset: RelativeChunkOffset(0),
+                data_size: 32,
+            };
+            let second = DataRootInfo {
+                start_offset: RelativeChunkOffset(8),
+                data_size: 64,
+            };
             store.update(|tx| {
-                tx.add_data_root_info(
-                    data_root,
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset(0),
-                        data_size: 32,
-                    },
-                )?;
-                tx.add_data_root_info(
-                    data_root,
-                    &DataRootInfo {
-                        start_offset: RelativeChunkOffset(8),
-                        data_size: 64,
-                    },
-                )?;
+                if tx.intervals_own_data_root_rows() {
+                    // Two placements share the root. Each info names its interval start.
+                    bind_as_root(tx, data_root)?;
+                    tx.add_tx_path_hash_to_offset_range(
+                        PartitionChunkOffset(0),
+                        PartitionChunkOffset(0),
+                        Some(data_root),
+                    )?;
+                    tx.add_tx_path_hash_to_offset_range(
+                        PartitionChunkOffset(8),
+                        PartitionChunkOffset(8),
+                        Some(data_root),
+                    )?;
+                    tx.add_data_root_info_at(PartitionChunkOffset(0), data_root, &first)?;
+                    tx.add_data_root_info_at(PartitionChunkOffset(8), data_root, &second)?;
+                } else {
+                    tx.add_data_root_info(data_root, &first)?;
+                    tx.add_data_root_info(data_root, &second)?;
+                }
                 let infos = tx
                     .get_data_root_infos_for_data_root(data_root)?
                     .expect("uncommitted appends are visible in this batch");
@@ -1908,7 +2101,10 @@ mod tests {
             let new_tx = H256::repeat_byte(6);
             let tail_tx = H256::repeat_byte(7);
             store.update(|tx| {
-                tx.add_full_data_path(PartitionChunkOffset::from(2), data_bytes.clone())?;
+                bind_as_root(tx, old_tx)?;
+                bind_as_root(tx, new_tx)?;
+                bind_as_root(tx, tail_tx)?;
+                // The interval goes in before the data path so schema v3 keeps the bytes.
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
                     ChunkPathHashes {
@@ -1916,6 +2112,7 @@ mod tests {
                         tx_path_hash: Some(old_tx),
                     },
                 )?;
+                tx.add_full_data_path(PartitionChunkOffset::from(2), data_bytes.clone())?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(0),
                     PartitionChunkOffset::from(3),
@@ -1940,6 +2137,7 @@ mod tests {
             assert_eq!(at_five.data_path_hash, None);
             assert_eq!(at_five.tx_path_hash, Some(tail_tx));
             store.update(|tx| {
+                bind_as_root(tx, tail_tx)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(6),
                     PartitionChunkOffset::from(7),
@@ -1964,6 +2162,8 @@ mod tests {
             let hash_a = H256::repeat_byte(1);
             let hash_b = H256::repeat_byte(2);
             store.update(|tx| {
+                bind_as_root(tx, hash_a)?;
+                bind_as_root(tx, hash_b)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(0),
                     PartitionChunkOffset::from(4),
@@ -1977,6 +2177,7 @@ mod tests {
             })?;
             assert_eq!(store.interval_row_count()?, 2);
             store.update(|tx| {
+                bind_as_root(tx, hash_a)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(5),
                     PartitionChunkOffset::from(9),
@@ -1989,6 +2190,7 @@ mod tests {
                 .expect("merged span covers the old right edge");
             assert_eq!(at_nine.tx_path_hash, Some(hash_a));
             store.update(|tx| {
+                bind_as_root(tx, hash_b)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(0),
                     PartitionChunkOffset::from(2),
@@ -2131,6 +2333,26 @@ mod tests {
                 start_offset: RelativeChunkOffset(1),
                 data_size: 32,
             };
+            if !store.stores_tx_paths() {
+                let err = store
+                    .update(|tx| tx.add_data_root_info(root, &info))
+                    .unwrap_err();
+                assert!(err.to_string().contains("no unfilled placement"), "{err}");
+                store.update(|tx| {
+                    bind_as_root(tx, root)?;
+                    tx.add_tx_path_hash_to_offset_range(
+                        PartitionChunkOffset::from(1),
+                        PartitionChunkOffset::from(1),
+                        Some(root),
+                    )?;
+                    tx.add_data_root_info(root, &info)
+                })?;
+                let err = store
+                    .update(|tx| tx.set_data_root_infos_for_data_root(root, DataRootInfos(vec![])))
+                    .unwrap_err();
+                assert!(err.to_string().contains("keeps the data-root row"), "{err}");
+                return Ok(());
+            }
             store.update(|tx| tx.add_data_root_info(root, &info))?;
             assert_eq!(
                 store.view(|tx| tx.get_data_root_infos_for_data_root(root))?,
@@ -2158,6 +2380,7 @@ mod tests {
             let tx_hash = H256::repeat_byte(7);
             let data_hash = H256::repeat_byte(8);
             store.update(|tx| {
+                bind_as_root(tx, tx_hash)?;
                 tx.set_path_hashes_by_offset(
                     offset,
                     ChunkPathHashes {
@@ -2188,6 +2411,7 @@ mod tests {
         each_engine("submodule_store_gaps", |store| {
             store.update(|tx| {
                 let tx_hash = H256::repeat_byte(3);
+                bind_as_root(tx, tx_hash)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(0),
                     PartitionChunkOffset::from(0),
@@ -2221,11 +2445,18 @@ mod tests {
                     )?,
                     Some(PartitionChunkOffset::from(0))
                 );
-                assert!(
-                    tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?
-                        .is_some(),
-                    "a data path does not fill a tx-coverage hole"
-                );
+                let uncovered = tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?;
+                if tx.intervals_own_data_root_rows() {
+                    assert!(
+                        uncovered.is_none(),
+                        "schema v3 drops a data path that has no interval"
+                    );
+                } else {
+                    assert!(
+                        uncovered.is_some(),
+                        "a data path does not fill a tx-coverage hole"
+                    );
+                }
                 Ok(())
             })?;
             Ok(())
@@ -2288,6 +2519,7 @@ mod tests {
             store.update(|tx| {
                 for key in keys {
                     let offset = PartitionChunkOffset::from(key);
+                    ensure_v3_cover(tx, offset)?;
                     tx.write_data_path_updates(vec![(
                         offset,
                         H256::repeat_byte((key % 200) as u8),
@@ -2299,6 +2531,7 @@ mod tests {
             })?;
 
             store.update(|tx| {
+                let v3 = tx.intervals_own_data_root_rows();
                 tx.clear_paths_in_inclusive_range(
                     PartitionChunkOffset::from(1),
                     PartitionChunkOffset::from(5),
@@ -2307,7 +2540,8 @@ mod tests {
                     PartitionChunkOffset::from(1),
                     PartitionChunkOffset::from(5),
                 )?;
-                assert_eq!(removed, 2);
+                // Schema v3 deletes pending in the same batch as the interval clear.
+                assert_eq!(removed, if v3 { 0 } else { 2 });
                 assert!(
                     tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?
                         .is_none()
@@ -2410,6 +2644,8 @@ mod tests {
                     PartitionChunkOffset::from(0),
                     PartitionChunkOffset::from(0),
                 )?;
+                // The clear removed coverage. Schema v3 keeps the new bytes only under a new interval.
+                ensure_v3_cover(tx, PartitionChunkOffset::from(0))?;
                 tx.write_data_path_updates(vec![(
                     PartitionChunkOffset::from(0),
                     H256::repeat_byte(8),
@@ -2444,6 +2680,7 @@ mod tests {
                     tx.get_path_hashes_by_offset(PartitionChunkOffset::from(5))?
                         .is_none()
                 );
+                ensure_v3_cover(tx, PartitionChunkOffset::from(6))?;
                 tx.add_full_data_path(PartitionChunkOffset::from(6), vec![5])?;
                 tx.set_path_hashes_by_offset(PartitionChunkOffset::from(6), hashes.clone())?;
                 Ok(())
@@ -2598,6 +2835,7 @@ mod tests {
             assert_eq!(store.group_sync_count(), 0);
             store.update(|tx| {
                 // Schema v3 presence is the data-path bytes. The hash row is v2.
+                ensure_v3_cover(tx, PartitionChunkOffset::from(2))?;
                 tx.add_full_data_path(PartitionChunkOffset::from(2), vec![2])?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
@@ -2649,19 +2887,25 @@ mod tests {
             };
             let max = PartitionChunkOffset::from(u32::MAX);
             store.update(|tx| {
-                tx.write_data_path_updates(vec![
-                    (PartitionChunkOffset::from(1), H256::repeat_byte(1), vec![1]),
-                    (PartitionChunkOffset::from(3), H256::repeat_byte(3), vec![3]),
-                    (max, H256::repeat_byte(7), vec![7]),
-                ])?;
                 tx.add_full_tx_path(tx_hash, tx_path.clone())?;
+                tx.add_tx_leaf_binding(tx_hash, &leaf)?;
                 tx.add_tx_path_hash_to_offset_range(
                     PartitionChunkOffset::from(1),
                     PartitionChunkOffset::from(3),
                     Some(tx_hash),
                 )?;
-                tx.add_tx_leaf_binding(tx_hash, &leaf)?;
-                tx.add_data_root_info(data_root, &info)?;
+                if tx.intervals_own_data_root_rows() {
+                    // The max offset needs its own interval or schema v3 drops that data path.
+                    tx.add_tx_path_hash_to_offset_range(max, max, Some(tx_hash))?;
+                    tx.add_data_root_info_at(PartitionChunkOffset::from(1), data_root, &info)?;
+                } else {
+                    tx.add_data_root_info(data_root, &info)?;
+                }
+                tx.write_data_path_updates(vec![
+                    (PartitionChunkOffset::from(1), H256::repeat_byte(1), vec![1]),
+                    (PartitionChunkOffset::from(3), H256::repeat_byte(3), vec![3]),
+                    (max, H256::repeat_byte(7), vec![7]),
+                ])?;
                 tx.add_pending_body_migration(PartitionChunkOffset::from(1), &pending)?;
                 Ok(())
             })?;
@@ -2804,6 +3048,7 @@ mod tests {
             let published = store.published_generation();
             assert!(published > store.durable_generation());
             store.update(|tx| {
+                ensure_v3_cover(tx, PartitionChunkOffset::from(2))?;
                 tx.add_full_data_path(PartitionChunkOffset::from(2), vec![2])?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
