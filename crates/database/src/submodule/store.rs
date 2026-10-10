@@ -1173,10 +1173,26 @@ impl SubmoduleIndex {
     ///
     /// This open skips the table-property scan during `DB::Open`.
     /// Production [`Self::open_rocks`] keeps every SST open and exports tickers.
+    /// An empty directory is schema v3.
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open_with_stats(
             path, tuning,
+        )?))
+    }
+
+    /// Bench open. `schema_v3` selects the layout of an empty directory.
+    ///
+    /// Same table cache as [`Self::open_rocks_with`]. A schema file that names
+    /// the other layout is refused.
+    #[cfg(feature = "rocksdb")]
+    pub fn open_rocks_bench(
+        path: impl AsRef<Path>,
+        tuning: RocksTuning,
+        schema_v3: bool,
+    ) -> eyre::Result<Self> {
+        Ok(Self::Rocks(RocksSubmoduleStore::open_bench(
+            path, tuning, schema_v3,
         )?))
     }
 

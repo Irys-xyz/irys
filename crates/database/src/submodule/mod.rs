@@ -16,7 +16,7 @@ mod verify;
 #[cfg(feature = "rocksdb")]
 pub use convert::{
     ConvertOptions, ConvertStats, EngineEquivalenceReport, convert_mdbx_to_rocks,
-    convert_rocks_to_mdbx, verify_mdbx_and_rocks,
+    convert_rocks_to_mdbx, convert_rocks_v2_to_v3, verify_mdbx_and_rocks, verify_rocks_v2_and_v3,
 };
 pub use db::*;
 pub use interval::IntervalRow;

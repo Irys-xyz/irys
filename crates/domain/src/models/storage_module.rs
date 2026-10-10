@@ -941,7 +941,7 @@ fn open_submodule_index(
             // An empty MDBX index would hide the live Rocks rows.
             if rocks_index_present(&rocks_dir) && !mdbx_dat.is_file() {
                 Err(eyre!(
-                    "refusing to open {}: {} exists and the Rocks index was not copied. Stop the node and run `submodule-index-convert rocks-to-mdbx {} {}`, then verify. If the node wrote new rows into rocks/ after switching to RocksDB, that command is the rollback. Switching database.submodule_index back to mdbx without it leaves those rows out of db/.",
+                    "refusing to open {}: {} exists and the Rocks index was not copied. Stop the node and run `submodule-index-convert rocks-to-mdbx` (see --help for --consensus-db and the partition geometry) from {} to {}, then verify. Set database.submodule_index to mdbx only after verify passes.",
                     path.display(),
                     rocks_dir.display(),
                     rocks_dir.display(),
@@ -959,7 +959,7 @@ fn open_submodule_index(
             // An empty Rocks index would hide the live MDBX rows.
             if mdbx_dat.is_file() && !rocks_index_present(&path) {
                 Err(eyre!(
-                    "refusing to open {}: {} exists and the MDBX index was not copied. Stop the node and run `submodule-index-convert mdbx-to-rocks {} {}`, then verify, then set database.submodule_index to rocksdb. Keep db/ until rollback is proven. If the node wrote new rows into rocks/ after the switch, rollback is `submodule-index-convert rocks-to-mdbx`.",
+                    "refusing to open {}: {} exists and the MDBX index was not copied. Stop the node and run `submodule-index-convert mdbx-to-rocks` (see --help for --consensus-db and the partition geometry) from {} to {}, then verify. Set database.submodule_index to rocksdb only after verify passes. Keep db/ until rollback is proven.",
                     path.display(),
                     mdbx_dat.display(),
                     mdbx_dir.display(),

@@ -1080,9 +1080,26 @@ impl RocksSubmoduleStore {
     /// Bench open. Same table cache as [`Self::open`], and it skips the
     /// table-property scan during `DB::Open`.
     ///
-    /// Histograms and timers stay off.
+    /// Histograms and timers stay off. An empty directory is schema v3.
     pub fn open_with_stats(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Self::open_inner(path, tuning, true, true, None, true, None)
+    }
+
+    /// Bench open that picks the layout of an empty directory.
+    ///
+    /// Same cache and table scan as [`Self::open_with_stats`]. A schema file
+    /// that names the other layout is refused.
+    pub fn open_bench(
+        path: impl AsRef<Path>,
+        tuning: RocksTuning,
+        schema_v3: bool,
+    ) -> eyre::Result<Self> {
+        let layout = if schema_v3 {
+            IndexLayout::V3
+        } else {
+            IndexLayout::V2
+        };
+        Self::open_inner(path, tuning, true, true, None, true, Some(layout))
     }
 
     /// Baseline open on an explicit resource set.
@@ -1124,6 +1141,22 @@ impl RocksSubmoduleStore {
             None,
             false,
             Some(IndexLayout::V2),
+        )
+    }
+
+    /// Opens a schema v3 conversion target. Does not write the SCHEMA file.
+    ///
+    /// [`Self::stamp_schema_marker`] writes the schema 3 marker after the copy
+    /// is durable. A crash before that leaves `CURRENT` and no SCHEMA file.
+    pub(super) fn open_converting_v3(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        Self::open_inner(
+            path,
+            RocksTuning::baseline(),
+            true,
+            false,
+            None,
+            false,
+            Some(IndexLayout::V3),
         )
     }
 
@@ -1442,6 +1475,72 @@ impl RocksSubmoduleStore {
             out.push(key);
         }
         iter.status().wrap_err("scan rocksdb keys")?;
+        Ok(out)
+    }
+
+    /// Next data-path keys in this layout. Values are not decoded.
+    pub(super) fn read_data_path_keys(
+        &self,
+        after: Option<PartitionChunkOffset>,
+        limit: usize,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        self.read_cf_keys(Cf::DataPath.name_in(self.layout), after, limit)
+    }
+
+    /// Next pending-job keys in this layout. Values are not decoded.
+    pub(super) fn read_pending_keys(
+        &self,
+        after: Option<PartitionChunkOffset>,
+        limit: usize,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        self.read_cf_keys(Cf::Pending.name_in(self.layout), after, limit)
+    }
+
+    /// Next schema v3 placements after `after`, in start-offset order.
+    pub(super) fn read_v3_placements(
+        &self,
+        after: Option<PartitionChunkOffset>,
+        limit: usize,
+    ) -> eyre::Result<Vec<Placement>> {
+        eyre::ensure!(
+            self.layout == IndexLayout::V3,
+            "placement scan requires a schema v3 index"
+        );
+        let limit = limit.max(1);
+        let handle = cf_handle(&self.db, Cf::Interval)?;
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        let encoded = after.map(encode_key);
+        let mode = match &encoded {
+            None => IteratorMode::Start,
+            Some(bytes) => IteratorMode::From(bytes.as_slice(), Direction::Forward),
+        };
+        let snap = self.db.snapshot();
+        let mut out = Vec::new();
+        for item in snap.iterator_cf_opt(&handle, opts, mode) {
+            let (key, value) = item.wrap_err("scan placement interval")?;
+            if key.len() != 4 {
+                continue;
+            }
+            let start = u32::from_be_bytes(key.as_ref().try_into().expect("length checked"));
+            if after.is_some_and(|prev| start <= prev.0) {
+                continue;
+            }
+            let decoded = v3::decode_placement(value.as_ref())?;
+            out.push(Placement {
+                data_root: H256(decoded.data_root),
+                tx_start_offset: irys_types::RelativeChunkOffset(decoded.tx_start),
+                data_size: decoded.data_size,
+                ledger: v3::optional_u32(decoded.ledger),
+                start: PartitionChunkOffset(start),
+                end: PartitionChunkOffset(decoded.end),
+                block_height: v3::optional_u64(decoded.block_height),
+                tx_index: v3::optional_u32(decoded.tx_index),
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
         Ok(out)
     }
 
@@ -2860,7 +2959,7 @@ fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
     }
     if path.join("CURRENT").is_file() {
         eyre::bail!(
-            "submodule index {} has RocksDB files but no SCHEMA marker, so the conversion is incomplete. Delete this directory and rerun `submodule-index-convert mdbx-to-rocks` with --replace-incomplete. Do not start the node on it. If a completed rocks/ index has rows written after the switch, rollback is `submodule-index-convert rocks-to-mdbx`.",
+            "submodule index {} has RocksDB files but no SCHEMA marker, so the conversion is incomplete. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`) with --replace-incomplete. Do not start the node on it. Rollback of a completed schema v3 index is `submodule-index-convert rocks-to-mdbx`.",
             path.display()
         );
     }
@@ -5787,8 +5886,7 @@ mod tests {
     ///
     /// `SetOptions` after open loses the race with bottommost compaction.
     /// That job rewrites the blob SST and inlines it. The flag is read while
-    /// the column options are built, including the opens inside convert and
-    /// verify.
+    /// the column options are built, including a later baseline open.
     struct HoldAutoCompaction;
     impl HoldAutoCompaction {
         fn enter() -> Self {
@@ -5803,14 +5901,13 @@ mod tests {
     }
 
     /// Blob files from the `blobs` preset stay readable under baseline.
-    /// Forced compaction inlines them. Reconcile and converter verify run
-    /// while legacy blob values and new inline values are both present.
+    /// Forced compaction inlines them. A second baseline open reads every
+    /// path while legacy blob values and new inline values are both present.
+    ///
+    /// These bytes are not a ledger tx path, so the schema-v3 converter
+    /// cannot check them. That tool derives the path and aborts on a mismatch.
     #[test]
     fn legacy_blob_values_reopen_inline_and_compact_away() -> eyre::Result<()> {
-        use crate::IrysDatabaseArgs as _;
-        use crate::submodule::{ConvertOptions, convert_rocks_to_mdbx, verify_mdbx_and_rocks};
-        use reth_db::mdbx::DatabaseArguments;
-
         let _hold = HoldAutoCompaction::enter();
         const LEGACY_PATHS: u32 = 4_096;
         const INLINE_PATHS: u32 = 256;
@@ -5882,20 +5979,23 @@ mod tests {
             );
         }
 
-        let mdbx = dir.path().join("db");
-        let options = ConvertOptions::new(DatabaseArguments::irys_testing()?);
-        let copied = convert_rocks_to_mdbx(&path, &mdbx, &options)?;
-        assert_eq!(copied.data_paths, u64::from(total - 2));
-        assert_eq!(copied.tx_paths, 2);
-        let report = verify_mdbx_and_rocks(&mdbx, &path, &options)?;
-        assert!(!report.has_mismatch(), "{report}");
-        assert_eq!(report.offsets_checked, u64::from(total - 2), "{report}");
-        assert_eq!(report.tx_paths_checked, 2, "{report}");
+        {
+            let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
+            assert_data_paths(&store, total, &removed)?;
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(legacy_tx))?,
+                Some(large_path(0))
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_full_tx_path(inline_tx))?,
+                Some(large_path(1))
+            );
+        }
 
         let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
         assert!(
             store.blob_file_count(Cf::DataPath)? > 0,
-            "verify open compacted legacy blobs away"
+            "reopen compacted legacy blobs away"
         );
         assert!(store.blob_file_count(Cf::TxPath)? > 0);
         store.compact_column_force(Cf::DataPath)?;
