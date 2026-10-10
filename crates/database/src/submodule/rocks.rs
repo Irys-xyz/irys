@@ -265,6 +265,12 @@ pub struct RocksTuning {
     /// Does not change `partition_filters`. An existing SST keeps its own
     /// filter until compaction rewrites the file.
     pub bloom_all_families: bool,
+    /// Bloom on `ChunkDataPathByOffset`. Schema v3 reads the old proof before
+    /// every proof write (to keep the content-hash rows exact), and for a new
+    /// offset that read misses. Without a filter a miss under scattered data
+    /// sync can cost a disk read per chunk. `no-datapath-bloom` turns it off
+    /// for A/B.
+    pub data_path_bloom: bool,
     /// Use the process-wide block cache, write-buffer manager, and Env pools.
     ///
     /// `false` builds a private cache of `block_cache_bytes` and does not
@@ -294,12 +300,13 @@ impl RocksTuning {
             max_total_wal_size: 0,
             small_file_compact_threshold: 0,
             bloom_all_families: false,
+            data_path_bloom: true,
             share_resources: true,
         }
     }
 
     /// Named opens. `baseline` matches [`Self::baseline`].
-    pub const fn presets() -> [Self; 15] {
+    pub const fn presets() -> [Self; 16] {
         let base = Self::baseline();
         [
             base,
@@ -402,6 +409,11 @@ impl RocksTuning {
                 bloom_all_families: true,
                 ..base
             },
+            Self {
+                name: "no-datapath-bloom",
+                data_path_bloom: false,
+                ..base
+            },
         ]
     }
 
@@ -452,6 +464,8 @@ impl RocksTuning {
         };
         let blooms = if self.bloom_all_families {
             "all"
+        } else if self.data_path_bloom {
+            "miss+datapath"
         } else {
             "miss"
         };
@@ -490,6 +504,7 @@ impl RocksTuning {
             + usize::from(self.max_total_wal_size != other.max_total_wal_size)
             + usize::from(self.small_file_compact_threshold != other.small_file_compact_threshold)
             + usize::from(self.bloom_all_families != other.bloom_all_families)
+            + usize::from(self.data_path_bloom != other.data_path_bloom)
     }
 }
 
@@ -823,6 +838,7 @@ impl Cf {
     fn uses_bloom(self, tuning: &RocksTuning) -> bool {
         matches!(self, Self::Content)
             || tuning.bloom_all_families
+            || (tuning.data_path_bloom && matches!(self, Self::DataPath))
             || matches!(
                 self,
                 Self::PathHashes | Self::TxPath | Self::DataRoots | Self::TxLeaf
@@ -6346,8 +6362,10 @@ mod tests {
             store.flush_memtables()?;
         }
         let reopened = persisted_options(&path)?;
+        // Baseline keeps a bloom on the data-path family: schema v3 reads the
+        // old proof before every proof write, and a new offset misses.
         assert!(
-            !table_options_have_bloom(&reopened, <ChunkDataPathByOffset as Table>::NAME),
+            table_options_have_bloom(&reopened, <ChunkDataPathByOffset as Table>::NAME),
             "{reopened}"
         );
         assert!(
