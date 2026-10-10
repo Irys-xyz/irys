@@ -450,6 +450,7 @@ impl GossipClient {
             block_hash: header.block_hash,
             data_transactions,
             commitment_transactions,
+            custody_proofs: Vec::new(),
         };
 
         Ok(GossipResponse::Accepted(Some(GossipDataV2::BlockBody(
@@ -1097,6 +1098,10 @@ impl GossipClient {
                 GossipRoutes::IngressProof,
                 serde_json::to_vec(&self.create_request_v2_ref(proof)),
             ),
+            GossipDataV2::CustodyProof(proof) => (
+                GossipRoutes::CustodyProof,
+                serde_json::to_vec(&self.create_request_v2_ref(proof)),
+            ),
         };
         match json_result {
             Ok(b) => Some((route, bytes::Bytes::from(b))),
@@ -1330,6 +1335,15 @@ impl GossipClient {
                     &peer.address.gossip,
                     GossipRoutes::IngressProof,
                     wire,
+                    ProtocolVersion::V2,
+                )
+                .await
+            }
+            GossipDataV2::CustodyProof(custody_proof) => {
+                self.send_data_internal(
+                    &peer.address.gossip,
+                    GossipRoutes::CustodyProof,
+                    custody_proof,
                     ProtocolVersion::V2,
                 )
                 .await
@@ -1775,7 +1789,8 @@ impl GossipClient {
                 | GossipDataV2::CommitmentTransaction(_)
                 | GossipDataV2::BlockHeader(_)
                 | GossipDataV2::ExecutionPayload(_)
-                | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
+                | GossipDataV2::IngressProof(_)
+                | GossipDataV2::CustodyProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                     "Expected BlockBody, got {:?}",
                     gossip_data.data_type_and_id()
                 ))),
@@ -1884,7 +1899,8 @@ impl GossipClient {
             | GossipDataV2::CommitmentTransaction(_)
             | GossipDataV2::BlockBody(_)
             | GossipDataV2::ExecutionPayload(_)
-            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
+            | GossipDataV2::IngressProof(_)
+            | GossipDataV2::CustodyProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected IrysBlockHeader, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1899,7 +1915,8 @@ impl GossipClient {
             | GossipDataV2::CommitmentTransaction(_)
             | GossipDataV2::BlockHeader(_)
             | GossipDataV2::BlockBody(_)
-            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
+            | GossipDataV2::IngressProof(_)
+            | GossipDataV2::CustodyProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected ExecutionPayload, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1914,7 +1931,8 @@ impl GossipClient {
             | GossipDataV2::BlockHeader(_)
             | GossipDataV2::BlockBody(_)
             | GossipDataV2::ExecutionPayload(_)
-            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
+            | GossipDataV2::IngressProof(_)
+            | GossipDataV2::CustodyProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected Transaction or CommitmentTransaction, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1929,7 +1947,8 @@ impl GossipClient {
             | GossipDataV2::CommitmentTransaction(_)
             | GossipDataV2::BlockHeader(_)
             | GossipDataV2::ExecutionPayload(_)
-            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
+            | GossipDataV2::IngressProof(_)
+            | GossipDataV2::CustodyProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected BlockBody, got {:?}",
                 gossip_data.data_type_and_id()
             ))),

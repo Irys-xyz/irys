@@ -1,4 +1,4 @@
-use eyre::ensure;
+use eyre::{bail, ensure};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::{ops::Deref, sync::Arc};
@@ -17,7 +17,8 @@ pub struct Config(Arc<CombinedConfigInner>);
 
 impl Config {
     pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
-        let consensus = node_config.consensus_config();
+        let mut consensus = node_config.consensus_config();
+        consensus.normalize();
 
         Self(Arc::new(CombinedConfigInner {
             consensus,
@@ -596,6 +597,33 @@ impl Config {
                  must be 0 until the assigned-miners determinism fix lands — see frontier guard above",
                 fork.number_of_ingress_proofs_from_assignees,
             );
+        }
+
+        for (flag_name, flag_set, reason) in [
+            (
+                "require_kzg_ingress_proofs",
+                self.consensus.require_kzg_ingress_proofs,
+                "contradictory config",
+            ),
+            (
+                "enable_blobs",
+                self.consensus.enable_blobs,
+                "blob V2 proofs would be rejected",
+            ),
+            (
+                "use_kzg_ingress_proofs",
+                self.consensus.use_kzg_ingress_proofs,
+                "generated proofs would be rejected",
+            ),
+            (
+                "enable_custody_proofs",
+                self.consensus.enable_custody_proofs,
+                "custody proofs require KZG commitments",
+            ),
+        ] {
+            if flag_set && !self.consensus.accept_kzg_ingress_proofs {
+                bail!("{flag_name}=true but accept_kzg_ingress_proofs=false — {reason}");
+            }
         }
 
         Ok(())

@@ -448,7 +448,10 @@
     "peerCount": 5,
     "pendingBlocks": "2",
     "protocolVersion": 2,
-    "supportedProtocolVersions": [1, 2],
+    "supportedProtocolVersions": [
+      1,
+      2
+    ],
     "uptimeSecs": "3600",
     "version": "1.2.3"
   },
@@ -1083,6 +1086,14 @@
       "signer": "33SJ648cFX5HwVXH4cYsmji4UiZ7",
       "value": "0",
       "version": 2
+    }
+  },
+  "v2_gossip_data_custody_proof": {
+    "CustodyProof": {
+      "challenge_seed": "3JF3sEqM796hk5WFqA6EtmEwJQ9quALszsfJyvXNQKy3",
+      "challenged_miner": "3NuVdsXK1DmiyJKa1EawMJwxhDdb",
+      "openings": [],
+      "partition_hash": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2"
     }
   },
   "v2_gossip_data_execution_payload": {

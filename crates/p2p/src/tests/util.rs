@@ -1055,6 +1055,7 @@ pub(crate) fn data_handler_stub(
         irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
     // Keep the chunk_ingress receiver alive so the channel remains open.
     spawn_test_chunk_ingress_consumer(service_receivers.chunk_ingress, None);
+    let custody_proof_sender = service_senders.custody_proof.clone(); // clone: extract before move into BlockPool
     let block_pool_stub = Arc::new(BlockPool::new(
         db,
         block_discovery_stub,
@@ -1100,6 +1101,7 @@ pub(crate) fn data_handler_stub(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        custody_proof_sender,
     })
 }
 
@@ -1141,6 +1143,10 @@ pub(crate) fn data_handler_with_stubbed_pool(
     // Keep the chunk_ingress receiver alive so the channel remains open.
     spawn_test_chunk_ingress_consumer(service_receivers.chunk_ingress, None);
     let consensus_config_hash = config.consensus.keccak256_hash();
+    let custody_proof_sender = {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        tx
+    };
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
         chunk_ingress,
@@ -1163,6 +1169,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
+        custody_proof_sender,
     })
 }
 

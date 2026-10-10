@@ -1,4 +1,5 @@
 use crate::{
+    blob_extraction_service::BlobExtractionMessage,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     chunk_ingress_service::ChunkIngressState,
     mempool_guard::MempoolReadGuard,
@@ -928,6 +929,34 @@ pub trait BlockProdStrategy {
             .broadcast_block(block, stats, &eth_built_payload)
             .await?;
         let Some(block) = block else { return Ok(None) };
+        // Extract blobs from any EIP-4844 transactions in the produced block
+        if self.inner().config.consensus.enable_blobs {
+            let blob_tx_hashes: Vec<B256> = eth_built_payload
+                .block()
+                .body()
+                .transactions
+                .iter()
+                .filter(|tx| tx.is_eip4844())
+                .map(|tx| *tx.hash())
+                .collect();
+
+            if !blob_tx_hashes.is_empty() {
+                debug!(
+                    block.hash = %block.header().block_hash,
+                    blob_txs = blob_tx_hashes.len(),
+                    "Triggering blob extraction for EIP-4844 transactions",
+                );
+                if let Err(e) = self.inner().service_senders.blob_extraction.send(
+                    BlobExtractionMessage::ExtractBlobs {
+                        block_hash: block.header().block_hash,
+                        blob_tx_hashes,
+                    },
+                ) {
+                    warn!(error = %e, "Failed to send blob extraction request");
+                }
+            }
+        }
+
         Ok(Some((block, eth_built_payload)))
     }
 
@@ -1381,7 +1410,32 @@ pub trait BlockProdStrategy {
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
             treasury: final_treasury,
+            custody_proofs_root: None,
         });
+
+        let custody_proofs = if self.inner().config.consensus.enable_custody_proofs {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.inner()
+                .service_senders
+                .custody_proof
+                .send(
+                    crate::custody_proof_service::CustodyProofMessage::TakePendingProofs(reply_tx),
+                )
+                .map_err(|e| eyre!("failed to request pending custody proofs: {e}"))?;
+            let proofs = reply_rx
+                .await
+                .map_err(|_| eyre!("custody proof service dropped the pending-proof reply"))?;
+            if proofs.is_empty() {
+                return Err(eyre!("custody proofs are required and none are pending"));
+            }
+            proofs
+        } else {
+            Vec::new()
+        };
+        if !custody_proofs.is_empty() {
+            irys_block.custody_proofs_root =
+                Some(irys_types::custody::custody_proofs_root(&custody_proofs));
+        }
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
@@ -1391,6 +1445,7 @@ pub trait BlockProdStrategy {
         // Clear internal metadata (promoted_height, included_height) so block
         // contents match wire format — metadata is mempool-internal state and
         // must not leak into produced blocks.
+
         let mut all_data_txs = Vec::new();
         all_data_txs.extend(mempool_bundle.submit_txs);
         all_data_txs.extend(mempool_bundle.one_year_txs);
@@ -1404,6 +1459,7 @@ pub trait BlockProdStrategy {
             block_hash: irys_block.block_hash,
             commitment_transactions: mempool_bundle.commitment_txs,
             data_transactions: all_data_txs,
+            custody_proofs,
         };
 
         let sealed_block = IrysSealedBlock::new(irys_block, block_body)?;
@@ -1480,6 +1536,22 @@ pub trait BlockProdStrategy {
                 ))
             }
         }?;
+
+        if self.inner().config.consensus.enable_custody_proofs {
+            // clone: ReleaseIncluded takes ownership and the sealed block keeps its copy
+            let included = block.transactions().custody_proofs.clone();
+            if let Err(error) =
+                self.inner().service_senders.custody_proof.send(
+                    crate::custody_proof_service::CustodyProofMessage::ReleaseIncluded(included),
+                )
+            {
+                warn!(
+                    block.hash = ?block.header().block_hash,
+                    error = %error,
+                    "failed to release included custody proofs"
+                );
+            }
+        }
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =

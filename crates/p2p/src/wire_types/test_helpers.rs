@@ -337,6 +337,7 @@ pub(crate) fn canonical_block_header() -> IrysBlockHeader {
         oracle_irys_price: Amount::new(U256::from(100_u64)),
         ema_irys_price: Amount::new(U256::from(95_u64)),
         treasury: U256::from(999_999_u64),
+        custody_proofs_root: None,
     })
 }
 
@@ -345,6 +346,7 @@ pub(crate) fn canonical_block_body() -> BlockBody {
         block_hash: test_h256(0xBB),
         data_transactions: vec![canonical_data_tx_header()],
         commitment_transactions: vec![canonical_commitment_v2_stake()],
+        custody_proofs: Vec::new(),
     }
 }
 
