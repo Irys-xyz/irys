@@ -46,7 +46,7 @@ use crate::submodule::db::read_schema_bytes;
 use crate::tx_header_by_txid;
 use crate::tx_path_derive::{
     DerivedTxPath, TxPathBlockCache, consensus_is_behind, derive_tx_path_at_offset_cached,
-    tx_header_schema, tx_path_hash,
+    ledger_frontier, tx_header_schema, tx_path_hash,
 };
 
 use super::migrate::{self, OpenRun};
@@ -102,6 +102,7 @@ pub struct EngineEquivalenceReport {
     /// Source rows outside every interval. The node drops these at open.
     pub skipped_orphans: u64,
     /// Placements past the consensus frontier. The node has not indexed them yet.
+    /// A non-zero count is a mismatch: verify must not accept a partial index.
     pub skipped_frontier: u64,
     pub samples: Vec<EngineMismatch>,
 }
@@ -119,6 +120,7 @@ impl EngineEquivalenceReport {
             || self.content_offset_mismatches > 0
             || self.mismatch_data_path_hash > 0
             || self.mismatch_tx_path_hash > 0
+            || self.skipped_frontier > 0
     }
 }
 
@@ -257,6 +259,9 @@ pub struct ConvertOptions {
     pub fail_after_batches: Option<u32>,
     /// Validate, scan, and report. Do not create or write the target.
     pub dry_run: bool,
+    /// Keep going when a placement is past the consensus frontier.
+    /// An empty consensus block index still fails the run.
+    pub allow_unresolved: bool,
 }
 
 impl ConvertOptions {
@@ -277,6 +282,7 @@ impl ConvertOptions {
             chunk_size: 0,
             fail_after_batches: None,
             dry_run: false,
+            allow_unresolved: false,
         }
     }
 }
@@ -351,6 +357,10 @@ trait RowSource {
         after: Option<PartitionChunkOffset>,
         limit: usize,
     ) -> eyre::Result<Vec<PartitionChunkOffset>>;
+
+    /// End offset of the last placement, in key order. `None` when the source
+    /// has no placement. This is the offset the consensus database must cover.
+    fn highest_placement_end(&self) -> eyre::Result<Option<PartitionChunkOffset>>;
 }
 
 #[derive(Clone, Copy)]
@@ -401,6 +411,10 @@ impl RowSource for MdbxSubmoduleStore {
             OffsetTable::DataPaths => self.read_keys::<ChunkDataPathByOffset>(after, limit),
             OffsetTable::Pending => self.read_keys::<PendingBodyMigrationsByOffset>(after, limit),
         }
+    }
+
+    fn highest_placement_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
+        self.highest_interval_end()
     }
 }
 
@@ -458,6 +472,10 @@ impl RowSource for RocksSubmoduleStore {
             OffsetTable::Pending => PendingBodyMigrationsByOffset::NAME,
         };
         self.read_cf_keys(name, after, limit)
+    }
+
+    fn highest_placement_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
+        RocksSubmoduleStore::highest_placement_end(self)
     }
 }
 
@@ -557,13 +575,22 @@ pub fn convert_rocks_to_mdbx(
             false,
         ));
     }
+    ensure_consensus_covers(
+        &db,
+        &map,
+        src.highest_placement_end()?,
+        options.allow_unresolved,
+    )?;
     let stats = if options.dry_run {
-        copy_v3_into_v2(&src, None, options, &db, &map)?
+        let stats = copy_v3_into_v2(&src, None, options, &db, &map)?;
+        refuse_unresolved(&stats, options)?;
+        stats
     } else {
         let args = exclusive_args(options);
         prepare_mdbx_target(mdbx_dir, args.clone(), options.replace_incomplete)?;
         let dst = map_open(MdbxSubmoduleStore::open_for_convert(mdbx_dir, args))?;
         let stats = copy_v3_into_v2(&src, Some(&dst), options, &db, &map)?;
+        refuse_unresolved(&stats, options)?;
         dst.put_schema_bytes(SUBMODULE_SCHEMA.as_bytes())?;
         stats
     };
@@ -2007,12 +2034,21 @@ fn copy_v2_rocks<S>(
 where
     S: RowSource + SubmoduleStore,
 {
+    ensure_consensus_covers(
+        db,
+        map,
+        src.highest_placement_end()?,
+        options.allow_unresolved,
+    )?;
     if options.dry_run {
-        return copy_v2_into_v3(src, None, options, db, map);
+        let stats = copy_v2_into_v3(src, None, options, db, map)?;
+        refuse_unresolved(&stats, options)?;
+        return Ok(stats);
     }
     prepare_rocks_target(dir, options.replace_incomplete)?;
     let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
     let stats = copy_v2_into_v3(src, Some(&dst), options, db, map)?;
+    refuse_unresolved(&stats, options)?;
     dst.stamp_schema_marker()?;
     Ok(stats)
 }
@@ -2089,14 +2125,96 @@ fn copy_v1_rocks(
     db: &DatabaseEnv,
     map: &PlacementMap,
 ) -> eyre::Result<ConvertStats> {
+    ensure_consensus_covers(
+        db,
+        map,
+        highest_v1_placement(env)?,
+        options.allow_unresolved,
+    )?;
     if options.dry_run {
-        return copy_v1_into_v3(env, None, options, db, map);
+        let stats = copy_v1_into_v3(env, None, options, db, map)?;
+        refuse_unresolved(&stats, options)?;
+        return Ok(stats);
     }
     prepare_rocks_target(dir, options.replace_incomplete)?;
     let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
     let stats = copy_v1_into_v3(env, Some(&dst), options, db, map)?;
+    refuse_unresolved(&stats, options)?;
     dst.stamp_schema_marker()?;
     Ok(stats)
+}
+
+/// Last offset that carries a tx-path hash. An orphan data-path row past that
+/// offset is not a placement.
+fn highest_v1_placement(env: &DatabaseEnv) -> eyre::Result<Option<PartitionChunkOffset>> {
+    env.view_eyre(|tx| {
+        let mut cursor = match tx.cursor_read::<ChunkPathHashesByOffset>() {
+            Ok(cursor) => cursor,
+            Err(err) if table_missing(&err) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let mut current = cursor.last()?;
+        while let Some((offset, hashes)) = current {
+            if hashes.tx_path_hash.is_some() {
+                return Ok(Some(offset));
+            }
+            current = cursor.prev()?;
+        }
+        Ok(None)
+    })
+}
+
+/// Refuse a consensus database that does not cover `highest`.
+///
+/// An empty block index is always an error, including when unresolved
+/// placements are allowed. A source with no placement skips this check.
+fn ensure_consensus_covers(
+    db: &DatabaseEnv,
+    map: &PlacementMap,
+    highest: Option<PartitionChunkOffset>,
+    allow_unresolved: bool,
+) -> eyre::Result<()> {
+    let Some(highest) = highest else {
+        return Ok(());
+    };
+    let ledger_offset = map.ledger_offset(highest)?;
+    let frontier = ledger_frontier(db, map.ledger).map_err(|err| {
+        eyre::eyre!(
+            "{err:#}. An empty or unreadable consensus block index is refused even with --allow-unresolved."
+        )
+    })?;
+    if ledger_offset < frontier {
+        return Ok(());
+    }
+    let summary = format!(
+        "consensus database does not cover the highest placement: partition offset {} is ledger {} offset {ledger_offset}, frontier is {frontier}",
+        highest.0,
+        map.ledger.get_id(),
+    );
+    if allow_unresolved {
+        tracing::warn!("{summary}");
+        return Ok(());
+    }
+    eyre::bail!(
+        "{summary}. The target was not written. Point --consensus-db at a database that includes this height, or pass --allow-unresolved to write a partial index."
+    )
+}
+
+/// A convert that skipped placements is not a successful index.
+fn refuse_unresolved(stats: &ConvertStats, options: &ConvertOptions) -> eyre::Result<()> {
+    if stats.skipped_frontier == 0 || options.allow_unresolved {
+        return Ok(());
+    }
+    let outcome = if options.dry_run {
+        "The target was not created."
+    } else {
+        "The target has no completion marker."
+    };
+    eyre::bail!(
+        "consensus database left {} placement(s) unresolved (skipped_frontier={}). {outcome} Point --consensus-db at a database that contains those blocks, or pass --allow-unresolved.",
+        stats.skipped_frontier,
+        stats.skipped_frontier,
+    )
 }
 
 fn copy_v1_into_v3(
@@ -3924,30 +4042,52 @@ mod tests {
         Ok(())
     }
 
+    fn add_orphan_and_frontier(mdbx: &Path) -> eyre::Result<()> {
+        let store = MdbxSubmoduleStore::open(mdbx, testing_args()?)?;
+        let hash = hid(77);
+        store.update(|tx| {
+            tx.add_full_data_path(PartitionChunkOffset(7), b"orphan-path".to_vec())?;
+            tx.add_full_tx_path(hash, b"frontier-path".to_vec())?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset(20),
+                PartitionChunkOffset(20),
+                Some(hash),
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     #[test]
-    fn orphan_and_frontier_rows_are_counted_not_aborted() -> eyre::Result<()> {
+    fn unresolved_placements_fail_unless_allowed() -> eyre::Result<()> {
         let root = temp("convert-skip");
         let consensus = populate_mdbx(root.path())?;
         let mdbx = root.path().join("db");
         let rocks = root.path().join("rocks");
-        {
-            let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
-            let hash = hid(77);
-            store.update(|tx| {
-                tx.add_full_data_path(PartitionChunkOffset(7), b"orphan-path".to_vec())?;
-                tx.add_full_tx_path(hash, b"frontier-path".to_vec())?;
-                tx.add_tx_path_hash_to_offset_range(
-                    PartitionChunkOffset(20),
-                    PartitionChunkOffset(20),
-                    Some(hash),
-                )?;
-                Ok(())
-            })?;
-        }
-        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        add_orphan_and_frontier(&mdbx)?;
+
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("does not cover"), "{text}");
+        assert!(text.contains("frontier is 13"), "{text}");
+        assert!(
+            !rocks.exists(),
+            "a behind consensus database must not create the target"
+        );
+
+        let mut dry = options_for(&consensus)?;
+        dry.dry_run = true;
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &dry).unwrap_err();
+        assert!(format!("{err:#}").contains("does not cover"), "{err:#}");
+        assert!(!rocks.exists());
+
+        let mut allowed = options_for(&consensus)?;
+        allowed.allow_unresolved = true;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &allowed)?;
         assert!(stats.skipped_orphans >= 1, "{stats}");
         assert!(stats.skipped_frontier >= 1, "{stats}");
         assert_eq!(stats.intervals, 2);
+        assert!(rocks.join("SCHEMA").is_file());
         let opened = RocksSubmoduleStore::open(&rocks)?;
         opened.view(|tx| {
             assert!(
@@ -3958,9 +4098,69 @@ mod tests {
             Ok(())
         })?;
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
-        assert!(!report.has_mismatch(), "{report}");
+        assert!(report.has_mismatch(), "{report}");
         assert!(report.skipped_orphans >= 1, "{report}");
         assert!(report.skipped_frontier >= 1, "{report}");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_consensus_block_index_is_refused() -> eyre::Result<()> {
+        let root = temp("convert-empty-consensus");
+        let consensus = populate_mdbx(root.path())?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let empty = root.path().join("empty-consensus");
+        fs::create_dir_all(&empty)?;
+        let db = open_or_create_db(&empty, IrysTables::ALL, testing_args()?)?;
+        db.update_eyre(|tx| {
+            crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+            Ok(())
+        })?;
+        drop(db);
+
+        let mut allowed = options_for(&empty)?;
+        allowed.allow_unresolved = true;
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &allowed).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("block index is empty"), "{text}");
+        assert!(text.contains("even with --allow-unresolved"), "{text}");
+        assert!(!rocks.exists());
+
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let back = root.path().join("db-back");
+        let err = convert_rocks_to_mdbx(&rocks, &back, &allowed).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("block index is empty"),
+            "{err:#}"
+        );
+        assert!(!back.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_counts_a_missing_target_placement() -> eyre::Result<()> {
+        let root = temp("convert-missing-place");
+        let consensus = populate_mdbx(root.path())?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        assert!(!clean.has_mismatch(), "{clean}");
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset(0),
+                    PartitionChunkOffset(2),
+                    None,
+                )?;
+                Ok(())
+            })?;
+        }
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        assert!(report.intervals_mismatches >= 1, "{report}");
+        assert!(report.has_mismatch(), "{report}");
         Ok(())
     }
 

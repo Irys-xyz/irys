@@ -352,6 +352,20 @@ pub fn consensus_is_behind(err: &eyre::Report) -> bool {
         || (text.contains("block header") && text.contains("missing"))
 }
 
+/// Chunk count of `ledger` at the latest migrated height.
+///
+/// An empty block index is an error. A ledger with no row at that height is
+/// an error. An offset is covered only when it is strictly below this total,
+/// the same bound [`locate_block`] uses.
+pub(crate) fn ledger_frontier(db: &DatabaseEnv, ledger: DataLedger) -> eyre::Result<u64> {
+    db.view_eyre(|tx| {
+        let anchor = block_index_latest_height(tx)?.ok_or_else(|| eyre!("block index is empty"))?;
+        let anchor_item = block_index_item_by_height(tx, &anchor)?;
+        ledger_total(&anchor_item.ledgers, ledger)
+            .ok_or_else(|| eyre!("ledger {ledger} is inactive at anchor height {anchor}"))
+    })
+}
+
 /// Tx headers for `ids`, in order. With a pool the ids are cut into one
 /// contiguous share per pool thread; each share is one read transaction.
 pub fn fetch_tx_headers(

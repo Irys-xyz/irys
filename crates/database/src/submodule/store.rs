@@ -577,6 +577,18 @@ impl MdbxSubmoduleStore {
         })
     }
 
+    /// End offset of the last tx interval. `None` when the table is empty.
+    #[cfg(feature = "rocksdb")]
+    pub(super) fn highest_interval_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
+        use reth_db::cursor::DbCursorRO as _;
+        use reth_db::transaction::DbTx as _;
+
+        self.env.view_eyre(|tx| {
+            let mut cursor = tx.cursor_read::<super::tables::TxPathIntervalByStart>()?;
+            Ok(cursor.last()?.map(|(_start, value)| value.end))
+        })
+    }
+
     #[cfg(test)]
     fn interval_row_count(&self) -> eyre::Result<usize> {
         use reth_db::transaction::DbTx as _;

@@ -1614,6 +1614,29 @@ impl RocksSubmoduleStore {
         Ok(out)
     }
 
+    /// End offset of the last placement. `None` when this index has no placement.
+    pub(super) fn highest_placement_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
+        let handle = cf_handle(&self.db, Cf::Interval)?;
+        let mut opts = ReadOptions::default();
+        opts.fill_cache(false);
+        let snap = self.db.snapshot();
+        let mut iter = snap.iterator_cf_opt(&handle, opts, IteratorMode::End);
+        let Some(item) = iter.next() else {
+            return Ok(None);
+        };
+        let (_key, value) = item.wrap_err("read the last placement")?;
+        let end = match self.layout {
+            IndexLayout::V3 => v3::decode_placement(value.as_ref())?.end,
+            IndexLayout::V2 => {
+                TxPathInterval::decompress(value.as_ref())
+                    .map_err(|err| eyre::eyre!("decode the last interval: {err}"))?
+                    .end
+                    .0
+            }
+        };
+        Ok(Some(PartitionChunkOffset(end)))
+    }
+
     pub(super) fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
         // A caller that already set the bound keeps it. Otherwise one second.
         if !self.group.delay_is_set() {

@@ -59,6 +59,14 @@ optional:
                                  orphans and a reset that would write an empty index.
                                  Does not create the target and does not write
                                  CONVERTING. Illegal on verify and verify-rocks.
+  --allow-unresolved             write the target even when the consensus database
+                                 does not cover every placement. Those placements
+                                 are omitted and counted as skipped_frontier.
+                                 Without this flag the run fails and does not write
+                                 the completion marker. An empty consensus block
+                                 index always fails. Illegal on verify and
+                                 verify-rocks. verify always counts skipped_frontier
+                                 as a mismatch.
 
 ledger offset = slot * chunks_per_partition + partition offset.
 The tool derives the tx path at that offset and requires the stored bytes to
@@ -66,8 +74,10 @@ be identical. A mismatch aborts and prints the partition offset.
 The source is never modified. A schema v1 MDBX index is read as v1.
 rocks-to-mdbx accepts only schema v3. A schema v2 RocksDB index uses rocks-to-v3.
 
-An empty index, or a slot and ledger that contain no indexed chunks, succeeds
-with these flags. The report then shows zero copied rows.
+An empty submodule index succeeds and the report shows zero copied rows.
+A placement the consensus database cannot resolve fails the run. The target
+then has no completion marker. Pass --allow-unresolved only for a partial
+index. verify and verify-rocks count skipped_frontier as a mismatch.
 
 Stop the node first. The tool locks the index and refuses a held lock.
 The completion marker is written last (rocks/SCHEMA, or the MDBX schema row).
@@ -100,7 +110,8 @@ Rollback to 4.0.8 is: keep the original db/ directory. This tool does not
 modify that directory. rocks-to-mdbx is only for a node whose live index is
 already RocksDB schema v2 or v3 and that will keep running this build.
 
-verify and verify-rocks exit 1 when a public read differs.
+verify and verify-rocks exit 1 when a public read differs or when a placement
+was skipped because the consensus database does not cover it.
 ";
 
 fn main() -> ExitCode {
@@ -125,6 +136,7 @@ fn run() -> eyre::Result<ExitCode> {
     options.consensus = consensus_db_args(&DatabaseConfig::default())?;
     options.replace_incomplete = tool.replace_incomplete;
     options.dry_run = tool.dry_run;
+    options.allow_unresolved = tool.allow_unresolved;
     options.consensus_db = Some(tool.consensus_db);
     options.ledger_id = tool.ledger_id;
     options.slot_index = tool.slot_index;
@@ -173,6 +185,7 @@ struct ToolArgs {
     command: Command,
     replace_incomplete: bool,
     dry_run: bool,
+    allow_unresolved: bool,
     consensus_db: PathBuf,
     ledger_id: u32,
     slot_index: u64,
@@ -205,6 +218,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     let raw: Vec<String> = args.collect();
     let mut replace_incomplete = false;
     let mut dry_run = false;
+    let mut allow_unresolved = false;
     let mut consensus_db = None;
     let mut ledger_id = None;
     let mut slot_index = None;
@@ -222,6 +236,10 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
             }
             "--dry-run" => {
                 dry_run = true;
+                index += 1;
+            }
+            "--allow-unresolved" => {
+                allow_unresolved = true;
                 index += 1;
             }
             "--consensus-db"
@@ -264,9 +282,9 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         std::process::exit(2);
     }
     let verify = matches!(command, Command::Verify | Command::VerifyRocks);
-    if (replace_incomplete || dry_run) && verify {
+    if (replace_incomplete || dry_run || allow_unresolved) && verify {
         eprintln!(
-            "error: --replace-incomplete and --dry-run are not valid for verify or verify-rocks"
+            "error: --replace-incomplete, --dry-run, and --allow-unresolved are not valid for verify or verify-rocks"
         );
         eprintln!("{USAGE}");
         std::process::exit(2);
@@ -295,6 +313,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         command,
         replace_incomplete,
         dry_run,
+        allow_unresolved,
         consensus_db,
         ledger_id,
         slot_index,
