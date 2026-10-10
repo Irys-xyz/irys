@@ -1044,7 +1044,12 @@ fn read_phase(
             let path = tx
                 .get_data_path_by_offset(PartitionChunkOffset::from(at))?
                 .ok_or_else(|| eyre::eyre!("missing data path body at {at}"))?;
-            eyre::ensure!(path.len() == args.path_bytes, "serve path len at {at}");
+            let want_len = expected_path_len(args, at);
+            eyre::ensure!(
+                path.len() == want_len,
+                "serve path len at {at}: {} != {want_len}",
+                path.len()
+            );
             // Schema v2 stores the hash the writer passed. Schema v3 has no
             // path-hash row, so the reported hash is sha256 of the bytes.
             let expected = if store.stores_tx_paths() {
@@ -1131,10 +1136,25 @@ fn read_phase(
     Ok(())
 }
 
+/// Stored proof length at `at`. Tree shapes vary the depth per transaction
+/// (and per leaf in an odd tree), so ask the generator.
+fn expected_path_len(args: &Args, at: u32) -> usize {
+    if args.workload.is_tree() {
+        data_path_bytes(args, at).len()
+    } else {
+        args.path_bytes
+    }
+}
+
 fn read_one_data_path(store: &SubmoduleIndex, args: &Args, at: u32) -> eyre::Result<()> {
     let path = store.view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(at)))?;
     let path = path.ok_or_else(|| eyre::eyre!("missing data path at {at}"))?;
-    eyre::ensure!(path.len() == args.path_bytes, "data path len at {at}");
+    let expected = expected_path_len(args, at);
+    eyre::ensure!(
+        path.len() == expected,
+        "data path len at {at}: {} != {expected}",
+        path.len()
+    );
     Ok(())
 }
 
