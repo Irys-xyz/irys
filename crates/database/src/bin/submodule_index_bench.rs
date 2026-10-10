@@ -251,8 +251,18 @@ struct Args {
     schema: IndexSchema,
 }
 
+/// Every open gets its own block cache, sized like the production shared
+/// cache. The process-wide shared cache survives a reopen, so a cold shape
+/// would hit blocks an earlier shape loaded (serve samples overlap the random
+/// shape's offsets). Presets that already chose a private cache keep it.
 fn open_bench_rocks(path: &Path, args: &Args) -> eyre::Result<SubmoduleIndex> {
-    SubmoduleIndex::open_rocks_bench(path, args.rocks, args.schema.is_v3())
+    let tuning = if args.rocks.share_resources {
+        args.rocks
+            .with_block_cache(irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES as usize)
+    } else {
+        args.rocks
+    };
+    SubmoduleIndex::open_rocks_bench(path, tuning, args.schema.is_v3())
 }
 
 fn main() -> eyre::Result<()> {
