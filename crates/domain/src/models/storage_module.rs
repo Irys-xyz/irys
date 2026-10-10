@@ -2685,7 +2685,25 @@ impl StorageModule {
         // One durable index batch per submodule in this gap. It holds the
         // data-path rows for the chunks just synced. A synced RocksDB write
         // also covers registrations still waiting on group commit.
-        self.commit_presence_rows(&durable_batch)?;
+        let uncovered = self.commit_presence_rows(&durable_batch)?;
+        // A proof with no covering interval was not stored. Put those offsets
+        // back to Uninitialized before the completion file is written, and
+        // leave them queued. A crash must not reload Data with no proof.
+        let skipped: BTreeSet<PartitionChunkOffset> = uncovered.into_iter().collect();
+        if !skipped.is_empty() {
+            index_read_metrics::note_uncovered_data_path(skipped.len() as u64);
+            let mut intervals = self
+                .intervals
+                .write()
+                .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+            for offset in &skipped {
+                Self::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    *offset,
+                    ChunkType::Uninitialized,
+                );
+            }
+        }
 
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::BeforeIntervalCommit)?;
@@ -2698,9 +2716,13 @@ impl StorageModule {
 
         // Remove only the exact values written by this snapshot. A concurrent
         // producer may have replaced an entry while the disk I/O was running;
-        // that newer value must remain queued for the next batch.
+        // that newer value must remain queued for the next batch. An offset
+        // whose proof was not stored stays queued with that proof.
         let mut pending = self.pending_writes.write().unwrap();
         for (chunk_offset, state, _) in write_batch {
+            if skipped.contains(chunk_offset) {
+                continue;
+            }
             if pending.get(chunk_offset) == Some(state) {
                 pending.remove(chunk_offset);
                 pending.priorities.remove(chunk_offset);
@@ -2709,6 +2731,9 @@ impl StorageModule {
             }
         }
         for (chunk_offset, state, _) in &ahead {
+            if skipped.contains(chunk_offset) {
+                continue;
+            }
             if pending.written_ahead.get(chunk_offset) == Some(state) {
                 pending.written_ahead.remove(chunk_offset);
                 pending.proofs.remove(chunk_offset);
@@ -2919,7 +2944,9 @@ impl StorageModule {
     /// Write the data-path rows for data chunks in `write_batch`.
     ///
     /// Call this only after `chunks.dat` has been fdatasync'd. A chunk with no
-    /// stored proof (an entropy or raw write) has no presence row.
+    /// stored proof (an entropy or raw write) has no presence row. The
+    /// returned offsets had a proof and no covering interval. Those proofs
+    /// were not stored.
     fn commit_presence_rows(
         &self,
         write_batch: &[(
@@ -2927,7 +2954,7 @@ impl StorageModule {
             (ChunkBytes, ChunkType),
             disk_lane::WritePriority,
         )],
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let mut by_start: BTreeMap<
             PartitionChunkOffset,
             Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
@@ -2949,13 +2976,15 @@ impl StorageModule {
                 ));
             }
         }
+        let mut uncovered = Vec::new();
         for (start, updates) in by_start {
             let (_, submodule) = self.get_submodule_for_offset(start)?;
-            submodule
+            let missed = submodule
                 .db
                 .update(|tx| tx.write_data_path_updates(updates))?;
+            uncovered.extend(missed);
         }
-        Ok(())
+        Ok(uncovered)
     }
 
     /// Persists partition interval data to individual submodules.
@@ -6877,6 +6906,81 @@ mod tests {
         assert_eq!(
             storage.durable_tx_offsets_for_data_root(data_root, &candidates)?,
             candidates
+        );
+        Ok(())
+    }
+
+    /// Rollback clears the interval while a packed chunk is still queued.
+    /// The durable point must not mark that chunk stored: the proof has
+    /// nowhere to go, so the chunk stays pending and the interval stays
+    /// `Uninitialized`.
+    #[test]
+    fn uncovered_proof_stays_queued_after_interval_rollback() -> eyre::Result<()> {
+        let (_tmp, _config, storage) =
+            open_presence_module("uncovered_proof", SubmoduleIndexEngine::Rocksdb)?;
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let data_root = H256::repeat_byte(4);
+        submodule.db.update(|tx| {
+            tx.add_tx_leaf_binding(
+                data_root,
+                &TxLeafBinding {
+                    data_root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(0),
+                Some(data_root),
+            )?;
+            tx.add_data_root_info(
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 32,
+                },
+            )
+        })?;
+
+        let offset = PartitionChunkOffset::from(0);
+        {
+            let mut pending = storage.pending_writes.write().unwrap();
+            pending.insert(offset, (vec![9_u8; 32], ChunkType::Data));
+            pending
+                .priorities
+                .insert(offset, disk_lane::WritePriority::Ingress);
+            pending.queued_at.insert(offset, Instant::now());
+            pending
+                .proofs
+                .insert(offset, (H256::repeat_byte(1), vec![1, 2, 3]));
+        }
+        storage.clear_offset_index_in_range(offset, offset)?;
+
+        let before = index_read_metrics::uncovered_data_path_for_test();
+        storage.force_sync_pending_chunks()?;
+        assert!(
+            index_read_metrics::uncovered_data_path_for_test() >= before + 1,
+            "an uncovered proof must count"
+        );
+        assert!(!storage.is_data_chunk_durable_at(offset));
+        assert!(storage.is_data_write_pending_at(offset));
+        assert!(data_path_at(&storage, 0)?.is_none());
+        assert!(
+            storage
+                .pending_writes
+                .read()
+                .unwrap()
+                .proofs
+                .contains_key(&offset)
+        );
+        assert_eq!(
+            storage
+                .intervals()
+                .read()
+                .unwrap()
+                .get_at_point(offset)
+                .copied(),
+            Some(ChunkType::Uninitialized)
         );
         Ok(())
     }

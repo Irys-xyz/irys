@@ -6,6 +6,9 @@
 
 use std::{cell::Cell, sync::LazyLock};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use opentelemetry::{KeyValue, global, metrics::Counter};
 
 pub(crate) const SERVE_LEDGER: &str = "serve_ledger";
@@ -115,6 +118,31 @@ static PRESENCE_RECONCILED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 pub(crate) fn note_presence_reconciled(rows: u64) {
     PRESENCE_RECONCILED.add(rows, &[]);
+}
+
+static UNCOVERED_DATA_PATH: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.uncovered_data_path_total")
+        .with_description("Data-path proofs not stored because no interval covers the offset")
+        .build()
+});
+
+#[cfg(test)]
+static UNCOVERED_DATA_PATH_TEST: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_uncovered_data_path(rows: u64) {
+    UNCOVERED_DATA_PATH.add(rows, &[]);
+    #[cfg(test)]
+    {
+        UNCOVERED_DATA_PATH_TEST.fetch_add(rows, Ordering::Relaxed);
+    }
+}
+
+/// Proofs dropped since process start. Tests assert a delta. Parallel tests
+/// can add to the same counter.
+#[cfg(test)]
+pub(crate) fn uncovered_data_path_for_test() -> u64 {
+    UNCOVERED_DATA_PATH_TEST.load(Ordering::Relaxed)
 }
 
 static DURABLE_POINTS: LazyLock<Counter<u64>> = LazyLock::new(|| {

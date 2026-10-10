@@ -244,11 +244,13 @@ pub trait SubmoduleWrite: SubmoduleRead {
 
     /// Store each chunk's data path under its offset, and the hash on the offset row.
     ///
-    /// The tx-path interval is left in place.
+    /// The tx-path interval is left in place. Schema v3 skips an offset that
+    /// no interval covers and returns it. Those bytes are not stored. v2 and
+    /// MDBX always store and return an empty list.
     fn write_data_path_updates(
         &mut self,
         updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
-    ) -> eyre::Result<()>;
+    ) -> eyre::Result<Vec<PartitionChunkOffset>>;
 
     fn set_path_hashes_by_offset(
         &mut self,
@@ -942,7 +944,7 @@ impl SubmoduleWrite for MdbxWrite<'_> {
     fn write_data_path_updates(
         &mut self,
         updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         write_data_path_updates(self.tx, updates)
     }
 

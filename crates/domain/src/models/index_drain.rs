@@ -8,6 +8,7 @@
 //! when `update_eyre` starts: after the chunk `pread`s, `pwrite`s, and
 //! mining recall on this drive have left the gap, and not during them.
 
+use super::super::index_read_metrics::note_uncovered_data_path;
 use super::{WriteDataChunkError, disk_lane::DiskWake};
 use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
 use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset};
@@ -468,12 +469,26 @@ impl DrainRunner {
         }
         let result = self.write_batch(&apply);
         self.clear_in_flight(&apply);
-        for op in apply {
-            let ack = match &result {
-                Ok(()) => Ok(()),
-                Err(error) => Err(WriteDataChunkError::Other(eyre::eyre!("{error}"))),
-            };
-            send_ack(op, ack);
+        match result {
+            Ok(missed) => {
+                let missed: HashSet<_> = missed.into_iter().collect();
+                for op in apply {
+                    let ack = if missed.contains(&op.offset) {
+                        Err(WriteDataChunkError::Other(eyre::eyre!(
+                            "data path at offset {} has no covering interval",
+                            op.offset.0
+                        )))
+                    } else {
+                        Ok(())
+                    };
+                    send_ack(op, ack);
+                }
+            }
+            Err(error) => {
+                for op in apply {
+                    send_ack(op, Err(WriteDataChunkError::Other(eyre::eyre!("{error}"))));
+                }
+            }
         }
     }
 
@@ -498,7 +513,7 @@ impl DrainRunner {
         self.in_flight.cv.notify_all();
     }
 
-    fn write_batch(&self, batch: &[IndexOp]) -> eyre::Result<()> {
+    fn write_batch(&self, batch: &[IndexOp]) -> eyre::Result<Vec<PartitionChunkOffset>> {
         #[cfg(test)]
         if let Some(hooks) = &self.hooks {
             hooks.commit_count.fetch_add(1, Ordering::SeqCst);
@@ -506,7 +521,7 @@ impl DrainRunner {
         if self.fail_next.swap(false, Ordering::SeqCst) {
             eyre::bail!("injected index drain commit failure");
         }
-        self.db.update(|tx| {
+        let uncovered = self.db.update(|tx| {
             // clone: put consumes the path bytes; the IndexOp is kept for the waiter ACK.
             // Offset order walks the leaf pages forward inside this one commit.
             let updates = batch
@@ -518,7 +533,11 @@ impl DrainRunner {
         // A presence batch is a durable point, so this `update` stays synced.
         // The ack below must not run ahead of that sync. `sync_group` is a
         // no-op once the write covered the open group.
-        self.db.sync_group()
+        self.db.sync_group()?;
+        if !uncovered.is_empty() {
+            note_uncovered_data_path(uncovered.len() as u64);
+        }
+        Ok(uncovered)
     }
 }
 

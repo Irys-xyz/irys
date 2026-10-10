@@ -1170,7 +1170,8 @@ fn read_phase(
                     PartitionChunkOffset::from(at),
                     hash_at(u64::from(at) + 0x2000_0000),
                     path,
-                )])
+                )])?;
+                Ok(())
             })
         },
     )?;

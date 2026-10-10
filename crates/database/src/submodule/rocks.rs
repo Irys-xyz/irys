@@ -5363,6 +5363,10 @@ impl SubmoduleWrite for Batch<'_> {
             // A proof committed after its interval was cleared would outlive
             // the placement. Drop it. The batch overlay is visible here.
             if self.rows().interval_covering(offset)?.is_none() {
+                tracing::warn!(
+                    offset = offset.0,
+                    "data path has no covering interval; the proof was not stored"
+                );
                 return Ok(());
             }
             // Read the previous proof before this put hides it. A different
@@ -5439,13 +5443,24 @@ impl SubmoduleWrite for Batch<'_> {
     fn write_data_path_updates(
         &mut self,
         mut updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         updates.sort_by_key(|(offset, _, _)| *offset);
+        let mut uncovered = Vec::new();
         for (offset, path_hash, data_path) in updates {
+            // Skip the path write too. `add_full_data_path` would drop it and
+            // warn again, and a hash with no path is not a stored proof.
+            if self.layout == IndexLayout::V3 && self.rows().interval_covering(offset)?.is_none() {
+                tracing::warn!(
+                    offset = offset.0,
+                    "data path has no covering interval; the proof was not stored"
+                );
+                uncovered.push(offset);
+                continue;
+            }
             self.add_full_data_path(offset, data_path)?;
             self.put_data_path_hash(offset, Some(path_hash));
         }
-        Ok(())
+        Ok(uncovered)
     }
 
     fn set_path_hashes_by_offset(
@@ -5656,6 +5671,59 @@ mod tests {
         );
         let marker = fs::read_to_string(path.join(SCHEMA_FILE))?;
         assert_eq!(marker, SCHEMA_TEXT);
+        Ok(())
+    }
+
+    /// A schema v3 proof outside every interval is not stored. A covered
+    /// offset in the same batch still is. The skipped offset is the result.
+    #[test]
+    fn uncovered_data_path_is_reported_and_not_stored() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_uncovered_path")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        let covered = PartitionChunkOffset::from(1);
+        let missing = PartitionChunkOffset::from(4);
+        let root = H256::repeat_byte(9);
+        store.update(|tx| {
+            tx.add_tx_leaf_binding(
+                root,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(covered, covered, Some(root))?;
+            tx.add_data_root_info(
+                root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(1),
+                    data_size: 32,
+                },
+            )
+        })?;
+        let missed = store.update(|tx| {
+            tx.write_data_path_updates(vec![
+                (missing, H256::repeat_byte(4), vec![4, 4]),
+                (covered, H256::repeat_byte(1), vec![1, 1]),
+            ])
+        })?;
+        assert_eq!(missed, vec![missing]);
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(missing))?
+                .is_none()
+        );
+        assert_eq!(
+            store.view(|tx| tx.get_data_path_by_offset(covered))?,
+            Some(vec![1, 1])
+        );
+        store.update(|tx| tx.add_full_data_path(missing, vec![9, 9]))?;
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(missing))?
+                .is_none()
+        );
         Ok(())
     }
 

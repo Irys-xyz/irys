@@ -338,16 +338,18 @@ pub fn add_tx_path_hash_to_offset_range<T: DbTxMut + DbTx>(
 /// Store each chunk's data path under its offset, and the hash on the offset row.
 ///
 /// `updates` may arrive in any offset order. The tx-path interval is unchanged.
+/// MDBX always stores every update. The returned list is empty. Schema v3
+/// reports offsets it skipped from its own writer.
 pub fn write_data_path_updates<T: DbTxMut + DbTx>(
     tx: &T,
     mut updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
-) -> eyre::Result<()> {
+) -> eyre::Result<Vec<PartitionChunkOffset>> {
     updates.sort_by_key(|(offset, _, _)| *offset);
     for (offset, path_hash, data_path) in updates {
         add_full_data_path(tx, offset, data_path)?;
         put_data_path_hash(tx, offset, Some(path_hash))?;
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 pub fn set_path_hashes_by_offset<T: DbTxMut + DbTx>(
