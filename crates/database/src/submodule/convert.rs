@@ -2113,11 +2113,6 @@ fn write_reset_mdbx(dir: &Path, options: &ConvertOptions) -> eyre::Result<Conver
     })
 }
 
-enum V1Take {
-    Frontier,
-    Wrote { paths: u64, info: bool },
-}
-
 fn copy_v1_rocks(
     env: &DatabaseEnv,
     dir: &Path,
@@ -2217,6 +2212,40 @@ fn refuse_unresolved(stats: &ConvertStats, options: &ConvertOptions) -> eyre::Re
     )
 }
 
+struct V1Ready {
+    placement: PreparedPlacement,
+    paths: Vec<(PartitionChunkOffset, ChunkDataPath)>,
+    path_bytes: usize,
+    /// The path bytes were larger than one batch. Write the placement, then
+    /// scan this range once. Short runs keep `paths` and do not scan again.
+    rescan: bool,
+}
+
+struct V1Out {
+    items: Vec<V1Ready>,
+    placements: usize,
+    bytes: usize,
+}
+
+struct V1Src<'a> {
+    env: &'a DatabaseEnv,
+    db: &'a DatabaseEnv,
+    cache: &'a mut TxPathBlockCache,
+    map: &'a PlacementMap,
+}
+
+struct V1Sink<'a> {
+    dst: Option<&'a RocksSubmoduleStore>,
+    limits: Limits,
+    progress: &'a mut CopyProgress,
+    stats: &'a mut ConvertStats,
+    written: &'a mut FrontierSkips,
+    frontier: &'a mut FrontierSkips,
+    out: &'a mut V1Out,
+}
+
+/// One streaming read of the v1 hash table. Placements and their data paths
+/// share a durable commit, up to `batch_rows` placements or `batch_value_bytes`.
 fn copy_v1_into_v3(
     env: &DatabaseEnv,
     dst: Option<&RocksSubmoduleStore>,
@@ -2233,32 +2262,86 @@ fn copy_v1_into_v3(
     let mut written = FrontierSkips::default();
     let mut frontier = FrontierSkips::default();
     let mut stats = ConvertStats::default();
-    let orphans = walk_v1_intervals(env, limits, |run| {
-        match accept_v1_run(env, dst, db, &mut cache, map, &run, limits, &mut progress)? {
-            V1Take::Frontier => {
-                stats.skipped_frontier = stats.skipped_frontier.saturating_add(1);
-                frontier.push(
-                    PartitionChunkOffset(run.start),
-                    PartitionChunkOffset(run.end),
-                );
-            }
-            V1Take::Wrote { paths, info } => {
-                stats.intervals = stats.intervals.saturating_add(1);
-                stats.tx_paths = stats.intervals;
-                stats.tx_leaf_bindings = stats.intervals;
-                stats.data_paths = stats.data_paths.saturating_add(paths);
-                stats.path_hashes = stats.data_paths;
-                if info {
-                    stats.data_roots = stats.data_roots.saturating_add(1);
+    let mut out = V1Out {
+        items: Vec::new(),
+        placements: 0,
+        bytes: 0,
+    };
+    let mut open = None;
+    let mut paths = Vec::new();
+    let mut path_bytes = 0_usize;
+    let mut rescan = false;
+    let mut after = None;
+    let mut orphans = 0_u64;
+    {
+        let mut src = V1Src {
+            env,
+            db,
+            cache: &mut cache,
+            map,
+        };
+        let mut sink = V1Sink {
+            dst,
+            limits,
+            progress: &mut progress,
+            stats: &mut stats,
+            written: &mut written,
+            frontier: &mut frontier,
+            out: &mut out,
+        };
+        loop {
+            let batch = read_v1_hash_batch(env, after, limits)?;
+            if batch.is_empty() {
+                if let Some(run) = open.take() {
+                    close_v1_run(
+                        &mut src,
+                        &mut sink,
+                        run,
+                        std::mem::take(&mut paths),
+                        path_bytes,
+                        rescan,
+                    )?;
                 }
-                written.push(
-                    PartitionChunkOffset(run.start),
-                    PartitionChunkOffset(run.end),
-                );
+                break;
             }
+            for (offset, hashes) in &batch {
+                let mut closed = Vec::new();
+                migrate::absorb(&mut open, offset.0, hashes.tx_path_hash, &mut closed);
+                if let Some(run) = closed.pop() {
+                    let taken_bytes = path_bytes;
+                    let taken_rescan = rescan;
+                    path_bytes = 0;
+                    rescan = false;
+                    close_v1_run(
+                        &mut src,
+                        &mut sink,
+                        run,
+                        std::mem::take(&mut paths),
+                        taken_bytes,
+                        taken_rescan,
+                    )?;
+                }
+                if hashes.tx_path_hash.is_none() {
+                    if let Some(hash) = hashes.data_path_hash {
+                        let _path = read_v1_data_path(env, *offset, hash)?;
+                        orphans = orphans.saturating_add(1);
+                    }
+                } else if let Some(hash) = hashes.data_path_hash {
+                    let path = read_v1_data_path(env, *offset, hash)?;
+                    attach_v1_path(
+                        limits,
+                        &mut paths,
+                        &mut path_bytes,
+                        &mut rescan,
+                        *offset,
+                        path,
+                    );
+                }
+            }
+            after = batch.last().map(|(key, _)| *key);
         }
-        Ok(())
-    })?;
+        flush_v1_out(&mut sink)?;
+    }
     stats.skipped_orphans = stats.skipped_orphans.saturating_add(orphans);
     let (pending, orphan_pending, frontier_pending) =
         copy_v1_pending(env, dst, &written, &frontier, limits, &mut progress)?;
@@ -2268,16 +2351,124 @@ fn copy_v1_into_v3(
     Ok(stats)
 }
 
-fn accept_v1_run(
+fn attach_v1_path(
+    limits: Limits,
+    paths: &mut Vec<(PartitionChunkOffset, ChunkDataPath)>,
+    path_bytes: &mut usize,
+    rescan: &mut bool,
+    offset: PartitionChunkOffset,
+    path: ChunkDataPath,
+) {
+    if *rescan {
+        return;
+    }
+    let len = path.len();
+    if !paths.is_empty() && path_bytes.saturating_add(len) > limits.value_bytes {
+        *rescan = true;
+        paths.clear();
+        *path_bytes = 0;
+        return;
+    }
+    *path_bytes = path_bytes.saturating_add(len);
+    paths.push((offset, path));
+}
+
+fn close_v1_run(
+    src: &mut V1Src<'_>,
+    sink: &mut V1Sink<'_>,
+    run: OpenRun,
+    paths: Vec<(PartitionChunkOffset, ChunkDataPath)>,
+    path_bytes: usize,
+    rescan: bool,
+) -> eyre::Result<()> {
+    let Some(placement) = prepare_v1_placement(src.env, src.db, src.cache, src.map, &run)? else {
+        sink.stats.skipped_frontier = sink.stats.skipped_frontier.saturating_add(1);
+        sink.frontier.push(
+            PartitionChunkOffset(run.start),
+            PartitionChunkOffset(run.end),
+        );
+        return Ok(());
+    };
+    let start = placement.start;
+    let end = placement.end;
+    push_v1_ready(
+        sink,
+        V1Ready {
+            placement,
+            paths: if rescan { Vec::new() } else { paths },
+            path_bytes: if rescan { 0 } else { path_bytes },
+            rescan,
+        },
+    )?;
+    if rescan {
+        flush_v1_out(sink)?;
+        let copied =
+            copy_v1_range_paths(src.env, sink.dst, start, end, sink.limits, sink.progress)?;
+        sink.stats.data_paths = sink.stats.data_paths.saturating_add(copied);
+        sink.stats.path_hashes = sink.stats.data_paths;
+    }
+    Ok(())
+}
+
+fn push_v1_ready(sink: &mut V1Sink<'_>, ready: V1Ready) -> eyre::Result<()> {
+    let add_bytes = ready.path_bytes;
+    let full = !sink.out.items.is_empty()
+        && (sink.out.placements >= sink.limits.rows
+            || sink.out.bytes.saturating_add(add_bytes) > sink.limits.value_bytes);
+    if full {
+        flush_v1_out(sink)?;
+    }
+    sink.stats.intervals = sink.stats.intervals.saturating_add(1);
+    sink.stats.tx_paths = sink.stats.intervals;
+    sink.stats.tx_leaf_bindings = sink.stats.intervals;
+    if !ready.rescan {
+        sink.stats.data_paths = sink
+            .stats
+            .data_paths
+            .saturating_add(u64::try_from(ready.paths.len()).unwrap_or(u64::MAX));
+        sink.stats.path_hashes = sink.stats.data_paths;
+    }
+    if ready.placement.info.is_some() {
+        sink.stats.data_roots = sink.stats.data_roots.saturating_add(1);
+    }
+    sink.written
+        .push(ready.placement.start, ready.placement.end);
+    sink.out.placements = sink.out.placements.saturating_add(1);
+    sink.out.bytes = sink.out.bytes.saturating_add(add_bytes);
+    sink.out.items.push(ready);
+    Ok(())
+}
+
+fn flush_v1_out(sink: &mut V1Sink<'_>) -> eyre::Result<()> {
+    if sink.out.items.is_empty() {
+        return Ok(());
+    }
+    let items = std::mem::take(&mut sink.out.items);
+    sink.out.placements = 0;
+    sink.out.bytes = 0;
+    if let Some(dst) = sink.dst {
+        dst.update(|tx| {
+            for item in items {
+                write_v3_placement(tx, &item.placement)?;
+                for (offset, path) in item.paths {
+                    require_interval(tx, offset, "data path")?;
+                    tx.add_full_data_path(offset, path)?;
+                }
+            }
+            Ok(())
+        })?;
+        sink.progress.note()?;
+    }
+    Ok(())
+}
+
+fn prepare_v1_placement(
     env: &DatabaseEnv,
-    dst: Option<&RocksSubmoduleStore>,
     db: &DatabaseEnv,
     cache: &mut TxPathBlockCache,
     map: &PlacementMap,
     run: &OpenRun,
-    limits: Limits,
-    progress: &mut CopyProgress,
-) -> eyre::Result<V1Take> {
+) -> eyre::Result<Option<PreparedPlacement>> {
     let start = PartitionChunkOffset(run.start);
     let end = PartitionChunkOffset(run.end);
     let stored = read_v1_tx_path(env, run.tx_hash)?
@@ -2289,7 +2480,7 @@ fn accept_v1_run(
         );
     }
     let Some(derived) = derive_checked(db, cache, map, start, end, &stored)? else {
-        return Ok(V1Take::Frontier);
+        return Ok(None);
     };
     let header = db
         .view_eyre(|tx| tx_header_by_txid(tx, &derived.tx_id))?
@@ -2312,27 +2503,18 @@ fn accept_v1_run(
     let info = v1_covering_info(env, derived.data_root, start)?;
     let tx_index = u32::try_from(derived.tx_index)
         .map_err(|_| eyre::eyre!("tx index at partition offset {} exceeds u32", start.0))?;
-    let prepared = PreparedPlacement {
+    Ok(Some(PreparedPlacement {
         start,
         end,
         path_hash: run.tx_hash,
         data_root: derived.data_root,
         prefix_hash: header.prefix_hash,
-        info: info.clone(),
+        info,
         ledger_id: map.ledger.get_id(),
         block_height: derived.height,
         tx_index,
         had_binding: binding.is_some(),
-    };
-    if let Some(dst) = dst {
-        dst.update(|tx| write_v3_placement(tx, &prepared))?;
-        progress.note()?;
-    }
-    let paths = copy_v1_range_paths(env, dst, start, end, limits, progress)?;
-    Ok(V1Take::Wrote {
-        paths,
-        info: info.is_some(),
-    })
+    }))
 }
 
 fn walk_v1_intervals(
@@ -4161,6 +4343,125 @@ mod tests {
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
         assert!(report.intervals_mismatches >= 1, "{report}");
         assert!(report.has_mismatch(), "{report}");
+        Ok(())
+    }
+
+    /// One-chunk v1 placements, one tx each, in a single block. This is the
+    /// shape that used to commit twice per placement.
+    fn write_v1_one_chunk_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
+        use crate::submodule::tables::v1_fixture::master;
+        use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
+        use reth_db::Database as _;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let consensus = root.join("consensus");
+        fs::create_dir_all(&consensus)?;
+        let txs: Vec<_> = (0..n).map(|i| tx_at(i + 1, 32)).collect();
+        let blocks = [block_with(0, &[], 0), block_with(1, &txs, n)];
+        let db = open_or_create_db(&consensus, IrysTables::ALL, testing_args()?)?;
+        db.update_eyre(|tx| {
+            for header in &txs {
+                insert_tx_header(tx, header)?;
+            }
+            for block in &blocks {
+                insert_block_header(tx, block)?;
+                insert_block_index_items_for_block(tx, block)?;
+            }
+            crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+            Ok(())
+        })?;
+        drop(db);
+
+        let opened = open_consensus(&consensus)?;
+        let mut cache = TxPathBlockCache::new();
+        let mdbx = root.join("db");
+        let index = open_or_create_db(&mdbx, master::MasterV1Tables::ALL, testing_args()?)?;
+        {
+            let tx = index.tx_mut()?;
+            for offset in 0..n {
+                let derived = derive_tx_path_at_offset_cached(
+                    &opened,
+                    &mut cache,
+                    DataLedger::Publish,
+                    offset,
+                    32,
+                )?;
+                let proof = derived.proof.proof;
+                let path_hash = tx_path_hash(&proof);
+                let data = (offset as u32).to_be_bytes().to_vec();
+                let data_hash = H256::from(hash_sha256(&data));
+                let key = PartitionChunkOffset(offset as u32);
+                tx.put::<master::ChunkPathHashesByOffset>(
+                    key,
+                    ChunkPathHashes {
+                        data_path_hash: Some(data_hash),
+                        tx_path_hash: Some(path_hash),
+                    },
+                )?;
+                tx.put::<master::ChunkDataPathByPathHash>(data_hash, data)?;
+                tx.put::<master::TxPathByTxPathHash>(path_hash, proof)?;
+            }
+            tx.commit()?;
+        }
+        drop(index);
+        drop(opened);
+        Ok(consensus)
+    }
+
+    #[test]
+    fn v1_one_chunk_placements_share_a_batch() -> eyre::Result<()> {
+        let root = temp("convert-v1-batch");
+        let consensus = write_v1_one_chunk_partition(root.path(), 3)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = 3;
+        options.batch_rows = 8;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.intervals, 3);
+        assert_eq!(stats.data_paths, 3);
+        assert_eq!(stats.skipped_frontier, 0);
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        let opened = RocksSubmoduleStore::open(&rocks)?;
+        opened.view(|tx| {
+            let place = tx
+                .placement_at(PartitionChunkOffset(2))?
+                .expect("third placement");
+            assert_eq!(place.tx_index, Some(2));
+            assert_eq!(place.end, PartitionChunkOffset(2));
+            assert!(
+                tx.get_data_path_by_offset(PartitionChunkOffset(2))?
+                    .is_some()
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "throughput sample for the v1 convert path"]
+    fn measure_v1_one_chunk_convert() -> eyre::Result<()> {
+        const N: u64 = 2048;
+        let root = temp("convert-v1-rate");
+        let consensus = write_v1_one_chunk_partition(root.path(), N)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.intervals, N);
+        assert_eq!(stats.data_paths, N);
+        assert_eq!(stats.skipped_frontier, 0);
+        let per_s = (N as f64) * 1000.0 / (stats.elapsed_ms.max(1) as f64);
+        eprintln!(
+            "v1_convert placements={N} elapsed_ms={} placements_per_s={per_s:.1}",
+            stats.elapsed_ms
+        );
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
         Ok(())
     }
 
