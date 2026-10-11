@@ -7,19 +7,23 @@
 //! cover that case.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use eyre::WrapErr as _;
 
-use crate::utils::IrysNodeTest;
+use crate::utils::{self, IrysNodeTest};
+use irys_actors::block_producer::BlockProducerCommand;
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_database::tx_path_derive::derive_tx_path_at_offset;
 use irys_domain::ChunkType;
 use irys_testing_utils::initialize_tracing;
+use irys_types::block_production::{TxPathJob, TxPathSource};
 use irys_types::hardfork_config::Cascade;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BoundedFee, DataLedger, DataTransaction, H256, IrysBlockHeader, NodeConfig, PoaData,
-    SubmoduleIndexEngine, UnixTimestamp,
+    SendTraced as _, SubmoduleIndexEngine, UnixTimestamp,
 };
 
 const CHUNK_SIZE: usize = 32;
@@ -190,6 +194,48 @@ async fn wait_for_data_on_slot(
     eyre::bail!("{ledger:?} slot {slot} has no data interval after 16 blocks")
 }
 
+/// The PoA tx path is the derive for this slot, and the tx is not the first
+/// tx in the block that introduced the chunk.
+fn assert_derived_tx_index(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    block: &IrysBlockHeader,
+    ledger: DataLedger,
+    slot: usize,
+) -> eyre::Result<()> {
+    let chunks = node.node_ctx.config.consensus.num_chunks_in_partition;
+    let ledger_offset = u64::try_from(slot)
+        .ok()
+        .and_then(|slot| slot.checked_mul(chunks))
+        .and_then(|base| base.checked_add(u64::from(block.poa.partition_chunk_offset)))
+        .ok_or_else(|| eyre::eyre!("ledger offset overflow"))?;
+    let derived = derive_tx_path_at_offset(
+        node.node_ctx.db.as_ref(),
+        ledger,
+        ledger_offset,
+        node.node_ctx.config.consensus.chunk_size,
+    )
+    .wrap_err_with(|| format!("derive {ledger:?} offset {ledger_offset}"))?;
+    eyre::ensure!(
+        derived.tx_index > 0,
+        "{ledger:?} offset {ledger_offset} derived tx_index {}, tx_count {}",
+        derived.tx_index,
+        derived.tx_count
+    );
+    let poa_path = block
+        .poa
+        .tx_path
+        .as_ref()
+        .map(|path| path.0.as_slice())
+        .unwrap_or(&[]);
+    eyre::ensure!(
+        poa_path == derived.proof.proof.as_slice(),
+        "poa tx path ({} bytes) does not match the derived proof ({} bytes)",
+        poa_path.len(),
+        derived.proof.proof.len()
+    );
+    Ok(())
+}
+
 /// Two chunk-aligned publish txs share one block. After migration the miner
 /// produces a Submit data PoA and, once the txs promote, a Publish data PoA.
 /// Both go through validation on a schema-v3 index.
@@ -301,6 +347,143 @@ async fn heavy_test_rocks_v3_nonzero_slot_data_poa() -> eyre::Result<()> {
     assert_eq!(block.poa.partition_hash, slot_one);
     assert!(is_data_poa(&block.poa, DataLedger::Publish));
     assert!(block.poa.partition_chunk_offset < 4);
+    // Slot 1 holds the second tx of the block that introduced these chunks.
+    assert_derived_tx_index(&node, &block, DataLedger::Publish, 1)?;
+
+    node.stop().await;
+    Ok(())
+}
+
+/// A chunk-aligned ThirtyDay tx is mined as a data chunk on that ledger.
+#[test_log::test(tokio::test)]
+async fn heavy_test_rocks_v3_thirty_day_data_poa() -> eyre::Result<()> {
+    initialize_tracing();
+    let mut config = rocks_config(4, 2);
+    config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+        activation_timestamp: UnixTimestamp::from_secs(0),
+        one_year_epoch_length: 100,
+        thirty_day_epoch_length: 100,
+        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+    });
+    let (node, signer) = start_rocks_node(config, 5).await?;
+    let activation = node.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+    while node.get_canonical_chain_height().await <= activation {
+        node.mine_block().await?;
+    }
+
+    let _tx = post_ledger_tx(
+        &node,
+        &signer,
+        DataLedger::ThirtyDay,
+        aligned_bytes(4, 0x34),
+    )
+    .await?;
+
+    wait_for_data_on_slot(&node, DataLedger::ThirtyDay, 0).await?;
+    let block = mine_until(&node, "thirty-day data poa", |block| {
+        is_data_poa(&block.poa, DataLedger::ThirtyDay)
+    })
+    .await?;
+    assert!(is_data_poa(&block.poa, DataLedger::ThirtyDay));
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Two chunk-aligned publish txs overflow one partition. They live on the
+/// Submit ledger until promotion. One node cannot produce the two ingress
+/// proofs promotion requires, so the spare capacity partition becomes Submit
+/// slot 1. The PoA is mined there while Publish still has no data.
+#[test_log::test(tokio::test)]
+async fn heavy_test_rocks_v3_submit_nonzero_slot_data_poa() -> eyre::Result<()> {
+    initialize_tracing();
+    let mut config = rocks_config(4, 2);
+    // One signer produces one ingress proof. Promotion needs two, so the
+    // chunks stay on Submit for this test.
+    config
+        .consensus
+        .get_mut()
+        .hardforks
+        .frontier
+        .number_of_ingress_proofs_total = 2;
+    let (node, signer) = start_rocks_node(config, 5).await?;
+
+    let _first =
+        post_ledger_tx(&node, &signer, DataLedger::Publish, aligned_bytes(4, 0x51)).await?;
+    let _second =
+        post_ledger_tx(&node, &signer, DataLedger::Publish, aligned_bytes(4, 0x52)).await?;
+    let multi = node.mine_block().await?;
+    assert!(
+        ledger_tx_count(&multi, DataLedger::Submit) >= 2,
+        "one block must carry both txs, got {}",
+        ledger_tx_count(&multi, DataLedger::Submit)
+    );
+
+    let slot_one = wait_for_data_on_slot(&node, DataLedger::Submit, 1).await?;
+    assert!(
+        node.get_storage_module_intervals(DataLedger::Publish, 0, ChunkType::Data)
+            .is_empty(),
+        "submit txs must not promote onto publish"
+    );
+    assert!(assigned_partition(&node, DataLedger::Publish, 1).is_none());
+
+    let block = mine_until(&node, "submit slot 1 data poa", |block| {
+        is_data_poa(&block.poa, DataLedger::Submit) && block.poa.partition_hash == slot_one
+    })
+    .await?;
+    assert_eq!(block.poa.partition_hash, slot_one);
+    assert!(is_data_poa(&block.poa, DataLedger::Submit));
+    assert_derived_tx_index(&node, &block, DataLedger::Submit, 1)?;
+
+    node.stop().await;
+    Ok(())
+}
+
+/// A solution whose derive already failed is dropped before a block is built.
+/// The node then mines a later block.
+#[test_log::test(tokio::test)]
+async fn heavy_test_rocks_v3_failed_derive_drops_the_solution() -> eyre::Result<()> {
+    initialize_tracing();
+    let (node, _signer) = start_rocks_node(rocks_config(4, 100), 3).await?;
+    let before = irys_actors::tx_path_derive_failed_for_test();
+    let height = node.get_canonical_chain_height().await;
+
+    node.node_ctx
+        .service_senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))
+        .unwrap();
+
+    let mut solution = utils::solution_context(&node.node_ctx).await?;
+    let job = TxPathJob::spawn(|| Err(eyre::eyre!("data_root mismatch at offset 0")));
+    solution.tx_path = TxPathSource::Derive(job);
+
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    node.node_ctx
+        .service_senders
+        .block_producer
+        .send_traced(BlockProducerCommand::SolutionFound {
+            solution,
+            response: response_tx,
+        })
+        .unwrap();
+    let produced = response_rx.await??;
+    assert!(produced.is_none(), "a failed derive must not build a block");
+    assert!(
+        irys_actors::tx_path_derive_failed_for_test() > before,
+        "tx path derive failure metric did not increase"
+    );
+    assert_eq!(
+        node.node_ctx
+            .block_producer_inner
+            .tx_path_fail_streak
+            .load(Ordering::Relaxed),
+        1,
+        "one dropped solution starts the failure streak"
+    );
+
+    let block = node.mine_block().await?;
+    assert!(block.height > height, "mining continues after the drop");
 
     node.stop().await;
     Ok(())

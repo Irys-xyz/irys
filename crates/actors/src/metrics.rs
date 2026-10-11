@@ -468,7 +468,23 @@ pub(crate) fn record_mining_solution_found() {
 
 pub(crate) fn record_tx_path_derive_failed(reason: &'static str) {
     TX_PATH_DERIVE_FAILED.add(1, &[KeyValue::new("reason", reason)]);
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        use std::sync::atomic::Ordering;
+        TX_PATH_DERIVE_FAILED_FOR_TEST.fetch_add(1, Ordering::Relaxed);
+    }
 }
+
+/// Count of `irys.mining.tx_path_derive_failed_total` in this process.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn tx_path_derive_failed_for_test() -> u64 {
+    use std::sync::atomic::Ordering;
+    TX_PATH_DERIVE_FAILED_FOR_TEST.load(Ordering::Relaxed)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+static TX_PATH_DERIVE_FAILED_FOR_TEST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn record_packing_workers(active: u64, semaphore_available: u64) {
     PACKING_ACTIVE_WORKERS.record(active, &[]);
