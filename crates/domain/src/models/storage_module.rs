@@ -941,8 +941,19 @@ fn open_submodule_index(
         SubmoduleIndexEngine::Mdbx => {
             let rocks_dir = module_dir.join("rocks");
             let mdbx_dat = path.join("mdbx.dat");
-            // An empty MDBX index would hide the live Rocks rows.
-            if rocks_index_present(&rocks_dir) && !mdbx_dat.is_file() {
+            // Check before open. Open migrates a schema v1 db/ in place, and a
+            // stale db/ would hide placements written to rocks/ after conversion.
+            if rocks_index_present(&rocks_dir) && mdbx_dat.is_file() {
+                Err(eyre!(
+                    "refusing to open {}: both indexes exist in {}. {} is present and {} is present. The config selects MDBX, which is also the default when database.submodule_index is unset. After a conversion, rocks/ is the live index, so set database.submodule_index = \"rocksdb\". If MDBX is really intended (a verified `rocks-to-mdbx` rollback), move {} out of the module directory (for example, rename it to rocks.retired) and start again.",
+                    path.display(),
+                    module_dir.display(),
+                    mdbx_dat.display(),
+                    rocks_dir.display(),
+                    rocks_dir.display()
+                ))
+            } else if rocks_index_present(&rocks_dir) {
+                // An empty MDBX index would hide the live Rocks rows.
                 Err(eyre!(
                     "refusing to open {}: {} exists and the Rocks index was not copied. Stop the node and run `submodule-index-convert rocks-to-mdbx` (see --help for --consensus-db and the partition geometry) from {} to {}, then verify. Set database.submodule_index to mdbx only after verify passes.",
                     path.display(),
@@ -970,8 +981,18 @@ fn open_submodule_index(
                 ))
             } else {
                 // The first submodule installs the process cache. The rest share it.
-                install_process_rocks_resources(database)
-                    .and_then(|_| SubmoduleIndex::open_rocks(&path))
+                let opened = install_process_rocks_resources(database)
+                    .and_then(|_| SubmoduleIndex::open_rocks(&path));
+                // One line per module. db/ stays for rollback and is not read.
+                if opened.is_ok() && mdbx_dat.is_file() {
+                    info!(
+                        module = %module_dir.display(),
+                        db = %mdbx_dir.display(),
+                        rocks = %path.display(),
+                        "db/ is kept beside rocks/ and is not read"
+                    );
+                }
+                opened
             }
         }
     };
@@ -1711,8 +1732,9 @@ impl StorageModule {
             };
         }
         // Production open, including `new` compiled with the bench feature.
-        // The free function selects the engine from config and refuses an
-        // empty index beside a live index of the other engine.
+        // The free function selects the engine from config. It refuses MDBX
+        // when rocks/ is also present, and it refuses an empty index beside
+        // a live index of the other engine.
         open_submodule_index(sub_base_path, &config.node_config.database)
     }
 
@@ -6771,25 +6793,163 @@ mod tests {
         Ok(())
     }
 
+    /// `db/` with no schema row. Node open of this directory stamps the schema,
+    /// so a later byte compare shows whether open ran.
+    fn write_unstamped_mdbx(module_dir: &Path) -> eyre::Result<PathBuf> {
+        use irys_database::open_or_create_db;
+        use irys_database::submodule::tables::SubmoduleTables;
+
+        let db_dir = module_dir.join("db");
+        let args = irys_database::submodule_db_args(&index_database(SubmoduleIndexEngine::Mdbx))?;
+        let env = open_or_create_db(&db_dir, SubmoduleTables::ALL, args)?;
+        drop(env);
+        Ok(db_dir)
+    }
+
+    fn mdbx_schema_row(db_dir: &Path) -> eyre::Result<Option<Vec<u8>>> {
+        use irys_database::metadata::MetadataKey;
+        use irys_database::open_or_create_db;
+        use irys_database::submodule::tables::{Metadata, SubmoduleTables};
+        use reth_db::Database as _;
+        use reth_db::transaction::DbTx as _;
+
+        let args = irys_database::submodule_db_args(&index_database(SubmoduleIndexEngine::Mdbx))?;
+        let env = open_or_create_db(db_dir, SubmoduleTables::ALL, args)?;
+        let tx = env.tx()?;
+        Ok(tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?)
+    }
+
+    fn directory_fingerprint(dir: &Path) -> eyre::Result<BTreeMap<String, (u64, [u8; 32])>> {
+        use std::io::Read as _;
+
+        let mut out = BTreeMap::new();
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let meta = entry.metadata()?;
+            let mut file = File::open(&path)?;
+            let mut hasher = sha::Sha256::new();
+            let mut buf = [0_u8; 64 * 1024];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            out.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                (meta.len(), hasher.finish()),
+            );
+        }
+        Ok(out)
+    }
+
     #[test]
-    fn submodule_index_engine_mdbx_opens_when_both_indexes_exist() -> eyre::Result<()> {
+    fn submodule_index_engine_mdbx_refuses_when_both_indexes_exist() -> eyre::Result<()> {
         let tmp_dir = TempDirBuilder::new()
             .prefix("submodule_index_engine_both")
             .build();
         let module_dir = tmp_dir.path().join("module");
         fs::create_dir_all(&module_dir)?;
+        let db_dir = write_unstamped_mdbx(&module_dir)?;
+        let before = directory_fingerprint(&db_dir)?;
+        assert!(before.contains_key("mdbx.dat"), "{before:?}");
 
-        let index = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))?;
-        drop(index);
-        let rocks_current = module_dir.join("rocks").join("CURRENT");
-        fs::create_dir_all(rocks_current.parent().expect("rocks parent"))?;
+        let rocks_dir = module_dir.join("rocks");
+        let rocks_current = rocks_dir.join("CURRENT");
+        fs::create_dir_all(&rocks_dir)?;
         fs::write(&rocks_current, b"live")?;
 
-        let again = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))?;
+        let error = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))
+            .expect_err("MDBX must not open when rocks/ is also present");
+        let message = error.to_string();
+        assert!(
+            message.contains(&module_dir.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&db_dir.join("mdbx.dat").display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&rocks_dir.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("both indexes exist"), "{message}");
+        assert!(
+            message.contains("database.submodule_index is unset"),
+            "{message}"
+        );
+        assert!(
+            message.contains("database.submodule_index = \"rocksdb\""),
+            "{message}"
+        );
+        assert!(message.contains("rocks-to-mdbx"), "{message}");
+        assert!(message.contains("rocks.retired"), "{message}");
+
+        assert_eq!(directory_fingerprint(&db_dir)?, before);
+        assert_eq!(mdbx_schema_row(&db_dir)?, None);
+        assert_eq!(fs::read(&rocks_current)?, b"live");
+        Ok(())
+    }
+
+    #[test]
+    fn submodule_index_engine_rocksdb_reads_rocks_row_when_both_indexes_exist() -> eyre::Result<()>
+    {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("submodule_index_engine_rocks_keeps_db")
+            .build();
+        let module_dir = tmp_dir.path().join("module");
+        fs::create_dir_all(&module_dir)?;
+
+        let index =
+            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
+        let offset = PartitionChunkOffset::from(7);
+        let root = H256::repeat_byte(1);
+        index.update(|tx| {
+            tx.add_tx_leaf_binding(
+                root,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))?;
+            tx.add_data_root_info(
+                root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 1,
+                },
+            )?;
+            tx.add_full_data_path(offset, vec![9, 9, 9])?;
+            Ok(())
+        })?;
+        drop(index);
+
+        // db/ is added after rocks/ exists. The node must not build rocks/ on
+        // top of a live MDBX index, and it must not read this db/.
+        let db_dir = write_unstamped_mdbx(&module_dir)?;
+        let before = directory_fingerprint(&db_dir)?;
+
+        let again =
+            open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
+        let got = again
+            .view(|tx| tx.get_data_path_by_offset(offset))?
+            .expect("the row exists only in rocks/");
+        assert_eq!(got, vec![9, 9, 9]);
         drop(again);
 
-        assert!(module_dir.join("db").join("mdbx.dat").is_file());
-        assert_eq!(fs::read(&rocks_current)?, b"live");
+        assert_eq!(directory_fingerprint(&db_dir)?, before);
+        assert_eq!(mdbx_schema_row(&db_dir)?, None);
+        assert_eq!(
+            fs::read_to_string(module_dir.join("rocks").join("SCHEMA"))?,
+            SUBMODULE_SCHEMA_V3
+        );
         Ok(())
     }
 

@@ -3,7 +3,11 @@
 Each submodule keeps its index in `db/` (MDBX) or `rocks/` (RocksDB).
 `database.submodule_index` selects the engine. The value is `mdbx` or
 `rocksdb`. The node opens only that directory. It refuses a layout that
-does not match the config.
+does not match the config. The node refuses to open MDBX when `rocks/`
+also exists, because after a conversion `rocks/` is the live index and
+`db/` stays beside it unread. A rollback to MDBX moves `rocks/` out of
+the module directory (for example, rename it to `rocks.retired`) before
+the node starts.
 
 MDBX stays on schema v2. A fresh RocksDB index is schema v3. A RocksDB
 schema v2 directory still opens until it is converted. Schema v3 stores
