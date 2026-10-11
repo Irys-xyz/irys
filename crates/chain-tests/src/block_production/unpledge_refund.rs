@@ -15,7 +15,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 use tracing::warn;
 
 use crate::utils::IrysNodeTest;
@@ -993,13 +993,25 @@ pub(crate) async fn setup_env_with_block_migration_depth(
 
     // Prefer a capacity assignment that is actually loaded on a local Storage Module.
     // This guarantees the subsequent unpledge triggers a real SM unassignment at epoch.
+    // The peer can finish startup before that assignment is applied.
     let capacity_pa = {
-        let sms = peer_node.node_ctx.storage_modules_guard.read();
-        // Require a locally loaded capacity assignment (ledger_id == None) for determinism
-        sms.iter()
-            .filter_map(|sm| sm.partition_assignment())
-            .find(|pa| pa.ledger_id.is_none())
-            .expect("Test requires at least one local capacity SM assignment")
+        let deadline = Instant::now() + Duration::from_secs(seconds_to_wait as u64);
+        loop {
+            let found = {
+                let sms = peer_node.node_ctx.storage_modules_guard.read();
+                // Require a locally loaded capacity assignment (ledger_id == None) for determinism
+                sms.iter()
+                    .filter_map(|sm| sm.partition_assignment())
+                    .find(|pa| pa.ledger_id.is_none())
+            };
+            if let Some(found) = found {
+                break found;
+            }
+            if Instant::now() >= deadline {
+                panic!("Test requires at least one local capacity SM assignment");
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
     };
 
     let consensus = genesis_node.node_ctx.config.node_config.consensus_config();
