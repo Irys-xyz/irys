@@ -204,16 +204,22 @@ fn metas_in_tx(
             continue;
         };
         let proof = get_leaf_proof(&path_buff)?;
-        let chunk_offset = (proof.offset() as u64).div_ceil(chunk_size) - 1;
-        out.insert(
-            offset,
-            (
-                data_root,
-                data_size,
-                path_buff,
-                TxChunkOffset(chunk_offset.try_into().expect("Value exceeds u32::MAX")),
-            ),
-        );
+        let tx_offset = match tx_chunk_offset_from_leaf(proof.offset(), chunk_size) {
+            Ok(tx_offset) => tx_offset,
+            Err(error) => {
+                // A zero leaf underflows the chunk index. A leaf past
+                // `u32::MAX` chunks does not fit `TxChunkOffset`. Either one
+                // used to panic the worker and fail the whole span.
+                warn!(
+                    partition.offset = offset.0,
+                    error = %error,
+                    "skipping stored data path with an unusable leaf offset"
+                );
+                index_read_metrics::note_bad_leaf_offset();
+                continue;
+            }
+        };
+        out.insert(offset, (data_root, data_size, path_buff, tx_offset));
     }
     Ok(out)
 }
@@ -224,15 +230,15 @@ fn data_size_for_offset(
     partition_offset: PartitionChunkOffset,
     cache: &mut HashMap<DataRoot, DataRootInfos>,
 ) -> eyre::Result<u64> {
-    let infos = cache.entry(data_root).or_insert_with(|| {
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(data_root) {
         index_read_metrics::note("data_root");
         let mut loaded = tx
-            .get_data_root_infos_for_data_root(data_root)
-            .expect("Database read should succeed")
+            .get_data_root_infos_for_data_root(data_root)?
             .unwrap_or_default();
         loaded.0.sort_unstable();
-        loaded
-    });
+        entry.insert(loaded);
+    }
+    let infos = &cache[&data_root];
     let index = infos
         .0
         .partition_point(|info| info.start_offset <= partition_offset.into())
@@ -242,6 +248,23 @@ fn data_size_for_offset(
     } else {
         Err(eyre!("could not find DataRootInfo for partition_offset"))
     }
+}
+
+/// Chunk index of a data-path leaf, or an error when the leaf note is 0 or
+/// the index does not fit in `u32`.
+fn tx_chunk_offset_from_leaf(
+    leaf_byte_offset: usize,
+    chunk_size: u64,
+) -> eyre::Result<TxChunkOffset> {
+    let bytes = u64::try_from(leaf_byte_offset)
+        .map_err(|_| eyre!("data path leaf offset does not fit in u64"))?;
+    let chunks = bytes.div_ceil(chunk_size);
+    let index = chunks
+        .checked_sub(1)
+        .ok_or_else(|| eyre!("data path leaf offset is 0"))?;
+    u32::try_from(index)
+        .map(TxChunkOffset::from)
+        .map_err(|_| eyre!("data path leaf offset exceeds u32::MAX chunks"))
 }
 
 fn paths_in_tx(
@@ -5155,7 +5178,9 @@ impl StorageModule {
 
         let mut bodies = self.read_chunks(partition_chunk_offset_ii!(start, end))?;
         let packing_address = self.config.node_config.miner_address();
-        let partition_hash = self.partition_hash().unwrap();
+        let partition_hash = self
+            .partition_hash()
+            .ok_or_eyre("storage module has no partition")?;
         let mut out = BTreeMap::new();
         for (offset, (data_root, data_size, data_path, tx_offset)) in metas {
             let Some((bytes, _)) = bodies.remove(&offset) else {

@@ -1527,4 +1527,91 @@ mod tests {
 
         Ok(())
     }
+
+    /// A stored leaf note of 0 underflows the chunk index. A note past
+    /// `u32::MAX` chunks does not fit `TxChunkOffset`. Neither panics, and a
+    /// span still returns the other offsets.
+    #[test]
+    fn span_omits_a_data_path_with_an_unusable_leaf_offset() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("span-bad-leaf")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf(), 8);
+        let sm = assigned(&config, 0, 0, "hdd0", 8);
+        let (good_a, bytes_a) = one_chunk(&config, 1);
+        let (bad_zero, _) = one_chunk(&config, 2);
+        let (good_b, bytes_b) = one_chunk(&config, 3);
+        let (bad_wide, _) = one_chunk(&config, 4);
+
+        pack_entropy(&sm, &config, 0);
+        pack_entropy(&sm, &config, 2);
+        index_one(&sm, &good_a, 0);
+        index_one(&sm, &bad_zero, 1);
+        index_one(&sm, &good_b, 2);
+        index_one(&sm, &bad_wide, 3);
+        write_one(&sm, &good_a, &bytes_a);
+        write_one(&sm, &good_b, &bytes_b);
+        sm.sync_pending_chunks()?;
+
+        remember_data_path(&sm, PartitionChunkOffset(1), &leaf_path(0));
+        let wide = leaf_byte_past_u32_chunks(config.consensus.chunk_size);
+        remember_data_path(&sm, PartitionChunkOffset(3), &leaf_path(wide));
+
+        let before = crate::models::index_read_metrics::bad_leaf_offset_for_test();
+        let packed = sm.generate_full_chunks(PartitionChunkOffset(0), PartitionChunkOffset(3))?;
+        let offsets: Vec<u32> = packed.keys().map(|offset| offset.0).collect();
+        assert_eq!(offsets, vec![0, 2]);
+        assert_eq!(
+            crate::models::index_read_metrics::bad_leaf_offset_for_test() - before,
+            2
+        );
+        assert!(sm.generate_full_chunk(PartitionChunkOffset(1))?.is_none());
+        assert!(sm.generate_full_chunk(PartitionChunkOffset(3))?.is_none());
+
+        let db = create_test_db(&tmp.path().join("db"));
+        let provider = make_provider(config, vec![Arc::new(sm)], db);
+        let span = provider
+            .get_unpacked_chunks_by_ledger_span(
+                DataLedger::Publish,
+                LedgerChunkOffset::from(0),
+                LedgerChunkOffset::from(3),
+            )
+            .expect("a bad leaf must not fail the span");
+        assert_eq!(span.len(), 2, "{span:?}");
+        assert_eq!(*span[0].0, 0);
+        assert_eq!(span[0].1.bytes.0, bytes_a);
+        assert_eq!(*span[1].0, 2);
+        assert_eq!(span[1].1.bytes.0, bytes_b);
+        assert!(
+            provider
+                .get_chunk_by_ledger_offset(DataLedger::Publish, LedgerChunkOffset::from(1))?
+                .is_none()
+        );
+
+        Ok(())
+    }
+
+    fn leaf_path(max_byte: u64) -> Vec<u8> {
+        let mut path = vec![0_u8; 64];
+        path[56..].copy_from_slice(&max_byte.to_be_bytes());
+        path
+    }
+
+    /// Smallest leaf note whose chunk index is `u32::MAX + 1`.
+    fn leaf_byte_past_u32_chunks(chunk_size: u64) -> u64 {
+        let chunks = u64::from(u32::MAX) + 2;
+        chunks * chunk_size - chunk_size + 1
+    }
+
+    fn write_one(sm: &StorageModule, tx: &irys_types::DataTransaction, bytes: &[u8]) {
+        sm.write_data_chunk(&UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(tx.proofs[0].proof.clone()),
+            bytes: Base64(bytes.to_vec()),
+            tx_offset: TxChunkOffset::from(0_u32),
+        })
+        .expect("write stored chunk");
+    }
 }
