@@ -6959,7 +6959,7 @@ mod tests {
         let before = index_read_metrics::uncovered_data_path_for_test();
         storage.force_sync_pending_chunks()?;
         assert!(
-            index_read_metrics::uncovered_data_path_for_test() >= before + 1,
+            index_read_metrics::uncovered_data_path_for_test() > before,
             "an uncovered proof must count"
         );
         assert!(!storage.is_data_chunk_durable_at(offset));
