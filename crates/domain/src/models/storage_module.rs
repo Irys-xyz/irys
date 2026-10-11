@@ -2380,8 +2380,12 @@ impl StorageModule {
         Ok(Some(offsets))
     }
 
-    /// Returns true only when the offset is on disk as transaction data and no
-    /// buffered write currently supersedes it.
+    /// True when the offset's live interval is `Data` and no buffered write
+    /// supersedes it.
+    ///
+    /// The live interval label flips to `Data` when `pwrite` returns
+    /// (`note_write_run`). This stays false while the offset is still in
+    /// `pending.chunks` or `written_ahead`.
     pub fn is_data_chunk_durable_at(&self, offset: PartitionChunkOffset) -> bool {
         let pending = self.pending_writes.read().unwrap();
         if pending.contains_key(&offset) || pending.written_ahead.contains_key(&offset) {
@@ -2398,14 +2402,16 @@ impl StorageModule {
     /// Candidate transaction-relative offsets of `data_root` whose bodies are
     /// fsynced in this module as `ChunkType::Data`.
     ///
-    /// This is the durability signal cached-body reclamation is gated on. It
-    /// follows the in-memory intervals, which flip to `Data` after the chunk
-    /// `fdatasync` and the presence commit. `intervals.json` can lag that flip
-    /// by `storage.intervals_persist_secs`. A crash in the lag reloads the
-    /// chunk as `Uninitialized`, and a body reclaimed in the lag is synced
-    /// again. Resolves the submodule
-    /// index once per root and checks only bodies the cache can actually
-    /// reclaim, rather than walking the transaction's entire funded range.
+    /// This is the durability signal cached-body reclamation is gated on. The
+    /// live interval label flips to `Data` when `pwrite` returns
+    /// (`note_write_run`). Durability stays false until that offset's
+    /// `pending.chunks` and `written_ahead` entries are gone, which is after
+    /// the `fdatasync` and the presence commit. `intervals.json` can lag the
+    /// label flip by `storage.intervals_persist_secs`. A crash in the lag
+    /// reloads the chunk as `Uninitialized`, and a body reclaimed in the lag
+    /// is synced again. Resolves the submodule index once per root and checks
+    /// only bodies the cache can actually reclaim, rather than walking the
+    /// transaction's entire funded range.
     pub fn durable_tx_offsets_for_data_root(
         &self,
         data_root: DataRoot,

@@ -6,7 +6,10 @@ rust-version.workspace = true
 
 [features]
 test-utils = []
-# Opt-in native engine for the submodule index. Off in the node build.
+# Native engine for the submodule index. Any crate that depends on
+# `irys-domain` turns this on (`irys-domain` enables it), so the node binary
+# links RocksDB. An `irys-database`-only build leaves it off. The converter
+# and bench bins built from this crate alone need `--features rocksdb`.
 # `cargo xtask check` turns it on via `--all-features`.
 rocksdb = ["dep:rocksdb", "dep:libc"]
 
