@@ -1324,13 +1324,10 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
     )
     .await;
 
-    // Verify all storage modules are unassigned
-    let post_epoch_assignments: Vec<_> = {
-        let sms = peer_node.node_ctx.storage_modules_guard.read();
-        sms.iter()
-            .filter_map(|sm| sm.partition_assignment())
-            .collect()
-    };
+    // The epoch block is published before the storage-module task finishes
+    // the reset. The assignment stays until that reset returns, so wait for
+    // the release instead of reading the guard once.
+    let post_epoch_assignments = wait_for_assignments_released(&peer_node, seconds_to_wait).await;
     assert!(
         post_epoch_assignments.is_empty(),
         "All storage modules must be unassigned after unpledge refunds"

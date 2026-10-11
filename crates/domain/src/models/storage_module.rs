@@ -65,6 +65,8 @@ use nodit::{
 };
 use openssl::sha;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::sync::Condvar;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, File, OpenOptions},
@@ -395,6 +397,38 @@ enum SyncFailurePoint {
     AfterResetIntervals,
 }
 
+/// Test barrier inside a durable point. The point holds `sync_in_progress`.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SyncPausePoint {
+    /// Proofs are copied out of `pending`. The index write has not started.
+    AfterPresenceCopy,
+}
+
+/// One armed pause. The durable point waits until the test releases it.
+#[cfg(test)]
+#[derive(Debug)]
+struct SyncPauseGate {
+    point: Mutex<Option<SyncPausePoint>>,
+    arrived: Mutex<bool>,
+    arrived_cv: Condvar,
+    release: Mutex<bool>,
+    release_cv: Condvar,
+}
+
+#[cfg(test)]
+impl SyncPauseGate {
+    fn new() -> Self {
+        Self {
+            point: Mutex::new(None),
+            arrived: Mutex::new(false),
+            arrived_cv: Condvar::new(),
+            release: Mutex::new(false),
+            release_cv: Condvar::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChunkTimeRecord {
     pub chunk_offset: PartitionChunkOffset,
@@ -625,12 +659,19 @@ pub struct StorageModule {
     data_writes_paused: AtomicBool,
     #[cfg(test)]
     sync_failure: Mutex<Option<SyncFailurePoint>>,
+    /// Pauses one durable point so a test can call `reset` in the gap.
+    #[cfg(test)]
+    sync_pause: SyncPauseGate,
     /// Monotonic instant of the last pending write, used only for idle flushing.
     last_pending_write: RwLock<Instant>,
     /// Tracks the storage state of each chunk across all submodules
     intervals: Arc<RwLock<StorageIntervals>>,
     /// `intervals.json` image, write-ahead mask, and completion timers.
     interval_disk: Mutex<IntervalDisk>,
+    /// Bumped when `reset` publishes a new interval map. A file rewrite that
+    /// read the map before the bump does not replace the reset image, and it
+    /// does not put the old write-ahead mask back.
+    interval_image_epoch: AtomicU64,
     /// Crash tests drop the module without storing batched completions.
     #[cfg(test)]
     suppress_interval_flush: AtomicBool,
@@ -1674,9 +1715,12 @@ impl StorageModule {
             data_writes_paused: AtomicBool::new(false),
             #[cfg(test)]
             sync_failure: Mutex::new(None),
+            #[cfg(test)]
+            sync_pause: SyncPauseGate::new(),
             last_pending_write: RwLock::new(Instant::now()),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             interval_disk: Mutex::new(Self::load_interval_disk(&submodule_map)),
+            interval_image_epoch: AtomicU64::new(0),
             #[cfg(test)]
             suppress_interval_flush: AtomicBool::new(false),
             index_write_generation,
@@ -2219,6 +2263,53 @@ impl StorageModule {
         Ok(())
     }
 
+    /// The next durable point waits at `point` until [`Self::release_sync_pause`].
+    #[cfg(test)]
+    fn pause_next_sync_at(&self, point: SyncPausePoint) {
+        *self.sync_pause.release.lock().unwrap() = false;
+        *self.sync_pause.arrived.lock().unwrap() = false;
+        *self.sync_pause.point.lock().unwrap() = Some(point);
+    }
+
+    /// `true` when the armed point was reached before `timeout`.
+    #[cfg(test)]
+    fn wait_for_sync_pause(&self, timeout: Duration) -> bool {
+        let guard = self.sync_pause.arrived.lock().unwrap();
+        let (guard, _) = self
+            .sync_pause
+            .arrived_cv
+            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
+            .unwrap();
+        *guard
+    }
+
+    /// Let a paused durable point continue.
+    #[cfg(test)]
+    fn release_sync_pause(&self) {
+        *self.sync_pause.release.lock().unwrap() = true;
+        self.sync_pause.release_cv.notify_all();
+    }
+
+    #[cfg(test)]
+    fn wait_if_sync_paused(&self, point: SyncPausePoint) {
+        {
+            let mut armed = self.sync_pause.point.lock().unwrap();
+            if *armed != Some(point) {
+                return;
+            }
+            *armed = None;
+        }
+        {
+            let mut arrived = self.sync_pause.arrived.lock().unwrap();
+            *arrived = true;
+            self.sync_pause.arrived_cv.notify_all();
+        }
+        let mut release = self.sync_pause.release.lock().unwrap();
+        while !*release {
+            release = self.sync_pause.release_cv.wait(release).unwrap();
+        }
+    }
+
     /// Resolves every local partition placement funded for one transaction
     /// chunk. This is the canonical forward mapping used by ingress writes,
     /// migration, and durability queries.
@@ -2334,6 +2425,16 @@ impl StorageModule {
 
     /// Erase the index, then mark every offset `Uninitialized`.
     ///
+    /// Holds `sync_in_progress` for the whole call, and takes it before
+    /// `pending_writes`. A durable point takes that lock first, copies proofs
+    /// out of `pending`, then writes them. The clear must not run in that
+    /// gap: the copied rows would land in the empty index.
+    ///
+    /// Interval files are written on this thread. The lane handoff waits on
+    /// the lane, and the lane takes `sync_in_progress` to flush chunks.
+    /// Waiting here would deadlock. [`Self::interval_image_epoch`] drops a
+    /// lane rewrite that snapshotted the map before this call.
+    ///
     /// The metadata marker is durable before the clear. A crash after the
     /// marker and before the marker is dropped is finished on the next open:
     /// the index is cleared again and that submodule's interval file is
@@ -2341,6 +2442,10 @@ impl StorageModule {
     /// `Uninitialized` as soon as the clear commits, so this process does not
     /// serve the old bytes while the file still names them `Data`.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
+        let _sync_guard = self
+            .sync_in_progress
+            .lock()
+            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
         #[cfg(any(test, feature = "test-utils"))]
         if self.reset_fail_next.swap(false, Ordering::SeqCst) {
             self.reset_incomplete.store(true, Ordering::SeqCst);
@@ -2384,10 +2489,23 @@ impl StorageModule {
                 .expect("Failed to create new interval, should never happen as interval is empty!");
             storage_interval
         };
+        // Publish the epoch with the mask clear. A rewrite that already read
+        // the old map fails its epoch check and does not restore that mask.
+        {
+            let mut disk = self.lock_interval_disk();
+            self.interval_image_epoch.fetch_add(1, Ordering::SeqCst);
+            disk.mask = IntervalMask::new();
+            disk.dirty.clear();
+        }
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetClear)?;
 
-        self.write_intervals_to_submodules()
+        // Not `write_intervals_to_submodules`: that waits for the lane, and
+        // the lane needs `sync_in_progress`, which this call holds.
+        // Always replace the files. A lane rewrite may already hold the file
+        // lock with a pre-reset snapshot; this waits for that lock and writes
+        // `Uninitialized` after it.
+        self.persist_intervals_authoritative(true)
             .wrap_err("Could not update submodule interval files")?;
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetIntervals)?;
@@ -2998,6 +3116,12 @@ impl StorageModule {
                 ));
             }
         }
+        // The copies are no longer tied to `pending`. A test can run `reset`
+        // in this gap. The caller still holds `sync_in_progress`.
+        #[cfg(test)]
+        if !by_start.is_empty() {
+            self.wait_if_sync_paused(SyncPausePoint::AfterPresenceCopy);
+        }
         let mut uncovered = Vec::new();
         for (start, updates) in by_start {
             let (_, submodule) = self.get_submodule_for_offset(start)?;
@@ -3038,7 +3162,7 @@ impl StorageModule {
         {
             return Ok(());
         }
-        self.persist_intervals_authoritative()
+        self.persist_intervals_authoritative(false)
     }
 
     fn intervals_persist_period(&self) -> Duration {
@@ -3070,6 +3194,20 @@ impl StorageModule {
         self.interval_disk
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn load_interval_image_epoch(&self) -> u64 {
+        self.interval_image_epoch.load(Ordering::SeqCst)
+    }
+
+    /// `false` when `reset` published a newer map after this snapshot was taken.
+    /// The caller must not replace the file or restore that snapshot's mask.
+    fn interval_snapshot_current(&self, snapshot_epoch: u64) -> bool {
+        let current = snapshot_epoch == self.load_interval_image_epoch();
+        if !current {
+            debug!("skipping interval rewrite snapshotted before reset");
+        }
+        current
     }
 
     /// Time until a dirty completion may be rewritten. `None` when batching
@@ -3122,6 +3260,9 @@ impl StorageModule {
         if !self.intervals_batched() {
             return self.write_intervals_files(Some(touched));
         }
+        // Read the epoch before the map. A later reset fails this snapshot
+        // instead of letting it put the old mask back.
+        let snapshot_epoch = self.load_interval_image_epoch();
         let memory = self
             .intervals
             .read()
@@ -3130,6 +3271,9 @@ impl StorageModule {
         let chunk = self.config.consensus.chunk_size.max(1);
         let budget = INTERVAL_WRITE_AHEAD_BYTES / chunk;
         let mut disk = self.lock_interval_disk();
+        if !self.interval_snapshot_current(snapshot_epoch) {
+            return Ok(());
+        }
         let covered = Self::runs_covered(&disk.mask, runs);
         // The file already says Interrupted for this batch. A rewrite here
         // would only publish retired completions, and those wait for the
@@ -3151,8 +3295,11 @@ impl StorageModule {
             return Ok(());
         }
         drop(disk);
-        self.write_interval_image(&projection, Some(touched))?;
-        self.lock_interval_disk().mask = mask;
+        self.write_interval_image(&projection, Some(touched), snapshot_epoch, false)?;
+        let mut disk = self.lock_interval_disk();
+        if self.interval_snapshot_current(snapshot_epoch) {
+            disk.mask = mask;
+        }
         Ok(())
     }
 
@@ -3199,12 +3346,16 @@ impl StorageModule {
             return Ok(());
         }
         let period = self.intervals_persist_period();
+        let snapshot_epoch = self.load_interval_image_epoch();
         let memory = self
             .intervals
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let disk = self.lock_interval_disk();
+        if !self.interval_snapshot_current(snapshot_epoch) {
+            return Ok(());
+        }
         let mut touched = BTreeSet::new();
         for (interval, _) in self.submodules.iter() {
             let start = interval.start();
@@ -3224,17 +3375,22 @@ impl StorageModule {
         }
         let projection = Self::project_interval_file(&memory, &disk.mask)?;
         drop(disk);
-        self.write_interval_image(&projection, Some(&touched))
+        self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)
     }
 
     /// Write the live map and drop the ahead mask. Call this only when no
     /// chunk is sitting in memory as `Data` before its `fdatasync`: shutdown
     /// does that by running it after a successful `force_sync`. Reset and
     /// rollback set the live map to `Uninitialized` first.
-    fn persist_intervals_authoritative(&self) -> eyre::Result<()> {
+    ///
+    /// `force_replace` writes every submodule file even when the tracked image
+    /// already matches. `reset` sets it so an in-flight rewrite cannot commit
+    /// a pre-reset snapshot after this call returns.
+    fn persist_intervals_authoritative(&self, force_replace: bool) -> eyre::Result<()> {
         if self.interval_flush_suppressed() {
             return Ok(());
         }
+        let snapshot_epoch = self.load_interval_image_epoch();
         let memory = self
             .intervals
             .read()
@@ -3242,13 +3398,18 @@ impl StorageModule {
             .clone();
         {
             let mut disk = self.lock_interval_disk();
+            // A snapshot from before `reset` must not clear a mask that reset,
+            // or a later write-ahead, already published.
+            if !self.interval_snapshot_current(snapshot_epoch) {
+                return Ok(());
+            }
             disk.mask = IntervalMask::new();
             disk.dirty.clear();
-            if disk.written == memory {
+            if !force_replace && disk.written == memory {
                 return Ok(());
             }
         }
-        self.write_interval_image(&memory, None)
+        self.write_interval_image(&memory, None, snapshot_epoch, force_replace)
     }
 
     /// Rewrite `intervals.json` from the live map. `only` limits the write to
@@ -3258,24 +3419,35 @@ impl StorageModule {
         &self,
         only: Option<&BTreeSet<PartitionChunkOffset>>,
     ) -> eyre::Result<()> {
+        let snapshot_epoch = self.load_interval_image_epoch();
         let memory = self
             .intervals
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        self.write_interval_image(&memory, only)
+        self.write_interval_image(&memory, only, snapshot_epoch, false)
     }
 
     /// Atomic replace of each selected submodule file. Temp names stay
     /// `.intervals.json.*` / `intervals.json.*`. An unchanged slice is not
     /// rewritten. A successful replace updates `written` and the completion
     /// timer for that submodule.
+    ///
+    /// `snapshot_epoch` is the value read before `image` was copied. `reset`
+    /// bumps the epoch after it publishes `Uninitialized`. A replace whose
+    /// epoch no longer matches does not write the file and does not change
+    /// `written` or the dirty set.
     fn write_interval_image(
         &self,
         image: &StorageIntervals,
         only: Option<&BTreeSet<PartitionChunkOffset>>,
+        snapshot_epoch: u64,
+        force_replace: bool,
     ) -> eyre::Result<()> {
         for (submodule_interval, submodule) in self.submodules.iter() {
+            if !self.interval_snapshot_current(snapshot_epoch) {
+                return Ok(());
+            }
             let start = submodule_interval.start();
             if only.is_some_and(|starts| !starts.contains(&start)) {
                 continue;
@@ -3283,18 +3455,30 @@ impl StorageModule {
             let Some(slice) = Self::interval_slice(image, *submodule_interval) else {
                 continue;
             };
-            let unchanged = {
+            let unchanged = !force_replace && {
                 let disk = self.lock_interval_disk();
                 Self::interval_slice(&disk.written, *submodule_interval).as_ref() == Some(&slice)
             };
             if unchanged {
-                self.lock_interval_disk().dirty.remove(&start);
+                let mut disk = self.lock_interval_disk();
+                // The epoch check and the dirty-bit clear share this lock.
+                // `reset` bumps the epoch under the same lock, so a stale
+                // snapshot cannot drop a dirty bit published after the bump.
+                if !self.interval_snapshot_current(snapshot_epoch) {
+                    return Ok(());
+                }
+                disk.dirty.remove(&start);
                 continue;
             }
             let path = submodule
                 .intervals_file
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // `reset` bumps the epoch before it takes this file lock. A
+            // snapshot from before that bump must not replace the new image.
+            if !self.interval_snapshot_current(snapshot_epoch) {
+                return Ok(());
+            }
             let mut file = get_atomic_file(path.clone())?;
             // `file` is a temporary file. `commit` renames it over the
             // original after fsync, then fsyncs the directory.
@@ -3302,6 +3486,9 @@ impl StorageModule {
             file.commit()?;
             drop(path);
             let mut disk = self.lock_interval_disk();
+            if !self.interval_snapshot_current(snapshot_epoch) {
+                return Ok(());
+            }
             Self::splice_interval_slice(&mut disk.written, *submodule_interval, &slice);
             disk.dirty.remove(&start);
             disk.last_completion.insert(start, Instant::now());
@@ -6039,7 +6226,7 @@ impl Drop for StorageModule {
         // flush can leave live `Data` for bytes that are not durable yet.
         match self.force_sync_pending_chunks() {
             Ok(()) => {
-                if let Err(e) = self.persist_intervals_authoritative() {
+                if let Err(e) = self.persist_intervals_authoritative(false) {
                     error!(
                         "Unable to persist intervals while dropping SM {} - {:?}",
                         &self.id, &e
@@ -7724,6 +7911,149 @@ mod tests {
             assert_index_consistent(&storage)?;
             Ok(())
         })
+    }
+
+    /// `reset` during the presence-copy gap must not leave that proof in the index.
+    ///
+    /// The durable point holds `sync_in_progress` at the pause. `reset` has to
+    /// take the same lock, so it runs only after the point commits and drops
+    /// the lock. The copied rows are then cleared with the rest of the index.
+    #[test]
+    fn reset_during_presence_copy_leaves_no_data_path() -> eyre::Result<()> {
+        let mut errors = Vec::new();
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let prefix = format!("reset_during_presence_copy_{engine:?}");
+            let outcome = (|| -> eyre::Result<()> {
+                let (_tmp, _config, storage) = open_presence_module(&prefix, engine)?;
+                let offset = PartitionChunkOffset::from(2);
+                let tx_hash = H256::repeat_byte(9);
+                let data_root = H256::repeat_byte(4);
+                let leaf = TxLeafBinding {
+                    data_root,
+                    prefix_hash: H256::repeat_byte(1),
+                };
+                // Schema v3 writes the interval only when this batch also stores
+                // the leaf. That interval is what lets a pre-clear proof commit
+                // on RocksDB. MDBX stores the proof either way.
+                let folded = DataTransactionLedger::fold_tx_root_leaf(data_root, leaf.prefix_hash);
+                let mut tx_path = folded.0.to_vec();
+                tx_path.extend_from_slice(&[0_u8; 32]);
+                let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+                submodule.db.update(|tx| {
+                    tx.add_full_tx_path(tx_hash, tx_path.clone())?;
+                    tx.add_tx_leaf_binding(tx_hash, &leaf)?;
+                    tx.add_tx_path_hash_to_offset_range(
+                        PartitionChunkOffset::from(1),
+                        PartitionChunkOffset::from(6),
+                        Some(tx_hash),
+                    )?;
+                    Ok(())
+                })?;
+                {
+                    let mut pending = storage.pending_writes.write().unwrap();
+                    pending.insert(offset, (vec![9_u8; 32], ChunkType::Data));
+                    pending
+                        .priorities
+                        .insert(offset, disk_lane::WritePriority::Ingress);
+                    pending.queued_at.insert(offset, Instant::now());
+                    pending
+                        .proofs
+                        .insert(offset, (H256::repeat_byte(7), vec![7, 7, 7]));
+                }
+                storage.pause_next_sync_at(SyncPausePoint::AfterPresenceCopy);
+
+                let storage_ref = &storage;
+                let (sync_result, reset_result, reset_finished_while_paused, sync_still_held) =
+                    std::thread::scope(|scope| {
+                        struct ReleasePause<'a>(&'a StorageModule);
+                        impl Drop for ReleasePause<'_> {
+                            fn drop(&mut self) {
+                                self.0.release_sync_pause();
+                            }
+                        }
+                        let _release = ReleasePause(storage_ref);
+                        let sync_thread =
+                            scope.spawn(move || storage_ref.force_sync_pending_chunks());
+                        assert!(
+                            storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                            "durable point did not pause after the proof copy"
+                        );
+                        let (reset_tx, reset_rx) = std::sync::mpsc::channel();
+                        scope.spawn(move || {
+                            let result = storage_ref.reset();
+                            let _ = reset_tx.send(result);
+                        });
+
+                        let deadline = Instant::now() + Duration::from_millis(500);
+                        let mut early = None;
+                        while Instant::now() < deadline {
+                            match reset_rx.try_recv() {
+                                Ok(result) => {
+                                    early = Some(result);
+                                    break;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    panic!("reset thread dropped the result");
+                                }
+                            }
+                        }
+                        let reset_finished_while_paused = early.is_some();
+                        let sync_still_held = storage_ref.sync_in_progress.try_lock().is_err();
+                        storage_ref.release_sync_pause();
+                        let sync_result = sync_thread.join().expect("sync thread");
+                        let reset_result = match early {
+                            Some(result) => result,
+                            None => reset_rx.recv_timeout(Duration::from_secs(5)).expect(
+                                "reset did not finish after the durable point was released",
+                            ),
+                        };
+                        (
+                            sync_result,
+                            reset_result,
+                            reset_finished_while_paused,
+                            sync_still_held,
+                        )
+                    });
+
+                sync_result?;
+                reset_result?;
+                let path = data_path_at(&storage, offset.0)?;
+                let pending = storage.pending_writes.read().unwrap();
+                let pending_clear = pending.chunks.is_empty()
+                    && pending.proofs.is_empty()
+                    && pending.written_ahead.is_empty()
+                    && pending.occupancy.is_empty();
+                drop(pending);
+                let intervals = storage.get_intervals(ChunkType::Uninitialized);
+                eyre::ensure!(
+                    path.is_none()
+                        && !reset_finished_while_paused
+                        && sync_still_held
+                        && pending_clear
+                        && intervals == vec![partition_chunk_offset_ii!(0, 7)]
+                        && storage.get_intervals(ChunkType::Data).is_empty(),
+                    "path={path:?} reset_finished_while_paused={reset_finished_while_paused} sync_still_held={sync_still_held} pending_clear={pending_clear} intervals={intervals:?}"
+                );
+                let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+                assert!(
+                    submodule
+                        .db
+                        .view(|tx| tx.get_tx_path_by_offset(offset))?
+                        .is_none()
+                );
+                assert_index_consistent(&storage)?;
+                assert!(!storage.reset_incomplete());
+                Ok(())
+            })();
+            if let Err(err) = outcome {
+                errors.push(format!("{engine:?}: {err}"));
+            }
+        }
+        eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
+        Ok(())
     }
 
     #[test]

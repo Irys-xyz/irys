@@ -2383,7 +2383,7 @@ impl StorageModule {
                 error = Some(cause.to_string());
             }
             if request.persist
-                && let Err(cause) = self.persist_intervals_authoritative()
+                && let Err(cause) = self.persist_intervals_authoritative(false)
             {
                 tracing::error!(
                     "Couldn't write intervals for storage_module {}: {cause}",
@@ -2406,7 +2406,7 @@ impl StorageModule {
         self.service_lane_handoff();
         match self.force_sync_pending_chunks() {
             Ok(()) => {
-                if let Err(error) = self.persist_intervals_authoritative() {
+                if let Err(error) = self.persist_intervals_authoritative(false) {
                     tracing::error!(
                         "Couldn't persist intervals for storage module {} on disk lane stop: {error}",
                         self.id
