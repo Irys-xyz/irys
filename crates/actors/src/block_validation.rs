@@ -8481,6 +8481,73 @@ mod tests {
         }
     }
 
+    /// Same 40-byte then 40-byte layout as
+    /// [`poa_validates_every_chunk_after_an_unaligned_tx`], but the owning
+    /// block is not migrated. It sits in the block tree only: the block index
+    /// has no item at its height, and the consensus DB has no header for it.
+    /// Bounds resolution therefore takes the block-tree fallback, and the Echo
+    /// walk reads the sealed block's Submit transactions. Offset 3 is the
+    /// chunk after the unaligned transaction. Echo accepts that PoA. The
+    /// historical rule still rejects it.
+    #[tokio::test]
+    async fn poa_echo_validates_unaligned_chunk_from_unmigrated_block() {
+        let (_tmp, context) = init().await;
+        let data = [vec![3_u8; 40], vec![5_u8; 40]];
+        let seeded = seed_unmigrated_submit_block(&context, &data);
+
+        assert_eq!(
+            context.block_index.num_blocks(),
+            1,
+            "genesis stays the only indexed block"
+        );
+        assert!(
+            context.block_index.get_item(seeded.height).is_none(),
+            "owning block at height {} must not be in the block index",
+            seeded.height
+        );
+        let stored_header = context
+            .block_index
+            .db()
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &seeded.parent_hash, false))
+            .expect("to read the consensus DB");
+        assert!(
+            stored_header.is_none(),
+            "owning block header must not be in the consensus DB"
+        );
+        assert_eq!(
+            seeded
+                .block_tree
+                .read()
+                .get_sealed_block(&seeded.parent_hash)
+                .expect("owning block is sealed in the tree")
+                .transactions()
+                .get_ledger_txs(DataLedger::Submit)
+                .len(),
+            2,
+            "the sealed block must carry both Submit transactions"
+        );
+
+        let shifted = seeded
+            .poas
+            .iter()
+            .find(|poa| poa.block_offset == 3)
+            .expect("offset 3 is the chunk after the unaligned tx");
+        assert_eq!(shifted.tx_index, 1);
+        assert_eq!(shifted.chunk_index, 1);
+
+        let accepted = validate_tree_poa(&context, &seeded, shifted, ForBlock::<Echo>::active());
+        assert!(
+            accepted.is_ok(),
+            "Echo accepts the chunk after the unaligned tx from the block tree: {accepted:?}"
+        );
+
+        let rejected = validate_tree_poa(&context, &seeded, shifted, ForBlock::<Echo>::inactive());
+        assert!(
+            matches!(rejected, Err(PreValidationError::MerkleProofInvalid(_))),
+            "the same PoA stays rejected while Echo is inactive, got {rejected:?}"
+        );
+    }
+
     /// The same PoA is rejected one second before Echo's activation timestamp
     /// and accepted at that timestamp. The fork is resolved from the validated
     /// block's own timestamp.
@@ -8724,9 +8791,18 @@ mod tests {
         }
     }
 
-    /// Sign each buffer, lay the txs out as one Submit block, and build a PoA
-    /// for every chunk of every tx.
-    fn index_submit_poas(context: &mut TestContext, datas: &[Vec<u8>]) -> IndexedSubmit {
+    /// Signed Submit transactions and one entropy-packed PoA per chunk.
+    struct BuiltSubmitPoas {
+        tx_root: H256,
+        headers: Vec<DataTransactionHeader>,
+        poas: Vec<IndexedChunkPoa>,
+        /// Whole-chunk span of `headers`. One past the last `block_offset`.
+        total_chunks: u64,
+    }
+
+    /// Sign each buffer and build a PoA for every chunk. Does not index the
+    /// block or write it to the DB.
+    fn build_submit_chunk_poas(context: &TestContext, datas: &[Vec<u8>]) -> BuiltSubmitPoas {
         let signer = IrysSigner::random_signer(&context.consensus_config);
         let chunk_size = context.consensus_config.chunk_size as usize;
         let txs: Vec<DataTransaction> = datas
@@ -8757,7 +8833,25 @@ mod tests {
                 block_offset += 1;
             }
         }
-        index_headers_and_poas(context, tx_root, &headers, poas, block_offset)
+        BuiltSubmitPoas {
+            tx_root,
+            headers,
+            poas,
+            total_chunks: block_offset,
+        }
+    }
+
+    /// Sign each buffer, lay the txs out as one Submit block, and build a PoA
+    /// for every chunk of every tx.
+    fn index_submit_poas(context: &mut TestContext, datas: &[Vec<u8>]) -> IndexedSubmit {
+        let built = build_submit_chunk_poas(context, datas);
+        index_headers_and_poas(
+            context,
+            built.tx_root,
+            &built.headers,
+            built.poas,
+            built.total_chunks,
+        )
     }
 
     /// Index one Submit block from headers that are already signed and from
@@ -8872,6 +8966,123 @@ mod tests {
             context.block_index.db(),
             H256::zero(),
             built.height,
+            &context.epoch_snapshot,
+            &context.consensus_config,
+            echo,
+            &context.miner_address,
+        )
+    }
+
+    /// Submit block that lives only in the block tree. `height` is absent from
+    /// the block index. `parent_hash` is the sealed block `poa_is_valid` anchors
+    /// on, so the bounds walk and the owning-tx walk both read this block.
+    struct TreeSubmit {
+        height: u64,
+        parent_hash: BlockHash,
+        block_tree: BlockTreeReadGuard,
+        poas: Vec<IndexedChunkPoa>,
+    }
+
+    /// Put one Submit block in a block tree and leave it out of the block index
+    /// and the consensus DB. The tree's genesis is a signed empty block. The
+    /// data block's previous hash points at that genesis, and its Submit ledger
+    /// carries `datas` in order.
+    fn seed_unmigrated_submit_block(context: &TestContext, datas: &[Vec<u8>]) -> TreeSubmit {
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+        let built = build_submit_chunk_poas(context, datas);
+        // The next height after the indexed genesis. This test never pushes it.
+        let height = context.block_index.num_blocks();
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.test_sign();
+        let genesis_hash = genesis.block_hash;
+
+        let mut tree = BlockTree::new(&genesis, context.consensus_config.clone());
+        let commitment_snapshot = tree
+            .get_commitment_snapshot(&genesis_hash)
+            .expect("genesis commitment snapshot");
+        let epoch_snapshot = tree
+            .get_epoch_snapshot(&genesis_hash)
+            .expect("genesis epoch snapshot");
+        let ema_snapshot = tree
+            .get_ema_snapshot(&genesis_hash)
+            .expect("genesis ema snapshot");
+
+        // Distinct from the indexed genesis, whose hash is zero.
+        let block_hash = H256::from([0xB1; 32]);
+        let data_tx_ids = built
+            .headers
+            .iter()
+            .map(|header| header.id)
+            .collect::<Vec<H256>>();
+        let header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+            height,
+            block_hash,
+            previous_block_hash: genesis_hash,
+            reward_address: context.miner_address,
+            miner_address: context.miner_address,
+            signature: Signature::test_signature().into(),
+            timestamp: UnixTimestampMs::from_millis(1000),
+            data_ledgers: vec![
+                DataTransactionLedger {
+                    ledger_id: DataLedger::Publish.into(),
+                    tx_root: H256::zero(),
+                    tx_ids: H256List(Vec::new()),
+                    total_chunks: 0,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: Some(1),
+                },
+                DataTransactionLedger {
+                    ledger_id: DataLedger::Submit.into(),
+                    tx_root: built.tx_root,
+                    tx_ids: H256List(data_tx_ids),
+                    total_chunks: built.total_chunks,
+                    expires: Some(1622543200),
+                    proofs: None,
+                    required_proof_count: None,
+                },
+            ],
+            ..IrysBlockHeaderV1::default()
+        });
+        let block_txs = BlockTransactions {
+            data_txs: HashMap::from([(DataLedger::Submit, built.headers)]),
+            ..Default::default()
+        };
+        let sealed = Arc::new(SealedBlock::new_unchecked(Arc::new(header), block_txs));
+        tree.add_block(&sealed, commitment_snapshot, epoch_snapshot, ema_snapshot)
+            .expect("unmigrated submit block enters the block tree");
+
+        TreeSubmit {
+            height,
+            parent_hash: block_hash,
+            block_tree: BlockTreeReadGuard::new(Arc::new(RwLock::new(tree))),
+            poas: built.poas,
+        }
+    }
+
+    fn validate_tree_poa(
+        context: &TestContext,
+        seeded: &TreeSubmit,
+        poa: &IndexedChunkPoa,
+        echo: ForBlock<Echo>,
+    ) -> Result<(), PreValidationError> {
+        let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
+        // Slot 0: the ledger offset equals the offset inside the block.
+        let ledger_chunk_offset = context.partition_assignment.slot_index.expect("slot index")
+            as u64
+            * context.consensus_config.num_chunks_in_partition
+            + poa.block_offset;
+        assert_eq!(ledger_chunk_offset, poa.block_offset);
+        poa_is_valid(
+            &poa.poa,
+            &block_index_guard,
+            &seeded.block_tree,
+            context.block_index.db(),
+            seeded.parent_hash,
+            seeded.height,
             &context.epoch_snapshot,
             &context.consensus_config,
             echo,
