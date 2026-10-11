@@ -8,8 +8,12 @@ use irys_types::{
 };
 use nodit::interval::ii;
 use opentelemetry::{KeyValue, global, metrics::Counter};
-use std::sync::LazyLock;
-use tracing::debug;
+use std::sync::{
+    LazyLock,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
+use tracing::{debug, warn};
 
 use crate::models::index_read_metrics::{self, SERVE_DATA_ROOT, SERVE_LEDGER, SERVE_SPAN};
 use crate::{
@@ -35,6 +39,54 @@ fn note_chunk_read(caller: &'static str, source: &'static str, outcome: &'static
             KeyValue::new("outcome", outcome),
         ],
     );
+    #[cfg(test)]
+    CHUNK_READ_NOTES.with(|notes| notes.borrow_mut().push((caller, source, outcome)));
+}
+
+/// One exhausted cache reader fails every hole in the span. Count each offset,
+/// but log the first one and then at most once a second.
+fn warn_omitted_cache_read(
+    ledger_offset: LedgerChunkOffset,
+    partition_offset: u32,
+    error: &eyre::Report,
+) {
+    use std::sync::OnceLock;
+
+    const INTERVAL: Duration = Duration::from_secs(1);
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    static LAST_MS: AtomicU64 = AtomicU64::new(0);
+
+    let elapsed_ms = u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let previous = LAST_MS.load(Ordering::Relaxed);
+    if previous != 0 && elapsed_ms.saturating_sub(previous) < INTERVAL.as_millis() as u64 {
+        return;
+    }
+    LAST_MS.store(elapsed_ms, Ordering::Relaxed);
+    warn!(
+        error = %error,
+        ledger.offset = *ledger_offset,
+        partition.offset = partition_offset,
+        "cache read failed; omitting offset from chunk span"
+    );
+}
+
+#[cfg(test)]
+thread_local! {
+    static CACHE_READ_FAULT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static CHUNK_READ_NOTES: std::cell::RefCell<Vec<(&'static str, &'static str, &'static str)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn set_cache_read_fault(tx_offset: Option<u32>) {
+    CACHE_READ_FAULT.with(|cell| cell.set(tx_offset));
+}
+
+#[cfg(test)]
+fn take_chunk_read_notes() -> Vec<(&'static str, &'static str, &'static str)> {
+    CHUNK_READ_NOTES.with(|notes| std::mem::take(&mut *notes.borrow_mut()))
 }
 
 fn missing_on_disk(error: &eyre::Report) -> bool {
@@ -242,10 +294,14 @@ impl ChunkProvider {
                     if batch.is_some() {
                         note_chunk_read(SERVE_SPAN, "storage_module", "miss");
                     }
-                    if let Some(cached) =
-                        self.cached_unpacked_at(SERVE_SPAN, &module, partition_offset)?
-                    {
-                        out.push((ledger_offset, cached));
+                    // A cache fault is this offset only. Single-offset callers
+                    // still get the error from `get_chunk_from_cache`.
+                    match self.cached_unpacked_at(SERVE_SPAN, &module, partition_offset) {
+                        Ok(Some(cached)) => out.push((ledger_offset, cached)),
+                        Ok(None) => {}
+                        Err(error) => {
+                            warn_omitted_cache_read(ledger_offset, cursor, &error);
+                        }
                     }
                 }
                 if cursor == end.0 {
@@ -419,6 +475,10 @@ impl ChunkProvider {
         data_root: DataRoot,
         data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
+        #[cfg(test)]
+        if CACHE_READ_FAULT.with(|cell| cell.get()) == Some(*data_tx_offset) {
+            return Err(eyre::eyre!("injected cache read error"));
+        }
         let chunk_size = self.config.consensus.chunk_size;
         self.db.view_eyre(|tx| {
             let Some(cdr) = cached_data_root_by_data_root(tx, data_root)? else {
@@ -1377,5 +1437,94 @@ mod tests {
                 .is_none(),
             "the ledger route does not pack a cached body"
         );
+    }
+
+    /// One cache read error in a span is that offset only. A single-offset
+    /// caller still receives the error.
+    #[test]
+    fn span_omits_one_cache_read_error() -> eyre::Result<()> {
+        struct ClearFault;
+        impl Drop for ClearFault {
+            fn drop(&mut self) {
+                set_cache_read_fault(None);
+            }
+        }
+        let _clear = ClearFault;
+
+        let tmp = TempDirBuilder::new()
+            .prefix("span-cache-read-error")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf(), 4);
+        let chunk_size = config.consensus.chunk_size as usize;
+        let sm = assigned(&config, 0, 0, "hdd0", 4);
+        let bytes = patterned_bytes(0x5A, chunk_size * 3);
+        let tx = signed_tx(&config, bytes.clone());
+        assert_eq!(tx.chunks.len(), 3);
+        index_placement(&sm, &tx, 0)?;
+        let chunks = unpacked_chunks_for(&tx, &bytes);
+
+        let db = create_test_db(&tmp.path().join("db"));
+        db.update_eyre(|wtx| {
+            cache_data_root(wtx, &tx.header, None)?;
+            for chunk in &chunks {
+                cache_chunk(wtx, chunk)?;
+            }
+            Ok(())
+        })?;
+        let provider = make_provider(config, vec![Arc::new(sm)], db);
+
+        let _ = take_chunk_read_notes();
+        set_cache_read_fault(Some(1));
+        let span = provider
+            .get_unpacked_chunks_by_ledger_span(
+                DataLedger::Publish,
+                LedgerChunkOffset::from(0),
+                LedgerChunkOffset::from(2),
+            )
+            .expect("one cache fault must not fail the span");
+        assert_eq!(span.len(), 2, "{span:?}");
+        assert_eq!(*span[0].0, 0);
+        assert_eq!(span[0].1.bytes.0, chunks[0].bytes.0);
+        assert_eq!(*span[1].0, 2);
+        assert_eq!(span[1].1.bytes.0, chunks[2].bytes.0);
+
+        let notes = take_chunk_read_notes();
+        assert!(
+            notes.contains(&("serve_span", "cache", "error")),
+            "cache/error was not recorded: {notes:?}"
+        );
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|note| **note == ("serve_span", "cache", "error"))
+                .count(),
+            1
+        );
+
+        let error = provider
+            .get_chunk_by_data_root(
+                DataLedger::Publish,
+                tx.header.data_root,
+                TxChunkOffset::from(1),
+            )
+            .expect_err("a single-offset cache read still returns the error");
+        assert!(
+            error.to_string().contains("injected cache read error"),
+            "{error}"
+        );
+        let kept = provider
+            .get_chunk_by_data_root(
+                DataLedger::Publish,
+                tx.header.data_root,
+                TxChunkOffset::from(0),
+            )?
+            .expect("the neighboring offset is still served");
+        assert_eq!(
+            kept.as_unpacked().expect("cache returns unpacked").bytes.0,
+            chunks[0].bytes.0
+        );
+
+        Ok(())
     }
 }
