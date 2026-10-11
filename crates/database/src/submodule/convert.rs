@@ -2234,7 +2234,7 @@ where
     let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
     let stats = copy_v2_into_v3(src, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
-    dst.stamp_schema_marker()?;
+    dst.seal_and_stamp()?;
     clear_converting_sentinel(dir)?;
     Ok(stats)
 }
@@ -2248,7 +2248,7 @@ fn write_empty_rocks(dir: &Path, options: &ConvertOptions) -> eyre::Result<Conve
     if options.fail_after_batches == Some(0) {
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
-    dst.stamp_schema_marker()?;
+    dst.seal_and_stamp()?;
     clear_converting_sentinel(dir)?;
     Ok(ConvertStats::default())
 }
@@ -2271,7 +2271,7 @@ fn write_reset_rocks(
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
     dst.set_reset_in_progress()?;
-    dst.stamp_schema_marker()?;
+    dst.seal_and_stamp()?;
     clear_converting_sentinel(dir)?;
     Ok(ConvertStats {
         reset_marker: true,
@@ -2324,7 +2324,7 @@ fn copy_v1_rocks(
     let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
     let stats = copy_v1_into_v3(env, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
-    dst.stamp_schema_marker()?;
+    dst.seal_and_stamp()?;
     clear_converting_sentinel(dir)?;
     Ok(stats)
 }
@@ -3976,6 +3976,41 @@ mod tests {
         assert!(!stats.source_v1);
     }
 
+    /// A sealed conversion may leave a header-sized log. It must not leave a
+    /// recycled write-ahead log.
+    const WAL_BYTE_BOUND: u64 = 4 * 1024;
+
+    fn wal_snapshot(dir: &Path) -> (u64, u64, usize) {
+        fn walk(dir: &Path, dir_bytes: &mut u64, wal_bytes: &mut u64, wal_files: &mut usize) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    walk(&entry.path(), dir_bytes, wal_bytes, wal_files);
+                    continue;
+                }
+                let len = meta.len();
+                *dir_bytes = dir_bytes.saturating_add(len);
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let stem = name.strip_suffix(".log").unwrap_or("");
+                if !stem.is_empty() && stem.bytes().all(|byte| byte.is_ascii_digit()) {
+                    *wal_bytes = wal_bytes.saturating_add(len);
+                    *wal_files = wal_files.saturating_add(1);
+                }
+            }
+        }
+        let mut dir_bytes = 0;
+        let mut wal_bytes = 0;
+        let mut wal_files = 0;
+        walk(dir, &mut dir_bytes, &mut wal_bytes, &mut wal_files);
+        (dir_bytes, wal_bytes, wal_files)
+    }
+
     fn vm_kib(prefix: &str) -> u64 {
         let Ok(text) = fs::read_to_string("/proc/self/status") else {
             return 0;
@@ -4017,6 +4052,11 @@ mod tests {
         let options = options_for(&consensus)?;
 
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let (dir_bytes, wal_bytes, wal_files) = wal_snapshot(&rocks);
+        assert!(
+            wal_bytes <= WAL_BYTE_BOUND,
+            "dir_bytes={dir_bytes} wal_bytes={wal_bytes} wal_files={wal_files}"
+        );
         assert!(!stats.migrated_v1);
         assert_copy_counts(&stats);
         assert_eq!(
@@ -4051,7 +4091,9 @@ mod tests {
         let rss_after = vm_kib("VmRSS:");
         let hwm = vm_kib("VmHWM:");
         let growth = rss_after.saturating_sub(rss_before);
-        eprintln!("convert_round_trip VmRSS_KiB={rss_after} VmHWM_KiB={hwm} growth_KiB={growth}");
+        eprintln!(
+            "convert_round_trip VmRSS_KiB={rss_after} VmHWM_KiB={hwm} growth_KiB={growth} dir_bytes={dir_bytes} wal_bytes={wal_bytes} wal_files={wal_files}"
+        );
         assert!(hwm > 0, "VmHWM was not readable");
         // VmRSS is the whole process. A parallel `cargo test` counts other
         // tests that open a schema v3 index while this one runs. The round
@@ -4605,15 +4647,19 @@ mod tests {
         assert!(stats.skipped_frontier >= 1, "{stats}");
         assert_eq!(stats.intervals, 2);
         assert!(rocks.join("SCHEMA").is_file());
-        let opened = RocksSubmoduleStore::open(&rocks)?;
-        opened.view(|tx| {
-            assert!(
-                tx.get_data_path_by_offset(PartitionChunkOffset(7))?
-                    .is_none()
-            );
-            assert!(tx.placement_at(PartitionChunkOffset(20))?.is_none());
-            Ok(())
-        })?;
+        // Drop the writer before the read-only verify. The writer can delete
+        // an SST that the on-disk manifest still names, and the second open fails.
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.view(|tx| {
+                assert!(
+                    tx.get_data_path_by_offset(PartitionChunkOffset(7))?
+                        .is_none()
+                );
+                assert!(tx.placement_at(PartitionChunkOffset(20))?.is_none());
+                Ok(())
+            })?;
+        }
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
         assert!(report.has_mismatch(), "{report}");
         assert!(report.skipped_orphans >= 1, "{report}");
@@ -4844,6 +4890,14 @@ mod tests {
     /// One-chunk v1 placements, one tx each, in a single block. This is the
     /// shape that used to commit twice per placement.
     fn write_v1_one_chunk_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
+        write_v1_one_chunk_partition_with(root, n, 4)
+    }
+
+    fn write_v1_one_chunk_partition_with(
+        root: &Path,
+        n: u64,
+        data_len: usize,
+    ) -> eyre::Result<PathBuf> {
         use crate::submodule::tables::v1_fixture::master;
         use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
         use reth_db::Database as _;
@@ -4883,7 +4937,8 @@ mod tests {
                 )?;
                 let proof = derived.proof.proof;
                 let path_hash = tx_path_hash(&proof);
-                let data = (offset as u32).to_be_bytes().to_vec();
+                let mut data = vec![0xab; data_len.max(8)];
+                data[..8].copy_from_slice(&offset.to_be_bytes());
                 let data_hash = H256::from(hash_sha256(&data));
                 let key = PartitionChunkOffset(offset as u32);
                 tx.put::<master::ChunkPathHashesByOffset>(
@@ -4965,6 +5020,38 @@ mod tests {
             "v1_convert placements={N} elapsed_ms={} placements_per_s={per_s:.1}",
             stats.elapsed_ms
         );
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        Ok(())
+    }
+
+    /// A large copy used to leave recycled WAL logs. The sealed directory stays under the bound.
+    #[test]
+    fn convert_large_paths_leave_no_wal() -> eyre::Result<()> {
+        const N: u64 = 2_500;
+        const DATA_LEN: usize = 32 * 1024;
+        let root = temp("convert-wal");
+        let consensus = write_v1_one_chunk_partition_with(root.path(), N, DATA_LEN)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.intervals, N, "{stats}");
+        assert_eq!(stats.data_paths, N, "{stats}");
+        let (dir_bytes, wal_bytes, wal_files) = wal_snapshot(&rocks);
+        assert!(
+            wal_bytes <= WAL_BYTE_BOUND,
+            "dir_bytes={dir_bytes} wal_bytes={wal_bytes} wal_files={wal_files}"
+        );
+        let opened = RocksSubmoduleStore::open(&rocks)?;
+        assert!(
+            opened
+                .view(|tx| tx.placement_at(PartitionChunkOffset((N - 1) as u32)))?
+                .is_some()
+        );
+        drop(opened);
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!report.has_mismatch(), "{report}");
         Ok(())

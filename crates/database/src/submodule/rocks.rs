@@ -1053,6 +1053,9 @@ pub struct RocksSubmoduleStore {
     layout: IndexLayout,
     /// A read-only open refuses every write, including compaction and the schema stamp.
     read_only: bool,
+    /// Conversion open. Writes skip the WAL. [`Self::seal_and_stamp`] flushes
+    /// the memtables, drops the log files, and writes the SCHEMA file last.
+    bulk_load: bool,
     /// Exclusive lock of the RocksDB `LOCK` file. Drop releases it.
     ///
     /// Read-only open does not take that lock itself. The converter holds it
@@ -1176,18 +1179,24 @@ impl RocksSubmoduleStore {
 
     /// Opens a schema v3 conversion target. Does not write the SCHEMA file.
     ///
-    /// [`Self::stamp_schema_marker`] writes the schema 3 marker after the copy
-    /// is durable. A crash before that leaves `CURRENT` and no SCHEMA file.
+    /// Writes skip the WAL (`recycle_log_file_num` is 0; a non-zero count
+    /// rejects `disableWAL`). [`Self::seal_and_stamp`] makes the rows durable
+    /// and writes the schema 3 marker last. A crash before that leaves
+    /// `CURRENT` and no SCHEMA file.
     pub(super) fn open_converting_v3(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        Self::open_inner(
+        let mut tuning = RocksTuning::baseline();
+        tuning.recycle_log_file_num = 0;
+        let mut opened = Self::open_inner(
             path,
-            RocksTuning::baseline(),
+            tuning,
             true,
             false,
             None,
             false,
             Some(IndexLayout::V3),
-        )
+        )?;
+        opened.bulk_load = true;
+        Ok(opened)
     }
 
     /// Open a schema-v1 directory for point reads of `ChunkPathHashesByOffset`.
@@ -1221,6 +1230,7 @@ impl RocksSubmoduleStore {
             stats,
             layout: IndexLayout::V2,
             read_only: false,
+            bulk_load: false,
             lock_file: None,
         })
     }
@@ -1255,6 +1265,7 @@ impl RocksSubmoduleStore {
             stats: None,
             layout,
             read_only: true,
+            bulk_load: false,
             lock_file,
         })
     }
@@ -1428,21 +1439,58 @@ impl RocksSubmoduleStore {
             stats,
             layout,
             read_only: false,
+            bulk_load: false,
             lock_file: None,
         })
     }
 
-    /// Syncs the copied rows, writes the schema row, then the SCHEMA file.
+    /// Flush copied rows into SST files, drop WAL logs, then write SCHEMA.
     ///
-    /// The file is last. A crash before the rename leaves no completion marker.
-    pub(super) fn stamp_schema_marker(&self) -> eyre::Result<()> {
-        self.ensure_writable()?;
-        let _guard = self.lock_write();
-        self.db
-            .flush_wal(true)
-            .wrap_err("sync wal before schema marker")?;
-        ensure_schema_row(&self.db, self.layout)?;
-        write_schema_marker_file(&self.path, schema_text(self.layout))
+    /// The database is closed before the log files are removed, and the
+    /// SCHEMA file is written after that. A crash before the file leaves no
+    /// completion marker, so the run is redone. A family with more than one
+    /// SST is compacted so the finished directory is not a pile of flushes.
+    pub(super) fn seal_and_stamp(self) -> eyre::Result<()> {
+        let path = self.path.clone();
+        let layout = self.layout;
+        {
+            self.ensure_writable()?;
+            let _guard = self.lock_write();
+            self.flush_families_locked()?;
+            self.compact_split_families_locked();
+            write_schema_row(&self.db, layout, true)?;
+            self.flush_families_locked()?;
+            self.compact_split_families_locked();
+        }
+        drop(self);
+        remove_rocks_wal_files(&path)?;
+        sync_dir(&path)?;
+        write_schema_marker_file(&path, schema_text(layout))
+    }
+
+    fn flush_families_locked(&self) -> eyre::Result<()> {
+        for cf in families(self.layout) {
+            let handle = cf_handle(&self.db, cf)?;
+            self.db.flush_cf(&handle).wrap_err("flush column family")?;
+        }
+        Ok(())
+    }
+
+    /// Merge a family that flushed more than one SST. One file is left as it is.
+    fn compact_split_families_locked(&self) {
+        for cf in families(self.layout) {
+            let Ok(handle) = cf_handle(&self.db, cf) else {
+                continue;
+            };
+            if live_sst_count(&self.db, handle) <= 1 {
+                continue;
+            }
+            let mut opts = rocksdb::CompactOptions::default();
+            opts.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::Force);
+            opts.set_exclusive_manual_compaction(true);
+            self.db
+                .compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
+        }
     }
 
     pub(super) fn schema_bytes(&self) -> eyre::Result<Option<Vec<u8>>> {
@@ -1807,8 +1855,10 @@ impl RocksSubmoduleStore {
             used_placeholder: false,
         };
         let result = f(&mut batch)?;
-        batch.commit(sync, &self.submodule)?;
-        if sync {
+        // Conversion skips the WAL. Durability is the later memtable flush.
+        let disable_wal = self.bulk_load;
+        batch.commit(sync && !disable_wal, disable_wal, &self.submodule)?;
+        if sync && !disable_wal {
             self.group.note_wal_sync();
         }
         Ok(result)
@@ -2222,13 +2272,14 @@ impl RocksSubmoduleStore {
                 batch.delete_cf(&handle, key);
             }
         }
-        let mut opts = WriteOptions::default();
-        opts.set_sync(true);
+        let disable_wal = self.bulk_load;
         self.db
-            .write_opt(batch, &opts)
+            .write_opt(batch, &write_opts(true, disable_wal))
             .wrap_err("reconcile presence rows")?;
-        self.group.note_wal_sync();
-        self.group.cover_durable();
+        if !disable_wal {
+            self.group.note_wal_sync();
+            self.group.cover_durable();
+        }
         Ok(PresenceReconcile {
             path_hash_rows,
             data_path_rows,
@@ -2549,7 +2600,10 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
         self.ensure_writable()?;
         let result = self.apply(true, f)?;
         // A synced write covers earlier unsynced registrations in this WAL.
-        self.group.cover_durable();
+        // A conversion write has no WAL, so it does not cover a group.
+        if !self.bulk_load {
+            self.group.cover_durable();
+        }
         Ok(result)
     }
 
@@ -2634,13 +2688,14 @@ impl RocksSubmoduleStore {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let mut batch = WriteBatch::new();
         batch.put_cf(&handle, encode_key(key), value);
-        let mut opts = WriteOptions::default();
-        opts.set_sync(true);
+        let disable_wal = self.bulk_load;
         self.db
-            .write_opt(batch, &opts)
+            .write_opt(batch, &write_opts(true, disable_wal))
             .wrap_err("write submodule metadata")?;
-        self.group.note_wal_sync();
-        self.group.cover_durable();
+        if !disable_wal {
+            self.group.note_wal_sync();
+            self.group.cover_durable();
+        }
         Ok(())
     }
 
@@ -2658,13 +2713,14 @@ impl RocksSubmoduleStore {
             }
             None => batch.delete_cf(&handle, encoded),
         }
-        let mut opts = WriteOptions::default();
-        opts.set_sync(true);
+        let disable_wal = self.bulk_load;
         self.db
-            .write_opt(batch, &opts)
+            .write_opt(batch, &write_opts(true, disable_wal))
             .wrap_err("write submodule metadata")?;
-        self.group.note_wal_sync();
-        self.group.cover_durable();
+        if !disable_wal {
+            self.group.note_wal_sync();
+            self.group.cover_durable();
+        }
         Ok(())
     }
 }
@@ -3442,6 +3498,10 @@ fn open_existing_db(
 }
 
 fn ensure_schema_row(db: &DB, layout: IndexLayout) -> eyre::Result<()> {
+    write_schema_row(db, layout, false)
+}
+
+fn write_schema_row(db: &DB, layout: IndexLayout, disable_wal: bool) -> eyre::Result<()> {
     let handle = cf_handle(db, Cf::Metadata)?;
     let key = encode_key(MetadataKey::DBSchemaVersion);
     let expected = schema_value(layout);
@@ -3453,11 +3513,54 @@ fn ensure_schema_row(db: &DB, layout: IndexLayout) -> eyre::Result<()> {
         None => {
             let mut batch = WriteBatch::new();
             batch.put_cf(&handle, key, expected);
-            let mut opts = WriteOptions::default();
-            opts.set_sync(true);
-            db.write_opt(batch, &opts).wrap_err("write schema row")
+            db.write_opt(batch, &write_opts(true, disable_wal))
+                .wrap_err("write schema row")
         }
     }
+}
+
+/// `sync` is ignored when the WAL is off. A disabled WAL has nothing to sync.
+fn write_opts(sync: bool, disable_wal: bool) -> WriteOptions {
+    let mut opts = WriteOptions::default();
+    opts.disable_wal(disable_wal);
+    opts.set_sync(sync && !disable_wal);
+    opts
+}
+
+fn is_rocks_wal_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".log") else {
+        return false;
+    };
+    !stem.is_empty() && stem.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Delete numeric `*.log` files. RocksDB creates one at open even when every
+/// write disables the WAL. Recycled logs are the same names.
+fn remove_rocks_wal_files(dir: &Path) -> eyre::Result<()> {
+    fn remove_in(dir: &Path) -> eyre::Result<()> {
+        for entry in fs::read_dir(dir).wrap_err("read rocksdb directory")? {
+            let entry = entry.wrap_err("read rocksdb directory entry")?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if is_rocks_wal_name(&name) {
+                fs::remove_file(entry.path()).wrap_err("remove rocksdb wal")?;
+            }
+        }
+        Ok(())
+    }
+    remove_in(dir)?;
+    let archive = dir.join("archive");
+    if archive.is_dir() {
+        remove_in(&archive)?;
+    }
+    Ok(())
+}
+
+fn sync_dir(dir: &Path) -> eyre::Result<()> {
+    fs::File::open(dir)
+        .wrap_err("open rocksdb directory")?
+        .sync_all()
+        .wrap_err("sync rocksdb directory")
 }
 
 fn schema_value(layout: IndexLayout) -> Vec<u8> {
@@ -4095,7 +4198,7 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
-    fn commit(&self, sync: bool, submodule: &str) -> eyre::Result<()> {
+    fn commit(&self, sync: bool, disable_wal: bool, submodule: &str) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
         for cf in families(self.layout) {
             let handle = cf_handle(self.db, cf)?;
@@ -4131,13 +4234,11 @@ impl<'a> Batch<'a> {
             "submodule" => submodule.to_owned()
         )
         .record(batch.size_in_bytes() as f64);
-        let mut opts = WriteOptions::default();
-        // `false` still appends the WAL. A later synced write or `flush_wal`
-        // makes this group durable. `true` syncs the WAL, including earlier
-        // unsynced records.
-        opts.set_sync(sync);
+        // `disable_wal` is the conversion copy. Those rows become durable when
+        // the memtables are flushed. `sync` false still appends the WAL. A
+        // later synced write or `flush_wal` makes that group durable.
         self.db
-            .write_opt(batch, &opts)
+            .write_opt(batch, &write_opts(sync, disable_wal))
             .wrap_err("commit submodule index batch")
     }
 }
