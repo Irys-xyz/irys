@@ -130,6 +130,13 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
     let num_chunks_in_partition = node_config.consensus_config().num_chunks_in_partition;
     let entropy_packing_iterations = node_config.consensus_config().entropy_packing_iterations;
     let chain_id = node_config.consensus_config().chain_id;
+    // These PoAs are checked as a child of `new_block`. Echo is unset in the
+    // testing preset, so the parent's timestamp resolves the same inactive state
+    // a child block would.
+    let echo = node_config
+        .consensus_config()
+        .hardforks
+        .echo_for_block(new_block.timestamp_secs());
 
     // Loop though the tx and their chunks validating entropy and data PoAs for each chunk
     for tx_index in 0..3 {
@@ -203,6 +210,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 new_block.height,
                 &epoch_snapshot,
                 &node_config.consensus_config(),
+                echo,
                 &genesis_signer.address(),
             )?;
 
@@ -228,6 +236,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 new_block.height,
                 &epoch_snapshot,
                 &node_config.consensus_config(),
+                echo,
                 &genesis_signer.address(),
             )?;
         }
@@ -415,6 +424,10 @@ async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()>
         data_block.height,
         &epoch_snapshot,
         &node_config.consensus_config(),
+        node_config
+            .consensus_config()
+            .hardforks
+            .echo_for_block(data_block.timestamp_secs()),
         &genesis_signer.address(),
     );
 
