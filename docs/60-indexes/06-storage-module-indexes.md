@@ -24,6 +24,8 @@ The tool takes the index lock and refuses the run when that lock is held.
 The directory name does not need to contain `copy`.
 
 Every command needs the consensus database and the partition geometry.
+The consensus database is `irys_consensus_data` under the node's
+`base_directory` (`.irys` by default), not a submodule `db/`.
 The ledger offset is `slot * chunks_per_partition + partition offset`.
 `ledger` and `slot` are the fields in `<submodule>/packing_params.toml`.
 `chunks-per-partition` and `chunk-size` come from the chain config.
@@ -31,9 +33,9 @@ Mainnet chunk size is 262144. The tool derives the tx path at that ledger
 offset and requires the stored bytes to be identical. A mismatch aborts
 and names the partition offset.
 
-The source is not modified, except a schema v1 `db/`. That directory is
-migrated to v2 in place, and then copied into RocksDB schema v3. The
-completion marker is written last. `rocks/SCHEMA` is the RocksDB marker.
+The converter never modifies its source. It reads a schema v1 or v2
+`db/` and writes RocksDB schema v3 to the target. The completion marker
+is written last. `rocks/SCHEMA` is the RocksDB marker.
 The MDBX marker is the schema row. A crash leaves no marker. The node
 refuses that directory. Run the same command again with
 `--replace-incomplete`.
@@ -41,18 +43,24 @@ refuses that directory. Run the same command again with
 `rocks-to-mdbx` reads schema v3 only. A schema v2 RocksDB index uses
 `rocks-to-v3` first.
 
-## devnet-node-2: RocksDB schema v2 to schema v3
+The node itself migrates a schema v1 `db/` (release 4.0.x) to MDBX
+schema v2 in place the first time it opens it with the MDBX engine.
+Release 4.0.x cannot read the result. There is no rollback from 4.1.0 to
+4.0.x. Both a schema v1 and a schema v2 `db/` convert to RocksDB, so the
+conversion can run before or after the first start of 4.1.0.
+
+## RocksDB schema v2 to schema v3
 
 Stop the node. Do this for each submodule. Keep `rocks/`.
 
 ```sh
 submodule-index-convert rocks-to-v3 \
-  --consensus-db <node>/db \
+  --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <submodule>/rocks <submodule>/rocks-v3
 submodule-index-convert verify-rocks \
-  --consensus-db <node>/db \
+  --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <submodule>/rocks <submodule>/rocks-v3
@@ -68,12 +76,12 @@ same as above.
 
 ```sh
 submodule-index-convert mdbx-to-rocks \
-  --consensus-db <node>/db \
+  --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <submodule>/db <submodule>/rocks
 submodule-index-convert verify \
-  --consensus-db <node>/db \
+  --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <submodule>/db <submodule>/rocks
@@ -83,23 +91,27 @@ Set `database.submodule_index` to `rocksdb`. Start the node. Keep `db/`.
 
 ## Rollback to MDBX schema v2
 
-Stop the node. `rocks-to-mdbx` rebuilds the tx paths by derivation.
+This rolls a 4.1.0 node back to the MDBX engine of the same release. The
+output is MDBX schema v2, which release 4.0.x cannot read. Stop the node.
+`rocks-to-mdbx` rebuilds the tx paths by derivation.
 
 ```sh
 submodule-index-convert rocks-to-mdbx \
-  --consensus-db <node>/db \
+  --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <submodule>/rocks <new-db-dir>
 submodule-index-convert verify \
-  --consensus-db <node>/db \
+  --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <new-db-dir> <submodule>/rocks
 ```
 
-Replace `db/` with `<new-db-dir>` only after verify passes. Set
-`database.submodule_index` to `mdbx`. Start the node.
+Replace `db/` with `<new-db-dir>` only after verify passes. Move
+`rocks/` out of the submodule directory (for example, rename it to
+`rocks.retired`); the node refuses to open MDBX while `rocks/` is
+present. Set `database.submodule_index` to `mdbx`. Start the node.
 
 ## Failed conversion
 
