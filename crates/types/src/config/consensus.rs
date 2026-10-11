@@ -844,6 +844,7 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                echo: None,
             },
         }
     }
@@ -987,6 +988,7 @@ impl ConsensusConfig {
                 // Delta hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 delta: None,
+                echo: None,
             },
         }
     }
@@ -1124,6 +1126,7 @@ impl ConsensusConfig {
                 }),
                 // Delta hardfork - not scheduled yet
                 delta: None,
+                echo: None,
             },
         }
     }
