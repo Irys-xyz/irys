@@ -18,9 +18,12 @@ use irys_types::{
     ProofDeserialize as _, SendTraced as _, TokioServiceHandle, U256,
     app_state::DatabaseProvider,
     block_production::{Seed, SolutionContext, TxPathJob, TxPathSource},
-    get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
+    get_leaf_proof,
+    partition::PartitionAssignment,
+    partition_chunk_offset_ie, u256_from_le_bytes,
 };
 use irys_vdf::state::VdfStateReadonly;
+use nodit::Interval;
 use openssl::sha;
 use reth::tasks::shutdown::Shutdown;
 use std::{sync::Arc, time::Duration};
@@ -64,6 +67,9 @@ pub struct PartitionMiningServiceInner {
     tx_path_pool: Option<TxPathPool>,
     /// Expiry `reset` did not finish. Retried until it does. Packing waits.
     expiry_reset_pending: bool,
+    /// Epoch height of the expiry that is still pending. The retry stores
+    /// the capacity assignment at this height.
+    expiry_update_height: u64,
     /// Path lookups this miner issued. Proves a non-winning recall does not
     /// open the index.
     #[cfg(test)]
@@ -189,6 +195,7 @@ impl PartitionMiningServiceInner {
             tx_path_db,
             tx_path_pool: tx_path_pool.map(TxPathPool),
             expiry_reset_pending: false,
+            expiry_update_height: 0,
             #[cfg(test)]
             data_path_lookups: std::sync::atomic::AtomicU64::new(0),
         }
@@ -216,16 +223,17 @@ impl PartitionMiningServiceInner {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn handle_partitions_expiration(&mut self, expired: &H256List) {
+    fn handle_partitions_expiration(&mut self, expired: &H256List, update_height: u64) {
         let Some(partition_hash) = self.storage_module.partition_hash() else {
             return;
         };
         if !expired.0.contains(&partition_hash) {
             return;
         }
+        self.expiry_update_height = update_height;
         // This call is the attempt. Do not also run the retry here: a
         // successful retry and this handler would pack twice.
-        match self.storage_module.reset() {
+        match self.expire_to_capacity() {
             Ok(interval) => {
                 self.expiry_reset_pending = false;
                 debug!(
@@ -259,7 +267,7 @@ impl PartitionMiningServiceInner {
             self.expiry_reset_pending = false;
             return;
         };
-        match self.storage_module.reset() {
+        match self.expire_to_capacity() {
             Ok(interval) => {
                 self.expiry_reset_pending = false;
                 debug!(
@@ -276,6 +284,23 @@ impl PartitionMiningServiceInner {
                 );
             }
         }
+    }
+
+    /// Reset and store capacity (same partition and miner, no ledger slot)
+    /// before the assignment write lock is released. A failed reset leaves
+    /// the previous assignment in place.
+    fn expire_to_capacity(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
+        let Some(current) = self.storage_module.partition_assignment() else {
+            eyre::bail!("partition assignment missing during expiry reset");
+        };
+        let capacity = PartitionAssignment {
+            partition_hash: current.partition_hash,
+            miner_address: current.miner_address,
+            ledger_id: None,
+            slot_index: None,
+        };
+        self.storage_module
+            .reset_with_assignment(Some(capacity), self.expiry_update_height)
     }
 
     fn enqueue_expiry_packing(&self, partition_hash: irys_types::H256, range: PartitionChunkRange) {
@@ -932,8 +957,12 @@ impl PartitionMiningService {
                                 self.state.finish_expiry_reset();
                                 self.state.update_difficulty(h.diff);
                             }
-                            MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list)) => {
-                                self.state.handle_partitions_expiration(list);
+                            MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration {
+                                partition_hashes,
+                                update_height,
+                            }) => {
+                                self.state
+                                    .handle_partitions_expiration(partition_hashes, *update_height);
                             }
                             MiningBroadcastEvent::Reanchored => {
                                 self.state.finish_expiry_reset();
@@ -995,7 +1024,11 @@ mod tests {
                 ledger_id: None,
                 slot_index: None,
             }),
-            submodules: vec![(partition_chunk_offset_ie!(0, 10), "hdd0".into())],
+            // Absolute: a successful expiry writes packing_params.toml here.
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
         };
         let storage_module =
             Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
@@ -1016,11 +1049,11 @@ mod tests {
             None,
         );
 
-        inner.handle_partitions_expiration(&H256List(vec![H256::repeat_byte(0x01)]));
+        inner.handle_partitions_expiration(&H256List(vec![H256::repeat_byte(0x01)]), 11);
         assert!(!inner.expiry_reset_pending);
 
         storage_module.fail_next_reset_for_test();
-        inner.handle_partitions_expiration(&H256List(vec![partition_hash]));
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 11);
         assert!(inner.expiry_reset_pending);
         assert!(storage_module.reset_incomplete());
         assert!(receivers.packing.try_recv().is_err());

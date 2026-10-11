@@ -306,10 +306,10 @@ impl StorageModuleServiceInner {
             if existing.partition_assignment().is_none()
                 && let Some(assignment) = sm_info.partition_assignment
             {
-                // Clear before the assignment changes. A failed reset leaves the
-                // module unassigned, so the next update takes this branch again.
-                let range = self.reset_for_assignment(existing)?;
-                existing.assign_partition(assignment, update_height);
+                // Reset and install the assignment under one write lock. A
+                // failed reset leaves the module unassigned, so the next
+                // update takes this branch again.
+                let range = self.reset_and_install(existing, Some(assignment), update_height)?;
                 // The protocol assigns a new partition to capacity for one epoch.
                 self.enqueue_packing(existing, range);
 
@@ -361,13 +361,14 @@ impl StorageModuleServiceInner {
                 {
                     let ledger_before = existing_pa.ledger_id;
 
-                    // Expiry clears the index before the assignment changes.
-                    // A failed reset leaves the ledger assignment in place, so
-                    // the next update still sees the ledger→capacity transition.
-                    // A module that already moved is not reset again.
+                    // Expiry resets and returns the partition to capacity
+                    // under one write lock. A failed reset leaves the ledger
+                    // assignment in place, so the next update still sees the
+                    // ledger→capacity transition. A module that already moved
+                    // is not reset again.
                     if ledger_before.is_some() && info_pa.ledger_id.is_none() {
-                        let range = self.reset_for_assignment(existing)?;
-                        existing.assign_partition(info_pa, update_height);
+                        let range =
+                            self.reset_and_install(existing, Some(info_pa), update_height)?;
                         self.enqueue_packing(existing, range);
                     } else {
                         // Capacity→LedgerSlot and long-lived ledger assigns.
@@ -391,13 +392,29 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
-    /// Reset, or report that the assignment update must be retried.
-    /// The assignment itself is not changed here.
-    fn reset_for_assignment(
+    /// Finish a reset that stopped before its marker was dropped.
+    /// The assignment is already `None` and is not written again.
+    fn finish_reset(&self, module: &Arc<StorageModule>) -> eyre::Result<PartitionChunkRange> {
+        self.map_reset(module, module.reset())
+    }
+
+    /// Reset and install `next` as one critical section. A failed reset
+    /// leaves the previous assignment in place so the update can be retried.
+    fn reset_and_install(
         &self,
         module: &Arc<StorageModule>,
+        next: Option<irys_types::partition::PartitionAssignment>,
+        update_height: u64,
     ) -> eyre::Result<PartitionChunkRange> {
-        match module.reset() {
+        self.map_reset(module, module.reset_with_assignment(next, update_height))
+    }
+
+    fn map_reset(
+        &self,
+        module: &Arc<StorageModule>,
+        result: eyre::Result<nodit::Interval<irys_types::PartitionChunkOffset>>,
+    ) -> eyre::Result<PartitionChunkRange> {
+        match result {
             Ok(interval) => Ok(PartitionChunkRange(interval)),
             Err(err) => {
                 warn!(
@@ -445,9 +462,10 @@ impl StorageModuleServiceInner {
     ) -> eyre::Result<()> {
         if module.partition_assignment().is_none() {
             // The assignment is already gone. Finish a reset that stopped
-            // before its marker was dropped.
+            // before its marker was dropped. Do not write the assignment
+            // again: it is already `None`.
             if module.reset_incomplete() {
-                self.reset_for_assignment(module)?;
+                self.finish_reset(module)?;
             }
             return Ok(());
         }
@@ -477,10 +495,9 @@ impl StorageModuleServiceInner {
             storage_module.clear_reason = reason,
             "clearing local partition assignment"
         );
-        // Reset while the assignment is still present. A failure leaves it
-        // in place so the next update retries the unassign.
-        let range = self.reset_for_assignment(module)?;
-        module.clear_assignment(update_height);
+        // Reset and clear the assignment under one write lock. A failure
+        // leaves the assignment in place so the next update retries.
+        let range = self.reset_and_install(module, None, update_height)?;
         debug!(
             packing.interval = ?range,
             storage_module.id = module.id,

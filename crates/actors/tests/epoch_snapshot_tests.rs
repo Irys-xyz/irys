@@ -826,9 +826,10 @@ async fn partition_expiration_and_repacking_test() {
                 infos.iter().map(|info| info.partition_hash).collect()
             });
 
-        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
-            expired_partition_hashes,
-        )));
+        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration {
+            partition_hashes: H256List(expired_partition_hashes),
+            update_height: new_epoch_block.height,
+        });
 
         previous_epoch_block = Some(new_epoch_block.clone());
 

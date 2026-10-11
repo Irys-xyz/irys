@@ -18,7 +18,12 @@ pub struct BroadcastMiningSeed {
 pub struct BroadcastDifficultyUpdate(pub Arc<IrysBlockHeader>);
 
 #[derive(Debug, Clone)]
-pub struct BroadcastPartitionsExpiration(pub H256List);
+pub struct BroadcastPartitionsExpiration {
+    pub partition_hashes: H256List,
+    /// Epoch height that owns this expiry. The miner stores the capacity
+    /// assignment at this height in the same critical section as the reset.
+    pub update_height: u64,
+}
 
 #[derive(Debug, Clone)]
 pub enum MiningBroadcastEvent {
@@ -103,9 +108,9 @@ impl MiningBus {
     }
 
     /// Send partition expiration notice to all subscribers.
-    #[tracing::instrument(level = "trace", skip_all, fields(partition.expired_count = msg.0.len()))]
+    #[tracing::instrument(level = "trace", skip_all, fields(partition.expired_count = msg.partition_hashes.len()))]
     pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
-        debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
+        debug!(custom.msg = ?msg.partition_hashes, "Broadcasting expiration, expired partition hashes");
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
     }
 

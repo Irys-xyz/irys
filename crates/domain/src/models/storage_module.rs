@@ -74,7 +74,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, Once, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -439,6 +439,39 @@ struct SyncPauseGate {
     release_cv: Condvar,
 }
 
+/// Test barrier in a registration, after the rows are computed and before
+/// they are committed. The registration does not hold `sync_in_progress`
+/// or the assignment lock while it waits.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegistrationPausePoint {
+    AfterRowsComputed,
+}
+
+/// One armed registration pause.
+#[cfg(test)]
+#[derive(Debug)]
+struct RegistrationPauseGate {
+    point: Mutex<Option<RegistrationPausePoint>>,
+    arrived: Mutex<bool>,
+    arrived_cv: Condvar,
+    release: Mutex<bool>,
+    release_cv: Condvar,
+}
+
+#[cfg(test)]
+impl RegistrationPauseGate {
+    fn new() -> Self {
+        Self {
+            point: Mutex::new(None),
+            arrived: Mutex::new(false),
+            arrived_cv: Condvar::new(),
+            release: Mutex::new(false),
+            release_cv: Condvar::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 impl SyncPauseGate {
     fn new() -> Self {
@@ -685,6 +718,13 @@ pub struct StorageModule {
     /// Pauses one durable point so a test can call `reset` in the gap.
     #[cfg(test)]
     sync_pause: SyncPauseGate,
+    /// Pauses one registration after its rows are computed and before commit.
+    #[cfg(test)]
+    registration_pause: RegistrationPauseGate,
+    /// Registrations dropped because the assignment changed. Tests read this.
+    /// The production counter is `irys.storage.registration_dropped_total`.
+    #[cfg(test)]
+    registration_drops: AtomicU64,
     /// Monotonic instant of the last pending write, used only for idle flushing.
     last_pending_write: RwLock<Instant>,
     /// Tracks the storage state of each chunk across all submodules
@@ -1740,6 +1780,10 @@ impl StorageModule {
             sync_failure: Mutex::new(None),
             #[cfg(test)]
             sync_pause: SyncPauseGate::new(),
+            #[cfg(test)]
+            registration_pause: RegistrationPauseGate::new(),
+            #[cfg(test)]
+            registration_drops: AtomicU64::new(0),
             last_pending_write: RwLock::new(Instant::now()),
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             interval_disk: Mutex::new(Self::load_interval_disk(&submodule_map)),
@@ -1918,21 +1962,7 @@ impl StorageModule {
 
     pub fn assign_partition(&self, partition_assignment: PartitionAssignment, update_height: u64) {
         let mut pa = self.partition_assignment.write().unwrap();
-        *pa = Some(partition_assignment);
-
-        // Also update the packing params file in each submodule
-        for (_, submodule) in self.submodules.iter() {
-            let params = PackingParams {
-                packing_address: self.config.node_config.miner_address(),
-                partition_hash: Some(partition_assignment.partition_hash),
-                ledger: partition_assignment.ledger_id,
-                slot: partition_assignment.slot_index,
-                last_updated_height: Some(update_height),
-            };
-
-            let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
-            params.write_to_disk(&params_path);
-        }
+        self.store_assignment(&mut pa, Some(partition_assignment), update_height);
     }
 
     /// Clears the current partition assignment and persists the change on disk.
@@ -1940,20 +1970,27 @@ impl StorageModule {
     /// Writes `packing_params.toml` with `partition_hash = None`, `ledger = None`,
     /// `slot = None`, and updates `last_updated_height`. In-memory assignment is set to `None`.
     pub fn clear_assignment(&self, update_height: u64) {
-        // Clear in-memory assignment
         let mut pa = self.partition_assignment.write().unwrap();
-        *pa = None;
+        self.store_assignment(&mut pa, None, update_height);
+    }
 
-        // Persist to each submodule's packing params
+    /// Store `next` and write each submodule's `packing_params.toml`.
+    /// The caller holds the assignment write lock.
+    fn store_assignment(
+        &self,
+        assignment: &mut Option<PartitionAssignment>,
+        next: Option<PartitionAssignment>,
+        update_height: u64,
+    ) {
+        *assignment = next;
         for (_, submodule) in self.submodules.iter() {
             let params = PackingParams {
                 packing_address: self.config.node_config.miner_address(),
-                partition_hash: None,
-                ledger: None,
-                slot: None,
+                partition_hash: next.map(|assignment| assignment.partition_hash),
+                ledger: next.and_then(|assignment| assignment.ledger_id),
+                slot: next.and_then(|assignment| assignment.slot_index),
                 last_updated_height: Some(update_height),
             };
-
             let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
             params.write_to_disk(&params_path);
         }
@@ -2333,6 +2370,53 @@ impl StorageModule {
         }
     }
 
+    /// The next registration waits after its rows are computed.
+    #[cfg(test)]
+    fn pause_next_registration_at(&self, point: RegistrationPausePoint) {
+        *self.registration_pause.release.lock().unwrap() = false;
+        *self.registration_pause.arrived.lock().unwrap() = false;
+        *self.registration_pause.point.lock().unwrap() = Some(point);
+    }
+
+    /// `true` when the armed registration pause was reached before `timeout`.
+    #[cfg(test)]
+    fn wait_for_registration_pause(&self, timeout: Duration) -> bool {
+        let guard = self.registration_pause.arrived.lock().unwrap();
+        let (guard, _) = self
+            .registration_pause
+            .arrived_cv
+            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
+            .unwrap();
+        *guard
+    }
+
+    /// Let a paused registration continue.
+    #[cfg(test)]
+    fn release_registration_pause(&self) {
+        *self.registration_pause.release.lock().unwrap() = true;
+        self.registration_pause.release_cv.notify_all();
+    }
+
+    #[cfg(test)]
+    fn wait_if_registration_paused(&self, point: RegistrationPausePoint) {
+        {
+            let mut armed = self.registration_pause.point.lock().unwrap();
+            if *armed != Some(point) {
+                return;
+            }
+            *armed = None;
+        }
+        {
+            let mut arrived = self.registration_pause.arrived.lock().unwrap();
+            *arrived = true;
+            self.registration_pause.arrived_cv.notify_all();
+        }
+        let mut release = self.registration_pause.release.lock().unwrap();
+        while !*release {
+            release = self.registration_pause.release_cv.wait(release).unwrap();
+        }
+    }
+
     /// Resolves every local partition placement funded for one transaction
     /// chunk. This is the canonical forward mapping used by ingress writes,
     /// migration, and durability queries.
@@ -2470,6 +2554,12 @@ impl StorageModule {
     /// rewritten to `Uninitialized`. The in-memory map flips to
     /// `Uninitialized` as soon as the clear commits, so this process does not
     /// serve the old bytes while the file still names them `Data`.
+    ///
+    /// This does not change the partition assignment. A caller that resets
+    /// because the assignment changes must use [`Self::reset_with_assignment`],
+    /// which stores the new assignment before releasing the assignment lock.
+    /// After `reset` alone, the previous assignment is still visible and a
+    /// registration can commit rows for it into the cleared index.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let _sync_guard = self
             .sync_in_progress
@@ -2544,6 +2634,31 @@ impl StorageModule {
         }
         self.reset_incomplete.store(false, Ordering::SeqCst);
         Ok(storage_interval)
+    }
+
+    /// Reset the index and install `next` before any registration can observe
+    /// the cleared module under the old assignment.
+    ///
+    /// Lock order, outer to inner: `partition_assignment` write, then
+    /// `sync_in_progress` (taken by [`Self::reset`]), then `pending_writes`
+    /// and the interval map. A registration takes the assignment read lock
+    /// only across its equality check and index commit. It does not take
+    /// `sync_in_progress`. No holder of `sync_in_progress` takes
+    /// `partition_assignment`. Readers (mining, the chunk provider, data
+    /// sync, the body worker) take the assignment read lock and drop it
+    /// before they take `pending_writes`, `intervals`, or `sync_in_progress`.
+    ///
+    /// `next` of `None` clears the assignment. A failed reset leaves the
+    /// previous assignment in place.
+    pub fn reset_with_assignment(
+        &self,
+        next: Option<PartitionAssignment>,
+        update_height: u64,
+    ) -> eyre::Result<Interval<PartitionChunkOffset>> {
+        let mut assignment = self.partition_assignment.write().unwrap();
+        let interval = self.reset()?;
+        self.store_assignment(&mut assignment, next, update_height);
+        Ok(interval)
     }
 
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
@@ -4493,6 +4608,11 @@ impl StorageModule {
     /// `ledger` and `tx_index` locate the tx in the block whose ledger tree
     /// covers this placement. Publish uses the promotion block, not the Submit
     /// inclusion. `None` leaves those fields unset. Schema v2 ignores them.
+    ///
+    /// The rows are computed for the assignment captured at the start. The
+    /// commit holds the assignment read lock and writes only when that
+    /// assignment is still current. A mismatch, including `None`, drops the
+    /// rows and returns `Ok`. This path does not take `sync_in_progress`.
     pub fn index_transaction_data_in(
         &self,
         data_tx: &DataTransactionHeader,
@@ -4502,8 +4622,33 @@ impl StorageModule {
         ledger: Option<DataLedger>,
         tx_index: Option<u32>,
     ) -> eyre::Result<()> {
+        let captured = {
+            let assignment = self.partition_assignment.read().unwrap();
+            let Some(assignment) = *assignment else {
+                return Err(eyre::eyre!("Partition not assigned!"));
+            };
+            assignment
+        };
+        // Use the captured slot. A later read could see a different slot and
+        // back, and the equality check would then commit the wrong rows.
+        let storage_range = self.ledger_range_for_assignment(&captured)?;
         let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
-        let (partition_overlap, start_offset) = self.partition_overlap_for(chunk_range)?;
+        let (partition_overlap, start_offset) =
+            self.partition_overlap_in(chunk_range, storage_range)?;
+
+        // Rows are computed. The commit has not started. A test can reset
+        // and change the assignment in this gap. The wait holds neither
+        // `sync_in_progress` nor the assignment lock.
+        #[cfg(test)]
+        self.wait_if_registration_paused(RegistrationPausePoint::AfterRowsComputed);
+
+        let assignment = self.partition_assignment.read().unwrap();
+        if *assignment != Some(captured) {
+            let current = *assignment;
+            drop(assignment);
+            self.note_registration_dropped(captured, current);
+            return Ok(());
+        }
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
             submodule.db.update_registration(|tx| -> eyre::Result<()> {
@@ -4559,30 +4704,81 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Partition-relative slice of `chunk_range` that lands in this module, plus
-    /// the unclipped partition-relative start of the whole tx (negative when the
-    /// tx began before this module's ledger range).
+    /// Count a registration whose rows were computed for an assignment this
+    /// module no longer has. No index rows are written.
+    fn note_registration_dropped(
+        &self,
+        captured: PartitionAssignment,
+        current: Option<PartitionAssignment>,
+    ) {
+        #[cfg(test)]
+        self.registration_drops.fetch_add(1, Ordering::SeqCst);
+        static DESCRIBED: Once = Once::new();
+        DESCRIBED.call_once(|| {
+            metrics::describe_counter!(
+                "irys.storage.registration_dropped_total",
+                "Index registrations dropped because the storage module assignment changed before commit"
+            );
+        });
+        metrics::counter!(
+            "irys.storage.registration_dropped_total",
+            "reason" => "assignment_changed"
+        )
+        .increment(1);
+        debug!(
+            storage_module.id = self.id,
+            captured_partition = %captured.partition_hash,
+            captured_ledger = ?captured.ledger_id,
+            captured_slot = ?captured.slot_index,
+            current_partition = ?current.map(|assignment| assignment.partition_hash),
+            current_ledger = ?current.and_then(|assignment| assignment.ledger_id),
+            current_slot = ?current.and_then(|assignment| assignment.slot_index),
+            "dropped index registration; the partition assignment changed before commit"
+        );
+    }
+
+    /// Partition-relative slice of `chunk_range` that lands in `storage_range`,
+    /// plus the unclipped partition-relative start of the whole tx (negative
+    /// when the tx began before this module's ledger range).
+    ///
+    /// Does not read `partition_assignment`. The caller passes the ledger
+    /// range of the assignment the rows were computed for.
     ///
     /// The `PendingBodyMigrationsByOffset` key for each submodule is the start of
     /// this slice clipped to that submodule's interval; the body worker recovers
     /// the same range from the row's `start_offset` + `data_size`.
     ///
     /// # Errors
-    /// Returns error if `chunk_range` doesn't overlap the storage module range.
-    fn partition_overlap_for(
+    /// Returns error if `chunk_range` doesn't overlap `storage_range`.
+    fn partition_overlap_in(
         &self,
         chunk_range: LedgerChunkRange,
+        storage_range: LedgerChunkRange,
     ) -> eyre::Result<(PartitionChunkRange, RelativeChunkOffset)> {
-        let storage_range = self.get_storage_module_ledger_offsets()?;
         let overlap = storage_range
             .intersection(&chunk_range)
             .ok_or_else(|| eyre::eyre!("chunk_range does not overlap storage module range"))?;
-        // Compute the partition relative overlapping chunk range
-        let partition_overlap = self.make_range_partition_relative(overlap)?;
-        // Compute the Partition relative start offset
-        let start_offset =
-            RelativeChunkOffset::from(self.make_offset_partition_relative(chunk_range.start())?);
+        let start = overlap.start() - storage_range.start();
+        let end = overlap.end() - storage_range.start();
+        let partition_overlap = PartitionChunkRange(ii(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+        ));
+        let relative = *chunk_range.start() as i64 - *storage_range.start() as i64;
+        let start_offset = RelativeChunkOffset::from(i32::try_from(relative)?);
         Ok((partition_overlap, start_offset))
+    }
+
+    fn ledger_range_for_assignment(
+        &self,
+        assignment: &PartitionAssignment,
+    ) -> eyre::Result<LedgerChunkRange> {
+        let Some(slot_index) = assignment.slot_index else {
+            return Err(eyre::eyre!("Ledger slot not assigned!"));
+        };
+        let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
+        let end = start + self.config.consensus.num_chunks_in_partition;
+        Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
     }
 
     /// Outstanding body-migration jobs grouped by submodule, each group in
@@ -6127,17 +6323,10 @@ impl StorageModule {
     /// ledger relative coordinates
     pub fn get_storage_module_ledger_offsets(&self) -> eyre::Result<LedgerChunkRange> {
         let pa = self.partition_assignment.read().unwrap();
-        if let Some(part_assign) = *pa {
-            if let Some(slot_index) = part_assign.slot_index {
-                let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
-                let end = start + self.config.consensus.num_chunks_in_partition;
-                Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
-            } else {
-                Err(eyre::eyre!("Ledger slot not assigned!"))
-            }
-        } else {
-            Err(eyre::eyre!("Partition not assigned!"))
-        }
+        let Some(part_assign) = *pa else {
+            return Err(eyre::eyre!("Partition not assigned!"));
+        };
+        self.ledger_range_for_assignment(&part_assign)
     }
 
     /// Internal utility function to take a ledger relative range and make it
@@ -8085,6 +8274,282 @@ mod tests {
         }
         eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
         Ok(())
+    }
+
+    /// A registration that has computed its rows must not commit them after
+    /// the assignment changes. The same ledger and slot still commits.
+    /// A registration that starts after the reset returns commits normally.
+    #[test]
+    fn registration_commit_follows_the_assignment() -> eyre::Result<()> {
+        let mut errors = Vec::new();
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let prefix = format!("registration_assignment_{engine:?}");
+            let outcome = (|| -> eyre::Result<()> {
+                let tmp = TempDirBuilder::new().prefix(&prefix).build();
+                let node_config = NodeConfig {
+                    consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                        chunk_size: 32,
+                        num_chunks_in_partition: 8,
+                        ..ConsensusConfig::testing()
+                    }),
+                    storage: StorageSyncConfig {
+                        num_writes_before_sync: 1,
+                        intervals_persist_secs: 0,
+                        min_durable_interval_ms: 0,
+                        ..StorageSyncConfig::default()
+                    },
+                    base_directory: tmp.path().to_path_buf(),
+                    database: index_database(engine),
+                    ..NodeConfig::testing()
+                };
+                let config = Config::new_with_random_peer_id(node_config);
+                let height = 9_u64;
+                let original = PartitionAssignment {
+                    partition_hash: H256::repeat_byte(0x44),
+                    miner_address: config.node_config.miner_address(),
+                    ledger_id: Some(DataLedger::Publish.into()),
+                    slot_index: Some(0),
+                };
+                let storage = StorageModule::new(
+                    &StorageModuleInfo {
+                        id: 0,
+                        partition_assignment: Some(original),
+                        submodules: vec![(
+                            partition_chunk_offset_ii!(0, 7),
+                            tmp.path().join("sub"),
+                        )],
+                    },
+                    &config,
+                )?;
+                let _tmp = tmp;
+                let mut other_slot = original;
+                other_slot.slot_index = Some(1);
+                let mut capacity = original;
+                capacity.ledger_id = None;
+                capacity.slot_index = None;
+
+                let mut case_errors = Vec::new();
+                let dropped = race_registration(&storage, None, height, "unassign")?;
+                if !(dropped.reset_finished_while_paused
+                    && dropped.rows.is_empty()
+                    && storage.partition_assignment().is_none()
+                    && dropped.registration_drops == 1)
+                {
+                    case_errors.push(format!(
+                        "unassign: {dropped:?} assignment={:?}",
+                        storage.partition_assignment()
+                    ));
+                }
+                assert_index_consistent(&storage)?;
+
+                storage.reset_with_assignment(Some(original), height)?;
+                let kept = race_registration(&storage, Some(original), height, "same-slot")?;
+                if !(kept.reset_finished_while_paused
+                    && kept.rows.is_present()
+                    && storage.partition_assignment() == Some(original)
+                    && kept.registration_drops == dropped.registration_drops)
+                {
+                    case_errors.push(format!("same-slot: {kept:?}"));
+                }
+                assert_index_consistent(&storage)?;
+
+                let moved = race_registration(&storage, Some(other_slot), height, "other-slot")?;
+                if !(moved.reset_finished_while_paused
+                    && moved.rows.is_empty()
+                    && storage.partition_assignment() == Some(other_slot)
+                    && moved.registration_drops == kept.registration_drops + 1)
+                {
+                    case_errors.push(format!(
+                        "other-slot: {moved:?} assignment={:?}",
+                        storage.partition_assignment()
+                    ));
+                }
+                assert_index_consistent(&storage)?;
+
+                storage.reset_with_assignment(Some(original), height)?;
+                let expired =
+                    race_registration(&storage, Some(capacity), height, "expiry-capacity")?;
+                if !(expired.reset_finished_while_paused
+                    && expired.rows.is_empty()
+                    && storage.partition_assignment() == Some(capacity)
+                    && expired.registration_drops == moved.registration_drops + 1)
+                {
+                    case_errors.push(format!(
+                        "expiry-capacity: {expired:?} assignment={:?}",
+                        storage.partition_assignment()
+                    ));
+                }
+                assert_index_consistent(&storage)?;
+
+                storage.reset_with_assignment(Some(original), height)?;
+                let before_drops = storage.registration_drops.load(Ordering::SeqCst);
+                index_one(&storage, 2)?;
+                let after = registration_rows(&storage)?;
+                if !(after.is_present()
+                    && storage.registration_drops.load(Ordering::SeqCst) == before_drops
+                    && storage.partition_assignment() == Some(original))
+                {
+                    case_errors.push(format!("registration after reset: {after:?}"));
+                }
+                assert_index_consistent(&storage)?;
+                eyre::ensure!(case_errors.is_empty(), "{}", case_errors.join("; "));
+                Ok(())
+            })();
+            if let Err(err) = outcome {
+                errors.push(format!("{engine:?}: {err}"));
+            }
+        }
+        eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
+        Ok(())
+    }
+
+    struct RegistrationRows {
+        placement: bool,
+        infos: usize,
+        jobs: usize,
+    }
+
+    impl RegistrationRows {
+        fn is_empty(&self) -> bool {
+            !self.placement && self.infos == 0 && self.jobs == 0
+        }
+
+        fn is_present(&self) -> bool {
+            self.placement && self.infos == 1 && self.jobs == 1
+        }
+    }
+
+    impl std::fmt::Debug for RegistrationRows {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("RegistrationRows")
+                .field("placement", &self.placement)
+                .field("infos", &self.infos)
+                .field("jobs", &self.jobs)
+                .finish()
+        }
+    }
+
+    struct RaceOutcome {
+        rows: RegistrationRows,
+        reset_finished_while_paused: bool,
+        registration_drops: u64,
+    }
+
+    impl std::fmt::Debug for RaceOutcome {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("RaceOutcome")
+                .field("rows", &self.rows)
+                .field(
+                    "reset_finished_while_paused",
+                    &self.reset_finished_while_paused,
+                )
+                .field("registration_drops", &self.registration_drops)
+                .finish()
+        }
+    }
+
+    fn registration_rows(storage: &StorageModule) -> eyre::Result<RegistrationRows> {
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let placement = submodule
+            .db
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+            .is_some();
+        let infos = storage
+            .collect_data_root_infos(H256::repeat_byte(4))?
+            .0
+            .len();
+        let jobs = storage.pending_body_migrations()?.len();
+        Ok(RegistrationRows {
+            placement,
+            infos,
+            jobs,
+        })
+    }
+
+    fn index_one(storage: &StorageModule, tx_index: u32) -> eyre::Result<()> {
+        let data_root = H256::repeat_byte(4);
+        let prefix_hash = H256::repeat_byte(1);
+        let chunk_size = storage.config.consensus.chunk_size;
+        let chunks = storage.config.consensus.num_chunks_in_partition;
+        let data_size = chunks * chunk_size;
+        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size,
+                prefix_hash,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        let folded = DataTransactionLedger::fold_tx_root_leaf(data_root, prefix_hash);
+        let mut tx_path = folded.0.to_vec();
+        tx_path.extend_from_slice(&[0_u8; 32]);
+        let range = LedgerChunkRange(ledger_chunk_offset_ii!(0, chunks - 1));
+        storage.index_transaction_data_in(
+            &header,
+            &tx_path,
+            range,
+            11,
+            Some(DataLedger::Publish),
+            Some(tx_index),
+        )
+    }
+
+    /// Pause a registration, then reset and install `next` the way production
+    /// does, then release the registration.
+    fn race_registration(
+        storage: &StorageModule,
+        next: Option<PartitionAssignment>,
+        update_height: u64,
+        _label: &'static str,
+    ) -> eyre::Result<RaceOutcome> {
+        storage.pause_next_registration_at(RegistrationPausePoint::AfterRowsComputed);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reset_finished_while_paused = std::thread::scope(|scope| -> eyre::Result<bool> {
+            struct ReleasePause<'a>(&'a StorageModule);
+            impl Drop for ReleasePause<'_> {
+                fn drop(&mut self) {
+                    self.0.release_registration_pause();
+                }
+            }
+            let _release = ReleasePause(storage);
+            scope.spawn(|| {
+                let result = index_one(storage, 1);
+                let _ = result_tx.send(result);
+            });
+            eyre::ensure!(
+                storage.wait_for_registration_pause(Duration::from_secs(5)),
+                "registration did not pause after computing its rows"
+            );
+            let (reset_tx, reset_rx) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let result = storage.reset_with_assignment(next, update_height);
+                let _ = reset_tx.send(result);
+            });
+            let finished = reset_rx.recv_timeout(Duration::from_secs(5));
+            let reset_finished_while_paused = match &finished {
+                Ok(Ok(_)) => true,
+                Ok(Err(err)) => eyre::bail!("reset failed while registration was paused: {err}"),
+                Err(_) => false,
+            };
+            storage.release_registration_pause();
+            result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| eyre::eyre!("registration did not finish after release"))??;
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = finished {
+                reset_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| eyre::eyre!("reset did not finish after release"))??;
+            }
+            Ok(reset_finished_while_paused)
+        })?;
+        Ok(RaceOutcome {
+            rows: registration_rows(storage)?,
+            reset_finished_while_paused,
+            registration_drops: storage.registration_drops.load(Ordering::SeqCst),
+        })
     }
 
     #[test]

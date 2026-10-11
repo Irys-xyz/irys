@@ -5309,6 +5309,7 @@ dependencies = [
  "irys-types",
  "libc",
  "lru 0.14.0",
+ "metrics",
  "nodit",
  "num-bigfloat",
  "openssl",

@@ -1733,9 +1733,10 @@ impl BlockTreeServiceInner {
 
             // Let miners know about expired partitions
             self.service_senders
-                .send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
-                    expired_partition_hashes,
-                )));
+                .send_partitions_expiration(BroadcastPartitionsExpiration {
+                    partition_hashes: H256List(expired_partition_hashes),
+                    update_height: epoch_block.height,
+                });
 
             // Let the cache service know some term ledger slots expired
             if let Err(e) = self.service_senders.chunk_cache.send_traced(
