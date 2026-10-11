@@ -849,6 +849,16 @@ impl BlockMigrationService {
                         }
                         module.write_intervals_to_submodules()?;
 
+                        // The range is packed again. Zeros in the rewritten span
+                        // must not stay mismatches under the old flag.
+                        if let Err(err) = module.clear_chunk_crc_complete() {
+                            warn!(
+                                module_id = module.id,
+                                %err,
+                                "failed to clear chunk crc complete during partition recovery"
+                            );
+                        }
+
                         // Re-request packing for the re-marked range. These offsets
                         // are now `Uninitialized` with no entropy on disk; packing is
                         // otherwise only requested at startup / assignment

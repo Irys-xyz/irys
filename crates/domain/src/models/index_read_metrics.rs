@@ -70,6 +70,12 @@ fn current() -> &'static str {
     CALLER.with(Cell::get)
 }
 
+/// Caller label installed by [`with_caller`]. Chunk reads that are not a
+/// mining recall use this so the crc counters share the serve label.
+pub(crate) fn caller() -> &'static str {
+    current()
+}
+
 static READS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("irys-domain")
         .u64_counter("irys.storage.index_reads_total")

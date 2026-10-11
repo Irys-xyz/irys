@@ -64,7 +64,12 @@ use super::tables::{
 };
 
 const CONVERTING_FILE: &str = "CONVERTING";
-const FORBIDDEN_NAMES: &[&str] = &["chunks.dat", "packing_params.toml", "intervals.json"];
+const FORBIDDEN_NAMES: &[&str] = &[
+    "chunks.dat",
+    "chunks.crc",
+    "packing_params.toml",
+    "intervals.json",
+];
 
 const VERIFY_KEYS: usize = 256;
 const SAMPLE_LIMIT: usize = 20;
@@ -4407,7 +4412,12 @@ mod tests {
         let mdbx = root.path().join("db");
         let options = options_for(&consensus)?;
 
-        for name in ["chunks.dat", "packing_params.toml", "intervals.json"] {
+        for name in [
+            "chunks.dat",
+            "chunks.crc",
+            "packing_params.toml",
+            "intervals.json",
+        ] {
             let rocks = root.path().join(name);
             fs::create_dir_all(&rocks)?;
             fs::write(rocks.join(name), b"keep")?;

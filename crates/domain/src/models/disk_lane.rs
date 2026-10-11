@@ -20,7 +20,8 @@
 //! New submits stop when another command would put the in-flight set past
 //! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
 //! The file lock is dropped before the lane moves on.
-//! A data-path row is written only after this gap's `chunks.dat` fdatasync.
+//! A data-path row is written only after this gap's `chunks.dat` and
+//! `chunks.crc` fdatasync.
 //! One index batch per submodule covers those rows. A synced RocksDB batch
 //! also covers registrations still waiting on group commit.
 //! `min_durable_interval_ms` can defer that pair. The node default is 250 ms
@@ -30,7 +31,8 @@
 //! and the pending-byte ceiling do not defer it. The interval is the longest
 //! wait. Recall does not wait on a deferred pair.
 //! This thread stores a write-ahead `Interrupted` mark in `intervals.json`
-//! before those `pwrite`s. A completion (`Data` or `Entropy`) is rewritten
+//! before those `pwrite`s. The mark covers `chunks.crc` as well. A completion
+//! (`Data` or `Entropy`) is rewritten
 //! with the next write-ahead, on the persist interval, or on shutdown.
 //! Another thread posts a full interval rewrite here.
 //!
@@ -1696,7 +1698,40 @@ impl StorageModule {
             }
             pending_submit.push((slot, entropy));
         }
+        // The sweep reads packed entropy and then XORs it. A bad source must
+        // not be packed into a data chunk. The bytes are the write file, which
+        // is the file `chunks.crc` describes.
+        let verdicts = match self.crc_span_verdicts(start, buf) {
+            Ok(verdicts) => verdicts,
+            Err(error) => {
+                let error = WriteDataChunkError::Other(error);
+                for (slot, _) in pending_submit {
+                    let group = slot.group;
+                    self.fail_slot(slot, clone_error(&error));
+                    self.fail_queued_group(group);
+                }
+                return;
+            }
+        };
         for (slot, entropy) in pending_submit {
+            let at = slot.offset.0.saturating_sub(start.0) as usize;
+            if matches!(
+                verdicts.get(at),
+                Some(super::chunk_crc::CrcVerdict::Mismatch)
+            ) {
+                self.note_crc_mismatch(slot.offset, ChunkType::Entropy, "entropy_sweep");
+                self.fail_slot(
+                    slot,
+                    WriteDataChunkError::Other(eyre::eyre!("chunk crc mismatch")),
+                );
+                continue;
+            }
+            if matches!(
+                verdicts.get(at),
+                Some(super::chunk_crc::CrcVerdict::Unknown)
+            ) {
+                super::chunk_crc::note_unknown("entropy_sweep");
+            }
             self.submit_packed(slot, entropy);
         }
     }
@@ -2085,7 +2120,8 @@ impl StorageModule {
             match cloned {
                 Ok(file) => file
                     .write_all_at(run.bytes.as_slice(), file_offset)
-                    .map_err(|error| Self::chunk_write_report(run.start, submodule_offset, &error)),
+                    .map_err(|error| Self::chunk_write_report(run.start, submodule_offset, &error))
+                    .and_then(|()| self.write_crc_for_run(run.start, &run.bytes, &run.offsets)),
                 Err(error) => Err(Self::chunk_write_report(
                     run.start,
                     submodule_offset,

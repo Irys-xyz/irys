@@ -50,7 +50,7 @@ required flags:
 optional:
   --replace-incomplete           delete a target only when it contains a CONVERTING
                                  file written by this tool, and none of chunks.dat,
-                                 packing_params.toml, intervals.json, a consensus
+                                 chunks.crc, packing_params.toml, intervals.json, a consensus
                                  database, a v1 or v2 index, or a completed v3 index.
                                  An older incomplete directory without CONVERTING
                                  is not deleted. Remove that directory by hand.

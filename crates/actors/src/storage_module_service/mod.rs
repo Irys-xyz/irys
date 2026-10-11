@@ -199,6 +199,9 @@ impl StorageModuleServiceInner {
         };
 
         for sm in storage_modules.iter() {
+            // Repair stays queued while the lane is up. The lane early-continue
+            // below must not skip it.
+            self.enqueue_crc_repairs(sm);
             if sm.disk_lane_running() {
                 sm.wake_disk_lane();
                 continue;
@@ -429,12 +432,18 @@ impl StorageModuleServiceInner {
     /// Ask the packing service to fill the range. A full or closed channel
     /// does not fail the assignment update.
     fn enqueue_packing(&self, module: &Arc<StorageModule>, range: PartitionChunkRange) {
+        let _ = self.try_enqueue_packing(module, range);
+    }
+
+    /// `false` when the request was not accepted. The caller decides whether
+    /// to retry. No partition assignment is not a warning: packing cannot run.
+    fn try_enqueue_packing(&self, module: &Arc<StorageModule>, range: PartitionChunkRange) -> bool {
         let sender = self.service_senders.packing_sender();
         let Ok(req) = PackingRequest::new(module.clone(), range) else {
-            return;
+            return false;
         };
         match sender.try_send(req) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!(
                     target = "irys::packing",
@@ -442,6 +451,7 @@ impl StorageModuleServiceInner {
                     storage_module.packing_interval = ?range,
                     "Dropping packing request due to a saturated channel"
                 );
+                false
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                 tracing::error!(
@@ -450,6 +460,17 @@ impl StorageModuleServiceInner {
                     storage_module.packing_interval = ?range,
                     "Packing channel closed; failed to enqueue repacking request"
                 );
+                false
+            }
+        }
+    }
+
+    /// Hand crc mismatches to the existing packing queue. A failed send puts
+    /// the range back so the next tick tries again.
+    fn enqueue_crc_repairs(&self, module: &Arc<StorageModule>) {
+        for range in module.take_crc_repair_ranges() {
+            if !self.try_enqueue_packing(module, PartitionChunkRange(range)) {
+                module.requeue_crc_repair_range(range);
             }
         }
     }

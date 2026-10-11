@@ -90,6 +90,9 @@ mod index_drain;
 #[path = "disk_lane.rs"]
 mod disk_lane;
 
+#[path = "chunk_crc.rs"]
+mod chunk_crc;
+
 #[cfg(feature = "bench")]
 #[path = "split_backing.rs"]
 mod split_backing;
@@ -332,7 +335,7 @@ struct PendingWrites {
     /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
     queued_unpacked_bytes: u64,
     /// Data-path proof for a packed data chunk. The index row is written only
-    /// after `chunks.dat` is fdatasync'd. Entropy has no proof.
+    /// after `chunks.dat` and `chunks.crc` are fdatasync'd. Entropy has no proof.
     proofs: HashMap<PartitionChunkOffset, (ChunkPathHash, ChunkDataPath)>,
     /// Pwritten bytes not yet covered by a durable point. Still pending: they
     /// count toward `pending_write_bytes` and are not reported durable. The
@@ -396,6 +399,10 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// commit. A write-ahead mark is never dropped or delayed. Clean shutdown
 /// writes the live map and drops the ahead mask, so a restart does not turn
 /// valid entropy into `Uninitialized`. A crash leaves the mask on disk.
+///
+/// `chunks.crc` shares this machine. The `Interrupted` mark covers that file
+/// too. Its entries are pwritten from the same buffers, and it is fdatasync'd
+/// in the same durable point, before the completion label and the presence commit.
 #[derive(Debug)]
 struct IntervalDisk {
     written: StorageIntervals,
@@ -750,6 +757,15 @@ pub struct StorageModule {
     /// Recall, packed writes, and entropy reads. Callers enqueue; this lane
     /// takes `chunks.dat`.
     disk: disk_lane::DiskGate,
+    /// Settled offsets whose bytes failed the crc check. The storage-module
+    /// service drains this into the existing packing queue.
+    crc_repairs: Mutex<BTreeSet<PartitionChunkOffset>>,
+    /// Set after a fully settled module has been scanned for stored-zero
+    /// entries. Reset clears it. The scan does not run on every durable point.
+    crc_scan_done: AtomicBool,
+    /// Crash tests drop the module without the final fsync or interval rewrite.
+    #[cfg(test)]
+    abandon_on_drop: AtomicBool,
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -824,6 +840,8 @@ pub struct StorageSubmodule {
     /// With a bench split this is the write file, never the read-only recall
     /// file, so the presence row is committed only after those bytes are durable.
     file: Arc<Mutex<File>>,
+    /// CRC32C sidecar for `chunks.dat`. Same fence, no state of its own.
+    crc: chunk_crc::ChunkCrc,
     /// Bench-only second file. `None` on every production open.
     #[cfg(feature = "bench")]
     split: Option<Arc<SplitBacking>>,
@@ -1439,6 +1457,14 @@ fn submodule_reserve_len(
     })
 }
 
+fn interval_chunk_count(interval: &Interval<PartitionChunkOffset>) -> eyre::Result<u64> {
+    let start = u64::from(interval.start().0);
+    let end = u64::from(interval.end().0);
+    end.checked_sub(start)
+        .and_then(|span| span.checked_add(1))
+        .ok_or_else(|| eyre!("submodule interval {start}..={end} chunk count overflow"))
+}
+
 /// Path of an already-open split write file, for the allocation log.
 #[cfg(feature = "bench")]
 fn split_write_label(file: &File, sub_base_path: &Path) -> PathBuf {
@@ -1532,6 +1558,12 @@ impl StorageModule {
                 split.as_ref(),
             )?;
             let chunks_file = opened.file;
+            let chunk_count = interval_chunk_count(&submodule_interval)?;
+            let crc = chunk_crc::ChunkCrc::open(
+                &sub_base_path,
+                config.consensus.chunk_size,
+                chunk_count,
+            )?;
 
             let submodule_db = Self::open_submodule_index(
                 &sub_base_path,
@@ -1629,6 +1661,7 @@ impl StorageModule {
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
+                        crc,
                         #[cfg(feature = "bench")]
                         split: opened.split,
                         db: submodule_db.clone(),
@@ -1795,6 +1828,10 @@ impl StorageModule {
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
             disk: disk_lane::DiskGate::with_index_gap(index_gap),
+            crc_repairs: Mutex::new(BTreeSet::new()),
+            crc_scan_done: AtomicBool::new(false),
+            #[cfg(test)]
+            abandon_on_drop: AtomicBool::new(false),
         })
     }
 
@@ -2570,6 +2607,10 @@ impl StorageModule {
             self.reset_incomplete.store(true, Ordering::SeqCst);
             eyre::bail!("injected storage module reset failure");
         }
+        // Drop crc_complete before the index clear and the interval rewrite.
+        // Repack writes fresh entries. A crash after this header fsync is
+        // finished by `finish_pending_resets`, which clears the flag again.
+        self.clear_chunk_crc_complete()?;
         self.reset_incomplete.store(true, Ordering::SeqCst);
         {
             let mut pending = self.pending_writes.write().unwrap();
@@ -2961,9 +3002,14 @@ impl StorageModule {
             }
             self.disk.yield_to_recall();
             let file_arc = Arc::clone(&submodule.file);
-            let file = self.disk.lock_chunks(&file_arc);
-            file.sync_data()
-                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+            {
+                let file = self.disk.lock_chunks(&file_arc);
+                file.sync_data()
+                    .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+            }
+            // Same fence as chunks.dat, without holding that file lock.
+            // A crash before this returns leaves the interval file Interrupted.
+            submodule.crc.sync_data()?;
         }
 
         // One durable index batch per submodule in this gap. It holds the
@@ -3026,6 +3072,7 @@ impl StorageModule {
         drop(pending);
         self.stamp_durable_point();
         self.durable_points.record(parked, cause);
+        self.maybe_mark_crc_complete();
         Ok(())
     }
 
@@ -3910,6 +3957,8 @@ impl StorageModule {
             if !submodule.db.reset_in_progress()? {
                 continue;
             }
+            // The reset marker won the crash. The flag clear may not have.
+            submodule.crc.clear_complete()?;
             submodule.db.update(|tx| tx.clear())?;
             let path = submodule
                 .intervals_file
@@ -4060,6 +4109,9 @@ impl StorageModule {
 
                 match (pending_chunk, interval_chunk_type) {
                     (Some(chunk_data), _) => {
+                        // Pending bytes are still in memory. No durable crc
+                        // entry exists for them yet, so this read does not
+                        // check a checksum.
                         if run_len > 0 {
                             disk_runs.push((
                                 run_start.take().expect("run length has a start"),
@@ -4108,7 +4160,12 @@ impl StorageModule {
             }
         }
 
-        self.read_disk_runs(&disk_runs, &mut chunk_map, recall)?;
+        let caller = if recall {
+            index_read_metrics::RECALL
+        } else {
+            index_read_metrics::caller()
+        };
+        self.read_disk_runs(&disk_runs, &mut chunk_map, recall, caller)?;
 
         // A chunk that landed in pending while the disk read held the file
         // lock must win over the bytes just read.
@@ -4143,6 +4200,7 @@ impl StorageModule {
         runs: &[(PartitionChunkOffset, u64, ChunkType)],
         chunk_map: &mut ChunkMap,
         recall: bool,
+        caller: &'static str,
     ) -> eyre::Result<()> {
         let chunk_size = self.config.consensus.chunk_size;
         let chunk_len = chunk_size as usize;
@@ -4178,6 +4236,7 @@ impl StorageModule {
             let file_arc = fallback;
             #[cfg(feature = "bench")]
             drop(fallback);
+            let mut group = Vec::new();
             if recall {
                 let file = {
                     let guard = file_arc
@@ -4207,6 +4266,7 @@ impl StorageModule {
                         max_chunks,
                         chunk_map,
                     )?;
+                    group.push((start, len, chunk_type));
                     index += 1;
                 }
             } else {
@@ -4259,11 +4319,326 @@ impl StorageModule {
                         }
                         done += n;
                     }
+                    group.push((start, len, chunk_type));
                     index += 1;
                 }
+                drop(file);
+            }
+            // The chunk-file lock is not held. A mismatch takes the interval
+            // lock, which must not nest under the file lock.
+            if self.crc_covers_file(&file_arc) {
+                self.reject_settled_crc(&group, chunk_map, caller)?;
             }
         }
         Ok(())
+    }
+
+    /// Bench recall bytes are not the bytes `chunks.crc` describes. Production
+    /// has one file, so every settled read is checked.
+    fn crc_covers_file(&self, file: &Arc<Mutex<File>>) -> bool {
+        #[cfg(feature = "bench")]
+        {
+            for (_, submodule) in self.submodules.iter() {
+                if let Some(split) = submodule.split.as_ref()
+                    && Arc::ptr_eq(file, &split.recall)
+                {
+                    return false;
+                }
+            }
+        }
+        #[cfg(not(feature = "bench"))]
+        let _ = file;
+        true
+    }
+
+    /// Drop settled chunks whose crc does not match. Unknown entries are kept
+    /// and counted. `Interrupted` runs and offsets still in `written_ahead`
+    /// or `pending.chunks` are not checked.
+    fn reject_settled_crc(
+        &self,
+        runs: &[(PartitionChunkOffset, u64, ChunkType)],
+        chunk_map: &mut ChunkMap,
+        caller: &'static str,
+    ) -> eyre::Result<()> {
+        let mut mismatches = Vec::new();
+        for &(start, len, chunk_type) in runs {
+            if !matches!(chunk_type, ChunkType::Data | ChunkType::Entropy) || len == 0 {
+                continue;
+            }
+            let (interval, submodule) = self.get_submodule_for_offset(start)?;
+            let index = u64::from(start.0 - interval.start().0);
+            let entries = submodule.crc.read_entries(index, len)?;
+            let complete = submodule.crc.is_complete();
+            let mut skip = vec![false; len as usize];
+            {
+                let pending = self.pending_writes.read().unwrap();
+                for (step, flag) in skip.iter_mut().enumerate() {
+                    let off = PartitionChunkOffset(start.0 + step as u32);
+                    *flag = pending.contains_key(&off) || pending.written_ahead.contains_key(&off);
+                }
+            }
+            for step in 0..len {
+                if skip[step as usize] {
+                    continue;
+                }
+                let off = PartitionChunkOffset(start.0 + step as u32);
+                let Some((bytes, _)) = chunk_map.get(&off) else {
+                    continue;
+                };
+                match chunk_crc::classify(entries[step as usize], bytes, complete) {
+                    chunk_crc::CrcVerdict::Unknown => chunk_crc::note_unknown(caller),
+                    chunk_crc::CrcVerdict::Mismatch => mismatches.push((off, chunk_type)),
+                    chunk_crc::CrcVerdict::Match | chunk_crc::CrcVerdict::Skip => {}
+                }
+            }
+        }
+        for (offset, _) in &mismatches {
+            chunk_map.remove(offset);
+        }
+        for (offset, kind) in mismatches {
+            self.note_crc_mismatch(offset, kind, caller);
+        }
+        Ok(())
+    }
+
+    /// One verdict per chunk in a dense `buf` that starts at `start`.
+    /// Unsettled offsets are `Skip`. Metrics are left to the caller.
+    fn crc_span_verdicts(
+        &self,
+        start: PartitionChunkOffset,
+        buf: &[u8],
+    ) -> eyre::Result<Vec<chunk_crc::CrcVerdict>> {
+        let chunk_len = usize::try_from(self.config.consensus.chunk_size.max(1))
+            .wrap_err("chunk size does not fit usize")?;
+        if chunk_len == 0 || !buf.len().is_multiple_of(chunk_len) {
+            return Err(eyre!(
+                "crc span of {} bytes is not a multiple of {chunk_len}",
+                buf.len()
+            ));
+        }
+        let count = (buf.len() / chunk_len) as u64;
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut settled = vec![false; count as usize];
+        {
+            let intervals = self.intervals.read().unwrap();
+            for (step, flag) in settled.iter_mut().enumerate() {
+                let off = PartitionChunkOffset(start.0 + step as u32);
+                *flag = matches!(
+                    intervals.get_at_point(off).copied(),
+                    Some(ChunkType::Data | ChunkType::Entropy)
+                );
+            }
+        }
+        {
+            let pending = self.pending_writes.read().unwrap();
+            for (step, flag) in settled.iter_mut().enumerate() {
+                let off = PartitionChunkOffset(start.0 + step as u32);
+                if pending.contains_key(&off) || pending.written_ahead.contains_key(&off) {
+                    *flag = false;
+                }
+            }
+        }
+        let (interval, submodule) = self.get_submodule_for_offset(start)?;
+        let index = u64::from(start.0 - interval.start().0);
+        let entries = submodule.crc.read_entries(index, count)?;
+        let complete = submodule.crc.is_complete();
+        let mut verdicts = Vec::with_capacity(count as usize);
+        for step in 0..count as usize {
+            if !settled[step] {
+                verdicts.push(chunk_crc::CrcVerdict::Skip);
+                continue;
+            }
+            let at = step * chunk_len;
+            verdicts.push(chunk_crc::classify(
+                entries[step],
+                &buf[at..at + chunk_len],
+                complete,
+            ));
+        }
+        Ok(verdicts)
+    }
+
+    /// One settled chunk. `Skip` means the bytes are not durable yet, or the
+    /// label is `Interrupted` / `Uninitialized`.
+    fn crc_verdict(
+        &self,
+        offset: PartitionChunkOffset,
+        bytes: &[u8],
+        caller: &'static str,
+    ) -> eyre::Result<chunk_crc::CrcVerdict> {
+        {
+            let pending = self.pending_writes.read().unwrap();
+            if pending.contains_key(&offset) || pending.written_ahead.contains_key(&offset) {
+                return Ok(chunk_crc::CrcVerdict::Skip);
+            }
+        }
+        let kind = self.intervals.read().unwrap().get_at_point(offset).copied();
+        if !matches!(kind, Some(ChunkType::Data | ChunkType::Entropy)) {
+            return Ok(chunk_crc::CrcVerdict::Skip);
+        }
+        let (interval, submodule) = self.get_submodule_for_offset(offset)?;
+        let index = u64::from(offset.0 - interval.start().0);
+        let entries = submodule.crc.read_entries(index, 1)?;
+        let verdict = chunk_crc::classify(entries[0], bytes, submodule.crc.is_complete());
+        if matches!(verdict, chunk_crc::CrcVerdict::Unknown) {
+            chunk_crc::note_unknown(caller);
+        }
+        Ok(verdict)
+    }
+
+    /// Mark one offset untrustworthy and hand it to the packing queue.
+    ///
+    /// The live map becomes `Uninitialized`, so a later read does not serve
+    /// the bytes. The interval file is not rewritten here: an authoritative
+    /// rewrite would drop the write-ahead mask. Packing's own write stores
+    /// the new label. A crash before that reloads the old label and the next
+    /// read queues the offset again. The offset index is left in place so
+    /// data sync can refill the body after entropy is packed.
+    fn note_crc_mismatch(
+        &self,
+        offset: PartitionChunkOffset,
+        kind: ChunkType,
+        caller: &'static str,
+    ) {
+        chunk_crc::note_mismatch(caller, kind);
+        chunk_crc::warn_mismatch(self.id, offset.0);
+        {
+            let mut intervals = self.intervals.write().unwrap();
+            Self::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                offset,
+                ChunkType::Uninitialized,
+            );
+        }
+        self.crc_repairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(offset);
+    }
+
+    /// Contiguous repair ranges. The storage-module service drains these.
+    pub fn take_crc_repair_ranges(&self) -> Vec<Interval<PartitionChunkOffset>> {
+        let offsets = std::mem::take(
+            &mut *self
+                .crc_repairs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut ranges = Vec::new();
+        let mut iter = offsets.into_iter();
+        let Some(first) = iter.next() else {
+            return ranges;
+        };
+        let mut start = first;
+        let mut prev = first;
+        for offset in iter {
+            if offset.0 == prev.0.saturating_add(1) {
+                prev = offset;
+                continue;
+            }
+            ranges.push(ii(start, prev));
+            start = offset;
+            prev = offset;
+        }
+        ranges.push(ii(start, prev));
+        ranges
+    }
+
+    /// Put a range back when the packing channel did not accept it.
+    pub fn requeue_crc_repair_range(&self, range: Interval<PartitionChunkOffset>) {
+        let mut repairs = self
+            .crc_repairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut raw = range.start().0;
+        loop {
+            repairs.insert(PartitionChunkOffset::from(raw));
+            if raw == range.end().0 {
+                break;
+            }
+            raw = raw.saturating_add(1);
+        }
+    }
+
+    /// Clear `crc_complete` and allow the settled scan to run again.
+    ///
+    /// Called before a reset rewrites the module, when a crashed reset is
+    /// finished on open, and before partition recovery repacks a range.
+    /// One mismatched offset does not clear the flag.
+    pub fn clear_chunk_crc_complete(&self) -> eyre::Result<()> {
+        self.crc_scan_done.store(false, Ordering::SeqCst);
+        for (_, submodule) in self.submodules.iter() {
+            submodule.crc.clear_complete()?;
+        }
+        Ok(())
+    }
+
+    /// Set `crc_complete` once every offset is settled and no stored entry is zero.
+    ///
+    /// An upgraded module is settled and full of zeros. The scan records that
+    /// and leaves the flag unset. A later release fills those entries and then
+    /// requires the flag. A scan or header error does not fail the durable point.
+    fn maybe_mark_crc_complete(&self) {
+        if self.crc_scan_done.load(Ordering::SeqCst) {
+            return;
+        }
+        {
+            let intervals = self.intervals.read().unwrap();
+            let settled = intervals
+                .iter()
+                .all(|(_, kind)| matches!(*kind, ChunkType::Data | ChunkType::Entropy));
+            if !settled {
+                return;
+            }
+        }
+        {
+            let pending = self.pending_writes.read().unwrap();
+            if !pending.is_empty() || !pending.written_ahead.is_empty() {
+                return;
+            }
+        }
+        for (_, submodule) in self.submodules.iter() {
+            match submodule.crc.any_zero_entry() {
+                Ok(true) => {
+                    self.crc_scan_done.store(true, Ordering::SeqCst);
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        module_id = self.id,
+                        path = %submodule.path.display(),
+                        "chunk crc scan failed; crc_complete stays unset: {error}"
+                    );
+                    return;
+                }
+            }
+        }
+        for (_, submodule) in self.submodules.iter() {
+            if let Err(error) = submodule.crc.set_complete() {
+                tracing::warn!(
+                    module_id = self.id,
+                    path = %submodule.path.display(),
+                    "chunk crc header update failed; crc_complete stays unset: {error}"
+                );
+                return;
+            }
+        }
+        self.crc_scan_done.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn abandon_on_drop_for_test(&self) {
+        self.abandon_on_drop.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn chunk_crc_complete_for_test(&self) -> bool {
+        self.submodules
+            .iter()
+            .all(|(_, submodule)| submodule.crc.is_complete())
     }
 
     /// Reads a single chunk from its physical storage location
@@ -4287,6 +4662,26 @@ impl StorageModule {
         let file = self.disk.lock_chunks(&file_arc);
         file.read_exact_at(&mut buf, file_offset)
             .wrap_err_with(|| format!("chunk read at offset {chunk_offset}"))?;
+        drop(file);
+
+        // A bench recall file is not the bytes the crc entries describe.
+        if self.crc_covers_file(&file_arc) {
+            let caller = index_read_metrics::caller();
+            if matches!(
+                self.crc_verdict(chunk_offset, &buf, caller)?,
+                chunk_crc::CrcVerdict::Mismatch
+            ) {
+                let kind = self
+                    .intervals
+                    .read()
+                    .unwrap()
+                    .get_at_point(chunk_offset)
+                    .copied()
+                    .unwrap_or(ChunkType::Uninitialized);
+                self.note_crc_mismatch(chunk_offset, kind, caller);
+                return Err(eyre!("chunk crc mismatch at offset {chunk_offset}"));
+            }
+        }
 
         Ok(buf)
     }
@@ -6060,10 +6455,53 @@ impl StorageModule {
                             e
                         )
                     })?;
+                drop(file);
+                // Same bytes as the chunks.dat pwrite. A crc failure is a write
+                // failure: the live interval goes back to Uninitialized.
+                self.write_crc_for_run(run.start, &run.bytes, &run.offsets)?;
                 return Ok(());
             }
         })();
         self.note_write_run(run, start_time, write_result)
+    }
+
+    /// Pwrite the crc entries for a contiguous run. `bytes` is the buffer just
+    /// written to `chunks.dat`.
+    fn write_crc_for_run(
+        &self,
+        start: PartitionChunkOffset,
+        bytes: &[u8],
+        offsets: &[PartitionChunkOffset],
+    ) -> eyre::Result<()> {
+        if offsets.is_empty() {
+            return Ok(());
+        }
+        for (step, offset) in offsets.iter().enumerate() {
+            let step = u32::try_from(step).wrap_err("crc run is longer than u32::MAX chunks")?;
+            let expected = start
+                .0
+                .checked_add(step)
+                .ok_or_else(|| eyre!("crc run at {start:?} overflows"))?;
+            if offset.0 != expected {
+                return Err(eyre!(
+                    "crc run at {start:?} is not contiguous at {offset:?}"
+                ));
+            }
+        }
+        let chunk_size = self.config.consensus.chunk_size;
+        let expected_len = (offsets.len() as u64)
+            .checked_mul(chunk_size)
+            .ok_or_else(|| eyre!("crc run at {start:?} length overflows"))?;
+        if bytes.len() as u64 != expected_len {
+            return Err(eyre!(
+                "crc run at {start:?} has {} bytes for {} chunks of {chunk_size}",
+                bytes.len(),
+                offsets.len()
+            ));
+        }
+        let (interval, submodule) = self.get_submodule_for_offset(start)?;
+        let index = u64::from(start.0 - interval.start().0);
+        submodule.crc.write_entries(index, bytes)
     }
 
     fn note_write_run(
@@ -6162,6 +6600,8 @@ impl StorageModule {
                     error!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e);
                     eyre::eyre!("Failed to write chunk @ chunk_offset {chunk_offset} submodule_offset {submodule_offset}: {}", e)
                 })?;
+            drop(file);
+            self.write_crc_for_run(chunk_offset, bytes.as_slice(), &[chunk_offset])?;
             // note: we don't fsync here for performance reasons
             Ok(())
         })();
@@ -6428,6 +6868,12 @@ impl StorageModule {
 
 impl Drop for StorageModule {
     fn drop(&mut self) {
+        // A crash test closes the files here. The durable point stays unfinished,
+        // so intervals.json keeps the Interrupted mark and reload does not check crc.
+        #[cfg(test)]
+        if self.abandon_on_drop.load(Ordering::SeqCst) {
+            return;
+        }
         // Index submits for deposited bodies must finish before the drains stop.
         self.drain_entropy_queue();
         for (_, submodule) in self.submodules.iter() {
@@ -6902,6 +7348,9 @@ mod tests {
         let storage = StorageModule::new(&info, &config)?;
         let path = chunks_path(&tmp);
         assert_reserved(&path, reserve_bytes())?;
+        let crc_path = tmp.path().join("hdd0").join(chunk_crc::FILE_NAME);
+        let crc_len = chunk_crc::HEADER_LEN + 4 * RESERVE_CHUNKS;
+        assert_reserved(&crc_path, crc_len)?;
         let head = read_prefix(&path, 1)?;
         assert_eq!(head, [0]);
         drop(storage);

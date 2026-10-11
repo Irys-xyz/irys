@@ -47,6 +47,7 @@ num-bigfloat = "1"
 base58.workspace=true
 thiserror.workspace=true
 semver.workspace = true
+crc32c = "0.6.8"
 
 [dev-dependencies]
 test-log.workspace = true
