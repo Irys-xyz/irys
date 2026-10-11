@@ -4,6 +4,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Halve `capacity` once per consecutive failure. A zero capacity stays zero.
+/// Any positive capacity stays at least 1, so one timed-out peer is retried.
+fn penalized_allowance(capacity: u32, consecutive_failures: u32) -> u32 {
+    if capacity == 0 || consecutive_failures == 0 {
+        return capacity;
+    }
+    (capacity >> consecutive_failures.min(31)).max(1)
+}
+
 #[derive(Debug, PartialEq)]
 pub enum BandwidthRating {
     Low,    // 0-40 MB/s of throughput
@@ -49,8 +58,9 @@ impl PeerStats {
         // (chunks smaller than 245KiB only used in testing)
         let chunk_multiplier = if chunk_size < 1024 { 1.5 } else { 1.0 };
 
-        // One 10 MiB sweep has to be in flight or a storage module cannot fill
-        // a packed run. The disk lane caps one run at that size. Tiny test
+        // One 10 MiB sweep is the disk-lane packed-run cap, so it is the
+        // concurrency ceiling. A fresh peer starts at half the bandwidth-scaled
+        // count and ramps toward that ceiling only as bytes arrive. Tiny test
         // chunks keep the bandwidth-scaled count.
         const SWEEP_SPAN_BYTES: u64 = 10 * 1024 * 1024;
         let span_floor = if chunk_size >= 1024 {
@@ -59,13 +69,10 @@ impl PeerStats {
             0
         };
 
-        let max_concurrency = ((base_concurrency as f64 * chunk_multiplier).round() as u32)
-            .clamp(1, 32)
-            .max(span_floor);
-
-        let baseline_concurrency = (max_concurrency / 2)
-            .max(1)
-            .max(span_floor.min(max_concurrency));
+        let bandwidth_max =
+            ((base_concurrency as f64 * chunk_multiplier).round() as u32).clamp(1, 32);
+        let max_concurrency = bandwidth_max.max(span_floor);
+        let baseline_concurrency = (bandwidth_max / 2).max(1);
 
         Self {
             chunk_size,
@@ -83,8 +90,14 @@ impl PeerStats {
         }
     }
 
-    /// Calculate the amount of concurrency that can be safely added beyond the
-    /// current_max_concurrency based on recent bandwidth measurements
+    /// Slots this peer can still accept.
+    ///
+    /// With no delivered bytes the allowance is [`Self::baseline_concurrency`].
+    /// Delivered bytes scale it toward [`Self::max_concurrency`]. Each
+    /// consecutive failure recorded by [`Self::record_request_failed`] halves
+    /// that allowance, down to 1, including before any bytes are recorded. A
+    /// completed request clears the streak. A 404 does not: it is not a
+    /// transport failure.
     pub fn available_concurrency(&self) -> u32 {
         let expected_bytes_per_sec = self.expected_bandwidth_bps();
         let observed_bytes_per_sec = self.short_term_bandwidth_bps() as f64;
@@ -98,9 +111,10 @@ impl PeerStats {
             // No observed data yet, use baseline capacity
             self.baseline_concurrency
         };
+        let allowance = penalized_allowance(total_capacity, self.consecutive_failures);
 
-        // Available = Total capacity - Currently active requests
-        total_capacity.saturating_sub(self.active_requests as u32)
+        // Available = allowance - currently active requests
+        allowance.saturating_sub(self.active_requests as u32)
     }
 
     pub fn expected_bandwidth_bps(&self) -> f64 {
