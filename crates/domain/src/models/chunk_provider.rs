@@ -476,7 +476,7 @@ impl ChunkProvider {
         data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
         #[cfg(test)]
-        if CACHE_READ_FAULT.with(|cell| cell.get()) == Some(*data_tx_offset) {
+        if CACHE_READ_FAULT.with(std::cell::Cell::get) == Some(*data_tx_offset) {
             return Err(eyre::eyre!("injected cache read error"));
         }
         let chunk_size = self.config.consensus.chunk_size;
