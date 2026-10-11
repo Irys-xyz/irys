@@ -357,6 +357,7 @@ pub fn consensus_is_behind(err: &eyre::Report) -> bool {
 /// An empty block index is an error. A ledger with no row at that height is
 /// an error. An offset is covered only when it is strictly below this total,
 /// the same bound [`locate_block`] uses.
+#[cfg(feature = "rocksdb")]
 pub(crate) fn ledger_frontier(db: &DatabaseEnv, ledger: DataLedger) -> eyre::Result<u64> {
     db.view_eyre(|tx| {
         let anchor = block_index_latest_height(tx)?.ok_or_else(|| eyre!("block index is empty"))?;

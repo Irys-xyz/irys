@@ -12,10 +12,12 @@
 //! The source is never modified. A schema v1 MDBX directory is read as v1
 //! and converted directly. The completion marker is written last: the
 //! RocksDB `SCHEMA` file, or the MDBX schema row [`SUBMODULE_SCHEMA`].
-//! A crash leaves a `CONVERTING` file and no completion marker.
-//! `--replace-incomplete` deletes only a directory that contains that file
-//! and none of the protected names (a storage module, a consensus database,
-//! or a finished index).
+//! A crash before that marker leaves a `CONVERTING` file and no marker.
+//! A finished index removes `CONVERTING` after the marker is durable.
+//! A crash between the two leaves both files. The marker still protects
+//! the directory. `--replace-incomplete` deletes only a directory that
+//! contains `CONVERTING` and none of the protected names (a storage module,
+//! a consensus database, or a finished index).
 //!
 //! Rows are read in bounded batches and written through the store write
 //! path, so each engine uses its own encoding. Each batch commit is durable.
@@ -29,8 +31,8 @@ use std::time::Instant;
 
 use eyre::WrapErr as _;
 use irys_types::{
-    ChunkDataPath, DataLedger, H256, PartitionChunkOffset, RelativeChunkOffset, TxPath, TxPathHash,
-    hash_sha256,
+    ChunkDataPath, DataLedger, DataTransactionHeader, H256, PartitionChunkOffset,
+    RelativeChunkOffset, TxPath, TxPathHash, hash_sha256,
 };
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::mdbx::DatabaseArguments;
@@ -104,6 +106,8 @@ pub struct EngineEquivalenceReport {
     /// Placements past the consensus frontier. The node has not indexed them yet.
     /// A non-zero count is a mismatch: verify must not accept a partial index.
     pub skipped_frontier: u64,
+    /// Schema v3 rows `audit_index` rejected. Zero on MDBX and schema v2.
+    pub index_audit_findings: u64,
     pub samples: Vec<EngineMismatch>,
 }
 
@@ -121,6 +125,7 @@ impl EngineEquivalenceReport {
             || self.mismatch_data_path_hash > 0
             || self.mismatch_tx_path_hash > 0
             || self.skipped_frontier > 0
+            || self.index_audit_findings > 0
     }
 }
 
@@ -188,6 +193,7 @@ impl std::fmt::Display for EngineEquivalenceReport {
         )?;
         writeln!(f, "skipped_orphans: {}", self.skipped_orphans)?;
         writeln!(f, "skipped_frontier: {}", self.skipped_frontier)?;
+        writeln!(f, "index_audit_findings: {}", self.index_audit_findings)?;
         for sample in &self.samples {
             writeln!(f, "mismatch: {} {}", sample.kind, sample.at)?;
         }
@@ -475,7 +481,7 @@ impl RowSource for RocksSubmoduleStore {
     }
 
     fn highest_placement_end(&self) -> eyre::Result<Option<PartitionChunkOffset>> {
-        RocksSubmoduleStore::highest_placement_end(self)
+        Self::highest_placement_end(self)
     }
 }
 
@@ -592,6 +598,7 @@ pub fn convert_rocks_to_mdbx(
         let stats = copy_v3_into_v2(&src, Some(&dst), options, &db, &map)?;
         refuse_unresolved(&stats, options)?;
         dst.put_schema_bytes(SUBMODULE_SCHEMA.as_bytes())?;
+        clear_converting_sentinel(mdbx_dir)?;
         stats
     };
     Ok(finish_stats(stats, started, false))
@@ -778,20 +785,19 @@ where
         |batch| {
             let mut prepared = Vec::with_capacity(batch.len());
             for (start, interval) in &batch {
-                match prepare_v2_placement(src, db, &mut cache, map, *start, interval)? {
-                    Some(item) => {
-                        if item.had_binding {
-                            bindings = bindings.saturating_add(1);
-                        }
-                        if item.info.is_some() {
-                            infos = infos.saturating_add(1);
-                        }
-                        prepared.push(item);
+                let run = prepare_v2_placement(src, db, &mut cache, map, *start, interval)?;
+                for (from, to) in run.frontier {
+                    skipped_frontier = skipped_frontier.saturating_add(1);
+                    skips.push(from, to);
+                }
+                for item in run.placements {
+                    if item.had_binding {
+                        bindings = bindings.saturating_add(1);
                     }
-                    None => {
-                        skipped_frontier = skipped_frontier.saturating_add(1);
-                        skips.push(*start, interval.end);
+                    if item.info.is_some() {
+                        infos = infos.saturating_add(1);
                     }
+                    prepared.push(item);
                 }
             }
             let copied = u64::try_from(prepared.len()).unwrap_or(u64::MAX);
@@ -1086,6 +1092,20 @@ fn require_interval(
     Ok(())
 }
 
+struct PreparedRun {
+    placements: Vec<PreparedPlacement>,
+    /// Inclusive ranges past the consensus frontier. The prefix is still written.
+    frontier: Vec<(PartitionChunkOffset, PartitionChunkOffset)>,
+}
+
+struct SplitInput<'a> {
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    stored: &'a [u8],
+    path_hash: TxPathHash,
+    binding: Option<TxLeafBinding>,
+}
+
 fn prepare_v2_placement<S: SubmoduleStore>(
     src: &S,
     db: &DatabaseEnv,
@@ -1093,80 +1113,155 @@ fn prepare_v2_placement<S: SubmoduleStore>(
     map: &PlacementMap,
     start: PartitionChunkOffset,
     interval: &TxPathInterval,
-) -> eyre::Result<Option<PreparedPlacement>> {
+) -> eyre::Result<PreparedRun> {
     let stored = src
         .view(|tx| tx.get_full_tx_path(interval.tx_path_hash))?
         .ok_or_else(|| eyre::eyre!("partition offset {} has no stored tx path", start.0))?;
-    let Some(derived) = derive_checked(db, cache, map, start, interval.end, &stored)? else {
-        return Ok(None);
-    };
     let binding = src.view(|tx| tx.get_tx_leaf_binding(interval.tx_path_hash))?;
-    let header = db
-        .view_eyre(|tx| tx_header_by_txid(tx, &derived.tx_id))?
-        .ok_or_else(|| {
-            eyre::eyre!(
-                "tx header {} missing for partition offset {}",
-                derived.tx_id,
-                start.0
-            )
-        })?;
-    if let Some(binding) = &binding
-        && (binding.data_root != derived.data_root || binding.prefix_hash != header.prefix_hash)
-    {
-        eyre::bail!(
-            "tx leaf binding at partition offset {} does not match the derived tx",
-            start.0
-        );
-    }
-    let info = covering_info_at(src, derived.data_root, start)?;
-    let tx_index = u32::try_from(derived.tx_index)
-        .map_err(|_| eyre::eyre!("tx index at partition offset {} exceeds u32", start.0))?;
-    Ok(Some(PreparedPlacement {
-        start,
-        end: interval.end,
-        path_hash: interval.tx_path_hash,
-        data_root: derived.data_root,
-        prefix_hash: header.prefix_hash,
-        info,
-        ledger_id: map.ledger.get_id(),
-        block_height: derived.height,
-        tx_index,
-        had_binding: binding.is_some(),
-    }))
+    split_stored_interval(
+        db,
+        cache,
+        map,
+        SplitInput {
+            start,
+            end: interval.end,
+            stored: &stored,
+            path_hash: interval.tx_path_hash,
+            binding,
+        },
+        |root| {
+            Ok(src
+                .view(|tx| tx.get_data_root_infos_for_data_root(root))?
+                .map(|infos| infos.0)
+                .unwrap_or_default())
+        },
+    )
 }
 
-fn derive_checked(
+/// One v3 placement per tx inside a stored interval.
+///
+/// Schema v2 merges adjacent offsets that share a tx-path hash. Two txs with
+/// the same bytes then occupy one interval. Cuts are the interval start plus
+/// every info start strictly inside it, the same cuts a placement read uses.
+/// The first segment must equal the stored bytes. Later segments use the
+/// derived proof. A later segment whose data root differs is corruption and
+/// aborts the run. A later segment the consensus database does not cover is
+/// a frontier skip, and the resolved prefix is still returned.
+fn split_stored_interval(
     db: &DatabaseEnv,
     cache: &mut TxPathBlockCache,
     map: &PlacementMap,
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-    stored: &[u8],
-) -> eyre::Result<Option<DerivedTxPath>> {
-    let start_ledger = map.ledger_offset(start)?;
-    let Some(derived) = derive_at(db, cache, map, start)? else {
-        return Ok(None);
+    input: SplitInput<'_>,
+    mut load_infos: impl FnMut(H256) -> eyre::Result<Vec<DataRootInfo>>,
+) -> eyre::Result<PreparedRun> {
+    let SplitInput {
+        start,
+        end,
+        stored,
+        path_hash,
+        binding,
+    } = input;
+    let Some(first) = derive_at(db, cache, map, start)? else {
+        return Ok(PreparedRun {
+            placements: Vec::new(),
+            frontier: vec![(start, end)],
+        });
     };
-    if derived.proof.proof.as_slice() != stored {
+    if first.proof.proof.as_slice() != stored {
+        let start_ledger = map.ledger_offset(start)?;
         eyre::bail!(
             "tx path at partition offset {} (ledger {} offset {start_ledger}) does not match the derived path",
             start.0,
             map.ledger.get_id()
         );
     }
-    if end != start {
-        let Some(at_end) = derive_at(db, cache, map, end)? else {
-            return Ok(None);
-        };
-        if at_end.height != derived.height || at_end.tx_index != derived.tx_index {
-            eyre::bail!(
-                "partition offset {} through {} covers more than one tx",
-                start.0,
-                end.0
-            );
-        }
+    let first_header = load_header(db, &first, start)?;
+    if let Some(binding) = &binding
+        && (binding.data_root != first.data_root || binding.prefix_hash != first_header.prefix_hash)
+    {
+        eyre::bail!(
+            "tx leaf binding at partition offset {} does not match the derived tx",
+            start.0
+        );
     }
-    Ok(Some(derived))
+    let infos = load_infos(first.data_root)?;
+    let segments = tx_segments(start, end, &infos);
+    let mut placements = Vec::with_capacity(segments.len());
+    let mut frontier = Vec::new();
+    let mut first_header = Some(first_header);
+    for (index, (seg_start, seg_end)) in segments.into_iter().enumerate() {
+        let (derived, header, seg_hash, had_binding) = if index == 0 {
+            let Some(header) = first_header.take() else {
+                eyre::bail!("partition offset {} lost its tx header", start.0);
+            };
+            (first.clone(), header, path_hash, binding.is_some())
+        } else {
+            let Some(derived) = derive_at(db, cache, map, seg_start)? else {
+                frontier.push((seg_start, end));
+                break;
+            };
+            if derived.data_root != first.data_root {
+                eyre::bail!(
+                    "partition offset {} derives a different data root",
+                    seg_start.0
+                );
+            }
+            let header = load_header(db, &derived, seg_start)?;
+            let seg_hash = tx_path_hash(&derived.proof.proof);
+            (derived, header, seg_hash, true)
+        };
+        if seg_end != seg_start {
+            match derive_at(db, cache, map, seg_end)? {
+                None => {
+                    frontier.push((seg_start, end));
+                    break;
+                }
+                Some(at_end)
+                    if at_end.height != derived.height || at_end.tx_index != derived.tx_index =>
+                {
+                    eyre::bail!(
+                        "partition offset {} through {} covers more than one tx",
+                        seg_start.0,
+                        seg_end.0
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+        let tx_index = u32::try_from(derived.tx_index)
+            .map_err(|_| eyre::eyre!("tx index at partition offset {} exceeds u32", seg_start.0))?;
+        placements.push(PreparedPlacement {
+            start: seg_start,
+            end: seg_end,
+            path_hash: seg_hash,
+            data_root: derived.data_root,
+            prefix_hash: header.prefix_hash,
+            info: select_covering_info(&infos, seg_start),
+            ledger_id: map.ledger.get_id(),
+            block_height: derived.height,
+            tx_index,
+            had_binding,
+        });
+    }
+    Ok(PreparedRun {
+        placements,
+        frontier,
+    })
+}
+
+fn load_header(
+    db: &DatabaseEnv,
+    derived: &DerivedTxPath,
+    at: PartitionChunkOffset,
+) -> eyre::Result<DataTransactionHeader> {
+    db.view_eyre(|tx| tx_header_by_txid(tx, &derived.tx_id))?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "tx header {} missing for partition offset {}",
+                derived.tx_id,
+                at.0
+            )
+        })
 }
 
 fn derive_at(
@@ -1185,17 +1280,6 @@ fn derive_at(
     }
 }
 
-fn covering_info_at<S: SubmoduleStore>(
-    src: &S,
-    data_root: H256,
-    probe: PartitionChunkOffset,
-) -> eyre::Result<Option<DataRootInfo>> {
-    let Some(infos) = src.view(|tx| tx.get_data_root_infos_for_data_root(data_root))? else {
-        return Ok(None);
-    };
-    Ok(select_covering_info(&infos.0, probe))
-}
-
 fn select_covering_info(
     infos: &[DataRootInfo],
     probe: PartitionChunkOffset,
@@ -1211,6 +1295,34 @@ fn select_covering_info(
         .saturating_sub(1);
     let info = sorted.get(index)?;
     (info.start_offset <= probe_rel).then(|| info.clone())
+}
+
+/// Inclusive segments of `[start, end]`. A negative info start does not cut.
+fn tx_segments(
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    infos: &[DataRootInfo],
+) -> Vec<(PartitionChunkOffset, PartitionChunkOffset)> {
+    let mut cuts = vec![start];
+    for info in infos {
+        let Ok(at) = u32::try_from(info.start_offset.0) else {
+            continue;
+        };
+        if at > start.0 && at <= end.0 {
+            cuts.push(PartitionChunkOffset(at));
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::with_capacity(cuts.len());
+    for (index, cut) in cuts.iter().enumerate() {
+        let seg_end = match cuts.get(index + 1) {
+            Some(next) => PartitionChunkOffset(next.0 - 1),
+            None => end,
+        };
+        out.push((*cut, seg_end));
+    }
+    out
 }
 
 fn write_v3_placement(tx: &mut dyn SubmoduleWrite, item: &PreparedPlacement) -> eyre::Result<()> {
@@ -1349,6 +1461,7 @@ where
     verify_pending_rows(v2, v3, &mut report)?;
     verify_markers(v2, v3, v2_schema, &mut report)?;
     verify_content_index(v3, &mut report)?;
+    note_index_audit(v3, &mut report)?;
     Ok(report)
 }
 
@@ -1368,6 +1481,18 @@ fn verify_content_index(
                 audit.missing_reverse, audit.dangling_reverse
             ),
         );
+    }
+    Ok(())
+}
+
+fn note_index_audit(
+    v3: &RocksSubmoduleStore,
+    report: &mut EngineEquivalenceReport,
+) -> eyre::Result<()> {
+    let findings = v3.audit_index()?;
+    report.index_audit_findings = u64::try_from(findings.len()).unwrap_or(u64::MAX);
+    for finding in findings.into_iter().take(SAMPLE_LIMIT) {
+        note(report, "index_audit", finding);
     }
     Ok(())
 }
@@ -1492,15 +1617,40 @@ fn compare_one_placement<S: SubmoduleStore>(
         note(report, "interval", format!("offset {}", key.0));
         return Ok(());
     };
-    if interval.start != key || place.start != key || interval.end != place.end {
+    let binding = v2.view(|tx| tx.get_tx_leaf_binding(interval.tx_path_hash))?;
+    let info_root = binding
+        .as_ref()
+        .map(|item| item.data_root)
+        .unwrap_or(place.data_root);
+    let infos = v2
+        .view(|tx| tx.get_data_root_infos_for_data_root(info_root))?
+        .map(|infos| infos.0)
+        .unwrap_or_default();
+    let segments = tx_segments(interval.start, interval.end, &infos);
+    let Some(segment_end) = segments
+        .iter()
+        .find(|(start, _)| *start == key)
+        .map(|(_, end)| *end)
+    else {
+        report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+        note(report, "interval", format!("offset {}", key.0));
+        return Ok(());
+    };
+    if place.start != key || place.end != segment_end {
         report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
         note(report, "interval", format!("offset {}", key.0));
         return Ok(());
     }
-    let Some(stored) = v2.view(|tx| tx.get_full_tx_path(interval.tx_path_hash))? else {
-        report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
-        note(report, "tx_path", format!("offset {}", key.0));
-        return Ok(());
+    let is_first = key == interval.start;
+    let stored = if is_first {
+        let Some(stored) = v2.view(|tx| tx.get_full_tx_path(interval.tx_path_hash))? else {
+            report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+            note(report, "tx_path", format!("offset {}", key.0));
+            return Ok(());
+        };
+        Some(stored)
+    } else {
+        None
     };
     let derived = match derive_at(db, cache, map, key)? {
         Some(derived) => derived,
@@ -1520,7 +1670,9 @@ fn compare_one_placement<S: SubmoduleStore>(
             return Ok(());
         }
     };
-    if tx_path_hash(&stored) != interval.tx_path_hash {
+    if let Some(stored) = &stored
+        && tx_path_hash(stored) != interval.tx_path_hash
+    {
         report.mismatch_tx_path_hash = report.mismatch_tx_path_hash.saturating_add(1);
         note(report, "tx_path_hash", format!("offset {}", key.0));
     }
@@ -1534,14 +1686,16 @@ fn compare_one_placement<S: SubmoduleStore>(
         );
         return Ok(());
     };
-    if derived.proof.proof != stored {
+    if let Some(stored) = &stored
+        && derived.proof.proof != *stored
+    {
         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
         note(report, "tx_path", format!("offset {}", key.0));
         return Ok(());
     }
     let tx_index = u32::try_from(derived.tx_index).ok();
     let same = place.data_root == derived.data_root
-        && place.end == interval.end
+        && place.end == segment_end
         && place.block_height == Some(derived.height)
         && place.tx_index == tx_index
         && place.ledger == Some(map.ledger.get_id());
@@ -1550,14 +1704,15 @@ fn compare_one_placement<S: SubmoduleStore>(
         note(report, "interval", format!("offset {}", key.0));
     }
     report.data_roots_checked = report.data_roots_checked.saturating_add(1);
-    let binding = v2.view(|tx| tx.get_tx_leaf_binding(interval.tx_path_hash))?;
-    if let Some(binding) = binding {
+    if is_first && let Some(binding) = &binding {
         report.tx_leaf_bindings_checked = report.tx_leaf_bindings_checked.saturating_add(1);
         if binding.data_root != derived.data_root || binding.prefix_hash != header.prefix_hash {
             report.tx_leaf_bindings_mismatches =
                 report.tx_leaf_bindings_mismatches.saturating_add(1);
             note(report, "tx_leaf_binding", format!("offset {}", key.0));
         }
+    }
+    if binding.is_some() {
         match v2.view(|tx| tx.placement_at(key))? {
             Some(v2_place)
                 if v2_place.tx_start_offset != place.tx_start_offset
@@ -1572,7 +1727,7 @@ fn compare_one_placement<S: SubmoduleStore>(
             }
             _ => {}
         }
-    } else if place.tx_start_offset.0 != 0 || place.data_size != 0 {
+    } else if is_first && (place.tx_start_offset.0 != 0 || place.data_size != 0) {
         report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
         note(report, "data_root", format!("offset {}", key.0));
     }
@@ -1589,6 +1744,36 @@ fn compare_one_placement<S: SubmoduleStore>(
             report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
             note(report, "data_root", format!("offset {} chain", key.0));
         }
+    }
+    if is_first {
+        note_missing_later_segments(v3, db, cache, map, &segments, key, report)?;
+    }
+    Ok(())
+}
+
+fn note_missing_later_segments(
+    v3: &RocksSubmoduleStore,
+    db: &DatabaseEnv,
+    cache: &mut TxPathBlockCache,
+    map: &PlacementMap,
+    segments: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    key: PartitionChunkOffset,
+    report: &mut EngineEquivalenceReport,
+) -> eyre::Result<()> {
+    for (cut, _) in segments.iter().skip_while(|(start, _)| *start <= key) {
+        if v3.view(|tx| tx.placement_at(*cut))?.is_some() {
+            continue;
+        }
+        if derive_at(db, cache, map, *cut)?.is_none() {
+            report.skipped_frontier = report.skipped_frontier.saturating_add(1);
+            break;
+        }
+        report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+        note(
+            report,
+            "interval",
+            format!("offset {} has no v3 placement", cut.0),
+        );
     }
     Ok(())
 }
@@ -2050,6 +2235,7 @@ where
     let stats = copy_v2_into_v3(src, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
     dst.stamp_schema_marker()?;
+    clear_converting_sentinel(dir)?;
     Ok(stats)
 }
 
@@ -2063,6 +2249,7 @@ fn write_empty_rocks(dir: &Path, options: &ConvertOptions) -> eyre::Result<Conve
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
     dst.stamp_schema_marker()?;
+    clear_converting_sentinel(dir)?;
     Ok(ConvertStats::default())
 }
 
@@ -2085,6 +2272,7 @@ fn write_reset_rocks(
     }
     dst.set_reset_in_progress()?;
     dst.stamp_schema_marker()?;
+    clear_converting_sentinel(dir)?;
     Ok(ConvertStats {
         reset_marker: true,
         source_v1,
@@ -2107,6 +2295,7 @@ fn write_reset_mdbx(dir: &Path, options: &ConvertOptions) -> eyre::Result<Conver
     }
     dst.set_reset_in_progress()?;
     dst.put_schema_bytes(SUBMODULE_SCHEMA.as_bytes())?;
+    clear_converting_sentinel(dir)?;
     Ok(ConvertStats {
         reset_marker: true,
         ..ConvertStats::default()
@@ -2136,6 +2325,7 @@ fn copy_v1_rocks(
     let stats = copy_v1_into_v3(env, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
     dst.stamp_schema_marker()?;
+    clear_converting_sentinel(dir)?;
     Ok(stats)
 }
 
@@ -2377,37 +2567,75 @@ fn close_v1_run(
     src: &mut V1Src<'_>,
     sink: &mut V1Sink<'_>,
     run: OpenRun,
-    paths: Vec<(PartitionChunkOffset, ChunkDataPath)>,
-    path_bytes: usize,
+    mut paths: Vec<(PartitionChunkOffset, ChunkDataPath)>,
+    _path_bytes: usize,
     rescan: bool,
 ) -> eyre::Result<()> {
-    let Some(placement) = prepare_v1_placement(src.env, src.db, src.cache, src.map, &run)? else {
+    let prepared = prepare_v1_placement(src.env, src.db, src.cache, src.map, &run)?;
+    for (start, end) in prepared.frontier {
         sink.stats.skipped_frontier = sink.stats.skipped_frontier.saturating_add(1);
-        sink.frontier.push(
-            PartitionChunkOffset(run.start),
-            PartitionChunkOffset(run.end),
-        );
+        sink.frontier.push(start, end);
+    }
+    if prepared.placements.is_empty() {
         return Ok(());
-    };
-    let start = placement.start;
-    let end = placement.end;
-    push_v1_ready(
-        sink,
-        V1Ready {
-            placement,
-            paths: if rescan { Vec::new() } else { paths },
-            path_bytes: if rescan { 0 } else { path_bytes },
-            rescan,
-        },
-    )?;
+    }
+    let written_start = prepared.placements[0].start;
+    let written_end = prepared
+        .placements
+        .last()
+        .map(|item| item.end)
+        .unwrap_or(written_start);
     if rescan {
+        for placement in prepared.placements {
+            push_v1_ready(
+                sink,
+                V1Ready {
+                    placement,
+                    paths: Vec::new(),
+                    path_bytes: 0,
+                    rescan: false,
+                },
+            )?;
+        }
         flush_v1_out(sink)?;
-        let copied =
-            copy_v1_range_paths(src.env, sink.dst, start, end, sink.limits, sink.progress)?;
+        let copied = copy_v1_range_paths(
+            src.env,
+            sink.dst,
+            written_start,
+            written_end,
+            sink.limits,
+            sink.progress,
+        )?;
         sink.stats.data_paths = sink.stats.data_paths.saturating_add(copied);
         sink.stats.path_hashes = sink.stats.data_paths;
+        return Ok(());
+    }
+    for placement in prepared.placements {
+        let end = placement.end;
+        let seg_paths = take_paths_through(&mut paths, end);
+        let seg_bytes = seg_paths.iter().map(|(_, path)| path.len()).sum();
+        push_v1_ready(
+            sink,
+            V1Ready {
+                placement,
+                paths: seg_paths,
+                path_bytes: seg_bytes,
+                rescan: false,
+            },
+        )?;
     }
     Ok(())
+}
+
+fn take_paths_through(
+    paths: &mut Vec<(PartitionChunkOffset, ChunkDataPath)>,
+    end: PartitionChunkOffset,
+) -> Vec<(PartitionChunkOffset, ChunkDataPath)> {
+    let count = paths
+        .iter()
+        .take_while(|(offset, _)| *offset <= end)
+        .count();
+    paths.drain(..count).collect()
 }
 
 fn push_v1_ready(sink: &mut V1Sink<'_>, ready: V1Ready) -> eyre::Result<()> {
@@ -2468,7 +2696,7 @@ fn prepare_v1_placement(
     cache: &mut TxPathBlockCache,
     map: &PlacementMap,
     run: &OpenRun,
-) -> eyre::Result<Option<PreparedPlacement>> {
+) -> eyre::Result<PreparedRun> {
     let start = PartitionChunkOffset(run.start);
     let end = PartitionChunkOffset(run.end);
     let stored = read_v1_tx_path(env, run.tx_hash)?
@@ -2479,42 +2707,20 @@ fn prepare_v1_placement(
             start.0
         );
     }
-    let Some(derived) = derive_checked(db, cache, map, start, end, &stored)? else {
-        return Ok(None);
-    };
-    let header = db
-        .view_eyre(|tx| tx_header_by_txid(tx, &derived.tx_id))?
-        .ok_or_else(|| {
-            eyre::eyre!(
-                "tx header {} missing for partition offset {}",
-                derived.tx_id,
-                start.0
-            )
-        })?;
     let binding = read_v1_binding(env, run.tx_hash)?;
-    if let Some(binding) = &binding
-        && (binding.data_root != derived.data_root || binding.prefix_hash != header.prefix_hash)
-    {
-        eyre::bail!(
-            "tx leaf binding at partition offset {} does not match the derived tx",
-            start.0
-        );
-    }
-    let info = v1_covering_info(env, derived.data_root, start)?;
-    let tx_index = u32::try_from(derived.tx_index)
-        .map_err(|_| eyre::eyre!("tx index at partition offset {} exceeds u32", start.0))?;
-    Ok(Some(PreparedPlacement {
-        start,
-        end,
-        path_hash: run.tx_hash,
-        data_root: derived.data_root,
-        prefix_hash: header.prefix_hash,
-        info,
-        ledger_id: map.ledger.get_id(),
-        block_height: derived.height,
-        tx_index,
-        had_binding: binding.is_some(),
-    }))
+    split_stored_interval(
+        db,
+        cache,
+        map,
+        SplitInput {
+            start,
+            end,
+            stored: &stored,
+            path_hash: run.tx_hash,
+            binding,
+        },
+        |root| v1_infos(env, root),
+    )
 }
 
 fn walk_v1_intervals(
@@ -2621,15 +2827,11 @@ fn read_v1_binding(env: &DatabaseEnv, hash: H256) -> eyre::Result<Option<TxLeafB
     })
 }
 
-fn v1_covering_info(
-    env: &DatabaseEnv,
-    data_root: H256,
-    probe: PartitionChunkOffset,
-) -> eyre::Result<Option<DataRootInfo>> {
+fn v1_infos(env: &DatabaseEnv, data_root: H256) -> eyre::Result<Vec<DataRootInfo>> {
     env.view_eyre(|tx| match tx.get::<DataRootInfosByDataRoot>(data_root) {
-        Ok(Some(DataRootInfos(infos))) => Ok(select_covering_info(&infos, probe)),
-        Ok(None) => Ok(None),
-        Err(err) if table_missing(&err) => Ok(None),
+        Ok(Some(DataRootInfos(infos))) => Ok(infos),
+        Ok(None) => Ok(Vec::new()),
+        Err(err) if table_missing(&err) => Ok(Vec::new()),
         Err(err) => Err(err.into()),
     })
 }
@@ -2780,6 +2982,32 @@ fn v1_interval_starts_at(env: &DatabaseEnv, offset: PartitionChunkOffset) -> eyr
     Ok(prev.and_then(|row| row.tx_path_hash) != Some(hash))
 }
 
+/// A v3 start is a v1 run start, or an info cut inside that same run.
+fn v1_placement_start_ok(
+    env: &DatabaseEnv,
+    start: PartitionChunkOffset,
+    data_root: H256,
+) -> eyre::Result<bool> {
+    if v1_interval_starts_at(env, start)? {
+        return Ok(true);
+    }
+    if start.0 == 0 {
+        return Ok(false);
+    }
+    let hash = v1_hashes_at(env, start)?.and_then(|row| row.tx_path_hash);
+    let prev =
+        v1_hashes_at(env, PartitionChunkOffset(start.0 - 1))?.and_then(|row| row.tx_path_hash);
+    if hash.is_none() || hash != prev {
+        return Ok(false);
+    }
+    let Ok(at) = i32::try_from(start.0) else {
+        return Ok(false);
+    };
+    Ok(v1_infos(env, data_root)?
+        .iter()
+        .any(|info| info.start_offset.0 == at))
+}
+
 fn verify_v1_and_v3(
     env: &DatabaseEnv,
     v3: &RocksSubmoduleStore,
@@ -2821,6 +3049,7 @@ fn verify_v1_and_v3(
     compare_v1_pending(env, v3, &written, &frontier, &mut report)?;
     note_extra_v3_offset_rows(v3, &written, &frontier, &mut report)?;
     verify_content_index(v3, &mut report)?;
+    note_index_audit(v3, &mut report)?;
     Ok(report)
 }
 
@@ -2865,27 +3094,6 @@ fn compare_v1_interval(
         }
         return Ok(());
     };
-    if end != start {
-        match derive_at(db, cache, map, end)? {
-            None => {
-                report.skipped_frontier = report.skipped_frontier.saturating_add(1);
-                frontier.push(start, end);
-                return Ok(());
-            }
-            Some(at_end)
-                if at_end.height != derived.height || at_end.tx_index != derived.tx_index =>
-            {
-                report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
-                note(
-                    report,
-                    "interval",
-                    format!("offset {} through {}", start.0, end.0),
-                );
-                return Ok(());
-            }
-            Some(_) => {}
-        }
-    }
     let header = db.view_eyre(|tx| tx_header_by_txid(tx, &derived.tx_id))?;
     let Some(header) = header else {
         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
@@ -2901,46 +3109,146 @@ fn compare_v1_interval(
         note(report, "tx_path", format!("offset {}", start.0));
         return Ok(());
     }
-    let Some(place) = v3.view(|tx| tx.placement_at(start))? else {
-        report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
-        note(report, "interval", format!("offset {}", start.0));
-        return Ok(());
-    };
-    written.push(start, end);
-    let tx_index = u32::try_from(derived.tx_index).ok();
-    let same = place.start == start
-        && place.end == end
-        && place.data_root == derived.data_root
-        && place.block_height == Some(derived.height)
-        && place.tx_index == tx_index
-        && place.ledger == Some(map.ledger.get_id());
-    if !same {
-        report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
-        note(report, "interval", format!("offset {}", start.0));
-    }
-    report.tx_leaf_bindings_checked = report.tx_leaf_bindings_checked.saturating_add(1);
-    if let Some(binding) = read_v1_binding(env, run.tx_hash)?
-        && (binding.data_root != derived.data_root || binding.prefix_hash != header.prefix_hash)
-    {
-        report.tx_leaf_bindings_mismatches = report.tx_leaf_bindings_mismatches.saturating_add(1);
-        note(report, "tx_leaf_binding", format!("offset {}", start.0));
-    }
-    report.data_roots_checked = report.data_roots_checked.saturating_add(1);
-    let filled = place.tx_start_offset.0 != 0 || place.data_size != 0;
-    if filled {
-        let base = ledger_base(map.slot_index, map.chunks_per_partition);
-        let expected = i64::try_from(derived.tx_ledger_start)
-            .ok()
-            .zip(base)
-            .and_then(|(ledger_start, base)| ledger_start.checked_sub(base));
-        let start_ok =
-            expected.and_then(|value| i32::try_from(value).ok()) == Some(place.tx_start_offset.0);
-        if !start_ok || place.data_size != header.data_size {
-            report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
-            note(report, "data_root", format!("offset {} chain", start.0));
+    let infos = v1_infos(env, derived.data_root)?;
+    let segments = tx_segments(start, end, &infos);
+    let mut written_end = None;
+    let mut stop_paths = false;
+    for (index, (seg_start, seg_end)) in segments.into_iter().enumerate() {
+        let (seg_derived, seg_header) = if index == 0 {
+            (derived.clone(), header.clone())
+        } else {
+            match derive_at(db, cache, map, seg_start)? {
+                None => {
+                    note_v1_frontier_segment(v3, seg_start, end, frontier, report)?;
+                    break;
+                }
+                Some(next) if next.data_root != derived.data_root => {
+                    report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+                    note(
+                        report,
+                        "interval",
+                        format!("offset {} derives a different data root", seg_start.0),
+                    );
+                    stop_paths = true;
+                    break;
+                }
+                Some(next) => {
+                    let Some(next_header) =
+                        db.view_eyre(|tx| tx_header_by_txid(tx, &next.tx_id))?
+                    else {
+                        report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+                        note(
+                            report,
+                            "tx_path",
+                            format!("offset {} tx header {} missing", seg_start.0, next.tx_id),
+                        );
+                        stop_paths = true;
+                        break;
+                    };
+                    (next, next_header)
+                }
+            }
+        };
+        if seg_end != seg_start {
+            match derive_at(db, cache, map, seg_end)? {
+                None => {
+                    note_v1_frontier_segment(v3, seg_start, end, frontier, report)?;
+                    break;
+                }
+                Some(at_end)
+                    if at_end.height != seg_derived.height
+                        || at_end.tx_index != seg_derived.tx_index =>
+                {
+                    report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+                    note(
+                        report,
+                        "interval",
+                        format!("offset {} through {}", seg_start.0, seg_end.0),
+                    );
+                    stop_paths = true;
+                    break;
+                }
+                Some(_) => {}
+            }
+        }
+        if index > 0 {
+            report.intervals_checked = report.intervals_checked.saturating_add(1);
+            report.tx_paths_checked = report.tx_paths_checked.saturating_add(1);
+        }
+        let Some(place) = v3.view(|tx| tx.placement_at(seg_start))? else {
+            report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+            note(report, "interval", format!("offset {}", seg_start.0));
+            stop_paths = true;
+            break;
+        };
+        written.push(seg_start, seg_end);
+        written_end = Some(seg_end);
+        let tx_index = u32::try_from(seg_derived.tx_index).ok();
+        let same = place.start == seg_start
+            && place.end == seg_end
+            && place.data_root == seg_derived.data_root
+            && place.block_height == Some(seg_derived.height)
+            && place.tx_index == tx_index
+            && place.ledger == Some(map.ledger.get_id());
+        if !same {
+            report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+            note(report, "interval", format!("offset {}", seg_start.0));
+        }
+        if index == 0 {
+            report.tx_leaf_bindings_checked = report.tx_leaf_bindings_checked.saturating_add(1);
+            if let Some(binding) = read_v1_binding(env, run.tx_hash)?
+                && (binding.data_root != seg_derived.data_root
+                    || binding.prefix_hash != seg_header.prefix_hash)
+            {
+                report.tx_leaf_bindings_mismatches =
+                    report.tx_leaf_bindings_mismatches.saturating_add(1);
+                note(report, "tx_leaf_binding", format!("offset {}", seg_start.0));
+            }
+        }
+        report.data_roots_checked = report.data_roots_checked.saturating_add(1);
+        let filled = place.tx_start_offset.0 != 0 || place.data_size != 0;
+        if filled {
+            let base = ledger_base(map.slot_index, map.chunks_per_partition);
+            let expected = i64::try_from(seg_derived.tx_ledger_start)
+                .ok()
+                .zip(base)
+                .and_then(|(ledger_start, base)| ledger_start.checked_sub(base));
+            let start_ok = expected.and_then(|value| i32::try_from(value).ok())
+                == Some(place.tx_start_offset.0);
+            if !start_ok || place.data_size != seg_header.data_size {
+                report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
+                note(report, "data_root", format!("offset {} chain", seg_start.0));
+            }
         }
     }
-    compare_v1_paths(env, v3, start, end, limits, report)?;
+    if let Some(path_end) = written_end
+        && !stop_paths
+    {
+        compare_v1_paths(env, v3, start, path_end, limits, report)?;
+    }
+    Ok(())
+}
+
+fn note_v1_frontier_segment(
+    v3: &RocksSubmoduleStore,
+    seg_start: PartitionChunkOffset,
+    interval_end: PartitionChunkOffset,
+    frontier: &mut FrontierSkips,
+    report: &mut EngineEquivalenceReport,
+) -> eyre::Result<()> {
+    report.skipped_frontier = report.skipped_frontier.saturating_add(1);
+    frontier.push(seg_start, interval_end);
+    if v3.view(|tx| tx.placement_at(seg_start))?.is_some() {
+        report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+        note(
+            report,
+            "interval",
+            format!(
+                "offset {} is past the consensus frontier but v3 has a placement",
+                seg_start.0
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -3001,7 +3309,7 @@ fn note_v3_placements_absent_from_v1(
             break;
         }
         for place in &batch {
-            if !v1_interval_starts_at(env, place.start)? {
+            if !v1_placement_start_ok(env, place.start, place.data_root)? {
                 report.intervals_checked = report.intervals_checked.saturating_add(1);
                 report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
                 note(
@@ -3259,6 +3567,23 @@ fn write_converting_sentinel(path: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Drop `CONVERTING` only after the completion marker is durable.
+///
+/// A crash before this call leaves the sentinel, so `--replace-incomplete`
+/// can still delete the partial directory. A crash after the marker and
+/// before this call leaves both. The marker still refuses replacement.
+fn clear_converting_sentinel(path: &Path) -> eyre::Result<()> {
+    let file_path = path.join(CONVERTING_FILE);
+    if !file_path.is_file() {
+        return Ok(());
+    }
+    fs::remove_file(&file_path).wrap_err("remove CONVERTING")?;
+    File::open(path)
+        .and_then(|dir| dir.sync_all())
+        .wrap_err("sync target directory")?;
+    Ok(())
+}
+
 fn verify_empty_and_v3(
     env: &DatabaseEnv,
     v3: &RocksSubmoduleStore,
@@ -3297,6 +3622,7 @@ fn verify_reset_target(
         );
     }
     verify_content_index(v3, &mut report)?;
+    note_index_audit(v3, &mut report)?;
     Ok(report)
 }
 
@@ -3318,7 +3644,7 @@ mod tests {
 
     use super::super::store::{MdbxSubmoduleStore, SubmoduleStore};
     use super::super::tables::{
-        ChunkPathHashes, DataRootInfo, PendingBodyMigration, SUBMODULE_SCHEMA_V3,
+        ChunkPathHashes, DataRootInfo, DataRootInfos, PendingBodyMigration, SUBMODULE_SCHEMA_V3,
         SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
     };
     use super::{
@@ -3697,6 +4023,7 @@ mod tests {
             fs::read_to_string(rocks.join("SCHEMA"))?,
             SUBMODULE_SCHEMA_V3
         );
+        assert!(!rocks.join("CONVERTING").exists());
         assert_equivalent(&verify_mdbx_and_rocks(&mdbx, &rocks, &options)?);
         {
             let opened = RocksSubmoduleStore::open(&rocks)?;
@@ -3709,6 +4036,7 @@ mod tests {
 
         let back_stats = convert_rocks_to_mdbx(&rocks, &back, &options)?;
         assert_copy_counts(&back_stats);
+        assert!(!back.join("CONVERTING").exists());
         assert_equivalent(&verify_mdbx_and_rocks(&back, &rocks, &options)?);
         assert_v2(
             &MdbxSubmoduleStore::open(&back, testing_args()?)?,
@@ -3933,6 +4261,13 @@ mod tests {
             )?;
             tx.put::<master::ChunkDataPathByPathHash>(data_hash, data.clone())?;
             tx.put::<master::TxPathByTxPathHash>(path_hash, pair.proof_a.clone())?;
+            tx.put::<master::DataRootInfosByDataRoot>(
+                pair.root_a,
+                DataRootInfos(vec![DataRootInfo {
+                    start_offset: RelativeChunkOffset(-8),
+                    data_size: 352,
+                }]),
+            )?;
             tx.commit()?;
         }
         drop(db);
@@ -3944,7 +4279,7 @@ mod tests {
         assert_eq!(stats.intervals, 1);
         assert_eq!(stats.tx_leaf_bindings, 1);
         assert_eq!(stats.path_hashes, 1);
-        assert_eq!(stats.data_roots, 0);
+        assert_eq!(stats.data_roots, 1);
         assert_eq!(stats.data_paths, 1);
         {
             let opened = DatabaseEnv::open(
@@ -3980,8 +4315,8 @@ mod tests {
             assert_eq!(place.block_height, Some(1));
             assert_eq!(place.tx_index, Some(0));
             assert_eq!(place.ledger, Some(DataLedger::Publish.get_id()));
-            assert_eq!(place.tx_start_offset, RelativeChunkOffset(0));
-            assert_eq!(place.data_size, 0);
+            assert_eq!(place.tx_start_offset, RelativeChunkOffset(-8));
+            assert_eq!(place.data_size, 352);
             assert_eq!(place.start, PartitionChunkOffset(0));
             assert_eq!(place.end, PartitionChunkOffset(0));
             Ok(())
@@ -4346,6 +4681,166 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn merged_identical_roots_split_into_one_placement_per_tx() -> eyre::Result<()> {
+        let root = temp("convert-split-same-root");
+        let consensus = root.path().join("consensus");
+        fs::create_dir_all(&consensus)?;
+        let mut left = tx_at(1, 32);
+        let mut right = tx_at(2, 32);
+        let data_root = hid(50);
+        let prefix = hid(60);
+        left.data_root = data_root;
+        right.data_root = data_root;
+        left.prefix_hash = prefix;
+        right.prefix_hash = prefix;
+        let blocks = [
+            block_with(0, &[], 0),
+            block_with(1, &[left.clone(), right.clone()], 2),
+        ];
+        let db = open_or_create_db(&consensus, IrysTables::ALL, testing_args()?)?;
+        db.update_eyre(|tx| {
+            insert_tx_header(tx, &left)?;
+            insert_tx_header(tx, &right)?;
+            for block in &blocks {
+                insert_block_header(tx, block)?;
+                insert_block_index_items_for_block(tx, block)?;
+            }
+            crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+            Ok(())
+        })?;
+        drop(db);
+
+        let opened = open_consensus(&consensus)?;
+        let first = derive_tx_path_at_offset(&opened, DataLedger::Publish, 0, 32)?;
+        let second = derive_tx_path_at_offset(&opened, DataLedger::Publish, 1, 32)?;
+        assert_ne!(first.tx_index, second.tx_index);
+        assert_eq!(first.data_root, data_root);
+        let stored_hash = tx_path_hash(&first.proof.proof);
+        drop(opened);
+
+        let mdbx = root.path().join("db");
+        let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
+        store.update(|tx| {
+            tx.add_full_tx_path(stored_hash, first.proof.proof.clone())?;
+            tx.add_tx_leaf_binding(
+                stored_hash,
+                &TxLeafBinding {
+                    data_root,
+                    prefix_hash: prefix,
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset(0),
+                PartitionChunkOffset(1),
+                Some(stored_hash),
+            )?;
+            tx.add_data_root_info(
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 32,
+                },
+            )?;
+            tx.add_data_root_info(
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(1),
+                    data_size: 32,
+                },
+            )?;
+            Ok(())
+        })?;
+        drop(store);
+
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.intervals, 2, "{stats}");
+        assert_eq!(stats.skipped_frontier, 0, "{stats}");
+        assert!(!rocks.join("CONVERTING").exists());
+        assert_eq!(
+            fs::read_to_string(rocks.join("SCHEMA"))?,
+            SUBMODULE_SCHEMA_V3
+        );
+        let opened = RocksSubmoduleStore::open(&rocks)?;
+        opened.view(|tx| {
+            let head = tx
+                .placement_at(PartitionChunkOffset(0))?
+                .expect("first placement");
+            assert_eq!(head.start, PartitionChunkOffset(0));
+            assert_eq!(head.end, PartitionChunkOffset(0));
+            assert_eq!(head.tx_index, Some(0));
+            assert_eq!(head.data_root, data_root);
+            assert_eq!(head.data_size, 32);
+            assert_eq!(head.tx_start_offset, RelativeChunkOffset(0));
+            let tail = tx
+                .placement_at(PartitionChunkOffset(1))?
+                .expect("second placement");
+            assert_eq!(tail.start, PartitionChunkOffset(1));
+            assert_eq!(tail.end, PartitionChunkOffset(1));
+            assert_eq!(tail.tx_index, Some(1));
+            assert_eq!(tail.data_root, data_root);
+            assert_eq!(tail.data_size, 32);
+            assert_eq!(tail.tx_start_offset, RelativeChunkOffset(1));
+            Ok(())
+        })?;
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(report.index_audit_findings, 0, "{report}");
+        Ok(())
+    }
+
+    #[test]
+    fn merged_interval_that_derives_another_root_is_refused() -> eyre::Result<()> {
+        let root = temp("convert-split-other-root");
+        let consensus = root.path().join("consensus");
+        write_chain(&consensus)?;
+        let pair = derived_pair(&consensus)?;
+        let hash_b = tx_path_hash(&pair.proof_b);
+        let mdbx = root.path().join("db");
+        let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
+        store.update(|tx| {
+            tx.add_full_tx_path(hash_b, pair.proof_b.clone())?;
+            tx.add_tx_leaf_binding(
+                hash_b,
+                &TxLeafBinding {
+                    data_root: pair.root_b,
+                    prefix_hash: pair.prefix_b,
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset(3),
+                PartitionChunkOffset(4),
+                Some(hash_b),
+            )?;
+            tx.add_data_root_info(
+                pair.root_b,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(3),
+                    data_size: 32,
+                },
+            )?;
+            tx.add_data_root_info(
+                pair.root_b,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(4),
+                    data_size: 32,
+                },
+            )?;
+            Ok(())
+        })?;
+        drop(store);
+
+        let rocks = root.path().join("rocks");
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("derives a different data root"), "{text}");
+        assert!(!rocks.join("SCHEMA").exists());
+        Ok(())
+    }
+
     /// One-chunk v1 placements, one tx each, in a single block. This is the
     /// shape that used to commit twice per placement.
     fn write_v1_one_chunk_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
@@ -4400,6 +4895,15 @@ mod tests {
                 )?;
                 tx.put::<master::ChunkDataPathByPathHash>(data_hash, data)?;
                 tx.put::<master::TxPathByTxPathHash>(path_hash, proof)?;
+                tx.put::<master::DataRootInfosByDataRoot>(
+                    derived.data_root,
+                    DataRootInfos(vec![DataRootInfo {
+                        start_offset: RelativeChunkOffset(
+                            i32::try_from(offset).unwrap_or(i32::MAX),
+                        ),
+                        data_size: 32,
+                    }]),
+                )?;
             }
             tx.commit()?;
         }
@@ -4419,6 +4923,7 @@ mod tests {
         options.chunks_per_partition = 3;
         options.batch_rows = 8;
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert!(!rocks.join("CONVERTING").exists());
         assert_eq!(stats.intervals, 3);
         assert_eq!(stats.data_paths, 3);
         assert_eq!(stats.skipped_frontier, 0);

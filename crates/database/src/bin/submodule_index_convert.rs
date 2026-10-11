@@ -11,9 +11,10 @@
 //! `slot * chunks_per_partition + partition_offset`.
 //!
 //! The source is never modified, including a schema v1 MDBX directory.
-//! The completion marker is written last. A crash leaves a `CONVERTING`
-//! file and no completion marker. `--replace-incomplete` deletes only a
-//! directory this tool marked with that file.
+//! The completion marker is written last. A crash before that marker leaves
+//! a `CONVERTING` file and no marker. A finished index removes `CONVERTING`
+//! after the marker is durable. `--replace-incomplete` deletes only a
+//! directory this tool marked with that file and that has no marker.
 //!
 //! See `--help` for the node steps.
 
@@ -81,8 +82,9 @@ index. verify and verify-rocks count skipped_frontier as a mismatch.
 
 Stop the node first. The tool locks the index and refuses a held lock.
 The completion marker is written last (rocks/SCHEMA, or the MDBX schema row).
-A crash leaves CONVERTING and no completion marker. Rerun the same command
-with --replace-incomplete. Do not start the node on an incomplete directory.
+A crash before that marker leaves CONVERTING and no completion marker.
+Rerun the same command with --replace-incomplete. A finished run removes
+CONVERTING. Do not start the node on an incomplete directory.
 
 mdbx-to-rocks writes <submodule>/rocks. Set database.submodule_index to rocksdb
 before the next start. Read `ledger` and `slot` from <submodule>/packing_params.toml.

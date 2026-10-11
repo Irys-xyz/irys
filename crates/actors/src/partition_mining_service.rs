@@ -125,6 +125,48 @@ fn fresh_ranges(config: &irys_types::ConsensusConfig) -> Ranges {
     .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig")
 }
 
+fn check_startup_placement(
+    db: DatabaseProvider,
+    ledger: DataLedger,
+    ledger_offset: u64,
+    chunk_size: u64,
+    pool: Option<TxPathPool>,
+    placement: DerivePlacement,
+) -> eyre::Result<()> {
+    let derived = irys_database::tx_path_derive::derive_tx_path_at_offset_with(
+        db.0.as_ref(),
+        ledger,
+        ledger_offset,
+        chunk_size,
+        pool.as_deref(),
+    )?;
+    let check = match placement {
+        DerivePlacement::Skip => None,
+        DerivePlacement::Check(check) => Some(check),
+        DerivePlacement::Missing(reason) => {
+            return Err(eyre::eyre!("{reason}"));
+        }
+    };
+    let Some(check) = check else {
+        return Ok(());
+    };
+    let tx_index =
+        u32::try_from(derived.tx_index).map_err(|_| eyre::eyre!("tx index exceeds u32"))?;
+    if check.data_root != derived.data_root
+        || check.block_height != Some(derived.height)
+        || check.tx_index != Some(tx_index)
+        || check.ledger != Some(derived.ledger.get_id())
+    {
+        return Err(eyre::eyre!(
+            "placement mismatch: derived data_root {} height {} tx_index {tx_index} ledger {}",
+            derived.data_root,
+            derived.height,
+            derived.ledger.get_id()
+        ));
+    }
+    Ok(())
+}
+
 impl PartitionMiningServiceInner {
     pub fn new(
         config: &Config,
@@ -567,6 +609,65 @@ impl PartitionMiningServiceInner {
         })
     }
 
+    /// Derive one stored data offset before the mining loop.
+    ///
+    /// A failure is logged and counted. The service still mines. An empty
+    /// partition, or a capacity assignment with no ledger, is skipped.
+    async fn check_startup_derive(&self) {
+        let Some(offset) = self.first_data_offset() else {
+            return;
+        };
+        let Some((ledger, ledger_offset)) = self.assigned_ledger_offset(offset) else {
+            return;
+        };
+        let Some(db) = self.tx_path_db.clone() else {
+            error!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "startup tx path derive has no consensus database"
+            );
+            metrics::record_tx_path_derive_failed("startup");
+            return;
+        };
+        let Some(placement) = self.placement_for_derive(offset) else {
+            error!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "startup tx path derive has no submodule for the data interval"
+            );
+            metrics::record_tx_path_derive_failed("startup");
+            return;
+        };
+        let pool = self.tx_path_pool.clone();
+        let chunk_size = self.config.consensus.chunk_size;
+        let module_id = self.storage_module.id;
+        let joined = tokio::task::spawn_blocking(move || {
+            check_startup_placement(db, ledger, ledger_offset, chunk_size, pool, placement)
+        })
+        .await;
+        let failed = match joined {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some(eyre::eyre!("startup tx path derive task failed: {error}")),
+        };
+        if let Some(error) = failed {
+            error!(
+                storage_module.id = module_id,
+                chunk_offset = offset.0,
+                "startup tx path derive failed: {error:#}"
+            );
+            metrics::record_tx_path_derive_failed("startup");
+        }
+    }
+
+    fn first_data_offset(&self) -> Option<PartitionChunkOffset> {
+        self.storage_module
+            .get_intervals(ChunkType::Data)
+            .into_iter()
+            .next()
+            .map(|interval| interval.start())
+    }
+
     fn assigned_ledger_offset(&self, offset: PartitionChunkOffset) -> Option<(DataLedger, u64)> {
         let assignment = self.storage_module.partition_assignment()?;
         let ledger_id = assignment.ledger_id?;
@@ -793,6 +894,7 @@ impl PartitionMiningService {
 
     async fn start(mut self) {
         info!("Starting partition mining service");
+        self.state.check_startup_derive().await;
         // Monotonic. A stalled runtime retries once, then waits again.
         let mut expiry_retry = tokio::time::interval(Duration::from_secs(5));
         expiry_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
