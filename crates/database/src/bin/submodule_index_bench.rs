@@ -1190,25 +1190,24 @@ fn read_phase(
             })
         },
     )?;
-    time_reopen(
-        dir,
-        disk.as_ref(),
-        "rmw_root",
-        args.reads,
-        open,
-        |store, i| {
-            let at = sample_offset(i.wrapping_add(4), args.chunks);
-            let tx_start = at / args.tx_chunks * args.tx_chunks;
-            let root = hash_at(u64::from(tx_start) + 0x1000_0000);
-            // Distinct from the indexed row and from every other sample, so
-            // the read-before-write always appends and both engines commit.
-            let info = DataRootInfo {
-                start_offset: RelativeChunkOffset(-1),
-                data_size: indexed_data_size(args, 1).saturating_add(u64::from(i) + 1),
-            };
-            store.update(|tx| tx.add_data_root_info(root, &info))
-        },
-    )?;
+    if args.schema.is_v3() {
+        // Same reason as `rmw_root_sample`. Do not time empty samples.
+        println!("  read shape=rmw_root skipped: {V3_RMW_ROOT_SKIP}");
+    } else {
+        time_reopen(
+            dir,
+            disk.as_ref(),
+            "rmw_root",
+            args.reads,
+            open,
+            |store, i| match rmw_root_sample(store, args, i)? {
+                RmwRoot::Wrote => Ok(()),
+                RmwRoot::Skipped(reason) => {
+                    eyre::bail!("rmw_root skipped during a timed shape: {reason}")
+                }
+            },
+        )?;
+    }
     let store = open(dir)?;
     let kept = store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(0)))?;
     let kept = kept.ok_or_else(|| eyre::eyre!("offset 0 missing after rmw"))?;
@@ -1234,6 +1233,42 @@ fn expected_path_len(args: &Args, at: u32) -> usize {
     } else {
         args.path_bytes
     }
+}
+
+enum RmwRoot {
+    Wrote,
+    Skipped(&'static str),
+}
+
+/// Why `rmw_root` does not write on schema v3.
+///
+/// Production fills the data-root row once, in the same commit as the
+/// interval (`add_data_root_info` while the placement is still unfilled).
+/// After that commit the placement is filled. A later append has no unfilled
+/// placement, and `set_data_root_infos` will not add or replace the row while
+/// the interval exists. There is no production read-modify-write of this row.
+const V3_RMW_ROOT_SKIP: &str = "schema v3 fills each placement's data-root row once, in the same commit as its interval. A later info append has no unfilled placement, and that row cannot be replaced while the interval exists. Production has no read-modify-write of this row.";
+
+/// Append one data-root info that is not already stored, so the commit is real.
+///
+/// Schema v2 keeps a list per data root. This sample pushes a new entry.
+/// Schema v3 returns [`RmwRoot::Skipped`] and does not write. See
+/// [`V3_RMW_ROOT_SKIP`].
+fn rmw_root_sample(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<RmwRoot> {
+    if !store.stores_tx_paths() {
+        return Ok(RmwRoot::Skipped(V3_RMW_ROOT_SKIP));
+    }
+    let at = sample_offset(i.wrapping_add(4), args.chunks);
+    let tx_start = at / args.tx_chunks * args.tx_chunks;
+    let root = hash_at(u64::from(tx_start) + 0x1000_0000);
+    // Distinct from the indexed row and from every other sample, so
+    // the read-before-write always appends and both engines commit.
+    let info = DataRootInfo {
+        start_offset: RelativeChunkOffset(-1),
+        data_size: indexed_data_size(args, 1).saturating_add(u64::from(i) + 1),
+    };
+    store.update(|tx| tx.add_data_root_info(root, &info))?;
+    Ok(RmwRoot::Wrote)
 }
 
 fn read_one_data_path(store: &SubmoduleIndex, args: &Args, at: u32) -> eyre::Result<()> {
@@ -2690,7 +2725,7 @@ content_lookup is a cold prefix seek of a leaf hash that was stored. content_mis
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
 RocksDB prints rocks_bg before and after each shape: running compactions, running flushes, pending flags, and no_file_opens.\n\
 The RocksDB engine line shows max_open_files=-1 file_opening_threads=16. Production open uses the same table cache. The bench open also skips the table-property scan.\n\
-rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit.\n\
+rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit. Schema v3 skips rmw_root: a placement's data-root row is filled once, with the interval, and production does not read-modify-write that row.\n\
 Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache. data_path_random_open keeps the Rocks block cache.\n\
 Each engine prints mem lines. rss_kb is resident. anon_kb is heap. file_kb is mapped file pages. size_kb is virtual.\n\
 --group-commit makes both engines commit {MID_MDBX_TXS_PER_COMMIT} transactions and {MID_MDBX_PATH_BATCH} data-path rows (or --batch, when that is larger). Without it, only --mid MDBX uses those sizes. RocksDB stays at one transaction and --batch rows.\n\
@@ -3404,6 +3439,54 @@ VmHWM:\t   8600000 kB
             at += place.stored;
         }
         assert_eq!(roots.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn rmw_root_on_a_tiny_v3_index_keeps_the_placement() -> eyre::Result<()> {
+        // Breaks if the shape appends an info schema v3 rejects, or if it
+        // changes the placement data_size that production stored.
+        use irys_database::submodule::SubmoduleStore as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::PartitionChunkOffset;
+
+        let args = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "4",
+            "--small-txs",
+            "2",
+            "--schema",
+            "v3",
+            "--engine",
+            "rocks",
+            "--reads",
+            "1",
+            "--batch",
+            "4",
+        ])
+        .unwrap();
+        let dir = TempDirBuilder::new()
+            .prefix("index_bench_rmw_root_v3")
+            .build();
+        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks, true)?;
+        write_tx_index(&store, &args, 8)?;
+        let before = store
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+            .expect("placement");
+        let outcome = super::rmw_root_sample(&store, &args, 0)?;
+        let super::RmwRoot::Skipped(reason) = outcome else {
+            panic!("v3 rmw_root wrote a data-root row");
+        };
+        assert!(reason.contains("schema v3"), "{reason}");
+        assert!(reason.contains("read-modify-write"), "{reason}");
+        let after = store
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+            .expect("placement");
+        assert_eq!(after.data_size, before.data_size);
+        assert_eq!(after.data_root, before.data_root);
+        assert_eq!(after.tx_start_offset, before.tx_start_offset);
         Ok(())
     }
 }
