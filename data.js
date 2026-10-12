@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791814415148,
+  "lastUpdate": 1791816542188,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -16891,6 +16891,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cf7759e4c3f823682c58cecd0b457472e6b988c6",
+          "message": "fix(p2p): cap concurrent block-body serves (#1573)",
+          "timestamp": "2026-10-12T15:29:29+01:00",
+          "tree_id": "47c9d4901f7e787ee061a511b1f32c07a178d192",
+          "url": "https://github.com/Irys-xyz/irys/commit/cf7759e4c3f823682c58cecd0b457472e6b988c6"
+        },
+        "date": 1791816540857,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012633,
+            "range": "± 0.000294",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126794,
+            "range": "± 0.001614",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.218965,
+            "range": "± 0.024715",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.366304,
+            "range": "± 0.223908",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078634,
+            "range": "± 0.001757",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 765.117834,
+            "range": "± 18.546398",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1014.001351,
+            "range": "± 42.556771",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120093,
+            "range": "± 0.000603",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1240.332165,
+            "range": "± 89.514656",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1594.576149,
+            "range": "± 54.557813",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034439,
+            "range": "± 0.002315",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.214648,
+            "range": "± 1.175188",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.089828,
+            "range": "± 2.337352",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
