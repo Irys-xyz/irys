@@ -1061,6 +1061,16 @@ fn recall_piece_plan(len: u64, max_chunks: u64) -> Vec<(u64, u64)> {
     pieces
 }
 
+/// Byte offset of one recall-file chunk.
+///
+/// `origin_chunks` is 0 in production. The bench sets it so partition chunk 0
+/// is that chunk of the recall file. Buffered and `O_DIRECT` reads share it.
+fn recall_file_byte_offset(origin_chunks: u32, submodule_offset: u32, chunk_size: u64) -> u64 {
+    u64::from(origin_chunks)
+        .saturating_add(u64::from(submodule_offset))
+        .saturating_mul(chunk_size)
+}
+
 /// Two `pread`s of one recall run share `buffered`. `buffered` is a dup, so
 /// these `pread`s do not wait for packed writes already in the kernel.
 /// `direct`, when present, is a dup of the `O_DIRECT` descriptor and is the
@@ -1075,6 +1085,7 @@ fn read_recall_run(
     len: u64,
     chunk_type: ChunkType,
     interval_start: PartitionChunkOffset,
+    origin_chunks: u32,
     chunk_size: u64,
     chunk_len: usize,
     max_chunks: u64,
@@ -1088,7 +1099,8 @@ fn read_recall_run(
         let mut batch = Vec::with_capacity(end - next);
         for &(done, n) in &pieces[next..end] {
             let piece = PartitionChunkOffset(start.0 + done as u32);
-            let file_offset = *(piece - interval_start) as u64 * chunk_size;
+            let file_offset =
+                recall_file_byte_offset(origin_chunks, *(piece - interval_start), chunk_size);
             let nbytes = n as usize * chunk_len;
             batch.push((piece, file_offset, n, nbytes));
         }
@@ -2096,7 +2108,7 @@ impl StorageModule {
             }
             return Ok((
                 Arc::clone(&split.recall),
-                u64::from(submodule_offset.0) * chunk_size,
+                recall_file_byte_offset(split.recall_origin, *submodule_offset, chunk_size),
                 submodule_offset,
             ));
         }
@@ -4430,10 +4442,11 @@ impl StorageModule {
                     Arc::clone(&split.write),
                     split.write_origin,
                     split.write_chunks,
+                    split.recall_origin,
                 )
             });
             #[cfg(feature = "bench")]
-            let file_arc = if let Some((recall_file, write_file, _, _)) = &split_files {
+            let file_arc = if let Some((recall_file, write_file, ..)) = &split_files {
                 if recall || runs[index].2 != ChunkType::Data {
                     Arc::clone(recall_file)
                 } else {
@@ -4471,6 +4484,13 @@ impl StorageModule {
                     None => None,
                 };
                 let direct_requested = self.config.node_config.storage.recall_direct_io;
+                #[cfg(feature = "bench")]
+                let origin_chunks = split_files
+                    .as_ref()
+                    .map(|(_, _, _, _, origin)| *origin)
+                    .unwrap_or(0);
+                #[cfg(not(feature = "bench"))]
+                let origin_chunks = 0;
                 while index < runs.len() {
                     let (start, len, chunk_type) = runs[index];
                     let (run_interval, _) = self
@@ -4488,6 +4508,7 @@ impl StorageModule {
                         len,
                         chunk_type,
                         run_interval.start(),
+                        origin_chunks,
                         chunk_size,
                         chunk_len,
                         max_chunks,
@@ -4509,7 +4530,7 @@ impl StorageModule {
                         break;
                     }
                     #[cfg(feature = "bench")]
-                    if let Some((recall_file, write_file, _, _)) = &split_files {
+                    if let Some((recall_file, write_file, ..)) = &split_files {
                         let run_write = chunk_type == ChunkType::Data;
                         let opened_write = Arc::ptr_eq(&file_arc, write_file);
                         let opened_recall = Arc::ptr_eq(&file_arc, recall_file);
@@ -4521,17 +4542,21 @@ impl StorageModule {
                     while done < len {
                         let n = (len - done).min(max_chunks);
                         let piece = PartitionChunkOffset(start.0 + done as u32);
-                        let file_offset = *(piece - run_interval.start()) as u64 * chunk_size;
+                        let relative = *(piece - run_interval.start());
+                        let file_offset = u64::from(relative) * chunk_size;
                         #[cfg(feature = "bench")]
                         let file_offset = if chunk_type == ChunkType::Data
-                            && let Some((_, _, write_origin, write_chunks)) = split_files.as_ref()
+                            && let Some((_, _, write_origin, write_chunks, _)) =
+                                split_files.as_ref()
                         {
                             split_backing::map_write_offset(
                                 *write_origin,
                                 *write_chunks,
-                                *(piece - run_interval.start()),
+                                relative,
                                 chunk_size,
                             )?
+                        } else if let Some((_, _, _, _, origin)) = split_files.as_ref() {
+                            recall_file_byte_offset(*origin, relative, chunk_size)
                         } else {
                             file_offset
                         };

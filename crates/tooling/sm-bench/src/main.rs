@@ -71,6 +71,14 @@ struct Args {
     /// Partition size in chunks. Default: recall file bytes / 256 KiB.
     #[arg(long)]
     chunks: Option<u64>,
+    /// File chunk where partition chunk 0 starts. Default 0.
+    ///
+    /// A recall of partition offset `P` reads file chunk `N + P` on the
+    /// buffered descriptor and on the `O_DIRECT` descriptor. `N` plus the
+    /// partition length must fit in the recall file. Writes stay on
+    /// `--write-file`.
+    #[arg(long, default_value_t = 0)]
+    recall_offset_chunks: u64,
     /// Directory for `header.json`, `samples.jsonl`, `summary.json`, and `steps.jsonl`.
     #[arg(long)]
     out: PathBuf,
@@ -326,6 +334,9 @@ fn run() -> eyre::Result<i32> {
     let recall_len = std::fs::metadata(&recall_file)?.len();
     let write_len = std::fs::metadata(&write_file)?.len();
     let partition_chunks = partition_chunks(args.chunks, recall_len)?;
+    let file_chunks = recall_len / CHUNK_SIZE;
+    let recall_offset_chunks =
+        checked_recall_offset(args.recall_offset_chunks, partition_chunks, file_chunks)?;
     let write_origin = u32::try_from(args.write_origin)
         .map_err(|_| eyre!("--write-origin does not fit in u32"))?;
     let write_chunks = write_chunks(write_len)?;
@@ -381,6 +392,7 @@ fn run() -> eyre::Result<i32> {
         min_durable_interval_ms: args.min_durable_interval_ms,
         durable_headroom_permille: args.durable_headroom_permille,
         recall_direct_io: args.recall_direct_io,
+        recall_offset_chunks,
         index,
         index_group_commit: args.index_group_commit,
     })?;
@@ -428,7 +440,7 @@ fn run() -> eyre::Result<i32> {
     eprintln!("irys-sm-bench: {}", index_line.trim_end());
     eprintln!("irys-sm-bench: recall_io={recall_io}");
     eprintln!(
-        "irys-sm-bench: partition {partition_chunks} chunks, write window {write_origin}..{write_end}, ingest frontier {ingest_cursor}, migration frontier {migration_cursor}"
+        "irys-sm-bench: partition {partition_chunks} chunks, recall offset {recall_offset_chunks}, write window {write_origin}..{write_end}, ingest frontier {ingest_cursor}, migration frontier {migration_cursor}"
     );
 
     let ceiling = pending_ceiling(args.num_writes_before_sync, CHUNK_SIZE);
@@ -443,6 +455,7 @@ fn run() -> eyre::Result<i32> {
         "write_file": write_file,
         "partition_chunks": partition_chunks,
         "recall_chunks": recall_chunks,
+        "recall_offset_chunks": recall_offset_chunks,
         "write_origin": write_origin,
         "write_chunks": write_chunks,
         "write_end": write_end,
@@ -491,6 +504,12 @@ fn run() -> eyre::Result<i32> {
     header["durable_headroom_permille"] = serde_json::json!(args.durable_headroom_permille);
     header["recall_direct_io"] = serde_json::json!(args.recall_direct_io);
     header["recall_io"] = serde_json::Value::from(recall_io);
+    header["io_notes"]
+        .as_array_mut()
+        .expect("io_notes is an array")
+        .push(serde_json::Value::from(
+            "recall_offset_chunks is the file chunk of partition chunk 0. A recall of partition offset P reads file chunk N + P on the buffered descriptor and on the O_DIRECT descriptor. Writes stay on the write file.",
+        ));
     header["io_notes"]
         .as_array_mut()
         .expect("io_notes is an array")
@@ -605,6 +624,23 @@ fn refuse_without_loadtest(label: &str, path: &Path) -> eyre::Result<()> {
             path.display()
         ))
     }
+}
+
+/// `N + partition_chunks` must fit in the recall file. `N` is a chunk index.
+fn checked_recall_offset(
+    requested: u64,
+    partition_chunks: u32,
+    file_chunks: u64,
+) -> eyre::Result<u32> {
+    let offset = u32::try_from(requested)
+        .map_err(|_| eyre!("--recall-offset-chunks {requested} does not fit in u32"))?;
+    let end = u64::from(offset) + u64::from(partition_chunks);
+    if end > file_chunks {
+        return Err(eyre!(
+            "--recall-offset-chunks {offset} plus partition {partition_chunks} chunks is {end}, past the recall file ({file_chunks} chunks)"
+        ));
+    }
+    Ok(offset)
 }
 
 fn partition_chunks(requested: Option<u64>, recall_len: u64) -> eyre::Result<u32> {
@@ -1256,6 +1292,11 @@ mod tests {
             parsed(&["--durable-headroom-permille", "1000"]).durable_headroom_permille,
             1000
         );
+        assert_eq!(args.recall_offset_chunks, 0);
+        assert_eq!(
+            parsed(&["--recall-offset-chunks", "12"]).recall_offset_chunks,
+            12
+        );
         assert!(!args.recall_direct_io);
         assert!(parsed(&["--recall-direct-io"]).recall_direct_io);
         assert!(args.rocks_preset.is_none());
@@ -1451,6 +1492,25 @@ mod tests {
         assert_eq!(parsed(&[]).judge_tail_secs, DEFAULT_JUDGE_TAIL_SECS);
         assert_eq!(parsed(&["--judge-tail-secs", "0"]).judge_tail_secs, 0);
         assert_eq!(parsed(&["--judge-tail-secs", "90"]).judge_tail_secs, 90);
+    }
+
+    #[test]
+    fn recall_offset_past_the_end_of_the_file_is_rejected() {
+        // Breaks if N + partition length is allowed to run past the last full chunk.
+        let err = checked_recall_offset(2, 3, 4).unwrap_err();
+        let text = format!("{err}");
+        assert!(text.contains("past the recall file"), "{text}");
+        assert!(text.contains('2'), "{text}");
+        assert!(text.contains('3'), "{text}");
+        assert!(text.contains('5'), "{text}");
+        assert!(text.contains('4'), "{text}");
+        assert_eq!(checked_recall_offset(2, 2, 4).unwrap(), 2);
+        assert_eq!(checked_recall_offset(0, 4, 4).unwrap(), 0);
+        let too_big = checked_recall_offset(u64::from(u32::MAX) + 1, 1, u64::MAX).unwrap_err();
+        assert!(
+            format!("{too_big}").contains("does not fit in u32"),
+            "{too_big}"
+        );
     }
 
     #[test]

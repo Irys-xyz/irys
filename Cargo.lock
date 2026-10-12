@@ -5620,6 +5620,7 @@ dependencies = [
  "eyre",
  "irys-database",
  "irys-domain",
+ "irys-testing-utils",
  "irys-types",
  "libc",
  "rand 0.8.5",

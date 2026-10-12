@@ -45,6 +45,8 @@ pub(crate) struct OpenRequest<'a> {
     pub durable_headroom_permille: u64,
     /// Mining recall uses an `O_DIRECT` descriptor on `recall_file`.
     pub recall_direct_io: bool,
+    /// File chunk where partition chunk 0 starts. `0` reads the start of the file.
+    pub recall_offset_chunks: u32,
     pub index: BenchIndex,
     /// Arms group commit. MDBX syncs every N. RocksDB does not.
     /// `0` skips the call; the method rejects 0.
@@ -121,7 +123,8 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         .write(true)
         .open(request.write_file)
         .wrap_err_with(|| format!("failed to open write file {}", request.write_file.display()))?;
-    let mut split = SplitBacking::open(recall, write, request.write_origin, request.write_chunks)?;
+    let mut split = SplitBacking::open(recall, write, request.write_origin, request.write_chunks)?
+        .with_recall_origin(request.recall_offset_chunks);
     // Mining recall only. The buffered recall descriptor above still serves
     // non-data reads. `Ok(None)` keeps those recalls buffered.
     if request.recall_direct_io
@@ -197,4 +200,189 @@ pub(crate) fn flush_batch(num_writes_before_sync: u64, chunk_size: u64) -> u64 {
 pub(crate) fn span_limit(entropy_sweep_max_bytes: u64, chunk_size: u64) -> usize {
     let span = (entropy_sweep_max_bytes / chunk_size.max(1)).clamp(1, 512);
     usize::try_from(span).unwrap_or(512)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write as _;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use irys_domain::{BenchIndex, ChunkType, StorageModule};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{PartitionChunkOffset, ii, partition_chunk_offset_ii};
+
+    use super::{OpenRequest, open_module};
+    use crate::guard::CHUNK_SIZE;
+
+    /// File chunk `i` is filled with `0xA0 + i`.
+    fn write_marked(path: &Path, chunks: u64) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        for index in 0..chunks {
+            let mark = 0xA0 + u8::try_from(index).unwrap();
+            file.write_all(&vec![mark; CHUNK_SIZE as usize]).unwrap();
+        }
+        file.sync_all().unwrap();
+    }
+
+    fn write_uniform(path: &Path, chunks: u64, mark: u8) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        for _ in 0..chunks {
+            file.write_all(&vec![mark; CHUNK_SIZE as usize]).unwrap();
+        }
+        file.sync_all().unwrap();
+    }
+
+    fn open_slice(
+        dir: &Path,
+        recall: &Path,
+        write: &Path,
+        recall_offset_chunks: u32,
+        direct: bool,
+    ) -> super::OpenedModule {
+        fs::create_dir_all(dir).unwrap();
+        open_module(OpenRequest {
+            dir,
+            recall_file: recall,
+            write_file: write,
+            partition_chunks: 2,
+            recall_chunks: 1,
+            write_origin: 0,
+            write_chunks: 1,
+            num_writes_before_sync: 100,
+            entropy_sweep_max_bytes: CHUNK_SIZE,
+            intervals_persist_secs: 0,
+            min_durable_interval_ms: 0,
+            durable_headroom_permille: 1000,
+            recall_direct_io: direct,
+            recall_offset_chunks,
+            index: BenchIndex::Mdbx,
+            index_group_commit: 0,
+        })
+        .unwrap_or_else(|error| panic!("open {}: {error}", dir.display()))
+    }
+
+    fn uniform_mark(bytes: &[u8], kind: ChunkType, offset: u32) -> u8 {
+        assert_eq!(kind, ChunkType::Entropy, "offset {offset}");
+        assert_eq!(bytes.len(), CHUNK_SIZE as usize, "offset {offset}");
+        let mark = bytes[0];
+        assert!(
+            bytes.iter().all(|byte| *byte == mark),
+            "offset {offset} is not one mark"
+        );
+        mark
+    }
+
+    fn mining_mark(module: &StorageModule, offset: u32) -> u8 {
+        let range = partition_chunk_offset_ii!(offset, offset);
+        let got = module
+            .read_recall_chunks(range)
+            .unwrap_or_else(|error| panic!("recall {offset}: {error}"));
+        let (bytes, kind) = got
+            .chunks
+            .get(&PartitionChunkOffset::from(offset))
+            .unwrap_or_else(|| panic!("recall missed partition chunk {offset}"));
+        uniform_mark(bytes, *kind, offset)
+    }
+
+    fn serve_mark(module: &StorageModule, offset: u32) -> u8 {
+        let range = partition_chunk_offset_ii!(offset, offset);
+        let got = module
+            .read_chunks(range)
+            .unwrap_or_else(|error| panic!("read {offset}: {error}"));
+        let (bytes, kind) = got
+            .get(&PartitionChunkOffset::from(offset))
+            .unwrap_or_else(|| panic!("read missed partition chunk {offset}"));
+        uniform_mark(bytes, *kind, offset)
+    }
+
+    #[test]
+    fn recall_offset_reads_file_chunk_n_plus_the_partition_offset() {
+        // Breaks if partition chunk 0 is read at file offset 0 when N is 2.
+        let tmp = TempDirBuilder::new().prefix("sm-recall-offset-").build();
+        let root = tmp.path().join("loadtest");
+        let recall = root.join("recall.dat");
+        write_marked(&recall, 4);
+        let write = root.join("write.dat");
+        write_uniform(&write, 1, 0x11);
+
+        for direct in [false, true] {
+            let dir = root.join(if direct { "direct" } else { "buffered" });
+            let opened = open_slice(&dir, &recall, &write, 2, direct);
+            let mode = opened.module.recall_io_mode();
+            if direct {
+                assert_eq!(mode, "direct", "O_DIRECT recall did not open");
+            } else {
+                assert_eq!(mode, "buffered");
+            }
+            assert_eq!(
+                mining_mark(&opened.module, 0),
+                0xA2,
+                "direct={direct} mode={mode} partition chunk 0"
+            );
+            assert_eq!(
+                mining_mark(&opened.module, 1),
+                0xA3,
+                "direct={direct} mode={mode} partition chunk 1"
+            );
+            assert_eq!(
+                serve_mark(&opened.module, 0),
+                0xA2,
+                "direct={direct} mode={mode} non-recall read"
+            );
+            drop(opened);
+        }
+    }
+
+    #[test]
+    fn two_benches_open_the_same_recall_file() {
+        // Breaks if the second open of a read-only recall file fails or blocks.
+        let tmp = TempDirBuilder::new().prefix("sm-recall-shared-").build();
+        let root = tmp.path().join("loadtest");
+        let recall = root.join("recall.dat");
+        write_marked(&recall, 4);
+        let (tx_a, rx_a) = mpsc::channel();
+        let (tx_b, rx_b) = mpsc::channel();
+        for (name, tx) in [("a", tx_a), ("b", tx_b)] {
+            let recall = recall.clone();
+            let root = root.clone();
+            let name = name.to_string();
+            thread::spawn(move || {
+                let dir = root.join(&name);
+                let write = root.join(format!("{name}-write.dat"));
+                write_uniform(&write, 1, 0x11);
+                let opened = open_slice(&dir, &recall, &write, 2, false);
+                let mark = mining_mark(&opened.module, 0);
+                let _ = tx.send(mark);
+            });
+        }
+        let wait = Duration::from_secs(90);
+        let mark_a = rx_a
+            .recv_timeout(wait)
+            .expect("first bench did not open the recall file within 90s");
+        let mark_b = rx_b
+            .recv_timeout(wait)
+            .expect("second bench did not open the recall file within 90s");
+        assert_eq!(mark_a, 0xA2);
+        assert_eq!(mark_b, 0xA2);
+    }
 }

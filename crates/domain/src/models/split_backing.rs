@@ -22,6 +22,9 @@ pub struct SplitBacking {
     pub(super) recall_direct: Option<Arc<File>>,
     pub(crate) write_origin: u32,
     pub(crate) write_chunks: u64,
+    /// File chunk of partition chunk 0. Recall reads add this to the
+    /// partition-relative chunk. Packed writes do not.
+    pub(crate) recall_origin: u32,
 }
 
 impl SplitBacking {
@@ -41,7 +44,14 @@ impl SplitBacking {
             recall_direct: None,
             write_origin,
             write_chunks,
+            recall_origin: 0,
         })
+    }
+
+    /// Partition chunk 0 reads file chunk `chunks` of the recall file.
+    pub fn with_recall_origin(mut self, chunks: u32) -> Self {
+        self.recall_origin = chunks;
+        self
     }
 
     /// Mining-recall descriptor for the same file as `recall`.
