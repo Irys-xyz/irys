@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791795543503,
+  "lastUpdate": 1791806753642,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -16675,6 +16675,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00012,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "60aed758195d693bfd0b1610b63793f8de9aaefa",
+          "message": "fix(xtask): keep what plain cargo builds use; prune old binaries (#1601)\n\n* fix(xtask): keep what plain cargo builds use; prune old binaries\n\nThe 30-minute duplicate rule removed any unrecorded unit that shared a\ncrate root with a recorded one. A plain `cargo build` / `cargo run` uses\nsuch units (another feature set, or the same features over another\ndependency graph), so they were deleted half an hour after use and\nrebuilt on the next plain build. Bin targets, on the other hand, were\nnever pruned.\n\n- A unit is in use when a live record names it, or when it is in the\n  dependency closure of an artifact cargo uplifted into the profile dir:\n  the outputs of the latest plain build. The closure follows each\n  fingerprint JSON to its dependencies, keyed on the unit hash because\n  `deps/` uses the crate name and `.fingerprint/` the package name.\n- Any other unit, binaries included, is removed once cargo last wrote\n  it more than `--prune-unused-days` ago. The duplicate rule is gone.\n- A removed unit also loses its `.fingerprint` dir, and orphan\n  fingerprint dirs older than the window are swept.\n- Unit age is the mtime only. The prune reads `.d` and fingerprint\n  files itself, so on a `relatime` mount atime made every unit look used.\n\n* fix(xtask): prune examples, keep recently run binaries, remove dSYM dirs\n\nReview follow-ups to the closure-based prune:\n\n- Examples live in `<profile>/examples/`, not `deps/`. They are now\n  pruned like `deps/` units, an uplifted `examples/<name>` is a closure\n  root, and their files count as present for the orphan sweep. Before,\n  an example and the units only it used were deleted after a day while\n  `cargo run --example` still used them.\n- An executable whose own atime is recent is kept. The prune never reads\n  executables, so their atime shows a real run, such as a plain\n  `cargo nextest run` of a binary built more than a day ago.\n- Unit files that are directories (`<name>-<hash>.dSYM` on macOS with\n  `split-debuginfo = \"packed\"`) are removed with `remove_dir_all`.\n  `remove_file` failed on them and stopped the profile pass.\n- A missing `.fingerprint/` dir keeps the uplifted roots themselves.\n\n* fix(xtask): remove a unit's fingerprint only when the prune removed its files\n\nIf every file of a unit was already gone (a concurrent removal), the\npass removed nothing, so it no longer removes the fingerprint dir either.\nThe orphan sweep handles that dir after the unused window.",
+          "timestamp": "2026-10-12T12:52:01+01:00",
+          "tree_id": "1cf76b56bc963bb15d3b3776f857dd96789e033a",
+          "url": "https://github.com/Irys-xyz/irys/commit/60aed758195d693bfd0b1610b63793f8de9aaefa"
+        },
+        "date": 1791806752312,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015832,
+            "range": "± 0.001797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.156891,
+            "range": "± 0.008749",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.57077,
+            "range": "± 0.068017",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.693739,
+            "range": "± 0.808621",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082976,
+            "range": "± 0.005435",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 834.558952,
+            "range": "± 6.233006",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1081.741401,
+            "range": "± 24.047052",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.148897,
+            "range": "± 0.00531",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1340.823025,
+            "range": "± 95.286267",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1668.67885,
+            "range": "± 39.208783",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.131422,
+            "range": "± 0.045746",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 223.528382,
+            "range": "± 15.194429",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 343.953675,
+            "range": "± 32.659746",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00012,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
