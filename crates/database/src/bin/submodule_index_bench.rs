@@ -22,6 +22,13 @@
 //! of an empty directory. The default is v2. Production open of an empty
 //! directory is schema v3. MDBX stays schema v2.
 //!
+//! `--data-fraction F` writes transactions and data rows for the first
+//! `F × --chunks` offsets. `--with-crc` stores each of those rows with the
+//! schema 3.2 checksum trailer. `--entropy-fill` writes a checksum-only row
+//! for every other offset. Both need `--schema v3` on RocksDB. `entropy_range`
+//! and `recall_rows` time cold reads of those rows. They are skipped when the
+//! data region covers the whole partition.
+//!
 //! After the writes, each engine drops its file cache with `posix_fadvise`
 //! and times random lookups. This does not call `drop_caches`.
 
@@ -36,8 +43,8 @@ use std::time::{Duration, Instant};
 
 use irys_database::IrysDatabaseArgs as _;
 use irys_database::submodule::tables::{
-    CHUNK_META_BY_OFFSET_CF, ChunkPathHashes, DataRootInfo, OffsetMeta, PendingBodyMigration,
-    TxLeafBinding,
+    CHUNK_META_BY_OFFSET_CF, ChunkPathHashes, DataRootInfo, OffsetMeta, PackedOffsetRow,
+    PendingBodyMigration, TxLeafBinding,
 };
 use irys_database::submodule::{
     LegacySstSpan, RocksTuning, SubmoduleIndex, SubmoduleStore as _, encode_offset_meta,
@@ -255,6 +262,14 @@ struct Args {
     txs_per_commit: Option<u32>,
     /// RocksDB layout. MDBX ignores this and stays schema v2.
     schema: IndexSchema,
+    /// Printed `--data-fraction`. `1` when the flag is absent.
+    data_fraction: f64,
+    /// First offsets that receive transactions, placements, and data rows.
+    data_chunks: u32,
+    /// Data rows use the schema 3.2 checksum trailer.
+    with_crc: bool,
+    /// Offsets outside the data region get a checksum-only row.
+    entropy_fill: bool,
 }
 
 /// Every open gets its own block cache, sized like the production shared
@@ -276,7 +291,7 @@ fn main() -> eyre::Result<()> {
     refuse_large_payload(&args)?;
     prepare_dir(&args.dir, args.workload.is_filter_reuse())?;
     println!(
-        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} schema={} dbs={} group_commit={} shuffle_run={} allocator=system jemalloc=off",
+        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} schema={} dbs={} group_commit={} shuffle_run={} data_fraction={} data_chunks={} with_crc={} entropy_fill={} allocator=system jemalloc=off",
         args.chunks,
         args.tx_chunks,
         args.batch,
@@ -289,6 +304,10 @@ fn main() -> eyre::Result<()> {
         args.dbs,
         u8::from(args.group_commit),
         args.shuffle_run.unwrap_or(0),
+        args.data_fraction,
+        args.data_chunks,
+        u8::from(args.with_crc),
+        u8::from(args.entropy_fill),
     );
     if args.workload.is_filter_reuse() {
         println!(
@@ -716,10 +735,20 @@ fn measure(
     note_mem(engine, "after_index", &watch);
     let data_path_ms = timed(|| write_data_paths(&store, args, commits.path_batch))?;
     note_mem(engine, "after_data_path", &watch);
+    let entropy_ms = if args.entropy_fill {
+        let elapsed = timed(|| write_entropy_rows(&store, args, commits.path_batch))?;
+        note_mem(engine, "after_entropy", &watch);
+        elapsed
+    } else {
+        0
+    };
     let settle_ms = timed(|| store.settle_files())?;
     note_mem(engine, "after_settle", &watch);
     if engine == "rocks" {
         print_column_files(&store, args.chunks)?;
+        if args.entropy_fill {
+            print_entropy_fill_size(&entropy_fill_size(&store, args)?);
+        }
     }
     drop(store);
     note_mem(engine, "after_write_drop", &watch);
@@ -729,7 +758,7 @@ fn measure(
     let store = open(dir)?;
     let open_ms = open_started.elapsed().as_millis();
     println!(
-        "  index_ms={index_ms} data_path_ms={data_path_ms} settle_ms={settle_ms} open_ms={open_ms}"
+        "  index_ms={index_ms} data_path_ms={data_path_ms} entropy_ms={entropy_ms} settle_ms={settle_ms} open_ms={open_ms}"
     );
     println!("  logical_bytes={logical} allocated_bytes={allocated}");
     drop(store);
@@ -869,10 +898,10 @@ struct IndexTx {
 
 fn write_tx_index(store: &SubmoduleIndex, args: &Args, txs_per_commit: u32) -> eyre::Result<()> {
     let mut offset = 0_u32;
-    while offset < args.chunks {
+    while offset < args.data_chunks {
         let mut group = Vec::new();
         for _ in 0..txs_per_commit {
-            if offset >= args.chunks {
+            if offset >= args.data_chunks {
                 break;
             }
             let place = place_tx(args, offset);
@@ -935,8 +964,8 @@ fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyr
         return write_shuffled_data_paths(store, args, path_batch, run);
     }
     let mut offset = 0_u32;
-    while offset < args.chunks {
-        let count = path_batch.min(args.chunks - offset);
+    while offset < args.data_chunks {
+        let count = path_batch.min(args.data_chunks - offset);
         let mut updates = Vec::with_capacity(count as usize);
         for step in 0..count {
             let at = offset + step;
@@ -946,7 +975,7 @@ fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyr
                 data_path_bytes(args, at),
             ));
         }
-        store.update(|tx| tx.write_data_path_updates(updates))?;
+        write_data_batch(store, args, updates)?;
         offset += count;
     }
     Ok(())
@@ -961,10 +990,10 @@ fn write_shuffled_data_paths(
     path_batch: u32,
     run: u32,
 ) -> eyre::Result<()> {
-    let runs = shuffled_runs(args.chunks, run);
+    let runs = shuffled_runs(args.data_chunks, run);
     let mut updates = Vec::with_capacity(path_batch as usize);
     for start in runs {
-        let end = start.saturating_add(run).min(args.chunks);
+        let end = start.saturating_add(run).min(args.data_chunks);
         for at in start..end {
             updates.push((
                 PartitionChunkOffset::from(at),
@@ -973,12 +1002,73 @@ fn write_shuffled_data_paths(
             ));
             if updates.len() >= path_batch as usize {
                 let batch = std::mem::take(&mut updates);
-                store.update(|tx| tx.write_data_path_updates(batch))?;
+                write_data_batch(store, args, batch)?;
             }
         }
     }
     if !updates.is_empty() {
-        store.update(|tx| tx.write_data_path_updates(updates))?;
+        write_data_batch(store, args, updates)?;
+    }
+    Ok(())
+}
+
+/// One data-path commit. `--with-crc` uses the production offset record.
+fn write_data_batch(
+    store: &SubmoduleIndex,
+    args: &Args,
+    updates: Vec<(PartitionChunkOffset, H256, Vec<u8>)>,
+) -> eyre::Result<()> {
+    if args.with_crc {
+        let rows = updates
+            .into_iter()
+            .map(|(offset, _hash, proof)| PackedOffsetRow {
+                offset,
+                crc: Some(bench_chunk_crc(offset.0)),
+                proof: Some(proof),
+            })
+            .collect();
+        let missed = store.update(|tx| tx.write_packed_offset_rows(rows))?;
+        eyre::ensure!(
+            missed.is_empty(),
+            "data row has no placement at {}",
+            missed.first().map(|offset| offset.0).unwrap_or(0)
+        );
+        return Ok(());
+    }
+    store.update(|tx| tx.write_data_path_updates(updates))?;
+    Ok(())
+}
+
+/// Checksum stored in a bench offset row.
+///
+/// The bench has no packed chunk, so this is not the CRC32C of chunk bytes.
+/// The record is still [`encode_offset_meta`]: proof bytes, then the 4-byte
+/// checksum, the flags byte, and the format byte. Offset 0 stores checksum 0.
+fn bench_chunk_crc(offset: u32) -> u32 {
+    offset.wrapping_mul(0x0100_0001)
+}
+
+/// Checksum-only rows for offsets the data region does not cover.
+///
+/// Rows go out in offset order. One `update` holds `batch` rows, the same
+/// commit size as the data-path writes. `update` is the commit. The bench
+/// does not add a sync between batches.
+fn write_entropy_rows(store: &SubmoduleIndex, args: &Args, batch: u32) -> eyre::Result<()> {
+    let mut offset = args.data_chunks;
+    while offset < args.chunks {
+        let count = batch.min(args.chunks - offset);
+        let mut rows = Vec::with_capacity(count as usize);
+        for step in 0..count {
+            let at = offset + step;
+            rows.push(PackedOffsetRow {
+                offset: PartitionChunkOffset::from(at),
+                crc: Some(bench_chunk_crc(at)),
+                proof: None,
+            });
+        }
+        let missed = store.update(|tx| tx.write_packed_offset_rows(rows))?;
+        eyre::ensure!(missed.is_empty(), "entropy row was not stored");
+        offset += count;
     }
     Ok(())
 }
@@ -1016,10 +1106,10 @@ fn read_phase(
     let disk = disk_id(dir)?;
     let disk_name = disk.as_ref().map(|id| id.name.as_str()).unwrap_or("none");
     println!("  cold=fadvise disk={disk_name}");
-    // Scattered chunk reads (recall, single-chunk serve).
-    let mut random = |store: &SubmoduleIndex, i: u32| {
-        read_one_data_path(store, args, sample_offset(i, args.chunks))
-    };
+    // Scattered chunk reads (recall, single-chunk serve). Data offsets only.
+    let data = args.data_chunks;
+    let mut random =
+        |store: &SubmoduleIndex, i: u32| read_one_data_path(store, args, sample_offset(i, data));
     let (store, files) = open_for_shape(dir, open)?;
     time_shape(
         disk.as_ref(),
@@ -1054,10 +1144,10 @@ fn read_phase(
         "data_path_seq",
         args.reads,
         open,
-        |store, i| read_one_data_path(store, args, seq_offset(i, args.chunks)),
+        |store, i| read_one_data_path(store, args, seq_offset(i, data)),
     )?;
     time_reopen(dir, disk.as_ref(), "serve", args.reads, open, |store, i| {
-        let at = sample_offset(i.wrapping_add(1), args.chunks);
+        let at = sample_offset(i.wrapping_add(1), data);
         let expected = hash_at(u64::from(at) + 0x2000_0000);
         store.view(|tx| {
             let hashes = tx
@@ -1086,9 +1176,9 @@ fn read_phase(
             Ok(())
         })
     })?;
-    let window = args.range_len.min(args.chunks);
+    let window = args.range_len.min(data);
     time_reopen(dir, disk.as_ref(), "range", args.reads, open, |store, i| {
-        let start = sample_offset(i.wrapping_add(2), args.chunks - window + 1);
+        let start = sample_offset(i.wrapping_add(2), data - window + 1);
         let end = start + window - 1;
         let rows = store.view(|tx| {
             tx.path_hashes_in_inclusive_range(
@@ -1108,7 +1198,7 @@ fn read_phase(
     // What `paths_in_tx` / `metas_in_tx` do for a span: the range read,
     // then every proof in it, in one read transaction. Same offsets as range.
     time_reopen(dir, disk.as_ref(), "span", args.reads, open, |store, i| {
-        let start = sample_offset(i.wrapping_add(2), args.chunks - window + 1);
+        let start = sample_offset(i.wrapping_add(2), data - window + 1);
         let end = start + window - 1;
         let proofs = store.view(|tx| {
             let rows = tx.path_hashes_in_inclusive_range(
@@ -1130,6 +1220,34 @@ fn read_phase(
         );
         Ok(())
     })?;
+    // Cold range reads of offset rows. Skipped when every offset is data.
+    if let Some(reason) = entropy_read_skip(engine, args) {
+        println!("  read shape=entropy_range skipped: {reason}");
+        println!("  read shape=recall_rows skipped: {reason}");
+    } else {
+        time_reopen(
+            dir,
+            disk.as_ref(),
+            "entropy_range",
+            args.reads,
+            open,
+            |store, i| {
+                read_entropy_range(store, args, i)?;
+                Ok(())
+            },
+        )?;
+        time_reopen(
+            dir,
+            disk.as_ref(),
+            "recall_rows",
+            args.reads,
+            open,
+            |store, i| {
+                read_recall_rows(store, args, i)?;
+                Ok(())
+            },
+        )?;
+    }
     // Before rmw_path rewrites proofs. The leaf hash comes from the bytes
     // this run stored, not from a data-path read that would warm that family.
     if engine == "rocks" && args.schema.is_v3() {
@@ -1140,7 +1258,7 @@ fn read_phase(
             args.reads,
             open,
             |store, i| {
-                let at = sample_offset(i, args.chunks);
+                let at = sample_offset(i, data);
                 let proof = data_path_bytes(args, at);
                 let Some(hash) = content_hash_of_proof(&proof) else {
                     eyre::bail!("content_lookup needs a proof of at least 64 bytes at offset {at}");
@@ -1176,7 +1294,7 @@ fn read_phase(
         args.reads,
         open,
         |store, i| {
-            let at = sample_offset(i.wrapping_add(3), args.chunks);
+            let at = sample_offset(i.wrapping_add(3), data);
             // One changed byte. The same bytes let MDBX skip the flush while
             // RocksDB still syncs the WAL.
             let path = rewritten_data_path(args, at);
@@ -1258,7 +1376,7 @@ fn rmw_root_sample(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<
     if !store.stores_tx_paths() {
         return Ok(RmwRoot::Skipped(V3_RMW_ROOT_SKIP));
     }
-    let at = sample_offset(i.wrapping_add(4), args.chunks);
+    let at = sample_offset(i.wrapping_add(4), args.data_chunks);
     let tx_start = at / args.tx_chunks * args.tx_chunks;
     let root = hash_at(u64::from(tx_start) + 0x1000_0000);
     // Distinct from the indexed row and from every other sample, so
@@ -1281,6 +1399,85 @@ fn read_one_data_path(store: &SubmoduleIndex, args: &Args, at: u32) -> eyre::Res
         path.len()
     );
     Ok(())
+}
+
+/// Why `entropy_range` and `recall_rows` do not run.
+fn entropy_read_skip(engine: &str, args: &Args) -> Option<&'static str> {
+    if args.data_chunks == args.chunks {
+        Some("no entropy region")
+    } else if engine != "rocks" || !args.schema.is_v3() {
+        Some("schema v3 rocks is required")
+    } else {
+        None
+    }
+}
+
+/// Cold `--range-len` read of consecutive checksum-only rows.
+///
+/// The window sits in the entropy region. The call is `offset_metas_in_range`,
+/// the same range read production uses when it checks recall checksums.
+/// Returns the row count.
+fn read_entropy_range(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<usize> {
+    let entropy = args.chunks - args.data_chunks;
+    eyre::ensure!(entropy > 0, "no entropy region");
+    let window = args.range_len.min(entropy);
+    let start = args.data_chunks + sample_offset(i, entropy - window + 1);
+    let end = start + window - 1;
+    let rows = store.view(|tx| {
+        tx.offset_metas_in_range(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+        )
+    })?;
+    if args.entropy_fill {
+        eyre::ensure!(
+            rows.len() == usize::try_from(window)?,
+            "entropy_range {start}..={end} returned {} rows",
+            rows.len()
+        );
+        for (offset, meta) in &rows {
+            eyre::ensure!(
+                meta.proof.is_none() && meta.crc.is_some(),
+                "entropy row {} is not checksum-only",
+                offset.0
+            );
+        }
+    } else {
+        eyre::ensure!(
+            rows.is_empty(),
+            "entropy_range {start}..={end} returned {} rows without --entropy-fill",
+            rows.len()
+        );
+    }
+    Ok(rows.len())
+}
+
+/// Cold `--range-len` read at a random offset over the whole partition.
+///
+/// Data and entropy rows are both visible. The iterator is
+/// `offset_metas_in_range`. Returns the row count.
+fn read_recall_rows(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<usize> {
+    let window = args.range_len.min(args.chunks);
+    let start = sample_offset(i, args.chunks - window + 1);
+    let end = start + window - 1;
+    let rows = store.view(|tx| {
+        tx.offset_metas_in_range(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+        )
+    })?;
+    let mut expected = 0_usize;
+    for offset in start..=end {
+        if offset < args.data_chunks || args.entropy_fill {
+            expected += 1;
+        }
+    }
+    eyre::ensure!(
+        rows.len() == expected,
+        "recall_rows {start}..={end} returned {} rows, want {expected}",
+        rows.len()
+    );
+    Ok(rows.len())
 }
 
 /// Sequential offsets, wrapping after the last chunk.
@@ -1752,6 +1949,38 @@ fn measure_crc_only(args: &Args, chunks: u32) -> eyre::Result<()> {
     Ok(())
 }
 
+struct EntropyFillSize {
+    data_rows: u64,
+    entropy_rows: u64,
+    sst_bytes: u64,
+}
+
+/// `ChunkMetaByOffset` after settle. `sst_bytes` is the whole family.
+fn entropy_fill_size(store: &SubmoduleIndex, args: &Args) -> eyre::Result<EntropyFillSize> {
+    Ok(EntropyFillSize {
+        data_rows: u64::from(args.data_chunks),
+        entropy_rows: u64::from(args.chunks - args.data_chunks),
+        sst_bytes: data_path_sst_bytes(store)?,
+    })
+}
+
+fn print_entropy_fill_size(size: &EntropyFillSize) {
+    let per_data = if size.data_rows == 0 {
+        0.0
+    } else {
+        size.sst_bytes as f64 / size.data_rows as f64
+    };
+    let per_entropy = if size.entropy_rows == 0 {
+        0.0
+    } else {
+        size.sst_bytes as f64 / size.entropy_rows as f64
+    };
+    println!(
+        "  entropy_fill data_rows={} entropy_rows={} cf={CHUNK_META_BY_OFFSET_CF} sst_bytes={} sst_bytes_per_data_chunk={per_data:.2} sst_bytes_per_entropy_row={per_entropy:.2}",
+        size.data_rows, size.entropy_rows, size.sst_bytes
+    );
+}
+
 fn print_crc_size(shape: &str, layout: &str, chunks: u32, total_value: u64, sst: u64) {
     let chunks_f = f64::from(chunks);
     let value_per = total_value as f64 / chunks_f;
@@ -1898,13 +2127,12 @@ fn engine_map_bytes(args: &Args) -> usize {
 }
 
 fn tx_count(args: &Args) -> u64 {
+    let chunks = args.data_chunks;
     match args.workload {
-        Workload::SmallTxs => {
-            u64::from(args.chunks).div_ceil(u64::from(args.small_tx_chunks.max(1)))
-        }
+        Workload::SmallTxs => u64::from(chunks).div_ceil(u64::from(args.small_tx_chunks.max(1))),
         Workload::MidTxs => args.mid_spans.len() as u64,
-        Workload::Worst => u64::from(args.chunks).div_ceil(MAX_DATA_TX_CHUNKS),
-        _ => u64::from(args.chunks).div_ceil(u64::from(args.tx_chunks.max(1))),
+        Workload::Worst => u64::from(chunks).div_ceil(MAX_DATA_TX_CHUNKS),
+        _ => u64::from(chunks).div_ceil(u64::from(args.tx_chunks.max(1))),
     }
 }
 
@@ -1914,7 +2142,7 @@ fn place_tx(args: &Args, offset: u32) -> TxPlace {
         Workload::Worst => {
             let span = u32::try_from(MAX_DATA_TX_CHUNKS).unwrap_or(u32::MAX);
             let start = offset / span * span;
-            let stored = span.min(args.chunks - start);
+            let stored = span.min(args.data_chunks - start);
             TxPlace {
                 start,
                 stored,
@@ -1924,7 +2152,7 @@ fn place_tx(args: &Args, offset: u32) -> TxPlace {
         Workload::SmallTxs => {
             let span = args.small_tx_chunks.max(1);
             let start = offset / span * span;
-            let stored = span.min(args.chunks - start);
+            let stored = span.min(args.data_chunks - start);
             TxPlace {
                 start,
                 stored,
@@ -1946,7 +2174,7 @@ fn place_tx(args: &Args, offset: u32) -> TxPlace {
         _ => {
             let span = args.tx_chunks.max(1);
             let start = offset / span * span;
-            let stored = span.min(args.chunks - start);
+            let stored = span.min(args.data_chunks - start);
             TxPlace {
                 start,
                 stored,
@@ -2403,6 +2631,9 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     let mut txs_per_commit: Option<u32> = None;
     let mut schema = IndexSchema::V2;
     let mut schema_set = false;
+    let mut data_fraction: Option<(u64, u64, f64)> = None;
+    let mut with_crc = false;
+    let mut entropy_fill = false;
     let mut it = args.into_iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -2452,6 +2683,12 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
                 schema = parse_schema(&required(&mut it, &flag)?)?;
                 schema_set = true;
             }
+            "--data-fraction" => {
+                let text = required(&mut it, &flag)?;
+                data_fraction = Some(parse_data_fraction(&text)?);
+            }
+            "--with-crc" => with_crc = true,
+            "--entropy-fill" => entropy_fill = true,
             "--group-commit" => group_commit = true,
             "--rewrite-filters" => rewrite_filters = true,
             other => eyre::bail!("unknown argument {other}"),
@@ -2552,6 +2789,22 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     if mid {
         chunks = MID_CHUNKS;
     }
+    let (fraction_numer, fraction_denom, data_fraction) = data_fraction.unwrap_or((1, 1, 1.0));
+    let data_chunks = data_prefix(chunks, fraction_numer, fraction_denom)?;
+    if (fraction_numer != fraction_denom || with_crc || entropy_fill)
+        && (workload.is_memory() || workload.is_filter_reuse() || workload == Workload::CrcRows)
+    {
+        eyre::bail!(
+            "--data-fraction, --with-crc, and --entropy-fill do not apply to --profile {}",
+            workload.name()
+        );
+    }
+    if (with_crc || entropy_fill) && !schema.is_v3() {
+        eyre::bail!("--with-crc and --entropy-fill need --schema v3");
+    }
+    if (with_crc || entropy_fill) && engines.includes_mdbx() {
+        eyre::bail!("--with-crc and --entropy-fill run on rocks only");
+    }
     let small_tx_chunks = small_txs.unwrap_or(0);
     let tree_leaves = if worst_case {
         MAX_DATA_TX_CHUNKS
@@ -2581,7 +2834,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         tx_chunks.unwrap_or(32)
     };
     let mid_spans = if workload == Workload::MidTxs {
-        mid_spans(chunks)
+        mid_spans(data_chunks)
     } else {
         Vec::new()
     };
@@ -2616,7 +2869,58 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         txs_per_commit,
         schema,
         uniform_proofs,
+        data_fraction,
+        data_chunks,
+        with_crc,
+        entropy_fill,
     })
+}
+
+/// `(numerator, denominator, printed value)`. The ratio is `> 0` and `<= 1`.
+fn parse_data_fraction(text: &str) -> eyre::Result<(u64, u64, f64)> {
+    let text = text.trim();
+    let (whole, frac) = match text.split_once('.') {
+        Some((whole, frac)) => (whole, frac),
+        None => (text, ""),
+    };
+    eyre::ensure!(
+        (!whole.is_empty() || !frac.is_empty())
+            && whole.chars().all(|c| c.is_ascii_digit())
+            && frac.chars().all(|c| c.is_ascii_digit()),
+        "--data-fraction {text} is not a number"
+    );
+    eyre::ensure!(
+        frac.len() <= 9,
+        "--data-fraction {text} has too many decimal places"
+    );
+    let denom = 10_u64.pow(u32::try_from(frac.len()).unwrap_or(0));
+    let digits = if frac.is_empty() {
+        whole.to_string()
+    } else if whole.is_empty() {
+        frac.to_string()
+    } else {
+        format!("{whole}{frac}")
+    };
+    let numer: u64 = digits
+        .parse()
+        .map_err(|_| eyre::eyre!("--data-fraction {text} is too large"))?;
+    eyre::ensure!(
+        numer > 0 && numer <= denom,
+        "--data-fraction must be > 0 and <= 1"
+    );
+    Ok((numer, denom, numer as f64 / denom as f64))
+}
+
+/// First `numer/denom` of `chunks`, rounded down. At least one offset.
+fn data_prefix(chunks: u32, numer: u64, denom: u64) -> eyre::Result<u32> {
+    eyre::ensure!(denom > 0 && numer > 0 && numer <= denom);
+    let chunks_u = u64::from(chunks);
+    let n = chunks_u / denom * numer + (chunks_u % denom) * numer / denom;
+    eyre::ensure!(
+        n > 0,
+        "--data-fraction covers no offsets of --chunks {chunks}"
+    );
+    Ok(u32::try_from(n).unwrap_or(chunks))
 }
 
 fn parse_schema(value: &str) -> eyre::Result<IndexSchema> {
@@ -2694,7 +2998,7 @@ fn print_rocks() {
 fn print_help() {
     let presets = RocksTuning::preset_names();
     eprintln!(
-        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--schema v2|v3] [--rocks <preset>] [--mid] [--group-commit] [--worst-case] [--small-txs N] [--mid-txs] [--shuffle-paths RUN] [--txs-per-commit N] [--list-rocks]\n\
+        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--schema v2|v3] [--rocks <preset>] [--mid] [--group-commit] [--worst-case] [--small-txs N] [--mid-txs] [--shuffle-paths RUN] [--txs-per-commit N] [--data-fraction F] [--with-crc] [--entropy-fill] [--list-rocks]\n\
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
 --profile selects the workload. filled is the default. mid is --mid. worst is --worst-case and still takes --chunks.\n\
@@ -2719,7 +3023,11 @@ Default --chunks is 20971520, the first max transaction in the stuck worst-case 
 --shuffle-paths RUN writes the data paths as runs of RUN consecutive chunks in a seeded random order, like scattered data sync. Each commit still holds the data-path batch size. RUN=1 is fully random. Transaction rows stay in offset order.\n\
 --txs-per-commit N overrides the transaction rows per durable commit. Production commits one block's transactions together, so --small-txs 1 should use the block's transaction count (100 at the expected cap).\n\
 --small-txs N stores one data root every N chunks. Sibling chunks in one transaction share branch bytes. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
---reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), rmw_path, rmw_root. Schema v3 RocksDB also times content_lookup and content_miss.\n\
+--data-fraction F (default 1, and 0 < F <= 1) writes transactions, placements, and data rows for the first F × --chunks offsets. The transaction shape is the shape of that prefix. The header prints data_fraction and data_chunks.\n\
+--with-crc stores every data row as the schema 3.2 record: the proof, then the checksum trailer from encode_offset_meta. It needs --schema v3 and --engine rocks.\n\
+--entropy-fill writes a checksum-only row (crc set, no proof) for every offset outside that data region. Rows are written in offset order, one commit per data-path batch. It needs --schema v3 and --engine rocks. After settle the run prints data_rows, entropy_rows, and ChunkMetaByOffset SST bytes per data chunk and per entropy row.\n\
+--reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), entropy_range, recall_rows, rmw_path, rmw_root. Schema v3 RocksDB also times content_lookup and content_miss. The data shapes sample the data region only.\n\
+entropy_range is a cold offset_metas_in_range of --range-len consecutive entropy offsets, sampled over the entropy region. recall_rows is the same call for --range-len offsets at a uniform start over the whole partition, so the window can mix data and entropy rows. Both use the cold-cache reopen the other shapes use. Both are skipped, with a printed reason, when there is no entropy region.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
 content_lookup is a cold prefix seek of a leaf hash that was stored. content_miss seeks a hash that was not stored. Both run only for schema v3 RocksDB, before rmw_path rewrites proofs.\n\
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
@@ -2750,7 +3058,7 @@ mod tests {
         mdbx_map_bytes, memory_predict, mid_spans, pairing_layers, parse_arg_list, parse_diskstats,
         parse_mount_line, parse_proc_status, percentile, place_tx, proof_bytes, ranks,
         rewritten_data_path, sample_offset, seq_offset, shaped_proof, shuffled_runs, tx_count,
-        tx_path_bytes, write_data_paths, write_tx_index,
+        tx_path_bytes, write_data_paths, write_entropy_rows, write_tx_index,
     };
 
     #[test]
@@ -2904,6 +3212,10 @@ VmHWM:\t   8600000 kB
             txs_per_commit: None,
             schema: IndexSchema::V2,
             uniform_proofs: false,
+            data_fraction: 1.0,
+            data_chunks: 8,
+            with_crc: false,
+            entropy_fill: false,
         };
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
@@ -3487,6 +3799,224 @@ VmHWM:\t   8600000 kB
         assert_eq!(after.data_size, before.data_size);
         assert_eq!(after.data_root, before.data_root);
         assert_eq!(after.tx_start_offset, before.tx_start_offset);
+        Ok(())
+    }
+
+    #[test]
+    fn data_fraction_keeps_the_tx_shape_of_the_prefix() {
+        // Breaks if the fraction is applied to the full span, or if 0.1 of a
+        // partition is not an exact tenth.
+        let tenth = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "75534400",
+            "--schema",
+            "v3",
+            "--engine",
+            "rocks",
+            "--data-fraction",
+            "0.1",
+        ])
+        .unwrap();
+        assert_eq!(tenth.data_chunks, 7_553_440);
+        assert_eq!(tenth.chunks, 75_534_400);
+        assert!((tenth.data_fraction - 0.1).abs() < 1e-12);
+
+        let half = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "10",
+            "--small-txs",
+            "3",
+            "--schema",
+            "v3",
+            "--engine",
+            "rocks",
+            "--data-fraction",
+            "0.5",
+        ])
+        .unwrap();
+        assert_eq!(half.data_chunks, 5);
+        assert_eq!(place_tx(&half, 0).stored, 3);
+        assert_eq!(place_tx(&half, 3).stored, 2);
+
+        let mid = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "10000",
+            "--mid-txs",
+            "--engine",
+            "rocks",
+            "--schema",
+            "v3",
+            "--data-fraction",
+            "0.5",
+        ])
+        .unwrap();
+        assert_eq!(mid.data_chunks, 5_000);
+        let (start, stored) = mid.mid_spans.last().copied().unwrap();
+        assert_eq!(start + stored, 5_000);
+        assert!(mid.mid_spans.iter().all(|(start, _)| *start < 5_000));
+
+        assert!(parse(&["--dir", "index-bench", "--data-fraction", "0"]).is_err());
+        assert!(parse(&["--dir", "index-bench", "--data-fraction", "1.1"]).is_err());
+        assert!(
+            parse(&[
+                "--dir",
+                "index-bench",
+                "--entropy-fill",
+                "--engine",
+                "rocks"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--dir",
+                "index-bench",
+                "--with-crc",
+                "--schema",
+                "v3",
+                "--engine",
+                "both"
+            ])
+            .is_err()
+        );
+        let defaults = parse(&["--dir", "index-bench"]).unwrap();
+        assert_eq!(defaults.data_chunks, defaults.chunks);
+        assert!(!defaults.with_crc);
+        assert!(!defaults.entropy_fill);
+    }
+
+    #[test]
+    fn with_crc_data_rows_decode_with_the_checksum() -> eyre::Result<()> {
+        // Breaks if the data row stays a proof with no trailer, or if the
+        // stored checksum is not the one encode_offset_meta writes.
+        use irys_database::submodule::SubmoduleStore as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::PartitionChunkOffset;
+
+        let args = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "4",
+            "--small-txs",
+            "2",
+            "--schema",
+            "v3",
+            "--engine",
+            "rocks",
+            "--with-crc",
+            "--reads",
+            "0",
+            "--batch",
+            "4",
+        ])
+        .unwrap();
+        let dir = TempDirBuilder::new().prefix("index_bench_with_crc").build();
+        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks, true)?;
+        write_tx_index(&store, &args, 8)?;
+        write_data_paths(&store, &args, 4)?;
+        for (offset, crc) in [
+            (0_u32, 0_u32),
+            (1, 0x0100_0001),
+            (2, 0x0200_0002),
+            (3, 0x0300_0003),
+        ] {
+            let meta = store
+                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
+                .unwrap_or_else(|| panic!("missing row {offset}"));
+            assert_eq!(meta.crc, Some(crc), "offset {offset}");
+            assert_eq!(
+                meta.proof.as_deref(),
+                Some(data_path_bytes(&args, offset).as_slice()),
+                "offset {offset}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn entropy_fill_half_is_checksum_only_and_the_new_reads_count_rows() -> eyre::Result<()> {
+        // Breaks if the second half gets a proof, if the first half loses its
+        // proof, or if the new shapes do not read those rows.
+        use irys_database::submodule::SubmoduleStore as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::PartitionChunkOffset;
+
+        let args = parse(&[
+            "--dir",
+            "index-bench",
+            "--chunks",
+            "4",
+            "--small-txs",
+            "2",
+            "--schema",
+            "v3",
+            "--engine",
+            "rocks",
+            "--data-fraction",
+            "0.5",
+            "--entropy-fill",
+            "--reads",
+            "1",
+            "--range-len",
+            "2",
+            "--batch",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(args.data_chunks, 2);
+        let dir = TempDirBuilder::new()
+            .prefix("index_bench_entropy_fill")
+            .build();
+        let path = dir.path().join("rocks");
+        let store = SubmoduleIndex::open_rocks_bench(&path, args.rocks, true)?;
+        write_tx_index(&store, &args, 8)?;
+        write_data_paths(&store, &args, 2)?;
+        write_entropy_rows(&store, &args, 2)?;
+        for offset in 0..2_u32 {
+            let meta = store
+                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
+                .unwrap_or_else(|| panic!("missing data row {offset}"));
+            assert!(meta.crc.is_none(), "data row {offset} stored a checksum");
+            assert_eq!(
+                meta.proof.as_deref(),
+                Some(data_path_bytes(&args, offset).as_slice())
+            );
+            assert!(
+                store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(offset)))?
+                    .is_some()
+            );
+        }
+        for (offset, crc) in [(2_u32, 0x0200_0002), (3, 0x0300_0003)] {
+            let meta = store
+                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
+                .unwrap_or_else(|| panic!("missing entropy row {offset}"));
+            assert_eq!(meta.crc, Some(crc));
+            assert!(meta.proof.is_none());
+            assert!(
+                store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(offset)))?
+                    .is_none()
+            );
+        }
+        assert_eq!(super::read_entropy_range(&store, &args, 0)?, 2);
+        assert_eq!(super::read_recall_rows(&store, &args, 0)?, 2);
+        store.settle_files()?;
+        let size = super::entropy_fill_size(&store, &args)?;
+        assert_eq!(size.data_rows, 2);
+        assert_eq!(size.entropy_rows, 2);
+        assert!(size.sst_bytes > 0);
+        drop(store);
+        super::read_phase(&path, "rocks", &args, &|dir| {
+            SubmoduleIndex::open_rocks_bench(dir, args.rocks, true)
+        })?;
         Ok(())
     }
 }
