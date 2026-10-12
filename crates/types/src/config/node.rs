@@ -667,8 +667,11 @@ pub struct StorageSyncConfig {
     /// is also where RocksDB SST pages and other reused file data live.
     /// `O_DIRECT` keeps the recall bytes out of that cache.
     ///
-    /// The default is false. Enable it on a filesystem that accepts
-    /// `O_DIRECT` (XFS or ext4 on the storage-module disk). A filesystem that
+    /// The default is true: buffered recall reads put about 100 MiB of
+    /// use-once pages per partition per step into the page cache and evict
+    /// everything else (measured on devnet HDDs: page cache full within
+    /// minutes; serving p50 5–8 ms buffered vs 0.8 ms direct, recall p50
+    /// ~12% lower direct). `testing()` keeps it off. A filesystem that
     /// rejects the open (tmpfs returns `EINVAL` on kernels without the
     /// support) logs one warning and keeps the buffered descriptor. Serving,
     /// the entropy sweep, and packing validation stay on the buffered
@@ -677,8 +680,13 @@ pub struct StorageSyncConfig {
     /// A direct read of a range that still has dirty buffered pages returns
     /// the new bytes. Linux writes that range back before the direct read
     /// (XFS and ext4 iomap).
-    #[serde(default)]
+    #[serde(default = "default_recall_direct_io")]
     pub recall_direct_io: bool,
+}
+
+/// Mining recall reads `chunks.dat` with `O_DIRECT` unless a config says otherwise.
+pub const fn default_recall_direct_io() -> bool {
+    true
 }
 
 impl Default for StorageSyncConfig {
@@ -690,7 +698,7 @@ impl Default for StorageSyncConfig {
             entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),
             entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
             drop_recall_page_cache: false,
-            recall_direct_io: false,
+            recall_direct_io: default_recall_direct_io(),
             intervals_persist_secs: default_intervals_persist_secs(),
             index_wal_backstop_ms: default_index_wal_backstop_ms(),
             tx_path_derive_threads: default_tx_path_derive_threads(),
@@ -1789,7 +1797,7 @@ impl NodeConfig {
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
                 drop_recall_page_cache: false,
-                recall_direct_io: false,
+                recall_direct_io: default_recall_direct_io(),
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
@@ -2038,9 +2046,13 @@ mod run_mode_tests {
             toml::from_str("min_durable_interval_ms = 0\ndurable_headroom_permille = 400").unwrap();
         assert_eq!(every_gap.min_durable_interval_ms, 0);
         assert_eq!(every_gap.durable_headroom_permille, 400);
-        assert!(!parsed.recall_direct_io);
-        let direct: StorageSyncConfig = toml::from_str("recall_direct_io = true").unwrap();
-        assert!(direct.recall_direct_io);
+        // Absent key: O_DIRECT recall is the production default.
+        assert!(parsed.recall_direct_io);
+        let buffered: StorageSyncConfig = toml::from_str("recall_direct_io = false").unwrap();
+        assert!(!buffered.recall_direct_io);
+        assert!(StorageSyncConfig::default().recall_direct_io);
+        assert!(NodeConfig::testnet().storage.recall_direct_io);
+        assert!(!NodeConfig::testing().storage.recall_direct_io);
     }
 
     #[test]
