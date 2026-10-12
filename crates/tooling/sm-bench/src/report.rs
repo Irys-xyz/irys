@@ -697,7 +697,7 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
         "serve ops",
     ));
     for row in rows {
-        let result = if row.passed { "PASS" } else { "FAIL" };
+        let result = step_verdict(row.passed, &row.reasons);
         let recall_lat = summarize(&row.recall.lats_us);
         let ingest = mib_triple(
             row.measured.scheduled_ingest,
@@ -824,6 +824,23 @@ fn phase_line(
     )
 }
 
+fn step_verdict(passed: bool, reasons: &[String]) -> String {
+    if passed {
+        return "PASS".to_string();
+    }
+    let serve = reasons.iter().find(|reason| {
+        let text = reason.strip_prefix("tail: ").unwrap_or(reason);
+        text.starts_with("serve ") && text.contains('/')
+    });
+    match serve {
+        Some(reason) => {
+            let text = reason.strip_prefix("tail: ").unwrap_or(reason);
+            format!("FAIL({text})")
+        }
+        None => "FAIL".to_string(),
+    }
+}
+
 fn tail_line(tail: &TailWindow) -> String {
     let verdict = if tail.passed { "PASS" } else { "FAIL" };
     format!(
@@ -904,6 +921,8 @@ mod tests {
             scheduled_migration: 0,
             durable_migration: 0,
             enqueued_migration: 0,
+            serve_ops: 0,
+            scheduled_serve: 0,
             chunk_size: 262_144,
             recall_ops: 0,
             recall_skips: 0,
@@ -1102,6 +1121,50 @@ mod tests {
             "tail 240s: ingest enq/dur 21.0/21.0 MiB/s  mig enq/dur 0.0/0.0 MiB/s  skips=0  start_p99_us=620000  start_max_us=940000  FAIL"
         ));
         assert!(text.contains("tail: ingest enqueued is short"));
+    }
+
+    #[test]
+    fn the_table_names_a_serve_shortfall() {
+        let mut miss = measured(0);
+        miss.secs = 900;
+        miss.scheduled_serve = 18_000;
+        miss.serve_ops = 9_600;
+        let row = StepRow {
+            name: "load".to_string(),
+            passed: false,
+            soft_fail: true,
+            reasons: vec!["serve 9.6k/18k".to_string()],
+            measured: miss,
+            recall: DriverBucket::default(),
+            ingest: DriverBucket::default(),
+            migration: DriverBucket::default(),
+            serve: DriverBucket::default(),
+            rocks: None,
+            durable_points: irys_domain::DurablePointCounts::default(),
+            tail: None,
+            page_cache: None,
+        };
+        let text = table(&[row], "");
+        assert!(text.contains("FAIL(serve 9.6k/18k)"));
+
+        let row = StepRow {
+            name: "warm".to_string(),
+            passed: false,
+            soft_fail: true,
+            reasons: vec!["recall latency p99 700000 us > 500000 us".to_string()],
+            measured: measured(0),
+            recall: DriverBucket::default(),
+            ingest: DriverBucket::default(),
+            migration: DriverBucket::default(),
+            serve: DriverBucket::default(),
+            rocks: None,
+            durable_points: irys_domain::DurablePointCounts::default(),
+            tail: None,
+            page_cache: None,
+        };
+        let text = table(&[row], "");
+        assert!(text.contains("  FAIL\n"));
+        assert!(!text.contains("FAIL(serve"));
     }
 
     #[test]

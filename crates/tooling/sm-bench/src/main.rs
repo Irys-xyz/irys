@@ -40,7 +40,7 @@ use crate::report::{
 };
 use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
-    merge_tail, mib_bytes, parse_mix, preset, stop_for_score, tail_window,
+    merge_tail, mib_bytes, parse_mix, preset, recall_bar, stop_for_score, tail_window,
 };
 use crate::stats::{PermitGauge, StepAccum, fold_permit};
 
@@ -812,16 +812,7 @@ async fn execute(
         step_log.mark(index, &step.name, "start")?;
         io.accept_new.store(true, Ordering::Release);
         let _ = rates_tx.send(step.rates);
-        let bar = if step.name == "idle" {
-            RecallBar::Baseline
-        } else if let Some((start_p99_us, lat_p99_us)) = recall_baseline {
-            RecallBar::Relative {
-                start_p99_us,
-                lat_p99_us,
-            }
-        } else {
-            RecallBar::Absolute
-        };
+        let bar = recall_bar(step, recall_baseline);
         let outcome = run_step(
             step,
             &io,
@@ -840,7 +831,10 @@ async fn execute(
             judge_tail_secs,
         )
         .await?;
-        if step.name == "idle" && !outcome.interrupted && outcome.row.measured.recall_ops > 0 {
+        if matches!(bar, RecallBar::Baseline)
+            && !outcome.interrupted
+            && outcome.row.measured.recall_ops > 0
+        {
             recall_baseline = Some((
                 outcome.row.measured.recall_start_p99_us,
                 outcome.row.measured.recall_lat_p99_us,
@@ -997,6 +991,8 @@ async fn run_step(
         scheduled_migration: mib_bytes(step.rates.migration_mib_s, accum.seconds),
         durable_migration: accum.migration.durable,
         enqueued_migration: accum.migration.enqueued,
+        serve_ops: accum.serve.ops,
+        scheduled_serve: step.rates.serve_per_sec.saturating_mul(accum.seconds),
         chunk_size: CHUNK_SIZE,
         recall_ops: accum.recall.ops,
         recall_skips: accum.recall.skips,

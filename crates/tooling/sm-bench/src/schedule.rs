@@ -2,11 +2,12 @@
 //!
 //! Rates are integer ratios. `1.8/s` is `9/5`, which is a 555_555_555 ns period.
 //!
-//! A step named `idle` is the recall baseline. Later steps fail recall when
-//! start-delay or latency p99 rises by more than the configured margin.
-//! A schedule with no `idle` step uses the absolute ceilings instead.
-//! Recall-margin misses and enqueue shortfalls are soft: they fail the step
-//! and do not stop the ladder. A durability backlog is not soft.
+//! A step named `idle` or `warm`, and the first recall-only step, is the
+//! recall baseline. Later steps fail recall when start-delay or latency p99
+//! rises by more than the configured margin. A schedule with no such step
+//! uses the absolute ceilings instead.
+//! Recall-margin misses, enqueue shortfalls, and serve-rate misses are soft:
+//! they fail the step and do not stop the ladder. A durability backlog is not soft.
 //!
 //! The tail window judges the last N scored seconds on their own. A step
 //! whose mean meets the offer can still fail once the backlog fills.
@@ -269,6 +270,10 @@ pub(crate) struct StepMeasured {
     pub scheduled_migration: u64,
     pub durable_migration: u64,
     pub enqueued_migration: u64,
+    /// Serve reads finished during the step, including the drain.
+    pub serve_ops: u64,
+    /// `serve_per_sec * scored seconds`. Zero means this step has no serve target.
+    pub scheduled_serve: u64,
     pub chunk_size: u64,
     pub recall_ops: u64,
     pub recall_skips: u64,
@@ -303,11 +308,34 @@ pub(crate) struct RecallRule {
     pub latency_margin_us: u64,
 }
 
+/// The recall bar for one step.
+///
+/// `idle` and `warm` are baselines. So is the first recall-only step when no
+/// baseline exists yet: it offers no ingest, migration, or serve, so its own
+/// p99 is not a miss. A later step uses that baseline. Absolute ceilings apply
+/// only when no baseline has been seen and this step is not one.
+pub(crate) fn recall_bar(step: &Step, baseline: Option<(u64, u64)>) -> RecallBar {
+    let recall_only = step.rates.recall_num > 0
+        && step.rates.ingest_mib_s == 0
+        && step.rates.migration_mib_s == 0
+        && step.rates.serve_per_sec == 0;
+    if step.name == "idle" || step.name == "warm" || (baseline.is_none() && recall_only) {
+        return RecallBar::Baseline;
+    }
+    match baseline {
+        Some((start_p99_us, lat_p99_us)) => RecallBar::Relative {
+            start_p99_us,
+            lat_p99_us,
+        },
+        None => RecallBar::Absolute,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Finding {
     pub message: String,
-    /// Recall-margin and enqueue-shortfall misses. They fail the step and
-    /// do not stop the ladder while `--stop-on-fail` is set.
+    /// Recall-margin, enqueue-shortfall, and serve-rate misses. They fail the
+    /// step and do not stop the ladder while `--stop-on-fail` is set.
     pub soft: bool,
 }
 
@@ -375,6 +403,7 @@ pub(crate) fn judge(measured: &StepMeasured, rule: &RecallRule) -> Vec<Finding> 
         measured.chunk_size,
         &mut reasons,
     );
+    short_of_serve(measured.serve_ops, measured.scheduled_serve, &mut reasons);
     if measured.secs >= 5 && measured.overloaded_secs.saturating_mul(5) > measured.secs {
         reasons.push(Finding::hard(format!(
             "overloaded for {}s of {}s",
@@ -463,6 +492,34 @@ fn short_of_offered(
     }
 }
 
+/// Offered serve ops the driver did not finish.
+///
+/// One op of slack covers a read that straddles the step boundary. A step
+/// with `scheduled_serve == 0` has no serve target.
+fn short_of_serve(ops: u64, offered: u64, reasons: &mut Vec<Finding>) {
+    if offered > 0 && ops.saturating_add(1) < offered {
+        reasons.push(Finding::soft(format!(
+            "serve {}/{}",
+            fmt_count(ops),
+            fmt_count(offered)
+        )));
+    }
+}
+
+/// `9600` is `9.6k`. A multiple of 1000 drops the decimal.
+fn fmt_count(n: u64) -> String {
+    if n < 1_000 {
+        return n.to_string();
+    }
+    let whole = n / 1_000;
+    let tenth = (n % 1_000) / 100;
+    if n.is_multiple_of(1_000) {
+        format!("{whole}k")
+    } else {
+        format!("{whole}.{tenth}k")
+    }
+}
+
 /// Bytes the module accepted that were not durable after the drain.
 fn short_of_enqueued(
     name: &str,
@@ -498,6 +555,7 @@ pub(crate) struct SecondView {
     pub migration_enqueued: u64,
     pub migration_durable: u64,
     pub migration_blocked_us: u64,
+    pub serve_ops: u64,
     pub pending_bytes: u64,
     pub overloaded: bool,
 }
@@ -541,6 +599,7 @@ pub(crate) fn tail_window(
     let mut migration_enqueued = 0_u64;
     let mut migration_durable = 0_u64;
     let mut migration_blocked = 0_u64;
+    let mut serve_ops = 0_u64;
     let mut pending = Vec::with_capacity(slice.len());
     let mut overloaded = 0_u64;
     for view in slice {
@@ -557,6 +616,7 @@ pub(crate) fn tail_window(
         migration_enqueued = migration_enqueued.saturating_add(view.migration_enqueued);
         migration_durable = migration_durable.saturating_add(view.migration_durable);
         migration_blocked = migration_blocked.saturating_add(view.migration_blocked_us);
+        serve_ops = serve_ops.saturating_add(view.serve_ops);
         pending.push(view.pending_bytes);
         if view.overloaded {
             overloaded = overloaded.saturating_add(1);
@@ -570,6 +630,8 @@ pub(crate) fn tail_window(
         scheduled_migration: mib_bytes(rates.migration_mib_s, secs),
         durable_migration: migration_durable,
         enqueued_migration: migration_enqueued,
+        serve_ops,
+        scheduled_serve: rates.serve_per_sec.saturating_mul(secs),
         chunk_size,
         recall_ops,
         recall_skips,
@@ -618,11 +680,11 @@ pub(crate) fn merge_tail(
 
 /// Steady-state checks for the tail window.
 ///
-/// Recall skips, recall p99, the enqueue-versus-offer gap, and the
-/// overloaded-second rule match `judge`. Durable bytes may lag the enqueue
-/// inside the window, because the drain is outside it, so a durable
-/// shortfall is not a tail failure. Aborts, leftover migration rows, and
-/// bytes still pending after the drain stay on the whole-step judge.
+/// Recall skips, recall p99, the enqueue-versus-offer gap, the serve-rate
+/// gap, and the overloaded-second rule match `judge`. Durable bytes may lag
+/// the enqueue inside the window, because the drain is outside it, so a
+/// durable shortfall is not a tail failure. Aborts, leftover migration rows,
+/// and bytes still pending after the drain stay on the whole-step judge.
 fn judge_tail(measured: &StepMeasured, rule: &RecallRule) -> Vec<Finding> {
     let mut reasons = Vec::new();
     if measured.recall_skips > 0 {
@@ -648,6 +710,7 @@ fn judge_tail(measured: &StepMeasured, rule: &RecallRule) -> Vec<Finding> {
         measured.migration_enqueue_blocked_us,
         &mut reasons,
     );
+    short_of_serve(measured.serve_ops, measured.scheduled_serve, &mut reasons);
     if measured.secs >= 5 && measured.overloaded_secs.saturating_mul(5) > measured.secs {
         reasons.push(Finding::hard(format!(
             "overloaded for {}s of {}s",
@@ -698,6 +761,8 @@ mod tests {
             scheduled_migration: 0,
             durable_migration: 0,
             enqueued_migration: 0,
+            serve_ops: 0,
+            scheduled_serve: 0,
             chunk_size: 262_144,
             recall_ops: 10,
             recall_skips: 0,
@@ -995,5 +1060,109 @@ mod tests {
         assert!(tail.findings.iter().any(|finding| !finding.soft));
         let merged = merge_tail(Vec::new(), &tail, 300);
         assert!(stop_for_score(&merged, true));
+    }
+
+    fn warm_step() -> Step {
+        Step {
+            name: "warm".to_string(),
+            secs: 60,
+            rates: Rates {
+                recall_num: 1,
+                recall_den: 1,
+                ingest_mib_s: 0,
+                migration_mib_s: 0,
+                serve_per_sec: 0,
+                serve_seq_pct: 50,
+            },
+        }
+    }
+
+    fn load_step() -> Step {
+        Step {
+            name: "load".to_string(),
+            secs: 900,
+            rates: Rates {
+                recall_num: 1,
+                recall_den: 1,
+                ingest_mib_s: 16,
+                migration_mib_s: 0,
+                serve_per_sec: 20,
+                serve_seq_pct: 50,
+            },
+        }
+    }
+
+    #[test]
+    fn recall_only_warm_step_passes_its_own_targets() {
+        // Breaks if a recall-only warm step is judged on the absolute ceilings.
+        let bar = recall_bar(&warm_step(), None);
+        assert_eq!(bar, RecallBar::Baseline);
+        let rule = RecallRule {
+            bar,
+            delay_margin_us: 200_000,
+            latency_margin_us: 500_000,
+        };
+        let mut measured = base();
+        measured.secs = 60;
+        measured.recall_ops = 60;
+        measured.recall_skips = 0;
+        measured.recall_start_p99_us = 800_000;
+        measured.recall_lat_p99_us = 700_000;
+        measured.scheduled_serve = 0;
+        measured.serve_ops = 0;
+        assert!(
+            judge(&measured, &rule).is_empty(),
+            "skips=0 and no serve target is a pass"
+        );
+        let later = recall_bar(&load_step(), Some((800_000, 700_000)));
+        assert_eq!(
+            later,
+            RecallBar::Relative {
+                start_p99_us: 800_000,
+                lat_p99_us: 700_000,
+            }
+        );
+        assert_eq!(recall_bar(&load_step(), None), RecallBar::Absolute);
+    }
+
+    #[test]
+    fn serve_shortfall_names_the_gap_and_a_zero_target_does_not_fail() {
+        // Breaks if serve ops are ignored, or if a step with no serve rate fails.
+        let rule = absolute();
+        let mut quiet = base();
+        quiet.scheduled_serve = 0;
+        quiet.serve_ops = 0;
+        assert!(judge(&quiet, &rule).is_empty());
+
+        let mut hit = base();
+        hit.secs = 900;
+        hit.scheduled_serve = 18_000;
+        hit.serve_ops = 18_000;
+        assert!(judge(&hit, &rule).is_empty());
+
+        let mut one_short = hit.clone();
+        one_short.serve_ops = 17_999;
+        assert!(
+            judge(&one_short, &rule).is_empty(),
+            "one op of slack covers the last interval"
+        );
+
+        let mut miss = hit;
+        miss.serve_ops = 9_600;
+        let findings = judge(&miss, &rule);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].soft);
+        assert_eq!(findings[0].message, "serve 9.6k/18k");
+        assert!(!stop_for_score(&findings, true));
+
+        let mut view = quiet_second(0, 1_000);
+        view.serve_ops = 10;
+        let views = vec![view; 240];
+        let mut rates = rates_at(0);
+        rates.serve_per_sec = 20;
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        assert!(!tail.passed);
+        assert_eq!(tail.findings.len(), 1);
+        assert_eq!(tail.findings[0].message, "serve 2.4k/4.8k");
     }
 }

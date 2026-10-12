@@ -335,16 +335,17 @@ A step fails when any of these hold:
 - durable bytes are short of the enqueued bytes by more than one chunk (hard: backlog)
 - any recall was skipped (start lag of 3 steps or more, the mining rule)
 - recall start-delay p99 or recall latency p99 is over the bar below (soft)
+- serve ops are short of `serve_per_sec` times the scored seconds by more than one op (soft). The result column names that miss, for example `FAIL(serve 9.6k/18k)`. `serve_per_sec = 0` is not a target, so a recall-only step does not fail for serve
 - more than 20% of seconds at or above 5 s were at the pending-write ceiling, or pending bytes are still above the ceiling after the drain
 - the pending-write backlog grew by more than one flush batch and is still high after the drain (needs at least 30 samples)
 - a body-migration row remains after the drain
 - a driver or the lane aborts
 
-The last `--judge-tail-secs` scored seconds (default 240) get a second verdict. Recall skips, recall p99, an enqueue shortfall, and the overloaded-second rule apply to that window. Durable bytes may lag the enqueue inside the window, because the drain is outside it. That gap is printed on the tail line and does not fail the tail. Bytes still pending after the drain, leftover migration rows, backlog growth, and an abort stay on the whole-step judge. `0` turns the window off. An interrupted step has no tail. A tail miss is part of the step verdict. A soft tail miss does not stop the ladder.
+The last `--judge-tail-secs` scored seconds (default 240) get a second verdict. Recall skips, recall p99, an enqueue shortfall, a serve-rate miss, and the overloaded-second rule apply to that window. Durable bytes may lag the enqueue inside the window, because the drain is outside it. That gap is printed on the tail line and does not fail the tail. Bytes still pending after the drain, leftover migration rows, backlog growth, and an abort stay on the whole-step judge. `0` turns the window off. An interrupted step has no tail. A tail miss is part of the step verdict. A soft tail miss does not stop the ladder.
 
-The recall bar depends on the schedule. A step named `idle` is the baseline: skips fail it, and its own p99 does not. A later step fails when its start-delay p99 exceeds that baseline by more than `--recall-delay-margin-ms` (default 200), or its latency p99 exceeds the baseline by more than `--recall-latency-margin-ms` (default 500). The summary and the table still show the absolute microseconds. If no `idle` step has completed, the absolute ceilings apply: start-delay p99 above 200 ms, or latency p99 above 500 ms.
+The recall bar depends on the schedule. A step named `idle` or `warm`, or the first recall-only step when no baseline exists yet, is the baseline: skips fail it, and its own p99 does not. A later step fails when its start-delay p99 exceeds that baseline by more than `--recall-delay-margin-ms` (default 200), or its latency p99 exceeds the baseline by more than `--recall-latency-margin-ms` (default 500). The summary and the table still show the absolute microseconds. If no baseline step has completed, the absolute ceilings apply: start-delay p99 above 200 ms, or latency p99 above 500 ms.
 
-`soft_fail` on a step means every miss was a recall-margin or enqueue-shortfall miss. Those misses do not stop the ladder. Other misses do, unless `--no-stop-on-fail` is set. The process still exits `2` when any scored step failed.
+`soft_fail` on a step means every miss was a recall-margin miss, an enqueue shortfall, or a serve-rate miss. Those misses do not stop the ladder. Other misses do, unless `--no-stop-on-fail` is set. The process still exits `2` when any scored step failed.
 
 At the end of a step the bench stops recall and serve, refuses a new transaction, and keeps pacing the open transaction until it is durable. That drain waits up to 45 s so one 64 MiB transaction offered at 2 MiB/s can finish. Completions during the drain count toward durable bytes. They do not add a scored second and they are not extra sample lines.
 

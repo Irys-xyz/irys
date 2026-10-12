@@ -113,6 +113,7 @@ impl StepAccum {
             recall,
             ingest,
             migration,
+            serve,
             pending_bytes,
             overloaded,
         ));
@@ -142,6 +143,7 @@ fn second_view(
     recall: &DriverBucket,
     ingest: &DriverBucket,
     migration: &DriverBucket,
+    serve: &DriverBucket,
     pending_bytes: u64,
     overloaded: bool,
 ) -> SecondView {
@@ -156,6 +158,7 @@ fn second_view(
         migration_enqueued: migration.enqueued,
         migration_durable: migration.durable,
         migration_blocked_us: migration.enqueue_blocked_us,
+        serve_ops: serve.ops,
         pending_bytes,
         overloaded,
     }
