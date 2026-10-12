@@ -49,5 +49,3 @@ minimum_commitment_tx_version = 2
 
 [consensus.Custom.hardforks.borealis]
 activation_timestamp = "2099-01-01T00:00:00+00:00"
-
-# echo stays unset (None). This overlay does not schedule it.

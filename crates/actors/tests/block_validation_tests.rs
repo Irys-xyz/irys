@@ -7,7 +7,6 @@ use irys_testing_utils::new_mock_signed_header;
 use irys_types::{
     Base64, BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, H256, IrysAddress,
     IrysBlockHeader, LedgerIndexItem, PoaData, compute_solution_hash,
-    hardfork_config::{Echo, ForBlock},
     partition::PartitionAssignment,
 };
 use std::sync::{Arc, RwLock};
@@ -143,7 +142,6 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         2,
         &epoch_snapshot,
         &config,
-        ForBlock::<Echo>::inactive(),
         &IrysAddress::ZERO,
     );
 
@@ -188,7 +186,6 @@ fn poa_chunk_longer_than_chunk_size_is_too_long() {
         0,
         &EpochSnapshot::default(),
         &config,
-        ForBlock::<Echo>::inactive(),
         &IrysAddress::ZERO,
     );
 
