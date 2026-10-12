@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eyre::eyre;
-use irys_domain::{BatchEnqueueItem, ChunkType, StorageModule};
+use irys_domain::{BatchEnqueueItem, ChunkType, RecallChunks, StorageModule};
 use irys_types::{
     Base64, DataTransactionHeader, H256, LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset,
     TxChunkOffset, UnpackedChunk, hash_sha256, ii, ledger_chunk_offset_ii,
@@ -729,7 +729,8 @@ pub(crate) async fn recall_driver(
             tokio::task::spawn_blocking(move || {
                 let end = start + recall_chunks - 1;
                 let range = partition_chunk_offset_ii!(start, end);
-                let map = module.read_recall_chunks(range)?;
+                let RecallChunks { chunks: map, rows } = module.read_recall_chunks(range)?;
+                let _rows = rows;
                 let count = map.len();
                 if count != usize::try_from(recall_chunks).unwrap_or(usize::MAX) {
                     return Err(eyre!(

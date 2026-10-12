@@ -20,8 +20,8 @@
 //! New submits stop when another command would put the in-flight set past
 //! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
 //! The file lock is dropped before the lane moves on.
-//! A data-path row is written only after this gap's `chunks.dat` and
-//! `chunks.crc` fdatasync.
+//! A data-path row and its packed-byte checksum are written only after this
+//! gap's `chunks.dat` fdatasync.
 //! One index batch per submodule covers those rows. A synced RocksDB batch
 //! also covers registrations still waiting on group commit.
 //! `min_durable_interval_ms` can defer that pair. The node default is 250 ms
@@ -31,7 +31,8 @@
 //! and the pending-byte ceiling do not defer it. The interval is the longest
 //! wait. Recall does not wait on a deferred pair.
 //! This thread stores a write-ahead `Interrupted` mark in `intervals.json`
-//! before those `pwrite`s. The mark covers `chunks.crc` as well. A completion
+//! before those `pwrite`s. The mark covers the bytes the checksum will
+//! describe. A completion
 //! (`Data` or `Entropy`) is rewritten
 //! with the next write-ahead, on the persist interval, or on shutdown.
 //! Another thread posts a full interval rewrite here.
@@ -936,10 +937,10 @@ impl StorageModule {
     pub fn read_recall_chunks(
         &self,
         chunk_range: Interval<PartitionChunkOffset>,
-    ) -> eyre::Result<super::ChunkMap> {
-        let chunks = {
+    ) -> eyre::Result<super::RecallChunks> {
+        let (chunks, rows) = {
             let _recall = self.disk.begin_recall();
-            self.read_chunks_inner(chunk_range, true)?
+            self.read_chunks_inner(chunk_range, true, true)?
         };
         if let Err(error) = self.flush_after_recall() {
             tracing::error!(
@@ -952,7 +953,7 @@ impl StorageModule {
         if !self.disk.lane_running() {
             self.pump_entropy_reads();
         }
-        Ok(chunks)
+        Ok(super::RecallChunks { chunks, rows })
     }
 
     /// Without a lane thread, commit one window before the caller returns.
@@ -1699,8 +1700,8 @@ impl StorageModule {
             pending_submit.push((slot, entropy));
         }
         // The sweep reads packed entropy and then XORs it. A bad source must
-        // not be packed into a data chunk. The bytes are the write file, which
-        // is the file `chunks.crc` describes.
+        // not be packed into a data chunk. The checksum is the offset row
+        // committed with those bytes.
         let verdicts = match self.crc_span_verdicts(start, buf) {
             Ok(verdicts) => verdicts,
             Err(error) => {
@@ -2120,8 +2121,7 @@ impl StorageModule {
             match cloned {
                 Ok(file) => file
                     .write_all_at(run.bytes.as_slice(), file_offset)
-                    .map_err(|error| Self::chunk_write_report(run.start, submodule_offset, &error))
-                    .and_then(|()| self.write_crc_for_run(run.start, &run.bytes, &run.offsets)),
+                    .map_err(|error| Self::chunk_write_report(run.start, submodule_offset, &error)),
                 Err(error) => Err(Self::chunk_write_report(
                     run.start,
                     submodule_offset,

@@ -9,7 +9,7 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::WrapErr as _;
-use irys_domain::{ChunkType, StorageModule};
+use irys_domain::{ChunkType, RecallChunks, StorageModule};
 use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
@@ -423,7 +423,9 @@ impl PartitionMiningServiceInner {
             start_chunk_offset + self.config.consensus.num_chunks_in_recall_range as u32
         );
 
-        let chunks = self.storage_module.read_recall_chunks(read_range)?;
+        let RecallChunks { chunks, rows } = self.storage_module.read_recall_chunks(read_range)?;
+        // Held for the future recall scrub. This pass checks checksums only.
+        let _rows = rows;
         if chunks.is_empty() {
             warn!(
                 "No chunks found - storage_module_id:{} {}-{}",
