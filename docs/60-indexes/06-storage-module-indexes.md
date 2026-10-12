@@ -16,7 +16,11 @@ in `ChunkMetaByOffset`, and `ChunkOffsetsByContentHash` (the 32-byte
 leaf hash, then the partition offset, with an empty value). The offset
 row is the data proof when one is stored, and the CRC32C of the packed
 chunk when one was written. A checksum with no proof is an entropy row. It is not a data
-chunk. Schema 3.2 does not store the tx path. Mining derives that path
+chunk. The checksum, a flags byte and a format byte are a trailer after
+the proof, not a header: neighbouring proofs share their upper branches,
+and block compression keeps more of that sharing when each value starts
+with the proof (measured at 1–3 bytes per chunk less than a header; see
+`encode_offset_meta`). Schema 3.2 does not store the tx path. Mining derives that path
 from the consensus database. A directory whose `SCHEMA` file is
 `irys-submodule-index 3` has no content-hash family. Open refuses it and
 does not create the family empty. Delete that directory and rerun

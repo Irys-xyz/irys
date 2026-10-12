@@ -106,12 +106,21 @@ pub(super) fn test_mismatch_count() -> u64 {
 }
 
 static WARN_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
-static WARN_LAST_MS: AtomicU64 = AtomicU64::new(0);
+/// `WARN_NEVER` until the first warning. Starting at 0 would rate-limit the
+/// first mismatch away: the origin is set by that same first call, so its
+/// elapsed time is about 0 ms.
+const WARN_NEVER: u64 = u64::MAX;
+static WARN_LAST_MS: AtomicU64 = AtomicU64::new(WARN_NEVER);
+
+/// At most one mismatch warning per second; the first one always logs.
+fn mismatch_warning_due(now_ms: u64, last_ms: u64) -> bool {
+    last_ms == WARN_NEVER || now_ms.saturating_sub(last_ms) >= 1_000
+}
 
 pub(super) fn warn_mismatch(module_id: usize, offset: u32) {
     let now_ms = u64::try_from(WARN_ORIGIN.elapsed().as_millis()).unwrap_or(u64::MAX);
     let prev = WARN_LAST_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(prev) < 1_000 {
+    if !mismatch_warning_due(now_ms, prev) {
         return;
     }
     if WARN_LAST_MS
@@ -125,6 +134,16 @@ pub(super) fn warn_mismatch(module_id: usize, offset: u32) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn first_mismatch_warning_is_not_rate_limited() {
+        use super::{WARN_NEVER, mismatch_warning_due};
+        // The origin starts on the first call, so its elapsed time is ~0 ms.
+        assert!(mismatch_warning_due(0, WARN_NEVER));
+        assert!(!mismatch_warning_due(999, 0));
+        assert!(mismatch_warning_due(1_000, 0));
+        assert!(!mismatch_warning_due(1_500, 1_000));
+    }
     use std::fs::OpenOptions;
     use std::io::Write as _;
     use std::os::unix::fs::FileExt as _;

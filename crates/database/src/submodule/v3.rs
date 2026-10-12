@@ -15,13 +15,24 @@ const OFFSET_FLAG_HAS_PROOF: u8 = 0x01;
 /// The trailer contains the CRC32C of the packed chunk.
 const OFFSET_FLAG_CRC_PRESENT: u8 = 0x02;
 
-/// Encode one offset row.
+/// Encode one offset row: proof bytes (when stored), then a trailer of the
+/// CRC32C (little-endian, when the flag is set), the flags byte, and
+/// [`OFFSET_META_FORMAT`]. A stored CRC of zero is a real checksum; unknown
+/// is the flag being unset. The leaf is the last 64 bytes of the proof, not
+/// of this value.
 ///
-/// The proof is a prefix so neighbouring proofs still share a compressed
-/// run. The trailer is last: CRC32C little-endian when the flag is set,
-/// then the flags byte, then [`OFFSET_META_FORMAT`]. A stored CRC of zero
-/// is a real checksum. Unknown is the flag being unset. The leaf is the
-/// last 64 bytes of the proof, not of this value.
+/// Why the metadata is a trailer, not a header: neighbouring chunks' proofs
+/// share their upper merkle branches, so consecutive values in an SST block
+/// begin with long identical runs. RocksDB delta-encodes keys, not values, so
+/// that sharing is only recovered by block compression (LZ4), which finds it
+/// most cheaply when every value starts with it. Measured after compaction
+/// (`submodule_index_bench --profile crc-rows`, which still writes both
+/// layouts): CRC as trailer costs +5.77 B/chunk on mid-size shared proofs and
+/// +4.10 on the largest; as a prefix it costs +1.09 and +2.86 B/chunk more.
+/// Prefix wins only on unrelated (uniform) proofs, by ~1.06 B/chunk, which is
+/// not the stored shape. The format byte can sit last because RocksDB values
+/// are length-delimited; a schema 3.1 raw proof is told apart by the schema
+/// marker, never by these bytes.
 pub fn encode_offset_meta(meta: &OffsetMeta) -> eyre::Result<Vec<u8>> {
     let proof = meta.proof.as_deref().unwrap_or(&[]);
     let has_proof = meta.proof.is_some();
