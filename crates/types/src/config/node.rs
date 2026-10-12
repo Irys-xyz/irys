@@ -794,6 +794,10 @@ pub struct P2PGossipConfig {
     /// Maximum concurrent chunk handler tasks on the gossip receiver.
     /// Limits memory and CPU pressure from inbound chunk processing.
     pub max_concurrent_gossip_chunks: usize,
+    /// Maximum concurrent block-body serves (pull and get-data).
+    /// Limits database reconstruction of historical bodies.
+    /// `0` means unlimited.
+    pub max_concurrent_block_body_serves: usize,
 }
 
 impl Default for P2PGossipConfig {
@@ -803,6 +807,7 @@ impl Default for P2PGossipConfig {
             broadcast_batch_throttle_interval: 100,
             enable_scoring: true,
             max_concurrent_gossip_chunks: 50,
+            max_concurrent_block_body_serves: 8,
         }
     }
 }
@@ -1859,6 +1864,38 @@ mod run_mode_tests {
             cfg.sync.execution_payload_wait_timeout_millis, 5_000,
             "test config must use the short 5s payload wait so integration tests don't hang 60s on the prod default"
         );
+    }
+
+    #[test]
+    fn block_body_serve_cap_defaults_to_eight() {
+        assert_eq!(
+            P2PGossipConfig::default().max_concurrent_block_body_serves,
+            8
+        );
+    }
+
+    #[test]
+    fn block_body_serve_cap_is_eight_when_the_key_is_absent() {
+        #[derive(Deserialize)]
+        struct Doc {
+            p2p_gossip: P2PGossipConfig,
+        }
+
+        let cfg: Doc =
+            toml::from_str("[p2p_gossip]\n").expect("[p2p_gossip] without the key must parse");
+        assert_eq!(cfg.p2p_gossip.max_concurrent_block_body_serves, 8);
+    }
+
+    #[test]
+    fn block_body_serve_cap_honours_an_explicit_zero() {
+        #[derive(Deserialize)]
+        struct Doc {
+            p2p_gossip: P2PGossipConfig,
+        }
+
+        let cfg: Doc = toml::from_str("[p2p_gossip]\nmax_concurrent_block_body_serves = 0\n")
+            .expect("explicit zero must parse");
+        assert_eq!(cfg.p2p_gossip.max_concurrent_block_body_serves, 0);
     }
 }
 

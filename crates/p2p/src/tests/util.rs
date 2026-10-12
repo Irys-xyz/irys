@@ -1094,6 +1094,12 @@ pub(crate) fn data_handler_stub(
         sync_state,
         execution_payload_cache,
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+        block_body_semaphore: crate::gossip_data_handler::block_body_serve_semaphore(
+            config
+                .node_config
+                .p2p_gossip
+                .max_concurrent_block_body_serves,
+        ),
         block_index: block_index_read_guard_stub,
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),
@@ -1157,6 +1163,12 @@ pub(crate) fn data_handler_with_stubbed_pool(
         sync_state,
         execution_payload_cache,
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+        block_body_semaphore: crate::gossip_data_handler::block_body_serve_semaphore(
+            config
+                .node_config
+                .p2p_gossip
+                .max_concurrent_block_body_serves,
+        ),
         block_index: block_index_read_guard_stub,
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),

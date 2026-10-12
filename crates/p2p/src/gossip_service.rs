@@ -222,6 +222,12 @@ impl P2PService {
             sync_state: self.sync_state.clone(),
             execution_payload_cache: execution_payload_provider,
             data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+            block_body_semaphore: crate::gossip_data_handler::block_body_serve_semaphore(
+                config
+                    .node_config
+                    .p2p_gossip
+                    .max_concurrent_block_body_serves,
+            ),
             block_index,
             block_tree,
             config: config.clone(),
