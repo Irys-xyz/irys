@@ -571,10 +571,12 @@ fn prune_deps_units(
                 removed_any = true;
             }
         }
+        // Only a unit this pass removed loses its fingerprint; one whose files were all already
+        // gone is left to the orphan sweep.
         if removed_any {
             report.removed_units += 1;
+            remove_fingerprint(dir, id);
         }
-        remove_fingerprint(dir, id);
     }
     Ok(())
 }
