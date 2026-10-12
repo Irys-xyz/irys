@@ -5,4 +5,5 @@
 
 pub mod failures;
 pub mod flaky;
+pub mod prune;
 pub mod util;
