@@ -16,6 +16,10 @@ use eyre::{ensure, eyre};
 pub struct SplitBacking {
     pub(crate) recall: Arc<Mutex<File>>,
     pub(crate) write: Arc<Mutex<File>>,
+    /// `O_DIRECT` descriptor for the same bytes as `recall`. Mining recall
+    /// uses it. `None` when the bench did not request it, or when the open
+    /// failed.
+    pub(super) recall_direct: Option<Arc<File>>,
     pub(crate) write_origin: u32,
     pub(crate) write_chunks: u64,
 }
@@ -34,9 +38,24 @@ impl SplitBacking {
         Ok(Self {
             recall: Arc::new(Mutex::new(recall)),
             write: Arc::new(Mutex::new(write)),
+            recall_direct: None,
             write_origin,
             write_chunks,
         })
+    }
+
+    /// Mining-recall descriptor for the same file as `recall`.
+    ///
+    /// `file` must be read-only and open `O_DIRECT`. Entropy-for-XOR and serve
+    /// stay on the buffered recall descriptor.
+    pub fn with_direct_recall(mut self, file: File) -> eyre::Result<Self> {
+        ensure_recall_rdonly(&file)?;
+        ensure!(
+            super::recall_direct::fd_is_direct(&file),
+            "recall direct file is not open O_DIRECT"
+        );
+        self.recall_direct = Some(Arc::new(file));
+        Ok(self)
     }
 
     /// Byte offset in the write file for a submodule-relative chunk.
@@ -110,6 +129,16 @@ mod tests {
             .open("/dev/null")
             .unwrap();
         let rejected = SplitBacking::open(writable, File::open("/dev/null").unwrap(), 0, 1);
+        assert!(rejected.is_err());
+
+        let split = SplitBacking::open(
+            File::open("/dev/null").unwrap(),
+            File::open("/dev/null").unwrap(),
+            0,
+            1,
+        )
+        .unwrap();
+        let rejected = split.with_direct_recall(File::open("/dev/null").unwrap());
         assert!(rejected.is_err());
     }
 }

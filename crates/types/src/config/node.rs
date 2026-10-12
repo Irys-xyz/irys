@@ -659,6 +659,26 @@ pub struct StorageSyncConfig {
     /// The value is ignored. Recall pages stay cached.
     #[serde(default)]
     pub drop_recall_page_cache: bool,
+    /// When true, mining recall reads `chunks.dat` through a second read-only
+    /// descriptor opened with `O_DIRECT`.
+    ///
+    /// A recall range is read once per step. A buffered read of that range
+    /// fills the page cache with pages nothing else will hit, and that cache
+    /// is also where RocksDB SST pages and other reused file data live.
+    /// `O_DIRECT` keeps the recall bytes out of that cache.
+    ///
+    /// The default is false. Enable it on a filesystem that accepts
+    /// `O_DIRECT` (XFS or ext4 on the storage-module disk). A filesystem that
+    /// rejects the open (tmpfs returns `EINVAL` on kernels without the
+    /// support) logs one warning and keeps the buffered descriptor. Serving,
+    /// the entropy sweep, and packing validation stay on the buffered
+    /// descriptor either way.
+    ///
+    /// A direct read of a range that still has dirty buffered pages returns
+    /// the new bytes. Linux writes that range back before the direct read
+    /// (XFS and ext4 iomap).
+    #[serde(default)]
+    pub recall_direct_io: bool,
 }
 
 impl Default for StorageSyncConfig {
@@ -670,6 +690,7 @@ impl Default for StorageSyncConfig {
             entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),
             entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
             drop_recall_page_cache: false,
+            recall_direct_io: false,
             intervals_persist_secs: default_intervals_persist_secs(),
             index_wal_backstop_ms: default_index_wal_backstop_ms(),
             tx_path_derive_threads: default_tx_path_derive_threads(),
@@ -1560,6 +1581,7 @@ impl NodeConfig {
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
                 drop_recall_page_cache: false,
+                recall_direct_io: false,
                 // Tests read `intervals.json` as soon as `sync` returns.
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
@@ -1767,6 +1789,7 @@ impl NodeConfig {
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
                 drop_recall_page_cache: false,
+                recall_direct_io: false,
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
                 index_wal_backstop_ms: DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: DEFAULT_TX_PATH_DERIVE_THREADS,
@@ -2015,6 +2038,9 @@ mod run_mode_tests {
             toml::from_str("min_durable_interval_ms = 0\ndurable_headroom_permille = 400").unwrap();
         assert_eq!(every_gap.min_durable_interval_ms, 0);
         assert_eq!(every_gap.durable_headroom_permille, 400);
+        assert!(!parsed.recall_direct_io);
+        let direct: StorageSyncConfig = toml::from_str("recall_direct_io = true").unwrap();
+        assert!(direct.recall_direct_io);
     }
 
     #[test]

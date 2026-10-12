@@ -296,6 +296,7 @@ struct StepOut {
     rocks: Option<RocksStepStats>,
     durable_points: irys_domain::DurablePointCounts,
     tail: Option<TailOut>,
+    page_cache: Option<PageCacheSpan>,
 }
 
 #[derive(Serialize)]
@@ -316,6 +317,50 @@ struct TailOut {
     reasons: Vec<String>,
 }
 
+/// `Cached` and `Inactive(file)` from `/proc/meminfo`, in KiB.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct PageCacheSample {
+    pub cached_kib: u64,
+    pub inactive_file_kib: u64,
+}
+
+/// Page cache at the start and end of one step.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct PageCacheSpan {
+    pub start: PageCacheSample,
+    pub end: PageCacheSample,
+}
+
+/// Read `Cached` and `Inactive(file)`. `None` when `/proc/meminfo` is missing
+/// or those lines are absent.
+pub(crate) fn read_page_cache() -> Option<PageCacheSample> {
+    let text = fs::read_to_string("/proc/meminfo").ok()?;
+    parse_page_cache(&text)
+}
+
+pub(crate) fn parse_page_cache(text: &str) -> Option<PageCacheSample> {
+    let mut cached = None;
+    let mut inactive_file = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Cached:") {
+            cached = parse_kib(rest);
+        } else if let Some(rest) = line.strip_prefix("Inactive(file):") {
+            inactive_file = parse_kib(rest);
+        }
+        if cached.is_some() && inactive_file.is_some() {
+            break;
+        }
+    }
+    Some(PageCacheSample {
+        cached_kib: cached?,
+        inactive_file_kib: inactive_file?,
+    })
+}
+
+fn parse_kib(rest: &str) -> Option<u64> {
+    rest.split_whitespace().next()?.parse().ok()
+}
+
 pub(crate) struct StepRow {
     pub name: String,
     pub passed: bool,
@@ -331,6 +376,8 @@ pub(crate) struct StepRow {
     /// Durable points during the step, including the drain.
     pub durable_points: irys_domain::DurablePointCounts,
     pub tail: Option<TailWindow>,
+    /// `Cached` and `Inactive(file)` at step start and step end.
+    pub page_cache: Option<PageCacheSpan>,
 }
 
 /// RocksDB counters for one step. Stall time, flush count, WAL syncs, and
@@ -359,6 +406,7 @@ struct Summary<'a> {
     passed: bool,
     exit_code: i32,
     interrupted: bool,
+    recall_io: &'a str,
     driver_notes: &'a [String],
     steps: Vec<StepOut>,
 }
@@ -370,6 +418,7 @@ pub(crate) fn write_summary(
     exit_code: i32,
     interrupted: bool,
     driver_notes: &[String],
+    recall_io: &str,
 ) -> eyre::Result<()> {
     let steps = rows.iter().map(step_out).collect();
     write_json(
@@ -378,6 +427,7 @@ pub(crate) fn write_summary(
             passed,
             exit_code,
             interrupted,
+            recall_io,
             driver_notes,
             steps,
         },
@@ -427,6 +477,7 @@ fn step_out(row: &StepRow) -> StepOut {
         rocks: row.rocks,
         durable_points: row.durable_points,
         tail: row.tail.as_ref().map(tail_out),
+        page_cache: row.page_cache,
     }
 }
 
@@ -687,6 +738,9 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
             true,
         ));
         out.push_str(&durable_line(row.durable_points));
+        if let Some(cache) = row.page_cache {
+            out.push_str(&page_cache_line(&cache));
+        }
         if let Some(rocks) = row.rocks {
             out.push_str(&format!(
                 "rocks: stall={} pending_compaction_bytes={} flushes={} running_flushes={} wal_syncs={} wal_backstop_syncs={} small_file_compactions={} files_before={} files_after={}\n",
@@ -709,6 +763,16 @@ fn table(rows: &[StepRow], index_line: &str) -> String {
         }
     }
     out
+}
+
+fn page_cache_line(span: &PageCacheSpan) -> String {
+    format!(
+        "page cache: Cached {}->{} KiB  Inactive(file) {}->{} KiB\n",
+        span.start.cached_kib,
+        span.end.cached_kib,
+        span.start.inactive_file_kib,
+        span.end.inactive_file_kib,
+    )
 }
 
 fn durable_line(counts: irys_domain::DurablePointCounts) -> String {
@@ -952,6 +1016,16 @@ mod tests {
                 deferred_interval: 40,
             },
             tail: None,
+            page_cache: Some(PageCacheSpan {
+                start: PageCacheSample {
+                    cached_kib: 1024,
+                    inactive_file_kib: 256,
+                },
+                end: PageCacheSample {
+                    cached_kib: 2048,
+                    inactive_file_kib: 512,
+                },
+            }),
         };
         let text = table(&[row], "index_engine=rocks index_dir=/loadtest/rocks\n");
         assert!(text.contains(
@@ -960,6 +1034,7 @@ mod tests {
         assert!(text.contains(
             "durable points: immediate=12 deferred=40 forced=0 ceiling=0 headroom=4 interval=8"
         ));
+        assert!(text.contains("page cache: Cached 1024->2048 KiB  Inactive(file) 256->512 KiB"));
     }
 
     #[test]
@@ -981,6 +1056,7 @@ mod tests {
             rocks: None,
             durable_points: irys_domain::DurablePointCounts::default(),
             tail: None,
+            page_cache: None,
         };
         let text = table(&[row], "index_engine=mdbx index_dir=/loadtest/db\n");
         assert!(text.contains("index_engine=mdbx"));
@@ -1012,6 +1088,7 @@ mod tests {
             serve: DriverBucket::default(),
             rocks: None,
             durable_points: irys_domain::DurablePointCounts::default(),
+            page_cache: None,
             tail: Some(crate::schedule::TailWindow {
                 secs: 240,
                 measured: window,
@@ -1092,5 +1169,21 @@ mod tests {
         assert!(end["monotonic_ns"].as_u64().unwrap() >= start["monotonic_ns"].as_u64().unwrap());
         assert!(lines.next().is_none());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn page_cache_parser_reads_cached_and_inactive_file() {
+        let text = "\
+MemTotal:        100 kB\n\
+SwapCached:        1 kB\n\
+Cached:         2048 kB\n\
+Inactive:       1000 kB\n\
+Inactive(anon):  100 kB\n\
+Inactive(file):  512 kB\n";
+        let sample = parse_page_cache(text).expect("both counters");
+        assert_eq!(sample.cached_kib, 2048);
+        assert_eq!(sample.inactive_file_kib, 512);
+        assert!(parse_page_cache("Cached: 1 kB\n").is_none());
+        assert!(read_page_cache().is_some());
     }
 }

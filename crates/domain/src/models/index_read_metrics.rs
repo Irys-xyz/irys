@@ -196,6 +196,19 @@ pub(super) fn note_durable_point(timing: &'static str, cause: &'static str) {
     );
 }
 
+static RECALL_IO: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.recall_reads_total")
+        .with_description(
+            "Mining recall preads of chunks.dat by mode. direct uses the O_DIRECT descriptor. buffered is the normal descriptor when storage.recall_direct_io is false. fallback asked for O_DIRECT and used the buffered descriptor because the open failed or the range was not 4096-byte aligned. One count is one pread.",
+        )
+        .build()
+});
+
+pub(super) fn note_recall_io(mode: &'static str) {
+    RECALL_IO.add(1, &[KeyValue::new("mode", mode)]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DATA_SYNC, INGRESS_SIZE, PLACEMENT, current, with_caller};

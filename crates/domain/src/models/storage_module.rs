@@ -96,6 +96,10 @@ mod disk_lane;
 #[path = "chunk_crc.rs"]
 mod chunk_crc;
 
+#[path = "recall_direct.rs"]
+mod recall_direct;
+pub use recall_direct::open_recall_direct;
+
 #[cfg(feature = "bench")]
 #[path = "split_backing.rs"]
 mod split_backing;
@@ -799,6 +803,29 @@ pub struct StorageModule {
     /// Crash tests drop the module without the final fsync or interval rewrite.
     #[cfg(test)]
     abandon_on_drop: AtomicBool,
+    /// Mining-recall preads by mode. The meter exports the same counts.
+    #[cfg(test)]
+    recall_io: RecallIoAtoms,
+}
+
+/// Per-module recall `pread` counts. Parallel tests do not share these.
+#[cfg(test)]
+#[derive(Debug)]
+struct RecallIoAtoms {
+    direct: AtomicU64,
+    buffered: AtomicU64,
+    fallback: AtomicU64,
+}
+
+#[cfg(test)]
+impl RecallIoAtoms {
+    fn new() -> Self {
+        Self {
+            direct: AtomicU64::new(0),
+            buffered: AtomicU64::new(0),
+            fallback: AtomicU64::new(0),
+        }
+    }
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -873,6 +900,12 @@ pub struct StorageSubmodule {
     /// With a bench split this is the write file, never the read-only recall
     /// file, so the presence row is committed only after those bytes are durable.
     file: Arc<Mutex<File>>,
+    /// Read-only `O_DIRECT` descriptor for mining recall.
+    ///
+    /// `None` when `storage.recall_direct_io` is false, or when the open
+    /// failed and recall stays on `file` (or the bench recall file). Serving,
+    /// the entropy sweep, and packing validation never use this descriptor.
+    recall_direct: Option<Arc<File>>,
     /// Cached Metadata `crc_complete`. MDBX stays false: it stores no checksum.
     crc_complete: AtomicBool,
     /// Bench-only second file. `None` on every production open.
@@ -1028,11 +1061,16 @@ fn recall_piece_plan(len: u64, max_chunks: u64) -> Vec<(u64, u64)> {
     pieces
 }
 
-/// Two `pread`s of one recall run share `file`. `file` is a dup, so these
-/// `pread`s do not wait for packed writes already in the kernel. Chunk bytes
-/// land in `chunk_map` after each wave joins.
+/// Two `pread`s of one recall run share `buffered`. `buffered` is a dup, so
+/// these `pread`s do not wait for packed writes already in the kernel.
+/// `direct`, when present, is a dup of the `O_DIRECT` descriptor and is the
+/// only file mining recall reads when the range is 4096-byte aligned.
+/// Chunk bytes land in `chunk_map` after each wave joins. `note` records the
+/// mode of each `pread`.
 fn read_recall_run(
-    file: &File,
+    buffered: &File,
+    direct: Option<&File>,
+    direct_requested: bool,
     start: PartitionChunkOffset,
     len: u64,
     chunk_type: ChunkType,
@@ -1041,6 +1079,7 @@ fn read_recall_run(
     chunk_len: usize,
     max_chunks: u64,
     chunk_map: &mut ChunkMap,
+    note: &impl Fn(&'static str),
 ) -> eyre::Result<()> {
     let pieces = recall_piece_plan(len, max_chunks);
     let mut next = 0;
@@ -1050,14 +1089,21 @@ fn read_recall_run(
         for &(done, n) in &pieces[next..end] {
             let piece = PartitionChunkOffset(start.0 + done as u32);
             let file_offset = *(piece - interval_start) as u64 * chunk_size;
-            batch.push((piece, file_offset, n, vec![0_u8; n as usize * chunk_len]));
+            let nbytes = n as usize * chunk_len;
+            batch.push((piece, file_offset, n, nbytes));
         }
         let loaded = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(batch.len());
-            for (piece, file_offset, n, mut buf) in batch {
+            for (piece, file_offset, n, nbytes) in batch {
                 handles.push(scope.spawn(move || {
-                    let result = file.read_exact_at(&mut buf, file_offset);
-                    (piece, n, buf, result)
+                    let result = recall_direct::read_recall_piece(
+                        buffered,
+                        direct,
+                        direct_requested,
+                        file_offset,
+                        nbytes,
+                    );
+                    (piece, n, result)
                 }));
             }
             handles
@@ -1065,8 +1111,11 @@ fn read_recall_run(
                 .map(|handle| handle.join().expect("recall read"))
                 .collect::<Vec<_>>()
         });
-        for (piece, n, buf, result) in loaded {
-            result.wrap_err_with(|| format!("recall read at offset {piece} count {n}"))?;
+        for (piece, n, result) in loaded {
+            let loaded =
+                result.wrap_err_with(|| format!("recall read at offset {piece} count {n}"))?;
+            note(loaded.mode);
+            let buf = loaded.bytes();
             for step in 0..n {
                 let at = step as usize * chunk_len;
                 let off = PartitionChunkOffset(piece.0 + step as u32);
@@ -1163,6 +1212,7 @@ fn open_submodule_index(
 
 struct OpenedChunkFile {
     file: Arc<Mutex<File>>,
+    recall_direct: Option<Arc<File>>,
     #[cfg(feature = "bench")]
     split: Option<Arc<SplitBacking>>,
 }
@@ -1600,6 +1650,7 @@ impl StorageModule {
             let opened = Self::open_submodule_file(
                 &sub_base_path,
                 full_len,
+                config.node_config.storage.recall_direct_io,
                 #[cfg(feature = "bench")]
                 split.as_ref(),
             )?;
@@ -1700,6 +1751,7 @@ impl StorageModule {
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
+                        recall_direct: opened.recall_direct,
                         crc_complete: AtomicBool::new(submodule_db.chunk_crc_complete()?),
                         #[cfg(feature = "bench")]
                         split: opened.split,
@@ -1867,6 +1919,8 @@ impl StorageModule {
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
             disk: disk_lane::DiskGate::with_index_gap(index_gap),
+            #[cfg(test)]
+            recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
             #[cfg(test)]
@@ -1928,6 +1982,7 @@ impl StorageModule {
     fn open_submodule_file(
         sub_base_path: &Path,
         full_len: u64,
+        recall_direct_io: bool,
         #[cfg(feature = "bench")] split: Option<&Arc<SplitBacking>>,
     ) -> eyre::Result<OpenedChunkFile> {
         #[cfg(feature = "bench")]
@@ -1962,8 +2017,16 @@ impl StorageModule {
                 advise_chunks_random(&write, &label)
                     .wrap_err("Failed to disable read-ahead on the write file")?;
             }
+            // The bench opens the `O_DIRECT` descriptor on `--recall-file`.
+            // Entropy-for-XOR and serve stay on the buffered recall descriptor.
+            let recall_direct = if recall_direct_io {
+                split.recall_direct.clone()
+            } else {
+                None
+            };
             return Ok(OpenedChunkFile {
                 file: Arc::clone(&split.write),
+                recall_direct,
                 split: Some(Arc::clone(split)),
             });
         }
@@ -1995,8 +2058,17 @@ impl StorageModule {
         // read otherwise fetches past its range by the device's maximum
         // request size.
         advise_chunks_random(&chunks_file, &path)?;
+        // Mining recall only. The buffered descriptor above still serves,
+        // sweeps entropy, and validates packing. `Ok(None)` is a filesystem
+        // that rejected `O_DIRECT`; recall stays on `chunks_file`.
+        let recall_direct = if recall_direct_io {
+            open_recall_direct(&path)?.map(Arc::new)
+        } else {
+            None
+        };
         Ok(OpenedChunkFile {
             file: Arc::new(Mutex::new(chunks_file)),
+            recall_direct,
             #[cfg(feature = "bench")]
             split: None,
         })
@@ -4146,6 +4218,47 @@ impl StorageModule {
             .copied()
     }
 
+    /// How mining recall is armed.
+    ///
+    /// `buffered` when `storage.recall_direct_io` is false. `direct` when the
+    /// `O_DIRECT` descriptor is open. `fallback` when the flag is set and the
+    /// open failed. An unaligned range still uses the buffered descriptor for
+    /// that read and is counted as `fallback`.
+    pub fn recall_io_mode(&self) -> &'static str {
+        let requested = self.config.node_config.storage.recall_direct_io;
+        let opened = self
+            .submodules
+            .iter()
+            .any(|(_, submodule)| submodule.recall_direct.is_some());
+        match (requested, opened) {
+            (false, _) => recall_direct::MODE_BUFFERED,
+            (true, true) => recall_direct::MODE_DIRECT,
+            (true, false) => recall_direct::MODE_FALLBACK,
+        }
+    }
+
+    fn record_recall_io(&self, mode: &'static str) {
+        index_read_metrics::note_recall_io(mode);
+        #[cfg(test)]
+        {
+            let counter = match mode {
+                recall_direct::MODE_DIRECT => &self.recall_io.direct,
+                recall_direct::MODE_FALLBACK => &self.recall_io.fallback,
+                _ => &self.recall_io.buffered,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    fn recall_io_counts_for_test(&self) -> (u64, u64, u64) {
+        (
+            self.recall_io.direct.load(Ordering::Relaxed),
+            self.recall_io.buffered.load(Ordering::Relaxed),
+            self.recall_io.fallback.load(Ordering::Relaxed),
+        )
+    }
+
     /// Reads chunks from the specified range and returns their data and storage state
     ///
     /// Takes a range [start, end) of partition-relative offsets (end exclusive).
@@ -4335,7 +4448,14 @@ impl StorageModule {
             drop(fallback);
             let mut group = Vec::new();
             if recall {
-                let file = {
+                // `file_arc` is the buffered descriptor. Mining recall uses
+                // `recall_direct` when that descriptor is open and the range
+                // is 4096-byte aligned. A dirty buffered page for the same
+                // range is written back by the kernel before the direct read,
+                // so `written_ahead` bytes (pwritten, not yet fdatasync'd)
+                // come back as the new bytes. `pending.chunks` is overlaid
+                // after this function returns.
+                let buffered = {
                     let guard = file_arc
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4343,6 +4463,14 @@ impl StorageModule {
                         .try_clone()
                         .wrap_err("recall could not dup chunks.dat")?
                 };
+                let direct = match submodule.recall_direct.as_ref() {
+                    Some(file) => Some(
+                        file.try_clone()
+                            .wrap_err("recall could not dup the O_DIRECT descriptor")?,
+                    ),
+                    None => None,
+                };
+                let direct_requested = self.config.node_config.storage.recall_direct_io;
                 while index < runs.len() {
                     let (start, len, chunk_type) = runs[index];
                     let (run_interval, _) = self
@@ -4353,7 +4481,9 @@ impl StorageModule {
                         break;
                     }
                     read_recall_run(
-                        &file,
+                        &buffered,
+                        direct.as_ref(),
+                        direct_requested,
                         start,
                         len,
                         chunk_type,
@@ -4362,6 +4492,7 @@ impl StorageModule {
                         chunk_len,
                         max_chunks,
                         chunk_map,
+                        &|mode| self.record_recall_io(mode),
                     )?;
                     group.push((start, len, chunk_type));
                     index += 1;
@@ -10343,6 +10474,7 @@ mod tests {
                 entropy_sweep_max_bytes: sweep_bytes,
                 entropy_coalesce_hole_bytes: sweep_bytes,
                 drop_recall_page_cache: false,
+                recall_direct_io: false,
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: irys_types::DEFAULT_TX_PATH_DERIVE_THREADS,
@@ -12159,6 +12291,284 @@ mod tests {
             );
         }
         Ok((tmp_dir, storage_module))
+    }
+
+    /// 256 KiB is the production chunk size and a multiple of the 4096-byte
+    /// `O_DIRECT` alignment.
+    const RECALL_DIRECT_CHUNK: u64 = 256 * 1024;
+
+    /// Clears an injected `EINVAL` from `open_recall_direct` when the test ends.
+    struct RecallDirectOpenGuard;
+
+    impl RecallDirectOpenGuard {
+        fn arm() -> Self {
+            recall_direct::force_recall_direct_open_einval(true);
+            Self
+        }
+    }
+
+    impl Drop for RecallDirectOpenGuard {
+        fn drop(&mut self) {
+            recall_direct::force_recall_direct_open_einval(false);
+        }
+    }
+
+    fn open_recall_io_module(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+        direct: bool,
+        chunk_size: u64,
+        min_durable_interval_ms: u64,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let chunks = 2_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: chunks,
+                num_chunks_in_recall_range: chunks,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms,
+                recall_direct_io: direct,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp.path().to_path_buf(),
+            database: index_database(engine),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, chunks - 1), "hdd0".into())],
+            },
+            &config,
+        )?;
+        Ok((tmp, storage))
+    }
+
+    fn for_each_recall_io(
+        prefix: &str,
+        direct: bool,
+        chunk_size: u64,
+        min_durable_interval_ms: u64,
+        mut f: impl FnMut(&StorageModule) -> eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let (tmp, storage) = open_recall_io_module(
+                &format!("{prefix}_{engine:?}"),
+                engine,
+                direct,
+                chunk_size,
+                min_durable_interval_ms,
+            )?;
+            f(&storage).map_err(|err| eyre!("{engine:?}: {err}"))?;
+            drop(storage);
+            drop(tmp);
+        }
+        Ok(())
+    }
+
+    fn chunk_fill(byte: u8, chunk_size: u64) -> Vec<u8> {
+        vec![byte; chunk_size as usize]
+    }
+
+    fn write_synced(storage: &StorageModule, offset: u32, bytes: Vec<u8>) -> eyre::Result<()> {
+        assert!(storage.write_chunk(PartitionChunkOffset::from(offset), bytes, ChunkType::Data));
+        storage.force_sync_pending_chunks()?;
+        Ok(())
+    }
+
+    fn chunk_bytes(
+        map: &BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>,
+        offset: u32,
+    ) -> eyre::Result<Vec<u8>> {
+        map.get(&PartitionChunkOffset::from(offset))
+            .map(|(bytes, _)| bytes.clone())
+            .ok_or_else(|| eyre!("offset {offset} was omitted"))
+    }
+
+    fn served_chunk(storage: &StorageModule, offset: u32) -> eyre::Result<Vec<u8>> {
+        let map = storage.read_chunks(partition_chunk_offset_ii!(offset, offset))?;
+        chunk_bytes(&map, offset)
+    }
+
+    fn recalled_chunk(storage: &StorageModule, offset: u32) -> eyre::Result<Vec<u8>> {
+        let recalled = storage.read_recall_chunks(partition_chunk_offset_ii!(offset, offset))?;
+        chunk_bytes(&recalled.chunks, offset)
+    }
+
+    /// `Ok(true)` when this filesystem rejected `O_DIRECT`. The caller skips.
+    fn skip_without_direct(storage: &StorageModule, test: &str) -> eyre::Result<bool> {
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let Some(file) = submodule.recall_direct.as_ref() else {
+            eprintln!(
+                "skip {test}: this filesystem rejected O_DIRECT; mining recall stays on the buffered descriptor"
+            );
+            return Ok(true);
+        };
+        assert!(
+            recall_direct::fd_is_direct(file),
+            "recall descriptor is not O_DIRECT"
+        );
+        assert_eq!(storage.recall_io_mode(), recall_direct::MODE_DIRECT);
+        Ok(false)
+    }
+
+    #[test]
+    fn recall_direct_io_reads_the_same_bytes_as_buffered() -> eyre::Result<()> {
+        for_each_recall_io(
+            "recall_direct_same",
+            true,
+            RECALL_DIRECT_CHUNK,
+            0,
+            |storage| {
+                if skip_without_direct(
+                    storage,
+                    "recall_direct_io_reads_the_same_bytes_as_buffered",
+                )? {
+                    return Ok(());
+                }
+                let synced = chunk_fill(0x11, RECALL_DIRECT_CHUNK);
+                write_synced(storage, 0, synced.clone())?;
+                assert_eq!(served_chunk(storage, 0)?, synced);
+                assert_eq!(storage.recall_io_counts_for_test(), (0, 0, 0));
+                assert_eq!(recalled_chunk(storage, 0)?, synced);
+                assert_eq!(storage.recall_io_counts_for_test(), (1, 0, 0));
+
+                // Offset 1 is still in `pending.chunks`. Recall overlays it and
+                // does not pread it. Offset 0 is the one direct pread.
+                let pending = chunk_fill(0x22, RECALL_DIRECT_CHUNK);
+                assert!(storage.write_chunk(
+                    PartitionChunkOffset::from(1),
+                    pending.clone(),
+                    ChunkType::Data,
+                ));
+                let recalled = storage.read_recall_chunks(partition_chunk_offset_ii!(0, 1))?;
+                assert_eq!(chunk_bytes(&recalled.chunks, 0)?, synced);
+                assert_eq!(chunk_bytes(&recalled.chunks, 1)?, pending);
+                assert_eq!(storage.recall_io_counts_for_test(), (2, 0, 0));
+                Ok(())
+            },
+        )
+    }
+
+    /// A buffered `pwrite` that has not been `fdatasync`'d still has dirty pages.
+    /// Linux writes that range back before the `O_DIRECT` read (XFS and ext4
+    /// iomap), so mining recall returns the new bytes. `written_ahead` is not
+    /// overlaid from memory: the bytes come from the direct read. The checksum
+    /// is not stored until the durable point, and an offset still in
+    /// `written_ahead` is not checked.
+    #[test]
+    fn recall_direct_io_sees_dirty_buffered_pages() -> eyre::Result<()> {
+        for_each_recall_io(
+            "recall_direct_dirty",
+            true,
+            RECALL_DIRECT_CHUNK,
+            60_000,
+            |storage| {
+                if skip_without_direct(storage, "recall_direct_io_sees_dirty_buffered_pages")? {
+                    return Ok(());
+                }
+                // The first point is immediate. It arms the interval so the
+                // next `pwrite` can be parked.
+                write_synced(storage, 0, chunk_fill(0x11, RECALL_DIRECT_CHUNK))?;
+                let fresh = chunk_fill(0x22, RECALL_DIRECT_CHUNK);
+                assert!(storage.write_chunk(
+                    PartitionChunkOffset::from(1),
+                    fresh.clone(),
+                    ChunkType::Data,
+                ));
+                // `pwrite` returns here. `fdatasync` waits out the interval.
+                storage.sync_pending_chunks()?;
+                {
+                    let pending = storage.pending_writes.read().unwrap();
+                    let offset = PartitionChunkOffset::from(1);
+                    assert!(
+                        pending.written_ahead.contains_key(&offset),
+                        "the new bytes must be pwritten and not yet fdatasync'd"
+                    );
+                    assert!(!pending.contains_key(&offset));
+                }
+                assert!(!storage.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+                let before = storage.recall_io_counts_for_test();
+                assert_eq!(recalled_chunk(storage, 1)?, fresh);
+                assert_eq!(
+                    storage.recall_io_counts_for_test(),
+                    (before.0 + 1, before.1, before.2)
+                );
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn recall_direct_io_falls_back_when_open_fails() -> eyre::Result<()> {
+        let _guard = RecallDirectOpenGuard::arm();
+        for_each_recall_io(
+            "recall_direct_einval",
+            true,
+            RECALL_DIRECT_CHUNK,
+            0,
+            |storage| {
+                let (_, submodule) =
+                    storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+                assert!(submodule.recall_direct.is_none());
+                assert_eq!(storage.recall_io_mode(), recall_direct::MODE_FALLBACK);
+                let bytes = chunk_fill(0x33, RECALL_DIRECT_CHUNK);
+                write_synced(storage, 0, bytes.clone())?;
+                assert_eq!(served_chunk(storage, 0)?, bytes);
+                assert_eq!(storage.recall_io_counts_for_test(), (0, 0, 0));
+                assert_eq!(recalled_chunk(storage, 0)?, bytes);
+                assert_eq!(storage.recall_io_counts_for_test(), (0, 0, 1));
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn recall_direct_io_off_matches_buffered_recall() -> eyre::Result<()> {
+        for_each_recall_io(
+            "recall_direct_off",
+            false,
+            RECALL_DIRECT_CHUNK,
+            0,
+            |storage| {
+                let (_, submodule) =
+                    storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+                assert!(submodule.recall_direct.is_none());
+                assert_eq!(storage.recall_io_mode(), recall_direct::MODE_BUFFERED);
+                let bytes = chunk_fill(0x44, RECALL_DIRECT_CHUNK);
+                write_synced(storage, 0, bytes.clone())?;
+                assert_eq!(served_chunk(storage, 0)?, bytes);
+                assert_eq!(storage.recall_io_counts_for_test(), (0, 0, 0));
+                assert_eq!(recalled_chunk(storage, 0)?, bytes);
+                assert_eq!(storage.recall_io_counts_for_test(), (0, 1, 0));
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn recall_direct_io_unaligned_range_falls_back() -> eyre::Result<()> {
+        // 32 is not a multiple of 4096. The kernel may still accept the read.
+        // Userspace falls back before the syscall.
+        let chunk_size = 32;
+        for_each_recall_io("recall_direct_unaligned", true, chunk_size, 0, |storage| {
+            let bytes = chunk_fill(0x55, chunk_size);
+            write_synced(storage, 0, bytes.clone())?;
+            assert_eq!(served_chunk(storage, 0)?, bytes);
+            assert_eq!(storage.recall_io_counts_for_test(), (0, 0, 0));
+            assert_eq!(recalled_chunk(storage, 0)?, bytes);
+            assert_eq!(storage.recall_io_counts_for_test(), (0, 0, 1));
+            Ok(())
+        })
     }
 
     fn assert_recall_window(storage_module: &StorageModule, durable_through: u32) {

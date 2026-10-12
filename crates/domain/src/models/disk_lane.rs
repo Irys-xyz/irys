@@ -2882,6 +2882,7 @@ mod tests {
                 entropy_sweep_max_bytes: chunk_size * max_chunks,
                 entropy_coalesce_hole_bytes: chunk_size * hole_chunks,
                 drop_recall_page_cache: false,
+                recall_direct_io: false,
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: irys_types::DEFAULT_TX_PATH_DERIVE_THREADS,

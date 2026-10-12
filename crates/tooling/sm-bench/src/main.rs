@@ -35,8 +35,8 @@ use crate::guard::{
 use crate::module::{OpenRequest, flush_batch, open_module, pending_ceiling, span_limit};
 use crate::prepop::prepopulate;
 use crate::report::{
-    RocksStepStats, SampleWriter, StepLog, StepRow, git_info, index_banner, plan_steps,
-    sample_line, write_json, write_summary, write_table,
+    PageCacheSpan, RocksStepStats, SampleWriter, StepLog, StepRow, git_info, index_banner,
+    plan_steps, read_page_cache, sample_line, write_json, write_summary, write_table,
 };
 use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
@@ -57,6 +57,14 @@ struct Args {
     /// Read-only entropy file. Opened `O_RDONLY`.
     #[arg(long)]
     recall_file: PathBuf,
+    /// Mining recall reads `--recall-file` with `O_DIRECT`.
+    ///
+    /// Recall ranges are read once and are not reused. Buffered reads of those
+    /// ranges fill the page cache. Serving, the entropy sweep, and packed
+    /// writes stay on the buffered descriptors. If the open is rejected the
+    /// run header says `fallback` and recall stays buffered.
+    #[arg(long, action = ArgAction::SetTrue)]
+    recall_direct_io: bool,
     /// Write region. Ingest, migration, and serve reads use this file.
     #[arg(long)]
     write_file: PathBuf,
@@ -372,6 +380,7 @@ fn run() -> eyre::Result<i32> {
         intervals_persist_secs: args.intervals_persist_secs,
         min_durable_interval_ms: args.min_durable_interval_ms,
         durable_headroom_permille: args.durable_headroom_permille,
+        recall_direct_io: args.recall_direct_io,
         index,
         index_group_commit: args.index_group_commit,
     })?;
@@ -415,7 +424,9 @@ fn run() -> eyre::Result<i32> {
         rocks_block_cache_bytes,
         args.index_group_commit,
     );
+    let recall_io = opened.module.recall_io_mode();
     eprintln!("irys-sm-bench: {}", index_line.trim_end());
+    eprintln!("irys-sm-bench: recall_io={recall_io}");
     eprintln!(
         "irys-sm-bench: partition {partition_chunks} chunks, write window {write_origin}..{write_end}, ingest frontier {ingest_cursor}, migration frontier {migration_cursor}"
     );
@@ -478,6 +489,14 @@ fn run() -> eyre::Result<i32> {
     });
     header["min_durable_interval_ms"] = serde_json::json!(args.min_durable_interval_ms);
     header["durable_headroom_permille"] = serde_json::json!(args.durable_headroom_permille);
+    header["recall_direct_io"] = serde_json::json!(args.recall_direct_io);
+    header["recall_io"] = serde_json::Value::from(recall_io);
+    header["io_notes"]
+        .as_array_mut()
+        .expect("io_notes is an array")
+        .push(serde_json::Value::from(
+            "recall_direct_io reads the entropy file with O_DIRECT. Serving, entropy-for-XOR, and packed writes stay on the buffered descriptors. fallback means the open was rejected and recall stayed buffered.",
+        ));
     header["io_notes"]
         .as_array_mut()
         .expect("io_notes is an array")
@@ -566,6 +585,7 @@ fn run() -> eyre::Result<i32> {
         overlap_index,
         &index_line,
         judge_tail_secs,
+        recall_io,
     ))?;
     match opened.stop_lane() {
         Ok(()) => Ok(code),
@@ -722,6 +742,7 @@ async fn execute(
     overlap_index: bool,
     index_line: &str,
     judge_tail_secs: u64,
+    recall_io: &str,
 ) -> eyre::Result<i32> {
     let (rates_tx, rates_rx) = watch::channel(Rates::idle());
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -833,6 +854,16 @@ async fn execute(
         }
         let halt = outcome.halt;
         let stop = stop_for_score(&outcome.findings, stop_on_fail);
+        if let Some(cache) = &outcome.row.page_cache {
+            eprintln!(
+                "irys-sm-bench: step {} page cache Cached {}->{} KiB Inactive(file) {}->{} KiB",
+                outcome.row.name,
+                cache.start.cached_kib,
+                cache.end.cached_kib,
+                cache.start.inactive_file_kib,
+                cache.end.inactive_file_kib,
+            );
+        }
         rows.push(outcome.row);
         // A drain timeout or a driver abort stops the plan even when
         // `stop_on_fail` is false. Recall-margin and enqueue-shortfall
@@ -874,8 +905,10 @@ async fn execute(
         code,
         interrupted,
         &driver_notes,
+        recall_io,
     )?;
-    write_table(&out.join("table.txt"), &rows, index_line)?;
+    let table_head = format!("recall_io={recall_io}\n{index_line}");
+    write_table(&out.join("table.txt"), &rows, &table_head)?;
     Ok(code)
 }
 
@@ -902,6 +935,7 @@ async fn run_step(
     judge_tail_secs: u64,
 ) -> eyre::Result<StepOutcome> {
     io.permits.reset_window();
+    let page_cache_start = read_page_cache();
     let rocks_before = sample_rocks(&io.module);
     let durable_before = io.module.durable_point_counts();
     let mut accum = StepAccum::default();
@@ -1009,6 +1043,9 @@ async fn run_step(
     }
     let passed = reasons.iter().all(|reason| reason == "interrupted");
     let soft_fail = !passed && !interrupted && findings.iter().all(|finding| finding.soft);
+    let page_cache = page_cache_start
+        .zip(read_page_cache())
+        .map(|(start, end)| PageCacheSpan { start, end });
     let rocks = rocks_before
         .and_then(|before| sample_rocks(&io.module).map(|after| rocks_delta(before, after)));
     let durable_points = io
@@ -1033,6 +1070,7 @@ async fn run_step(
             rocks,
             durable_points,
             tail,
+            page_cache,
         },
     })
 }
@@ -1222,6 +1260,8 @@ mod tests {
             parsed(&["--durable-headroom-permille", "1000"]).durable_headroom_permille,
             1000
         );
+        assert!(!args.recall_direct_io);
+        assert!(parsed(&["--recall-direct-io"]).recall_direct_io);
         assert!(args.rocks_preset.is_none());
         assert!(args.rocks_block_cache.is_none());
         assert!(args.rocks_small_file_compact_threshold.is_none());

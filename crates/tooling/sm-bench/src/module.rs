@@ -43,6 +43,8 @@ pub(crate) struct OpenRequest<'a> {
     /// Parts per thousand of the pending-byte ceiling. See
     /// `StorageSyncConfig::durable_headroom_permille`.
     pub durable_headroom_permille: u64,
+    /// Mining recall uses an `O_DIRECT` descriptor on `recall_file`.
+    pub recall_direct_io: bool,
     pub index: BenchIndex,
     /// Arms group commit. MDBX syncs every N. RocksDB does not.
     /// `0` skips the call; the method rejects 0.
@@ -83,6 +85,7 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         intervals_persist_secs: request.intervals_persist_secs,
         min_durable_interval_ms: request.min_durable_interval_ms,
         durable_headroom_permille: request.durable_headroom_permille,
+        recall_direct_io: request.recall_direct_io,
         ..StorageSyncConfig::default()
     };
     // Production durability and the 2 TiB submodule geometry. The testing
@@ -118,7 +121,14 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         .write(true)
         .open(request.write_file)
         .wrap_err_with(|| format!("failed to open write file {}", request.write_file.display()))?;
-    let split = SplitBacking::open(recall, write, request.write_origin, request.write_chunks)?;
+    let mut split = SplitBacking::open(recall, write, request.write_origin, request.write_chunks)?;
+    // Mining recall only. The buffered recall descriptor above still serves
+    // non-data reads. `Ok(None)` keeps those recalls buffered.
+    if request.recall_direct_io
+        && let Some(direct) = irys_domain::open_recall_direct(request.recall_file)?
+    {
+        split = split.with_direct_recall(direct)?;
+    }
     let module = Arc::new(StorageModule::open_split(
         &info,
         &config,
