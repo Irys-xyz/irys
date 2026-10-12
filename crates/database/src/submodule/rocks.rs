@@ -58,11 +58,12 @@ use super::interval::{
 };
 use super::store::PresenceReconcile;
 use super::tables::{
-    ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
-    DataRootInfosByDataRoot, OffsetMeta, PackedOffsetRow, PendingBodyMigration,
-    PendingBodyMigrationsByOffset, Placement, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3,
-    SUBMODULE_SCHEMA_V3_1, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
-    TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
+    CHUNK_META_BY_OFFSET_CF, ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset,
+    DataRootInfo, DataRootInfos, DataRootInfosByDataRoot, OffsetMeta, PackedOffsetRow,
+    PendingBodyMigration, PendingBodyMigrationsByOffset, Placement, SUBMODULE_SCHEMA,
+    SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_1, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX,
+    TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval,
+    TxPathIntervalByStart,
 };
 use super::v3::{self, IndexLayout};
 use super::{
@@ -267,9 +268,10 @@ pub struct RocksTuning {
     /// Does not change `partition_filters`. An existing SST keeps its own
     /// filter until compaction rewrites the file.
     pub bloom_all_families: bool,
-    /// Bloom on `ChunkDataPathByOffset`. Schema v3 reads the old proof before
-    /// every proof write (to keep the content-hash rows exact), and for a new
-    /// offset that read misses. Off by default: on a full partition with
+    /// Bloom on the offset family. Schema 3.2 names it `ChunkMetaByOffset`.
+    /// Schema v2 names it `ChunkDataPathByOffset`. Schema v3 reads the stored
+    /// record before every proof write (to keep the content-hash rows exact),
+    /// and for a new offset that read misses. Off by default: on a full partition with
     /// fully random write order the filter did not change proof-write time
     /// (137 vs 134 min); that cost comes from compacting the random-keyed
     /// content-hash family, and the ingest ladder did not see either. The
@@ -742,7 +744,12 @@ const CF_COUNT: usize = 9;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cf {
     PathHashes,
-    DataPath,
+    /// Offset row.
+    ///
+    /// Schema v2 and schema 3.1 name it `ChunkDataPathByOffset` and store the
+    /// raw proof. Schema 3.2 names it `ChunkMetaByOffset` and stores the
+    /// versioned proof and checksum.
+    OffsetMeta,
     TxPath,
     DataRoots,
     TxLeaf,
@@ -757,7 +764,7 @@ enum Cf {
 impl Cf {
     const ALL: [Self; CF_COUNT] = [
         Self::PathHashes,
-        Self::DataPath,
+        Self::OffsetMeta,
         Self::TxPath,
         Self::DataRoots,
         Self::TxLeaf,
@@ -770,7 +777,7 @@ impl Cf {
     fn index(self) -> usize {
         match self {
             Self::PathHashes => 0,
-            Self::DataPath => 1,
+            Self::OffsetMeta => 1,
             Self::TxPath => 2,
             Self::DataRoots => 3,
             Self::TxLeaf => 4,
@@ -785,16 +792,20 @@ impl Cf {
         self.name_in(IndexLayout::V2)
     }
 
-    /// On-disk family name for this layout. v3 renames the placement families.
+    /// On-disk family name for this layout.
+    ///
+    /// Schema 3.2 renames the placement families and the offset family.
+    /// Schema v2 and schema 3.1 keep `ChunkDataPathByOffset`.
     fn name_in(self, layout: IndexLayout) -> &'static str {
         match (layout, self) {
             (IndexLayout::V3, Self::Interval) => "PlacementIntervals",
             (IndexLayout::V3, Self::DataRoots) => "DataRootPlacements",
             (IndexLayout::V3, Self::Pending) => "PendingBodyMigrations",
+            (IndexLayout::V3, Self::OffsetMeta) => CHUNK_META_BY_OFFSET_CF,
             (_, Self::Content) => "ChunkOffsetsByContentHash",
             _ => match self {
                 Self::PathHashes => <ChunkPathHashesByOffset as Table>::NAME,
-                Self::DataPath => <ChunkDataPathByOffset as Table>::NAME,
+                Self::OffsetMeta => <ChunkDataPathByOffset as Table>::NAME,
                 Self::TxPath => <TxPathByTxPathHash as Table>::NAME,
                 Self::DataRoots => <DataRootInfosByDataRoot as Table>::NAME,
                 Self::TxLeaf => <TxLeafBindingByTxPathHash as Table>::NAME,
@@ -807,13 +818,19 @@ impl Cf {
     }
 
     /// Names `cf_handle` may find. A directory has only one of each pair.
+    ///
+    /// Schema 3.2 opens `ChunkMetaByOffset`. Schema 3.1 and schema v2 still
+    /// have `ChunkDataPathByOffset`. The schema 3.2 name is first.
     fn lookup_names(self) -> &'static [&'static str] {
         match self {
             Self::Interval => &["TxPathIntervalByStart", "PlacementIntervals"],
             Self::DataRoots => &["DataRootInfosByDataRoot", "DataRootPlacements"],
             Self::Pending => &["PendingBodyMigrationsByOffset", "PendingBodyMigrations"],
             Self::PathHashes => &["ChunkPathHashesByOffset"],
-            Self::DataPath => &["ChunkDataPathByOffset"],
+            Self::OffsetMeta => &[
+                CHUNK_META_BY_OFFSET_CF,
+                <ChunkDataPathByOffset as Table>::NAME,
+            ],
             Self::TxPath => &["TxPathByTxPathHash"],
             Self::TxLeaf => &["TxLeafBindingByTxPathHash"],
             Self::Metadata => &["Metadata"],
@@ -831,7 +848,7 @@ impl Cf {
     /// Path families. Baseline stores new values inline and garbage-collects
     /// an existing blob file. The `blobs` preset still writes one.
     fn uses_blobs(self) -> bool {
-        matches!(self, Self::DataPath | Self::TxPath)
+        matches!(self, Self::OffsetMeta | Self::TxPath)
     }
 
     /// Point lookups on this family can miss, so a bloom can reject a block.
@@ -844,7 +861,7 @@ impl Cf {
         let data_roots = layout != IndexLayout::V3 && matches!(self, Self::DataRoots);
         matches!(self, Self::Content)
             || tuning.bloom_all_families
-            || (tuning.data_path_bloom && matches!(self, Self::DataPath))
+            || (tuning.data_path_bloom && matches!(self, Self::OffsetMeta))
             || matches!(self, Self::PathHashes | Self::TxPath | Self::TxLeaf)
             || data_roots
     }
@@ -1253,6 +1270,7 @@ impl RocksSubmoduleStore {
         }
         let lock_file = hold_rocks_lock(&path)?;
         let layout = resolve_layout(&path, None)?;
+        require_offset_meta_family(&path, layout)?;
         let db = open_db_read_only(&path)?;
         let group = GroupCommit::new();
         let db = Arc::new(db);
@@ -1414,7 +1432,10 @@ impl RocksSubmoduleStore {
         Ok(by_name.into_values().collect())
     }
 
-    /// Replace `ChunkDataPathByOffset` values with these bytes. No codec.
+    /// Replace offset-family values with these bytes. No codec.
+    ///
+    /// Schema 3.2 writes `ChunkMetaByOffset`. Schema v2 writes
+    /// `ChunkDataPathByOffset`.
     ///
     /// The bench uses this to compare record layouts. Production writes go
     /// through [`SubmoduleWrite::write_packed_offset_rows`]. The WAL stays
@@ -1426,7 +1447,7 @@ impl RocksSubmoduleStore {
         rows: impl IntoIterator<Item = (PartitionChunkOffset, Vec<u8>)>,
     ) -> eyre::Result<()> {
         let _guard = self.lock_write();
-        let handle = cf_handle(&self.db, Cf::DataPath)?;
+        let handle = cf_handle(&self.db, Cf::OffsetMeta)?;
         let mut batch = WriteBatch::default();
         let mut pending = 0_u32;
         for (offset, value) in rows {
@@ -1447,10 +1468,10 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
-    /// Flush and compact `ChunkDataPathByOffset`, rewriting the bottom level.
+    /// Flush and compact the offset family, rewriting the bottom level.
     pub fn compact_data_paths(&self) -> eyre::Result<()> {
         let _guard = self.lock_write();
-        let handle = cf_handle(&self.db, Cf::DataPath)?;
+        let handle = cf_handle(&self.db, Cf::OffsetMeta)?;
         self.db
             .flush_cf(&handle)
             .wrap_err("flush data path column")?;
@@ -1495,6 +1516,7 @@ impl RocksSubmoduleStore {
         };
         let resources = shared_resources_for(tuning, resources)?;
         require_content_family(&path, layout)?;
+        require_offset_meta_family(&path, layout)?;
         let (db, stats) = open_db(
             &path,
             &tuning,
@@ -1614,7 +1636,7 @@ impl RocksSubmoduleStore {
                     iter.next();
                     continue;
                 }
-                let stored = if cf == Cf::DataPath {
+                let stored = if cf == Cf::OffsetMeta {
                     if value.is_empty() {
                         iter.next();
                         continue;
@@ -1752,13 +1774,27 @@ impl RocksSubmoduleStore {
         Ok(out)
     }
 
-    /// Next data-path keys in this layout. Values are not decoded.
-    pub(super) fn read_data_path_keys(
+    /// Next offset-row keys in this layout. Values are not decoded.
+    ///
+    /// Schema 3.1 reads `ChunkDataPathByOffset`. Schema 3.2 reads
+    /// `ChunkMetaByOffset`. Schema v2 reads `ChunkDataPathByOffset`.
+    pub(super) fn read_offset_row_keys(
         &self,
         after: Option<PartitionChunkOffset>,
         limit: usize,
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        self.read_cf_keys(Cf::DataPath.name_in(self.layout), after, limit)
+        self.read_cf_keys(self.offset_family_name(), after, limit)
+    }
+
+    /// On-disk name of the offset family for this open.
+    ///
+    /// A schema 3.1 directory is layout v3 and still uses the raw-proof name.
+    fn offset_family_name(&self) -> &'static str {
+        if self.layout == IndexLayout::V3 && !self.raw_proofs {
+            CHUNK_META_BY_OFFSET_CF
+        } else {
+            <ChunkDataPathByOffset as Table>::NAME
+        }
     }
 
     /// Next pending-job keys in this layout. Values are not decoded.
@@ -2111,7 +2147,11 @@ impl RocksSubmoduleStore {
             let Ok(handle) = cf_handle(&self.db, cf) else {
                 continue;
             };
-            let name = cf.name_in(self.layout);
+            let name = if matches!(cf, Cf::OffsetMeta) {
+                self.offset_family_name()
+            } else {
+                cf.name_in(self.layout)
+            };
             set_cf_gauge(
                 &self.db,
                 handle,
@@ -2398,14 +2438,14 @@ impl RocksSubmoduleStore {
             } else {
                 0
             };
-            let data_count = count_presence_keys(&self.db, &snap, Cf::DataPath, start, end)?;
+            let data_count = count_presence_keys(&self.db, &snap, Cf::OffsetMeta, start, end)?;
             path_hash_rows = path_hash_rows.saturating_add(path_count);
             data_path_rows = data_path_rows.saturating_add(data_count);
             if path_count > 0 {
                 deletes.push((Cf::PathHashes, start, end));
             }
             if data_count > 0 {
-                deletes.push((Cf::DataPath, start, end));
+                deletes.push((Cf::OffsetMeta, start, end));
                 if self.layout == IndexLayout::V3 {
                     content_deletes.extend(content_keys_for_proofs(
                         &self.db,
@@ -2469,7 +2509,7 @@ impl RocksSubmoduleStore {
             if start > end {
                 continue;
             }
-            let handle = cf_handle(&self.db, Cf::DataPath)?;
+            let handle = cf_handle(&self.db, Cf::OffsetMeta)?;
             let mut opts = full_scan_options();
             opts.set_iterate_upper_bound(exclusive_end_key(end));
             let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
@@ -2496,7 +2536,7 @@ impl RocksSubmoduleStore {
             return Ok(PresenceReconcile::default());
         }
         let mut batch = WriteBatch::new();
-        let data = cf_handle(&self.db, Cf::DataPath)?;
+        let data = cf_handle(&self.db, Cf::OffsetMeta)?;
         for key in &deletes {
             batch.delete_cf(&data, key);
         }
@@ -2663,7 +2703,7 @@ impl RocksSubmoduleStore {
             }
         }
         {
-            let handle = cf_handle(&self.db, Cf::DataPath)?;
+            let handle = cf_handle(&self.db, Cf::OffsetMeta)?;
             for item in snap.iterator_cf(&handle, IteratorMode::Start) {
                 let (key, value) = item.wrap_err("scan data paths")?;
                 let offset = PartitionChunkOffset::decode(&key)?.0;
@@ -2747,7 +2787,7 @@ impl RocksSubmoduleStore {
             eyre::bail!("content-hash offset index is not supported on this schema");
         }
         let snap = self.db.snapshot();
-        let data = cf_handle(&self.db, Cf::DataPath)?;
+        let data = cf_handle(&self.db, Cf::OffsetMeta)?;
         let content = cf_handle(&self.db, Cf::Content)?;
         let mut audit = ContentIndexAudit::default();
         let mut from_proofs = (0_u64, 0_u64);
@@ -3495,7 +3535,7 @@ fn column_options(
     // reads the value, and an iterator seek never consults a filter, so
     // the filter is a second I/O and a cache resident on those families.
     //
-    // DataPath Gets run only after the offset row already names a data-path
+    // Offset-family Gets run only after the offset row already names a data-path
     // hash. Interval reads are floor seeks and range scans. Pending point
     // Gets use a key the pending scan just returned; that scan is itself
     // an iterator. `optimize_filters_for_hits` would still build a filter
@@ -3717,6 +3757,31 @@ fn require_content_family(path: &Path, layout: IndexLayout) -> eyre::Result<()> 
     );
 }
 
+/// A schema 3.2 directory that still names the offset family
+/// `ChunkDataPathByOffset` is a pre-rename index.
+///
+/// `create_missing_column_families` would add `ChunkMetaByOffset` empty and
+/// leave the rows in the old family. An empty directory has no `CURRENT`
+/// and is created with the new name. Schema 3.1 is refused before this
+/// check. Schema v2 keeps the old name.
+fn require_offset_meta_family(path: &Path, layout: IndexLayout) -> eyre::Result<()> {
+    if layout != IndexLayout::V3 || !path.join("CURRENT").is_file() {
+        return Ok(());
+    }
+    let names = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
+    let has_meta = names.iter().any(|name| name == CHUNK_META_BY_OFFSET_CF);
+    let has_old = names
+        .iter()
+        .any(|name| name == <ChunkDataPathByOffset as Table>::NAME);
+    if has_old && !has_meta {
+        eyre::bail!(
+            "submodule index {} is schema 3.2 but column family ChunkDataPathByOffset still holds the offset rows. Schema 3.2 stores that record in ChunkMetaByOffset. This open does not rename the family and will not create an empty ChunkMetaByOffset beside the old one. Reset this index, or reconvert it from the schema 3.1 backup with `submodule-index-convert v31-to-v32`, then `submodule-index-convert verify-rocks`.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn check_schema_text(path: &Path, expected: &str) -> eyre::Result<()> {
     let marker = path.join(SCHEMA_FILE);
     let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
@@ -3733,7 +3798,7 @@ fn check_schema_text(path: &Path, expected: &str) -> eyre::Result<()> {
 fn legacy_cf_kind(name: &str) -> Cf {
     match name {
         LEGACY_PATH_HASH_CF => Cf::PathHashes,
-        "ChunkDataPathByPathHash" | "ChunkDataPathByOffset" => Cf::DataPath,
+        "ChunkDataPathByPathHash" | "ChunkDataPathByOffset" => Cf::OffsetMeta,
         "TxPathByTxPathHash" => Cf::TxPath,
         "DataRootInfosByDataRoot" => Cf::DataRoots,
         "TxLeafBindingByTxPathHash" => Cf::TxLeaf,
@@ -3969,7 +4034,7 @@ fn exclusive_end_key(end: PartitionChunkOffset) -> Vec<u8> {
 /// half-open range covers the last key. `Metadata` is not cleared.
 fn full_cf_end(cf: Cf) -> Vec<u8> {
     match cf {
-        Cf::PathHashes | Cf::DataPath | Cf::Pending | Cf::Interval => {
+        Cf::PathHashes | Cf::OffsetMeta | Cf::Pending | Cf::Interval => {
             exclusive_end_key(PartitionChunkOffset(u32::MAX))
         }
         Cf::TxPath | Cf::DataRoots | Cf::TxLeaf | Cf::Content | Cf::Metadata => {
@@ -4044,7 +4109,7 @@ fn content_keys_for_proofs(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<Vec<Vec<u8>>> {
-    let handle = cf_handle(db, Cf::DataPath)?;
+    let handle = cf_handle(db, Cf::OffsetMeta)?;
     let mut opts = full_scan_options();
     opts.set_iterate_upper_bound(exclusive_end_key(end));
     let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
@@ -4183,7 +4248,7 @@ impl<'a> Batch<'a> {
         meta: OffsetMeta,
     ) -> eyre::Result<()> {
         let key = encode_key(offset);
-        let old = self.rows().get_raw(Cf::DataPath, &key)?;
+        let old = self.rows().get_raw(Cf::OffsetMeta, &key)?;
         let old_meta = match &old {
             Some(bytes) => stored_offset_meta(self.raw_proofs, bytes)?,
             None => OffsetMeta::default(),
@@ -4199,7 +4264,7 @@ impl<'a> Batch<'a> {
             self.put_bytes(Cf::Content, &v3::content_key(&new_hash, offset), Vec::new());
         }
         if meta.crc.is_none() && meta.proof.is_none() {
-            self.delete(Cf::DataPath, &key);
+            self.delete(Cf::OffsetMeta, &key);
             return Ok(());
         }
         let bytes = if self.raw_proofs {
@@ -4207,7 +4272,7 @@ impl<'a> Batch<'a> {
         } else {
             v3::encode_offset_meta(&meta)?
         };
-        self.put_bytes(Cf::DataPath, &key, bytes);
+        self.put_bytes(Cf::OffsetMeta, &key, bytes);
         Ok(())
     }
 
@@ -4529,7 +4594,7 @@ impl<'a> Batch<'a> {
         let start_key = encode_key(start);
         let proofs = self
             .rows()
-            .collect_raw(Cf::DataPath, Some(&start_key), |key| {
+            .collect_raw(Cf::OffsetMeta, Some(&start_key), |key| {
                 PartitionChunkOffset::decode(key)
                     .map(|offset| offset > end)
                     .unwrap_or(true)
@@ -5148,7 +5213,7 @@ impl Rows<'_> {
     ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
         let intervals = self.intervals_touching(start, end)?;
         let start_key = encode_key(start);
-        let stored = self.collect_raw(Cf::DataPath, Some(&start_key), |key| {
+        let stored = self.collect_raw(Cf::OffsetMeta, Some(&start_key), |key| {
             PartitionChunkOffset::decode(key)
                 .map(|offset| offset > end)
                 .unwrap_or(true)
@@ -5362,13 +5427,13 @@ impl SubmoduleRead for Rows<'_> {
         let key = encode_key(offset);
         if self.layout != IndexLayout::V3 {
             return Ok(self
-                .get_value::<ChunkDataPath>(Cf::DataPath, &key)?
+                .get_value::<ChunkDataPath>(Cf::OffsetMeta, &key)?
                 .map(|proof| OffsetMeta {
                     crc: None,
                     proof: Some(proof),
                 }));
         }
-        let Some(bytes) = self.get_raw(Cf::DataPath, &key)? else {
+        let Some(bytes) = self.get_raw(Cf::OffsetMeta, &key)? else {
             return Ok(None);
         };
         stored_offset_meta(self.raw_proofs, &bytes).map(Some)
@@ -5383,7 +5448,7 @@ impl SubmoduleRead for Rows<'_> {
             return Ok(Vec::new());
         }
         let start_key = encode_key(start);
-        let stored = self.collect_raw(Cf::DataPath, Some(&start_key), |key| {
+        let stored = self.collect_raw(Cf::OffsetMeta, Some(&start_key), |key| {
             PartitionChunkOffset::decode(key)
                 .map(|offset| offset > end)
                 .unwrap_or(true)
@@ -5408,7 +5473,7 @@ impl SubmoduleRead for Rows<'_> {
             return Ok(false);
         }
         let start_key = encode_key(start);
-        let stored = self.collect_raw(Cf::DataPath, Some(&start_key), |key| {
+        let stored = self.collect_raw(Cf::OffsetMeta, Some(&start_key), |key| {
             PartitionChunkOffset::decode(key)
                 .map(|offset| offset > end)
                 .unwrap_or(true)
@@ -5924,7 +5989,7 @@ impl SubmoduleWrite for Batch<'_> {
             // bytes. The durable-point write replaces both together.
             let old_crc = self
                 .rows()
-                .get_raw(Cf::DataPath, &key)?
+                .get_raw(Cf::OffsetMeta, &key)?
                 .as_deref()
                 .map(|bytes| stored_offset_meta(self.raw_proofs, bytes))
                 .transpose()?
@@ -5937,7 +6002,7 @@ impl SubmoduleWrite for Batch<'_> {
                 },
             )?;
         } else {
-            self.put(Cf::DataPath, &key, &data_path);
+            self.put(Cf::OffsetMeta, &key, &data_path);
         }
         Ok(())
     }
@@ -6079,7 +6144,7 @@ impl SubmoduleWrite for Batch<'_> {
             self.delete_content_rows_for_paths(start, end)?;
             self.delete_offset_range(Cf::Pending, start, end)?;
         }
-        self.delete_offset_range(Cf::DataPath, start, end)?;
+        self.delete_offset_range(Cf::OffsetMeta, start, end)?;
         Ok(())
     }
 
@@ -6376,7 +6441,7 @@ mod tests {
             tx.add_full_data_path(PartitionChunkOffset::from(0), vec![7_u8; 256 * 1024])?;
             Ok(())
         })?;
-        assert!(store.cf_key_count(Cf::DataPath)? >= usize::try_from(ROWS)?);
+        assert!(store.cf_key_count(Cf::OffsetMeta)? >= usize::try_from(ROWS)?);
 
         let started = std::time::Instant::now();
         store.update(|tx| tx.clear())?;
@@ -6420,7 +6485,7 @@ mod tests {
         drop(store);
 
         let store = RocksSubmoduleStore::open(&path)?;
-        assert_eq!(store.cf_key_count(Cf::DataPath)?, 0);
+        assert_eq!(store.cf_key_count(Cf::OffsetMeta)?, 0);
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
         assert_eq!(
             store.schema_payload()?.expect("schema row"),
@@ -6616,6 +6681,28 @@ mod tests {
         let report = crate::submodule::verify_rocks_v31_and_v32(&src, &dst)?;
         assert!(!report.has_mismatch(), "{report}");
         assert!(report.offsets_checked > 0, "{report}");
+        let src_names = DB::list_cf(&Options::default(), &src)?;
+        assert!(
+            src_names
+                .iter()
+                .any(|name| name == <ChunkDataPathByOffset as Table>::NAME),
+            "{src_names:?}"
+        );
+        assert!(
+            !src_names.iter().any(|name| name == CHUNK_META_BY_OFFSET_CF),
+            "{src_names:?}"
+        );
+        let dst_names = DB::list_cf(&Options::default(), &dst)?;
+        assert!(
+            dst_names.iter().any(|name| name == CHUNK_META_BY_OFFSET_CF),
+            "{dst_names:?}"
+        );
+        assert!(
+            !dst_names
+                .iter()
+                .any(|name| name == <ChunkDataPathByOffset as Table>::NAME),
+            "{dst_names:?}"
+        );
         let store = RocksSubmoduleStore::open(&dst)?;
         let meta = store
             .view(|tx| tx.get_offset_meta(offset))?
@@ -6626,6 +6713,9 @@ mod tests {
     }
 
     /// Turn schema 3.2 proof rows back into raw 3.1 proofs and rewrite the marker.
+    ///
+    /// Schema 3.1 names the family `ChunkDataPathByOffset`. The raw proofs
+    /// are copied there and `ChunkMetaByOffset` is dropped.
     fn downgrade_proof_rows_to_v31(path: &Path) -> eyre::Result<()> {
         let names = DB::list_cf(&Options::default(), path)?;
         let families = names
@@ -6633,21 +6723,28 @@ mod tests {
             .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
         let mut db_opts = Options::default();
         db_opts.create_if_missing(false);
-        let db = DB::open_cf_descriptors(&db_opts, path, families)?;
-        let data = db
-            .cf_handle("ChunkDataPathByOffset")
-            .expect("data path family");
-        let meta = db.cf_handle("Metadata").expect("metadata family");
-        let mut batch = WriteBatch::default();
-        let iter = db.iterator_cf(&data, IteratorMode::Start);
-        for item in iter {
+        let mut db = DB::open_cf_descriptors(&db_opts, path, families)?;
+        let source = db
+            .cf_handle(CHUNK_META_BY_OFFSET_CF)
+            .expect("offset meta family");
+        let mut rows = Vec::new();
+        for item in db.iterator_cf(&source, IteratorMode::Start) {
             let (key, value) = item.wrap_err("read offset row")?;
             let decoded = v3::decode_offset_meta(&value)?;
             let proof = decoded
                 .proof
                 .ok_or_else(|| eyre::eyre!("schema 3.1 fixture found a checksum-only row"))?;
             assert!(decoded.crc.is_none());
-            batch.put_cf(&data, key, proof);
+            rows.push((key, proof));
+        }
+        let raw_name = <ChunkDataPathByOffset as Table>::NAME;
+        db.create_cf(raw_name, &Options::default())
+            .wrap_err("create schema 3.1 offset family")?;
+        let raw = db.cf_handle(raw_name).expect("schema 3.1 offset family");
+        let meta = db.cf_handle("Metadata").expect("metadata family");
+        let mut batch = WriteBatch::default();
+        for (key, proof) in rows {
+            batch.put_cf(&raw, key, proof);
         }
         batch.put_cf(
             &meta,
@@ -6655,6 +6752,8 @@ mod tests {
             SUBMODULE_SCHEMA_V3_1.as_bytes(),
         );
         db.write(batch).wrap_err("rewrite schema 3.1 rows")?;
+        db.drop_cf(CHUNK_META_BY_OFFSET_CF)
+            .wrap_err("drop schema 3.2 offset family")?;
         drop(db);
         fs::write(path.join(SCHEMA_FILE), SUBMODULE_SCHEMA_V3_1)?;
         Ok(())
@@ -6681,7 +6780,7 @@ mod tests {
         db_opts.create_missing_column_families(true);
         let families = [
             "default",
-            "ChunkDataPathByOffset",
+            CHUNK_META_BY_OFFSET_CF,
             "PlacementIntervals",
             "DataRootPlacements",
             "PendingBodyMigrations",
@@ -6701,6 +6800,89 @@ mod tests {
         assert!(
             err.to_string().contains("will not create an empty family"),
             "{err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_3_2_with_the_old_offset_family_is_refused() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_old_offset_cf")
+            .build();
+        let path = dir.path().join("old-name");
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        let families = [
+            "default",
+            <ChunkDataPathByOffset as Table>::NAME,
+            "PlacementIntervals",
+            "DataRootPlacements",
+            "PendingBodyMigrations",
+            "Metadata",
+            "ChunkOffsetsByContentHash",
+        ]
+        .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
+        {
+            let db = DB::open_cf_descriptors(&db_opts, &path, families)
+                .wrap_err("open pre-rename schema 3.2")?;
+            let data = db
+                .cf_handle(<ChunkDataPathByOffset as Table>::NAME)
+                .expect("old offset family");
+            db.put_cf(&data, encode_key(PartitionChunkOffset::from(4)), b"proof")
+                .wrap_err("write pre-rename offset row")?;
+        }
+        fs::write(path.join(SCHEMA_FILE), SUBMODULE_SCHEMA_V3)?;
+
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("ChunkDataPathByOffset"), "{text}");
+        assert!(text.contains("ChunkMetaByOffset"), "{text}");
+        assert!(text.contains("will not create an empty"), "{text}");
+        assert!(text.contains("v31-to-v32"), "{text}");
+        let err = RocksSubmoduleStore::open_read_only(&path).unwrap_err();
+        assert!(err.to_string().contains("ChunkMetaByOffset"), "{err}");
+
+        let names = DB::list_cf(&Options::default(), &path)?;
+        assert!(
+            names
+                .iter()
+                .any(|name| name == <ChunkDataPathByOffset as Table>::NAME),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == CHUNK_META_BY_OFFSET_CF),
+            "{names:?}"
+        );
+        let families = names
+            .into_iter()
+            .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
+        let mut read_opts = Options::default();
+        read_opts.create_if_missing(false);
+        let db = DB::open_cf_descriptors_read_only(&read_opts, &path, families, false)?;
+        let data = db
+            .cf_handle(<ChunkDataPathByOffset as Table>::NAME)
+            .expect("old offset family");
+        let got = db
+            .get_cf(&data, encode_key(PartitionChunkOffset::from(4)))
+            .wrap_err("read pre-rename offset row")?;
+        assert_eq!(got.as_deref(), Some(b"proof".as_slice()));
+        drop(db);
+
+        let fresh = dir.path().join("fresh");
+        drop(RocksSubmoduleStore::open(&fresh)?);
+        let fresh_names = DB::list_cf(&Options::default(), &fresh)?;
+        assert!(
+            fresh_names
+                .iter()
+                .any(|name| name == CHUNK_META_BY_OFFSET_CF),
+            "{fresh_names:?}"
+        );
+        assert!(
+            !fresh_names
+                .iter()
+                .any(|name| name == <ChunkDataPathByOffset as Table>::NAME),
+            "{fresh_names:?}"
         );
         Ok(())
     }
@@ -6861,7 +7043,7 @@ mod tests {
         assert_no_orphans(&store)?;
         for cf in [
             Cf::Interval,
-            Cf::DataPath,
+            Cf::OffsetMeta,
             Cf::DataRoots,
             Cf::Pending,
             Cf::Content,
@@ -6875,7 +7057,7 @@ mod tests {
         assert_no_orphans(&store)?;
         for cf in [
             Cf::Interval,
-            Cf::DataPath,
+            Cf::OffsetMeta,
             Cf::DataRoots,
             Cf::Pending,
             Cf::Content,
@@ -7270,19 +7452,14 @@ mod tests {
             "{baseline_opts}"
         );
         assert_eq!(
-            cf_option(
-                &baseline_opts,
-                <ChunkDataPathByOffset as Table>::NAME,
-                "enable_blob_files"
-            )
-            .as_deref(),
+            cf_option(&baseline_opts, CHUNK_META_BY_OFFSET_CF, "enable_blob_files").as_deref(),
             Some("false"),
             "{baseline_opts}"
         );
         assert_eq!(
             cf_option(
                 &baseline_opts,
-                <ChunkDataPathByOffset as Table>::NAME,
+                CHUNK_META_BY_OFFSET_CF,
                 "enable_blob_garbage_collection"
             )
             .as_deref(),
@@ -7292,7 +7469,7 @@ mod tests {
         assert_eq!(
             cf_option(
                 &baseline_opts,
-                <ChunkDataPathByOffset as Table>::NAME,
+                CHUNK_META_BY_OFFSET_CF,
                 "blob_garbage_collection_age_cutoff"
             )
             .as_deref(),
@@ -7309,6 +7486,14 @@ mod tests {
         );
         assert!(
             baseline_opts.contains("[CFOptions \"PendingBodyMigrations\"]"),
+            "{baseline_opts}"
+        );
+        assert!(
+            baseline_opts.contains("[CFOptions \"ChunkMetaByOffset\"]"),
+            "{baseline_opts}"
+        );
+        assert!(
+            !baseline_opts.contains("ChunkDataPathByOffset"),
             "{baseline_opts}"
         );
         assert!(
@@ -7359,29 +7544,19 @@ mod tests {
         let blobs_opts = persisted_options(&dir.path().join("blobs"))?;
         let min_blob = BLOB_MIN_BYTES.to_string();
         assert_eq!(
-            cf_option(
-                &blobs_opts,
-                <ChunkDataPathByOffset as Table>::NAME,
-                "enable_blob_files"
-            )
-            .as_deref(),
+            cf_option(&blobs_opts, CHUNK_META_BY_OFFSET_CF, "enable_blob_files").as_deref(),
             Some("true"),
             "{blobs_opts}"
         );
         assert_eq!(
-            cf_option(
-                &blobs_opts,
-                <ChunkDataPathByOffset as Table>::NAME,
-                "min_blob_size"
-            )
-            .as_deref(),
+            cf_option(&blobs_opts, CHUNK_META_BY_OFFSET_CF, "min_blob_size").as_deref(),
             Some(min_blob.as_str()),
             "{blobs_opts}"
         );
         assert_eq!(
             cf_option(
                 &blobs_opts,
-                <ChunkDataPathByOffset as Table>::NAME,
+                CHUNK_META_BY_OFFSET_CF,
                 "enable_blob_garbage_collection"
             )
             .as_deref(),
@@ -7391,7 +7566,7 @@ mod tests {
         assert_eq!(
             cf_option(
                 &blobs_opts,
-                <ChunkDataPathByOffset as Table>::NAME,
+                CHUNK_META_BY_OFFSET_CF,
                 "blob_garbage_collection_age_cutoff"
             )
             .as_deref(),
@@ -7506,6 +7681,7 @@ mod tests {
             table_options_have_bloom(&written, <ChunkDataPathByOffset as Table>::NAME),
             "{written}"
         );
+        assert!(!written.contains(CHUNK_META_BY_OFFSET_CF), "{written}");
         assert!(
             table_options_have_bloom(&written, <TxPathByTxPathHash as Table>::NAME),
             "{written}"
@@ -7644,7 +7820,7 @@ mod tests {
             store.update(|tx| tx.add_full_tx_path(legacy_tx, large_path(0)))?;
             store.flush_memtables()?;
             assert!(
-                store.blob_file_count(Cf::DataPath)? > 0,
+                store.blob_file_count(Cf::OffsetMeta)? > 0,
                 "data paths did not reach blob files"
             );
             assert!(
@@ -7655,7 +7831,7 @@ mod tests {
 
         {
             let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
-            assert!(store.blob_file_count(Cf::DataPath)? > 0);
+            assert!(store.blob_file_count(Cf::OffsetMeta)? > 0);
             assert!(store.blob_file_count(Cf::TxPath)? > 0);
             assert_data_paths(&store, LEGACY_PATHS, &[])?;
             assert_eq!(
@@ -7667,7 +7843,7 @@ mod tests {
             store.update(|tx| tx.add_full_tx_path(inline_tx, large_path(1)))?;
             store.flush_memtables()?;
             assert!(
-                store.blob_file_count(Cf::DataPath)? > 0,
+                store.blob_file_count(Cf::OffsetMeta)? > 0,
                 "flush of inline values dropped legacy blob files"
             );
             assert!(store.blob_file_count(Cf::TxPath)? > 0);
@@ -7711,13 +7887,13 @@ mod tests {
 
         let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
         assert!(
-            store.blob_file_count(Cf::DataPath)? > 0,
+            store.blob_file_count(Cf::OffsetMeta)? > 0,
             "reopen compacted legacy blobs away"
         );
         assert!(store.blob_file_count(Cf::TxPath)? > 0);
-        store.compact_column_force(Cf::DataPath)?;
+        store.compact_column_force(Cf::OffsetMeta)?;
         store.compact_column_force(Cf::TxPath)?;
-        assert_eq!(store.blob_file_count(Cf::DataPath)?, 0);
+        assert_eq!(store.blob_file_count(Cf::OffsetMeta)?, 0);
         assert_eq!(store.blob_file_count(Cf::TxPath)?, 0);
         assert_data_paths(&store, total, &removed)?;
         assert_eq!(

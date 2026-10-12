@@ -453,6 +453,8 @@ impl RowSource for RocksSubmoduleStore {
         after: Option<PartitionChunkOffset>,
         limits: Limits,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkDataPath)>> {
+        // Schema v2 stores the raw proof under this name. Schema 3.2 reads
+        // `ChunkMetaByOffset` through `read_offset_row_keys`.
         self.read_cf_batch(
             ChunkDataPathByOffset::NAME,
             after,
@@ -483,6 +485,7 @@ impl RowSource for RocksSubmoduleStore {
         limit: usize,
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let name = match table {
+            // Schema v2. Schema 3.2 offset keys use `read_offset_row_keys`.
             OffsetTable::DataPaths => ChunkDataPathByOffset::NAME,
             OffsetTable::Pending => PendingBodyMigrationsByOffset::NAME,
         };
@@ -589,7 +592,7 @@ pub fn convert_rocks_v31_to_v32(
         let mut data_paths = 0_u64;
         let mut after = None;
         loop {
-            let keys = src.read_data_path_keys(after, 1024)?;
+            let keys = src.read_offset_row_keys(after, 1024)?;
             let Some(last) = keys.last().copied() else {
                 break;
             };
@@ -655,8 +658,8 @@ fn verify_wrapped_records(
         note(&mut report, "reset_marker", "metadata".to_owned());
     }
     merge_keys(
-        &mut |after| left.read_data_path_keys(after, VERIFY_KEYS),
-        &mut |after| right.read_data_path_keys(after, VERIFY_KEYS),
+        &mut |after| left.read_offset_row_keys(after, VERIFY_KEYS),
+        &mut |after| right.read_offset_row_keys(after, VERIFY_KEYS),
         |keys| {
             let left_rows = left.view(|tx| {
                 keys.iter()
@@ -1095,7 +1098,7 @@ fn copy_v3_into_v2(
     }
     let mut skipped_orphans = 0_u64;
     let data_paths = copy_keyed(
-        |after| src.read_data_path_keys(after, limit),
+        |after| src.read_offset_row_keys(after, limit),
         |keys| {
             let rows = src.view(|tx| {
                 keys.iter()
@@ -1653,7 +1656,7 @@ where
 {
     merge_keys(
         &mut |after| v2.read_offset_keys(OffsetTable::DataPaths, after, VERIFY_KEYS),
-        &mut |after| v3.read_data_path_keys(after, VERIFY_KEYS),
+        &mut |after| v3.read_offset_row_keys(after, VERIFY_KEYS),
         |keys| {
             let left = v2.view(|tx| read_data_paths_at(tx, keys))?;
             let right = v3.view(|tx| read_data_paths_at(tx, keys))?;
@@ -3482,7 +3485,7 @@ fn note_extra_v3_offset_rows(
 ) -> eyre::Result<()> {
     let mut after = None;
     loop {
-        let keys = v3.read_data_path_keys(after, VERIFY_KEYS)?;
+        let keys = v3.read_offset_row_keys(after, VERIFY_KEYS)?;
         if keys.is_empty() {
             break;
         }
@@ -3764,7 +3767,7 @@ fn verify_reset_target(
         report.intervals_mismatches = 1;
         note(&mut report, "interval", "reset or empty source".to_owned());
     }
-    if !v3.read_data_path_keys(None, 1)?.is_empty() {
+    if !v3.read_offset_row_keys(None, 1)?.is_empty() {
         report.offset_mismatches = 1;
         report.mismatch_data_path = 1;
         note(&mut report, "data_path", "reset or empty source".to_owned());

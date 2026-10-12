@@ -22,6 +22,13 @@ pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 /// `ChunkOffsetsByContentHash`. MDBX stays on [`SUBMODULE_SCHEMA`].
 pub const SUBMODULE_SCHEMA_V3: &str = "irys-submodule-index 3.2\n";
 
+/// RocksDB column family for a schema 3.2 offset record.
+///
+/// The value is the versioned proof and checksum. Schema 3.1 and schema v2
+/// keep the raw proof in `ChunkDataPathByOffset`. MDBX uses that table name
+/// and stores only the proof.
+pub const CHUNK_META_BY_OFFSET_CF: &str = "ChunkMetaByOffset";
+
 /// Schema 3.1 marker. The offset value is the raw proof and has no checksum.
 ///
 /// Open refuses this file. `submodule-index-convert v31-to-v32` writes a new
@@ -54,12 +61,12 @@ tables! {
         type Value = ChunkPathHashes;
     }
 
-    /// One chunk at a partition offset.
+    /// One data proof at a partition offset.
     ///
-    /// Offset order keeps compaction on sequential keys. Schema v2 and MDBX
-    /// store the data proof. Schema 3.2 stores a versioned record: the proof
-    /// bytes, then an optional checksum trailer. A checksum-only value is an
-    /// entropy chunk and is not a data proof. The 32-byte hash stays on
+    /// MDBX, RocksDB schema v2, and RocksDB schema 3.1 use this name. The
+    /// value is the raw proof. RocksDB schema 3.2 stores the versioned
+    /// offset record in [`CHUNK_META_BY_OFFSET_CF`]. Offset order keeps
+    /// compaction on sequential keys. The 32-byte hash stays on
     /// [`ChunkPathHashesByOffset`] for schema v2 because callers return it.
     table ChunkDataPathByOffset {
         type Key = PartitionChunkOffset;
@@ -122,7 +129,7 @@ tables! {
 
 }
 
-/// Decoded `ChunkDataPathByOffset` value on schema 3.2.
+/// Decoded [`CHUNK_META_BY_OFFSET_CF`] value on schema 3.2.
 ///
 /// `crc` is `None` when the row does not carry a checksum. That is unknown,
 /// not a stored zero. `proof` is `None` on an entropy checksum row. A data

@@ -1413,7 +1413,10 @@ impl SubmoduleIndex {
         }
     }
 
-    /// Replace `ChunkDataPathByOffset` values. The bytes are stored as given.
+    /// Replace offset-family values. The bytes are stored as given.
+    ///
+    /// Schema 3.2 writes `ChunkMetaByOffset`. Schema v2 writes
+    /// `ChunkDataPathByOffset`.
     #[cfg(feature = "rocksdb")]
     pub fn write_raw_data_paths(
         &self,

@@ -11,11 +11,11 @@ the node starts.
 
 MDBX stays on schema v2. A fresh RocksDB index is schema 3.2
 (`irys-submodule-index 3.2`). A RocksDB schema v2 directory still opens
-until it is converted. Schema 3.2 stores the placement, the offset row,
-and `ChunkOffsetsByContentHash` (the 32-byte leaf hash, then the
-partition offset, with an empty value). The offset row is the data proof
-when one is stored, and the CRC32C of the packed chunk when one was
-written. A checksum with no proof is an entropy row. It is not a data
+until it is converted. Schema 3.2 stores the placement, the offset row
+in `ChunkMetaByOffset`, and `ChunkOffsetsByContentHash` (the 32-byte
+leaf hash, then the partition offset, with an empty value). The offset
+row is the data proof when one is stored, and the CRC32C of the packed
+chunk when one was written. A checksum with no proof is an entropy row. It is not a data
 chunk. Schema 3.2 does not store the tx path. Mining derives that path
 from the consensus database. A directory whose `SCHEMA` file is
 `irys-submodule-index 3` has no content-hash family. Open refuses it and
@@ -23,7 +23,12 @@ does not create the family empty. Delete that directory and rerun
 `submodule-index-convert`. A directory whose `SCHEMA` file is
 `irys-submodule-index 3.1` is refused. The node does not rewrite it in
 place. Run `v31-to-v32`, then `verify-rocks`, and replace `rocks/` only
-after verify prints no mismatch.
+after verify prints no mismatch. Schema v2 and schema 3.1 keep the raw
+proof in `ChunkDataPathByOffset`. MDBX keeps that table and stores only
+the proof. A schema 3.2 directory that has `ChunkDataPathByOffset` and
+not `ChunkMetaByOffset` is refused. Open does not create an empty
+`ChunkMetaByOffset` beside the old family. Reset that index, or
+reconvert it from the schema 3.1 backup with `v31-to-v32`.
 
 The converter is `submodule-index-convert` in the `irys-database` crate.
 Build it with the `rocksdb` feature. Stop the node before you run it.

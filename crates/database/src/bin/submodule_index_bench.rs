@@ -36,7 +36,8 @@ use std::time::{Duration, Instant};
 
 use irys_database::IrysDatabaseArgs as _;
 use irys_database::submodule::tables::{
-    ChunkPathHashes, DataRootInfo, OffsetMeta, PendingBodyMigration, TxLeafBinding,
+    CHUNK_META_BY_OFFSET_CF, ChunkPathHashes, DataRootInfo, OffsetMeta, PendingBodyMigration,
+    TxLeafBinding,
 };
 use irys_database::submodule::{
     LegacySstSpan, RocksTuning, SubmoduleIndex, SubmoduleStore as _, encode_offset_meta,
@@ -1730,7 +1731,7 @@ fn data_path_sst_bytes(store: &SubmoduleIndex) -> eyre::Result<u64> {
     let files = store.column_file_usage()?;
     Ok(files
         .into_iter()
-        .find(|cf| cf.name == "ChunkDataPathByOffset")
+        .find(|cf| cf.name == CHUNK_META_BY_OFFSET_CF)
         .map(|cf| cf.sst_bytes)
         .unwrap_or(0))
 }
