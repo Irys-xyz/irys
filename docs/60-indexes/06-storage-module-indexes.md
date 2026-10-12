@@ -9,39 +9,51 @@ also exists, because after a conversion `rocks/` is the live index and
 the module directory (for example, rename it to `rocks.retired`) before
 the node starts.
 
-MDBX stays on schema v2. A fresh RocksDB index is schema v3. A RocksDB
-schema v2 directory still opens until it is converted. Schema v3 stores
-the placement, the data proof, and `ChunkOffsetsByContentHash` (the
-32-byte leaf hash, then the partition offset, with an empty value). It
-does not store the tx path. Mining derives that path from the consensus
-database. A directory whose `SCHEMA` file is `irys-submodule-index 3`
-has no content-hash family. Open refuses it and does not create the
-family empty. Delete that directory and rerun `submodule-index-convert`.
+MDBX stays on schema v2. A fresh RocksDB index is schema 3.2
+(`irys-submodule-index 3.2`). A RocksDB schema v2 directory still opens
+until it is converted. Schema 3.2 stores the placement, the offset row,
+and `ChunkOffsetsByContentHash` (the 32-byte leaf hash, then the
+partition offset, with an empty value). The offset row is the data proof
+when one is stored, and the CRC32C of the packed chunk when one was
+written. A checksum with no proof is an entropy row. It is not a data
+chunk. Schema 3.2 does not store the tx path. Mining derives that path
+from the consensus database. A directory whose `SCHEMA` file is
+`irys-submodule-index 3` has no content-hash family. Open refuses it and
+does not create the family empty. Delete that directory and rerun
+`submodule-index-convert`. A directory whose `SCHEMA` file is
+`irys-submodule-index 3.1` is refused. The node does not rewrite it in
+place. Run `v31-to-v32`, then `verify-rocks`, and replace `rocks/` only
+after verify prints no mismatch.
 
 The converter is `submodule-index-convert` in the `irys-database` crate.
 Build it with the `rocksdb` feature. Stop the node before you run it.
 The tool takes the index lock and refuses the run when that lock is held.
 The directory name does not need to contain `copy`.
 
-Every command needs the consensus database and the partition geometry.
-The consensus database is `irys_consensus_data` under the node's
-`base_directory` (`.irys` by default), not a submodule `db/`.
-The ledger offset is `slot * chunks_per_partition + partition offset`.
-`ledger` and `slot` are the fields in `<submodule>/packing_params.toml`.
+`mdbx-to-rocks`, `rocks-to-v3`, `rocks-to-mdbx`, and `verify` need the
+consensus database and the partition geometry. `v31-to-v32` does not.
+`verify-rocks` of a schema 3.1 directory against schema 3.2, or of two
+schema 3.2 directories, does not either. The consensus database is
+`irys_consensus_data` under the node's `base_directory` (`.irys` by
+default), not a submodule `db/`. The ledger offset is
+`slot * chunks_per_partition + partition offset`. `ledger` and `slot`
+are the fields in `<submodule>/packing_params.toml`.
 `chunks-per-partition` and `chunk-size` come from the chain config.
 Mainnet chunk size is 262144. The tool derives the tx path at that ledger
 offset and requires the stored bytes to be identical. A mismatch aborts
 and names the partition offset.
 
 The converter never modifies its source. It reads a schema v1 or v2
-`db/` and writes RocksDB schema v3 to the target. The completion marker
+`db/` and writes RocksDB schema 3.2 to the target. The completion marker
 is written last. `rocks/SCHEMA` is the RocksDB marker.
 The MDBX marker is the schema row. A crash leaves no marker. The node
 refuses that directory. Run the same command again with
 `--replace-incomplete`.
 
-`rocks-to-mdbx` reads schema v3 only. A schema v2 RocksDB index uses
-`rocks-to-v3` first.
+`rocks-to-mdbx` reads schema 3.2 only. It drops checksum-only rows and
+strips the record header from proof rows. A schema v2 RocksDB index uses
+`rocks-to-v3` first. A schema 3.1 index uses `v31-to-v32` first. Direct
+3.1 to MDBX is refused.
 
 The node itself migrates a schema v1 `db/` (release 4.0.x) to MDBX
 schema v2 in place the first time it opens it with the MDBX engine.
@@ -49,7 +61,25 @@ Release 4.0.x cannot read the result. There is no rollback from 4.1.0 to
 4.0.x. Both a schema v1 and a schema v2 `db/` convert to RocksDB, so the
 conversion can run before or after the first start of 4.1.0.
 
-## RocksDB schema v2 to schema v3
+## RocksDB schema 3.1 to schema 3.2
+
+Stop the node. Do this for each submodule. The source is not modified.
+The pass wraps each proof and leaves the checksum unset. It does not read
+`chunks.dat`, so it writes no entropy rows. No consensus flags.
+
+```sh
+submodule-index-convert v31-to-v32 \
+  <submodule>/rocks <submodule>/rocks-3.2
+submodule-index-convert verify-rocks \
+  <submodule>/rocks <submodule>/rocks-3.2
+```
+
+Replace `rocks/` with `rocks-3.2` only when verify-rocks prints no mismatch.
+`database.submodule_index` stays `rocksdb`. Start the node. The node
+deletes a leftover `chunks.crc` on open. The checksums for bytes written
+after the start live in the offset row.
+
+## RocksDB schema v2 to schema 3.2
 
 Stop the node. Do this for each submodule. Keep `rocks/`.
 

@@ -4,8 +4,9 @@
 //! when that lock is already held. The directory name does not need to contain
 //! `copy`.
 //!
-//! `mdbx-to-rocks` and `rocks-to-v3` write schema v3. `rocks-to-mdbx` rebuilds
-//! MDBX schema v2 from schema v3. Each stored tx path must equal the path
+//! `mdbx-to-rocks` and `rocks-to-v3` write schema 3.2. `v31-to-v32` wraps a
+//! schema 3.1 index into schema 3.2. `rocks-to-mdbx` rebuilds MDBX schema v2
+//! from schema 3.2 and drops checksum-only rows. Each stored tx path must equal the path
 //! derived from the consensus database. A mismatch aborts and names the
 //! partition offset. The ledger offset is
 //! `slot * chunks_per_partition + partition_offset`.
@@ -21,9 +22,13 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use irys_database::submodule::tables::{
+    SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_1,
+};
 use irys_database::submodule::{
     ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, convert_rocks_v2_to_v3,
-    verify_mdbx_and_rocks, verify_rocks_v2_and_v3,
+    convert_rocks_v31_to_v32, verify_mdbx_and_rocks, verify_rocks_v2_and_v3,
+    verify_rocks_v31_and_v32, verify_rocks_v32_records,
 };
 use irys_database::{consensus_db_args, submodule_db_args};
 use irys_types::config::DatabaseConfig;
@@ -32,9 +37,14 @@ const USAGE: &str = "\
 usage:
   submodule-index-convert mdbx-to-rocks [flags] <db-dir> <rocks-v3-dir>
   submodule-index-convert rocks-to-v3   [flags] <rocks-v2-dir> <rocks-v3-dir>
+  submodule-index-convert v31-to-v32    [flags] <rocks-3.1-dir> <rocks-3.2-dir>
   submodule-index-convert rocks-to-mdbx [flags] <rocks-v3-dir> <db-dir>
   submodule-index-convert verify        [flags] <db-dir> <rocks-v3-dir>
-  submodule-index-convert verify-rocks  [flags] <rocks-v2-dir> <rocks-v3-dir>
+  submodule-index-convert verify-rocks  [flags] <rocks-left-dir> <rocks-right-dir>
+
+v31-to-v32 does not read the consensus database. verify-rocks of a schema 3.1
+directory against schema 3.2, or of two schema 3.2 directories, does not either.
+The flags below are required for every other command.
 
 required flags:
   --consensus-db <dir>           node consensus database.
@@ -103,8 +113,12 @@ Read num_chunks_in_partition and the chunk size from the chain config.
     <submodule>/db <submodule>/rocks
 
 A RocksDB schema v2 index uses rocks-to-v3 with the same flags, then
-verify-rocks. Replace rocks/ with the new directory only when verify-rocks
+verify-rocks. A schema 3.1 index uses v31-to-v32, then verify-rocks, with no
+consensus flags. Replace rocks/ with the new directory only when verify-rocks
 prints no mismatch. database.submodule_index stays rocksdb.
+
+  submodule-index-convert v31-to-v32 <submodule>/rocks <submodule>/rocks-3.2
+  submodule-index-convert verify-rocks <submodule>/rocks <submodule>/rocks-3.2
 
 rocks-to-mdbx writes an MDBX schema v2 index. That index is readable by the
 mdbx engine in this build. Release 4.0.8 cannot read it.
@@ -134,50 +148,100 @@ fn run() -> eyre::Result<ExitCode> {
     if paths_are_same(&tool.left, &tool.right) {
         eyre::bail!("source and target are the same path");
     }
-    let mut options = ConvertOptions::new(submodule_db_args(&DatabaseConfig::default())?);
-    options.consensus = consensus_db_args(&DatabaseConfig::default())?;
-    options.replace_incomplete = tool.replace_incomplete;
-    options.dry_run = tool.dry_run;
-    options.allow_unresolved = tool.allow_unresolved;
-    options.consensus_db = Some(tool.consensus_db);
-    options.ledger_id = tool.ledger_id;
-    options.slot_index = tool.slot_index;
-    options.chunks_per_partition = tool.chunks_per_partition;
-    options.chunk_size = tool.chunk_size;
     match tool.command {
-        Command::MdbxToRocks => {
-            let stats = convert_mdbx_to_rocks(&tool.left, &tool.right, &options)?;
+        Command::V31ToV32 => {
+            let stats = convert_rocks_v31_to_v32(
+                &tool.left,
+                &tool.right,
+                tool.replace_incomplete,
+                tool.dry_run,
+            )?;
             print!("{stats}");
         }
-        Command::RocksToV3 => {
-            let stats = convert_rocks_v2_to_v3(&tool.left, &tool.right, &options)?;
-            print!("{stats}");
-        }
-        Command::RocksToMdbx => {
-            let stats = convert_rocks_to_mdbx(&tool.left, &tool.right, &options)?;
-            print!("{stats}");
-        }
-        Command::Verify => {
-            let report = verify_mdbx_and_rocks(&tool.left, &tool.right, &options)?;
+        Command::VerifyRocks => {
+            let left_schema = std::fs::read_to_string(tool.left.join("SCHEMA")).unwrap_or_default();
+            let report = if left_schema == SUBMODULE_SCHEMA_V3_1 {
+                verify_rocks_v31_and_v32(&tool.left, &tool.right)?
+            } else if left_schema == SUBMODULE_SCHEMA_V3 {
+                verify_rocks_v32_records(&tool.left, &tool.right)?
+            } else if left_schema == SUBMODULE_SCHEMA {
+                let options = consensus_options(&tool)?;
+                verify_rocks_v2_and_v3(&tool.left, &tool.right, &options)?
+            } else {
+                eyre::bail!(
+                    "verify-rocks left schema is {left_schema:?}. Use a schema v2, 3.1, or 3.2 directory."
+                );
+            };
             print!("{report}");
             if report.has_mismatch() {
                 eyre::bail!("read equivalence mismatch");
             }
         }
-        Command::VerifyRocks => {
-            let report = verify_rocks_v2_and_v3(&tool.left, &tool.right, &options)?;
-            print!("{report}");
-            if report.has_mismatch() {
-                eyre::bail!("read equivalence mismatch");
+        command => {
+            let options = consensus_options(&tool)?;
+            match command {
+                Command::MdbxToRocks => {
+                    let stats = convert_mdbx_to_rocks(&tool.left, &tool.right, &options)?;
+                    print!("{stats}");
+                }
+                Command::RocksToV3 => {
+                    let stats = convert_rocks_v2_to_v3(&tool.left, &tool.right, &options)?;
+                    print!("{stats}");
+                }
+                Command::RocksToMdbx => {
+                    let stats = convert_rocks_to_mdbx(&tool.left, &tool.right, &options)?;
+                    print!("{stats}");
+                }
+                Command::Verify => {
+                    let report = verify_mdbx_and_rocks(&tool.left, &tool.right, &options)?;
+                    print!("{report}");
+                    if report.has_mismatch() {
+                        eyre::bail!("read equivalence mismatch");
+                    }
+                }
+                Command::V31ToV32 | Command::VerifyRocks => unreachable!("handled above"),
             }
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
+/// Consensus flags for a command that derives tx paths. `v31-to-v32` and a
+/// schema 3.1 or 3.2 `verify-rocks` do not call this.
+fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
+    let Some(consensus_db) = tool.consensus_db.clone() else {
+        eyre::bail!("--consensus-db is required for this command");
+    };
+    let Some(ledger_id) = tool.ledger_id else {
+        eyre::bail!("--ledger is required for this command");
+    };
+    let Some(slot_index) = tool.slot_index else {
+        eyre::bail!("--slot is required for this command");
+    };
+    let Some(chunks_per_partition) = tool.chunks_per_partition else {
+        eyre::bail!("--chunks-per-partition is required for this command");
+    };
+    let Some(chunk_size) = tool.chunk_size else {
+        eyre::bail!("--chunk-size is required for this command");
+    };
+    let mut options = ConvertOptions::new(submodule_db_args(&DatabaseConfig::default())?);
+    options.consensus = consensus_db_args(&DatabaseConfig::default())?;
+    options.replace_incomplete = tool.replace_incomplete;
+    options.dry_run = tool.dry_run;
+    options.allow_unresolved = tool.allow_unresolved;
+    options.consensus_db = Some(consensus_db);
+    options.ledger_id = ledger_id;
+    options.slot_index = slot_index;
+    options.chunks_per_partition = chunks_per_partition;
+    options.chunk_size = chunk_size;
+    Ok(options)
+}
+
+#[derive(Clone, Copy)]
 enum Command {
     MdbxToRocks,
     RocksToV3,
+    V31ToV32,
     RocksToMdbx,
     Verify,
     VerifyRocks,
@@ -188,11 +252,11 @@ struct ToolArgs {
     replace_incomplete: bool,
     dry_run: bool,
     allow_unresolved: bool,
-    consensus_db: PathBuf,
-    ledger_id: u32,
-    slot_index: u64,
-    chunks_per_partition: u64,
-    chunk_size: u64,
+    consensus_db: Option<PathBuf>,
+    ledger_id: Option<u32>,
+    slot_index: Option<u64>,
+    chunks_per_partition: Option<u64>,
+    chunk_size: Option<u64>,
     left: PathBuf,
     right: PathBuf,
 }
@@ -209,6 +273,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     let command = match command.as_str() {
         "mdbx-to-rocks" => Command::MdbxToRocks,
         "rocks-to-v3" => Command::RocksToV3,
+        "v31-to-v32" => Command::V31ToV32,
         "rocks-to-mdbx" => Command::RocksToMdbx,
         "verify" => Command::Verify,
         "verify-rocks" => Command::VerifyRocks,
@@ -291,26 +356,19 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
-    let Some(consensus_db) = consensus_db else {
+    // Schema 3.1 and 3.2 verify-rocks are structural. Schema v2 verify-rocks
+    // still needs the consensus flags; `run` checks that after it reads SCHEMA.
+    let structural = matches!(command, Command::V31ToV32 | Command::VerifyRocks);
+    if !structural
+        && (consensus_db.is_none()
+            || ledger_id.is_none()
+            || slot_index.is_none()
+            || chunks_per_partition.is_none()
+            || chunk_size.is_none())
+    {
         eprintln!("{USAGE}");
         std::process::exit(2);
-    };
-    let Some(ledger_id) = ledger_id else {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    };
-    let Some(slot_index) = slot_index else {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    };
-    let Some(chunks_per_partition) = chunks_per_partition else {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    };
-    let Some(chunk_size) = chunk_size else {
-        eprintln!("{USAGE}");
-        std::process::exit(2);
-    };
+    }
     Ok(Some(ToolArgs {
         command,
         replace_incomplete,

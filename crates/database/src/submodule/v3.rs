@@ -6,7 +6,91 @@
 
 use irys_types::{H256, PartitionChunkOffset, RelativeChunkOffset};
 
-use super::tables::PendingBodyMigration;
+use super::tables::{OffsetMeta, PendingBodyMigration};
+
+/// Format byte at the end of a schema 3.2 offset value.
+const OFFSET_META_FORMAT: u8 = 1;
+/// The value begins with a data proof.
+const OFFSET_FLAG_HAS_PROOF: u8 = 0x01;
+/// The trailer contains the CRC32C of the packed chunk.
+const OFFSET_FLAG_CRC_PRESENT: u8 = 0x02;
+
+/// Encode one offset row.
+///
+/// The proof is a prefix so neighbouring proofs still share a compressed
+/// run. The trailer is last: CRC32C little-endian when the flag is set,
+/// then the flags byte, then [`OFFSET_META_FORMAT`]. A stored CRC of zero
+/// is a real checksum. Unknown is the flag being unset. The leaf is the
+/// last 64 bytes of the proof, not of this value.
+pub fn encode_offset_meta(meta: &OffsetMeta) -> eyre::Result<Vec<u8>> {
+    let proof = meta.proof.as_deref().unwrap_or(&[]);
+    let has_proof = meta.proof.is_some();
+    let has_crc = meta.crc.is_some();
+    if !has_proof && !has_crc {
+        eyre::bail!("offset row needs a proof or a checksum");
+    }
+    if has_proof && proof.is_empty() {
+        eyre::bail!("offset row proof is empty");
+    }
+    let mut out = Vec::with_capacity(proof.len() + 6);
+    if has_proof {
+        out.extend_from_slice(proof);
+    }
+    let mut flags = 0_u8;
+    if has_proof {
+        flags |= OFFSET_FLAG_HAS_PROOF;
+    }
+    if let Some(crc) = meta.crc {
+        flags |= OFFSET_FLAG_CRC_PRESENT;
+        out.extend_from_slice(&crc.to_le_bytes());
+    }
+    out.push(flags);
+    out.push(OFFSET_META_FORMAT);
+    Ok(out)
+}
+
+/// Decode one schema 3.2 offset value. A raw schema 3.1 proof does not decode.
+pub fn decode_offset_meta(bytes: &[u8]) -> eyre::Result<OffsetMeta> {
+    if bytes.len() < 2 {
+        eyre::bail!("offset row is {} bytes", bytes.len());
+    }
+    let format = bytes[bytes.len() - 1];
+    if format != OFFSET_META_FORMAT {
+        eyre::bail!("offset row format {format} is not {OFFSET_META_FORMAT}");
+    }
+    let flags = bytes[bytes.len() - 2];
+    if flags & !(OFFSET_FLAG_HAS_PROOF | OFFSET_FLAG_CRC_PRESENT) != 0 {
+        eyre::bail!("offset row flags {flags:#x} are not known");
+    }
+    let has_proof = flags & OFFSET_FLAG_HAS_PROOF != 0;
+    let has_crc = flags & OFFSET_FLAG_CRC_PRESENT != 0;
+    if !has_proof && !has_crc {
+        eyre::bail!("offset row has neither a proof nor a checksum");
+    }
+    let mut head = bytes.len() - 2;
+    let crc = if has_crc {
+        if head < 4 {
+            eyre::bail!("offset row checksum is truncated");
+        }
+        head -= 4;
+        let mut word = [0_u8; 4];
+        word.copy_from_slice(&bytes[head..head + 4]);
+        Some(u32::from_le_bytes(word))
+    } else {
+        None
+    };
+    let proof = if has_proof {
+        if head == 0 {
+            eyre::bail!("offset row proof is empty");
+        }
+        Some(bytes[..head].to_vec())
+    } else if head != 0 {
+        eyre::bail!("offset row has {head} bytes before a checksum-only trailer");
+    } else {
+        None
+    };
+    Ok(OffsetMeta { crc, proof })
+}
 
 pub(super) const PLACEMENT_LEN: usize = 64;
 pub(super) const DATA_ROOT_KEY_LEN: usize = 36;
@@ -304,6 +388,43 @@ pub(super) fn optional_u64(value: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offset_meta_round_trip_keeps_the_proof_as_a_prefix() {
+        let proof = vec![0x11_u8; 80];
+        let meta = OffsetMeta {
+            crc: Some(0),
+            proof: Some(proof.clone()),
+        };
+        let bytes = encode_offset_meta(&meta).unwrap();
+        assert_eq!(&bytes[..proof.len()], proof.as_slice());
+        assert_eq!(bytes[bytes.len() - 1], OFFSET_META_FORMAT);
+        assert_eq!(
+            bytes[bytes.len() - 2],
+            OFFSET_FLAG_HAS_PROOF | OFFSET_FLAG_CRC_PRESENT
+        );
+        assert_eq!(decode_offset_meta(&bytes).unwrap(), meta);
+
+        let crc_only = OffsetMeta {
+            crc: Some(7),
+            proof: None,
+        };
+        let only = encode_offset_meta(&crc_only).unwrap();
+        assert_eq!(only.len(), 6);
+        assert_eq!(decode_offset_meta(&only).unwrap(), crc_only);
+
+        let proof_only = OffsetMeta {
+            crc: None,
+            proof: Some(b"proof".to_vec()),
+        };
+        assert_eq!(
+            decode_offset_meta(&encode_offset_meta(&proof_only).unwrap()).unwrap(),
+            proof_only
+        );
+        assert!(encode_offset_meta(&OffsetMeta::default()).is_err());
+        assert!(decode_offset_meta(&[1, 0]).is_err());
+        assert!(decode_offset_meta(&[OFFSET_FLAG_HAS_PROOF, OFFSET_META_FORMAT]).is_err());
+    }
 
     fn placed(end: u32, byte: u8, size: u64) -> V3Placement {
         V3Placement {

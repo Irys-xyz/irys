@@ -47,8 +47,8 @@ use super::{
     missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range, pending_body_migrations_from,
     set_data_root_infos_for_data_root, set_path_hashes_by_offset,
     tables::{
-        ChunkPathHashes, DataRootInfo, DataRootInfos, PendingBodyMigration, Placement,
-        TxLeafBinding,
+        ChunkPathHashes, DataRootInfo, DataRootInfos, OffsetMeta, PackedOffsetRow,
+        PendingBodyMigration, Placement, TxLeafBinding,
     },
     write_data_path_updates,
 };
@@ -201,6 +201,50 @@ pub trait SubmoduleRead {
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         eyre::bail!("content-hash offset index is not supported on this schema")
     }
+
+    /// Schema 3.2 stores a packed-chunk checksum in the offset row.
+    ///
+    /// The default is false. MDBX and schema v2 do not.
+    fn stores_offset_crc(&self) -> bool {
+        false
+    }
+
+    /// Proof and checksum at `offset`. `Ok(None)` when the key is absent.
+    ///
+    /// The default is the schema v2 proof with no checksum. A checksum-only
+    /// row returns `proof: None`.
+    fn get_offset_meta(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>> {
+        Ok(self
+            .get_data_path_by_offset(offset)?
+            .map(|proof| OffsetMeta {
+                crc: None,
+                proof: Some(proof),
+            }))
+    }
+
+    /// Stored offset rows in `[start, end]`, including checksum-only rows.
+    ///
+    /// The default is empty. Schema v2 and MDBX do not scan this family to
+    /// answer a checksum read.
+    fn offset_metas_in_range(
+        &self,
+        _start: PartitionChunkOffset,
+        _end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, OffsetMeta)>> {
+        Ok(Vec::new())
+    }
+
+    /// `true` when any offset in the inclusive span has no checksum.
+    ///
+    /// The default is `true`. An engine that does not store checksums never
+    /// reports a complete span.
+    fn offset_crc_missing(
+        &self,
+        _start: PartitionChunkOffset,
+        _end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        Ok(true)
+    }
 }
 
 /// Exclusive write batch. Reads inside the batch see its own writes.
@@ -326,6 +370,26 @@ pub trait SubmoduleWrite: SubmoduleRead {
     ) -> eyre::Result<()> {
         Ok(())
     }
+
+    /// Replace each offset row with the packed checksum and optional proof.
+    ///
+    /// A proof that no interval covers is returned and not stored. Its
+    /// checksum is not stored either. Schema v2 and MDBX ignore `crc` and
+    /// write proofs through [`Self::write_data_path_updates`].
+    fn write_packed_offset_rows(
+        &mut self,
+        rows: Vec<PackedOffsetRow>,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        let updates = rows
+            .into_iter()
+            .filter_map(|row| {
+                let proof = row.proof?;
+                let hash = H256(irys_types::hash_sha256(&proof));
+                Some((row.offset, hash, proof))
+            })
+            .collect();
+        self.write_data_path_updates(updates)
+    }
 }
 
 /// Rows removed from the two presence families.
@@ -396,6 +460,32 @@ pub trait SubmoduleStore: Send + Sync {
 
     /// Remove the reset marker. Same sync as `update`.
     fn clear_reset_in_progress(&self) -> eyre::Result<()>;
+
+    /// Schema 3.2 stores a packed-chunk checksum in the offset row.
+    fn stores_offset_crc(&self) -> bool {
+        false
+    }
+
+    /// Metadata flag. Set only after every offset in a packed module has a checksum.
+    fn chunk_crc_complete(&self) -> eyre::Result<bool> {
+        Ok(false)
+    }
+
+    /// Set or clear the checksum-complete flag. `clear` does not remove it.
+    fn set_chunk_crc_complete(&self, _complete: bool) -> eyre::Result<()> {
+        Ok(())
+    }
+
+    /// On an entropy span, keep checksum-only rows and drop proof rows.
+    ///
+    /// The default drops every presence row. Schema v2 and MDBX have no
+    /// checksum row to keep.
+    fn retain_entropy_crc_rows(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        self.drop_presence_in_ranges(ranges)
+    }
 }
 
 /// MDBX submodule index. One environment, the tables in [`super::tables`].
@@ -1323,6 +1413,27 @@ impl SubmoduleIndex {
         }
     }
 
+    /// Replace `ChunkDataPathByOffset` values. The bytes are stored as given.
+    #[cfg(feature = "rocksdb")]
+    pub fn write_raw_data_paths(
+        &self,
+        rows: impl IntoIterator<Item = (PartitionChunkOffset, Vec<u8>)>,
+    ) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(_) => eyre::bail!("raw offset rows are rocks only"),
+            Self::Rocks(store) => store.write_raw_data_paths(rows),
+        }
+    }
+
+    /// Flush and compact the offset-row family.
+    #[cfg(feature = "rocksdb")]
+    pub fn compact_data_paths(&self) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(_) => eyre::bail!("offset-row compact is rocks only"),
+            Self::Rocks(store) => store.compact_data_paths(),
+        }
+    }
+
     /// Live SST files in the v1 path-hash family.
     #[cfg(feature = "rocksdb")]
     pub fn legacy_path_hash_ssts(&self) -> eyre::Result<Vec<LegacySstSpan>> {
@@ -1648,6 +1759,41 @@ impl SubmoduleStore for SubmoduleIndex {
             Self::Mdbx(store) => store.clear_reset_in_progress(),
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.clear_reset_in_progress(),
+        }
+    }
+
+    fn stores_offset_crc(&self) -> bool {
+        match self {
+            Self::Mdbx(store) => store.stores_offset_crc(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.stores_offset_crc(),
+        }
+    }
+
+    fn chunk_crc_complete(&self) -> eyre::Result<bool> {
+        match self {
+            Self::Mdbx(store) => store.chunk_crc_complete(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.chunk_crc_complete(),
+        }
+    }
+
+    fn set_chunk_crc_complete(&self, complete: bool) -> eyre::Result<()> {
+        match self {
+            Self::Mdbx(store) => store.set_chunk_crc_complete(complete),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.set_chunk_crc_complete(complete),
+        }
+    }
+
+    fn retain_entropy_crc_rows(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        match self {
+            Self::Mdbx(store) => store.retain_entropy_crc_rows(ranges),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(store) => store.retain_entropy_crc_rows(ranges),
         }
     }
 }

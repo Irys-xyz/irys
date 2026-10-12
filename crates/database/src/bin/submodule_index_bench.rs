@@ -36,9 +36,11 @@ use std::time::{Duration, Instant};
 
 use irys_database::IrysDatabaseArgs as _;
 use irys_database::submodule::tables::{
-    ChunkPathHashes, DataRootInfo, PendingBodyMigration, TxLeafBinding,
+    ChunkPathHashes, DataRootInfo, OffsetMeta, PendingBodyMigration, TxLeafBinding,
 };
-use irys_database::submodule::{LegacySstSpan, RocksTuning, SubmoduleIndex, SubmoduleStore as _};
+use irys_database::submodule::{
+    LegacySstSpan, RocksTuning, SubmoduleIndex, SubmoduleStore as _, encode_offset_meta,
+};
 use irys_types::{DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset, TERABYTE};
 use reth_db::mdbx::DatabaseArguments;
 
@@ -115,6 +117,8 @@ enum Workload {
     SmallTxs,
     /// Transactions of [`MID_TX_MIN`] to [`MID_TX_MAX`] chunks, one root each.
     MidTxs,
+    /// SST bytes of the offset row with and without the checksum trailer.
+    CrcRows,
 }
 
 impl Workload {
@@ -129,6 +133,7 @@ impl Workload {
             Self::FilterReuse => "filter-reuse",
             Self::SmallTxs => "small-txs",
             Self::MidTxs => "mid-txs",
+            Self::CrcRows => "crc-rows",
         }
     }
 
@@ -291,6 +296,13 @@ fn main() -> eyre::Result<()> {
         );
         return run_filter_reuse(&args);
     }
+    if args.workload == Workload::CrcRows {
+        println!(
+            "mode=crc-rows sample_chunks={} partition_chunks={PARTITION_CHUNKS} schema=3.2",
+            args.chunks
+        );
+        return run_crc_rows(&args);
+    }
     if args.workload.is_worst() {
         let raw = u64::from(args.chunks) * DATA_PROOF_BYTES as u64;
         let full = PARTITION_CHUNKS * DATA_PROOF_BYTES as u64;
@@ -424,7 +436,8 @@ fn memory_predict(args: &Args) -> String {
         | Workload::Worst
         | Workload::FilterReuse
         | Workload::SmallTxs
-        | Workload::MidTxs => String::new(),
+        | Workload::MidTxs
+        | Workload::CrcRows => String::new(),
     }
 }
 
@@ -438,7 +451,8 @@ fn run_memory(args: &Args) -> eyre::Result<()> {
         | Workload::Worst
         | Workload::FilterReuse
         | Workload::SmallTxs
-        | Workload::MidTxs => {
+        | Workload::MidTxs
+        | Workload::CrcRows => {
             eyre::bail!("not a memory profile")
         }
     }
@@ -1587,6 +1601,196 @@ fn disk_name(text: &str, major: u32, minor: u32) -> Option<String> {
     None
 }
 
+#[derive(Clone, Copy)]
+enum CrcShape {
+    /// One 4096-chunk transaction. Neighbouring leaves share the upper proof.
+    MidShared,
+    /// One max-size transaction. The sample is a contiguous leaf prefix.
+    WorstShared,
+    /// A distinct max-depth proof on every offset.
+    WorstUniform,
+}
+
+#[derive(Clone, Copy)]
+enum CrcLayout {
+    Raw,
+    SuffixNoCrc,
+    SuffixCrc,
+    PrefixCrc,
+}
+
+impl CrcLayout {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::SuffixNoCrc => "suffix_no_crc",
+            Self::SuffixCrc => "suffix_crc",
+            Self::PrefixCrc => "prefix_crc",
+        }
+    }
+}
+
+fn run_crc_rows(args: &Args) -> eyre::Result<()> {
+    let shared = args.chunks;
+    let uniform = shared.min(131_072);
+    let shapes = [
+        ("mid_shared", shared, CrcShape::MidShared),
+        ("worst_shared", shared, CrcShape::WorstShared),
+        ("worst_uniform", uniform, CrcShape::WorstUniform),
+    ];
+    let layouts = [
+        CrcLayout::Raw,
+        CrcLayout::SuffixNoCrc,
+        CrcLayout::SuffixCrc,
+        CrcLayout::PrefixCrc,
+    ];
+    for (shape, chunks, kind) in shapes {
+        for layout in layouts {
+            measure_crc_layout(args, shape, chunks, kind, layout)?;
+        }
+    }
+    measure_crc_only(args, shared)?;
+    println!(
+        "crc_rows note=sample partition_chunks={PARTITION_CHUNKS} extrapolated_sst is sample_sst / sample_chunks * partition_chunks"
+    );
+    Ok(())
+}
+
+fn measure_crc_layout(
+    args: &Args,
+    shape: &str,
+    chunks: u32,
+    kind: CrcShape,
+    layout: CrcLayout,
+) -> eyre::Result<()> {
+    let path = args.dir.join(format!("crc-{shape}-{}", layout.name()));
+    fs::create_dir_all(&path)?;
+    let store = open_bench_rocks(&path, args)?;
+    let mut total_value = 0_u64;
+    let mut batch = Vec::with_capacity(4_096);
+    for index in 0..chunks {
+        let proof = crc_shape_proof(kind, index);
+        let bytes = crc_layout_bytes(layout, &proof, index)?;
+        total_value = total_value.saturating_add(bytes.len() as u64);
+        batch.push((PartitionChunkOffset::from(index), bytes));
+        if batch.len() == 4_096 {
+            store.write_raw_data_paths(std::mem::take(&mut batch))?;
+        }
+    }
+    if !batch.is_empty() {
+        store.write_raw_data_paths(batch)?;
+    }
+    store.compact_data_paths()?;
+    let sst = data_path_sst_bytes(&store)?;
+    drop(store);
+    print_crc_size(shape, layout.name(), chunks, total_value, sst);
+    fs::remove_dir_all(&path)?;
+    Ok(())
+}
+
+fn measure_crc_only(args: &Args, chunks: u32) -> eyre::Result<()> {
+    let path = args.dir.join("crc-only");
+    fs::create_dir_all(&path)?;
+    let store = open_bench_rocks(&path, args)?;
+    let mut total_value = 0_u64;
+    let mut batch = Vec::with_capacity(4_096);
+    for index in 0..chunks {
+        let bytes = encode_offset_meta(&OffsetMeta {
+            crc: Some(index.wrapping_mul(0x0100_0001)),
+            proof: None,
+        })?;
+        total_value = total_value.saturating_add(bytes.len() as u64);
+        batch.push((PartitionChunkOffset::from(index), bytes));
+        if batch.len() == 4_096 {
+            store.write_raw_data_paths(std::mem::take(&mut batch))?;
+        }
+    }
+    if !batch.is_empty() {
+        store.write_raw_data_paths(batch)?;
+    }
+    store.compact_data_paths()?;
+    let sst = data_path_sst_bytes(&store)?;
+    drop(store);
+    print_crc_size("crc_only", "suffix", chunks, total_value, sst);
+    fs::remove_dir_all(&path)?;
+    Ok(())
+}
+
+fn print_crc_size(shape: &str, layout: &str, chunks: u32, total_value: u64, sst: u64) {
+    let chunks_f = f64::from(chunks);
+    let value_per = total_value as f64 / chunks_f;
+    let sst_per = sst as f64 / chunks_f;
+    let extrapolated = sst_per * PARTITION_CHUNKS as f64;
+    println!(
+        "crc_rows shape={shape} layout={layout} chunks={chunks} value_bytes={total_value} value_bytes_per_chunk={value_per:.2} sst_bytes={sst} sst_bytes_per_chunk={sst_per:.2} extrapolated_partition_sst={extrapolated:.0}"
+    );
+}
+
+fn data_path_sst_bytes(store: &SubmoduleIndex) -> eyre::Result<u64> {
+    let files = store.column_file_usage()?;
+    Ok(files
+        .into_iter()
+        .find(|cf| cf.name == "ChunkDataPathByOffset")
+        .map(|cf| cf.sst_bytes)
+        .unwrap_or(0))
+}
+
+fn crc_shape_proof(kind: CrcShape, index: u32) -> Vec<u8> {
+    match kind {
+        CrcShape::MidShared => {
+            let leaf = u64::from(index % 4_096);
+            shared_data_proof(&[0x11_u8; 32], 4_096, leaf, CHUNK_SIZE)
+        }
+        CrcShape::WorstShared => shared_data_proof(
+            &[0x22_u8; 32],
+            MAX_DATA_TX_CHUNKS,
+            u64::from(index),
+            CHUNK_SIZE,
+        ),
+        CrcShape::WorstUniform => {
+            let end = u64::from(index)
+                .saturating_add(1)
+                .saturating_mul(CHUNK_SIZE);
+            shaped_proof(DATA_PROOF_LAYERS, end, u64::from(index))
+        }
+    }
+}
+
+fn crc_layout_bytes(layout: CrcLayout, proof: &[u8], index: u32) -> eyre::Result<Vec<u8>> {
+    let crc = index.wrapping_mul(0x0100_0001);
+    match layout {
+        CrcLayout::Raw => Ok(proof.to_vec()),
+        CrcLayout::SuffixNoCrc => encode_offset_meta(&OffsetMeta {
+            crc: None,
+            proof: Some(proof.to_vec()),
+        }),
+        CrcLayout::SuffixCrc => encode_offset_meta(&OffsetMeta {
+            crc: Some(crc),
+            proof: Some(proof.to_vec()),
+        }),
+        CrcLayout::PrefixCrc => Ok(encode_prefix_record(proof, Some(crc))),
+    }
+}
+
+/// Bench-only prefix. Production records put the trailer after the proof.
+fn encode_prefix_record(proof: &[u8], crc: Option<u32>) -> Vec<u8> {
+    let mut flags = 0_u8;
+    if !proof.is_empty() {
+        flags |= 0x01;
+    }
+    if crc.is_some() {
+        flags |= 0x02;
+    }
+    let mut out = Vec::with_capacity(proof.len() + 6);
+    out.push(1);
+    out.push(flags);
+    if let Some(crc) = crc {
+        out.extend_from_slice(&crc.to_le_bytes());
+    }
+    out.extend_from_slice(proof);
+    out
+}
+
 fn timed(f: impl FnOnce() -> eyre::Result<()>) -> eyre::Result<u128> {
     let started = Instant::now();
     f()?;
@@ -1873,7 +2077,8 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
         | Workload::Worst
         | Workload::FilterReuse
         | Workload::SmallTxs
-        | Workload::MidTxs => false,
+        | Workload::MidTxs
+        | Workload::CrcRows => false,
     };
     if !args.workload.is_mid() && !tree_over && !memory_over {
         return Ok(());
@@ -2230,6 +2435,16 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     if rewrite_filters && !workload.is_filter_reuse() {
         eyre::bail!("--rewrite-filters applies only to --profile filter-reuse");
     }
+    if workload == Workload::CrcRows {
+        if engines_set && engines != Engines::Rocks {
+            eyre::bail!("--profile crc-rows runs rocks only");
+        }
+        engines = Engines::Rocks;
+        schema = IndexSchema::V3;
+        if !chunks_set {
+            chunks = 262_144;
+        }
+    }
     if workload.is_filter_reuse() {
         if engines_set && engines != Engines::Rocks {
             eyre::bail!("--profile filter-reuse runs rocks only");
@@ -2385,8 +2600,9 @@ fn parse_profile(value: &str) -> eyre::Result<Workload> {
         "index-span" => Ok(Workload::IndexSpan),
         "offset-rows" => Ok(Workload::OffsetRows),
         "filter-reuse" => Ok(Workload::FilterReuse),
+        "crc-rows" => Ok(Workload::CrcRows),
         other => eyre::bail!(
-            "unknown profile {other}; use filled, mid, worst, mem-dbs, index-span, offset-rows, or filter-reuse"
+            "unknown profile {other}; use filled, mid, worst, mem-dbs, index-span, offset-rows, filter-reuse, or crc-rows"
         ),
     }
 }
@@ -2460,6 +2676,7 @@ Baseline uses partitioned filters and a 10-bit bloom only on families whose poin
 Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, and fdatasync-wal-rotate-compact changes one setting. \
 --rocks-block-cache overrides that preset's cache size and does not change the shard count. A new block size or a switch between baseline and full-filters needs an empty directory. An existing SST keeps its filter until --rewrite-filters.\n\
 --profile filter-reuse opens an existing schema-v1 rocks/ directory. It refuses a directory that also contains mdbx/. \
+--profile crc-rows writes schema 3.2 offset records on RocksDB and prints SST bytes per chunk for raw proofs, the production suffix trailer, a prefix trailer, and checksum-only rows. The default sample is 262144 chunks. The uniform shape is capped at 131072. The line extrapolated_partition_sst scales that sample to 75534400 offsets. \
 --rewrite-filters forces a bottommost compaction of ChunkPathHashesByOffset so the existing SST is rewritten with this open's filter. A plain compact can trivial-move the file and keep the old filter. The run prints one sst line per live path-hash file and sst_cover for the sampled offsets. \
 Default --chunks is 20971520, the first max transaction in the stuck worst-case run.\n\
 --list-rocks prints the presets and exits.\n\

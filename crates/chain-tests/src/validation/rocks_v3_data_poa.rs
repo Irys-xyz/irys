@@ -15,6 +15,7 @@ use crate::utils::{self, IrysNodeTest};
 use irys_actors::block_producer::BlockProducerCommand;
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_database::submodule::tables::SUBMODULE_SCHEMA_V3;
 use irys_database::tx_path_derive::derive_tx_path_at_offset;
 use irys_domain::ChunkType;
 use irys_testing_utils::initialize_tracing;
@@ -27,7 +28,6 @@ use irys_types::{
 };
 
 const CHUNK_SIZE: usize = 32;
-const SCHEMA_V3: &str = "irys-submodule-index 3.1\n";
 
 fn rocks_config(chunks_in_partition: u64, blocks_in_epoch: u64) -> NodeConfig {
     let mut config = NodeConfig::testing();
@@ -62,7 +62,7 @@ fn assert_rocks_v3(base: &Path) -> eyre::Result<()> {
         }
         let text = std::fs::read_to_string(&schema)?;
         eyre::ensure!(
-            text == SCHEMA_V3,
+            text == SUBMODULE_SCHEMA_V3,
             "{} is {text:?}, want schema v3",
             schema.display()
         );

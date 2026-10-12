@@ -59,8 +59,9 @@ use super::interval::{
 use super::store::PresenceReconcile;
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
-    DataRootInfosByDataRoot, PendingBodyMigration, PendingBodyMigrationsByOffset, Placement,
-    SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
+    DataRootInfosByDataRoot, OffsetMeta, PackedOffsetRow, PendingBodyMigration,
+    PendingBodyMigrationsByOffset, Placement, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3,
+    SUBMODULE_SCHEMA_V3_1, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
     TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
 };
 use super::v3::{self, IndexLayout};
@@ -738,7 +739,7 @@ fn raise_default_env_threads(env: &rocksdb::Env, flush: i32, compaction: i32) {
 
 const CF_COUNT: usize = 9;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Cf {
     PathHashes,
     DataPath,
@@ -1051,6 +1052,8 @@ pub struct RocksSubmoduleStore {
     submodule: String,
     /// Chosen from the SCHEMA file before `DB::open`. An empty directory is v3.
     layout: IndexLayout,
+    /// Schema 3.1 values are raw proofs. Schema 3.2 values are versioned records.
+    raw_proofs: bool,
     /// A read-only open refuses every write, including compaction and the schema stamp.
     read_only: bool,
     /// Conversion open. Writes skip the WAL. [`Self::seal_and_stamp`] flushes
@@ -1229,6 +1232,7 @@ impl RocksSubmoduleStore {
             path,
             stats,
             layout: IndexLayout::V2,
+            raw_proofs: false,
             read_only: false,
             bulk_load: false,
             lock_file: None,
@@ -1264,6 +1268,45 @@ impl RocksSubmoduleStore {
             path,
             stats: None,
             layout,
+            raw_proofs: false,
+            read_only: true,
+            bulk_load: false,
+            lock_file,
+        })
+    }
+
+    /// Read-only open of a schema 3.1 directory. Values are raw proofs.
+    ///
+    /// The node open refuses 3.1. The converter uses this so it can wrap
+    /// those proofs into a new schema 3.2 directory.
+    pub(super) fn open_read_only_v31(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let marker = path.join(SCHEMA_FILE);
+        let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
+        if text != SUBMODULE_SCHEMA_V3_1 {
+            eyre::bail!(
+                "rocks index {} is not schema 3.1 ({text:?}). `v31-to-v32` reads only that marker.",
+                path.display()
+            );
+        }
+        let lock_file = hold_rocks_lock(&path)?;
+        let db = open_db_read_only(&path)?;
+        let group = GroupCommit::new();
+        let db = Arc::new(db);
+        let submodule = submodule_label(&path);
+        let layout = IndexLayout::V3;
+        Ok(Self {
+            lifetime: EngineLifetime::new(Arc::clone(&group)),
+            compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone(), layout)?,
+            db,
+            resources: None,
+            write: Arc::new(Mutex::new(())),
+            group,
+            submodule,
+            path,
+            stats: None,
+            layout,
+            raw_proofs: true,
             read_only: true,
             bulk_load: false,
             lock_file,
@@ -1371,6 +1414,54 @@ impl RocksSubmoduleStore {
         Ok(by_name.into_values().collect())
     }
 
+    /// Replace `ChunkDataPathByOffset` values with these bytes. No codec.
+    ///
+    /// The bench uses this to compare record layouts. Production writes go
+    /// through [`SubmoduleWrite::write_packed_offset_rows`]. The WAL stays
+    /// on: this open recycles log files, and that option rejects
+    /// `disableWAL`. The caller compacts before it reads SST sizes, so the
+    /// WAL is not part of the measurement.
+    pub fn write_raw_data_paths(
+        &self,
+        rows: impl IntoIterator<Item = (PartitionChunkOffset, Vec<u8>)>,
+    ) -> eyre::Result<()> {
+        let _guard = self.lock_write();
+        let handle = cf_handle(&self.db, Cf::DataPath)?;
+        let mut batch = WriteBatch::default();
+        let mut pending = 0_u32;
+        for (offset, value) in rows {
+            batch.put_cf(&handle, encode_key(offset), value);
+            pending += 1;
+            if pending == 4_096 {
+                self.db
+                    .write_opt(std::mem::take(&mut batch), &write_opts(false, false))
+                    .wrap_err("write raw offset rows")?;
+                pending = 0;
+            }
+        }
+        if pending > 0 {
+            self.db
+                .write_opt(batch, &write_opts(false, false))
+                .wrap_err("write raw offset rows")?;
+        }
+        Ok(())
+    }
+
+    /// Flush and compact `ChunkDataPathByOffset`, rewriting the bottom level.
+    pub fn compact_data_paths(&self) -> eyre::Result<()> {
+        let _guard = self.lock_write();
+        let handle = cf_handle(&self.db, Cf::DataPath)?;
+        self.db
+            .flush_cf(&handle)
+            .wrap_err("flush data path column")?;
+        let mut opts = rocksdb::CompactOptions::default();
+        opts.set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::Force);
+        opts.set_exclusive_manual_compaction(true);
+        self.db
+            .compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
+        Ok(())
+    }
+
     fn legacy_path_hash_cf(&self) -> eyre::Result<&rocksdb::ColumnFamily> {
         self.db
             .cf_handle(LEGACY_PATH_HASH_CF)
@@ -1438,6 +1529,7 @@ impl RocksSubmoduleStore {
             path,
             stats,
             layout,
+            raw_proofs: false,
             read_only: false,
             bulk_load: false,
             lock_file: None,
@@ -1491,6 +1583,70 @@ impl RocksSubmoduleStore {
             self.db
                 .compact_range_cf_opt(&handle, None::<&[u8]>, None::<&[u8]>, &opts);
         }
+    }
+
+    /// Copy schema 3.1 families into a schema 3.2 target.
+    ///
+    /// Data-path values are wrapped with the checksum unset. Other families
+    /// are copied byte for byte. The schema row is left for `seal_and_stamp`.
+    /// Content-hash keys stay valid because the proof bytes do not change.
+    pub(super) fn copy_wrapping_proofs(&self, dst: &Self) -> eyre::Result<(u64, u64)> {
+        eyre::ensure!(self.raw_proofs, "source is not a schema 3.1 index");
+        eyre::ensure!(
+            dst.layout == IndexLayout::V3 && !dst.raw_proofs,
+            "target is not a schema 3.2 index"
+        );
+        let schema_key = encode_key(MetadataKey::DBSchemaVersion);
+        let mut proofs = 0_u64;
+        let mut other = 0_u64;
+        for cf in families(IndexLayout::V3) {
+            let src_handle = cf_handle(&self.db, cf)?;
+            let dst_handle = cf_handle(&dst.db, cf)?;
+            let snap = self.db.snapshot();
+            let mut iter = snap.raw_iterator_cf_opt(&src_handle, full_scan_options());
+            iter.seek_to_first();
+            let mut batch = WriteBatch::new();
+            let mut pending = 0_usize;
+            while let Some(key) = iter.key() {
+                let key_owned = key.to_vec();
+                let value = iter.value().unwrap_or(&[]).to_vec();
+                if cf == Cf::Metadata && key_owned.as_slice() == schema_key.as_slice() {
+                    iter.next();
+                    continue;
+                }
+                let stored = if cf == Cf::DataPath {
+                    if value.is_empty() {
+                        iter.next();
+                        continue;
+                    }
+                    proofs = proofs.saturating_add(1);
+                    v3::encode_offset_meta(&OffsetMeta {
+                        crc: None,
+                        proof: Some(value),
+                    })?
+                } else {
+                    other = other.saturating_add(1);
+                    value
+                };
+                batch.put_cf(&dst_handle, &key_owned, stored);
+                pending += 1;
+                if pending >= 1024 {
+                    dst.db
+                        .write_opt(batch, &write_opts(false, true))
+                        .wrap_err("copy schema 3.1 rows")?;
+                    batch = WriteBatch::new();
+                    pending = 0;
+                }
+                iter.next();
+            }
+            iter.status().wrap_err("scan schema 3.1 column family")?;
+            if pending > 0 {
+                dst.db
+                    .write_opt(batch, &write_opts(false, true))
+                    .wrap_err("copy schema 3.1 rows")?;
+            }
+        }
+        Ok((proofs, other))
     }
 
     pub(super) fn schema_bytes(&self) -> eyre::Result<Option<Vec<u8>>> {
@@ -1849,6 +2005,7 @@ impl RocksSubmoduleStore {
             snap: &snap,
             overlay: Overlay::default(),
             layout: self.layout,
+            raw_proofs: self.raw_proofs,
             bindings: HashMap::new(),
             unfilled: Vec::new(),
             origin: None,
@@ -2250,7 +2407,13 @@ impl RocksSubmoduleStore {
             if data_count > 0 {
                 deletes.push((Cf::DataPath, start, end));
                 if self.layout == IndexLayout::V3 {
-                    content_deletes.extend(content_keys_for_proofs(&self.db, &snap, start, end)?);
+                    content_deletes.extend(content_keys_for_proofs(
+                        &self.db,
+                        &snap,
+                        self.raw_proofs,
+                        start,
+                        end,
+                    )?);
                 }
             }
         }
@@ -2282,6 +2445,77 @@ impl RocksSubmoduleStore {
         }
         Ok(PresenceReconcile {
             path_hash_rows,
+            data_path_rows,
+        })
+    }
+
+    /// Drop proof rows in each span. Keep a checksum-only row.
+    ///
+    /// A proof row's checksum was computed over data bytes. After the span
+    /// is entropy those bytes are gone, so the row is dropped and the offset
+    /// is unknown until the next entropy write.
+    fn retain_entropy_crc_rows_v3(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        if ranges.iter().all(|(start, end)| start > end) {
+            return Ok(PresenceReconcile::default());
+        }
+        let _guard = self.lock_write();
+        let snap = self.db.snapshot();
+        let mut deletes = Vec::new();
+        let mut content_deletes = Vec::new();
+        for &(start, end) in ranges {
+            if start > end {
+                continue;
+            }
+            let handle = cf_handle(&self.db, Cf::DataPath)?;
+            let mut opts = full_scan_options();
+            opts.set_iterate_upper_bound(exclusive_end_key(end));
+            let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
+            iter.seek(encode_key(start));
+            while let Some(key) = iter.key() {
+                let key_owned = key.to_vec();
+                let value = iter.value().unwrap_or(&[]).to_vec();
+                if let Ok(offset) = PartitionChunkOffset::decode(&key_owned) {
+                    let meta = stored_offset_meta(false, &value)?;
+                    if meta.proof.is_some() {
+                        deletes.push(key_owned);
+                        if let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) {
+                            content_deletes.push(v3::content_key(&hash, offset).to_vec());
+                        }
+                    }
+                }
+                iter.next();
+            }
+            iter.status().wrap_err("scan entropy offset rows")?;
+        }
+        drop(snap);
+        let data_path_rows = u64::try_from(deletes.len()).unwrap_or(u64::MAX);
+        if deletes.is_empty() {
+            return Ok(PresenceReconcile::default());
+        }
+        let mut batch = WriteBatch::new();
+        let data = cf_handle(&self.db, Cf::DataPath)?;
+        for key in &deletes {
+            batch.delete_cf(&data, key);
+        }
+        if !content_deletes.is_empty() {
+            let content = cf_handle(&self.db, Cf::Content)?;
+            for key in &content_deletes {
+                batch.delete_cf(&content, key);
+            }
+        }
+        let disable_wal = self.bulk_load;
+        self.db
+            .write_opt(batch, &write_opts(true, disable_wal))
+            .wrap_err("drop entropy proof rows")?;
+        if !disable_wal {
+            self.group.note_wal_sync();
+            self.group.cover_durable();
+        }
+        Ok(PresenceReconcile {
+            path_hash_rows: 0,
             data_path_rows,
         })
     }
@@ -2431,9 +2665,12 @@ impl RocksSubmoduleStore {
         {
             let handle = cf_handle(&self.db, Cf::DataPath)?;
             for item in snap.iterator_cf(&handle, IteratorMode::Start) {
-                let (key, _) = item.wrap_err("scan data paths")?;
+                let (key, value) = item.wrap_err("scan data paths")?;
                 let offset = PartitionChunkOffset::decode(&key)?.0;
-                if !covers(offset) {
+                let meta = stored_offset_meta(self.raw_proofs, &value)?;
+                // A checksum-only row is an entropy chunk. It is not a proof
+                // and does not have to sit inside a placement.
+                if meta.proof.is_some() && !covers(offset) {
                     findings.push(format!("data path {offset} is outside every interval"));
                 }
             }
@@ -2520,8 +2757,9 @@ impl RocksSubmoduleStore {
             while let Some(key) = iter.key() {
                 let key_owned = key.to_vec();
                 let value = iter.value().unwrap_or(&[]).to_vec();
+                let meta = stored_offset_meta(self.raw_proofs, &value)?;
                 if let Ok(offset) = PartitionChunkOffset::decode(&key_owned)
-                    && let Some(hash) = content_hash_of(&value)
+                    && let Some(hash) = meta.proof.as_deref().and_then(content_hash_of)
                 {
                     audit.proofs_with_leaf = audit.proofs_with_leaf.saturating_add(1);
                     mix_key(&mut from_proofs, &v3::content_key(&hash, offset));
@@ -2587,6 +2825,7 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
             snap: &snap,
             overlay: None,
             layout: self.layout,
+            raw_proofs: self.raw_proofs,
         };
         f(&mut rows)
     }
@@ -2631,6 +2870,46 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
 
     fn clear_reset_in_progress(&self) -> eyre::Result<()> {
         self.write_metadata(MetadataKey::SubmoduleResetInProgress, None)
+    }
+
+    fn stores_offset_crc(&self) -> bool {
+        self.layout == IndexLayout::V3 && !self.raw_proofs
+    }
+
+    fn chunk_crc_complete(&self) -> eyre::Result<bool> {
+        if !self.stores_offset_crc() {
+            return Ok(false);
+        }
+        Ok(self
+            .read_raw_metadata(MetadataKey::ChunkCrcComplete)?
+            .is_some())
+    }
+
+    fn set_chunk_crc_complete(&self, complete: bool) -> eyre::Result<()> {
+        if !self.stores_offset_crc() {
+            return Ok(());
+        }
+        // Presence is the flag. Skip the synced write when the stored bit
+        // already matches, so a durable point does not fsync a no-op.
+        if self
+            .read_raw_metadata(MetadataKey::ChunkCrcComplete)?
+            .is_some()
+            == complete
+        {
+            return Ok(());
+        }
+        let value = complete.then(|| vec![1_u8]);
+        self.write_metadata(MetadataKey::ChunkCrcComplete, value)
+    }
+
+    fn retain_entropy_crc_rows(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<PresenceReconcile> {
+        if self.layout != IndexLayout::V3 || self.raw_proofs {
+            return self.delete_presence_ranges(ranges);
+        }
+        self.retain_entropy_crc_rows_v3(ranges)
     }
 }
 
@@ -3332,11 +3611,18 @@ fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
     }
     if path.join("CURRENT").is_file() {
         eyre::bail!(
-            "submodule index {} has RocksDB files but no SCHEMA marker, so the conversion is incomplete. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`) with --replace-incomplete. Do not start the node on it. Rollback of a completed schema v3 index is `submodule-index-convert rocks-to-mdbx`.",
+            "submodule index {} has RocksDB files but no SCHEMA marker, so the conversion is incomplete. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks`, `rocks-to-v3`, or `v31-to-v32`) with --replace-incomplete. Do not start the node on it. Rollback of a completed schema v3 index is `submodule-index-convert rocks-to-mdbx`.",
             path.display()
         );
     }
     Ok(())
+}
+
+fn schema_v31_refused(marker: &Path) -> eyre::Report {
+    eyre::eyre!(
+        "schema file {} is irys-submodule-index 3.1. Chunk checksums live in the offset row on schema 3.2. Run `submodule-index-convert v31-to-v32` into a new directory, then `submodule-index-convert verify-rocks`, and replace the live index only after verify succeeds. This open does not rewrite 3.1 in place.",
+        marker.display()
+    )
 }
 
 fn schema_text(layout: IndexLayout) -> &'static str {
@@ -3364,11 +3650,13 @@ fn resolve_layout(path: &Path, force: Option<IndexLayout>) -> eyre::Result<Index
             "schema file {} is irys-submodule-index 3, which has no column family ChunkOffsetsByContentHash. This open does not backfill and will not create an empty family: every stored proof would lack its reverse row. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`).",
             marker.display()
         );
+    } else if text == SUBMODULE_SCHEMA_V3_1 {
+        return Err(schema_v31_refused(&marker));
     } else if text == SUBMODULE_SCHEMA_V3 {
         IndexLayout::V3
     } else {
         eyre::bail!(
-            "schema file {} does not match this index engine ({text:?}). Run `submodule-index-convert` to move a v1 or v2 index to schema 3, or to roll a schema 3 index back to MDBX v2.",
+            "schema file {} does not match this index engine ({text:?}). Run `submodule-index-convert` to move a v1 or v2 index to schema 3.2, or to roll a schema 3.2 index back to MDBX v2. A schema 3.1 index uses `submodule-index-convert v31-to-v32`.",
             marker.display()
         );
     };
@@ -3507,8 +3795,13 @@ fn write_schema_row(db: &DB, layout: IndexLayout, disable_wal: bool) -> eyre::Re
     let expected = schema_value(layout);
     match db.get_cf(&handle, &key).wrap_err("read schema row")? {
         Some(found) if found == expected => Ok(()),
+        Some(found) if found.as_slice() == SUBMODULE_SCHEMA_V3_1.as_bytes() => {
+            eyre::bail!(
+                "schema row is irys-submodule-index 3.1. Chunk checksums live in the offset row on schema 3.2. Run `submodule-index-convert v31-to-v32` into a new directory, then `submodule-index-convert verify-rocks`, and replace the live index only after verify succeeds. This open does not rewrite 3.1 in place."
+            )
+        }
         Some(_) => eyre::bail!(
-            "schema row does not match this index engine. Run `submodule-index-convert` to move a v1 or v2 index to schema 3, or to roll a schema 3 index back to MDBX v2."
+            "schema row does not match this index engine. Run `submodule-index-convert` to move a v1 or v2 index to schema 3.2, or to roll a schema 3.2 index back to MDBX v2. A schema 3.1 index uses `submodule-index-convert v31-to-v32`."
         ),
         None => {
             let mut batch = WriteBatch::new();
@@ -3722,6 +4015,17 @@ fn mix_key(state: &mut (u64, u64), bytes: &[u8]) {
     state.1 = state.1.wrapping_add(hash);
 }
 
+/// Schema 3.1 stores the proof. Schema 3.2 stores the versioned record.
+fn stored_offset_meta(raw_proofs: bool, bytes: &[u8]) -> eyre::Result<OffsetMeta> {
+    if raw_proofs {
+        return Ok(OffsetMeta {
+            crc: None,
+            proof: (!bytes.is_empty()).then(|| bytes.to_vec()),
+        });
+    }
+    v3::decode_offset_meta(bytes)
+}
+
 fn content_hash_of(proof: &[u8]) -> Option<H256> {
     const LEAF_LEN: usize = 64;
     if proof.len() < LEAF_LEN {
@@ -3736,6 +4040,7 @@ fn content_hash_of(proof: &[u8]) -> Option<H256> {
 fn content_keys_for_proofs(
     db: &DB,
     snap: &rocksdb::Snapshot<'_>,
+    raw_proofs: bool,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<Vec<Vec<u8>>> {
@@ -3748,10 +4053,11 @@ fn content_keys_for_proofs(
     while let Some(key) = iter.key() {
         let key_owned = key.to_vec();
         let value = iter.value().unwrap_or(&[]).to_vec();
-        if let Ok(offset) = PartitionChunkOffset::decode(&key_owned)
-            && let Some(hash) = content_hash_of(&value)
-        {
-            keys.push(v3::content_key(&hash, offset).to_vec());
+        if let Ok(offset) = PartitionChunkOffset::decode(&key_owned) {
+            let meta = stored_offset_meta(raw_proofs, &value)?;
+            if let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) {
+                keys.push(v3::content_key(&hash, offset).to_vec());
+            }
         }
         iter.next();
     }
@@ -3827,6 +4133,7 @@ struct Rows<'a> {
     snap: &'a rocksdb::Snapshot<'a>,
     overlay: Option<&'a Overlay>,
     layout: IndexLayout,
+    raw_proofs: bool,
 }
 
 struct Batch<'a> {
@@ -3834,6 +4141,7 @@ struct Batch<'a> {
     snap: &'a rocksdb::Snapshot<'a>,
     overlay: Overlay,
     layout: IndexLayout,
+    raw_proofs: bool,
     /// Leaf bindings seen in this batch. Schema v3 does not store them.
     bindings: HashMap<H256, TxLeafBinding>,
     /// Interval starts in this batch that still need a data-root info.
@@ -3853,6 +4161,7 @@ impl<'a> Batch<'a> {
             snap: self.snap,
             overlay: Some(&self.overlay),
             layout: self.layout,
+            raw_proofs: self.raw_proofs,
         }
     }
 
@@ -3864,6 +4173,44 @@ impl<'a> Batch<'a> {
         self.overlay.maps[cf.index()].insert(key.to_vec(), Some(value));
     }
 
+    /// Replace the offset record and swap the content-hash key from the proof.
+    ///
+    /// Both fields empty deletes the row. The checksum is not part of the
+    /// content hash. A checksum-only row has no content-hash key.
+    fn put_offset_record(
+        &mut self,
+        offset: PartitionChunkOffset,
+        meta: OffsetMeta,
+    ) -> eyre::Result<()> {
+        let key = encode_key(offset);
+        let old = self.rows().get_raw(Cf::DataPath, &key)?;
+        let old_meta = match &old {
+            Some(bytes) => stored_offset_meta(self.raw_proofs, bytes)?,
+            None => OffsetMeta::default(),
+        };
+        let old_hash = old_meta.proof.as_deref().and_then(content_hash_of);
+        let new_hash = meta.proof.as_deref().and_then(content_hash_of);
+        if old_hash != new_hash
+            && let Some(old_hash) = old_hash
+        {
+            self.delete(Cf::Content, &v3::content_key(&old_hash, offset));
+        }
+        if let Some(new_hash) = new_hash {
+            self.put_bytes(Cf::Content, &v3::content_key(&new_hash, offset), Vec::new());
+        }
+        if meta.crc.is_none() && meta.proof.is_none() {
+            self.delete(Cf::DataPath, &key);
+            return Ok(());
+        }
+        let bytes = if self.raw_proofs {
+            meta.proof.unwrap_or_default()
+        } else {
+            v3::encode_offset_meta(&meta)?
+        };
+        self.put_bytes(Cf::DataPath, &key, bytes);
+        Ok(())
+    }
+
     fn delete(&mut self, cf: Cf, key: &[u8]) {
         self.overlay.maps[cf.index()].insert(key.to_vec(), None);
     }
@@ -3873,7 +4220,8 @@ impl<'a> Batch<'a> {
         offset: PartitionChunkOffset,
         path_hash: Option<ChunkPathHash>,
     ) {
-        // Schema v3 has no path-hash family. A data-path row is the presence bit.
+        // Schema v3 has no path-hash family. A proof in the offset row is the
+        // presence bit. A checksum-only row is not.
         if self.layout == IndexLayout::V3 {
             return;
         }
@@ -4190,7 +4538,8 @@ impl<'a> Batch<'a> {
             let Ok(offset) = PartitionChunkOffset::decode(&key) else {
                 continue;
             };
-            let Some(hash) = content_hash_of(&value) else {
+            let meta = stored_offset_meta(self.raw_proofs, &value)?;
+            let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) else {
                 continue;
             };
             self.delete(Cf::Content, &v3::content_key(&hash, offset));
@@ -4776,9 +5125,12 @@ impl Rows<'_> {
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkPathHashes>> {
+        // Hash the proof only. A checksum-only row is not a data chunk, and
+        // the trailer bytes are not part of the proof.
         let data_path_hash = self
-            .get_raw(Cf::DataPath, &encode_key(offset))?
-            .map(|bytes| H256(irys_types::hash_sha256(&bytes)));
+            .get_offset_meta(offset)?
+            .and_then(|meta| meta.proof)
+            .map(|proof| H256(irys_types::hash_sha256(&proof)));
         let tx_path_hash = self.v3_tx_hash_at(offset)?;
         Ok(combine_hashes(
             data_path_hash.map(|hash| ChunkPathHashes {
@@ -4805,6 +5157,10 @@ impl Rows<'_> {
         let mut rows = Vec::new();
         for (key, bytes) in stored {
             let offset = PartitionChunkOffset::decode(&key)?;
+            let meta = stored_offset_meta(self.raw_proofs, &bytes)?;
+            let Some(proof) = meta.proof else {
+                continue;
+            };
             while index < intervals.len() && intervals[index].end < offset {
                 index += 1;
             }
@@ -4816,7 +5172,7 @@ impl Rows<'_> {
             rows.push((
                 offset,
                 ChunkPathHashes {
-                    data_path_hash: Some(H256(irys_types::hash_sha256(&bytes))),
+                    data_path_hash: Some(H256(irys_types::hash_sha256(&proof))),
                     tx_path_hash,
                 },
             ));
@@ -4991,15 +5347,85 @@ impl SubmoduleRead for Rows<'_> {
         self.layout != IndexLayout::V3
     }
 
+    fn stores_offset_crc(&self) -> bool {
+        self.layout == IndexLayout::V3 && !self.raw_proofs
+    }
+
     fn get_data_path_by_offset(
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkDataPath>> {
+        Ok(self.get_offset_meta(offset)?.and_then(|meta| meta.proof))
+    }
+
+    fn get_offset_meta(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>> {
         let key = encode_key(offset);
-        if self.layout == IndexLayout::V3 {
-            return self.get_raw(Cf::DataPath, &key);
+        if self.layout != IndexLayout::V3 {
+            return Ok(self
+                .get_value::<ChunkDataPath>(Cf::DataPath, &key)?
+                .map(|proof| OffsetMeta {
+                    crc: None,
+                    proof: Some(proof),
+                }));
         }
-        self.get_value(Cf::DataPath, &key)
+        let Some(bytes) = self.get_raw(Cf::DataPath, &key)? else {
+            return Ok(None);
+        };
+        stored_offset_meta(self.raw_proofs, &bytes).map(Some)
+    }
+
+    fn offset_metas_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, OffsetMeta)>> {
+        if self.layout != IndexLayout::V3 || start > end {
+            return Ok(Vec::new());
+        }
+        let start_key = encode_key(start);
+        let stored = self.collect_raw(Cf::DataPath, Some(&start_key), |key| {
+            PartitionChunkOffset::decode(key)
+                .map(|offset| offset > end)
+                .unwrap_or(true)
+        })?;
+        let mut rows = Vec::with_capacity(stored.len());
+        for (key, bytes) in stored {
+            let offset = PartitionChunkOffset::decode(&key)?;
+            rows.push((offset, stored_offset_meta(self.raw_proofs, &bytes)?));
+        }
+        Ok(rows)
+    }
+
+    fn offset_crc_missing(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        if self.layout != IndexLayout::V3 || self.raw_proofs {
+            return Ok(true);
+        }
+        if start > end {
+            return Ok(false);
+        }
+        let start_key = encode_key(start);
+        let stored = self.collect_raw(Cf::DataPath, Some(&start_key), |key| {
+            PartitionChunkOffset::decode(key)
+                .map(|offset| offset > end)
+                .unwrap_or(true)
+        })?;
+        let mut expect = u64::from(start.0);
+        let last = u64::from(end.0);
+        for (key, bytes) in stored {
+            let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
+            if offset != expect {
+                return Ok(true);
+            }
+            if stored_offset_meta(false, &bytes)?.crc.is_none() {
+                return Ok(true);
+            }
+            expect = expect.saturating_add(1);
+        }
+        Ok(expect != last.saturating_add(1))
     }
 
     fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
@@ -5325,11 +5751,35 @@ impl SubmoduleRead for Batch<'_> {
         self.layout != IndexLayout::V3
     }
 
+    fn stores_offset_crc(&self) -> bool {
+        self.rows().stores_offset_crc()
+    }
+
     fn get_data_path_by_offset(
         &self,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<Option<ChunkDataPath>> {
         self.rows().get_data_path_by_offset(offset)
+    }
+
+    fn get_offset_meta(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>> {
+        self.rows().get_offset_meta(offset)
+    }
+
+    fn offset_metas_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, OffsetMeta)>> {
+        self.rows().offset_metas_in_range(start, end)
+    }
+
+    fn offset_crc_missing(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        self.rows().offset_crc_missing(start, end)
     }
 
     fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
@@ -5470,24 +5920,22 @@ impl SubmoduleWrite for Batch<'_> {
                 );
                 return Ok(());
             }
-            // Read the previous proof before this put hides it. A different
-            // leaf drops that reverse row. The same leaf puts again, which
-            // repairs a missing row. A short value has no reverse row.
-            let old_hash = self
+            // A proof rewrite keeps the checksum already stored for these
+            // bytes. The durable-point write replaces both together.
+            let old_crc = self
                 .rows()
                 .get_raw(Cf::DataPath, &key)?
                 .as_deref()
-                .and_then(content_hash_of);
-            let new_hash = content_hash_of(&data_path);
-            if old_hash != new_hash
-                && let Some(old_hash) = old_hash
-            {
-                self.delete(Cf::Content, &v3::content_key(&old_hash, offset));
-            }
-            if let Some(new_hash) = new_hash {
-                self.put_bytes(Cf::Content, &v3::content_key(&new_hash, offset), Vec::new());
-            }
-            self.put_bytes(Cf::DataPath, &key, data_path);
+                .map(|bytes| stored_offset_meta(self.raw_proofs, bytes))
+                .transpose()?
+                .and_then(|meta| meta.crc);
+            self.put_offset_record(
+                offset,
+                OffsetMeta {
+                    crc: old_crc,
+                    proof: Some(data_path),
+                },
+            )?;
         } else {
             self.put(Cf::DataPath, &key, &data_path);
         }
@@ -5560,6 +6008,42 @@ impl SubmoduleWrite for Batch<'_> {
             }
             self.add_full_data_path(offset, data_path)?;
             self.put_data_path_hash(offset, Some(path_hash));
+        }
+        Ok(uncovered)
+    }
+
+    fn write_packed_offset_rows(
+        &mut self,
+        rows: Vec<PackedOffsetRow>,
+    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
+        if self.layout != IndexLayout::V3 {
+            let updates = rows
+                .into_iter()
+                .filter_map(|row| {
+                    let proof = row.proof?;
+                    let hash = H256(irys_types::hash_sha256(&proof));
+                    Some((row.offset, hash, proof))
+                })
+                .collect();
+            return self.write_data_path_updates(updates);
+        }
+        let mut uncovered = Vec::new();
+        for row in rows {
+            if row.proof.is_some() && self.rows().interval_covering(row.offset)?.is_none() {
+                tracing::warn!(
+                    offset = row.offset.0,
+                    "data path has no covering interval; the proof was not stored"
+                );
+                uncovered.push(row.offset);
+                continue;
+            }
+            self.put_offset_record(
+                row.offset,
+                OffsetMeta {
+                    crc: row.crc,
+                    proof: row.proof,
+                },
+            )?;
         }
         Ok(uncovered)
     }
@@ -6037,6 +6521,142 @@ mod tests {
         drop(v2);
         let v2_opts = persisted_options(&v2_path)?;
         assert!(!v2_opts.contains("ChunkOffsetsByContentHash"), "{v2_opts}");
+        Ok(())
+    }
+
+    #[test]
+    fn checksum_only_row_is_not_a_stored_proof() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_crc_only")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        let entropy = PartitionChunkOffset::from(2);
+        let data = PartitionChunkOffset::from(4);
+        place_span(&store, 0, 7, H256::repeat_byte(3), 0, 1, 0, &[4], None)?;
+        assert_eq!(store.cf_key_count(Cf::Content)?, 1);
+        store.update(|tx| {
+            tx.write_packed_offset_rows(vec![
+                PackedOffsetRow {
+                    offset: entropy,
+                    crc: Some(0x1111),
+                    proof: None,
+                },
+                PackedOffsetRow {
+                    offset: data,
+                    crc: Some(0x2222),
+                    proof: None,
+                },
+            ])
+        })?;
+        assert_eq!(
+            store.cf_key_count(Cf::Content)?,
+            0,
+            "replacing a proof with a checksum drops the content key"
+        );
+        assert!(store.view(|tx| tx.get_data_path_by_offset(data))?.is_none());
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(entropy))?
+                .is_none()
+        );
+        let meta = store
+            .view(|tx| tx.get_offset_meta(entropy))?
+            .expect("checksum row");
+        assert_eq!(meta.crc, Some(0x1111));
+        assert!(meta.proof.is_none());
+        let hashes = store.view(|tx| tx.path_hashes_in_inclusive_range(entropy, entropy))?;
+        assert!(
+            hashes.iter().all(|(offset, _)| *offset != entropy),
+            "a checksum-only row is not a data-path range entry: {hashes:?}"
+        );
+        let findings = store.audit_index()?;
+        assert!(
+            findings.iter().all(|line| !line.contains("data path")),
+            "{findings:?}"
+        );
+
+        store.update(|tx| tx.add_full_data_path(data, content_leaf(4)))?;
+        let kept = store
+            .view(|tx| tx.get_offset_meta(data))?
+            .expect("proof keeps the checksum");
+        assert_eq!(kept.crc, Some(0x2222));
+        assert!(kept.proof.is_some());
+        let removed = store.retain_entropy_crc_rows(&[(data, data)])?;
+        assert_eq!(removed.data_path_rows, 1);
+        assert!(
+            store.view(|tx| tx.get_offset_meta(data))?.is_none(),
+            "an entropy span drops a proof row, checksum included"
+        );
+        assert!(store.view(|tx| tx.get_offset_meta(entropy))?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn schema_3_1_open_is_refused_and_v31_to_v32_keeps_the_proof() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().prefix("submodule_rocks_v31").build();
+        let src = dir.path().join("v31");
+        let dst = dir.path().join("v32");
+        let offset = PartitionChunkOffset::from(4);
+        let proof = content_leaf(4);
+        {
+            let store = RocksSubmoduleStore::open(&src)?;
+            place_span(&store, 0, 7, H256::repeat_byte(9), 0, 1, 0, &[4], None)?;
+            let meta = store
+                .view(|tx| tx.get_offset_meta(offset))?
+                .expect("proof row");
+            assert_eq!(meta.proof.as_deref(), Some(proof.as_slice()));
+            assert!(meta.crc.is_none());
+        }
+        downgrade_proof_rows_to_v31(&src)?;
+        let err = RocksSubmoduleStore::open(&src).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("v31-to-v32"), "{text}");
+        assert!(text.contains("does not rewrite 3.1 in place"), "{text}");
+        crate::submodule::convert_rocks_v31_to_v32(&src, &dst, false, false)?;
+        let report = crate::submodule::verify_rocks_v31_and_v32(&src, &dst)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert!(report.offsets_checked > 0, "{report}");
+        let store = RocksSubmoduleStore::open(&dst)?;
+        let meta = store
+            .view(|tx| tx.get_offset_meta(offset))?
+            .expect("wrapped proof");
+        assert_eq!(meta.proof.as_deref(), Some(proof.as_slice()));
+        assert!(meta.crc.is_none());
+        Ok(())
+    }
+
+    /// Turn schema 3.2 proof rows back into raw 3.1 proofs and rewrite the marker.
+    fn downgrade_proof_rows_to_v31(path: &Path) -> eyre::Result<()> {
+        let names = DB::list_cf(&Options::default(), path)?;
+        let families = names
+            .iter()
+            .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(false);
+        let db = DB::open_cf_descriptors(&db_opts, path, families)?;
+        let data = db
+            .cf_handle("ChunkDataPathByOffset")
+            .expect("data path family");
+        let meta = db.cf_handle("Metadata").expect("metadata family");
+        let mut batch = WriteBatch::default();
+        let iter = db.iterator_cf(&data, IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item.wrap_err("read offset row")?;
+            let decoded = v3::decode_offset_meta(&value)?;
+            let proof = decoded
+                .proof
+                .ok_or_else(|| eyre::eyre!("schema 3.1 fixture found a checksum-only row"))?;
+            assert!(decoded.crc.is_none());
+            batch.put_cf(&data, key, proof);
+        }
+        batch.put_cf(
+            &meta,
+            encode_key(MetadataKey::DBSchemaVersion),
+            SUBMODULE_SCHEMA_V3_1.as_bytes(),
+        );
+        db.write(batch).wrap_err("rewrite schema 3.1 rows")?;
+        drop(db);
+        fs::write(path.join(SCHEMA_FILE), SUBMODULE_SCHEMA_V3_1)?;
         Ok(())
     }
 

@@ -17,6 +17,9 @@ pub enum MetadataKey {
     /// Hash of the packing address, iterations, chunk size, and chain id.
     /// A mismatch refuses to open a schema-v3 index.
     PackingParamsHash = 4,
+    /// Set after a scan of a fully packed module finds a checksum on every
+    /// offset. Absent means unset. Reset deletes the key. `clear` does not.
+    ChunkCrcComplete = 5,
 }
 
 impl Encode for MetadataKey {
@@ -41,6 +44,7 @@ impl Decode for MetadataKey {
             2 => Ok(Self::SubmoduleResetInProgress),
             3 => Ok(Self::PartitionHash),
             4 => Ok(Self::PackingParamsHash),
+            5 => Ok(Self::ChunkCrcComplete),
             _ => Err(DatabaseError::Decode),
         }
     }
@@ -79,7 +83,7 @@ mod tests {
     proptest! {
         #[test]
         fn metadata_key_decode_rejects_invalid_discriminants(val in any::<u32>()) {
-            prop_assume!(val != 1 && val != 2 && val != 3 && val != 4);
+            prop_assume!(val != 1 && val != 2 && val != 3 && val != 4 && val != 5);
             let bytes = val.to_le_bytes();
             prop_assert!(MetadataKey::decode(&bytes).is_err());
         }

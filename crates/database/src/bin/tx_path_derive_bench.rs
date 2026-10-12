@@ -21,7 +21,7 @@ use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_database::submodule::tables::{
     Metadata, SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3,
-    SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxPathIntervalByStart,
+    SUBMODULE_SCHEMA_V3_1, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxPathIntervalByStart,
 };
 use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
 use irys_database::tables::{IrysDataTxHeaders, IrysTables, MigratedBlockHashes};
@@ -989,6 +989,11 @@ fn accept_rocks_schema(text: &str) -> eyre::Result<()> {
             "SCHEMA is irys-submodule-index 3, which has no column family ChunkOffsetsByContentHash. Delete the directory and rerun submodule-index-convert (mdbx-to-rocks or rocks-to-v3)."
         );
     }
+    if text == SUBMODULE_SCHEMA_V3_1 {
+        eyre::bail!(
+            "SCHEMA is irys-submodule-index 3.1. Chunk checksums live in the offset row on schema 3.2. Run `submodule-index-convert v31-to-v32` into a new directory, then `submodule-index-convert verify-rocks`."
+        );
+    }
     if text != SUBMODULE_SCHEMA && text != SUBMODULE_SCHEMA_V3 {
         let shown: String = text.chars().take(80).collect();
         eyre::bail!("unrecognized RocksDB SCHEMA: {shown}");
@@ -1941,7 +1946,8 @@ mod tests {
     #[test]
     fn rocks_schema_v2_and_v3_open() {
         use irys_database::submodule::tables::{
-            SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX,
+            SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_1,
+            SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX,
         };
 
         super::accept_rocks_schema(SUBMODULE_SCHEMA).unwrap();
@@ -1951,6 +1957,8 @@ mod tests {
             old.to_string().contains("ChunkOffsetsByContentHash"),
             "{old}"
         );
+        let v31 = super::accept_rocks_schema(SUBMODULE_SCHEMA_V3_1).unwrap_err();
+        assert!(v31.to_string().contains("v31-to-v32"), "{v31}");
         assert!(super::accept_rocks_schema("irys-submodule-rocks 1\n").is_err());
         assert!(super::accept_rocks_schema("nope").is_err());
     }

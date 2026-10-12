@@ -18,9 +18,15 @@ use std::fmt;
 pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 
 /// Schema file and metadata row for a RocksDB index that stores placements,
-/// inline data proofs, and `ChunkOffsetsByContentHash`. MDBX stays on
-/// [`SUBMODULE_SCHEMA`].
-pub const SUBMODULE_SCHEMA_V3: &str = "irys-submodule-index 3.1\n";
+/// inline data proofs, chunk checksums in the offset row, and
+/// `ChunkOffsetsByContentHash`. MDBX stays on [`SUBMODULE_SCHEMA`].
+pub const SUBMODULE_SCHEMA_V3: &str = "irys-submodule-index 3.2\n";
+
+/// Schema 3.1 marker. The offset value is the raw proof and has no checksum.
+///
+/// Open refuses this file. `submodule-index-convert v31-to-v32` writes a new
+/// directory. The node does not rewrite 3.1 in place.
+pub const SUBMODULE_SCHEMA_V3_1: &str = "irys-submodule-index 3.1\n";
 
 /// Schema v3 marker that does not name the content-hash offset index.
 ///
@@ -48,10 +54,13 @@ tables! {
         type Value = ChunkPathHashes;
     }
 
-    /// Full data path for one chunk, keyed by partition offset.
+    /// One chunk at a partition offset.
     ///
-    /// Offset order keeps compaction on sequential keys. The 32-byte hash
-    /// stays on [`ChunkPathHashesByOffset`] because callers return it.
+    /// Offset order keeps compaction on sequential keys. Schema v2 and MDBX
+    /// store the data proof. Schema 3.2 stores a versioned record: the proof
+    /// bytes, then an optional checksum trailer. A checksum-only value is an
+    /// entropy chunk and is not a data proof. The 32-byte hash stays on
+    /// [`ChunkPathHashesByOffset`] for schema v2 because callers return it.
     table ChunkDataPathByOffset {
         type Key = PartitionChunkOffset;
         type Value = ChunkDataPath;
@@ -111,6 +120,29 @@ tables! {
         type Value = Vec<u8>;
     }
 
+}
+
+/// Decoded `ChunkDataPathByOffset` value on schema 3.2.
+///
+/// `crc` is `None` when the row does not carry a checksum. That is unknown,
+/// not a stored zero. `proof` is `None` on an entropy checksum row. A data
+/// chunk has both. Callers that ask "is a data chunk stored here" read
+/// `proof`, not the key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OffsetMeta {
+    pub crc: Option<u32>,
+    pub proof: Option<ChunkDataPath>,
+}
+
+/// One packed-chunk index write. `proof` of `None` is an entropy checksum.
+///
+/// Both fields `None` deletes the row. A proof with no covering interval is
+/// not stored, and its checksum is not stored either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedOffsetRow {
+    pub offset: PartitionChunkOffset,
+    pub crc: Option<u32>,
+    pub proof: Option<ChunkDataPath>,
 }
 
 /// One tx placement as a reader sees it.
