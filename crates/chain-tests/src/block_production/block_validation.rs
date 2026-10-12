@@ -359,6 +359,46 @@ async fn test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_prevalidation_rejects_too_many_publish_txs() -> Result<()> {
+    let ctx = PrevalidationTestContext::new().await?;
+
+    let max = ctx
+        .config
+        .consensus_config()
+        .mempool
+        .max_publish_txs_per_block as usize;
+    let excessive_txs = mock_data_txs(max + 1);
+
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = excessive_txs.clone();
+
+    let mut header = (**ctx.block.header()).clone();
+    let tx_ids: irys_types::H256List =
+        irys_types::H256List(excessive_txs.iter().map(|tx| tx.id).collect());
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
+        .expect("Publish ledger should exist");
+    ledger.tx_ids = tx_ids;
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    body.block_hash = header.block_hash;
+
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::TooManyPublishTxs { max: m, got }) => {
+            assert_eq!(m, max as u64);
+            assert_eq!(got, max + 1);
+        }
+        other => panic!("expected TooManyPublishTxs, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
 /// A block whose ledger `tx_root` does not match the folded `(data_root, prefix_hash)`
 /// recompute of its included transactions must be rejected with `TxRootMismatch`. This is
 /// the consensus enforcement that authenticates each tx's `prefix_hash` via the

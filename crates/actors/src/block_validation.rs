@@ -374,6 +374,10 @@ pub enum PreValidationError {
     #[error("Too many data transactions in submit ledger: max {max}, got {got}")]
     TooManyDataTxs { max: u64, got: usize },
 
+    /// The Publish ledger holds more transactions than `max_publish_txs_per_block`.
+    #[error("Too many publish transactions: max {max}, got {got}")]
+    TooManyPublishTxs { max: u64, got: usize },
+
     /// The ledger's `tx_root` does not match the merkle root recomputed from the
     /// included transactions' folded `(data_root, prefix_hash)` leaves. Any tampering
     /// with a tx's `data_root` or `prefix_hash` relative to the signed `tx_root` is
@@ -652,6 +656,7 @@ impl PreValidationError {
             | Self::TimestampTooFarInFuture { .. }
             | Self::TooManyCommitmentTxs { .. }
             | Self::TooManyDataTxs { .. }
+            | Self::TooManyPublishTxs { .. }
             | Self::TxRootMismatch { .. }
             | Self::TotalChunksMismatch { .. }
             | Self::PoaTxRootLeafMismatch { .. }
@@ -764,6 +769,7 @@ impl PreValidationError {
             Self::DatabaseError { .. } => "database_error",
             Self::InvalidEpochSnapshot { .. } => "invalid_epoch_snapshot",
             Self::TooManyDataTxs { .. } => "too_many_data_txs",
+            Self::TooManyPublishTxs { .. } => "too_many_publish_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::TotalChunksMismatch { .. } => "total_chunks_mismatch",
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
@@ -1918,12 +1924,10 @@ pub async fn prevalidate_block(
     // ========================================
 
     // Validate all data ledger transactions: count, IDs, and signatures
-    let max_data_txs = config
-        .node_config
-        .consensus_config()
-        .mempool
-        .max_data_txs_per_block;
+    let mempool_consensus = config.node_config.consensus_config().mempool;
+    let max_data_txs = mempool_consensus.max_data_txs_per_block;
     let mut total_term_txs: usize = 0;
+    let mut total_publish_txs: usize = 0;
 
     for dl in &block.data_ledgers {
         let ledger = DataLedger::try_from(dl.ledger_id).map_err(|_| {
@@ -1942,19 +1946,29 @@ pub async fn prevalidate_block(
             "{:?}_transactions_valid", ledger,
         );
 
-        // Count term ledger txs for max_data_txs enforcement
-        if ledger != DataLedger::Publish {
+        // Count term ledger txs for max_data_txs enforcement.
+        // Publish has its own cap and is not part of this total.
+        if ledger == DataLedger::Publish {
+            total_publish_txs += ledger_txs.len();
+        } else {
             total_term_txs += ledger_txs.len();
         }
     }
 
-    // Enforce max_data_txs_per_block across all term ledgers (Submit + OneYear +
-    // ThirtyDay) BEFORE the per-ledger tx_root recompute below — the count limit is an
-    // O(1) structural check, so reject an over-sized block before doing O(N) merkle work.
+    // Enforce the per-block tx caps BEFORE the per-ledger tx_root recompute below.
+    // The count limit is an O(1) structural check, so reject an over-sized block
+    // before doing O(N) merkle work.
     if total_term_txs > max_data_txs as usize {
         return Err(PreValidationError::TooManyDataTxs {
             max: max_data_txs,
             got: total_term_txs,
+        });
+    }
+    let max_publish_txs = mempool_consensus.max_publish_txs_per_block;
+    if total_publish_txs > max_publish_txs as usize {
+        return Err(PreValidationError::TooManyPublishTxs {
+            max: max_publish_txs,
+            got: total_publish_txs,
         });
     }
 
