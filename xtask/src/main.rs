@@ -70,8 +70,8 @@ enum Commands {
         /// touched since this run started are kept.
         #[clap(long, env = "XTASK_PRUNE_GRACE_MINUTES", default_value_t = DEFAULT_PRUNE_GRACE_MINUTES)]
         prune_grace_minutes: u64,
-        /// Keep a compilation unit that no recent `xtask test`, `clippy` or `check` used, and that
-        /// is not a duplicate of one they used, for this many days after it was last touched.
+        /// Keep a compilation unit that no recent xtask build recorded, and that the latest plain
+        /// `cargo build` / `cargo run` does not use, for this many days after cargo last wrote it.
         #[clap(long, env = "XTASK_PRUNE_UNUSED_DAYS", default_value_t = DEFAULT_PRUNE_UNUSED_DAYS)]
         prune_unused_days: u64,
         /// Args after `--` go to nextest.
@@ -1088,14 +1088,20 @@ fn prune_after_run(
         Ok(_) => {}
         Err(e) => eprintln!("Warning: stale executable prune failed: {e}"),
     }
-    match prune::prune_unused_units(target_dir, workspace_root, keep_after, unused_before) {
-        Ok(report) if report.removed_units + report.removed_build_dirs > 0 => println!(
-            "Pruned {} unused compilation unit(s) and {} build-script dir(s), {} MiB \
-             (XTASK_NO_PRUNE=1 keeps them)",
-            report.removed_units,
-            report.removed_build_dirs,
-            report.removed_bytes / (1024 * 1024)
-        ),
+    match prune::prune_unused_units(target_dir, unused_before) {
+        Ok(report)
+            if report.removed_units + report.removed_build_dirs + report.removed_fingerprints
+                > 0 =>
+        {
+            println!(
+                "Pruned {} unused compilation unit(s), {} build-script dir(s) and {} orphan \
+                 fingerprint dir(s), {} MiB (XTASK_NO_PRUNE=1 keeps them)",
+                report.removed_units,
+                report.removed_build_dirs,
+                report.removed_fingerprints,
+                report.removed_bytes / (1024 * 1024)
+            )
+        }
         Ok(_) => {}
         Err(e) => eprintln!("Warning: unused unit prune failed: {e}"),
     }

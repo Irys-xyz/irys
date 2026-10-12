@@ -97,6 +97,9 @@ pub fn prune_stale_executables(
             }
             tracing::debug!(exe = %path.display(), root = %key.root.display(), ?reason, "removing");
             remove_with_siblings(dir, &path, &mut report)?;
+            if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
+                remove_fingerprint(dir, id);
+            }
         }
     }
     Ok(report)
@@ -266,24 +269,25 @@ pub fn record_usage(target_dir: &Path, invocation: &str, artifacts: &[PathBuf]) 
 pub struct UnitPruneReport {
     pub removed_units: usize,
     pub removed_build_dirs: usize,
+    /// `.fingerprint` dirs whose unit is already gone.
+    pub removed_fingerprints: usize,
     pub removed_bytes: u64,
 }
 
-/// Remove compilation units that no live usage record names.
+/// Remove compilation units that nothing is known to use.
 ///
-/// A unit is every file in a `deps/` directory that shares one `<name>-<hash>`: its rlib, rmeta or
-/// proc-macro `.so`, its `.d`, and its `.dwo` files. Executables are left to
-/// [`prune_stale_executables`]. A unit no record names is removed when it was last touched before
-/// `keep_after` and either duplicates a recorded unit (same name and crate root, another hash: a
-/// different feature set or profile of the same crate) or was last touched before
-/// `unused_before`. A build-script directory under `build/` follows the `unused_before` rule.
+/// A unit is every file in a `deps/` directory that shares one `<name>-<hash>`: its rlib, rmeta,
+/// proc-macro shared object or executable, its `.d` and its `.dwo` files, plus its
+/// `.fingerprint/<name>-<hash>` dir. A unit is in use when a live usage record names one of its
+/// files, or when it is in the dependency closure of an artifact cargo uplifted into the profile
+/// dir (see [`uplifted_closure`]): that closure is what the latest plain `cargo build` or
+/// `cargo run` uses, which no record covers. Any other unit is removed once it was last touched
+/// before `unused_before`. A build-script directory under `build/` follows the same rules.
 ///
 /// Records last written before `unused_before` expire and are deleted. With no live record the
 /// pass removes nothing, since nothing is known to be in use.
 pub fn prune_unused_units(
     target_dir: &Path,
-    workspace_root: &Path,
-    keep_after: SystemTime,
     unused_before: SystemTime,
 ) -> io::Result<UnitPruneReport> {
     let mut report = UnitPruneReport::default();
@@ -299,19 +303,179 @@ pub fn prune_unused_units(
         .filter(|dir| dir.file_name().is_some_and(|n| n == "deps"))
         .collect();
     for dir in deps_dirs {
-        prune_deps_units(
-            dir,
-            workspace_root,
+        let Some(profile) = dir.parent() else {
+            continue;
+        };
+        let uplifted = uplifted_closure(profile)?;
+        tracing::debug!(units = uplifted.len(), profile = %profile.display(), "uplifted closure");
+        prune_deps_units(dir, &used, &uplifted, unused_before, &mut report)?;
+        prune_build_dirs(
+            &profile.join("build"),
             &used,
-            keep_after,
+            &uplifted,
             unused_before,
             &mut report,
         )?;
-        if let Some(build) = dir.parent().map(|profile| profile.join("build")) {
-            prune_build_dirs(&build, &used, unused_before, &mut report)?;
-        }
+        prune_orphan_fingerprints(profile, &uplifted, unused_before, &mut report)?;
     }
     Ok(report)
+}
+
+/// Remove `.fingerprint` dirs whose unit has no files left in `deps/` or `build/`, such as those an
+/// older prune left behind. A unit with no output there (a `cargo doc` unit) follows the
+/// `unused_before` rule like every other unit.
+fn prune_orphan_fingerprints(
+    profile: &Path,
+    uplifted: &HashSet<String>,
+    unused_before: SystemTime,
+    report: &mut UnitPruneReport,
+) -> io::Result<()> {
+    let mut present: HashSet<String> = HashSet::new();
+    for sub in ["deps", "build"] {
+        for path in fingerprint_files(&profile.join(sub)) {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let id = unit_id(name).unwrap_or(name);
+                present.insert(unit_hash(id).to_owned());
+            }
+        }
+    }
+    for dir in fingerprint_files(&profile.join(".fingerprint")) {
+        let Some(hash) = dir.file_name().and_then(|n| n.to_str()).map(unit_hash) else {
+            continue;
+        };
+        if present.contains(hash) || uplifted.contains(hash) {
+            continue;
+        }
+        let touched = last_touched(&fingerprint_files(&dir))?.unwrap_or(SystemTime::UNIX_EPOCH);
+        if touched > unused_before {
+            continue;
+        }
+        let bytes = dir_size(&dir);
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                report.removed_bytes += bytes;
+                report.removed_fingerprints += 1;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// The unit hashes (the `<hash>` of `<name>-<hash>`) of every artifact cargo uplifted into
+/// `profile` (the file in `target/debug/` that is a hard link to one in `deps/`), and of all units
+/// those depend on. The hash is the key because the name differs: `deps/` and `build/` use the
+/// crate name (`actix_web`), `.fingerprint/` the package name (`actix-web`).
+///
+/// Cargo uplifts the outputs of the latest plain `cargo build` or `cargo run`, and a fresh build
+/// rewrites nothing, so neither a record nor a file time shows that those units are in use. The
+/// closure follows each unit's fingerprint JSON: a dependency is listed by its fingerprint hash,
+/// which cargo also writes, as little-endian hex, to the dependency's own fingerprint file.
+pub fn uplifted_closure(profile: &Path) -> io::Result<HashSet<String>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let fingerprints = profile.join(".fingerprint");
+    let mut by_inode = std::collections::HashMap::new();
+    let deps = match fs::read_dir(profile.join("deps")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(e),
+    };
+    for entry in deps {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(id) = name.to_str().and_then(unit_id) {
+            let meta = entry.metadata()?;
+            by_inode.insert((meta.dev(), meta.ino()), unit_hash(id).to_owned());
+        }
+    }
+    let mut roots = Vec::new();
+    for entry in fs::read_dir(profile)? {
+        let meta = entry?.metadata()?;
+        if meta.is_file()
+            && let Some(id) = by_inode.get(&(meta.dev(), meta.ino()))
+        {
+            roots.push(id.clone());
+        }
+    }
+
+    let unit_dirs: Vec<String> = match fs::read_dir(&fingerprints) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(e),
+    };
+    // Unit hash -> its fingerprint dir, and fingerprint hash (as cargo writes it) -> unit hash.
+    let dir_of: std::collections::HashMap<&str, &String> =
+        unit_dirs.iter().map(|d| (unit_hash(d), d)).collect();
+    let mut by_hash = std::collections::HashMap::new();
+    for unit in &unit_dirs {
+        for file in fingerprint_files(&fingerprints.join(unit)) {
+            let is_hash_file = file
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !n.contains('.') && !n.starts_with("dep-"));
+            if is_hash_file && let Ok(hash) = fs::read_to_string(&file) {
+                by_hash.insert(hash.trim().to_owned(), unit_hash(unit).to_owned());
+            }
+        }
+    }
+
+    let mut closure = HashSet::new();
+    while let Some(unit) = roots.pop() {
+        if !closure.insert(unit.clone()) {
+            continue;
+        }
+        let Some(dir) = dir_of.get(unit.as_str()) else {
+            continue;
+        };
+        for file in fingerprint_files(&fingerprints.join(dir)) {
+            if file.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Ok(json) = fs::read(&file) else { continue };
+            let Ok(fingerprint) = serde_json::from_slice::<FingerprintDeps>(&json) else {
+                continue;
+            };
+            for dep in fingerprint.deps {
+                let hash = hex_le(dep.3);
+                match by_hash.get(&hash) {
+                    Some(dep_unit) => roots.push(dep_unit.clone()),
+                    None => tracing::debug!(unit, dep = dep.1, "dependency fingerprint not found"),
+                }
+            }
+        }
+    }
+    Ok(closure)
+}
+
+/// The `<hash>` of a `<name>-<hash>` unit id or dir name.
+fn unit_hash(id: &str) -> &str {
+    id.rsplit_once('-').map_or(id, |(_, hash)| hash)
+}
+
+/// The part of a cargo fingerprint JSON the closure reads: each dependency is
+/// `[package id hash, crate name, public, fingerprint hash]`.
+#[derive(serde::Deserialize)]
+struct FingerprintDeps {
+    #[serde(default)]
+    deps: Vec<(u64, String, bool, u64)>,
+}
+
+fn hex_le(hash: u64) -> String {
+    hash.to_le_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn fingerprint_files(dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| Some(e.ok()?.path()))
+        .collect()
 }
 
 fn live_usage(usage_dir: &Path, unused_before: SystemTime) -> io::Result<HashSet<PathBuf>> {
@@ -354,9 +518,8 @@ fn unit_id(name: &str) -> Option<&str> {
 
 fn prune_deps_units(
     dir: &Path,
-    workspace_root: &Path,
     used: &HashSet<PathBuf>,
-    keep_after: SystemTime,
+    uplifted: &HashSet<String>,
     unused_before: SystemTime,
     report: &mut UnitPruneReport,
 ) -> io::Result<()> {
@@ -368,44 +531,21 @@ fn prune_deps_units(
             units.entry(id.to_owned()).or_default().push(path);
         }
     }
-    let unit_key = |id: &str| -> Option<TargetKey> {
-        let dep_info = fs::read_to_string(dir.join(format!("{id}.d"))).ok()?;
-        Some(TargetKey {
-            stem: id.rsplit_once('-')?.0.to_owned(),
-            root: workspace_root.join(crate_root(&dep_info)?),
-        })
-    };
-    let used_ids: HashSet<&str> = units
-        .iter()
-        .filter(|(_, files)| files.iter().any(|f| used.contains(f)))
-        .map(|(id, _)| id.as_str())
-        .collect();
-    let used_keys: HashSet<TargetKey> = used_ids.iter().filter_map(|id| unit_key(id)).collect();
-
     for (id, files) in &units {
-        if used_ids.contains(id.as_str()) {
+        if uplifted.contains(unit_hash(id)) {
             continue;
         }
-        // An executable belongs to the executable prune, which knows whether a run superseded it.
-        if files.iter().any(|f| {
-            f.file_name()
-                .is_some_and(|n| !n.to_string_lossy().contains('.'))
-        }) {
+        if files.iter().any(|f| used.contains(f)) {
             continue;
         }
         let Some(touched) = last_touched(files)? else {
             continue;
         };
-        if touched > keep_after {
-            tracing::debug!(unit = %id, "kept: used within the grace period");
-            continue;
-        }
-        let duplicate = unit_key(id).is_some_and(|key| used_keys.contains(&key));
-        if !duplicate && touched > unused_before {
+        if touched > unused_before {
             tracing::debug!(unit = %id, "kept: unrecorded but recent");
             continue;
         }
-        tracing::debug!(unit = %id, duplicate, "removing unit");
+        tracing::debug!(unit = %id, "removing unit");
         let mut removed_any = false;
         for file in files {
             match fs::metadata(file).and_then(|m| fs::remove_file(file).map(|()| m.len())) {
@@ -420,13 +560,36 @@ fn prune_deps_units(
         if removed_any {
             report.removed_units += 1;
         }
+        remove_fingerprint(dir, id);
     }
     Ok(())
+}
+
+/// Remove the `.fingerprint` dir next to `deps` of the unit with id `id`. Without the unit's
+/// files it describes nothing, and cargo rebuilds a unit that has no fingerprint. The dir is found
+/// by hash, since it carries the package name and `id` the crate name.
+fn remove_fingerprint(deps: &Path, id: &str) {
+    let Some(fingerprints) = deps.parent().map(|profile| profile.join(".fingerprint")) else {
+        return;
+    };
+    let hash = unit_hash(id);
+    for dir in fingerprint_files(&fingerprints) {
+        if dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| unit_hash(n) == hash)
+            && let Err(e) = fs::remove_dir_all(&dir)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            tracing::debug!(dir = %dir.display(), "fingerprint dir not removed: {e}");
+        }
+    }
 }
 
 fn prune_build_dirs(
     build: &Path,
     used: &HashSet<PathBuf>,
+    uplifted: &HashSet<String>,
     unused_before: SystemTime,
     report: &mut UnitPruneReport,
 ) -> io::Result<()> {
@@ -437,7 +600,13 @@ fn prune_build_dirs(
     };
     for entry in entries {
         let dir = entry?.path();
-        if !dir.is_dir() || used.iter().any(|p| p.starts_with(&dir)) {
+        if !dir.is_dir()
+            || used.iter().any(|p| p.starts_with(&dir))
+            || dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| uplifted.contains(unit_hash(n)))
+        {
             continue;
         }
         let files: Vec<PathBuf> = fs::read_dir(&dir)?
@@ -461,7 +630,10 @@ fn prune_build_dirs(
     Ok(())
 }
 
-/// The latest mtime or atime across `files`; `None` when every one is already gone.
+/// The latest mtime across `files`: when cargo last wrote them; `None` when every one is already
+/// gone. atime is not used: a prune itself reads `.d` and fingerprint files, so on a `relatime`
+/// mount every unit would look recently used, and on a `noatime` mount atime never moves. What is
+/// in use is known from the usage records, the uplifted closure and the run lock instead.
 fn last_touched(files: &[PathBuf]) -> io::Result<Option<SystemTime>> {
     let mut latest = None;
     for file in files {
@@ -470,8 +642,7 @@ fn last_touched(files: &[PathBuf]) -> io::Result<Option<SystemTime>> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
         };
-        let touched = meta.modified()?.max(meta.accessed()?);
-        latest = latest.max(Some(touched));
+        latest = latest.max(Some(meta.modified()?));
     }
     Ok(latest)
 }
@@ -772,15 +943,40 @@ mod tests {
             }
 
             fn prune(&self) -> UnitPruneReport {
-                let now = SystemTime::now();
-                // Grace 30 minutes, unused window 1 day, as the defaults.
-                prune_unused_units(
-                    &self.target(),
-                    self.root.path(),
-                    now - Duration::from_secs(1800),
-                    now - 24 * HOUR,
+                // Unused window 1 day, as the default.
+                prune_unused_units(&self.target(), SystemTime::now() - 24 * HOUR).unwrap()
+            }
+
+            fn fingerprints(&self) -> PathBuf {
+                self.target().join("debug/.fingerprint")
+            }
+
+            /// The `.fingerprint/<id>` dir cargo writes for a unit: its hash file holds `hash`
+            /// (little-endian hex), and its JSON lists `deps` by their fingerprint hashes.
+            fn fingerprint(&self, id: &str, kind: &str, hash: u64, deps: &[u64]) {
+                let dir = self.fingerprints().join(id);
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join(kind), hex_le(hash)).unwrap();
+                let deps: Vec<_> = deps.iter().map(|h| (1_u64, "dep", false, *h)).collect();
+                fs::write(
+                    dir.join(format!("{kind}.json")),
+                    serde_json::json!({ "deps": deps }).to_string(),
                 )
-                .unwrap()
+                .unwrap();
+            }
+
+            /// An executable unit with its dep-info, last touched `age` ago.
+            fn exe(&self, id: &str, age: Duration) -> PathBuf {
+                let exe = self.deps().join(id);
+                fs::write(&exe, "exe").unwrap();
+                fs::write(
+                    self.deps().join(format!("{id}.d")),
+                    format!("{}: crates/gateway/src/main.rs\n", exe.display()),
+                )
+                .unwrap();
+                age_file(&exe, age);
+                age_file(&self.deps().join(format!("{id}.d")), age);
+                exe
             }
 
             fn has(&self, name: &str) -> bool {
@@ -823,7 +1019,9 @@ mod tests {
         }
 
         #[test]
-        fn removes_a_duplicate_of_a_used_unit_after_the_grace_period() {
+        fn keeps_an_unrecorded_copy_of_a_used_crate_until_the_unused_window_passes() {
+            // Another feature set of a recorded crate, as a plain `cargo build` or
+            // `cargo nextest run -p` leaves it: in use, but no record names it.
             let t = Target::new();
             let used = t.lib(
                 "serde-00000000000000aa",
@@ -835,15 +1033,21 @@ mod tests {
                 "/registry/serde-1.0.0/src/lib.rs",
                 HOUR,
             );
+            t.lib(
+                "serde-00000000000000cc",
+                "/registry/serde-1.0.0/src/lib.rs",
+                48 * HOUR,
+            );
             t.record(&[used]);
 
             let report = t.prune();
 
             assert_eq!(report.removed_units, 1);
             assert!(t.has("libserde-00000000000000aa.rlib"));
-            assert!(!t.has("libserde-00000000000000bb.rlib"));
-            assert!(!t.has("serde-00000000000000bb.d"));
-            assert!(!t.has("serde-00000000000000bb.x.cgu.0.rcgu.dwo"));
+            assert!(t.has("libserde-00000000000000bb.rlib"));
+            assert!(!t.has("libserde-00000000000000cc.rlib"));
+            assert!(!t.has("serde-00000000000000cc.d"));
+            assert!(!t.has("serde-00000000000000cc.x.cgu.0.rcgu.dwo"));
         }
 
         #[test]
@@ -874,24 +1078,6 @@ mod tests {
         }
 
         #[test]
-        fn keeps_a_duplicate_touched_within_the_grace_period() {
-            let t = Target::new();
-            let used = t.lib(
-                "serde-00000000000000aa",
-                "/registry/serde-1.0.0/src/lib.rs",
-                HOUR,
-            );
-            t.lib(
-                "serde-00000000000000bb",
-                "/registry/serde-1.0.0/src/lib.rs",
-                Duration::ZERO,
-            );
-            t.record(&[used]);
-
-            assert_eq!(t.prune(), UnitPruneReport::default());
-        }
-
-        #[test]
         fn removes_nothing_without_a_live_record_and_drops_expired_ones() {
             let t = Target::new();
             let used = t.lib(
@@ -919,22 +1105,88 @@ mod tests {
         }
 
         #[test]
-        fn leaves_executables_to_the_executable_prune() {
+        fn removes_an_old_unrecorded_executable_and_its_fingerprint() {
             let t = Target::new();
-            let used = t.lib("it-00000000000000aa", "crates/cdn/tests/it/main.rs", HOUR);
-            let exe = t.deps().join("it-00000000000000bb");
-            fs::write(&exe, "exe").unwrap();
-            fs::write(
-                t.deps().join("it-00000000000000bb.d"),
-                format!("{}: crates/cdn/tests/it/main.rs\n", exe.display()),
-            )
-            .unwrap();
-            age_file(&exe, 48 * HOUR);
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            let old = t.exe("my_gw-00000000000000bb", 48 * HOUR);
+            let recent = t.exe("my_gw-00000000000000cc", HOUR);
+            t.fingerprint("my-gw-00000000000000bb", "bin-my_gw", 0xbb, &[]);
             t.record(&[used]);
 
-            t.prune();
+            let report = t.prune();
 
-            assert!(exe.exists());
+            assert_eq!(report.removed_units, 1);
+            assert!(!old.exists());
+            assert!(!t.fingerprints().join("my-gw-00000000000000bb").exists());
+            assert!(recent.exists());
+        }
+
+        #[test]
+        fn keeps_an_uplifted_binary_and_everything_it_depends_on() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            // `cargo build` hard-links its binary into the profile dir.
+            let bin = t.exe("gateway-00000000000000b1", 48 * HOUR);
+            fs::hard_link(&bin, t.target().join("debug/gateway")).unwrap();
+            t.fingerprint("gateway-00000000000000b1", "bin-gateway", 0xb1, &[0xd1]);
+            // A library it depends on, which depends on a build-script run. Its package name
+            // has a hyphen: `.fingerprint/` and `build/` use it, `deps/` uses the crate name.
+            t.lib(
+                "my_dep-00000000000000d1",
+                "crates/my-dep/src/lib.rs",
+                48 * HOUR,
+            );
+            t.fingerprint("my-dep-00000000000000d1", "lib-my_dep", 0xd1, &[0xd2]);
+            t.fingerprint(
+                "my-dep-00000000000000d2",
+                "run-build-script-build-script-build",
+                0xd2,
+                &[],
+            );
+            let out = t.target().join("debug/build/my-dep-00000000000000d2");
+            fs::create_dir_all(&out).unwrap();
+            fs::write(out.join("output"), "x").unwrap();
+            age_file(&out.join("output"), 48 * HOUR);
+            // An old unit nothing uses.
+            t.lib("old-00000000000000e1", "crates/old/src/lib.rs", 48 * HOUR);
+            t.record(&[used]);
+
+            let report = t.prune();
+
+            assert_eq!(report.removed_units, 1);
+            assert_eq!(report.removed_build_dirs, 0);
+            assert!(bin.exists());
+            assert!(t.has("libmy_dep-00000000000000d1.rlib"));
+            assert!(out.exists());
+            assert!(!t.has("libold-00000000000000e1.rlib"));
+        }
+
+        #[test]
+        fn removes_old_fingerprint_dirs_whose_unit_is_gone() {
+            let t = Target::new();
+            let used = t.lib("my_dep-00000000000000a1", "crates/my-dep/src/lib.rs", HOUR);
+            t.fingerprint("my-dep-00000000000000a1", "lib-my_dep", 0xa1, &[]);
+            t.fingerprint("gone-00000000000000a2", "lib-gone", 0xa2, &[]);
+            t.fingerprint("fresh-00000000000000a3", "lib-fresh", 0xa3, &[]);
+            for file in fingerprint_files(&t.fingerprints().join("gone-00000000000000a2")) {
+                age_file(&file, 48 * HOUR);
+            }
+            t.record(&[used]);
+
+            let report = t.prune();
+
+            assert_eq!(report.removed_fingerprints, 1);
+            assert!(t.fingerprints().join("my-dep-00000000000000a1").exists());
+            assert!(!t.fingerprints().join("gone-00000000000000a2").exists());
+            assert!(t.fingerprints().join("fresh-00000000000000a3").exists());
         }
 
         #[test]
