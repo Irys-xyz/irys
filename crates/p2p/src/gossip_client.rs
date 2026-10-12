@@ -2741,19 +2741,20 @@ impl GossipClient {
                             .into()),
                             Ok(text) => {
                                 if text.trim().is_empty() {
-                                    return Err(PeerNetworkError::FailedToRequestData(format!(
+                                    Err(PeerNetworkError::FailedToRequestData(format!(
                                         "Empty response from {}",
                                         url
-                                    )));
-                                }
-
-                                let gossip_response = serde_json::from_str(&text).map_err(|e| {
-                                    PeerNetworkError::FailedToRequestData(format!(
-                                        "{}: Failed to parse JSON: {} - Response: {}",
-                                        url, e, text
                                     ))
-                                })?;
-                                Ok(gossip_response)
+                                    .into())
+                                } else {
+                                    serde_json::from_str(&text).map_err(|e| {
+                                        PeerNetworkError::FailedToRequestData(format!(
+                                            "{}: Failed to parse JSON: {} - Response: {}",
+                                            url, e, text
+                                        ))
+                                        .into()
+                                    })
+                                }
                             }
                         },
                     },
