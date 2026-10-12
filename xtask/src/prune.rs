@@ -161,16 +161,10 @@ fn remove_with_siblings(dir: &Path, exe: &Path, report: &mut PruneReport) -> io:
     let mut exe_removed = false;
     for path in doomed {
         // A file a concurrent prune already removed is skipped, not an error.
-        let removed =
-            fs::metadata(&path).and_then(|meta| fs::remove_file(&path).map(|()| meta.len()));
-        match removed {
-            Ok(len) => {
-                exe_removed |= path == exe;
-                report.removed_bytes += len;
-                report.removed_files.push(path);
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+        if let Some(len) = remove_path(&path)? {
+            exe_removed |= path == exe;
+            report.removed_bytes += len;
+            report.removed_files.push(path);
         }
     }
     if exe_removed {
@@ -201,6 +195,10 @@ pub fn clean_target_dir(target_dir: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// The profile subdirs that hold `<name>-<hash>` units: `deps/` for libraries, binaries and tests,
+/// `examples/` for examples.
+const UNIT_DIRS: [&str; 2] = ["deps", "examples"];
 
 /// Where recorded invocations list the artifacts they used, one file per invocation.
 const USAGE_DIR: &str = "xtask-usage";
@@ -276,13 +274,13 @@ pub struct UnitPruneReport {
 
 /// Remove compilation units that nothing is known to use.
 ///
-/// A unit is every file in a `deps/` directory that shares one `<name>-<hash>`: its rlib, rmeta,
-/// proc-macro shared object or executable, its `.d` and its `.dwo` files, plus its
+/// A unit is every file in a `deps/` or `examples/` directory that shares one `<name>-<hash>`: its
+/// rlib, rmeta, proc-macro shared object or executable, its `.d` and its `.dwo` files, plus its
 /// `.fingerprint/<name>-<hash>` dir. A unit is in use when a live usage record names one of its
 /// files, or when it is in the dependency closure of an artifact cargo uplifted into the profile
 /// dir (see [`uplifted_closure`]): that closure is what the latest plain `cargo build` or
-/// `cargo run` uses, which no record covers. Any other unit is removed once it was last touched
-/// before `unused_before`. A build-script directory under `build/` follows the same rules.
+/// `cargo run` uses, which no record covers. Any other unit is removed once cargo last wrote it, and
+/// any executable of it last ran, before `unused_before`. A build-script directory under `build/` follows the same rules.
 ///
 /// Records last written before `unused_before` expire and are deleted. With no live record the
 /// pass removes nothing, since nothing is known to be in use.
@@ -308,7 +306,15 @@ pub fn prune_unused_units(
         };
         let uplifted = uplifted_closure(profile)?;
         tracing::debug!(units = uplifted.len(), profile = %profile.display(), "uplifted closure");
-        prune_deps_units(dir, &used, &uplifted, unused_before, &mut report)?;
+        for unit_dir in UNIT_DIRS {
+            prune_deps_units(
+                &profile.join(unit_dir),
+                &used,
+                &uplifted,
+                unused_before,
+                &mut report,
+            )?;
+        }
         prune_build_dirs(
             &profile.join("build"),
             &used,
@@ -331,7 +337,7 @@ fn prune_orphan_fingerprints(
     report: &mut UnitPruneReport,
 ) -> io::Result<()> {
     let mut present: HashSet<String> = HashSet::new();
-    for sub in ["deps", "build"] {
+    for sub in UNIT_DIRS.iter().chain(&["build"]) {
         for path in fingerprint_files(&profile.join(sub)) {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 let id = unit_id(name).unwrap_or(name);
@@ -375,27 +381,33 @@ fn prune_orphan_fingerprints(
 pub fn uplifted_closure(profile: &Path) -> io::Result<HashSet<String>> {
     use std::os::unix::fs::MetadataExt as _;
     let fingerprints = profile.join(".fingerprint");
+    // Hashed unit files: libraries and binaries in `deps/`, examples in `examples/`.
     let mut by_inode = std::collections::HashMap::new();
-    let deps = match fs::read_dir(profile.join("deps")) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
-        Err(e) => return Err(e),
-    };
-    for entry in deps {
-        let entry = entry?;
-        let name = entry.file_name();
-        if let Some(id) = name.to_str().and_then(unit_id) {
-            let meta = entry.metadata()?;
-            by_inode.insert((meta.dev(), meta.ino()), unit_hash(id).to_owned());
+    for dir in UNIT_DIRS {
+        for path in fingerprint_files(&profile.join(dir)) {
+            if let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(unit_id) {
+                let meta = fs::metadata(&path)?;
+                by_inode.insert((meta.dev(), meta.ino()), unit_hash(id).to_owned());
+            }
         }
     }
+    // Uplifted files are the unhashed names (`target/debug/irys`, `examples/dupsort`).
     let mut roots = Vec::new();
-    for entry in fs::read_dir(profile)? {
-        let meta = entry?.metadata()?;
-        if meta.is_file()
-            && let Some(id) = by_inode.get(&(meta.dev(), meta.ino()))
-        {
-            roots.push(id.clone());
+    for dir in [profile.to_path_buf(), profile.join("examples")] {
+        for path in fingerprint_files(&dir) {
+            let uplifted_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| unit_id(n).is_none());
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            if uplifted_name
+                && meta.is_file()
+                && let Some(id) = by_inode.get(&(meta.dev(), meta.ino()))
+            {
+                roots.push(id.clone());
+            }
         }
     }
 
@@ -403,7 +415,8 @@ pub fn uplifted_closure(profile: &Path) -> io::Result<HashSet<String>> {
         Ok(entries) => entries
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
             .collect(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        // Without fingerprints cargo rebuilds everything anyway; still keep the roots themselves.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(roots.into_iter().collect()),
         Err(e) => return Err(e),
     };
     // Unit hash -> its fingerprint dir, and fingerprint hash (as cargo writes it) -> unit hash.
@@ -525,7 +538,12 @@ fn prune_deps_units(
 ) -> io::Result<()> {
     let mut units: std::collections::HashMap<String, Vec<PathBuf>> =
         std::collections::HashMap::new();
-    for entry in fs::read_dir(dir)? {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
         let path = entry?.path();
         if let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(unit_id) {
             units.entry(id.to_owned()).or_default().push(path);
@@ -541,20 +559,16 @@ fn prune_deps_units(
         let Some(touched) = last_touched(files)? else {
             continue;
         };
-        if touched > unused_before {
+        if touched.max(last_run(files)?) > unused_before {
             tracing::debug!(unit = %id, "kept: unrecorded but recent");
             continue;
         }
         tracing::debug!(unit = %id, "removing unit");
         let mut removed_any = false;
         for file in files {
-            match fs::metadata(file).and_then(|m| fs::remove_file(file).map(|()| m.len())) {
-                Ok(len) => {
-                    report.removed_bytes += len;
-                    removed_any = true;
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
+            if let Some(len) = remove_path(file)? {
+                report.removed_bytes += len;
+                removed_any = true;
             }
         }
         if removed_any {
@@ -630,10 +644,32 @@ fn prune_build_dirs(
     Ok(())
 }
 
+/// The latest atime of the executables among `files` (extensionless: a test or bin binary). Unlike
+/// a `.d` or fingerprint file, a prune never reads an executable, so where atime moves (`relatime`)
+/// it shows a recent run, such as a plain `cargo nextest run` that no record covers.
+fn last_run(files: &[PathBuf]) -> io::Result<SystemTime> {
+    let mut latest = SystemTime::UNIX_EPOCH;
+    for file in files {
+        if file
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains('.'))
+        {
+            continue;
+        }
+        match fs::metadata(file) {
+            Ok(meta) => latest = latest.max(meta.accessed()?),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(latest)
+}
+
 /// The latest mtime across `files`: when cargo last wrote them; `None` when every one is already
-/// gone. atime is not used: a prune itself reads `.d` and fingerprint files, so on a `relatime`
-/// mount every unit would look recently used, and on a `noatime` mount atime never moves. What is
-/// in use is known from the usage records, the uplifted closure and the run lock instead.
+/// gone. atime is not used here: a prune itself reads `.d` and fingerprint files, so on a
+/// `relatime` mount every unit would look recently used, and on a `noatime` mount atime never
+/// moves. What is in use is known from the usage records, the uplifted closure, the run lock and
+/// an executable's own atime ([`last_run`]).
 fn last_touched(files: &[PathBuf]) -> io::Result<Option<SystemTime>> {
     let mut latest = None;
     for file in files {
@@ -645,6 +681,27 @@ fn last_touched(files: &[PathBuf]) -> io::Result<Option<SystemTime>> {
         latest = latest.max(Some(meta.modified()?));
     }
     Ok(latest)
+}
+
+/// Remove a unit's file, or a directory such as the `<name>-<hash>.dSYM` bundle rustc writes on
+/// macOS with `split-debuginfo = "packed"`. Returns the bytes freed, or `None` when it was already
+/// gone (a concurrent prune).
+fn remove_path(path: &Path) -> io::Result<Option<u64>> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let (len, removed) = if meta.is_dir() {
+        (dir_size(path), fs::remove_dir_all(path))
+    } else {
+        (meta.len(), fs::remove_file(path))
+    };
+    match removed {
+        Ok(()) => Ok(Some(len)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn dir_size(dir: &Path) -> u64 {
@@ -1167,6 +1224,86 @@ mod tests {
             assert!(t.has("libmy_dep-00000000000000d1.rlib"));
             assert!(out.exists());
             assert!(!t.has("libold-00000000000000e1.rlib"));
+        }
+
+        #[test]
+        fn keeps_an_uplifted_example_and_its_dependencies_and_prunes_old_examples() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            let examples = t.target().join("debug/examples");
+            fs::create_dir_all(&examples).unwrap();
+            let current = examples.join("dupsort-00000000000000c1");
+            let old = examples.join("dupsort-00000000000000c0");
+            for exe in [&current, &old] {
+                fs::write(exe, "exe").unwrap();
+                age_file(exe, 48 * HOUR);
+            }
+            // `cargo run --example dupsort` hard-links the example as `examples/dupsort`.
+            fs::hard_link(&current, examples.join("dupsort")).unwrap();
+            t.fingerprint("dupsort-00000000000000c1", "example-dupsort", 0xc1, &[0xd1]);
+            t.fingerprint("dupsort-00000000000000c0", "example-dupsort", 0xc0, &[]);
+            t.lib(
+                "dev_dep-00000000000000d1",
+                "crates/dev-dep/src/lib.rs",
+                48 * HOUR,
+            );
+            t.fingerprint("dev-dep-00000000000000d1", "lib-dev_dep", 0xd1, &[]);
+            t.record(&[used]);
+
+            let report = t.prune();
+
+            assert!(current.exists());
+            assert!(t.fingerprints().join("dupsort-00000000000000c1").exists());
+            assert!(t.has("libdev_dep-00000000000000d1.rlib"));
+            assert!(!old.exists());
+            assert!(!t.fingerprints().join("dupsort-00000000000000c0").exists());
+            assert_eq!(report.removed_units, 1);
+        }
+
+        #[test]
+        fn removes_a_units_dsym_directory() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            let exe = t.exe("it-00000000000000b2", 48 * HOUR);
+            let dsym = t
+                .deps()
+                .join("it-00000000000000b2.dSYM/Contents/Resources/DWARF");
+            fs::create_dir_all(&dsym).unwrap();
+            fs::write(dsym.join("it-00000000000000b2"), "dwarf").unwrap();
+            age_file(&t.deps().join("it-00000000000000b2.dSYM"), 48 * HOUR);
+            t.record(&[used]);
+
+            assert_eq!(t.prune().removed_units, 1);
+            assert!(!exe.exists());
+            assert!(!t.deps().join("it-00000000000000b2.dSYM").exists());
+        }
+
+        #[test]
+        fn keeps_an_old_executable_that_ran_recently() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            // Built two days ago, run a minute ago by a plain `cargo nextest run`.
+            let exe = t.exe("it-00000000000000b1", 48 * HOUR);
+            fs::File::open(&exe)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_accessed(SystemTime::now()))
+                .unwrap();
+            t.record(&[used]);
+
+            assert_eq!(t.prune().removed_units, 0);
+            assert!(exe.exists());
         }
 
         #[test]
