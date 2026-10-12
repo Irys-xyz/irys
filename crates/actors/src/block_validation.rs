@@ -35,7 +35,7 @@ use irys_types::{
     SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
     app_state::DatabaseProvider,
     calculate_difficulty,
-    hardfork_config::{Cascade, Echo, ForBlock, ForEpoch},
+    hardfork_config::{Cascade, ForEpoch},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path,
@@ -4208,17 +4208,6 @@ fn ledger_tx_ids_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<Vec<
         .map(|l| l.tx_ids.0.clone())
 }
 
-/// True iff the tx whose folded `tx_root` leaf starts at cumulative byte `cursor` (prefix
-/// sums of `data_size` in `tx_ids` order) is the recall chunk's owner for a tx_path leaf
-/// at `target`. A `data_size == 0` tx contributes a zero-width leaf that shares its start
-/// offset with the following tx but owns no chunks, and `validate_path` resolves an
-/// exact-boundary target to the right-hand (non-empty) leaf — so the owner is the first tx
-/// at `target` that actually holds bytes. Skipping zero-width leaves keeps recovery correct
-/// even if a zero-size tx ever slips past prevalidation.
-fn is_poa_owning_leaf(cursor: u128, data_size: u64, target: u128) -> bool {
-    cursor == target && data_size > 0
-}
-
 /// Walk the owning block's ledger txs in `tx_ids` order.
 ///
 /// Recent blocks live in `block_tree` (not yet migrated). Older blocks are read
@@ -4280,45 +4269,9 @@ fn visit_owning_ledger_txs<T>(
     .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))
 }
 
-/// Recover the recall chunk's owning data transaction for the pre-Echo PoA path.
-///
-/// After `prefix_hash` is folded into the tx_root leaf, a tx_path proof no longer yields the
-/// real `data_root`, so we fetch the owning block's ledger txs and pick the one whose
-/// cumulative byte range (prefix sums of `data_size`, the same order the fold uses) begins at
-/// `tx_leaf_min_byte_range`. Deferred until after `tx_path` validation so an invalid proof
-/// still surfaces as `MerkleProofInvalid`.
-fn load_owning_tx_for_poa(
-    block_tree_guard: &BlockTreeReadGuard,
-    db: &DatabaseProvider,
-    owning_block_hash: BlockHash,
-    ledger: DataLedger,
-    tx_leaf_min_byte_range: u128,
-) -> Result<DataTransactionHeader, PreValidationError> {
-    // The owner is the first non-empty leaf whose cumulative start byte ==
-    // `tx_leaf_min_byte_range` (see `is_poa_owning_leaf` for why zero-width leaves are
-    // skipped). Prefix-sum `data_size` in `tx_ids` order and stop once the cursor passes
-    // the target — never reading the ledger's trailing transactions.
-    let cursor = Cell::new(0_u128);
-    visit_owning_ledger_txs(
-        block_tree_guard,
-        db,
-        owning_block_hash,
-        ledger,
-        || cursor.get() > tx_leaf_min_byte_range,
-        |header| {
-            if is_poa_owning_leaf(cursor.get(), header.data_size, tx_leaf_min_byte_range) {
-                return ControlFlow::Break(header.clone());
-            }
-            cursor.set(cursor.get() + u128::from(header.data_size));
-            ControlFlow::Continue(())
-        },
-    )?
-    .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)
-}
-
 /// Transaction selected by the whole-chunk layout, plus the byte positions that
 /// layout assigns inside the tx_root tree.
-struct EchoPoaTx {
+struct ChunkLayoutPoaTx {
     tx: DataTransactionHeader,
     /// Sum of `data_size` of every preceding tx. Start of this tx in the tx_root tree.
     raw_start: u128,
@@ -4340,7 +4293,7 @@ fn select_poa_tx_by_chunk_layout(
     ledger: DataLedger,
     block_chunk_offset: u128,
     chunk_size: u64,
-) -> Result<EchoPoaTx, PreValidationError> {
+) -> Result<ChunkLayoutPoaTx, PreValidationError> {
     let chunk_size = u128::from(chunk_size);
     if chunk_size == 0 {
         return Err(PreValidationError::BlockBoundsLookupError(
@@ -4349,7 +4302,7 @@ fn select_poa_tx_by_chunk_layout(
     }
 
     enum Stop {
-        Hit(EchoPoaTx),
+        Hit(ChunkLayoutPoaTx),
         Overflow,
     }
 
@@ -4373,7 +4326,7 @@ fn select_poa_tx_by_chunk_layout(
                 else {
                     return ControlFlow::Break(Stop::Overflow);
                 };
-                return ControlFlow::Break(Stop::Hit(EchoPoaTx {
+                return ControlFlow::Break(Stop::Hit(ChunkLayoutPoaTx {
                     tx: header.clone(),
                     raw_start: raw_start.get(),
                     tx_chunk_offset,
@@ -4713,7 +4666,6 @@ pub fn poa_is_valid(
     parent_height: u64,
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
-    echo: ForBlock<Echo>,
     miner_address: &IrysAddress,
 ) -> Result<(), PreValidationError> {
     debug!("PoA validating");
@@ -4791,73 +4743,36 @@ pub fn poa_is_valid(
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
 
-        // Echo (active): the block index places each tx on whole chunks, while the
-        // tx_root tree sizes each tx by raw `data_size`. Select the tx by the chunk
-        // prefix, then check its tx_path at `raw_start + chunk_byte_within_tx`.
-        // Inactive: the historical lookup at `block_chunk_offset * chunk_size`.
-        let (tx_path_result, owning_tx, tx_chunk_offset) = if echo.is_active() {
-            let hit = select_poa_tx_by_chunk_layout(
-                block_tree_guard,
-                db,
-                owning_block_hash,
-                ledger,
-                block_chunk_offset,
-                config.chunk_size,
-            )?;
-            let data_size = u128::from(hit.tx.data_size);
-            let raw_end = hit
-                .raw_start
-                .checked_add(data_size)
-                .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)?;
-            let target = hit
-                .raw_start
-                .checked_add(hit.tx_chunk_offset)
-                .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)?;
-            debug_assert!(target < raw_end);
-            let tx_path_result = validate_path(bb.tx_root.0, &tx_path, target)
-                .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-            if tx_path_result.min_byte_range != hit.raw_start
-                || tx_path_result.max_byte_range != raw_end
-            {
-                return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
-            }
-            (tx_path_result, hit.tx, hit.tx_chunk_offset)
-        } else {
-            // tx_path validation
-            let tx_path_result = validate_path(
-                bb.tx_root.0,
-                &tx_path,
-                block_chunk_offset * (config.chunk_size as u128),
-            )
+        // The block index places each tx on whole chunks, while the tx_root tree
+        // sizes each tx by raw `data_size`. Select the tx by the chunk prefix,
+        // then check its tx_path at `raw_start + chunk_byte_within_tx`.
+        let hit = select_poa_tx_by_chunk_layout(
+            block_tree_guard,
+            db,
+            owning_block_hash,
+            ledger,
+            block_chunk_offset,
+            config.chunk_size,
+        )?;
+        let data_size = u128::from(hit.tx.data_size);
+        let raw_end = hit
+            .raw_start
+            .checked_add(data_size)
+            .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)?;
+        let target = hit
+            .raw_start
+            .checked_add(hit.tx_chunk_offset)
+            .ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)?;
+        debug_assert!(target < raw_end);
+        let tx_path_result = validate_path(bb.tx_root.0, &tx_path, target)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
-
-            if !(tx_path_result.min_byte_range..=tx_path_result.max_byte_range)
-                .contains(&(block_chunk_offset * (config.chunk_size as u128)))
-            {
-                return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
-            }
-
-            let tx_chunk_offset =
-                block_chunk_offset * (config.chunk_size as u128) - tx_path_result.min_byte_range;
-
-            // After folding `prefix_hash` into the leaf, `tx_path_result.leaf_hash` is
-            // `hash_all_sha256([data_root, prefix_hash])` — no longer the raw `data_root`, so
-            // it can no longer serve as the root for the data (chunk) proof. Recover the recall
-            // chunk's owning transaction so we can (a) bind the tx_path leaf to the signed tree
-            // and (b) validate the `data_path` against the real `data_root`.
-            //
-            // The owning tx is the one whose cumulative byte range — prefix sums of `data_size`
-            // in the owning block's `tx_ids` order, the same ordering the tx_root fold uses —
-            // begins at `tx_path_result.min_byte_range`. Deferred until after tx_path validated.
-            let owning_tx = load_owning_tx_for_poa(
-                block_tree_guard,
-                db,
-                owning_block_hash,
-                ledger,
-                tx_path_result.min_byte_range,
-            )?;
-            (tx_path_result, owning_tx, tx_chunk_offset)
-        };
+        if tx_path_result.min_byte_range != hit.raw_start
+            || tx_path_result.max_byte_range != raw_end
+        {
+            return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
+        }
+        let owning_tx = hit.tx;
+        let tx_chunk_offset = hit.tx_chunk_offset;
 
         // Bind the tx_path leaf to the signed tx_root tree: it must equal the folded
         // `(data_root, prefix_hash)` value of the owning tx. This is what authenticates
@@ -7796,7 +7711,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             };
 
             let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
@@ -7852,31 +7766,6 @@ mod tests {
             find_commitment_chain_id_mismatch(&[ok, foreign.clone()], consensus.chain_id),
             Some((foreign.id(), 1, consensus.chain_id + 1)),
             "the foreign-chain commitment must be flagged so prevalidation can reject the block",
-        );
-    }
-
-    /// PoA owning-tx recovery must attribute a recall chunk to the tx that actually holds
-    /// bytes at the tx_path leaf offset, NOT a preceding `data_size == 0` tx that shares the
-    /// same start offset via its zero-width `tx_root` leaf. Ledger [A:100, Z:0, B:200] has
-    /// leaf start offsets [0, 100, 100]; a chunk in B resolves to `min_byte_range = 100`, so
-    /// the owner must be B (index 2), not the zero-width Z (index 1).
-    #[test]
-    fn poa_owner_recovery_skips_zero_width_leaves() {
-        let data_sizes: [u64; 3] = [100, 0, 200];
-        let target: u128 = 100;
-        let mut cursor: u128 = 0;
-        let mut owner = None;
-        for (i, &ds) in data_sizes.iter().enumerate() {
-            if is_poa_owning_leaf(cursor, ds, target) {
-                owner = Some(i);
-                break;
-            }
-            cursor += ds as u128;
-        }
-        assert_eq!(
-            owner,
-            Some(2),
-            "owner must be the tx that holds bytes at offset 100, not the zero-width leaf",
         );
     }
 
@@ -8256,7 +8145,6 @@ mod tests {
                     poa_tx_num * 3 + poa_chunk_num,
                     9,
                     chunk_size,
-                    ForBlock::<Echo>::inactive(),
                 );
                 assert!(poa_valid.is_ok(), "PoA should be valid: {poa_valid:?}");
             }
@@ -8295,7 +8183,6 @@ mod tests {
                 poa_chunk_num,
                 2,
                 chunk_size,
-                ForBlock::<Echo>::inactive(),
             );
             assert!(poa_valid.is_ok(), "PoA should be valid: {poa_valid:?}");
         }
@@ -8330,7 +8217,6 @@ mod tests {
             poa_chunk_num,
             2,
             chunk_size,
-            ForBlock::<Echo>::inactive(),
         );
 
         match result {
@@ -8359,20 +8245,22 @@ mod tests {
     /// The block index places every tx on a whole-chunk boundary
     /// (`BlockIndex::push_block` rounds each `data_size` up to a chunk), but
     /// the tx_root tree gives each tx a byte range of its raw `data_size`.
-    /// With Echo active, validation selects the tx by whole chunks and checks
-    /// the tx_path at that tx's raw start plus the chunk's byte offset inside
-    /// it. Here tx0 is 40 bytes (chunks 0-1, 24 bytes of padding) and tx1 is
-    /// 40 bytes (chunks 2-3, tree bytes 40..80). Every chunk validates.
+    /// Validation selects the tx by whole chunks and checks the tx_path at
+    /// that tx's raw start plus the chunk's byte offset inside it. Here tx0
+    /// is 40 bytes (chunks 0-1, 24 bytes of padding) and tx1 is 40 bytes
+    /// (chunks 2-3, tree bytes 40..80). Every chunk validates, including
+    /// offset 3, which a `block_chunk_offset * chunk_size` lookup places
+    /// past the end of the tree.
     #[tokio::test]
     async fn poa_validates_every_chunk_after_an_unaligned_tx() {
         let (_tmp, mut context) = init().await;
         let data = [vec![3_u8; 40], vec![5_u8; 40]];
         let built = index_submit_poas(&mut context, &data);
         for poa in &built.poas {
-            let result = validate_indexed_poa(&context, &built, poa, ForBlock::<Echo>::active());
+            let result = validate_indexed_poa(&context, &built, poa);
             assert!(
                 result.is_ok(),
-                "Echo PoA for tx {} chunk {} at offset {} should be valid: {result:?}",
+                "PoA for tx {} chunk {} at offset {} should be valid: {result:?}",
                 poa.tx_index,
                 poa.chunk_index,
                 poa.block_offset
@@ -8380,43 +8268,15 @@ mod tests {
         }
     }
 
-    /// Same layout as [`poa_validates_every_chunk_after_an_unaligned_tx`], with
-    /// Echo inactive. The historical rule looks the chunk up at
-    /// `block_chunk_offset * chunk_size`. Offsets 0-2 still land inside the
-    /// tx that owns them. Offset 3 is byte 96, past the tree's end at 80, and
-    /// stays rejected.
-    #[tokio::test]
-    async fn poa_rejects_unaligned_chunk_before_echo() {
-        let (_tmp, mut context) = init().await;
-        let data = [vec![3_u8; 40], vec![5_u8; 40]];
-        let built = index_submit_poas(&mut context, &data);
-        for poa in &built.poas {
-            let result = validate_indexed_poa(&context, &built, poa, ForBlock::<Echo>::inactive());
-            if poa.block_offset == 3 {
-                assert!(
-                    matches!(result, Err(PreValidationError::MerkleProofInvalid(_))),
-                    "pre-Echo offset 3 must stay rejected, got {result:?}"
-                );
-            } else {
-                assert!(
-                    result.is_ok(),
-                    "pre-Echo offset {} still falls inside its tx: {result:?}",
-                    poa.block_offset
-                );
-            }
-        }
-    }
-
     /// Same 40-byte then 40-byte layout as
     /// [`poa_validates_every_chunk_after_an_unaligned_tx`], but the owning
     /// block is not migrated. It sits in the block tree only: the block index
     /// has no item at its height, and the consensus DB has no header for it.
-    /// Bounds resolution therefore takes the block-tree fallback, and the Echo
-    /// walk reads the sealed block's Submit transactions. Offset 3 is the
-    /// chunk after the unaligned transaction. Echo accepts that PoA. The
-    /// historical rule still rejects it.
+    /// Bounds resolution therefore takes the block-tree fallback, and the
+    /// chunk walk reads the sealed block's Submit transactions. Offset 3 is
+    /// the chunk after the unaligned transaction.
     #[tokio::test]
-    async fn poa_echo_validates_unaligned_chunk_from_unmigrated_block() {
+    async fn poa_validates_unaligned_chunk_from_unmigrated_block() {
         let (_tmp, context) = init().await;
         let data = [vec![3_u8; 40], vec![5_u8; 40]];
         let seeded = seed_unmigrated_submit_block(&context, &data);
@@ -8461,64 +8321,17 @@ mod tests {
         assert_eq!(shifted.tx_index, 1);
         assert_eq!(shifted.chunk_index, 1);
 
-        let accepted = validate_tree_poa(&context, &seeded, shifted, ForBlock::<Echo>::active());
+        let accepted = validate_tree_poa(&context, &seeded, shifted);
         assert!(
             accepted.is_ok(),
-            "Echo accepts the chunk after the unaligned tx from the block tree: {accepted:?}"
-        );
-
-        let rejected = validate_tree_poa(&context, &seeded, shifted, ForBlock::<Echo>::inactive());
-        assert!(
-            matches!(rejected, Err(PreValidationError::MerkleProofInvalid(_))),
-            "the same PoA stays rejected while Echo is inactive, got {rejected:?}"
+            "the chunk after the unaligned tx validates from the block tree: {accepted:?}"
         );
     }
 
-    /// The same PoA is rejected one second before Echo's activation timestamp
-    /// and accepted at that timestamp. The fork is resolved from the validated
-    /// block's own timestamp.
+    /// Every chunk of every listed layout validates. A proof whose tx_path
+    /// and data_path belong to a different tx than the chunk layout is rejected.
     #[tokio::test]
-    async fn poa_echo_activation_boundary_uses_block_timestamp() {
-        let (_tmp, mut context) = init().await;
-        let activation = UnixTimestamp::from_secs(1_700_000_000);
-        context.consensus_config.hardforks.echo = Some(Echo {
-            activation_timestamp: activation,
-        });
-        let before = context
-            .consensus_config
-            .hardforks
-            .echo_for_block(UnixTimestamp::from_secs(activation.as_secs() - 1));
-        let at = context
-            .consensus_config
-            .hardforks
-            .echo_for_block(activation);
-        assert!(!before.is_active());
-        assert!(at.is_active());
-
-        let data = [vec![3_u8; 40], vec![5_u8; 40]];
-        let built = index_submit_poas(&mut context, &data);
-        let shifted = built
-            .poas
-            .iter()
-            .find(|poa| poa.block_offset == 3)
-            .expect("offset 3 is the chunk the historical rule shifts out of the tree");
-        let rejected = validate_indexed_poa(&context, &built, shifted, before);
-        assert!(
-            matches!(rejected, Err(PreValidationError::MerkleProofInvalid(_))),
-            "one second before activation the historical rule still rejects offset 3: {rejected:?}"
-        );
-        let accepted = validate_indexed_poa(&context, &built, shifted, at);
-        assert!(
-            accepted.is_ok(),
-            "at activation the same PoA validates: {accepted:?}"
-        );
-    }
-
-    /// Post-Echo, every chunk of every listed layout validates. A proof whose
-    /// tx_path and data_path belong to a different tx than the chunk layout
-    /// is rejected.
-    #[tokio::test]
-    async fn poa_echo_accepts_each_layout_and_rejects_a_foreign_proof() {
+    async fn poa_accepts_each_layout_and_rejects_a_foreign_proof() {
         let chunk = 32_usize;
         let layouts: Vec<(&str, Vec<Vec<u8>>)> = vec![
             ("aligned", vec![vec![1_u8; chunk], vec![2_u8; chunk * 2]]),
@@ -8555,11 +8368,10 @@ mod tests {
             let (_tmp, mut context) = init().await;
             let built = index_submit_poas(&mut context, data);
             for poa in &built.poas {
-                let result =
-                    validate_indexed_poa(&context, &built, poa, ForBlock::<Echo>::active());
+                let result = validate_indexed_poa(&context, &built, poa);
                 assert!(
                     result.is_ok(),
-                    "{name}: tx {} chunk {} offset {} must validate under Echo: {result:?}",
+                    "{name}: tx {} chunk {} offset {} must validate: {result:?}",
                     poa.tx_index,
                     poa.chunk_index,
                     poa.block_offset
@@ -8588,7 +8400,6 @@ mod tests {
                     block_offset: host.block_offset,
                     poa: swapped,
                 },
-                ForBlock::<Echo>::active(),
             );
             assert!(
                 matches!(
@@ -8599,16 +8410,16 @@ mod tests {
                         | PreValidationError::PoAChunkHashMismatch { .. }
                         | PreValidationError::PoAChunkOffsetOutOfDataChunksBounds)
                 ),
-                "{label} must be rejected under Echo, got {result:?}"
+                "{label} must be rejected, got {result:?}"
             );
         }
     }
 
     /// A zero-size tx contributes no chunks and no bytes. The following tx
     /// keeps the chunk offset and the raw byte offset it would have had
-    /// without the empty tx, and its PoA validates under Echo.
+    /// without the empty tx, and its PoA validates.
     #[tokio::test]
-    async fn poa_echo_skips_zero_size_tx() {
+    async fn poa_skips_zero_size_tx() {
         let (_tmp, mut context) = init().await;
         let chunk_size = context.consensus_config.chunk_size as usize;
         let signer = IrysSigner::random_signer(&context.consensus_config);
@@ -8641,7 +8452,7 @@ mod tests {
         ];
         let built = index_headers_and_poas(&mut context, tx_root, &headers, poas, 2);
         for poa in &built.poas {
-            let result = validate_indexed_poa(&context, &built, poa, ForBlock::<Echo>::active());
+            let result = validate_indexed_poa(&context, &built, poa);
             assert!(
                 result.is_ok(),
                 "zero-size tx must not shift tx {} chunk {} (offset {}): {result:?}",
@@ -8875,7 +8686,6 @@ mod tests {
         context: &TestContext,
         built: &IndexedSubmit,
         poa: &IndexedChunkPoa,
-        echo: ForBlock<Echo>,
     ) -> Result<(), PreValidationError> {
         let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
         let block_tree_guard = dummy_block_tree_guard(&context.consensus_config);
@@ -8894,7 +8704,6 @@ mod tests {
             built.height,
             &context.epoch_snapshot,
             &context.consensus_config,
-            echo,
             &context.miner_address,
         )
     }
@@ -8993,7 +8802,6 @@ mod tests {
         context: &TestContext,
         seeded: &TreeSubmit,
         poa: &IndexedChunkPoa,
-        echo: ForBlock<Echo>,
     ) -> Result<(), PreValidationError> {
         let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
         // Slot 0: the ledger offset equals the offset inside the block.
@@ -9011,7 +8819,6 @@ mod tests {
             seeded.height,
             &context.epoch_snapshot,
             &context.consensus_config,
-            echo,
             &context.miner_address,
         )
     }
@@ -9029,7 +8836,6 @@ mod tests {
         poa_offset: usize,
         total_chunks_in_tx: usize,
         chunk_size: usize,
-        echo: ForBlock<Echo>,
     ) -> Result<(), PreValidationError> {
         // Initialize genesis block at height 0
         let height = context.block_index.num_blocks();
@@ -9179,7 +8985,6 @@ mod tests {
             height,
             &context.epoch_snapshot,
             &context.consensus_config,
-            echo,
             &context.miner_address,
         )
     }
@@ -9446,7 +9251,6 @@ mod tests {
             height,
             &context.epoch_snapshot,
             &context.consensus_config,
-            ForBlock::<Echo>::inactive(),
             &context.miner_address,
         );
 
@@ -10178,7 +9982,6 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -10196,7 +9999,6 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             },
             ..ConsensusConfig::testing()
         }

@@ -579,12 +579,6 @@ impl BlockValidationTask {
             // Clone the Arc for the blocking task; the non-PoA tasks below
             // get their own clones from the same single fetch.
             let poa_epoch_snapshot = Arc::clone(&parent_epoch_snapshot);
-            // Echo is a per-block rule. The block under validation carries the
-            // timestamp; the parent timestamp can still be on the other side of
-            // the boundary.
-            let echo = consensus_config
-                .hardforks
-                .echo_for_block(self.sealed_block.header().timestamp_secs());
             {
                 let poa_span = tracing::info_span!(
                     "poa_validation",
@@ -606,7 +600,6 @@ impl BlockValidationTask {
                         block_height.saturating_sub(1),
                         &poa_epoch_snapshot,
                         &consensus_config,
-                        echo,
                         &miner_address,
                     )
                     .map(|()| ValidationResult::Valid)

@@ -110,7 +110,6 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
         borealis: None,
         cascade: None,
         delta: None,
-        echo: None,
     };
     config
 }
@@ -606,7 +605,6 @@ mod epoch_block_filtering {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
         };
         config
     }
@@ -718,7 +716,6 @@ mod epoch_block_filtering {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
         };
         let [signer1, signer2] = create_funded_signers(&mut config);
         let node = IrysNodeTest::new_genesis(config)
@@ -794,7 +791,6 @@ mod borealis_hardfork {
             borealis,
             cascade: None,
             delta: None,
-            echo: None,
         };
         config
     }
@@ -892,7 +888,6 @@ mod borealis_hardfork {
             }),
             cascade: None,
             delta: None,
-            echo: None,
         };
 
         let signer = create_funded_signer(&mut config);
@@ -1015,7 +1010,6 @@ mod peer_sync_recovery {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
         };
 
         // Fund signers: 9 for V1 (3 epochs * 3 blocks), 9 for V2 (3 epochs * 3 blocks), 1 for peer

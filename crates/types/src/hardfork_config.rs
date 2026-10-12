@@ -39,17 +39,13 @@ pub struct IrysHardforkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascade: Option<Cascade>,
 
-    /// Delta hardfork - seeds slots for a data ledger in the epoch it activates.
-    /// Resolved at the epoch block's own timestamp; no per-block effect, since it
-    /// only acts during epoch processing. None means disabled.
+    /// Delta hardfork. WIP and not deployed: every preset leaves it unset, and
+    /// it accumulates consensus changes that need a hardfork. The change it
+    /// carries now seeds slots for a data ledger in the epoch it activates.
+    /// Resolved at the epoch block's own timestamp. It only acts during epoch
+    /// processing. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
-
-    /// Echo hardfork - PoA maps a block chunk offset through the whole-chunk
-    /// layout onto the tx_root byte range. Resolved at the validated block's
-    /// own timestamp (per block, not epoch-aligned). None means disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub echo: Option<Echo>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -139,8 +135,11 @@ impl Cascade {
     }
 }
 
-/// Delta hardfork - a data ledger that becomes active mid-chain gets its first
-/// slots in the epoch that activates it.
+/// Delta hardfork. WIP and not deployed. It accumulates consensus changes that
+/// need a hardfork.
+///
+/// The change it carries now: a data ledger that becomes active mid-chain gets
+/// its first slots in the epoch that activates it.
 ///
 /// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
 /// but the epoch block's own header cannot list it: the producer derives the
@@ -171,30 +170,6 @@ impl Delta {
     pub const fn default_initial_slots_per_new_ledger() -> NonZeroU64 {
         NonZeroU64::MIN
     }
-}
-
-/// Echo hardfork - PoA validation maps a ledger chunk offset through the block
-/// index's whole-chunk layout onto the tx_root tree's raw byte range.
-///
-/// The tx_root tree sizes each transaction by its raw `data_size`. The block
-/// index rounds each `data_size` up to a whole chunk. Before this fork, PoA
-/// validation treats `block_chunk_offset * chunk_size` as a byte offset in
-/// that tree, so padding from earlier transactions shifts the target. An
-/// honest proof is rejected once that padding reaches one chunk.
-///
-/// This fork does not change the tx_root tree, the block format, tx_path
-/// production, or the chunk layout. It changes only the mapping used when a
-/// block's PoA is validated.
-///
-/// Resolved at the validated block's own timestamp. The rule is per block,
-/// not epoch-aligned. None means disabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Echo {
-    /// Timestamp (seconds since epoch) at which this hardfork activates.
-    /// A block whose timestamp is greater than or equal to this value uses
-    /// the whole-chunk mapping.
-    #[serde(with = "unix_timestamp_string_serde")]
-    pub activation_timestamp: UnixTimestamp,
 }
 
 /// The resolved activation state of a hardfork, carrying that fork's parameters
@@ -389,20 +364,6 @@ impl IrysHardforkConfig {
             .into()
     }
 
-    /// Echo's activation state at a block's OWN timestamp (seconds).
-    ///
-    /// Per-block rule: the block being validated carries the timestamp that
-    /// selects the PoA chunk mapping. Not epoch-aligned — a block can cross
-    /// the boundary without waiting for the next epoch.
-    #[must_use]
-    pub fn echo_for_block(&self, timestamp: UnixTimestamp) -> ForBlock<Echo> {
-        ForBlock::new(
-            self.echo
-                .as_ref()
-                .is_some_and(|fork| timestamp >= fork.activation_timestamp),
-        )
-    }
-
     /// Check if the Borealis hardfork is active at the given timestamp (in seconds).
     #[must_use]
     pub fn is_borealis_active_at(&self, timestamp: UnixTimestamp) -> bool {
@@ -500,7 +461,6 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
         };
 
         assert_eq!(
@@ -534,7 +494,6 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
         };
 
         // Before activation timestamp
@@ -567,7 +526,6 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
-            echo: None,
         };
 
         // Before activation timestamp
@@ -592,7 +550,6 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
-            echo: None,
             ..config
         };
         assert!(
@@ -620,7 +577,6 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
-            echo: None,
         };
 
         let before = UnixTimestamp::from_secs(1499);
@@ -641,7 +597,6 @@ mod tests {
         let no_cascade = IrysHardforkConfig {
             cascade: None,
             delta: None,
-            echo: None,
             ..config
         };
         assert!(no_cascade.ledger_absence_expected(DataLedger::OneYear as u32, at));
@@ -669,7 +624,6 @@ mod tests {
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
             delta: None,
-            echo: None,
         };
 
         // Cascade active at the block's timestamp.
@@ -707,7 +661,6 @@ mod tests {
             }),
             cascade: None,
             delta: None,
-            echo: None,
         };
 
         assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
@@ -737,7 +690,6 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
         };
 
         // Before activation timestamp
@@ -788,7 +740,6 @@ mod tests {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
                 initial_slots_per_new_ledger: NonZeroU64::new(2).expect("non-zero"),
             }),
-            echo: None,
         };
 
         assert_eq!(
@@ -808,7 +759,6 @@ mod tests {
         // Unconfigured means never active.
         let no_delta = IrysHardforkConfig {
             delta: None,
-            echo: None,
             ..config
         };
         assert_eq!(
@@ -848,7 +798,6 @@ mod tests {
             borealis: None,
             cascade: None,
             delta: None,
-            echo: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -869,93 +818,7 @@ mod tests {
         assert_eq!(config.frontier.number_of_ingress_proofs_total, 5);
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.next_name_tbd.is_none());
-        assert!(config.echo.is_none());
-    }
-
-    #[test]
-    fn test_echo_for_block_activation_boundary() {
-        let config = IrysHardforkConfig {
-            frontier: FrontierParams {
-                number_of_ingress_proofs_total: 5,
-                number_of_ingress_proofs_from_assignees: 0,
-            },
-            next_name_tbd: None,
-            aurora: None,
-            borealis: None,
-            cascade: None,
-            delta: None,
-            echo: Some(Echo {
-                activation_timestamp: UnixTimestamp::from_secs(1500),
-            }),
-        };
-
-        assert!(
-            !config
-                .echo_for_block(UnixTimestamp::from_secs(1499))
-                .is_active()
-        );
-        assert!(
-            config
-                .echo_for_block(UnixTimestamp::from_secs(1500))
-                .is_active()
-        );
-        assert!(
-            config
-                .echo_for_block(UnixTimestamp::from_secs(1501))
-                .is_active()
-        );
-
-        let no_echo = IrysHardforkConfig {
-            echo: None,
-            ..config
-        };
-        assert!(
-            !no_echo
-                .echo_for_block(UnixTimestamp::from_secs(u64::MAX))
-                .is_active()
-        );
-    }
-
-    #[test]
-    fn test_echo_toml_roundtrip_present_and_absent() {
-        let with_echo = IrysHardforkConfig {
-            frontier: FrontierParams {
-                number_of_ingress_proofs_total: 1,
-                number_of_ingress_proofs_from_assignees: 0,
-            },
-            next_name_tbd: None,
-            aurora: None,
-            borealis: None,
-            cascade: None,
-            delta: None,
-            echo: Some(Echo {
-                activation_timestamp: UnixTimestamp::from_secs(5000),
-            }),
-        };
-        let toml_str = toml::to_string_pretty(&with_echo).unwrap();
-        assert!(toml_str.contains("[echo]"));
-        assert!(toml_str.contains("activation_timestamp"));
-        let parsed: IrysHardforkConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed, with_echo);
-
-        let without_echo = IrysHardforkConfig {
-            echo: None,
-            ..with_echo
-        };
-        let omitted = toml::to_string_pretty(&without_echo).unwrap();
-        assert!(!omitted.contains("[echo]"));
-        let parsed_absent: IrysHardforkConfig = toml::from_str(&omitted).unwrap();
-        assert!(parsed_absent.echo.is_none());
-        assert_eq!(parsed_absent, without_echo);
-
-        // A document that never mentions echo deserializes to None.
-        let frontier_only = "
-            [frontier]
-            number_of_ingress_proofs_total = 1
-            number_of_ingress_proofs_from_assignees = 0
-        ";
-        let from_partial: IrysHardforkConfig = toml::from_str(frontier_only).unwrap();
-        assert!(from_partial.echo.is_none());
+        assert!(config.delta.is_none());
     }
 
     proptest! {
@@ -983,7 +846,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -1011,7 +873,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -1032,7 +893,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -1066,7 +926,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -1100,7 +959,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             }
         }
 
@@ -1115,7 +973,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             }
         }
 
@@ -1208,7 +1065,6 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                echo: None,
             }
         }
 
@@ -1222,7 +1078,6 @@ mod tests {
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
                 delta: None,
-                echo: None,
                 ..base_config()
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();

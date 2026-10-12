@@ -89,6 +89,6 @@ Update [ethereum_hardfork_mapping()](https://github.com/Irys-xyz/irys/blob/3fd82
 
 > **Note:** Skip this step if the hardfork doesn't affect the EVM.
 
-## Echo
+## Delta
 
-`echo` (`Option<Echo>` on `IrysHardforkConfig`) is a consensus-only fork. It does not change the EVM, so it has no `IrysHardfork` chainspec entry. Every preset leaves it `None`. Validation resolves it with `echo_for_block` at the validated block's own timestamp.
+`delta` (`Option<Delta>` on `IrysHardforkConfig`) is a consensus-only fork. It does not change the EVM, so it has no `IrysHardfork` chainspec entry. It is a WIP hardfork and is not deployed: every preset leaves it `None`. It accumulates changes that need a hardfork activation. Epoch processing reads the current change with `delta_for_block` on the epoch block. That change gives a data ledger its first slots in the epoch that activates it.
