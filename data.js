@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791491513178,
+  "lastUpdate": 1791795543503,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -16567,6 +16567,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8470cd2f4950077692211a55f2701815067c670d",
+          "message": "feat(xtask): port target pruning and tooling fixes from gateway (#1588)\n\n* feat(xtask): prune stale test executables and unused build units\n\n`cargo xtask test` now deletes, after each run, other copies of the test\ntargets it built (cargo keeps one per feature set) and executables whose\ncrate root is gone. It also deletes compilation units (rlibs, rmetas,\nproc-macro objects, build-script dirs) that no recent xtask run used.\n\n`test`, `check`, `full-check`, `clippy`, the nextest-wrapper build and the\nxtask build record the artifacts cargo reports under `target/xtask-usage/`.\nA unit no live record names is removed once past the grace period if it\nduplicates a recorded unit, or once untouched for `--prune-unused-days`.\nRecords, not atime, decide what is in use: atime is unreliable on\n`noatime` mounts.\n\n`--no-prune` / `XTASK_NO_PRUNE=1` turns this off. `RUST_LOG=xtask=debug`\nlogs each decision. `local-checks --with-tests` now parses its `test`\narguments so the `XTASK_*` env vars apply to it too.\n\nPorted from the gateway repo's xtask.\n\n* build: stop forcing incremental compilation on every profile\n\n`[build] incremental = true` also applied to release builds. Cargo's default keeps incremental on for dev and test and off for release. CI already sets CARGO_INCREMENTAL=0.\n\n* fix(nextest-monitor): make `nextest-report clear` remove the stats directory\n\nStats are stored as one file each under `{input}.d/`, so removing `{input}` cleared nothing.\n\n* fix(xtask): reject --rerun-failures with --clean; let cargo pick the doc index\n\n`doc --open` lets cargo choose the index page instead of a hard-coded crate path opened with xdg-open/open.\n\n* fix(xtask): run flaky isolation over the same targets as phases 1 and 2\n\nPhase 3 ran `cargo nextest run -E test(=name)` without `--workspace --all-targets`. In a workspace with `default-members`, or for a suspect in a bench target, the filter matched nothing and the run aborted.\n\n* fix(xtask): stop flaky retries and silent build errors from hiding failures\n\n- Every nextest call passes `--retries 0`. A profile with retries\n  (gateway default: 2) let a failed-then-passed test count as a pass,\n  so it never became a suspect.\n- The prebuild compiles the same targets as phases 1 and 2\n  (`--tests --all-targets`). A compile error now stops the run, instead\n  of failing inside a teed phase whose exit code below 128 is ignored.\n- A phase 1 iteration that records no results aborts the run, instead of\n  reporting \"no flaky tests\".\n- A passing isolation run records its real duration, not 0.\n\n* fix(xtask): record and prune only after a successful build\n\nA failed build reports only the units it reached. Recording that\npartial list replaced the complete usage record, and the prune that\nfollowed removed units that the next build needed. Usage is now\nrecorded, and the prune runs, only when cargo reports\n`build-finished` with success.\n\n`unit_id` now also groups macOS proc-macro `.dylib` files and static\n`.a` libs with their `.d` file. Before, the `.d` file could be pruned\nalone, which forced a rebuild.\n\n* fix(xtask): let `check -- -p <pkg>` narrow the check again\n\nCargo accepts `--workspace` together with `-p` and then checks every\nmember. `check` and `full-check` add `--workspace` only when the args\ndo not already select packages.\n\n* feat(xtask): skip the prune while another xtask run uses the target dir\n\n`xtask test` and `xtask flaky` hold a shared flock on\n`target/xtask-run.lock` while they build and run tests. After a run,\nthe prune drops its own shared lock and tries to take the lock\nexclusively. If another run holds it, the prune is skipped\n(\"Prune skipped\"), so a prune never removes executables or units that\na concurrent xtask run still uses. A new run waits while a prune holds\nthe lock.\n\nThe `flaky` prebuild is now recorded like `test`, so its binaries are\nalso kept after the run. Plain `cargo` commands still do not take the\nlock; the docs say to set XTASK_NO_PRUNE=1 for those.\n\n* fix(xtask): guard flaky --clean and keep failures.json on scoped runs\n\n- `flaky --clean` runs `cargo clean` only while it holds the run lock\n  exclusively. `cargo clean` deletes the whole target dir, including the\n  binaries of another xtask run and the lock file itself.\n- A stress iteration that records no results stops the run, as phase 1\n  does. Without this, a broken stress config looked like a clean one.\n- Only a full-suite discovery run replaces failures.json. A --verify or\n  --tests run saw only the tests it was given, so it no longer drops the\n  failures that `xtask test` recorded.\n\n* fix(xtask): hold the run lock across every recorded build\n\n`check`, `full-check`, `clippy` and the other recorded builds now hold\nthe shared run lock from before cargo starts until the usage record is\nwritten. Before, a concurrent `xtask test` could prune the units of a\nlong clippy or check run as duplicates of its own.\n\nThe usage record is written aside and renamed over the old one, so a\nprune never reads a truncated record.\n\n* fix(xtask): clean the target dir without unlinking the run lock\n\n`flaky --clean` ran `cargo clean` while it held the run lock, but\n`cargo clean` unlinks the lock file. A run that started during the\nclean then locked a new file and built into the directory being\ndeleted. The clean now deletes everything in the target dir except the\nlock file, so the lock stays held for the whole clean.\n\n* fix(xtask): keep failures.json on filtered flaky runs; lock clean commands\n\n- A flaky run with phase-1 passthrough args (`-p`, `-E`, ...) sees only\n  part of the suite. Like a --verify or --tests run, it no longer clears\n  or replaces failures.json.\n- `clean-workspace` runs only while no other xtask run holds the run\n  lock, because `cargo clean -p` deletes artifacts that run may use.\n- `multiversion-test` holds the shared run lock for its `cargo test` build.\n\n* fix(xtask): scope flaky phase 1 to -p and keep failures.json on partial runs\n\n- Phase 1 adds `--workspace` only when the passthrough args select no\n  packages, so `flaky -- -p X` runs X only. `with_workspace` moves to\n  util.rs, shared with `check` and `full-check`.\n- failures.json is replaced or cleared only after a full-suite run that\n  ran phase 1 and isolation. Without isolation every suspect is\n  unverified, and with `-i 0` phase 1 saw nothing, so neither run may\n  drop the failures that `xtask test` recorded.\n\n* fix(xtask): lock multiversion-test cleans and its result reads\n\n`--clean` and `--clean-data` delete under the target dir, so they now\nrun only while no other xtask run holds the run lock. The shared lock\nof the test run is held until the status summary and the preserved\npaths are read, so a concurrent clean cannot remove them first.",
+          "timestamp": "2026-10-12T09:42:47+01:00",
+          "tree_id": "6cfab8fc2187832bf41adb3156a179f2cbf63705",
+          "url": "https://github.com/Irys-xyz/irys/commit/8470cd2f4950077692211a55f2701815067c670d"
+        },
+        "date": 1791795541681,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015221,
+            "range": "± 0.001595",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153461,
+            "range": "± 0.0019",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.576018,
+            "range": "± 0.038424",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.464397,
+            "range": "± 0.233079",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082674,
+            "range": "± 0.003299",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 779.84689,
+            "range": "± 9.284786",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.494713,
+            "range": "± 8.100955",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120421,
+            "range": "± 0.003338",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1223.787609,
+            "range": "± 85.775602",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1635.676739,
+            "range": "± 126.623671",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.030954,
+            "range": "± 0.00169",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.466513,
+            "range": "± 1.800911",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.42327,
+            "range": "± 0.861356",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00012,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
