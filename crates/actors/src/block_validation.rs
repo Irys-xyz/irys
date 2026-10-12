@@ -34,7 +34,7 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
     app_state::DatabaseProvider,
-    calculate_difficulty,
+    calculate_difficulty, ensure_proof_layout,
     hardfork_config::{Cascade, ForEpoch},
     next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -4389,14 +4389,14 @@ fn get_data_poa_bounds_with_block_tree_fallback(
     ledger: DataLedger,
     ledger_chunk_offset: u64,
 ) -> Result<(BlockBounds, H256), PreValidationError> {
-    // Returns the resolved bounds AND the owning block's hash — the data-ledger PoA
-    // branch uses the hash to fetch the owning block's tx headers (and the recall
-    // chunk's owning `data_root`) after `prefix_hash` is folded into the leaf. Only
-    // the hash is resolved here (cheap); the header + tx-header fetch is deferred to
-    // after `tx_path` validation so an invalid proof still surfaces as
-    // `MerkleProofInvalid` rather than a lookup error. The tree-walk path has the
-    // owning header in hand; the index paths use the hash carried by `BlockBounds`
-    // so the returned hash and bounds come from the same index snapshot.
+    // Returns the resolved bounds AND the owning block's hash. The data-ledger
+    // PoA branch fetches that block's tx headers with the hash. The caller
+    // rejects a proof buffer that cannot be parsed before that fetch, so an
+    // empty path is `MerkleProofInvalid` and not a missing-header node fault.
+    // The full path check still needs the tx: the byte target comes from the
+    // chunk layout. The tree-walk path has the owning header in hand; the
+    // index paths use the hash carried by `BlockBounds` so the returned hash
+    // and bounds come from the same index snapshot.
     //
     // Fast path: parent is migrated. Identical disambiguation to the prior
     // implementation — offsets past chain-max and ledger-not-active are
@@ -4742,6 +4742,15 @@ pub fn poa_is_valid(
         };
 
         let block_chunk_offset = (ledger_chunk_offset - bb.start_chunk_offset) as u128;
+
+        // The byte target depends on the owning tx, so the full path check
+        // follows that lookup. A buffer that cannot be a proof is invalid for
+        // every target. Reject it first, or a missing header turns an empty
+        // path into a node fault.
+        ensure_proof_layout(&tx_path)
+            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
+        ensure_proof_layout(&data_path)
+            .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         // The block index places each tx on whole chunks, while the tx_root tree
         // sizes each tx by raw `data_size`. Select the tx by the chunk prefix,
