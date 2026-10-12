@@ -6,8 +6,8 @@ irys_utils::define_metrics! {
     counter CHUNKS_INGESTED("irys.mempool.chunks.ingested_total", "Chunks successfully ingested into mempool");
     counter BYTES_INGESTED("irys.mempool.chunks.bytes_ingested_total", "Total bytes ingested into mempool");
     counter DUPLICATES("irys.mempool.chunks.duplicates_total", "Duplicate chunks skipped");
-    histogram VALIDATION_MS("irys.mempool.chunks.validation_duration_ms", "Chunk proof validation latency", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
-    histogram ENQUEUE_MS("irys.mempool.chunks.enqueue_duration_ms", "Chunk write-behind enqueue latency", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
+    histogram VALIDATION_MS("irys.mempool.chunks.validation_duration_ms", "Chunk proof validation latency", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0]);
+    histogram ENQUEUE_MS("irys.mempool.chunks.enqueue_duration_ms", "Chunk write-behind enqueue latency", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 30000.0]);
     counter FLUSH_FAILURES("irys.mempool.chunks.flush_failures_total", "Chunk writer flush failures");
     counter ERRORS("irys.mempool.chunks.errors_total", "Chunk processing errors by type");
 }
