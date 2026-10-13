@@ -87,6 +87,33 @@ async fn attempt_data_sync_write(
     }
 }
 
+/// The peer body must match its own data path. Ingress can return `Ok`
+/// without this check: a recent-chunk hit keys only the path hash, and a
+/// wrong length returns `Ok` before the leaf hash is compared.
+fn validate_peer_unpacked_chunk(chunk: &UnpackedChunk, chunk_size: u64) -> eyre::Result<()> {
+    let (min_byte, max_byte) =
+        irys_types::expected_chunk_byte_range(chunk.tx_offset, chunk.data_size, chunk_size)
+            .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
+    let target = u128::from(max_byte - 1);
+    let path = irys_types::validate_path(chunk.data_root.0, &chunk.data_path, target)
+        .map_err(|error| eyre::eyre!("peer chunk data path: {error}"))?;
+    let chunk_len = u64::try_from(chunk.bytes.len())
+        .map_err(|_| eyre::eyre!("peer chunk length exceeds u64"))?;
+    let expected_len = max_byte - min_byte;
+    eyre::ensure!(
+        chunk_len == expected_len,
+        "peer chunk length {chunk_len} does not match the data path range {expected_len}"
+    );
+    irys_types::validate_path_byte_range(&path, (min_byte, max_byte))
+        .map_err(|error| eyre::eyre!("peer chunk data path range: {error}"))?;
+    let hash = irys_types::hash_sha256(&chunk.bytes.0);
+    eyre::ensure!(
+        path.leaf_hash == hash,
+        "peer chunk hash does not match the data path leaf"
+    );
+    Ok(())
+}
+
 fn ingress_error_is_invalid_peer_data(error: &ChunkIngressError) -> bool {
     matches!(
         error,
@@ -812,6 +839,27 @@ impl DataSyncServiceInner {
             }
             return Err(eyre::eyre!(
                 "chunk ingress rejected data-sync body before durable write: {error}"
+            ));
+        }
+
+        // Ingress can accept a body it did not hash. Check this chunk against
+        // its own data path before the bytes are credited or written.
+        if let Err(error) = validate_peer_unpacked_chunk(&unpacked_chunk, consensus.chunk_size) {
+            if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
+                metrics::record_data_sync_chunk_failure();
+                metrics::record_data_sync_fetch_failure(
+                    orchestrator.ledger_id(),
+                    peer_addr,
+                    "invalid_chunk",
+                );
+                orchestrator.on_chunk_failed(
+                    chunk_offset,
+                    peer_addr,
+                    ChunkFetchFailureKind::InvalidResponse,
+                )?;
+            }
+            return Err(eyre::eyre!(
+                "data sync rejected peer chunk before durable write: {error}"
             ));
         }
 
@@ -2195,5 +2243,208 @@ mod body_migration_holes_routing_tests {
             orchestrator.chunk_requests[&PartitionChunkOffset::from(1)].request_state,
             ChunkRequestState::Pending
         ));
+    }
+}
+
+#[cfg(test)]
+mod peer_chunk_validation_tests {
+    use super::DataSyncServiceInner;
+    use super::chunk_orchestrator::{ChunkRequest, ChunkRequestState};
+    use crate::chunk_fetcher::MockChunkFetcher;
+    use crate::chunk_ingress_service::ChunkIngressMessage;
+    use crate::services::ServiceSenders;
+    use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Base64, ChunkFormat, Config, ConsensusConfig, DataLedger, H256, IrysAddress,
+        IrysBlockHeader, NodeConfig, PartitionChunkOffset, RelativeChunkOffset, UnpackedChunk,
+        app_state::DatabaseProvider, irys::IrysSigner, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
+    };
+    use std::{
+        sync::{Arc, RwLock},
+        time::Instant,
+    };
+
+    fn mark_requested(
+        inner: &mut DataSyncServiceInner,
+        storage_module_id: usize,
+        offset: PartitionChunkOffset,
+        peer: IrysAddress,
+    ) {
+        let orchestrator = inner
+            .chunk_orchestrators
+            .get_mut(&storage_module_id)
+            .expect("orchestrator");
+        orchestrator.chunk_requests.insert(
+            offset,
+            ChunkRequest {
+                excluded: Default::default(),
+                request_state: ChunkRequestState::Requested(peer, Instant::now()),
+                attempt_count: 1,
+                retry_round: 0,
+                ready_since: Instant::now(),
+                local_cache_miss: false,
+            },
+        );
+    }
+
+    /// Ingress answers `Ok` without looking at the bytes. Data sync must still
+    /// reject a body whose length or hash does not match its own data path,
+    /// and it must store a body that does match.
+    #[tokio::test]
+    async fn peer_bytes_must_match_their_data_path_before_enqueue() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 4,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 0,
+                    partition_assignment: Some(PartitionAssignment {
+                        ledger_id: Some(DataLedger::Publish.into()),
+                        slot_index: Some(0),
+                        miner_address: IrysAddress::from([1_u8; 20]),
+                        partition_hash: H256::random(),
+                    }),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+                },
+                &config,
+            )
+            .expect("storage module"),
+        );
+        sm.pack_with_zeros();
+
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .create_transaction(vec![7_u8; chunk_size as usize], H256::zero())
+            .expect("tx");
+        let good = tx.data_chunks().expect("chunk").remove(0);
+        let offset = PartitionChunkOffset::from(0_u32);
+        let (_, submodule) = sm.get_submodule_for_offset(offset).expect("submodule");
+        submodule
+            .db
+            .update(|db_tx| {
+                db_tx.add_data_root_info(
+                    good.data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset::from(0_i32),
+                        data_size: good.data_size,
+                    },
+                )
+            })
+            .expect("index data root");
+
+        let env = open_or_create_db(
+            tmp.path().join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("db");
+        let db = DatabaseProvider(Arc::new(env));
+        let (service_senders, receivers) = ServiceSenders::new();
+        let mut ingress_rx = receivers.chunk_ingress;
+        tokio::spawn(async move {
+            while let Some(traced) = ingress_rx.recv().await {
+                let (msg, _span) = traced.into_parts();
+                if let ChunkIngressMessage::IngestChunk(_, Some(reply), _) = msg {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        {
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            genesis.test_sign();
+        }
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let peer_list = PeerList::from_peers(
+            Vec::new(),
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+        let factory: crate::chunk_fetcher::ChunkFetcherFactory =
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize)));
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            Arc::new(RwLock::new(vec![sm.clone()])),
+            peer_list,
+            db,
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+
+        let peer = IrysAddress::from([9_u8; 20]);
+        let short = UnpackedChunk {
+            bytes: Base64(vec![7_u8; 4]),
+            ..good.clone()
+        };
+        mark_requested(&mut inner, sm.id, offset, peer);
+        let err = inner
+            .on_chunk_completed(sm.id, offset, peer, ChunkFormat::Unpacked(short))
+            .await
+            .expect_err("a short body must not be stored");
+        assert!(
+            err.to_string().contains("data path") || err.to_string().contains("length"),
+            "{err}"
+        );
+        assert!(!sm.is_data_write_pending_at(offset));
+        assert_eq!(sm.get_chunk_type(&offset), Some(ChunkType::Entropy));
+        assert!(
+            inner.chunk_orchestrators[&sm.id].chunk_requests[&offset]
+                .excluded
+                .contains(&peer)
+        );
+
+        let mismatched = UnpackedChunk {
+            bytes: Base64(vec![0_u8; chunk_size as usize]),
+            ..good.clone()
+        };
+        mark_requested(&mut inner, sm.id, offset, peer);
+        let err = inner
+            .on_chunk_completed(sm.id, offset, peer, ChunkFormat::Unpacked(mismatched))
+            .await
+            .expect_err("bytes that miss the leaf hash must not be stored");
+        assert!(
+            err.to_string().contains("leaf") || err.to_string().contains("hash"),
+            "{err}"
+        );
+        assert!(!sm.is_data_write_pending_at(offset));
+        assert!(
+            inner.chunk_orchestrators[&sm.id].chunk_requests[&offset]
+                .excluded
+                .contains(&peer)
+        );
+
+        mark_requested(&mut inner, sm.id, offset, peer);
+        inner
+            .on_chunk_completed(sm.id, offset, peer, ChunkFormat::Unpacked(good))
+            .await
+            .expect("a matching chunk is stored");
+        sm.pump_entropy_reads();
+        sm.force_sync_pending_chunks().expect("durable point");
+        assert!(sm.is_data_chunk_durable_at(offset));
+        assert_eq!(sm.get_chunk_type(&offset), Some(ChunkType::Data));
     }
 }
