@@ -2643,19 +2643,39 @@ impl StorageModule {
             .is_some_and(|chunk_type| *chunk_type == ChunkType::Data)
     }
 
-    /// Candidate transaction-relative offsets of `data_root` whose bodies are
-    /// fsynced in this module as `ChunkType::Data`.
+    /// [`Self::is_data_chunk_durable_at`], and `intervals.json` already stores
+    /// the offset as `Data`.
     ///
-    /// This is the durability signal cached-body reclamation is gated on. The
-    /// live interval label flips to `Data` when `pwrite` returns
-    /// (`note_write_run`). Durability stays false until that offset's
-    /// `pending.chunks` and `written_ahead` entries are gone, which is after
-    /// the `fdatasync` and the presence commit. `intervals.json` can lag the
-    /// label flip by `storage.intervals_persist_secs`. A crash in the lag
-    /// reloads the chunk as `Uninitialized`, and a body reclaimed in the lag
-    /// is synced again. Resolves the submodule index once per root and checks
-    /// only bodies the cache can actually reclaim, rather than walking the
-    /// transaction's entire funded range.
+    /// The live label leads the file by up to `storage.intervals_persist_secs`.
+    /// A crash in that lag reloads the offset as `Uninitialized`, and open
+    /// drops its presence and placement rows. The bytes are on disk, but the
+    /// node no longer knows it holds them. Anything that discards another copy
+    /// of the chunk must wait for this, not for durability alone.
+    pub fn is_data_chunk_persisted_at(&self, offset: PartitionChunkOffset) -> bool {
+        if !self.is_data_chunk_durable_at(offset) {
+            return false;
+        }
+        self.lock_interval_disk()
+            .written
+            .get_at_point(offset)
+            .is_some_and(|chunk_type| *chunk_type == ChunkType::Data)
+    }
+
+    /// Candidate transaction-relative offsets of `data_root` whose bodies are
+    /// fsynced in this module as `ChunkType::Data` and recorded as `Data` in
+    /// `intervals.json`.
+    ///
+    /// This is the gate cached-body reclamation uses. The live interval label
+    /// flips to `Data` when `pwrite` returns (`note_write_run`). Durability
+    /// stays false until that offset's `pending.chunks` and `written_ahead`
+    /// entries are gone, which is after the `fdatasync` and the presence
+    /// commit. `intervals.json` can lag that by `storage.intervals_persist_secs`,
+    /// and a crash in the lag forgets the chunk. A freshly uploaded chunk may
+    /// have no other replica, so the cached body is kept until the file says
+    /// `Data` ([`Self::is_data_chunk_persisted_at`]); after a crash, data sync
+    /// reads it from the local cache. Resolves the submodule index once per
+    /// root and checks only bodies the cache can actually reclaim, rather than
+    /// walking the transaction's entire funded range.
     pub fn durable_tx_offsets_for_data_root(
         &self,
         data_root: DataRoot,
@@ -2687,7 +2707,7 @@ impl StorageModule {
                 // One short lock acquisition per offset rather than holding
                 // pending/intervals across the whole loop: this runs on the
                 // background prune path and must not stall chunk writes.
-                if self.is_data_chunk_durable_at(PartitionChunkOffset::from(relative_offset)) {
+                if self.is_data_chunk_persisted_at(PartitionChunkOffset::from(relative_offset)) {
                     durable.insert(*tx_offset);
                     break;
                 }
@@ -8265,6 +8285,78 @@ mod tests {
         Ok(())
     }
 
+    /// The prune gate waits for `intervals.json`, not only the durable point.
+    /// With batched completions a durable chunk is still `Interrupted` in the
+    /// file. A crash then forgets it: it reloads `Uninitialized` with its
+    /// placement dropped. Its cached body may be the only copy, so the gate
+    /// stays closed until the completion rewrite.
+    #[test]
+    fn prune_gate_waits_for_the_persisted_completion() -> eyre::Result<()> {
+        let (_tmp, config, storage) =
+            open_presence_module_with("prune_gate_persisted", SubmoduleIndexEngine::Rocksdb, 3600)?;
+        let data_root = H256::repeat_byte(5);
+        let offset = PartitionChunkOffset::from(0);
+        let candidates = BTreeSet::from([TxChunkOffset::from(0)]);
+        let register = |storage: &StorageModule| -> eyre::Result<()> {
+            let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+            submodule.db.update_registration(|tx| {
+                tx.add_tx_leaf_binding(
+                    data_root,
+                    &TxLeafBinding {
+                        data_root,
+                        prefix_hash: H256::zero(),
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(offset, offset, Some(data_root))?;
+                tx.add_data_root_info(
+                    data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(0),
+                        data_size: 32,
+                    },
+                )
+            })
+        };
+
+        register(&storage)?;
+        assert!(storage.write_chunk(offset, vec![9_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(offset));
+        assert!(!storage.is_data_chunk_persisted_at(offset));
+        assert!(
+            storage
+                .durable_tx_offsets_for_data_root(data_root, &candidates)?
+                .is_empty()
+        );
+
+        // Crash before the completion rewrite: the node forgets the chunk.
+        storage.suppress_interval_flush_for_test();
+        drop(storage);
+        let storage = reopen_presence(&config)?;
+        assert_eq!(
+            storage.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized)
+        );
+        assert!(storage.collect_data_root_infos(data_root)?.0.is_empty());
+
+        // Written again, the gate opens once the file says `Data`.
+        register(&storage)?;
+        assert!(storage.write_chunk(offset, vec![9_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert!(
+            storage
+                .durable_tx_offsets_for_data_root(data_root, &candidates)?
+                .is_empty()
+        );
+        storage.flush_interval_completions_locked(true)?;
+        assert!(storage.is_data_chunk_persisted_at(offset));
+        assert_eq!(
+            storage.durable_tx_offsets_for_data_root(data_root, &candidates)?,
+            candidates
+        );
+        Ok(())
+    }
+
     /// Rollback clears the interval while a packed chunk is still queued.
     /// The durable point must not mark that chunk stored: the proof has
     /// nowhere to go, so the chunk stays pending and the interval stays
@@ -8364,6 +8456,18 @@ mod tests {
         Config,
         StorageModule,
     )> {
+        open_presence_module_with(prefix, engine, 0)
+    }
+
+    fn open_presence_module_with(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+        intervals_persist_secs: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
         let tmp = TempDirBuilder::new().prefix(prefix).build();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
@@ -8373,7 +8477,7 @@ mod tests {
             }),
             storage: StorageSyncConfig {
                 num_writes_before_sync: 1,
-                intervals_persist_secs: 0,
+                intervals_persist_secs,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
             },

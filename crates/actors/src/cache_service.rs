@@ -320,9 +320,10 @@ impl InnerCacheTask {
     /// Capacity-prunes cached bodies that are durably stored in a local
     /// storage module.
     ///
-    /// Durability is read straight from the storage modules' interval state —
-    /// the same state restart recovery reloads — so the pruner can never
-    /// disagree with what the node will see after a crash. The database delete
+    /// Durability is read from the storage modules' persisted interval state
+    /// (`intervals.json`, the state restart recovery reloads), not only the
+    /// live map, so the pruner can never drop a body the node would forget
+    /// after a crash. The database delete
     /// additionally requires the current signer's compact ingress hash. A body
     /// missing either independent prerequisite is never reclaimed, whatever
     /// its root's ingress-proof state.
