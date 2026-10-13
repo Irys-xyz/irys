@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791824404643,
+  "lastUpdate": 1791887791583,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -17215,6 +17215,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2a0008be123cfc84049e60800753d86773a4f0f4",
+          "message": "fix(p2p): cap a single peer HTTP response body (#1574)\n\n* fix(p2p): cap a single peer HTTP response body\n\n* fix(p2p): cap genesis fetches and keep whitelist retries\n\n* fix: address review findings\n\n* chore: trigger CI rebuild\n\n* fix(p2p): pass the response cap into production_client",
+          "timestamp": "2026-10-13T11:17:37+01:00",
+          "tree_id": "65766d27b00ba4f95d6b0eaacab00e82b3f2c881",
+          "url": "https://github.com/Irys-xyz/irys/commit/2a0008be123cfc84049e60800753d86773a4f0f4"
+        },
+        "date": 1791887790307,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012455,
+            "range": "± 0.000321",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125687,
+            "range": "± 0.00306",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.274894,
+            "range": "± 0.042864",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.255024,
+            "range": "± 0.184925",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.076048,
+            "range": "± 0.001672",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 749.79165,
+            "range": "± 6.32221",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1013.258235,
+            "range": "± 38.413665",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120074,
+            "range": "± 0.000397",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1206.225955,
+            "range": "± 5.84286",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1576.409763,
+            "range": "± 10.447066",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03532,
+            "range": "± 0.002234",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.398048,
+            "range": "± 0.839066",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.903424,
+            "range": "± 2.672928",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000118,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
