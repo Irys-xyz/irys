@@ -10,6 +10,7 @@ Think from the perspective of a blockchain L1 protocol developer. Security guara
 ```sh
 cargo xtask check              # Quick compile check
 cargo xtask test               # Run tests via nextest with failure tracking
+cargo xtask prune              # Delete superseded artifacts recorded by earlier xtask runs
 cargo xtask test --rerun-failures  # Re-run only previously failed tests
 cargo xtask local-checks       # Run ~99% of CI checks (fmt, check, clippy, unused-deps, typos)
 cargo xtask local-checks --fix # Auto-fix issues
@@ -37,6 +38,22 @@ Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Requires clang, gmp
 
 - macOS: Increase open file limit (default 256 is too low for some tests) — see README.md
 - `IRYS_CUSTOM_TMP_DIR` env var overrides the `./.tmp` test temp directory
+- `cargo xtask test`, `check`, `full-check` and `clippy` prune `target/` after a successful
+  build. `cargo xtask prune` runs that same deletion from the usage records, with no build. The
+  prune deletes superseded test executables, and compilation units (binaries included) that no
+  recent xtask run recorded, that the latest plain `cargo build` / `cargo run` does not use, and
+  that cargo has not written for a day. If another build sharing this target dir fails on a
+  missing artifact — nextest `No such file or directory` launching a test binary, rustc
+  `can't find crate` or `extern location ... does not exist`, or a build that keeps recompiling
+  the same dependencies (e.g. Reth) — a prune removed something that build still used.
+  `xtask test`, `flaky`, `check`, `full-check` and `clippy` hold a shared lock on the target dir,
+  and a prune is skipped while another run holds it. `cargo xtask prune` takes that lock
+  exclusively and leaves the directory alone when another run holds it. Plain `cargo` commands do
+  not take the lock. `XTASK_NO_PRUNE=1` (or `--no-prune`) skips the prune on `test`, `check`,
+  `full-check` and `clippy`. `cargo xtask prune` ignores that switch. Set `XTASK_NO_PRUNE=1` for
+  every agent that runs plain `cargo`, `check`, `full-check` or `clippy` in a target dir shared
+  with others. `RUST_LOG=xtask=debug` logs why each file was kept or removed; the rules are in
+  `xtask/src/prune.rs`.
 - Do not set `RUSTFLAGS`: that replaces `.cargo/config.toml`
   (`-C target-cpu=native`) and rebuilds the Reth graph. Warnings are denied by
   `cargo xtask clippy` (`-- -D warnings`), not rustflags. rust-analyzer

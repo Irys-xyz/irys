@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 use xshell::{Shell, cmd};
 
 use xtask::failures::{
@@ -11,9 +12,45 @@ use xtask::failures::{
     get_stats_file_path,
 };
 use xtask::flaky::{FlakyOptions, run_flaky};
-use xtask::util::{CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, with_deny_warnings};
+use xtask::prune;
+use xtask::util::{
+    CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, lock_target_dir, record_run,
+    run_collecting, run_recorded, target_dir, with_deny_warnings, with_workspace,
+};
 
 const LLVM_COV_VERSION: &str = "0.6.16";
+const DEFAULT_PRUNE_GRACE_MINUTES: u64 = 30;
+const DEFAULT_PRUNE_UNUSED_DAYS: u64 = 1;
+
+// Field docs are the CLI help. A doc comment on this struct becomes the parent command's about.
+#[derive(clap::Args, Debug, Clone)]
+struct PruneWindow {
+    /// Keep an old copy whose mtime or atime is within this many minutes. With 0, only a copy
+    /// touched since this command started is kept.
+    #[clap(long, env = "XTASK_PRUNE_GRACE_MINUTES", default_value_t = DEFAULT_PRUNE_GRACE_MINUTES)]
+    prune_grace_minutes: u64,
+    /// Keep a compilation unit that no recent xtask build recorded, and that the latest plain
+    /// `cargo build` / `cargo run` does not use, for this many days after cargo last wrote it.
+    #[clap(long, env = "XTASK_PRUNE_UNUSED_DAYS", default_value_t = DEFAULT_PRUNE_UNUSED_DAYS)]
+    prune_unused_days: u64,
+}
+
+// Not on `cargo xtask prune`: that command ignores `XTASK_NO_PRUNE`.
+#[derive(clap::Args, Debug, Clone)]
+struct PruneArgs {
+    /// Keep old copies. By default a successful run deletes superseded test executables and
+    /// compilation units no live usage record still needs. `RUST_LOG=xtask=debug` logs each
+    /// decision.
+    #[clap(
+        long,
+        env = "XTASK_NO_PRUNE",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        default_value_t = false
+    )]
+    no_prune: bool,
+    #[clap(flatten)]
+    window: PruneWindow,
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -35,7 +72,7 @@ enum Commands {
         )]
         coverage: bool,
         /// Only run tests that failed in the previous run
-        #[clap(long, default_value_t = false)]
+        #[clap(long, default_value_t = false, conflicts_with = "clean")]
         rerun_failures: bool,
         /// Clear the failures file and run all tests clean
         #[clap(long, default_value_t = false)]
@@ -49,15 +86,24 @@ enum Commands {
         /// Enable heap profiling via heaptrack for individual tests (Linux only)
         #[clap(long, default_value_t = false)]
         heap_profile: bool,
-        /// Arbitrary passthrough args
-        #[clap(last = true)]
+        #[clap(flatten)]
+        prune: PruneArgs,
+        /// Args after `--` go to nextest.
+        ///
+        /// Package filter: `cargo xtask test -- -p irys-actors`.
+        /// Do not pass `-p` before `--`.
+        #[clap(last = true, verbatim_doc_comment)]
         args: Vec<String>,
     },
     Check {
+        #[clap(flatten)]
+        prune: PruneArgs,
         #[clap(last = true)]
         args: Vec<String>,
     },
     FullCheck {
+        #[clap(flatten)]
+        prune: PruneArgs,
         #[clap(last = true)]
         args: Vec<String>,
     },
@@ -72,8 +118,17 @@ enum Commands {
         args: Vec<String>,
     },
     Clippy {
+        #[clap(flatten)]
+        prune: PruneArgs,
         #[clap(last = true)]
         args: Vec<String>,
+    },
+    /// Delete superseded test executables and unused compilation units recorded by earlier xtask runs.
+    ///
+    /// No compile. `XTASK_NO_PRUNE` does not apply.
+    Prune {
+        #[clap(flatten)]
+        window: PruneWindow,
     },
     Doc {
         #[clap(last = true)]
@@ -221,6 +276,15 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             no_update_failures,
             monitor,
             heap_profile,
+            prune:
+                PruneArgs {
+                    no_prune,
+                    window:
+                        PruneWindow {
+                            prune_grace_minutes,
+                            prune_unused_days,
+                        },
+                },
         } => {
             if coverage && heap_profile {
                 return Err(eyre::eyre!(
@@ -437,11 +501,71 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 nextest_args.push("heap-profile".to_string());
             }
 
+            // Coverage builds into llvm-cov's own target dir and cleans it on every run.
+            let user_has_message_format =
+                args.iter().any(|a| a.starts_with("--cargo-message-format"));
+            let prune = !no_prune && !coverage && !user_has_message_format;
+            if !prune {
+                tracing::debug!(
+                    no_prune,
+                    coverage,
+                    user_has_message_format,
+                    "stale executable prune skipped"
+                );
+            }
+            if prune {
+                // Cargo's JSON names every executable this run built; diagnostics stay human.
+                nextest_args.push("--cargo-message-format".to_string());
+                nextest_args.push("json-render-diagnostics".to_string());
+            }
+
             // Add user-provided args (by reference — args is needed later for coverage scope)
             nextest_args.extend(args.iter().cloned());
 
+            // Held until the prune: a concurrent run's prune must not remove what this run uses.
+            let run_lock = lock_target_dir();
+
             // Run nextest
-            let test_result = cmd!(sh, "cargo {nextest_args...}").remove_and_run();
+            let run_started = SystemTime::now();
+            let test_result = if prune {
+                let (collected, result) = run_collecting(cmd!(sh, "cargo {nextest_args...}"))?;
+                if collected.build_succeeded {
+                    // Keyed by what selects the build, not by the generated config file's path.
+                    record_run(
+                        &format!("test {} {}", heap_profile, args.join(" ")),
+                        &collected.artifacts,
+                    );
+                    let (keep_after, unused_before) =
+                        prune_deadlines(run_started, prune_grace_minutes, prune_unused_days);
+                    // `cargo xtask` is `cargo run -p xtask`, a build nothing else records; without
+                    // this record its dependencies read as duplicates and every xtask call
+                    // rebuilds them.
+                    if let Err(e) = run_recorded(
+                        cmd!(
+                            sh,
+                            "cargo build --message-format json-render-diagnostics -p xtask"
+                        ),
+                        "xtask",
+                    ) {
+                        eprintln!("Warning: xtask build not recorded: {e}");
+                    }
+                    prune_after_run(
+                        &collected.test_executables,
+                        keep_after,
+                        unused_before,
+                        run_lock,
+                    );
+                } else {
+                    // A failed build reached only part of the graph: its record would be partial,
+                    // and a prune against it would delete units the next build needs.
+                    tracing::debug!("build did not succeed; usage record and prune skipped");
+                }
+                result
+            } else {
+                cmd!(sh, "cargo {nextest_args...}")
+                    .remove_and_run()
+                    .map_err(eyre::Report::from)
+            };
 
             // Keep config file alive until after the command runs
             drop(config_file);
@@ -571,28 +695,54 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
 
             test_result?;
         }
-        Commands::Check { args } => {
-            println!("cargo check");
-            cmd!(sh, "cargo check {args...}").remove_and_run()?;
+        Commands::Check { args, prune } => {
+            let invocation = format!("check {}", args.join(" "));
+            let args = with_workspace(args);
+            println!("cargo check {}", args.join(" "));
+            run_cargo_then_prune(
+                cmd!(
+                    sh,
+                    "cargo check --message-format json-render-diagnostics {args...}"
+                ),
+                &invocation,
+                &prune,
+            )?;
         }
-        Commands::FullCheck { args } => {
-            println!("cargo check --all-features --all-targets");
-            cmd!(sh, "cargo check --all-features --all-targets {args...}").remove_and_run()?;
+        Commands::FullCheck { args, prune } => {
+            let invocation = format!("full-check {}", args.join(" "));
+            let args = with_workspace(args);
+            println!(
+                "cargo check --all-features --all-targets {}",
+                args.join(" ")
+            );
+            run_cargo_then_prune(
+                cmd!(
+                    sh,
+                    "cargo check --message-format json-render-diagnostics --all-features --all-targets {args...}"
+                ),
+                &invocation,
+                &prune,
+            )?;
         }
         Commands::FullBacon { args } => {
             let _ = cmd!(sh, "cargo install --locked --version 3.16.0 bacon").remove_and_run();
             println!("bacon check-all ");
             cmd!(sh, "bacon check-all {args...}").remove_and_run()?;
         }
-        Commands::Clippy { args } => {
+        Commands::Clippy { args, prune } => {
             println!("cargo clippy");
             let args = with_deny_warnings(args);
-            cmd!(
-                sh,
-                "cargo clippy --workspace --tests --all-targets --locked {args...}"
-            )
-            .remove_and_run()?;
+            let invocation = format!("clippy {}", args.join(" "));
+            run_cargo_then_prune(
+                cmd!(
+                    sh,
+                    "cargo clippy --message-format json-render-diagnostics --workspace --tests --all-targets --locked {args...}"
+                ),
+                &invocation,
+                &prune,
+            )?;
         }
+        Commands::Prune { window } => run_manual_prune(&window)?,
         Commands::Fmt {
             check_only: only_check,
             args,
@@ -617,14 +767,13 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Doc { args } => {
             println!("cargo doc");
-            cmd!(sh, "cargo doc --workspace --no-deps {args...}").remove_and_run()?;
-
+            // Outside CI, also open the generated docs in the browser. `--open`
+            // lets cargo pick the right index page rather than hardcoding a
+            // crate name.
             if std::env::var("CI").is_err() {
-                #[cfg(target_os = "macos")]
-                cmd!(sh, "open target/doc/irys/index.html").remove_and_run()?;
-
-                #[cfg(target_os = "linux")]
-                cmd!(sh, "xdg-open target/doc/irys/index.html").remove_and_run()?;
+                cmd!(sh, "cargo doc --workspace --no-deps --open {args...}").remove_and_run()?;
+            } else {
+                cmd!(sh, "cargo doc --workspace --no-deps {args...}").remove_and_run()?;
             }
         }
         Commands::Typos => {
@@ -656,34 +805,32 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             if !fix {
                 // When --fix is used, `cargo clippy --fix` (in the Fmt handler)
                 // already compiles the workspace with `-- -D warnings`.
+                // Parsed, not built by hand, so the `XTASK_*` prune env vars apply.
                 run_command(
-                    Commands::Check {
-                        args: vec!["--tests".to_string()],
-                    },
+                    Args::try_parse_from(["xtask", "check", "--", "--tests"])?.command,
                     sh,
                 )?;
-                run_command(Commands::Clippy { args: vec![] }, sh)?;
+                run_command(Args::try_parse_from(["xtask", "clippy"])?.command, sh)?;
             }
             run_command(Commands::UnusedDeps, sh)?;
             run_command(Commands::Typos, sh)?;
             if with_tests {
-                run_command(
-                    Commands::Test {
-                        coverage: false,
-                        rerun_failures: false,
-                        clean: false,
-                        no_update_failures: false,
-                        monitor: false,
-                        heap_profile: false,
-                        args: vec![],
-                    },
-                    sh,
-                )?
+                // Parsed, not built by hand, so the `XTASK_*` env vars apply exactly as they do to
+                // `cargo xtask test`.
+                run_command(Args::try_parse_from(["xtask", "test"])?.command, sh)?
             }
         }
         Commands::CleanWorkspace => {
             // get workspace metadata
             let metadata = MetadataCommand::new().exec()?;
+            // `cargo clean -p` deletes artifacts another xtask run may be using.
+            let target = metadata.target_directory.as_std_path();
+            let Some(_clean_lock) = prune::try_lock_run_exclusive(target)? else {
+                eyre::bail!(
+                    "another xtask run is using {}; cleaning would delete its files",
+                    target.display()
+                );
+            };
 
             // filter for just workspace member packages
             let workspace_packages: Vec<&Package> = metadata
@@ -720,6 +867,20 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 .parent()
                 .expect("xtask CARGO_MANIFEST_DIR must have a parent");
             let multiversion_dir = workspace_root.join("target/multiversion");
+            // Deleting under the target dir may remove another xtask run's files: clean only
+            // while no other run holds the run lock.
+            let clean_lock = if clean || clean_data {
+                let dir = target_dir()?;
+                let Some(lock) = prune::try_lock_run_exclusive(&dir)? else {
+                    eyre::bail!(
+                        "another xtask run is using {}; cleaning would delete its files",
+                        dir.display()
+                    );
+                };
+                Some(lock)
+            } else {
+                None
+            };
             if clean {
                 if multiversion_dir.exists() {
                     println!("Cleaning {}...", multiversion_dir.display());
@@ -738,6 +899,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     println!("Nothing to clean (target/multiversion/test-data does not exist).");
                 }
             }
+            drop(clean_lock);
             let binary_new = binary_new
                 .map(|p| {
                     std::fs::canonicalize(&p)
@@ -848,6 +1010,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 test_args.push(f.clone());
             }
             test_args.extend(runner_passthrough);
+            // The test build and its test data share the target dir: keep a concurrent prune or
+            // clean off them until the run's results are read.
+            let run_lock = lock_target_dir();
             let result = cmd!(sh, "cargo {test_args...}").remove_and_run();
             let test_data_dir = multiversion_dir.join("test-data").join(&run_id);
 
@@ -866,6 +1031,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     }
                 }
             }
+            drop(run_lock);
             result?;
         }
         Commands::Flaky {
@@ -909,8 +1075,171 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
     Ok(())
 }
 
+/// `keep_after` is the older of the run start and the grace window. `unused_before` is that
+/// instant or the unused-unit age, whichever is earlier.
+fn prune_deadlines(
+    run_started: SystemTime,
+    grace_minutes: u64,
+    unused_days: u64,
+) -> (SystemTime, SystemTime) {
+    let ago = |secs: u64| {
+        SystemTime::now()
+            .checked_sub(Duration::from_secs(secs))
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    };
+    let keep_after = run_started.min(ago(grace_minutes.saturating_mul(60)));
+    let unused_before = keep_after.min(ago(unused_days.saturating_mul(86_400)));
+    (keep_after, unused_before)
+}
+
+fn report_prune(executables: &prune::PruneReport, units: &prune::UnitPruneReport, keep_hint: bool) {
+    let hint = if keep_hint {
+        " (XTASK_NO_PRUNE=1 keeps them)"
+    } else {
+        ""
+    };
+    if executables.removed_executables > 0 {
+        println!(
+            "Pruned {} stale test executable(s), {} MiB{hint}",
+            executables.removed_executables,
+            executables.removed_bytes / (1024 * 1024)
+        );
+    }
+    if units.removed_units + units.removed_build_dirs + units.removed_fingerprints > 0 {
+        println!(
+            "Pruned {} unused compilation unit(s), {} build-script dir(s) and {} orphan \
+             fingerprint dir(s), {} MiB{hint}",
+            units.removed_units,
+            units.removed_build_dirs,
+            units.removed_fingerprints,
+            units.removed_bytes / (1024 * 1024)
+        );
+    }
+}
+
+/// The exclusive lock, or `None` when another xtask run holds the shared lock.
+fn lock_for_prune(target_dir: &std::path::Path) -> eyre::Result<Option<fs::File>> {
+    match prune::try_lock_run_exclusive(target_dir) {
+        Ok(lock) => Ok(lock),
+        Err(e) => Err(eyre::eyre!("target dir lock failed: {e}")),
+    }
+}
+
+fn skipped_prune(target_dir: &std::path::Path) {
+    println!(
+        "Prune skipped: another xtask run is using {}",
+        target_dir.display()
+    );
+}
+
+/// Prune never fails a run: a failure to delete leaves disk as it was. It runs only when no other
+/// xtask run holds the target dir's run lock, so it cannot remove files another run still uses.
+fn prune_after_run(
+    built: &[PathBuf],
+    keep_after: SystemTime,
+    unused_before: SystemTime,
+    run_lock: Option<fs::File>,
+) {
+    tracing::debug!(built = built.len(), "test executables reported by cargo");
+    let metadata = match MetadataCommand::new().no_deps().exec() {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            eprintln!("Warning: stale artifact prune skipped: {e}");
+            return;
+        }
+    };
+    let workspace_root = metadata.workspace_root.as_std_path();
+    let target_dir = metadata.target_directory.as_std_path();
+    // This run's own shared lock would block the exclusive one.
+    drop(run_lock);
+    let _prune_lock = match lock_for_prune(target_dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            skipped_prune(target_dir);
+            return;
+        }
+        Err(e) => {
+            eprintln!("Warning: prune skipped, {e}");
+            return;
+        }
+    };
+    let executables = match prune::prune_stale_executables(workspace_root, built, keep_after) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("Warning: stale executable prune failed: {e}");
+            prune::PruneReport::default()
+        }
+    };
+    let units = match prune::prune_unused_units(target_dir, unused_before) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("Warning: unused unit prune failed: {e}");
+            prune::UnitPruneReport::default()
+        }
+    };
+    report_prune(&executables, &units, true);
+}
+
+/// Record a successful cargo build, then prune. The shared lock covers the build. The prune takes
+/// the exclusive lock after that, same as [`prune_after_run`].
+fn run_cargo_then_prune(
+    cmd: xshell::Cmd<'_>,
+    invocation: &str,
+    prune_args: &PruneArgs,
+) -> eyre::Result<()> {
+    let run_started = SystemTime::now();
+    let run_lock = lock_target_dir();
+    let (collected, result) = run_collecting(cmd)?;
+    if collected.build_succeeded {
+        record_run(invocation, &collected.artifacts);
+        if !prune_args.no_prune {
+            let (keep_after, unused_before) = prune_deadlines(
+                run_started,
+                prune_args.window.prune_grace_minutes,
+                prune_args.window.prune_unused_days,
+            );
+            prune_after_run(
+                &collected.test_executables,
+                keep_after,
+                unused_before,
+                run_lock,
+            );
+        }
+    }
+    result
+}
+
+/// `cargo xtask prune`: the same deletion as a build command, using usage records, with no compile.
+/// `XTASK_NO_PRUNE` does not apply. A held run lock skips the deletion and the command still exits 0.
+fn run_manual_prune(window: &PruneWindow) -> eyre::Result<()> {
+    let metadata = MetadataCommand::new().no_deps().exec()?;
+    let workspace_root = metadata.workspace_root.as_std_path();
+    let target_dir = metadata.target_directory.as_std_path();
+    let _prune_lock = match lock_for_prune(target_dir)? {
+        Some(lock) => lock,
+        None => {
+            skipped_prune(target_dir);
+            return Ok(());
+        }
+    };
+    let (keep_after, unused_before) = prune_deadlines(
+        SystemTime::now(),
+        window.prune_grace_minutes,
+        window.prune_unused_days,
+    );
+    match prune::prune_recorded(workspace_root, target_dir, keep_after, unused_before)? {
+        None => println!("No live usage records; nothing pruned."),
+        Some(report) => report_prune(&report.executables, &report.units, false),
+    }
+    Ok(())
+}
+
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
     let sh = Shell::new()?;
     let args = Args::parse();
     run_command(args.command, &sh)
@@ -1354,5 +1683,50 @@ mod coverage_mismatch_tests {
         let crate_names = vec!["my_crate".to_owned()];
         let result = collect_executed_from_profdata(output, &crate_names);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn prune_command_has_no_no_prune_switch() {
+        match Args::try_parse_from(["xtask", "prune"]).unwrap().command {
+            Commands::Prune { window } => {
+                assert_eq!(window.prune_grace_minutes, DEFAULT_PRUNE_GRACE_MINUTES);
+                assert_eq!(window.prune_unused_days, DEFAULT_PRUNE_UNUSED_DAYS);
+            }
+            other => panic!("expected prune, got {other:?}"),
+        }
+        assert!(Args::try_parse_from(["xtask", "prune", "--no-prune"]).is_err());
+    }
+
+    #[test]
+    fn check_forwards_cargo_args_and_accepts_prune_flags() {
+        match Args::try_parse_from([
+            "xtask",
+            "check",
+            "--no-prune",
+            "--prune-grace-minutes",
+            "5",
+            "--",
+            "--tests",
+        ])
+        .unwrap()
+        .command
+        {
+            Commands::Check { args, prune } => {
+                assert_eq!(args, ["--tests"]);
+                assert!(prune.no_prune);
+                assert_eq!(prune.window.prune_grace_minutes, 5);
+            }
+            other => panic!("expected check, got {other:?}"),
+        }
+        assert!(matches!(
+            Args::try_parse_from(["xtask", "check", "--", "--tests"])
+                .unwrap()
+                .command,
+            Commands::Check { .. }
+        ));
+        assert!(matches!(
+            Args::try_parse_from(["xtask", "clippy"]).unwrap().command,
+            Commands::Clippy { .. }
+        ));
     }
 }

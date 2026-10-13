@@ -281,7 +281,8 @@ async fn spiky_heavy3_should_reject_commitment_transactions_from_unknown_sources
     assert_eq!(genesis_peers.len(), 1);
     let peer_socket_address = genesis_peers[0].api;
 
-    let api_client = irys_api_client::IrysApiClient::new();
+    let api_client =
+        irys_api_client::IrysApiClient::new(irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES);
 
     // mine first block on node
     info!("Commitment whitelist test: mining first block");

@@ -78,6 +78,16 @@ fn format_failure_summary(
     )
 }
 
+pub(crate) fn block_body_serve_semaphore(limit: usize) -> Arc<tokio::sync::Semaphore> {
+    let permits = if limit == 0 {
+        warn!("max_concurrent_block_body_serves is 0, treating as unlimited");
+        tokio::sync::Semaphore::MAX_PERMITS
+    } else {
+        limit
+    };
+    Arc::new(tokio::sync::Semaphore::new(permits))
+}
+
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
 pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery>
@@ -94,6 +104,7 @@ where
     pub sync_state: ChainSyncState,
     pub execution_payload_cache: ExecutionPayloadCache,
     pub data_request_tracker: DataRequestTracker,
+    pub(crate) block_body_semaphore: Arc<tokio::sync::Semaphore>,
     pub block_index: BlockIndexReadGuard,
     pub block_tree: BlockTreeReadGuard,
     pub config: Config,
@@ -119,6 +130,7 @@ where
             sync_state: self.sync_state.clone(),
             execution_payload_cache: self.execution_payload_cache.clone(),
             data_request_tracker: DataRequestTracker::new(),
+            block_body_semaphore: Arc::clone(&self.block_body_semaphore),
             block_index: self.block_index.clone(),
             block_tree: self.block_tree.clone(),
             config: self.config.clone(),
@@ -854,10 +866,12 @@ where
             return Err(GossipError::RateLimited);
         }
 
-        match self
-            .resolve_data_request(&request.data, request.miner_address)
-            .await?
-        {
+        let resolved = {
+            let _permit = self.acquire_block_body_permit(&request.data)?;
+            self.resolve_data_request(&request.data, request.miner_address)
+                .await?
+        };
+        match resolved {
             Some(data) => {
                 self.send_gossip_data((&request.peer_id, peer_info), Arc::new(data), &check_result);
                 Ok(true)
@@ -887,8 +901,22 @@ where
             );
             return Err(GossipError::RateLimited);
         }
+        let _permit = self.acquire_block_body_permit(&request.data)?;
         self.resolve_data_request(&request.data, request.miner_address)
             .await
+    }
+
+    pub(crate) fn acquire_block_body_permit(
+        &self,
+        request: &GossipDataRequestV2,
+    ) -> GossipResult<Option<tokio::sync::OwnedSemaphorePermit>> {
+        if !matches!(request, GossipDataRequestV2::BlockBody(_)) {
+            return Ok(None);
+        }
+        Arc::clone(&self.block_body_semaphore)
+            .try_acquire_owned()
+            .map(Some)
+            .map_err(|_| GossipError::RateLimited)
     }
 
     /// Resolves a data request by looking up the requested item locally.
@@ -1339,5 +1367,269 @@ mod fetch_body_retries_tests {
     fn other_errors_should_continue_outer_header_retry() {
         let err = GossipError::Network("transient".to_string());
         assert!(should_continue_header_outer_retry(&err));
+    }
+}
+
+#[cfg(test)]
+mod block_body_serve_cap_tests {
+    use super::*;
+    use crate::tests::util::data_handler_stub;
+    use irys_domain::PeerList;
+    use irys_domain::chain_sync_state::ChainSyncState;
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{
+        BlockHash, Config, DatabaseProvider, DbSyncMode, H256, IrysAddress, IrysPeerId, NodeConfig,
+        PeerAddress, PeerListItem, PeerScore,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    const WINDOW: Duration = Duration::from_secs(10);
+
+    struct Fixture {
+        _dir: irys_testing_utils::tempfile::TempDir,
+        handler: Arc<
+            GossipDataHandler<
+                crate::tests::util::MempoolStub,
+                crate::tests::util::BlockDiscoveryStub,
+            >,
+        >,
+    }
+
+    fn fixture(limit: usize) -> Fixture {
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        node_config.p2p_gossip.max_concurrent_block_body_serves = limit;
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let sync_state = ChainSyncState::new(false, false);
+        let handler = data_handler_stub(&config, &peer_list, db, sync_state);
+        Fixture { _dir: dir, handler }
+    }
+
+    fn peer() -> PeerListItem {
+        let mining_address = IrysAddress::repeat_byte(9);
+        PeerListItem {
+            peer_id: IrysPeerId::from(mining_address),
+            mining_address,
+            reputation_score: PeerScore::new(100),
+            response_time: 0,
+            address: PeerAddress {
+                gossip: "127.0.0.1:1".parse().expect("gossip addr"),
+                api: "127.0.0.1:1".parse().expect("api addr"),
+                execution: Default::default(),
+            },
+            last_seen: 0,
+            is_online: true,
+            protocol_version: Default::default(),
+            ..Default::default()
+        }
+    }
+
+    fn body_request() -> GossipRequestV2<GossipDataRequestV2> {
+        let miner = IrysAddress::repeat_byte(9);
+        GossipRequestV2 {
+            peer_id: IrysPeerId::from(miner),
+            miner_address: miner,
+            data: GossipDataRequestV2::BlockBody(BlockHash::repeat_byte(0xAB)),
+        }
+    }
+
+    fn tx_request() -> GossipRequestV2<GossipDataRequestV2> {
+        let miner = IrysAddress::repeat_byte(9);
+        GossipRequestV2 {
+            peer_id: IrysPeerId::from(miner),
+            miner_address: miner,
+            data: GossipDataRequestV2::Transaction(H256::repeat_byte(0x22)),
+        }
+    }
+
+    #[test]
+    fn zero_block_body_serve_limit_is_unlimited() {
+        let semaphore = block_body_serve_semaphore(0);
+        assert_eq!(
+            semaphore.available_permits(),
+            tokio::sync::Semaphore::MAX_PERMITS
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_cap_rejects_block_body_before_resolve() {
+        let fixture = fixture(1);
+        let _held = fixture
+            .handler
+            .block_body_semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("test holds the only permit");
+        let peer = peer();
+
+        let sync = fixture
+            .handler
+            .handle_get_data_sync(body_request(), WINDOW)
+            .await;
+        assert!(
+            matches!(sync, Err(GossipError::RateLimited)),
+            "sync path must refuse before resolve, got {sync:?}"
+        );
+
+        let get = fixture
+            .handler
+            .handle_get_data(&peer, body_request(), WINDOW)
+            .await;
+        assert!(
+            matches!(get, Err(GossipError::RateLimited)),
+            "get path must refuse before resolve, got {get:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_cap_still_serves_a_non_body_request() {
+        let fixture = fixture(1);
+        let _held = fixture
+            .handler
+            .block_body_semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("test holds the only permit");
+        let peer = peer();
+
+        let sync = fixture
+            .handler
+            .handle_get_data_sync(tx_request(), WINDOW)
+            .await
+            .expect("transaction lookup is outside the body cap");
+        assert!(sync.is_none());
+
+        let served = fixture
+            .handler
+            .handle_get_data(&peer, tx_request(), WINDOW)
+            .await
+            .expect("transaction lookup is outside the body cap");
+        assert!(!served);
+        assert_eq!(fixture.handler.block_body_semaphore.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn releasing_the_permit_serves_the_next_body() {
+        let fixture = fixture(1);
+        let held = fixture
+            .handler
+            .block_body_semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("test holds the only permit");
+        drop(held);
+
+        let sync = fixture
+            .handler
+            .handle_get_data_sync(body_request(), WINDOW)
+            .await
+            .expect("body serve under the cap");
+        assert!(sync.is_none(), "unknown hash has no body");
+        assert_eq!(fixture.handler.block_body_semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn permit_is_released_when_the_caller_returns_err() {
+        let fixture = fixture(1);
+        let request = body_request();
+        let result: GossipResult<()> = async {
+            let _permit = fixture.handler.acquire_block_body_permit(&request.data)?;
+            Err(GossipError::Internal(InternalGossipError::Unknown(
+                "boom".to_string(),
+            )))
+        }
+        .await;
+        assert!(matches!(result, Err(GossipError::Internal(_))));
+        assert_eq!(fixture.handler.block_body_semaphore.available_permits(), 1);
+    }
+
+    /// The write lock is held on its own thread. `get_block_body` then blocks
+    /// in `block_tree.read()` on a runtime worker, so this test needs a second
+    /// worker and must not hold that guard on the test task.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admitted_body_serve_holds_the_permit_until_resolve_finishes() {
+        let fixture = fixture(1);
+        let tree = fixture.handler.block_tree.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let locker = std::thread::spawn(move || {
+            let _guard = tree.write();
+            locked_tx.send(()).expect("test is waiting");
+            release_rx.recv().ok();
+        });
+        locked_rx.recv().expect("lock taken");
+
+        let handler = Arc::clone(&fixture.handler);
+        let in_flight =
+            tokio::spawn(async move { handler.handle_get_data_sync(body_request(), WINDOW).await });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fixture.handler.block_body_semaphore.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admitted request keeps the permit");
+
+        let peer = peer();
+        let rejected = fixture
+            .handler
+            .handle_get_data(&peer, body_request(), WINDOW)
+            .await;
+        assert!(matches!(rejected, Err(GossipError::RateLimited)));
+
+        let cloned = fixture.handler.as_ref().clone();
+        let cloned_rejected = cloned.handle_get_data_sync(body_request(), WINDOW).await;
+        assert!(
+            matches!(cloned_rejected, Err(GossipError::RateLimited)),
+            "Clone must share the semaphore, got {cloned_rejected:?}"
+        );
+
+        release_tx.send(()).expect("locker alive");
+        let body = tokio::time::timeout(Duration::from_secs(5), in_flight)
+            .await
+            .expect("request finishes once the tree lock is released")
+            .expect("task did not panic")
+            .expect("unknown hash is not a handler error");
+        assert!(body.is_none());
+        assert_eq!(fixture.handler.block_body_semaphore.available_permits(), 1);
+        locker.join().expect("locker thread");
+    }
+
+    /// `block_tree.read()` is a blocking lock, not a Tokio yield. After it
+    /// returns, `get_block_header` is immediately ready, so the same poll
+    /// finishes the handler and `abort` never becomes a `JoinError`. Hold the
+    /// real permit across `pending` instead, which is a cancellation point.
+    #[tokio::test]
+    async fn aborting_an_admitted_body_serve_returns_the_permit() {
+        let fixture = fixture(1);
+        let handler = Arc::clone(&fixture.handler);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let in_flight = tokio::spawn(async move {
+            let _permit = handler
+                .acquire_block_body_permit(&body_request().data)
+                .expect("acquire")
+                .expect("body request takes a permit");
+            started_tx.send(()).expect("test is waiting");
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("permit held");
+        assert_eq!(fixture.handler.block_body_semaphore.available_permits(), 0);
+
+        in_flight.abort();
+        let join = in_flight.await.expect_err("aborted task");
+        assert!(join.is_cancelled());
+        assert_eq!(fixture.handler.block_body_semaphore.available_permits(), 1);
     }
 }

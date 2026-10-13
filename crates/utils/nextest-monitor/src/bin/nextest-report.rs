@@ -984,11 +984,14 @@ fn main() -> std::io::Result<()> {
 
     match cli.command {
         Commands::Clear => {
-            if cli.input.exists() {
-                fs::remove_file(&cli.input)?;
-                println!("Cleared stats file: {}", cli.input.display());
+            // Stats live as individual files under `{input}.d/`, not at the
+            // base path itself (see types::append_stats)
+            let dir = nextest_monitor::types::stats_dir(&cli.input);
+            if dir.exists() {
+                fs::remove_dir_all(&dir)?;
+                println!("Cleared stats directory: {}", dir.display());
             } else {
-                println!("Stats file does not exist: {}", cli.input.display());
+                println!("Stats directory does not exist: {}", dir.display());
             }
         }
         Commands::Config => {

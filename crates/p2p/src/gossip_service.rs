@@ -131,6 +131,7 @@ impl P2PService {
         peer_id: IrysPeerId,
         broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
         runtime_handle: tokio::runtime::Handle,
+        max_peer_response_bytes: u64,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -140,6 +141,7 @@ impl P2PService {
             mining_address,
             peer_id,
             runtime_handle.clone(),
+            max_peer_response_bytes,
         );
 
         Self {
@@ -222,6 +224,12 @@ impl P2PService {
             sync_state: self.sync_state.clone(),
             execution_payload_cache: execution_payload_provider,
             data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+            block_body_semaphore: crate::gossip_data_handler::block_body_serve_semaphore(
+                config
+                    .node_config
+                    .p2p_gossip
+                    .max_concurrent_block_body_serves,
+            ),
             block_index,
             block_tree,
             config: config.clone(),

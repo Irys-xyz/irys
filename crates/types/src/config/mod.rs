@@ -89,6 +89,10 @@ impl Config {
             self.node_config.storage.entropy_sweep_max_bytes > 0,
             "storage.entropy_sweep_max_bytes must be > 0: a hold is at least one chunk"
         );
+        ensure!(
+            self.node_config.max_peer_response_bytes > 0,
+            "max_peer_response_bytes must be > 0: a zero ceiling rejects every peer response body"
+        );
         // block_tree_depth must exceed block_migration_depth to prevent premature pruning
         ensure!(
             (self.consensus.block_migration_depth as u64) < self.consensus.block_tree_depth,
@@ -180,6 +184,11 @@ impl Config {
         ensure!(
             self.consensus.num_partitions_per_slot > 0,
             "num_partitions_per_slot must be > 0"
+        );
+        // Zero multiplies OneYear/ThirtyDay term fees down to the minimum USD fee.
+        ensure!(
+            self.consensus.num_partitions_per_term_ledger_slot > 0,
+            "num_partitions_per_term_ledger_slot must be > 0"
         );
 
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
@@ -1715,6 +1724,34 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_peer_response_cap() {
+        assert_eq!(
+            NodeConfig::testing().max_peer_response_bytes,
+            32 * 1024 * 1024,
+            "testing() must use the 32 MiB default"
+        );
+        assert_eq!(
+            NodeConfig::testnet().max_peer_response_bytes,
+            32 * 1024 * 1024,
+            "testnet() must use the 32 MiB default"
+        );
+
+        let mut node_config = NodeConfig::testing();
+        node_config.max_peer_response_bytes = 0;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a zero response cap rejects every peer body")
+            .to_string();
+        assert!(err.contains("max_peer_response_bytes"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.max_peer_response_bytes = 1;
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive cap is accepted");
+    }
+
+    #[test]
     fn validate_rejects_epoch_shorter_than_reorg_window() {
         // Expiry+settlement is committed at epoch blocks; a finalized epoch block is
         // irreversible only because it falls block_tree_depth behind head (see
@@ -1970,6 +2007,12 @@ mod validate_tests {
             c.num_partitions_per_slot = 0;
         },
         "num_partitions_per_slot"
+    )]
+    #[case::zero_num_partitions_per_term_ledger_slot(
+        |c: &mut ConsensusConfig| {
+            c.num_partitions_per_term_ledger_slot = 0;
+        },
+        "num_partitions_per_term_ledger_slot"
     )]
     #[case::zero_vdf_checkpoints(
         |c: &mut ConsensusConfig| {
