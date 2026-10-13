@@ -32,6 +32,10 @@ use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Condvar;
+#[cfg(test)]
+use std::sync::Mutex;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
@@ -93,6 +97,33 @@ pub enum CacheServiceAction {
     },
 }
 
+/// One pause between the durability snapshot and the delete re-check.
+///
+/// A test marks an offset `Uninitialized` in that gap. The re-check must
+/// then keep the cached body.
+#[cfg(test)]
+#[derive(Debug)]
+struct PruneRecheckPause {
+    armed: Mutex<bool>,
+    arrived: Mutex<bool>,
+    arrived_cv: Condvar,
+    release: Mutex<bool>,
+    release_cv: Condvar,
+}
+
+#[cfg(test)]
+impl PruneRecheckPause {
+    fn new() -> Self {
+        Self {
+            armed: Mutex::new(false),
+            arrived: Mutex::new(false),
+            arrived_cv: Condvar::new(),
+            release: Mutex::new(false),
+            release_cv: Condvar::new(),
+        }
+    }
+}
+
 /// Context for cache pruning tasks. You can safely clone this struct to spawn pruning tasks on
 /// separate runtimes/threads.
 #[derive(Debug, Clone)]
@@ -107,6 +138,9 @@ pub struct InnerCacheTask {
     /// Read access to local storage modules, used to answer "is this chunk
     /// body durably stored?" at prune time.
     pub storage_modules_guard: StorageModulesReadGuard,
+    /// Shared by a cloned task so a test thread can release the prune thread.
+    #[cfg(test)]
+    prune_recheck_pause: Arc<PruneRecheckPause>,
 }
 
 /// Outcome of one [`InnerCacheTask::try_prune_txids_once`] attempt.
@@ -424,13 +458,25 @@ impl InnerCacheTask {
             }
         }
 
+        // The snapshot above can go stale before this delete. A checksum
+        // mismatch sets the live interval to Uninitialized. Re-read each
+        // batch here, still outside the MDBX write: `is_data_chunk_persisted_at`
+        // takes the interval-disk lock and must not hold the cache writer.
+        #[cfg(test)]
+        if !durable_by_root.is_empty() {
+            self.wait_if_prune_recheck_paused();
+        }
         let mut pruned_chunks = 0_u64;
         for batch in durable_by_root.chunks(256) {
+            let confirmed = self.recheck_durable_chunk_offsets(&storage_modules, batch);
+            if confirmed.is_empty() {
+                continue;
+            }
             let batch_pruned = self
                 .db
                 .update_eyre_at("cache_service.prune_chunks_batch", |write_tx| {
                     let mut batch_pruned = 0_u64;
-                    for (root, durable_tx_offsets) in batch {
+                    for (root, durable_tx_offsets) in &confirmed {
                         trace!(
                             chunk.data_root = ?root,
                             "Pruning durably stored cached chunk bodies"
@@ -458,6 +504,83 @@ impl InnerCacheTask {
             "Completed chunk pruning pass"
         );
         Ok(())
+    }
+
+    /// Offsets from `batch` that are still persisted. A storage-module error
+    /// drops that module's offsets from the delete set and keeps the bodies.
+    fn recheck_durable_chunk_offsets(
+        &self,
+        storage_modules: &[Arc<irys_domain::StorageModule>],
+        batch: &[(DataRoot, BTreeSet<TxChunkOffset>)],
+    ) -> Vec<(DataRoot, BTreeSet<TxChunkOffset>)> {
+        let mut confirmed = Vec::with_capacity(batch.len());
+        for (root, offsets) in batch {
+            let mut still = BTreeSet::new();
+            for storage_module in storage_modules {
+                match storage_module.durable_tx_offsets_for_data_root(*root, offsets) {
+                    Ok(live) => still.extend(live),
+                    Err(error) => {
+                        warn!(
+                            chunk.data_root = ?root,
+                            storage_module = %storage_module.id,
+                            ?error,
+                            "keeping cached chunk bodies; durability re-check failed"
+                        );
+                    }
+                }
+            }
+            if !still.is_empty() {
+                confirmed.push((*root, still));
+            }
+        }
+        confirmed
+    }
+
+    #[cfg(test)]
+    fn arm_prune_recheck_pause(&self) {
+        let pause = &self.prune_recheck_pause;
+        *pause.release.lock().unwrap() = false;
+        *pause.arrived.lock().unwrap() = false;
+        *pause.armed.lock().unwrap() = true;
+    }
+
+    #[cfg(test)]
+    fn wait_for_prune_recheck_pause(&self, timeout: std::time::Duration) -> bool {
+        let pause = &self.prune_recheck_pause;
+        let guard = pause.arrived.lock().unwrap();
+        let (guard, _) = pause
+            .arrived_cv
+            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
+            .unwrap();
+        *guard
+    }
+
+    #[cfg(test)]
+    fn release_prune_recheck_pause(&self) {
+        let pause = &self.prune_recheck_pause;
+        *pause.release.lock().unwrap() = true;
+        pause.release_cv.notify_all();
+    }
+
+    #[cfg(test)]
+    fn wait_if_prune_recheck_paused(&self) {
+        let pause = &self.prune_recheck_pause;
+        {
+            let mut armed = pause.armed.lock().unwrap();
+            if !*armed {
+                return;
+            }
+            *armed = false;
+        }
+        {
+            let mut arrived = pause.arrived.lock().unwrap();
+            *arrived = true;
+            pause.arrived_cv.notify_all();
+        }
+        let mut release = pause.release.lock().unwrap();
+        while !*release {
+            release = pause.release_cv.wait(release).unwrap();
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(prune_height))]
@@ -1199,6 +1322,8 @@ impl ChunkCacheService {
                     ingress_proof_generation_state,
                     cache_sender,
                     storage_modules_guard,
+                    #[cfg(test)]
+                    prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
                 },
                 pruning_running: false,
                 pruning_queue: VecDeque::new(),
@@ -1540,6 +1665,8 @@ mod tests {
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
                 storage_modules_guard: test_storage_modules_guard(),
+                #[cfg(test)]
+                prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
             },
             pruning_running: false,
             pruning_queue: VecDeque::new(),
@@ -1627,6 +1754,8 @@ mod tests {
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
                 storage_modules_guard: test_storage_modules_guard(),
+                #[cfg(test)]
+                prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
             },
             pruning_running: false,
             pruning_queue: VecDeque::new(),
@@ -1711,6 +1840,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Execute capacity pruning. No durable storage offset exists, so the body stays.
@@ -1724,6 +1855,127 @@ mod tests {
             eyre::ensure!(
                 index_entry.is_some(),
                 "unmigrated chunk was pruned merely because its root lacks a proof"
+            );
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    /// A body that was durable in the snapshot stays in the cache when that
+    /// offset is Uninitialized before the delete.
+    #[tokio::test]
+    async fn keeps_cached_body_when_offset_is_uninitialized_before_delete() -> eyre::Result<()> {
+        use irys_domain::{ChunkType, StorageModule};
+        use irys_types::PartitionChunkOffset;
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let local_address = config.irys_signer().address();
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let data_root = H256::random();
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 32,
+                data_root,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 32,
+            data_path: Base64(vec![1]),
+            bytes: Base64(vec![7_u8; 32]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            database::cache_chunk(wtx, &chunk)?;
+            irys_database::store_ingress_data_hash(
+                wtx,
+                data_root,
+                local_address,
+                chunk.tx_offset,
+                irys_types::generate_ingress_data_hash(&chunk.bytes.0, local_address),
+            )?;
+            let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+            let mut walk = cur.walk_dup(Some(data_root), None)?;
+            while let Some((_k, entry)) = walk.next().transpose()? {
+                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+                let mut updated = entry.clone();
+                updated.meta.updated_at = irys_types::UnixTimestamp::from_secs(0);
+                wtx.put::<CachedChunksIndex>(data_root, updated)?;
+            }
+            eyre::Ok(())
+        })??;
+
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let storage_modules_guard =
+            storage_modules_guard_with_durable(sm_dir.path().to_path_buf(), data_root, 32, &[0])?;
+        let sm: Arc<StorageModule> = storage_modules_guard.read()[0].clone();
+        let offset = PartitionChunkOffset::from(0_u32);
+        eyre::ensure!(
+            sm.is_data_chunk_persisted_at(offset),
+            "fixture offset is not persisted"
+        );
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+            storage_modules_guard,
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        task.arm_prune_recheck_pause();
+        struct Release<'a>(&'a InnerCacheTask);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.release_prune_recheck_pause();
+            }
+        }
+        let _release = Release(&task);
+        let worker = task.clone();
+        let handle = std::thread::spawn(move || worker.prune_durably_migrated_chunk_bodies());
+        eyre::ensure!(
+            task.wait_for_prune_recheck_pause(std::time::Duration::from_secs(5)),
+            "prune did not reach the durability re-check"
+        );
+        sm.reset()?;
+        eyre::ensure!(
+            sm.get_chunk_type(&offset) == Some(ChunkType::Uninitialized),
+            "reset did not clear the offset"
+        );
+        eyre::ensure!(
+            !sm.is_data_chunk_persisted_at(offset),
+            "offset is still persisted after reset"
+        );
+        task.release_prune_recheck_pause();
+        handle.join().expect("prune thread").expect("prune");
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(data_root))?;
+            eyre::ensure!(
+                walk.next().transpose()?.is_some(),
+                "cached body was deleted after the offset became Uninitialized"
             );
             Ok(())
         })??;
@@ -1966,6 +2218,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx.clone(),
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         task_below.prune_cache(0)?;
 
@@ -2008,6 +2262,8 @@ mod tests {
                 tx_header.data_size,
                 &[0, 1],
             )?,
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
         task_above.prune_cache(0)?;
 
@@ -2092,6 +2348,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Prune with prune_height greater than expiry (6 > 5).
@@ -2169,6 +2427,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         service_task.prune_data_root_cache(1)?;
@@ -2258,6 +2518,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Without the local-proof exemption the (None, None) state would be
@@ -2342,6 +2604,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // `prune_height = 100` is well past the confirmed tx's `included_height`
@@ -2422,6 +2686,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         // Spawn the prune task and wait for the background thread to finish.
@@ -2560,6 +2826,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         service_task.prune_ingress_proofs()?;
@@ -2689,6 +2957,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         service_task.prune_ingress_proofs()?;
@@ -2831,6 +3101,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
         service_task.prune_ingress_proofs()?;
@@ -2939,6 +3211,8 @@ mod tests {
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
             storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         }
     }
 
