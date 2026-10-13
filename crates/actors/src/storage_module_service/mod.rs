@@ -200,7 +200,9 @@ impl StorageModuleServiceInner {
 
         for sm in storage_modules.iter() {
             // Repair stays queued while the lane is up. The lane early-continue
-            // below must not skip it.
+            // below must not skip it. Confirm recall suspects first, on this
+            // thread: the mining thread must not take `sync_in_progress`.
+            sm.confirm_crc_suspects();
             self.enqueue_crc_repairs(sm);
             if sm.disk_lane_running() {
                 sm.wake_disk_lane();

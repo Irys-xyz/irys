@@ -950,8 +950,17 @@ impl StorageModule {
         }
         // Entropy stays behind the packed window. The lane thread sweeps
         // itself; this caller only does it when that thread is not running.
+        //
+        // Checksum suspects are not confirmed on the mining thread. This
+        // recall held `begin_recall` across the pread. A durable point waits
+        // in `yield_to_recall` while it holds `sync_in_progress`, so taking
+        // that lock under the recall deadlocks. Taking it after the hold
+        // drops still stalls mining for the durable point's fdatasync.
+        // Suspects stay queued for the storage-module service tick. With no
+        // lane there is no tick, so confirm once the recall hold is gone.
         if !self.disk.lane_running() {
             self.pump_entropy_reads();
+            self.confirm_crc_suspects();
         }
         Ok(super::RecallChunks { chunks, rows })
     }
@@ -1720,11 +1729,29 @@ impl StorageModule {
                 verdicts.get(at),
                 Some(super::chunk_crc::CrcVerdict::Mismatch)
             ) {
-                self.note_crc_mismatch(slot.offset, ChunkType::Entropy, "entropy_sweep");
-                self.fail_slot(
-                    slot,
-                    WriteDataChunkError::Other(eyre::eyre!("chunk crc mismatch")),
-                );
+                // The span bytes were read before the verdict. Confirm under
+                // `sync_in_progress`. Fresh bytes that match the stable row
+                // are safe to pack. An unsettled offset is not.
+                match self.note_if_crc_mismatch(slot.offset, ChunkType::Entropy, "entropy_sweep") {
+                    Ok(super::CrcConfirm::NotConfirmed(fresh)) => {
+                        self.submit_packed(slot, fresh);
+                    }
+                    Ok(super::CrcConfirm::Confirmed) => {
+                        self.fail_slot(
+                            slot,
+                            WriteDataChunkError::Other(eyre::eyre!("chunk crc mismatch")),
+                        );
+                    }
+                    // Do not pack entropy that is still in `pending`. Ingress
+                    // retries `Backpressure`. A mismatch error would fail the
+                    // chunk for good.
+                    Ok(super::CrcConfirm::Unsettled) => {
+                        self.fail_slot(slot, WriteDataChunkError::Backpressure);
+                    }
+                    Err(error) => {
+                        self.fail_slot(slot, WriteDataChunkError::Other(error));
+                    }
+                }
                 continue;
             }
             if matches!(

@@ -778,6 +778,10 @@ pub struct StorageModule {
     /// Pauses one durable point so a test can call `reset` in the gap.
     #[cfg(test)]
     sync_pause: SyncPauseGate,
+    /// Pauses one checksum check after the bytes are read and before the
+    /// offset row is loaded. The durable point can commit in that gap.
+    #[cfg(test)]
+    crc_check_pause: SyncPauseGate,
     /// Pauses one registration after its rows are computed and before commit.
     #[cfg(test)]
     registration_pause: RegistrationPauseGate,
@@ -813,6 +817,12 @@ pub struct StorageModule {
     /// Settled offsets whose bytes failed the crc check. The storage-module
     /// service drains this into the existing packing queue.
     crc_repairs: Mutex<BTreeSet<PartitionChunkOffset>>,
+    /// Recall mismatches not yet checked under `sync_in_progress`. The
+    /// mining thread must not take that lock: it still holds the recall,
+    /// and a durable point waits on the recall while holding the lock.
+    /// The storage-module service confirms these. A module with no lane
+    /// confirms them after the recall hold drops.
+    crc_suspects: Mutex<BTreeSet<PartitionChunkOffset>>,
     /// Set after a fully settled module has been scanned for stored-zero
     /// entries. Reset clears it. The scan does not run on every durable point.
     crc_scan_done: AtomicBool,
@@ -951,6 +961,16 @@ pub enum ChunkType {
     Uninitialized,
     /// Chunk write was interrupted, should be reinitialized
     Interrupted,
+}
+
+/// Second look at one checksum suspect. Taken under `sync_in_progress`.
+enum CrcConfirm {
+    /// The fresh bytes still disagree with the stable checksum row.
+    Confirmed,
+    /// The fresh bytes agree with the row, or this index stores no checksum.
+    NotConfirmed(ChunkBytes),
+    /// The offset is in `pending.chunks` or `pending.written_ahead`.
+    Unsettled,
 }
 
 /// Errors from [`StorageModule::write_data_chunk`].
@@ -1933,6 +1953,8 @@ impl StorageModule {
             #[cfg(test)]
             sync_pause: SyncPauseGate::new(),
             #[cfg(test)]
+            crc_check_pause: SyncPauseGate::new(),
+            #[cfg(test)]
             registration_pause: RegistrationPauseGate::new(),
             #[cfg(test)]
             registration_drops: AtomicU64::new(0),
@@ -1950,6 +1972,7 @@ impl StorageModule {
             #[cfg(test)]
             recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
+            crc_suspects: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
             #[cfg(test)]
             abandon_on_drop: AtomicBool::new(false),
@@ -2528,21 +2551,58 @@ impl StorageModule {
 
     #[cfg(test)]
     fn wait_if_sync_paused(&self, point: SyncPausePoint) {
+        Self::wait_on_pause_gate(&self.sync_pause, point);
+    }
+
+    /// The next checksum check waits after its bytes are read.
+    #[cfg(test)]
+    fn pause_next_crc_check(&self) {
+        *self.crc_check_pause.release.lock().unwrap() = false;
+        *self.crc_check_pause.arrived.lock().unwrap() = false;
+        *self.crc_check_pause.point.lock().unwrap() = Some(SyncPausePoint::AfterPresenceCopy);
+    }
+
+    /// `true` when the checksum check reached its pause before `timeout`.
+    #[cfg(test)]
+    fn wait_for_crc_check_pause(&self, timeout: Duration) -> bool {
+        let guard = self.crc_check_pause.arrived.lock().unwrap();
+        let (guard, _) = self
+            .crc_check_pause
+            .arrived_cv
+            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
+            .unwrap();
+        *guard
+    }
+
+    /// Let a paused checksum check continue.
+    #[cfg(test)]
+    fn release_crc_check_pause(&self) {
+        *self.crc_check_pause.release.lock().unwrap() = true;
+        self.crc_check_pause.release_cv.notify_all();
+    }
+
+    #[cfg(test)]
+    fn wait_if_crc_check_paused(&self) {
+        Self::wait_on_pause_gate(&self.crc_check_pause, SyncPausePoint::AfterPresenceCopy);
+    }
+
+    #[cfg(test)]
+    fn wait_on_pause_gate(gate: &SyncPauseGate, point: SyncPausePoint) {
         {
-            let mut armed = self.sync_pause.point.lock().unwrap();
+            let mut armed = gate.point.lock().unwrap();
             if *armed != Some(point) {
                 return;
             }
             *armed = None;
         }
         {
-            let mut arrived = self.sync_pause.arrived.lock().unwrap();
+            let mut arrived = gate.arrived.lock().unwrap();
             *arrived = true;
-            self.sync_pause.arrived_cv.notify_all();
+            gate.arrived_cv.notify_all();
         }
-        let mut release = self.sync_pause.release.lock().unwrap();
+        let mut release = gate.release.lock().unwrap();
         while !*release {
-            release = self.sync_pause.release_cv.wait(release).unwrap();
+            release = gate.release_cv.wait(release).unwrap();
         }
     }
 
@@ -2784,6 +2844,12 @@ impl StorageModule {
             pending.proofs.clear();
             pending.written_ahead.clear();
         }
+        // A recall may already have queued a suspect against the old bytes.
+        // Confirming it after this clear would judge the wiped module.
+        self.crc_suspects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.fail_queued_sweeps();
         self.poll_acks();
 
@@ -4750,7 +4816,9 @@ impl StorageModule {
             // The chunk-file lock is not held. A mismatch takes the interval
             // lock, which must not nest under the file lock.
             if check_crc && self.crc_covers_file(&file_arc) {
-                rows.extend(self.reject_settled_crc(&group, chunk_map, caller)?);
+                // Recall still holds `begin_recall`. Confirming under
+                // `sync_in_progress` here deadlocks with `yield_to_recall`.
+                rows.extend(self.reject_settled_crc(&group, chunk_map, caller, recall)?);
             }
         }
         Ok(rows)
@@ -4780,11 +4848,18 @@ impl StorageModule {
     ///
     /// One range read covers the group's offsets. The returned map is every
     /// stored row in that span, including checksum-only rows.
+    ///
+    /// A mismatch here is only a suspect. The bytes were read before this
+    /// row load, and a presence commit can land between the two. `recall`
+    /// omits the chunk and queues it. Any other caller confirms under
+    /// `sync_in_progress` before `note_crc_mismatch`. A false suspect is
+    /// put back from the fresh read.
     fn reject_settled_crc(
         &self,
         runs: &[(PartitionChunkOffset, u64, ChunkType)],
         chunk_map: &mut ChunkMap,
         caller: &'static str,
+        recall: bool,
     ) -> eyre::Result<BTreeMap<PartitionChunkOffset, OffsetMeta>> {
         let Some(&(first, _, _)) = runs.first() else {
             return Ok(BTreeMap::new());
@@ -4810,6 +4885,8 @@ impl StorageModule {
         if !any {
             return Ok(BTreeMap::new());
         }
+        #[cfg(test)]
+        self.wait_if_crc_check_paused();
         let stored = submodule.db.view(|tx| {
             tx.offset_metas_in_range(PartitionChunkOffset(min), PartitionChunkOffset(max))
         })?;
@@ -4840,9 +4917,142 @@ impl StorageModule {
             chunk_map.remove(offset);
         }
         for (offset, kind) in mismatches {
-            self.note_crc_mismatch(offset, kind, caller);
+            if recall {
+                self.crc_suspects
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(offset);
+                continue;
+            }
+            match self.note_if_crc_mismatch(offset, kind, caller)? {
+                CrcConfirm::NotConfirmed(bytes) => {
+                    chunk_map.insert(offset, (bytes, kind));
+                }
+                CrcConfirm::Confirmed | CrcConfirm::Unsettled => {}
+            }
         }
         Ok(by_offset)
+    }
+
+    /// One suspect offset, judged again under `sync_in_progress`.
+    ///
+    /// `Confirmed` has already called `note_crc_mismatch`. `NotConfirmed`
+    /// carries the fresh bytes that match the stable row. `Unsettled` is
+    /// still in `pending` or `written_ahead`: the caller omits it and does
+    /// not repair it.
+    fn note_if_crc_mismatch(
+        &self,
+        offset: PartitionChunkOffset,
+        kind: ChunkType,
+        caller: &'static str,
+    ) -> eyre::Result<CrcConfirm> {
+        let verdict = self.confirm_crc_mismatch(offset)?;
+        if matches!(verdict, CrcConfirm::Confirmed) {
+            self.note_crc_mismatch(offset, kind, caller);
+        }
+        Ok(verdict)
+    }
+
+    /// Re-read one offset and its checksum under `sync_in_progress`.
+    ///
+    /// Every write to an offset is in `pending.chunks` before its pwrite and
+    /// stays in `pending.chunks` or `pending.written_ahead` until
+    /// `finish_durable_point` removes it. `commit_presence_rows` writes the
+    /// checksum, then that removal runs, and both run while the caller holds
+    /// this lock. An offset in neither map therefore has stable bytes and a
+    /// stable checksum row for as long as this lock is held.
+    ///
+    /// Lock order matches `finish_durable_point`: `sync_in_progress`, then
+    /// `pending_writes`, then the `chunks.dat` lock. Release this lock before
+    /// `note_crc_mismatch`, which takes `intervals`.
+    fn confirm_crc_mismatch(&self, offset: PartitionChunkOffset) -> eyre::Result<CrcConfirm> {
+        let _sync_guard = self
+            .sync_in_progress
+            .lock()
+            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        if self.crc_bytes_are_unsettled(offset) {
+            return Ok(CrcConfirm::Unsettled);
+        }
+        let bytes = self.pread_settled_chunk(offset)?;
+        let (_, submodule) = self.get_submodule_for_offset(offset)?;
+        let crc = if submodule.db.stores_offset_crc() {
+            submodule
+                .db
+                .view(|tx| tx.get_offset_meta(offset))?
+                .and_then(|row| row.crc)
+        } else {
+            None
+        };
+        // A `write_chunk` can land in `pending` during the pread. The pwrite
+        // cannot: it needs this lock. The bytes above are still the previous
+        // generation. Treat the offset as not yet the durable pair.
+        if self.crc_bytes_are_unsettled(offset) {
+            return Ok(CrcConfirm::Unsettled);
+        }
+        if !submodule.db.stores_offset_crc() {
+            return Ok(CrcConfirm::NotConfirmed(bytes));
+        }
+        let complete = submodule.crc_complete.load(Ordering::SeqCst);
+        match chunk_crc::classify(crc, &bytes, complete) {
+            chunk_crc::CrcVerdict::Mismatch => Ok(CrcConfirm::Confirmed),
+            _ => Ok(CrcConfirm::NotConfirmed(bytes)),
+        }
+    }
+
+    /// One `pread` of the buffered `chunks.dat` descriptor.
+    ///
+    /// The caller holds `sync_in_progress`, so no pwrite runs during this read.
+    fn pread_settled_chunk(&self, offset: PartitionChunkOffset) -> eyre::Result<ChunkBytes> {
+        let mapped = self.get_chunk_type(&offset) == Some(ChunkType::Data);
+        let (file_arc, file_offset, _) = self.locate_io(offset, mapped)?;
+        let mut buf = vec![0_u8; self.config.consensus.chunk_size as usize];
+        let file = self.disk.lock_chunks(&file_arc);
+        file.read_exact_at(&mut buf, file_offset)
+            .wrap_err_with(|| format!("crc confirm read at offset {offset}"))?;
+        Ok(buf)
+    }
+
+    /// Judge recall suspects. Safe to call when the recall hold is not held.
+    ///
+    /// The storage-module service calls this on its tick, including while the
+    /// disk lane is running. `read_recall_chunks` calls it only when that
+    /// lane is not running, after it has dropped the recall hold.
+    pub fn confirm_crc_suspects(&self) {
+        let suspects = {
+            let mut queued = self
+                .crc_suspects
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *queued)
+        };
+        let mut retry = BTreeSet::new();
+        for offset in suspects {
+            let kind = self
+                .intervals
+                .read()
+                .unwrap()
+                .get_at_point(offset)
+                .copied()
+                .unwrap_or(ChunkType::Uninitialized);
+            match self.note_if_crc_mismatch(offset, kind, index_read_metrics::RECALL) {
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        module_id = self.id,
+                        offset = offset.0,
+                        "chunk crc confirm failed; the offset stays suspect: {error}"
+                    );
+                    retry.insert(offset);
+                }
+            }
+        }
+        if retry.is_empty() {
+            return;
+        }
+        self.crc_suspects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(retry);
     }
 
     /// Pending and written-ahead bytes are not the durable checksum's bytes.
@@ -5209,8 +5419,14 @@ impl StorageModule {
                     .get_at_point(chunk_offset)
                     .copied()
                     .unwrap_or(ChunkType::Uninitialized);
-                self.note_crc_mismatch(chunk_offset, kind, caller);
-                return Err(eyre!("chunk crc mismatch at offset {chunk_offset}"));
+                match self.note_if_crc_mismatch(chunk_offset, kind, caller)? {
+                    CrcConfirm::NotConfirmed(fresh) => return Ok(fresh),
+                    CrcConfirm::Confirmed => {
+                        return Err(eyre!("chunk crc mismatch at offset {chunk_offset}"));
+                    }
+                    // The next read sees the committed bytes.
+                    CrcConfirm::Unsettled => return Ok(buf),
+                }
             }
         }
 
@@ -6318,7 +6534,7 @@ impl StorageModule {
         let caller = index_read_metrics::caller();
         let mut out = BTreeMap::new();
         for (offset, (data_root, data_size, data_path, tx_offset, crc)) in metas {
-            let Some((bytes, kind)) = bodies.remove(&offset) else {
+            let Some((mut bytes, kind)) = bodies.remove(&offset) else {
                 if start == end {
                     return Err(eyre!("Could not find chunk bytes on disk"));
                 }
@@ -6329,8 +6545,10 @@ impl StorageModule {
                 let complete = submodule.crc_complete.load(Ordering::SeqCst);
                 match chunk_crc::classify(crc, &bytes, complete) {
                     chunk_crc::CrcVerdict::Mismatch => {
-                        self.note_crc_mismatch(offset, kind, caller);
-                        continue;
+                        match self.note_if_crc_mismatch(offset, kind, caller)? {
+                            CrcConfirm::NotConfirmed(fresh) => bytes = fresh,
+                            CrcConfirm::Confirmed | CrcConfirm::Unsettled => continue,
+                        }
                     }
                     chunk_crc::CrcVerdict::Unknown => chunk_crc::note_unknown(caller),
                     chunk_crc::CrcVerdict::Match | chunk_crc::CrcVerdict::Skip => {}

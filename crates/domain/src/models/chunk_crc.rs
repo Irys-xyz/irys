@@ -659,4 +659,156 @@ mod tests {
         assert!(!sub_path(&tmp, CRC_FILE).exists());
         Ok(())
     }
+
+    /// Bytes read before a presence commit must not be judged against the
+    /// checksum written by that commit. The read pauses after the pread.
+    /// The durable point then commits. The stale bytes are a suspect only.
+    #[test]
+    fn rocks_bytes_from_before_presence_commit_are_not_a_mismatch() -> eyre::Result<()> {
+        let (_tmp, _config, module) = open_module(
+            "crc_stale_bytes",
+            SubmoduleIndexEngine::Rocksdb,
+            fast_storage(),
+        )?;
+        write_synced(&module, 0, 0x11, ChunkType::Entropy);
+        let entropy_crc = module
+            .offset_meta_for_test(PartitionChunkOffset::from(0))?
+            .expect("entropy row")
+            .crc;
+        module.pause_next_crc_check();
+
+        let (served, mismatches) = std::thread::scope(|scope| {
+            struct Release<'a>(&'a StorageModule);
+            impl Drop for Release<'_> {
+                fn drop(&mut self) {
+                    self.0.release_crc_check_pause();
+                }
+            }
+            let _release = Release(&module);
+            let reader = scope.spawn(|| {
+                let before = test_mismatch_count();
+                let served = module.read_chunks(partition_chunk_offset_ii!(0, 0));
+                (served, test_mismatch_count().saturating_sub(before))
+            });
+            assert!(
+                module.wait_for_crc_check_pause(std::time::Duration::from_secs(5)),
+                "checksum check did not pause after the pread"
+            );
+            let data = vec![0x22_u8; CHUNK];
+            assert!(module.write_chunk(
+                PartitionChunkOffset::from(0),
+                data.clone(),
+                ChunkType::Data
+            ));
+            module.sync_pending_chunks().expect("presence commit");
+            let row = module
+                .offset_meta_for_test(PartitionChunkOffset::from(0))
+                .expect("row read")
+                .expect("data row");
+            assert_eq!(row.crc, Some(checksum(&data)));
+            assert_ne!(row.crc, entropy_crc);
+            module.release_crc_check_pause();
+            reader.join().expect("reader thread")
+        });
+
+        let served = served?;
+        assert_eq!(mismatches, 0, "a stale pread is not a checksum mismatch");
+        assert!(module.take_crc_repair_ranges().is_empty());
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Data)
+        );
+        assert_eq!(
+            served
+                .get(&PartitionChunkOffset::from(0))
+                .map(|(bytes, _)| bytes.clone()),
+            Some(vec![0x22_u8; CHUNK])
+        );
+        Ok(())
+    }
+
+    /// A stored data proof whose packed bytes were flipped is omitted and repaired.
+    #[test]
+    fn rocks_flipped_data_proof_is_omitted_from_generate_full_chunks() -> eyre::Result<()> {
+        use irys_types::ledger_chunk_offset_ii;
+        use irys_types::partition::PartitionAssignment;
+        use irys_types::{DataLedger, DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange};
+
+        let tmp = TempDirBuilder::new().prefix("crc_serve_flip").build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: CHUNK as u64,
+                num_chunks_in_partition: N,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: fast_storage(),
+            base_directory: tmp.path().to_path_buf(),
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            ..NodeConfig::testing()
+        };
+        let config = irys_types::Config::new_with_random_peer_id(node_config);
+        let module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Publish.into()),
+                    slot_index: Some(0),
+                    miner_address: config.node_config.miner_address(),
+                    partition_hash: irys_types::H256::repeat_byte(0x11),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 7), "sub".into())],
+            },
+            &config,
+        )?;
+        let mut entropy = Vec::with_capacity(CHUNK);
+        irys_packing::capacity_single::compute_entropy_chunk(
+            config.node_config.miner_address(),
+            0,
+            module.partition_hash().expect("assignment").0,
+            config.consensus.entropy_packing_iterations,
+            CHUNK,
+            &mut entropy,
+            config.consensus.chain_id,
+        );
+        assert!(module.write_chunk(PartitionChunkOffset::from(0), entropy, ChunkType::Entropy));
+        module.sync_pending_chunks()?;
+
+        let signer = irys_types::irys::IrysSigner::random_signer(&config.consensus);
+        let data = vec![0x5A_u8; CHUNK];
+        let tx =
+            signer.sign_transaction(signer.create_transaction(data, irys_types::H256::zero())?)?;
+        let unpacked = tx.data_chunks()?;
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        module.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        module.write_data_chunk(&unpacked[0])?;
+        module.sync_pending_chunks()?;
+        let before_flip = module
+            .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?;
+        assert_eq!(before_flip.len(), 1, "the stored proof is served");
+
+        flip_dat(&sub_path(&tmp, "chunks.dat"), 0);
+        let before = test_mismatch_count();
+        let served = module
+            .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?;
+        assert!(
+            served.is_empty(),
+            "a flipped packed chunk is not served: {served:?}"
+        );
+        assert!(test_mismatch_count() > before);
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            module.take_crc_repair_ranges(),
+            vec![partition_chunk_offset_ii!(0, 0)]
+        );
+        Ok(())
+    }
 }
