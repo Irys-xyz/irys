@@ -440,12 +440,17 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// | `index_transaction_data`, group commit, chunk `fdatasync` | Not an interval rewrite | Durable point is the chunk `fdatasync` plus the presence commit | `fdatasync` stays ~0.96/s |
 ///
 /// `intervals_persist_secs = 0` does both file rewrites on every sync and
-/// does not mark ahead. That is the previous behaviour.
+/// does not mark ahead. Offsets still queued or parked are stored as
+/// `Interrupted` in that image. A completion of a point that already
+/// fsynced those offsets stores the live label.
 ///
 /// A completion is never stored before its chunk `fdatasync` and presence
 /// commit. A write-ahead mark is never dropped or delayed. Clean shutdown
-/// writes the live map and drops the ahead mask, so a restart does not turn
-/// valid entropy into `Uninitialized`. A crash leaves the mask on disk.
+/// force-syncs first, so nothing is pending, then writes the live map and
+/// drops the ahead mask. A restart does not turn valid entropy into
+/// `Uninitialized`. A crash leaves the mask on disk. An image built from
+/// the live map keeps `Interrupted` for offsets still in `pending.chunks`
+/// or `pending.written_ahead`, and keeps those offsets in the mask.
 ///
 /// The packed-byte checksum is not a file. It is committed in the same index
 /// batch as the presence row, after the chunk `fdatasync` and before the
@@ -3672,7 +3677,8 @@ impl StorageModule {
     /// Store `Interrupted` for this batch before chunk bytes change.
     ///
     /// Period `0` rewrites the live map, which is already `Interrupted` for
-    /// the batch. A positive period also marks up to
+    /// the batch. Offsets parked by an earlier point are stored as
+    /// `Interrupted` too. A positive period also marks up to
     /// [`INTERVAL_WRITE_AHEAD_BYTES`] of following `Entropy` or
     /// `Uninitialized` in the same submodule. That ahead range is not written
     /// into the live map. The mask is updated only after the file replace
@@ -3683,7 +3689,7 @@ impl StorageModule {
         touched: &BTreeSet<PartitionChunkOffset>,
     ) -> eyre::Result<()> {
         if !self.intervals_batched() {
-            return self.write_intervals_files(Some(touched));
+            return self.write_intervals_files(Some(touched), None);
         }
         // Read the epoch before the map. A later reset fails this snapshot
         // instead of letting it put the old mask back.
@@ -3758,7 +3764,12 @@ impl StorageModule {
             self.retire_write_ahead(runs)?;
             self.flush_interval_completions_locked(force)?;
         } else {
-            self.write_intervals_files(Some(touched))?;
+            // These runs are fsynced and presence-committed. Pending still
+            // holds them until the caller drops the fence. Exclude them so
+            // the file stores the live label. Every other queued or parked
+            // offset stays `Interrupted`.
+            let durable_now = Self::offsets_in_runs(runs);
+            self.write_intervals_files(Some(touched), Some(&durable_now))?;
         }
         Ok(())
     }
@@ -3803,10 +3814,17 @@ impl StorageModule {
         self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)
     }
 
-    /// Write the live map and drop the ahead mask. Call this only when no
-    /// chunk is sitting in memory as `Data` before its `fdatasync`: shutdown
-    /// does that by running it after a successful `force_sync`. Reset and
-    /// rollback set the live map to `Uninitialized` first.
+    /// Write the live map and replace the ahead mask. Offsets still in
+    /// `pending.chunks` or `pending.written_ahead` stay `Interrupted` in the
+    /// file and stay in the mask, so a later completion flush does not
+    /// publish them as `Data`. Shutdown calls this after a successful
+    /// `force_sync`, when nothing is pending, so the image equals the live
+    /// map. Reset and rollback set the live map to `Uninitialized` first.
+    ///
+    /// Lock order: `interval_image_epoch`, `intervals` (released),
+    /// `pending_writes` (released), then `interval_disk`. The locks are not
+    /// nested. `intervals` is snapshotted before `pending_writes`, so a park
+    /// that lands between the two is still projected as `Interrupted`.
     ///
     /// `force_replace` writes every submodule file even when the tracked image
     /// already matches. `reset` sets it so an in-flight rewrite cannot commit
@@ -3816,11 +3834,13 @@ impl StorageModule {
             return Ok(());
         }
         let snapshot_epoch = self.load_interval_image_epoch();
-        let memory = self
+        let mut memory = self
             .intervals
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let nondurable = self.snapshot_nondurable_offsets();
+        Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
         {
             let mut disk = self.lock_interval_disk();
             // A snapshot from before `reset` must not clear a mask that reset,
@@ -3828,7 +3848,7 @@ impl StorageModule {
             if !self.interval_snapshot_current(snapshot_epoch) {
                 return Ok(());
             }
-            disk.mask = IntervalMask::new();
+            disk.mask = Self::mask_for_offsets(&nondurable);
             disk.dirty.clear();
             if !force_replace && disk.written == memory {
                 return Ok(());
@@ -3837,20 +3857,69 @@ impl StorageModule {
         self.write_interval_image(&memory, None, snapshot_epoch, force_replace)
     }
 
-    /// Rewrite `intervals.json` from the live map. `only` limits the write to
+    /// Rewrite `intervals.json` from the live map. Offsets still queued or
+    /// parked are stored as `Interrupted`, except `durable_now`: those runs
+    /// are already fsynced and presence-committed, and pending still holds
+    /// them until the caller drops the fence. `only` limits the write to
     /// those submodule starts. `None` rewrites every submodule. Period `0`
     /// uses this. Batching uses [`Self::write_interval_image`] on a projection.
+    ///
+    /// Lock order matches [`Self::persist_intervals_authoritative`].
     fn write_intervals_files(
         &self,
         only: Option<&BTreeSet<PartitionChunkOffset>>,
+        durable_now: Option<&BTreeSet<PartitionChunkOffset>>,
     ) -> eyre::Result<()> {
         let snapshot_epoch = self.load_interval_image_epoch();
-        let memory = self
+        let mut memory = self
             .intervals
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let mut nondurable = self.snapshot_nondurable_offsets();
+        if let Some(durable_now) = durable_now {
+            for offset in durable_now {
+                nondurable.remove(offset);
+            }
+        }
+        Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
         self.write_interval_image(&memory, only, snapshot_epoch, false)
+    }
+
+    /// `pending.chunks` and `pending.written_ahead`. Caller released
+    /// `intervals` first. This does not take `interval_disk`.
+    fn snapshot_nondurable_offsets(&self) -> BTreeSet<PartitionChunkOffset> {
+        let pending = self
+            .pending_writes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut offsets = BTreeSet::new();
+        offsets.extend(pending.chunks.keys().copied());
+        offsets.extend(pending.written_ahead.keys().copied());
+        offsets
+    }
+
+    fn overlay_nondurable_as_interrupted(
+        image: &mut StorageIntervals,
+        nondurable: &BTreeSet<PartitionChunkOffset>,
+    ) {
+        for offset in nondurable {
+            Self::cut_then_insert_interval_if_touching(image, *offset, ChunkType::Interrupted);
+        }
+    }
+
+    fn mask_for_offsets(offsets: &BTreeSet<PartitionChunkOffset>) -> IntervalMask {
+        let mut mask = IntervalMask::new();
+        for offset in offsets {
+            mask.insert_merge_touching_or_overlapping(ii(*offset, *offset));
+        }
+        mask
+    }
+
+    fn offsets_in_runs(runs: &[WriteRun]) -> BTreeSet<PartitionChunkOffset> {
+        runs.iter()
+            .flat_map(|run| run.offsets.iter().copied())
+            .collect()
     }
 
     /// Atomic replace of each selected submodule file. Temp names stay
@@ -12117,6 +12186,158 @@ mod tests {
             file.iter()
                 .all(|(_, chunk_type)| *chunk_type != ChunkType::Interrupted)
         );
+        Ok(())
+    }
+
+    /// RocksDB module whose second sync parks. The first point is never deferred.
+    fn parked_interval_module(
+        prefix: &str,
+        persist_secs: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 8,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                intervals_persist_secs: persist_secs,
+                min_durable_interval_ms: 60_000,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(&parked_interval_info(), &config)?;
+        Ok((tmp_dir, config, storage))
+    }
+
+    fn parked_interval_info() -> StorageModuleInfo {
+        StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment::default()),
+            submodules: vec![(partition_chunk_offset_ii!(0, 7), "sub".into())],
+        }
+    }
+
+    fn reopen_parked_interval(config: &Config) -> eyre::Result<StorageModule> {
+        StorageModule::new(&parked_interval_info(), config)
+    }
+
+    /// Offset 0 starts the durable interval. Offset 1 is pwritten and parked.
+    fn park_one_data_chunk(storage: &StorageModule) -> eyre::Result<PartitionChunkOffset> {
+        let chunk_size = storage.config.consensus.chunk_size as usize;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; chunk_size],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        let parked = PartitionChunkOffset::from(1);
+        assert!(storage.write_chunk(
+            parked,
+            vec![0xA1_u8; chunk_size],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert!(
+            !storage.is_data_chunk_durable_at(parked),
+            "a point inside the interval must park"
+        );
+        assert!(storage.is_data_write_pending_at(parked));
+        assert_eq!(
+            storage.get_chunk_type(&parked),
+            Some(ChunkType::Data),
+            "the live map already says Data"
+        );
+        Ok(parked)
+    }
+
+    #[test]
+    fn authoritative_persist_keeps_parked_data_interrupted() -> eyre::Result<()> {
+        let (tmp, config, storage) = parked_interval_module("parked_intervals_batch", 30)?;
+        let parked = park_one_data_chunk(&storage)?;
+        storage.write_intervals_to_submodules()?;
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(parked).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        storage.suppress_interval_flush_for_test();
+        drop(storage);
+
+        let reloaded = reopen_parked_interval(&config)?;
+        assert_eq!(
+            reloaded.get_chunk_type(&parked),
+            Some(ChunkType::Uninitialized)
+        );
+        assert!(reloaded.offset_meta_for_test(parked)?.is_none());
+        drop(reloaded);
+        drop(tmp);
+        Ok(())
+    }
+
+    #[test]
+    fn period_zero_persist_keeps_parked_data_interrupted() -> eyre::Result<()> {
+        let (tmp, config, storage) = parked_interval_module("parked_intervals_period_0", 0)?;
+        let parked = park_one_data_chunk(&storage)?;
+        storage.write_intervals_to_submodules()?;
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(parked).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        // The next write-ahead rewrites the live map. The parked offset is
+        // still not durable, so the file must keep Interrupted.
+        let chunk_size = storage.config.consensus.chunk_size as usize;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(2),
+            vec![2_u8; chunk_size],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(parked).copied(),
+            Some(ChunkType::Interrupted)
+        );
+        // Period 0 completion ignores the flush suppress flag. Abandon is the
+        // crash: drop must not finish the point and publish Data.
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reloaded = reopen_parked_interval(&config)?;
+        assert_eq!(
+            reloaded.get_chunk_type(&parked),
+            Some(ChunkType::Uninitialized)
+        );
+        assert!(reloaded.offset_meta_for_test(parked)?.is_none());
+        drop(reloaded);
+        drop(tmp);
+        Ok(())
+    }
+
+    #[test]
+    fn durable_persist_publishes_parked_data() -> eyre::Result<()> {
+        let (tmp, _config, storage) = parked_interval_module("parked_intervals_done", 30)?;
+        let parked = park_one_data_chunk(&storage)?;
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(parked));
+        storage.write_intervals_to_submodules()?;
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(parked).copied(),
+            Some(ChunkType::Data)
+        );
+        drop(storage);
+        drop(tmp);
         Ok(())
     }
 
