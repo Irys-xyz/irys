@@ -1840,7 +1840,7 @@ impl StorageModule {
             PartitionChunkOffset,
             Interval<PartitionChunkOffset>,
             ChunkType,
-        > = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id);
+        > = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id)?;
 
         // validate that the loaded intervals span the correct range
         let gaps = loaded_intervals
@@ -3279,9 +3279,11 @@ impl StorageModule {
             if skipped.contains(chunk_offset) {
                 continue;
             }
-            if pending.written_ahead.get(chunk_offset).is_some_and(|ahead| {
-                ahead.bytes == state.0 && ahead.chunk_type == state.1
-            }) {
+            if pending
+                .written_ahead
+                .get(chunk_offset)
+                .is_some_and(|ahead| ahead.bytes == state.0 && ahead.chunk_type == state.1)
+            {
                 pending.written_ahead.remove(chunk_offset);
                 pending.proofs.remove(chunk_offset);
             }
@@ -4167,14 +4169,17 @@ impl StorageModule {
     /// # Returns
     /// * `StorageIntervals` - A complete, merged map of all intervals across all submodules
     ///
+    /// # Errors
+    /// A submodule `intervals.json` that cannot be read or parsed. The error
+    /// names that file. Stop the node, move the file aside, and reset that
+    /// storage module so it can repack.
+    ///
     /// # Panics
     /// * If unable to lock a submodule's intervals file mutex
-    /// * If reading a submodule's intervals file fails
-    /// * If interval insertion into the global map fails due to overlapping intervals
     fn load_intervals_from_submodules(
         submodules: &SubmoduleMap,
         module_id: usize,
-    ) -> StorageIntervals {
+    ) -> eyre::Result<StorageIntervals> {
         let mut global_intervals = StorageIntervals::new();
         let mut interrupted_count = 0;
 
@@ -4183,8 +4188,7 @@ impl StorageModule {
                 .intervals_file
                 .lock()
                 .expect("to lock the submodule intervals file mutex");
-            let submodule_intervals =
-                read_intervals_file(&file).expect("to read submodule intervals file");
+            let submodule_intervals = read_intervals_file(&file)?;
 
             for (interval, chunk_type) in submodule_intervals {
                 let set_chunk_type = match chunk_type {
@@ -4201,7 +4205,12 @@ impl StorageModule {
                 };
                 global_intervals
                     .insert_merge_touching_if_values_equal(interval, set_chunk_type)
-                    .expect("to insert interval into global intervals map");
+                    .map_err(|error| {
+                        eyre!(
+                            "failed to insert interval from {}: {error:?}. {INTERVALS_FILE_REMEDY}",
+                            file.display()
+                        )
+                    })?;
             }
         }
 
@@ -4212,7 +4221,7 @@ impl StorageModule {
             );
         }
 
-        global_intervals
+        Ok(global_intervals)
     }
 
     /// Drop presence rows whose loaded interval is not `Data`.
@@ -7500,10 +7509,22 @@ fn ensure_default_intervals(
     Ok(())
 }
 
+/// Operator steps when `intervals.json` cannot be read. The open error names
+/// the file. The same steps are in `docs/60-indexes/06-storage-module-indexes.md`.
+const INTERVALS_FILE_REMEDY: &str = "Stop the node, move this intervals.json aside, and reset that storage module so it can repack. See docs/60-indexes/06-storage-module-indexes.md.";
+
+fn intervals_file_error(path: &Path, action: &str) -> String {
+    format!(
+        "Failed to {action} intervals.json at {}. {INTERVALS_FILE_REMEDY}",
+        path.display()
+    )
+}
+
 /// Reads and deserializes intervals from storage state file
 ///
 /// Loads the stored interval mapping that tracks chunk states.
 /// Expects a JSON-formatted file containing StorageIntervals.
+/// A read or parse failure names `path` and how to reset that module.
 pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -7511,23 +7532,31 @@ pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
         .create(true)
         .truncate(false)
         .open(path)
-        .wrap_err_with(|| {
-            format!(
-                "Failed to create or open intervals file at {}",
-                path.display()
-            )
-        })?;
+        .wrap_err_with(|| intervals_file_error(path, "open"))?;
 
-    let size = file.metadata().unwrap().len() as usize;
+    let size = file
+        .metadata()
+        .wrap_err_with(|| intervals_file_error(path, "stat"))?
+        .len() as usize;
 
     if size == 0 {
-        return Err(eyre!("Intervals file is empty"));
+        return Err(eyre!(
+            "Intervals file is empty at {}. {INTERVALS_FILE_REMEDY}",
+            path.display()
+        ));
     }
 
     let mut contents = String::with_capacity(size);
-    file.seek(SeekFrom::Start(0))?;
-    file.read_to_string(&mut contents).unwrap();
-    let intervals = serde_json::from_str(&contents)?;
+    file.seek(SeekFrom::Start(0))
+        .wrap_err_with(|| intervals_file_error(path, "seek"))?;
+    file.read_to_string(&mut contents)
+        .wrap_err_with(|| intervals_file_error(path, "read"))?;
+    let intervals = serde_json::from_str(&contents).wrap_err_with(|| {
+        format!(
+            "intervals.json at {} is corrupt. {INTERVALS_FILE_REMEDY}",
+            path.display()
+        )
+    })?;
     Ok(intervals)
 }
 
@@ -11150,7 +11179,7 @@ mod tests {
         let intervals = StorageModule::load_intervals_from_submodules(
             &storage_module.submodules,
             storage_module.id,
-        );
+        )?;
 
         {
             let file_intervals = intervals.into_iter().collect::<Vec<_>>();
@@ -11172,7 +11201,7 @@ mod tests {
         let intervals = StorageModule::load_intervals_from_submodules(
             &storage_module.submodules,
             storage_module.id,
-        );
+        )?;
 
         {
             let file_intervals = intervals.into_iter().collect::<Vec<_>>();
@@ -12165,6 +12194,27 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_intervals_file_names_its_path() -> eyre::Result<()> {
+        let (tmp, config, storage) = interval_batch_module("corrupt_intervals", 0)?;
+        let path = submodule_interval_path(&storage, 0);
+        drop(storage);
+        fs::write(&path, b"not-json{{")?;
+        let opened = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
+            },
+            &config,
+        );
+        let err = opened.expect_err("a corrupt intervals.json must not panic");
+        let message = format!("{err:#}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        drop(tmp);
+        Ok(())
+    }
+
+    #[test]
     fn period_zero_writes_the_completion_immediately() -> eyre::Result<()> {
         let (_tmp, _config, storage) = interval_batch_module("intervals_period_0", 0)?;
         assert!(storage.write_chunk(
@@ -12245,11 +12295,7 @@ mod tests {
         storage.sync_pending_chunks()?;
         assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
         let parked = PartitionChunkOffset::from(1);
-        assert!(storage.write_chunk(
-            parked,
-            vec![0xA1_u8; chunk_size],
-            ChunkType::Data,
-        ));
+        assert!(storage.write_chunk(parked, vec![0xA1_u8; chunk_size], ChunkType::Data,));
         storage.sync_pending_chunks()?;
         assert!(
             !storage.is_data_chunk_durable_at(parked),

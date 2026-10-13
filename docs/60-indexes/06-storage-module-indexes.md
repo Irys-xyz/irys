@@ -152,6 +152,18 @@ Replace `db/` with `<new-db-dir>` only after verify passes. Move
 `rocks.retired`); the node refuses to open MDBX while `rocks/` is
 present. Set `database.submodule_index` to `mdbx`. Start the node.
 
+## Corrupt intervals.json
+
+Stop the node. Each submodule directory has an `intervals.json`. It
+records which offsets are `Data`, `Entropy`, `Uninitialized`, or
+`Interrupted`. Open fails when that file cannot be parsed, and the error
+names the path.
+
+Move that `intervals.json` aside. Clear the contents of that storage
+module's submodule directory and start the node. The module packs again.
+Do not write `Data` back by hand. A span the node cannot trust is
+`Uninitialized`, and open drops presence rows that are not under `Data`.
+
 ## Failed conversion
 
 Run the same command again with `--replace-incomplete`. That flag deletes
