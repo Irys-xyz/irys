@@ -8548,10 +8548,10 @@ mod tests {
 
     /// Sign each buffer and build a PoA for every chunk. Does not index the
     /// block or write it to the DB.
-    fn build_submit_chunk_poas(context: &TestContext, datas: &[Vec<u8>]) -> BuiltSubmitPoas {
+    fn build_submit_chunk_poas(context: &TestContext, data: &[Vec<u8>]) -> BuiltSubmitPoas {
         let signer = IrysSigner::random_signer(&context.consensus_config);
         let chunk_size = context.consensus_config.chunk_size as usize;
-        let txs: Vec<DataTransaction> = datas
+        let txs: Vec<DataTransaction> = data
             .iter()
             .cloned()
             .map(|bytes| sign_data_tx(&signer, bytes))
@@ -8562,13 +8562,13 @@ mod tests {
         let mut poas = Vec::new();
         let mut block_offset = 0_u64;
         for (tx_index, tx) in txs.iter().enumerate() {
-            let data = &datas[tx_index];
+            let tx_bytes = &data[tx_index];
             for chunk_index in 0..tx.proofs.len() {
                 let start = chunk_index * chunk_size;
-                let end = (start + chunk_size).min(data.len());
+                let end = (start + chunk_size).min(tx_bytes.len());
                 let mut built = pack_chunk_poa(
                     context,
-                    &data[start..end],
+                    &tx_bytes[start..end],
                     &tx_paths[tx_index].proof,
                     &tx.proofs[chunk_index].proof,
                     block_offset,
@@ -8589,8 +8589,8 @@ mod tests {
 
     /// Sign each buffer, lay the txs out as one Submit block, and build a PoA
     /// for every chunk of every tx.
-    fn index_submit_poas(context: &mut TestContext, datas: &[Vec<u8>]) -> IndexedSubmit {
-        let built = build_submit_chunk_poas(context, datas);
+    fn index_submit_poas(context: &mut TestContext, data: &[Vec<u8>]) -> IndexedSubmit {
+        let built = build_submit_chunk_poas(context, data);
         index_headers_and_poas(
             context,
             built.tx_root,
@@ -8730,11 +8730,11 @@ mod tests {
     /// Put one Submit block in a block tree and leave it out of the block index
     /// and the consensus DB. The tree's genesis is a signed empty block. The
     /// data block's previous hash points at that genesis, and its Submit ledger
-    /// carries `datas` in order.
-    fn seed_unmigrated_submit_block(context: &TestContext, datas: &[Vec<u8>]) -> TreeSubmit {
+    /// carries `data` in order.
+    fn seed_unmigrated_submit_block(context: &TestContext, data: &[Vec<u8>]) -> TreeSubmit {
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
 
-        let built = build_submit_chunk_poas(context, datas);
+        let built = build_submit_chunk_poas(context, data);
         // The next height after the indexed genesis. This test never pushes it.
         let height = context.block_index.num_blocks();
 
