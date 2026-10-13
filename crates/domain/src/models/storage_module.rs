@@ -375,10 +375,21 @@ struct PendingWrites {
     proofs: HashMap<PartitionChunkOffset, (ChunkPathHash, ChunkDataPath)>,
     /// Pwritten bytes not yet covered by a durable point. Still pending: they
     /// count toward `pending_write_bytes` and are not reported durable. The
-    /// next point fdatasyncs them, commits presence, then drops them. A newer
-    /// enqueue for the same offset removes the entry so the new bytes are
-    /// pwritten.
-    written_ahead: BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>,
+    /// next point fdatasyncs them, commits presence, then drops them. A failed
+    /// `fdatasync` moves the entry back into `chunks` with the saved priority
+    /// and `queued_at`, so the next point pwrites it again. A newer enqueue
+    /// for the same offset removes the entry so the new bytes are pwritten.
+    written_ahead: BTreeMap<PartitionChunkOffset, WrittenAhead>,
+}
+
+/// One parked pwrite. `priority` and `queued_at` are the values the chunk had
+/// in `pending.chunks`, kept so a failed `fdatasync` can queue the same write.
+#[derive(Clone, Debug)]
+struct WrittenAhead {
+    bytes: ChunkBytes,
+    chunk_type: ChunkType,
+    priority: disk_lane::WritePriority,
+    queued_at: Instant,
 }
 
 impl Deref for PendingWrites {
@@ -2334,7 +2345,7 @@ impl StorageModule {
             || pending
                 .written_ahead
                 .get(&offset)
-                .is_some_and(|(_, chunk_type)| *chunk_type == ChunkType::Data)
+                .is_some_and(|ahead| ahead.chunk_type == ChunkType::Data)
     }
 
     /// Bytes of chunk data queued in memory awaiting flush. Background body
@@ -2349,7 +2360,7 @@ impl StorageModule {
         let ahead = pending
             .written_ahead
             .values()
-            .map(|(bytes, _)| bytes.len() as u64)
+            .map(|ahead| ahead.bytes.len() as u64)
             .sum::<u64>();
         packed
             .saturating_add(ahead)
@@ -3066,13 +3077,56 @@ impl StorageModule {
         )],
     ) {
         let mut pending = self.pending_writes.write().unwrap();
-        for (offset, state, _) in batch {
+        for (offset, state, priority) in batch {
             if pending.get(offset) == Some(state) {
-                let parked = pending.remove(offset).expect("pending state matched");
+                let (bytes, chunk_type) = pending.remove(offset).expect("pending state matched");
+                let queued_at = pending
+                    .queued_at
+                    .remove(offset)
+                    .unwrap_or_else(Instant::now);
                 pending.priorities.remove(offset);
-                pending.queued_at.remove(offset);
-                pending.written_ahead.insert(*offset, parked);
+                pending.written_ahead.insert(
+                    *offset,
+                    WrittenAhead {
+                        bytes,
+                        chunk_type,
+                        priority: *priority,
+                        queued_at,
+                    },
+                );
             }
+        }
+    }
+
+    /// Put this point's parked bytes back on the pwrite queue.
+    ///
+    /// Only an entry still identical to the snapshot moves. A newer enqueue
+    /// already replaced it and must stay. `priority` and `queued_at` are the
+    /// values saved when the bytes were parked. Bytes pwritten in this call
+    /// are still in `pending.chunks`; this function does not touch them.
+    fn requeue_written_ahead_after_sync_error(
+        &self,
+        ahead: &[(
+            PartitionChunkOffset,
+            (ChunkBytes, ChunkType),
+            disk_lane::WritePriority,
+        )],
+    ) {
+        let mut pending = self.pending_writes.write().unwrap();
+        for (offset, state, _) in ahead {
+            let Some(parked) = pending.written_ahead.get(offset) else {
+                continue;
+            };
+            if parked.bytes != state.0 || parked.chunk_type != state.1 {
+                continue;
+            }
+            let parked = pending.written_ahead.remove(offset).expect("matched above");
+            if pending.contains_key(offset) {
+                continue;
+            }
+            pending.priorities.insert(*offset, parked.priority);
+            pending.queued_at.insert(*offset, parked.queued_at);
+            pending.insert(*offset, (parked.bytes, parked.chunk_type));
         }
     }
 
@@ -3087,14 +3141,35 @@ impl StorageModule {
         pending
             .written_ahead
             .iter()
-            .map(|(offset, state)| {
-                let priority = match state.1 {
-                    ChunkType::Entropy => disk_lane::WritePriority::Packing,
-                    _ => disk_lane::WritePriority::Ingress,
-                };
-                (*offset, state.clone(), priority)
+            .map(|(offset, ahead)| {
+                (
+                    *offset,
+                    (ahead.bytes.clone(), ahead.chunk_type),
+                    ahead.priority,
+                )
             })
             .collect()
+    }
+
+    /// `fdatasync` every `chunks.dat` this point wrote. A test failure and an
+    /// I/O error both return before presence is committed.
+    fn sync_touched_chunk_files(
+        &self,
+        touched: &BTreeSet<PartitionChunkOffset>,
+    ) -> eyre::Result<()> {
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::BeforeDataFsync)?;
+        for (interval, submodule) in self.submodules.iter() {
+            if !touched.contains(&interval.start()) {
+                continue;
+            }
+            self.disk.yield_to_recall();
+            let file_arc = Arc::clone(&submodule.file);
+            let file = self.disk.lock_chunks(&file_arc);
+            file.sync_data()
+                .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
+        }
+        Ok(())
     }
 
     /// Fdatasync, presence commit, interval completion, then drop the fence.
@@ -3132,24 +3207,19 @@ impl StorageModule {
             touched.insert(interval.start());
         }
 
-        #[cfg(test)]
-        self.inject_sync_failure(SyncFailurePoint::BeforeDataFsync)?;
-
         // fdatasync this write batch before any row that says the chunk is
         // present. A crash after the bytes land and before that row is safe:
         // intervals and the index still say the chunk is absent.
         // A recall window syncs only the files it wrote.
-        for (interval, submodule) in self.submodules.iter() {
-            if !touched.contains(&interval.start()) {
-                continue;
-            }
-            self.disk.yield_to_recall();
-            let file_arc = Arc::clone(&submodule.file);
-            {
-                let file = self.disk.lock_chunks(&file_arc);
-                file.sync_data()
-                    .map_err(|e| eyre::eyre!("Failed to sync data to disk: {}", e))?;
-            }
+        // A failed sync can drop the dirty pages and the next sync can return
+        // success, so parked bytes go back on the pwrite queue. Bytes pwritten
+        // in this call are still in `pending.chunks` and are pwritten again
+        // with that queue.
+        if let Err(error) = self.sync_touched_chunk_files(&touched) {
+            error!("Failed to sync data to disk: {error}");
+            super::index_read_metrics::note_chunk_fsync_failure();
+            self.requeue_written_ahead_after_sync_error(&ahead);
+            return Err(error);
         }
 
         // One durable index batch per submodule in this gap. It holds the
@@ -3204,7 +3274,9 @@ impl StorageModule {
             if skipped.contains(chunk_offset) {
                 continue;
             }
-            if pending.written_ahead.get(chunk_offset) == Some(state) {
+            if pending.written_ahead.get(chunk_offset).is_some_and(|ahead| {
+                ahead.bytes == state.0 && ahead.chunk_type == state.1
+            }) {
                 pending.written_ahead.remove(chunk_offset);
                 pending.proofs.remove(chunk_offset);
             }
@@ -7195,7 +7267,7 @@ impl StorageModule {
         let ahead = pending
             .written_ahead
             .values()
-            .map(|(bytes, _)| bytes.len() as u64)
+            .map(|ahead| ahead.bytes.len() as u64)
             .sum::<u64>();
         let pending_bytes = packed
             .saturating_add(ahead)
@@ -12378,6 +12450,122 @@ mod tests {
             assert!(!storage_module.has_pending_writes());
         }
 
+        Ok(())
+    }
+
+    /// A failed `fdatasync` can drop the dirty pages. The next point must
+    /// pwrite parked bytes again before it commits presence and the checksum.
+    #[test]
+    fn failed_fsync_of_parked_bytes_rewrites_them_before_commit() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("parked_fsync_retry")
+            .with_tracing()
+            .build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 4,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 60_000,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp_dir.path().to_path_buf(),
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![(partition_chunk_offset_ii!(0, 3), "chunks".into())],
+            },
+            &config,
+        )?;
+
+        let parked_offset = PartitionChunkOffset::from(1);
+        let fresh_offset = PartitionChunkOffset::from(2);
+        let parked_bytes = vec![0xA1_u8; chunk_size as usize];
+        let fresh_bytes = vec![0xB2_u8; chunk_size as usize];
+
+        // The first point is never deferred. It starts the interval.
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; chunk_size as usize],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+
+        assert!(storage.write_chunk(parked_offset, parked_bytes.clone(), ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert!(
+            !storage.is_data_chunk_durable_at(parked_offset),
+            "a point inside the interval must park"
+        );
+        {
+            let pending = storage.pending_writes.read().unwrap();
+            assert!(pending.written_ahead.contains_key(&parked_offset));
+        }
+
+        assert!(storage.write_chunk(fresh_offset, fresh_bytes.clone(), ChunkType::Data));
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeDataFsync);
+        let failures_before = super::super::index_read_metrics::chunk_fsync_failures_for_test();
+        let err = storage.force_sync_pending_chunks().unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert!(
+            super::super::index_read_metrics::chunk_fsync_failures_for_test() > failures_before
+        );
+        {
+            let pending = storage.pending_writes.read().unwrap();
+            assert!(
+                pending.chunks.contains_key(&parked_offset),
+                "a failed fsync must queue parked bytes for another pwrite"
+            );
+            assert!(!pending.written_ahead.contains_key(&parked_offset));
+            assert!(
+                pending.chunks.contains_key(&fresh_offset),
+                "bytes pwritten in this call stay in pending.chunks"
+            );
+        }
+
+        let (_, submodule) = storage.get_submodule_for_offset(parked_offset)?;
+        // `path` is the relative submodule directory. The file lives beside
+        // `intervals.json`, under the node base directory.
+        let path = submodule
+            .intervals_file
+            .lock()
+            .expect("intervals path")
+            .with_file_name("chunks.dat");
+        {
+            use std::os::unix::fs::FileExt as _;
+            let file = OpenOptions::new().write(true).open(&path)?;
+            let zeros = vec![0_u8; chunk_size as usize];
+            file.write_all_at(&zeros, u64::from(parked_offset.0) * chunk_size)?;
+            file.write_all_at(&zeros, u64::from(fresh_offset.0) * chunk_size)?;
+        }
+
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(parked_offset));
+        assert!(storage.is_data_chunk_durable_at(fresh_offset));
+        let loaded = storage.read_chunks(partition_chunk_offset_ii!(1, 2))?;
+        assert_eq!(loaded.get(&parked_offset).unwrap().0, parked_bytes);
+        assert_eq!(loaded.get(&fresh_offset).unwrap().0, fresh_bytes);
+        let parked_row = storage
+            .offset_meta_for_test(parked_offset)?
+            .expect("durable data stores a checksum");
+        assert_eq!(parked_row.crc, Some(chunk_crc::checksum(&parked_bytes)));
+        let fresh_row = storage
+            .offset_meta_for_test(fresh_offset)?
+            .expect("fresh checksum");
+        assert_eq!(fresh_row.crc, Some(chunk_crc::checksum(&fresh_bytes)));
         Ok(())
     }
 

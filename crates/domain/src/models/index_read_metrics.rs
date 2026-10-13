@@ -196,6 +196,32 @@ pub(super) fn note_durable_point(timing: &'static str, cause: &'static str) {
     );
 }
 
+static CHUNK_FSYNC_FAILURES: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.chunk_fsync_failures_total")
+        .with_description(
+            "chunks.dat fdatasync failures. Parked bytes are queued for another pwrite before the next durable point.",
+        )
+        .build()
+});
+
+#[cfg(test)]
+static CHUNK_FSYNC_FAILURES_TEST: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn note_chunk_fsync_failure() {
+    CHUNK_FSYNC_FAILURES.add(1, &[]);
+    #[cfg(test)]
+    {
+        CHUNK_FSYNC_FAILURES_TEST.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `chunks.dat` fdatasync failures since process start. Tests assert a delta.
+#[cfg(test)]
+pub(crate) fn chunk_fsync_failures_for_test() -> u64 {
+    CHUNK_FSYNC_FAILURES_TEST.load(Ordering::Relaxed)
+}
+
 static RECALL_IO: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter("irys-domain")
         .u64_counter("irys.storage.recall_reads_total")
