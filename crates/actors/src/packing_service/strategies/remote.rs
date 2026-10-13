@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
-use irys_domain::{ChunkType, StorageModule};
+use irys_domain::StorageModule;
 use irys_types::{
     Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig, ii,
     partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
@@ -60,10 +60,10 @@ impl RemotePackingStrategy {
         let notify = self.notify.clone();
 
         let mut process_chunk = |chunk_bytes: Bytes| {
-            storage_module.write_chunk(
+            storage_module.write_entropy_chunk(
                 PartitionChunkOffset(range_start),
                 chunk_bytes.to_vec(),
-                ChunkType::Entropy,
+                partition_hash,
             );
             notify.notify_waiters();
 

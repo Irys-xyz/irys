@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use irys_domain::{ChunkType, StorageModule};
+use irys_domain::StorageModule;
 use irys_packing::{CUDAConfig, capacity_pack_range_cuda_c};
 use irys_types::{
     Config, IrysAddress, PartitionChunkRange, partition::PartitionHash, split_interval,
@@ -107,12 +107,12 @@ impl super::PackingStrategy for CudaPackingStrategy {
 
                 // Write packed chunks
                 for i in 0..num_chunks {
-                    storage_module_clone.write_chunk(
+                    storage_module_clone.write_entropy_chunk(
                         (start + i).into(),
                         out[(i * chunk_size as u32) as usize
                             ..((i + 1) * chunk_size as u32) as usize]
                             .to_vec(),
-                        ChunkType::Entropy,
+                        partition_hash,
                     );
 
                     // Periodic sync

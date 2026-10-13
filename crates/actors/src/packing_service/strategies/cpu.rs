@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use irys_domain::{ChunkType, StorageModule};
+use irys_domain::StorageModule;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_types::IrysAddress;
 use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash};
@@ -101,10 +101,10 @@ impl super::PackingStrategy for CpuPackingStrategy {
                         entropy_iterations
                     );
 
-                    storage_module_clone.write_chunk(
+                    storage_module_clone.write_entropy_chunk(
                         PartitionChunkOffset::from(i),
                         out,
-                        ChunkType::Entropy,
+                        partition_hash,
                     );
                     drop(permit);
                     notify.notify_waiters();

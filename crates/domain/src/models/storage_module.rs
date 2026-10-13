@@ -2846,7 +2846,12 @@ impl StorageModule {
         }
         // A recall may already have queued a suspect against the old bytes.
         // Confirming it after this clear would judge the wiped module.
+        // Repairs belong to those bytes. The next assignment must not repack them.
         self.crc_suspects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.crc_repairs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -2913,6 +2918,11 @@ impl StorageModule {
     /// `partition_assignment`. Readers (mining, the chunk provider, data
     /// sync, the body worker) take the assignment read lock and drop it
     /// before they take `pending_writes`, `intervals`, or `sync_in_progress`.
+    ///
+    /// `write_entropy_chunk` holds the assignment read lock across its pending
+    /// insert. That is this same outer-to-inner order. A reset cannot clear
+    /// `pending` and then lose the insert. The entropy write does not take
+    /// `sync_in_progress`.
     ///
     /// `next` of `None` clears the assignment. A failed reset leaves the
     /// previous assignment in place.
@@ -5504,6 +5514,46 @@ impl StorageModule {
     /// Queues chunk data for later disk write. Chunks are batched for efficiency
     /// and written during periodic sync operations.
     pub fn write_chunk(
+        &self,
+        chunk_offset: PartitionChunkOffset,
+        bytes: Vec<u8>,
+        chunk_type: ChunkType,
+    ) -> bool {
+        self.enqueue_pending_chunk(chunk_offset, bytes, chunk_type)
+    }
+
+    /// Entropy packed for `packed_for`.
+    ///
+    /// The assignment read lock is held across the pending insert.
+    /// [`Self::reset_with_assignment`] takes the assignment write lock before
+    /// it clears `pending`, so this insert cannot land bytes for a partition
+    /// the module no longer has. `None` refuses the write. A raw
+    /// [`Self::write_chunk`] of `ChunkType::Entropy` does not check the
+    /// assignment. That path is for bytes that were not packed for a hash.
+    pub fn write_entropy_chunk(
+        &self,
+        chunk_offset: PartitionChunkOffset,
+        bytes: Vec<u8>,
+        packed_for: PartitionHash,
+    ) -> bool {
+        let assignment = self.partition_assignment.read().unwrap();
+        let current = assignment
+            .as_ref()
+            .map(|assignment| assignment.partition_hash);
+        if current != Some(packed_for) {
+            debug!(
+                target: "irys::packing",
+                module_id = self.id,
+                offset = chunk_offset.0,
+                %packed_for,
+                "refusing entropy packed for a partition this module is not assigned"
+            );
+            return false;
+        }
+        self.enqueue_pending_chunk(chunk_offset, bytes, ChunkType::Entropy)
+    }
+
+    fn enqueue_pending_chunk(
         &self,
         chunk_offset: PartitionChunkOffset,
         bytes: Vec<u8>,

@@ -811,4 +811,98 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Entropy packed for hash A must not land after the module is hash B or unassigned.
+    #[test]
+    fn entropy_packed_for_another_partition_is_refused() -> eyre::Result<()> {
+        use irys_types::H256;
+        use irys_types::partition::PartitionAssignment;
+
+        let tmp = TempDirBuilder::new().prefix("entropy_assignment").build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: CHUNK as u64,
+                num_chunks_in_partition: N,
+                ..ConsensusConfig::testing()
+            }),
+            storage: fast_storage(),
+            base_directory: tmp.path().to_path_buf(),
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            ..NodeConfig::testing()
+        };
+        let config = irys_types::Config::new_with_random_peer_id(node_config);
+        let module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, 7), tmp.path().join("sub"))],
+            },
+            &config,
+        )?;
+        let hash_a = H256::repeat_byte(0xA1);
+        let hash_b = H256::repeat_byte(0xB2);
+        let assign = |hash| PartitionAssignment {
+            partition_hash: hash,
+            miner_address: config.node_config.miner_address(),
+            ledger_id: None,
+            slot_index: None,
+        };
+        module.assign_partition(assign(hash_a), 1);
+        let first = vec![0x11_u8; CHUNK];
+        assert!(module.write_entropy_chunk(PartitionChunkOffset::from(0), first.clone(), hash_a));
+        module.sync_pending_chunks()?;
+        let served = module.read_chunks(partition_chunk_offset_ii!(0, 0))?;
+        assert_eq!(
+            served
+                .get(&PartitionChunkOffset::from(0))
+                .map(|(bytes, _)| bytes.clone()),
+            Some(first)
+        );
+
+        module.note_crc_mismatch(PartitionChunkOffset::from(0), ChunkType::Entropy, "test");
+        assert!(!module.take_crc_repair_ranges().is_empty());
+        module.note_crc_mismatch(PartitionChunkOffset::from(0), ChunkType::Entropy, "test");
+        module.reset_with_assignment(Some(assign(hash_b)), 2)?;
+        assert!(
+            module.take_crc_repair_ranges().is_empty(),
+            "reset drops repairs for the old bytes"
+        );
+
+        assert!(!module.write_entropy_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x33_u8; CHUNK],
+            hash_a
+        ));
+        assert!(!module.has_pending_writes());
+        module.sync_pending_chunks()?;
+        assert!(
+            module
+                .offset_meta_for_test(PartitionChunkOffset::from(0))?
+                .is_none()
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized)
+        );
+
+        let fresh = vec![0x44_u8; CHUNK];
+        assert!(module.write_entropy_chunk(PartitionChunkOffset::from(0), fresh.clone(), hash_b));
+        module.sync_pending_chunks()?;
+        let served = module.read_chunks(partition_chunk_offset_ii!(0, 0))?;
+        assert_eq!(
+            served
+                .get(&PartitionChunkOffset::from(0))
+                .map(|(bytes, _)| bytes.clone()),
+            Some(fresh)
+        );
+
+        module.reset_with_assignment(None, 3)?;
+        assert!(!module.write_entropy_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x55_u8; CHUNK],
+            hash_b
+        ));
+        assert!(!module.has_pending_writes());
+        Ok(())
+    }
 }
