@@ -3729,6 +3729,7 @@ mod tests {
                 IrysPeerId::from([1_u8; 20]),
                 CircuitBreakerConfig::p2p_defaults(),
                 tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
             )
         }
 
