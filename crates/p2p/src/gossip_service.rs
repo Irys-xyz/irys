@@ -131,6 +131,7 @@ impl P2PService {
         peer_id: IrysPeerId,
         broadcast_data_receiver: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
         runtime_handle: tokio::runtime::Handle,
+        max_peer_response_bytes: u64,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -140,6 +141,7 @@ impl P2PService {
             mining_address,
             peer_id,
             runtime_handle.clone(),
+            max_peer_response_bytes,
         );
 
         Self {

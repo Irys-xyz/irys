@@ -3286,7 +3286,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {
-        IrysApiClient::new()
+        IrysApiClient::new(self.node_ctx.config.node_config.max_peer_response_bytes)
     }
 
     pub fn get_gossip_client(&self) -> GossipClient {
@@ -3295,6 +3295,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             self.node_ctx.config.node_config.miner_address(),
             self.node_ctx.config.peer_id(),
             tokio::runtime::Handle::current(),
+            self.node_ctx.config.node_config.max_peer_response_bytes,
         )
     }
 

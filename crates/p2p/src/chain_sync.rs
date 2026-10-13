@@ -2928,6 +2928,7 @@ mod tests {
                 IrysPeerId::from([0xAA_u8; 20]),
                 CircuitBreakerConfig::testing(),
                 tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
             );
             (peer_list, gossip_client)
         }
