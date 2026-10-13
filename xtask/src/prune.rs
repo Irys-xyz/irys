@@ -262,6 +262,44 @@ pub fn record_usage(target_dir: &Path, invocation: &str, artifacts: &[PathBuf]) 
     fs::rename(&aside, &record)
 }
 
+/// What [`prune_recorded`] removed. `None` from that function means no usage record was live.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RecordedPrune {
+    pub executables: PruneReport,
+    pub units: UnitPruneReport,
+}
+
+/// Prune from the usage records under `target_dir`.
+///
+/// The stale-executable pass treats every live record's `deps/` executable as the build it
+/// keeps. The unit pass is the same one a `test` run finishes with. No live record means
+/// nothing is known to be in use, so both passes leave the target directory alone. An expired
+/// record is deleted by the liveness read and does not count as live.
+pub fn prune_recorded(
+    workspace_root: &Path,
+    target_dir: &Path,
+    keep_after: SystemTime,
+    unused_before: SystemTime,
+) -> io::Result<Option<RecordedPrune>> {
+    let used = live_usage(&target_dir.join(USAGE_DIR), unused_before)?;
+    if used.is_empty() {
+        return Ok(None);
+    }
+    let mut built: Vec<PathBuf> = used
+        .iter()
+        .filter(|path| {
+            path.parent()
+                .is_some_and(|dir| dir.file_name().is_some_and(|name| name == "deps"))
+                && executable_stem(path).is_some()
+        })
+        .cloned()
+        .collect();
+    built.sort();
+    let executables = prune_stale_executables(workspace_root, &built, keep_after)?;
+    let units = prune_unused_units(target_dir, unused_before)?;
+    Ok(Some(RecordedPrune { executables, units }))
+}
+
 /// What one unit prune pass removed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct UnitPruneReport {
@@ -911,6 +949,63 @@ mod tests {
     }
 
     #[test]
+    fn prune_recorded_removes_a_superseded_copy_named_by_a_usage_record() {
+        let f = Fixture::new();
+        f.source(CDN);
+        let current = f.exe("it-00000000000000aa", CDN);
+        f.exe("it-00000000000000bb", CDN);
+        let rlib = f.deps().join("libcdn-00000000000000dd.rlib");
+        fs::write(&rlib, "rlib").unwrap();
+        let target = f.root.path().join("target");
+        record_usage(&target, "test", &[current.clone(), rlib.clone()]).unwrap();
+
+        let report = prune_recorded(
+            f.root.path(),
+            &target,
+            SystemTime::now() + Duration::from_secs(60),
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap()
+        .expect("a live usage record");
+
+        assert_eq!(report.executables.removed_executables, 1);
+        assert!(current.exists());
+        assert!(!f.deps().join("it-00000000000000bb").exists());
+        assert!(rlib.exists());
+    }
+
+    #[test]
+    fn prune_recorded_leaves_files_when_the_only_usage_record_is_expired() {
+        let f = Fixture::new();
+        f.source(CDN);
+        let old = f.exe("it-00000000000000bb", CDN);
+        let target = f.root.path().join("target");
+        record_usage(&target, "test", std::slice::from_ref(&old)).unwrap();
+        let record = fs::read_dir(target.join(USAGE_DIR))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let then = SystemTime::now() - Duration::from_secs(48 * 3600);
+        fs::File::open(&record)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(then).set_accessed(then))
+            .unwrap();
+
+        let outcome = prune_recorded(
+            f.root.path(),
+            &target,
+            SystemTime::now() + Duration::from_secs(60),
+            SystemTime::now() - Duration::from_secs(24 * 3600),
+        )
+        .unwrap();
+
+        assert!(outcome.is_none());
+        assert!(old.exists());
+    }
+
+    #[test]
     fn a_shared_run_lock_blocks_the_exclusive_prune_lock() {
         let f = Fixture::new();
         let target = f.root.path().join("target");
@@ -1161,6 +1256,36 @@ mod tests {
             assert_eq!(t.prune(), UnitPruneReport::default());
             assert!(!record.exists());
             assert!(t.has("libserde-00000000000000bb.rlib"));
+        }
+
+        #[test]
+        fn prune_recorded_removes_an_old_unit_when_the_record_names_no_executable() {
+            let t = Target::new();
+            let used = t.lib(
+                "serde-00000000000000aa",
+                "/registry/serde-1.0.0/src/lib.rs",
+                HOUR,
+            );
+            t.lib(
+                "serde-00000000000000bb",
+                "/registry/serde-1.0.0/src/lib.rs",
+                48 * HOUR,
+            );
+            t.record(std::slice::from_ref(&used));
+
+            let report = prune_recorded(
+                t.root.path(),
+                &t.target(),
+                SystemTime::now() + HOUR,
+                SystemTime::now() - 24 * HOUR,
+            )
+            .unwrap()
+            .expect("a live usage record");
+
+            assert_eq!(report.executables.removed_executables, 0);
+            assert_eq!(report.units.removed_units, 1);
+            assert!(used.exists());
+            assert!(!t.has("libserde-00000000000000bb.rlib"));
         }
 
         #[test]
