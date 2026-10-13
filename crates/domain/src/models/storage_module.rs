@@ -480,12 +480,16 @@ enum SyncFailurePoint {
     AfterResetIntervals,
 }
 
-/// Test barrier inside a durable point. The point holds `sync_in_progress`.
+/// Test barrier. `AfterPresenceCopy` runs inside a durable point that holds
+/// `sync_in_progress`. `AfterIntervalSnapshot` does not: the writer has
+/// copied the interval map and has not taken the file lock.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SyncPausePoint {
     /// Proofs are copied out of `pending`. The index write has not started.
     AfterPresenceCopy,
+    /// The interval map is copied. `intervals.json` is not locked yet.
+    AfterIntervalSnapshot,
 }
 
 /// One armed pause. The durable point waits until the test releases it.
@@ -782,6 +786,10 @@ pub struct StorageModule {
     /// offset row is loaded. The durable point can commit in that gap.
     #[cfg(test)]
     crc_check_pause: SyncPauseGate,
+    /// Pauses one interval rewrite after the map copy and before the file lock.
+    /// The pause disarms itself, so `reset` does not wait on its own rewrite.
+    #[cfg(test)]
+    interval_image_pause: SyncPauseGate,
     /// Pauses one registration after its rows are computed and before commit.
     #[cfg(test)]
     registration_pause: RegistrationPauseGate,
@@ -1955,6 +1963,8 @@ impl StorageModule {
             #[cfg(test)]
             crc_check_pause: SyncPauseGate::new(),
             #[cfg(test)]
+            interval_image_pause: SyncPauseGate::new(),
+            #[cfg(test)]
             registration_pause: RegistrationPauseGate::new(),
             #[cfg(test)]
             registration_drops: AtomicU64::new(0),
@@ -2584,6 +2594,45 @@ impl StorageModule {
     #[cfg(test)]
     fn wait_if_crc_check_paused(&self) {
         Self::wait_on_pause_gate(&self.crc_check_pause, SyncPausePoint::AfterPresenceCopy);
+    }
+
+    /// The next interval-file rewrite waits after it copies the live map.
+    #[cfg(test)]
+    fn pause_next_interval_image(&self) {
+        *self.interval_image_pause.release.lock().unwrap() = false;
+        *self.interval_image_pause.arrived.lock().unwrap() = false;
+        *self.interval_image_pause.point.lock().unwrap() =
+            Some(SyncPausePoint::AfterIntervalSnapshot);
+    }
+
+    /// `true` when the interval rewrite reached its pause before `timeout`.
+    #[cfg(test)]
+    fn wait_for_interval_image_pause(&self, timeout: Duration) -> bool {
+        let guard = self.interval_image_pause.arrived.lock().unwrap();
+        let (guard, _) = self
+            .interval_image_pause
+            .arrived_cv
+            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
+            .unwrap();
+        *guard
+    }
+
+    /// Let a paused interval rewrite continue.
+    #[cfg(test)]
+    fn release_interval_image_pause(&self) {
+        *self.interval_image_pause.release.lock().unwrap() = true;
+        self.interval_image_pause.release_cv.notify_all();
+    }
+
+    /// One-shot. The first writer disarms the pause before it waits, so a
+    /// `reset` that rewrites the file while the test holds the writer does
+    /// not block on this gate. `reset` holds `sync_in_progress`.
+    #[cfg(test)]
+    fn wait_if_interval_image_paused(&self) {
+        Self::wait_on_pause_gate(
+            &self.interval_image_pause,
+            SyncPausePoint::AfterIntervalSnapshot,
+        );
     }
 
     #[cfg(test)]
@@ -3919,6 +3968,11 @@ impl StorageModule {
             .clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
+        // The map copy is done. The file lock is later, inside
+        // `write_interval_image`. A test can `reset` in this gap. The pause
+        // disarms before it waits, so this call from `reset` does not stop.
+        #[cfg(test)]
+        self.wait_if_interval_image_paused();
         {
             let mut disk = self.lock_interval_disk();
             // A snapshot from before `reset` must not clear a mask that reset,
@@ -5375,6 +5429,18 @@ impl StorageModule {
     ) -> eyre::Result<Option<OffsetMeta>> {
         let (_, submodule) = self.get_submodule_for_offset(offset)?;
         submodule.db.view(|tx| tx.get_offset_meta(offset))
+    }
+
+    /// `true` when any offset in the inclusive span has no checksum.
+    #[cfg(test)]
+    fn offset_crc_missing_for_test(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<bool> {
+        let anchor = if start <= end { start } else { end };
+        let (_, submodule) = self.get_submodule_for_offset(anchor)?;
+        submodule.db.view(|tx| tx.offset_crc_missing(start, end))
     }
 
     /// Replace the checksum at `offset`. `None` with no proof deletes the row.
@@ -13256,19 +13322,60 @@ mod tests {
         chunk_bytes(&recalled.chunks, offset)
     }
 
+    /// `Ok(true)` when an explicit open of this module's `chunks.dat` is
+    /// rejected with `EINVAL`. That is the filesystem, not a missed flag.
+    fn direct_open_rejected(storage: &StorageModule) -> eyre::Result<bool> {
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let intervals = submodule
+            .intervals_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let chunks = intervals
+            .parent()
+            .ok_or_else(|| eyre!("intervals.json has no directory"))?
+            .join("chunks.dat");
+        match recall_direct::open_recall_direct(&chunks)? {
+            None => {
+                eprintln!(
+                    "O_DIRECT probe of {} returned EINVAL; this filesystem does not support O_DIRECT",
+                    chunks.display()
+                );
+                Ok(true)
+            }
+            Some(file) => {
+                if !recall_direct::fd_is_direct(&file) {
+                    eyre::bail!(
+                        "O_DIRECT probe of {} opened a descriptor that is not O_DIRECT",
+                        chunks.display()
+                    );
+                }
+                Ok(false)
+            }
+        }
+    }
+
     /// `Ok(true)` when this filesystem rejected `O_DIRECT`. The caller skips.
+    ///
+    /// A requested direct open that did not stick fails the test when the
+    /// probe above succeeds. A skip is only the filesystem rejecting the flag.
     fn skip_without_direct(storage: &StorageModule, test: &str) -> eyre::Result<bool> {
         let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
-        let Some(file) = submodule.recall_direct.as_ref() else {
-            eprintln!(
-                "skip {test}: this filesystem rejected O_DIRECT; mining recall stays on the buffered descriptor"
+        let direct = submodule
+            .recall_direct
+            .as_ref()
+            .is_some_and(|file| recall_direct::fd_is_direct(file));
+        if !direct {
+            if direct_open_rejected(storage)? {
+                eprintln!(
+                    "skip {test}: this filesystem rejected O_DIRECT; mining recall stays on the buffered descriptor"
+                );
+                return Ok(true);
+            }
+            eyre::bail!(
+                "{test}: recall_direct_io was requested and the filesystem accepts O_DIRECT, but the module descriptor is not direct"
             );
-            return Ok(true);
-        };
-        assert!(
-            recall_direct::fd_is_direct(file),
-            "recall descriptor is not O_DIRECT"
-        );
+        }
         assert_eq!(storage.recall_io_mode(), recall_direct::MODE_DIRECT);
         Ok(false)
     }
@@ -13402,6 +13509,27 @@ mod tests {
                 assert_eq!(storage.recall_io_counts_for_test(), (0, 0, 0));
                 assert_eq!(recalled_chunk(storage, 0)?, bytes);
                 assert_eq!(storage.recall_io_counts_for_test(), (0, 1, 0));
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn recall_io_mode_is_direct_when_the_filesystem_supports_it() -> eyre::Result<()> {
+        for_each_recall_io(
+            "recall_direct_mode",
+            true,
+            RECALL_DIRECT_CHUNK,
+            0,
+            |storage| {
+                let mode = storage.recall_io_mode();
+                if mode != recall_direct::MODE_DIRECT && direct_open_rejected(storage)? {
+                    eprintln!(
+                        "skip recall_io_mode_is_direct_when_the_filesystem_supports_it: filesystem rejected O_DIRECT"
+                    );
+                    return Ok(());
+                }
+                assert_eq!(mode, recall_direct::MODE_DIRECT);
                 Ok(())
             },
         )

@@ -3803,12 +3803,12 @@ mod tests {
 
     use super::super::store::{MdbxSubmoduleStore, SubmoduleStore};
     use super::super::tables::{
-        ChunkPathHashes, DataRootInfo, DataRootInfos, PendingBodyMigration, SUBMODULE_SCHEMA_V3,
-        SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
+        ChunkPathHashes, DataRootInfo, DataRootInfos, PackedOffsetRow, PendingBodyMigration,
+        SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
     };
     use super::{
         ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, convert_rocks_v2_to_v3,
-        verify_mdbx_and_rocks, verify_rocks_v2_and_v3,
+        verify_mdbx_and_rocks, verify_rocks_v2_and_v3, verify_rocks_v32_records,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::{RocksSubmoduleStore, RocksTuning};
@@ -5338,6 +5338,36 @@ mod tests {
             }
             other => eyre::bail!("unknown lock child {other}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn verify_rocks_v32_records_counts_one_offset_crc_difference() -> eyre::Result<()> {
+        fn write_crc(dir: &Path, crc: u32) -> eyre::Result<()> {
+            let store = RocksSubmoduleStore::open(dir)?;
+            store.update(|tx| {
+                tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                    offset: PartitionChunkOffset::from(1),
+                    crc: Some(crc),
+                    proof: None,
+                }])?;
+                Ok(())
+            })?;
+            drop(store);
+            Ok(())
+        }
+
+        let left = temp("v32_crc_left");
+        let right = temp("v32_crc_right");
+        let same = temp("v32_crc_same");
+        write_crc(left.path(), 0x1111_1111)?;
+        write_crc(right.path(), 0x2222_2222)?;
+        write_crc(same.path(), 0x1111_1111)?;
+        let differ = verify_rocks_v32_records(left.path(), right.path())?;
+        assert!(differ.offsets_checked > 0, "{differ}");
+        assert!(differ.mismatch_chunk_crc > 0, "{differ}");
+        let equal = verify_rocks_v32_records(left.path(), same.path())?;
+        assert_eq!(equal.mismatch_chunk_crc, 0, "{equal}");
         Ok(())
     }
 

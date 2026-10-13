@@ -905,4 +905,239 @@ mod tests {
         assert!(!module.has_pending_writes());
         Ok(())
     }
+
+    fn open_assigned(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        irys_types::Config,
+        StorageModule,
+    )> {
+        use irys_types::partition::PartitionAssignment;
+
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: CHUNK as u64,
+                num_chunks_in_partition: N,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: fast_storage(),
+            base_directory: tmp.path().to_path_buf(),
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            ..NodeConfig::testing()
+        };
+        let config = irys_types::Config::new_with_random_peer_id(node_config);
+        let module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(irys_types::DataLedger::Publish.into()),
+                    slot_index: Some(0),
+                    miner_address: config.node_config.miner_address(),
+                    partition_hash: irys_types::H256::repeat_byte(0x11),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 7), "sub".into())],
+            },
+            &config,
+        )?;
+        Ok((tmp, config, module))
+    }
+
+    fn index_one_chunk(
+        module: &StorageModule,
+        config: &irys_types::Config,
+        bytes: Vec<u8>,
+    ) -> eyre::Result<irys_types::UnpackedChunk> {
+        use irys_types::ledger_chunk_offset_ii;
+        use irys_types::{DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange};
+
+        let signer = irys_types::irys::IrysSigner::random_signer(&config.consensus);
+        let tx =
+            signer.sign_transaction(signer.create_transaction(bytes, irys_types::H256::zero())?)?;
+        let unpacked = tx.data_chunks()?;
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        module.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        Ok(unpacked[0].clone())
+    }
+
+    #[test]
+    fn rocks_offset_crc_missing_reports_a_gap_and_a_present_span() -> eyre::Result<()> {
+        let (_tmp, _config, module) = open_module(
+            "crc_missing_rocks",
+            SubmoduleIndexEngine::Rocksdb,
+            fast_storage(),
+        )?;
+        assert!(
+            !module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(1),
+                PartitionChunkOffset::from(0),
+            )?,
+            "an empty span is not a missing checksum"
+        );
+        assert!(
+            module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )?,
+            "a span with no rows is a gap"
+        );
+        for offset in 0..N as u32 {
+            write_synced(&module, offset, 0x41, ChunkType::Entropy);
+        }
+        assert!(
+            !module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )?,
+            "every settled offset has a checksum"
+        );
+        module.set_offset_crc_for_test(PartitionChunkOffset::from(3), None)?;
+        assert!(
+            module
+                .offset_meta_for_test(PartitionChunkOffset::from(3))?
+                .is_none(),
+            "a checksum-only row with no checksum is deleted"
+        );
+        assert!(
+            module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )?,
+            "a deleted row is a gap"
+        );
+        assert!(
+            !module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(2),
+            )?,
+            "a span whose rows all have a checksum is complete"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rocks_proof_only_row_keeps_crc_complete_false() -> eyre::Result<()> {
+        let (_tmp, config, module) = open_assigned("crc_proof_only")?;
+        write_synced(&module, 0, 0x21, ChunkType::Entropy);
+        let chunk = index_one_chunk(&module, &config, vec![0x5A_u8; CHUNK])?;
+        module
+            .write_data_chunk(&chunk)
+            .expect("pack the data chunk");
+        module.sync_pending_chunks()?;
+        for offset in 1..N as u32 {
+            write_synced(&module, offset, 0x22, ChunkType::Entropy);
+        }
+        assert!(module.chunk_crc_complete_for_test());
+        module.set_offset_crc_for_test(PartitionChunkOffset::from(0), None)?;
+        let row = module
+            .offset_meta_for_test(PartitionChunkOffset::from(0))?
+            .expect("the proof stays");
+        assert!(row.crc.is_none());
+        assert!(row.proof.is_some());
+        assert!(
+            module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )?,
+            "a proof with no checksum is missing"
+        );
+        module.clear_chunk_crc_complete()?;
+        assert!(
+            !module
+                .crc_scan_done
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        write_synced(&module, 1, 0x23, ChunkType::Entropy);
+        assert!(
+            module
+                .crc_scan_done
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the scan ran"
+        );
+        assert!(
+            !module.chunk_crc_complete_for_test(),
+            "one settled offset with no checksum keeps crc_complete false"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rocks_flipped_entropy_is_not_packed_by_the_sweep() -> eyre::Result<()> {
+        let (tmp, config, module) = open_assigned("crc_sweep_flip")?;
+        write_synced(&module, 0, 0x31, ChunkType::Entropy);
+        let chunk = index_one_chunk(&module, &config, vec![0x5A_u8; CHUNK])?;
+        flip_dat(&sub_path(&tmp, "chunks.dat"), 0);
+        let err = module
+            .write_data_chunk(&chunk)
+            .expect_err("a flipped entropy chunk is not packed");
+        assert!(err.to_string().contains("chunk crc mismatch"), "{err}");
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert!(!module.has_pending_writes());
+        assert_eq!(
+            module.take_crc_repair_ranges(),
+            vec![partition_chunk_offset_ii!(0, 0)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reset_during_interval_snapshot_keeps_the_file_uninitialized() -> eyre::Result<()> {
+        let (tmp, _config, module) = open_module(
+            "interval_epoch",
+            SubmoduleIndexEngine::Rocksdb,
+            fast_storage(),
+        )?;
+        for offset in 0..N as u32 {
+            write_synced(&module, offset, 0x44, ChunkType::Data);
+        }
+        let path = sub_path(&tmp, "intervals.json");
+        let before = super::super::read_intervals_file(&path)?;
+        assert!(
+            before.iter().any(|(_, kind)| *kind == ChunkType::Data),
+            "the writer copies a Data image"
+        );
+        module.pause_next_interval_image();
+        std::thread::scope(|scope| -> eyre::Result<()> {
+            struct Release<'a>(&'a StorageModule);
+            impl Drop for Release<'_> {
+                fn drop(&mut self) {
+                    self.0.release_interval_image_pause();
+                }
+            }
+            let _release = Release(&module);
+            let writer = scope.spawn(|| module.write_intervals_to_submodules());
+            assert!(
+                module.wait_for_interval_image_pause(std::time::Duration::from_secs(5)),
+                "interval rewrite did not pause after the map copy"
+            );
+            module.reset()?;
+            let mid = super::super::read_intervals_file(&path)?;
+            assert!(
+                mid.iter()
+                    .all(|(_, kind)| *kind == ChunkType::Uninitialized),
+                "reset publishes Uninitialized"
+            );
+            module.release_interval_image_pause();
+            writer.join().expect("interval writer")?;
+            let after = super::super::read_intervals_file(&path)?;
+            assert!(
+                after
+                    .iter()
+                    .all(|(_, kind)| *kind == ChunkType::Uninitialized),
+                "the old snapshot must not replace the reset image"
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
 }

@@ -780,6 +780,10 @@ mod assignment_reset_tests {
     }
 
     fn harness(ledger_id: Option<u32>) -> Harness {
+        open_harness(ledger_id, |_| {})
+    }
+
+    fn open_harness(ledger_id: Option<u32>, configure: impl FnOnce(&mut NodeConfig)) -> Harness {
         let tmp = TempDirBuilder::new().build();
         let mut node_config = NodeConfig::testing();
         node_config.node_mode = NodeMode::Miner;
@@ -789,6 +793,7 @@ mod assignment_reset_tests {
             num_chunks_in_partition: 10,
             ..ConsensusConfig::testing()
         });
+        configure(&mut node_config);
         let submodules = StorageSubmodulesConfig::load_for_test(tmp.path().to_path_buf(), 1)
             .expect("submodules");
         let path = submodules.submodule_paths[0].clone();
@@ -927,5 +932,86 @@ mod assignment_reset_tests {
         assert!(harness.module.partition_assignment().is_none());
         assert!(!harness.module.reset_incomplete());
         assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// A queued checksum repair is handed to packing even when the disk lane
+    /// is running. The lane early-continue in `tick` must not skip that send.
+    #[tokio::test]
+    async fn crc_repair_is_enqueued_while_the_disk_lane_runs() {
+        use irys_domain::storage_module::ChunkType;
+        use irys_types::{StorageSyncConfig, SubmoduleIndexEngine};
+        use std::os::unix::fs::FileExt as _;
+
+        let mut harness = open_harness(Some(DataLedger::Publish.into()), |node_config| {
+            node_config.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 0,
+                ..StorageSyncConfig::default()
+            };
+            node_config.database.submodule_index = SubmoduleIndexEngine::Rocksdb;
+        });
+        assert!(harness.module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x31_u8; 32],
+            ChunkType::Entropy,
+        ));
+        harness
+            .module
+            .force_sync_pending_chunks()
+            .expect("entropy is durable");
+        let chunks = harness.path.join("chunks.dat");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&chunks)
+            .expect("chunks.dat");
+        let mut byte = [0_u8; 1];
+        file.read_exact_at(&mut byte, 0).expect("read byte");
+        byte[0] ^= 0xff;
+        file.write_all_at(&byte, 0).expect("flip byte");
+        drop(file);
+        let served = harness
+            .module
+            .read_chunks(partition_chunk_offset_ie!(0, 1))
+            .expect("read");
+        assert!(
+            served.is_empty(),
+            "the flipped chunk is omitted: {served:?}"
+        );
+
+        let handle = harness
+            .module
+            .spawn_disk_lane()
+            .expect("spawn")
+            .expect("lane started");
+        struct Stop {
+            module: Arc<StorageModule>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                self.module.stop_disk_lane();
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+        let _stop = Stop {
+            module: Arc::clone(&harness.module),
+            handle: Some(handle),
+        };
+        assert!(harness.module.disk_lane_running());
+        harness.inner.tick();
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("crc repair is enqueued while the disk lane is running");
+        assert_eq!(*request.chunk_range().0.start(), 0);
+        assert!(
+            harness.module.take_crc_repair_ranges().is_empty(),
+            "the tick drained the repair"
+        );
     }
 }
