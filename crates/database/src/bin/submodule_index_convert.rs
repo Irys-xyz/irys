@@ -83,7 +83,9 @@ ledger offset = slot * chunks_per_partition + partition offset.
 The tool derives the tx path at that offset and requires the stored bytes to
 be identical. A mismatch aborts and prints the partition offset.
 The source is never modified. A schema v1 MDBX index is read as v1.
-rocks-to-mdbx accepts only schema v3. A schema v2 RocksDB index uses rocks-to-v3.
+rocks-to-mdbx reads schema 3.2 only. It drops checksum-only rows and strips
+the record header from proof rows. A schema v2 RocksDB index uses rocks-to-v3
+first. A schema 3.1 index uses v31-to-v32 first. Direct 3.1 to MDBX is refused.
 
 An empty submodule index succeeds and the report shows zero copied rows.
 A placement the consensus database cannot resolve fails the run. The target
@@ -120,11 +122,11 @@ prints no mismatch. database.submodule_index stays rocksdb.
   submodule-index-convert v31-to-v32 <submodule>/rocks <submodule>/rocks-3.2
   submodule-index-convert verify-rocks <submodule>/rocks <submodule>/rocks-3.2
 
-rocks-to-mdbx writes an MDBX schema v2 index. That index is readable by the
-mdbx engine in this build. Release 4.0.8 cannot read it.
-Rollback to 4.0.8 is: keep the original db/ directory. This tool does not
-modify that directory. rocks-to-mdbx is only for a node whose live index is
-already RocksDB schema v2 or v3 and that will keep running this build.
+rocks-to-mdbx writes an MDBX schema v2 index for this build. It reads schema
+3.2 only. A schema v2 RocksDB index uses rocks-to-v3 first. A schema 3.1
+index uses v31-to-v32 first. The node migrates a schema v1 db/ (release
+4.0.x) to MDBX schema v2 in place. Release 4.0.x cannot read the result.
+There is no rollback from 4.1.0 to 4.0.x.
 
 verify and verify-rocks exit 1 when a public read differs or when a placement
 was skipped because the consensus database does not cover it.

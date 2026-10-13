@@ -1,7 +1,7 @@
 //! Offline copy between submodule indexes.
 //!
 //! `mdbx-to-rocks` and `rocks-to-v3` write a RocksDB schema v3 index.
-//! `rocks-to-mdbx` rebuilds an MDBX schema v2 index from schema v3. Each
+//! `rocks-to-mdbx` rebuilds an MDBX schema v2 index from schema 3.2. Each
 //! stored tx path must equal the path derived from the consensus database.
 //! A mismatch aborts and names the partition offset.
 //!
@@ -2025,7 +2025,7 @@ fn require_rocks_v3(path: &Path) -> eyre::Result<()> {
             path.display()
         ),
         Some(text) if text == SUBMODULE_SCHEMA => eyre::bail!(
-            "rocks index {} is schema v2. Run `submodule-index-convert rocks-to-v3` to write schema v3. `rocks-to-mdbx` rebuilds MDBX from schema v3.",
+            "rocks index {} is schema v2. Run `submodule-index-convert rocks-to-v3` to write schema 3.2. `rocks-to-mdbx` reads schema 3.2 only.",
             path.display()
         ),
         _ => eyre::bail!(
