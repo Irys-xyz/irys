@@ -20,6 +20,7 @@ pub fn accumulate_response_bytes(
             cap,
         });
     };
+
     if total > cap {
         Err(ResponseBodyTooLarge {
             accumulated,
