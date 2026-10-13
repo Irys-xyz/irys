@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791887791583,
+  "lastUpdate": 1791907861432,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -17323,6 +17323,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000118,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1cdd184b4cead1c7fa16b473b3a9002a122428d8",
+          "message": "feat(xtask): add a prune command and prune after check (#1603)\n\ncargo xtask prune deletes superseded test executables and unused\ncompilation units from the usage records, with no compile. check,\nfull-check, and clippy run the same cleanup after a successful build.\nXTASK_NO_PRUNE still skips those three. The prune command ignores it.",
+          "timestamp": "2026-10-13T16:49:43+01:00",
+          "tree_id": "53b92d1c26dba42c1ca9f1a110a7eef5f3834cfd",
+          "url": "https://github.com/Irys-xyz/irys/commit/1cdd184b4cead1c7fa16b473b3a9002a122428d8"
+        },
+        "date": 1791907860171,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012722,
+            "range": "± 0.000353",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.127843,
+            "range": "± 0.003154",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.274004,
+            "range": "± 0.100331",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.792922,
+            "range": "± 0.962182",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.085393,
+            "range": "± 0.004546",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 819.614211,
+            "range": "± 40.435116",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1029.302477,
+            "range": "± 43.262138",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.151218,
+            "range": "± 0.014858",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1349.83062,
+            "range": "± 123.962199",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1593.935751,
+            "range": "± 13.437044",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034899,
+            "range": "± 0.002155",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.597433,
+            "range": "± 1.216585",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.386235,
+            "range": "± 1.492272",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000116,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
