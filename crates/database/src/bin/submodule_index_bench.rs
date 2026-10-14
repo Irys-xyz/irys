@@ -1,10 +1,8 @@
 //! Write one synthetic submodule index on MDBX and on RocksDB.
 //!
 //! Prints wall time and directory bytes. The path must contain an
-//! `index-bench` component and must be empty. `--profile filter-reuse` is
-//! the exception: it opens an existing `rocks/` directory and refuses the
-//! path when `mdbx/` is also present. This binary does not open a live
-//! node database.
+//! `index-bench` component and must be empty. This binary does not open a
+//! live node database.
 //!
 //! ```text
 //! cargo run -p irys-database --features rocksdb --bin submodule-index-bench -- \
@@ -18,16 +16,16 @@
 //! `--mid` writes 1_000_000 chunks of 4096-byte paths, past an HDD cache.
 //! It needs the same variable. `--profile filled|mid|worst` selects the
 //! older workloads. `--rocks <preset>` changes one RocksDB setting.
-//! `--engine rocks` skips MDBX. `--schema v2|v3` selects the RocksDB layout
-//! of an empty directory. The default is v2. Production open of an empty
-//! directory is schema v3. MDBX stays schema v2.
+//! `--engine rocks` skips MDBX. RocksDB is layout v1. MDBX stays schema v2.
+//! Production rocks open writes one placement and an inline data proof and
+//! does not store a tx path.
 //!
 //! `--data-fraction F` writes transactions and data rows for the first
-//! `F × --chunks` offsets. `--with-crc` stores each of those rows with the
-//! schema 3.2 checksum trailer. `--entropy-fill` writes a checksum-only row
-//! for every other offset. Both need `--schema v3` on RocksDB. `entropy_range`
-//! and `recall_rows` time cold reads of those rows. They are skipped when the
-//! data region covers the whole partition.
+//! `F × --chunks` offsets. `--with-crc` stores the proof plus the checksum
+//! trailer from `encode_offset_meta`. `--entropy-fill` writes checksum-only
+//! rows. Both need `--engine rocks`. `entropy_range` and `recall_rows` time
+//! cold reads of those rows. They are skipped when the data region covers
+//! the whole partition.
 //!
 //! After the writes, each engine drops its file cache with `posix_fadvise`
 //! and times random lookups. This does not call `drop_caches`.
@@ -47,7 +45,7 @@ use irys_database::submodule::tables::{
     PendingBodyMigration, TxLeafBinding,
 };
 use irys_database::submodule::{
-    LegacySstSpan, RocksTuning, SubmoduleIndex, SubmoduleStore as _, encode_offset_meta,
+    RocksTuning, SubmoduleIndex, SubmoduleStore as _, encode_offset_meta,
 };
 use irys_types::{DbSyncMode, H256, PartitionChunkOffset, RelativeChunkOffset, TERABYTE};
 use reth_db::mdbx::DatabaseArguments;
@@ -119,8 +117,6 @@ enum Workload {
     IndexSpan,
     /// Offset rows only, so the bloom can outgrow the block cache.
     OffsetRows,
-    /// Point reads of a schema-v1 `ChunkPathHashesByOffset` SST.
-    FilterReuse,
     /// `N` chunks per transaction. Each transaction has its own data root.
     SmallTxs,
     /// Transactions of [`MID_TX_MIN`] to [`MID_TX_MAX`] chunks, one root each.
@@ -138,15 +134,10 @@ impl Workload {
             Self::MemDbs => "mem-dbs",
             Self::IndexSpan => "index-span",
             Self::OffsetRows => "offset-rows",
-            Self::FilterReuse => "filter-reuse",
             Self::SmallTxs => "small-txs",
             Self::MidTxs => "mid-txs",
             Self::CrcRows => "crc-rows",
         }
-    }
-
-    fn is_filter_reuse(self) -> bool {
-        matches!(self, Self::FilterReuse)
     }
 
     fn is_memory(self) -> bool {
@@ -177,26 +168,6 @@ struct TxPlace {
     start: u32,
     stored: u32,
     leaves: u64,
-}
-
-/// RocksDB layout written into an empty directory. MDBX stays schema v2.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IndexSchema {
-    V2,
-    V3,
-}
-
-impl IndexSchema {
-    fn name(self) -> &'static str {
-        match self {
-            Self::V2 => "v2",
-            Self::V3 => "v3",
-        }
-    }
-
-    fn is_v3(self) -> bool {
-        matches!(self, Self::V3)
-    }
 }
 
 /// Which engines to write. A preset sweep uses `Rocks` so MDBX is not repeated.
@@ -248,8 +219,6 @@ struct Args {
     dbs: u32,
     /// Both engines use the `--mid` MDBX commit sizes.
     group_commit: bool,
-    /// Compact the v1 path-hash family before the timed reads.
-    rewrite_filters: bool,
     /// Chunks in each `--small-txs` transaction. Zero for other workloads.
     small_tx_chunks: u32,
     /// `(start, stored)` for `--mid-txs`. Empty otherwise.
@@ -260,13 +229,11 @@ struct Args {
     /// Overrides the transaction rows per commit. Production commits one
     /// block's transactions together.
     txs_per_commit: Option<u32>,
-    /// RocksDB layout. MDBX ignores this and stays schema v2.
-    schema: IndexSchema,
     /// Printed `--data-fraction`. `1` when the flag is absent.
     data_fraction: f64,
     /// First offsets that receive transactions, placements, and data rows.
     data_chunks: u32,
-    /// Data rows use the schema 3.2 checksum trailer.
+    /// Data rows store the proof plus the checksum trailer.
     with_crc: bool,
     /// Offsets outside the data region get a checksum-only row.
     entropy_fill: bool,
@@ -283,15 +250,15 @@ fn open_bench_rocks(path: &Path, args: &Args) -> eyre::Result<SubmoduleIndex> {
     } else {
         args.rocks
     };
-    SubmoduleIndex::open_rocks_bench(path, tuning, args.schema.is_v3())
+    SubmoduleIndex::open_rocks_bench(path, tuning)
 }
 
 fn main() -> eyre::Result<()> {
     let args = parse_args()?;
     refuse_large_payload(&args)?;
-    prepare_dir(&args.dir, args.workload.is_filter_reuse())?;
+    prepare_dir(&args.dir)?;
     println!(
-        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} schema={} dbs={} group_commit={} shuffle_run={} data_fraction={} data_chunks={} with_crc={} entropy_fill={} allocator=system jemalloc=off",
+        "chunks={} tx_chunks={} batch={} path_bytes={} reads={} range_len={} profile={} engines={} dbs={} group_commit={} shuffle_run={} data_fraction={} data_chunks={} with_crc={} entropy_fill={} allocator=system jemalloc=off",
         args.chunks,
         args.tx_chunks,
         args.batch,
@@ -300,7 +267,6 @@ fn main() -> eyre::Result<()> {
         args.range_len,
         args.workload.name(),
         args.engines.name(),
-        args.schema.name(),
         args.dbs,
         u8::from(args.group_commit),
         args.shuffle_run.unwrap_or(0),
@@ -309,16 +275,9 @@ fn main() -> eyre::Result<()> {
         u8::from(args.with_crc),
         u8::from(args.entropy_fill),
     );
-    if args.workload.is_filter_reuse() {
-        println!(
-            "mode=filter-reuse schema=v1 rewrite_filters={}",
-            u8::from(args.rewrite_filters)
-        );
-        return run_filter_reuse(&args);
-    }
     if args.workload == Workload::CrcRows {
         println!(
-            "mode=crc-rows sample_chunks={} partition_chunks={PARTITION_CHUNKS} schema=3.2",
+            "mode=crc-rows sample_chunks={} partition_chunks={PARTITION_CHUNKS} layout=rocks-v1",
             args.chunks
         );
         return run_crc_rows(&args);
@@ -387,8 +346,7 @@ fn main() -> eyre::Result<()> {
         }
         let tuning = args.rocks;
         println!(
-            "engine=rocks schema={} sync=wal_fsync {} max_open_files=-1 file_opening_threads=16 txs_per_commit={} path_batch={}",
-            args.schema.name(),
+            "engine=rocks schema=rocks-v1 sync=wal_fsync {} max_open_files=-1 file_opening_threads=16 txs_per_commit={} path_batch={}",
             tuning.describe(),
             rocks_commits.txs_per_commit,
             rocks_commits.path_batch
@@ -454,7 +412,6 @@ fn memory_predict(args: &Args) -> String {
         Workload::Filled
         | Workload::Mid
         | Workload::Worst
-        | Workload::FilterReuse
         | Workload::SmallTxs
         | Workload::MidTxs
         | Workload::CrcRows => String::new(),
@@ -469,7 +426,6 @@ fn run_memory(args: &Args) -> eyre::Result<()> {
         Workload::Filled
         | Workload::Mid
         | Workload::Worst
-        | Workload::FilterReuse
         | Workload::SmallTxs
         | Workload::MidTxs
         | Workload::CrcRows => {
@@ -527,11 +483,16 @@ fn run_index_span(args: &Args) -> eyre::Result<()> {
     let end = PartitionChunkOffset::from(args.chunks - 1);
     let update_ms = timed(|| {
         store.update(|tx| {
-            tx.add_tx_path_hash_to_offset_range(
-                PartitionChunkOffset::from(0),
-                end,
-                Some(hash_at(1)),
-            )
+            let hash = hash_at(1);
+            let root = hash_at(0x1000_0000);
+            tx.add_tx_leaf_binding(
+                hash,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(PartitionChunkOffset::from(0), end, Some(hash))
         })
     })?;
     note_mem("rocks", "after_update", &watch);
@@ -595,11 +556,19 @@ fn write_offset_rows(store: &SubmoduleIndex, chunks: u32, batch: u32) -> eyre::R
         let end = offset.saturating_add(batch).min(chunks);
         store.update(|tx| {
             for raw in offset..end {
+                let hash = hash_at(u64::from(raw).saturating_add(1));
+                tx.add_tx_leaf_binding(
+                    hash,
+                    &TxLeafBinding {
+                        data_root: hash,
+                        prefix_hash: H256::zero(),
+                    },
+                )?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(raw),
                     ChunkPathHashes {
                         data_path_hash: Some(hash_at(u64::from(raw).saturating_add(0x2000_0000))),
-                        tx_path_hash: Some(hash_at(1)),
+                        tx_path_hash: Some(hash),
                     },
                 )?;
             }
@@ -607,88 +576,6 @@ fn write_offset_rows(store: &SubmoduleIndex, chunks: u32, batch: u32) -> eyre::R
         })?;
         offset = end;
     }
-    Ok(())
-}
-
-fn print_legacy_ssts(store: &SubmoduleIndex, when: &str) -> eyre::Result<()> {
-    for file in store.legacy_path_hash_ssts()? {
-        println!(
-            "  sst when={when} name={} level={} bytes={} entries={} start={} end={}",
-            file.name,
-            file.level,
-            file.bytes,
-            file.entries,
-            fmt_offset(file.start),
-            fmt_offset(file.end),
-        );
-    }
-    Ok(())
-}
-
-/// Files whose key range overlaps the sampled offsets `0..chunks`.
-fn print_sst_cover(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
-    let end = chunks.saturating_sub(1);
-    let mut names = Vec::new();
-    for file in store.legacy_path_hash_ssts()? {
-        if sst_covers(&file, 0, end) {
-            names.push(format!("{}@{}", file.name, file.level));
-        }
-    }
-    let files = if names.is_empty() {
-        "none".to_string()
-    } else {
-        names.join(",")
-    };
-    println!("  sst_cover shape=offset_get span_start=0 span_end={end} files={files}");
-    Ok(())
-}
-
-fn sst_covers(file: &LegacySstSpan, start: u32, end: u32) -> bool {
-    match (file.start, file.end) {
-        (Some(file_start), Some(file_end)) => file_start <= end && start <= file_end,
-        _ => true,
-    }
-}
-
-fn fmt_offset(offset: Option<u32>) -> String {
-    offset
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "?".to_string())
-}
-
-/// Point Gets on a copied schema-v1 path-hash SST. Does not write proofs.
-fn run_filter_reuse(args: &Args) -> eyre::Result<()> {
-    let dir = args.dir.join("rocks");
-    println!(
-        "engine=rocks sync=wal_fsync {} max_open_files=-1 file_opening_threads=16",
-        args.rocks.describe()
-    );
-    let started = Instant::now();
-    let store = SubmoduleIndex::open_rocks_v1_probe(&dir, args.rocks)?;
-    println!("  open_ms={}", started.elapsed().as_millis());
-    print_legacy_ssts(&store, "after_open")?;
-    if args.rewrite_filters {
-        let rewrite_ms = timed(|| store.compact_legacy_path_hashes())?;
-        println!("  rewrite_ms={rewrite_ms}");
-        print_legacy_ssts(&store, "after_rewrite")?;
-    }
-    print_sst_cover(&store, args.chunks)?;
-    let files = evict_cache(&dir)?;
-    let disk = disk_id(&dir)?;
-    time_shape(
-        disk.as_ref(),
-        "offset_get",
-        args.reads,
-        &store,
-        files,
-        true,
-        &mut |store, i| {
-            let at = sample_offset(i, args.chunks);
-            let present = store.legacy_path_hash_present(PartitionChunkOffset::from(at))?;
-            eyre::ensure!(present, "missing offset {at}");
-            Ok(())
-        },
-    )?;
     Ok(())
 }
 
@@ -1165,7 +1052,7 @@ fn read_phase(
                 "serve path len at {at}: {} != {want_len}",
                 path.len()
             );
-            // Schema v2 stores the hash the writer passed. Schema v3 has no
+            // MDBX stores the hash the writer passed. RocksDB v1 has no
             // path-hash row, so the reported hash is sha256 of the bytes.
             let expected = if store.stores_tx_paths() {
                 expected
@@ -1250,7 +1137,7 @@ fn read_phase(
     }
     // Before rmw_path rewrites proofs. The leaf hash comes from the bytes
     // this run stored, not from a data-path read that would warm that family.
-    if engine == "rocks" && args.schema.is_v3() {
+    if engine == "rocks" {
         time_reopen(
             dir,
             disk.as_ref(),
@@ -1308,9 +1195,9 @@ fn read_phase(
             })
         },
     )?;
-    if args.schema.is_v3() {
+    if engine == "rocks" {
         // Same reason as `rmw_root_sample`. Do not time empty samples.
-        println!("  read shape=rmw_root skipped: {V3_RMW_ROOT_SKIP}");
+        println!("  read shape=rmw_root skipped: {ROCKS_RMW_ROOT_SKIP}");
     } else {
         time_reopen(
             dir,
@@ -1329,7 +1216,7 @@ fn read_phase(
     let store = open(dir)?;
     let kept = store.view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(0)))?;
     let kept = kept.ok_or_else(|| eyre::eyre!("offset 0 missing after rmw"))?;
-    // Schema v2 keeps the stored tx-path hash. Schema v3 reports the
+    // MDBX keeps the stored tx-path hash. RocksDB v1 reports the
     // placement data root. Offset 0 is the start of the first transaction.
     let expected_tx = if store.stores_tx_paths() {
         hash_at(0)
@@ -1358,23 +1245,23 @@ enum RmwRoot {
     Skipped(&'static str),
 }
 
-/// Why `rmw_root` does not write on schema v3.
+/// Why `rmw_root` does not write on RocksDB v1.
 ///
 /// Production fills the data-root row once, in the same commit as the
 /// interval (`add_data_root_info` while the placement is still unfilled).
 /// After that commit the placement is filled. A later append has no unfilled
 /// placement, and `set_data_root_infos` will not add or replace the row while
 /// the interval exists. There is no production read-modify-write of this row.
-const V3_RMW_ROOT_SKIP: &str = "schema v3 fills each placement's data-root row once, in the same commit as its interval. A later info append has no unfilled placement, and that row cannot be replaced while the interval exists. Production has no read-modify-write of this row.";
+const ROCKS_RMW_ROOT_SKIP: &str = "RocksDB v1 fills each placement's data-root row once, in the same commit as its interval. A later info append has no unfilled placement, and that row cannot be replaced while the interval exists. Production has no read-modify-write of this row.";
 
 /// Append one data-root info that is not already stored, so the commit is real.
 ///
-/// Schema v2 keeps a list per data root. This sample pushes a new entry.
-/// Schema v3 returns [`RmwRoot::Skipped`] and does not write. See
-/// [`V3_RMW_ROOT_SKIP`].
+/// MDBX keeps a list per data root. This sample pushes a new entry.
+/// RocksDB v1 returns [`RmwRoot::Skipped`] and does not write. See
+/// [`ROCKS_RMW_ROOT_SKIP`].
 fn rmw_root_sample(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<RmwRoot> {
     if !store.stores_tx_paths() {
-        return Ok(RmwRoot::Skipped(V3_RMW_ROOT_SKIP));
+        return Ok(RmwRoot::Skipped(ROCKS_RMW_ROOT_SKIP));
     }
     let at = sample_offset(i.wrapping_add(4), args.data_chunks);
     let tx_start = at / args.tx_chunks * args.tx_chunks;
@@ -1405,8 +1292,8 @@ fn read_one_data_path(store: &SubmoduleIndex, args: &Args, at: u32) -> eyre::Res
 fn entropy_read_skip(engine: &str, args: &Args) -> Option<&'static str> {
     if args.data_chunks == args.chunks {
         Some("no entropy region")
-    } else if engine != "rocks" || !args.schema.is_v3() {
-        Some("schema v3 rocks is required")
+    } else if engine != "rocks" {
+        Some("checksum rows are stored on RocksDB")
     } else {
         None
     }
@@ -2339,7 +2226,6 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
         Workload::Filled
         | Workload::Mid
         | Workload::Worst
-        | Workload::FilterReuse
         | Workload::SmallTxs
         | Workload::MidTxs
         | Workload::CrcRows => false,
@@ -2565,7 +2451,7 @@ fn push_note(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
-fn prepare_dir(path: &Path, reuse: bool) -> eyre::Result<()> {
+fn prepare_dir(path: &Path) -> eyre::Result<()> {
     let marked = path
         .components()
         .any(|component| matches!(component, Component::Normal(name) if name == "index-bench"));
@@ -2574,19 +2460,6 @@ fn prepare_dir(path: &Path, reuse: bool) -> eyre::Result<()> {
         "refusing {}: path needs an index-bench component",
         path.display()
     );
-    if reuse {
-        eyre::ensure!(
-            !path.join("mdbx").exists(),
-            "refusing {}: directory also has mdbx/. Copy rocks/ to a new index-bench directory first",
-            path.display()
-        );
-        eyre::ensure!(
-            path.join("rocks").join("CURRENT").is_file(),
-            "refusing {}: rocks/CURRENT is missing",
-            path.display()
-        );
-        return Ok(());
-    }
     if path.exists() {
         eyre::ensure!(
             path.read_dir()?.next().is_none(),
@@ -2623,14 +2496,11 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     let mut rocks_set = false;
     let mut block_cache: Option<usize> = None;
     let mut group_commit = false;
-    let mut rewrite_filters = false;
     let mut small_txs: Option<u32> = None;
     let mut uniform_proofs = false;
     let mut mid_txs = false;
     let mut shuffle_run: Option<u32> = None;
     let mut txs_per_commit: Option<u32> = None;
-    let mut schema = IndexSchema::V2;
-    let mut schema_set = false;
     let mut data_fraction: Option<(u64, u64, f64)> = None;
     let mut with_crc = false;
     let mut entropy_fill = false;
@@ -2679,10 +2549,6 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             "--mid-txs" => mid_txs = true,
             "--shuffle-paths" => shuffle_run = Some(required(&mut it, &flag)?.parse()?),
             "--txs-per-commit" => txs_per_commit = Some(required(&mut it, &flag)?.parse()?),
-            "--schema" => {
-                schema = parse_schema(&required(&mut it, &flag)?)?;
-                schema_set = true;
-            }
             "--data-fraction" => {
                 let text = required(&mut it, &flag)?;
                 data_fraction = Some(parse_data_fraction(&text)?);
@@ -2690,7 +2556,6 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             "--with-crc" => with_crc = true,
             "--entropy-fill" => entropy_fill = true,
             "--group-commit" => group_commit = true,
-            "--rewrite-filters" => rewrite_filters = true,
             other => eyre::bail!("unknown argument {other}"),
         }
     }
@@ -2699,32 +2564,19 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         eyre::bail!("--dir is required");
     };
     let workload = resolve_workload(profile, mid, worst_case, small_txs.is_some(), mid_txs)?;
-    if group_commit && (workload.is_memory() || workload.is_filter_reuse()) {
+    if group_commit && workload.is_memory() {
         eyre::bail!(
             "--group-commit does not apply to --profile {}",
             workload.name()
         );
-    }
-    if rewrite_filters && !workload.is_filter_reuse() {
-        eyre::bail!("--rewrite-filters applies only to --profile filter-reuse");
     }
     if workload == Workload::CrcRows {
         if engines_set && engines != Engines::Rocks {
             eyre::bail!("--profile crc-rows runs rocks only");
         }
         engines = Engines::Rocks;
-        schema = IndexSchema::V3;
         if !chunks_set {
             chunks = 262_144;
-        }
-    }
-    if workload.is_filter_reuse() {
-        if engines_set && engines != Engines::Rocks {
-            eyre::bail!("--profile filter-reuse runs rocks only");
-        }
-        engines = Engines::Rocks;
-        if !chunks_set {
-            chunks = u32::try_from(MAX_DATA_TX_CHUNKS)?;
         }
     }
     if workload.is_memory() {
@@ -2764,7 +2616,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     }
     if let Some(run) = shuffle_run {
         eyre::ensure!(run > 0, "--shuffle-paths must be > 0");
-        if workload.is_memory() || workload.is_filter_reuse() {
+        if workload.is_memory() {
             eyre::bail!(
                 "--shuffle-paths does not apply to --profile {}",
                 workload.name()
@@ -2780,27 +2632,18 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     if rocks_set && !engines.includes_rocks() {
         eyre::bail!("--rocks applies only when the rocks engine runs");
     }
-    if schema_set && workload.is_filter_reuse() {
-        eyre::bail!("--schema does not apply to --profile filter-reuse");
-    }
-    if schema_set && !engines.includes_rocks() {
-        eyre::bail!("--schema applies only when the rocks engine runs");
-    }
     if mid {
         chunks = MID_CHUNKS;
     }
     let (fraction_numerator, fraction_denom, data_fraction) = data_fraction.unwrap_or((1, 1, 1.0));
     let data_chunks = data_prefix(chunks, fraction_numerator, fraction_denom)?;
     if (fraction_numerator != fraction_denom || with_crc || entropy_fill)
-        && (workload.is_memory() || workload.is_filter_reuse() || workload == Workload::CrcRows)
+        && (workload.is_memory() || workload == Workload::CrcRows)
     {
         eyre::bail!(
             "--data-fraction, --with-crc, and --entropy-fill do not apply to --profile {}",
             workload.name()
         );
-    }
-    if (with_crc || entropy_fill) && !schema.is_v3() {
-        eyre::bail!("--with-crc and --entropy-fill need --schema v3");
     }
     if (with_crc || entropy_fill) && engines.includes_mdbx() {
         eyre::bail!("--with-crc and --entropy-fill run on rocks only");
@@ -2862,12 +2705,10 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
         rocks,
         dbs,
         group_commit,
-        rewrite_filters,
         small_tx_chunks,
         mid_spans,
         shuffle_run,
         txs_per_commit,
-        schema,
         uniform_proofs,
         data_fraction,
         data_chunks,
@@ -2923,14 +2764,6 @@ fn data_prefix(chunks: u32, numerator: u64, denom: u64) -> eyre::Result<u32> {
     Ok(u32::try_from(n).unwrap_or(chunks))
 }
 
-fn parse_schema(value: &str) -> eyre::Result<IndexSchema> {
-    match value {
-        "v2" => Ok(IndexSchema::V2),
-        "v3" => Ok(IndexSchema::V3),
-        other => eyre::bail!("unknown schema {other}; use v2 or v3"),
-    }
-}
-
 fn parse_profile(value: &str) -> eyre::Result<Workload> {
     match value {
         "filled" => Ok(Workload::Filled),
@@ -2939,10 +2772,9 @@ fn parse_profile(value: &str) -> eyre::Result<Workload> {
         "mem-dbs" => Ok(Workload::MemDbs),
         "index-span" => Ok(Workload::IndexSpan),
         "offset-rows" => Ok(Workload::OffsetRows),
-        "filter-reuse" => Ok(Workload::FilterReuse),
         "crc-rows" => Ok(Workload::CrcRows),
         other => eyre::bail!(
-            "unknown profile {other}; use filled, mid, worst, mem-dbs, index-span, offset-rows, filter-reuse, or crc-rows"
+            "unknown profile {other}; use filled, mid, worst, mem-dbs, index-span, offset-rows, or crc-rows"
         ),
     }
 }
@@ -2998,7 +2830,7 @@ fn print_rocks() {
 fn print_help() {
     let presets = RocksTuning::preset_names();
     eprintln!(
-        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--schema v2|v3] [--rocks <preset>] [--mid] [--group-commit] [--worst-case] [--small-txs N] [--mid-txs] [--shuffle-paths RUN] [--txs-per-commit N] [--data-fraction F] [--with-crc] [--entropy-fill] [--list-rocks]\n\
+        "submodule-index-bench --dir <path/index-bench> [--chunks N] [--batch N] [--tx-chunks N] [--path-bytes N] [--reads N] [--range-len N] [--rocks-block-cache N] [--profile filled|mid|worst] [--engine both|mdbx|rocks] [--rocks <preset>] [--mid] [--group-commit] [--worst-case] [--small-txs N] [--mid-txs] [--shuffle-paths RUN] [--txs-per-commit N] [--data-fraction F] [--with-crc] [--entropy-fill] [--list-rocks]\n\
 Writes the same synthetic submodule index on durable MDBX and on RocksDB, then times cold lookups.\n\
 The directory must be empty and must contain an index-bench path component.\n\
 --profile selects the workload. filled is the default. mid is --mid. worst is --worst-case and still takes --chunks.\n\
@@ -3007,33 +2839,29 @@ mem-dbs keeps --dbs databases open (default 8) after writing --chunks offset row
 index-span writes --chunks offsets in one update. A max transaction is --chunks 20971520.\n\
 offset-rows writes --chunks offset rows and no data paths, then does cold point reads. A full partition is --chunks 75534400.\n\
 --engine both is the default. A preset sweep uses --engine rocks so MDBX is not repeated.\n\
---schema v2|v3 selects the RocksDB layout of an empty directory. The default is v2, so a size line can be compared with an older run. \
-Production open of an empty directory is schema v3: one placement row and an inline data proof, and no stored tx path. \
-MDBX stays schema v2. --profile filter-reuse opens a schema-v1 directory and does not take --schema.\n\
+RocksDB is layout v1. Production rocks open writes one placement and an inline data proof and does not store a tx path. \
+MDBX stays schema v2.\n\
 --rocks selects one RocksDB preset. The default is baseline, which is what production open uses. \
 Baseline stores data-path and tx-path values in SST blocks. The blobs preset writes values at or above the blob threshold into blob files. \
 Baseline uses partitioned filters and a 10-bit bloom only on families whose point lookups miss. all-blooms keeps that shape and puts the bloom on every family. full-filters is one full filter per SST, one cache shard, and a 128 MiB cache. \
 Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, and fdatasync-wal-rotate-compact changes one setting. \
---rocks-block-cache overrides that preset's cache size and does not change the shard count. A new block size or a switch between baseline and full-filters needs an empty directory. An existing SST keeps its filter until --rewrite-filters.\n\
---profile filter-reuse opens an existing schema-v1 rocks/ directory. It refuses a directory that also contains mdbx/. \
---profile crc-rows writes schema 3.2 offset records on RocksDB and prints SST bytes per chunk for raw proofs, the production suffix trailer, a prefix trailer, and checksum-only rows. The default sample is 262144 chunks. The uniform shape is capped at 131072. The line extrapolated_partition_sst scales that sample to 75534400 offsets. \
---rewrite-filters forces a bottommost compaction of ChunkPathHashesByOffset so the existing SST is rewritten with this open's filter. A plain compact can trivial-move the file and keep the old filter. The run prints one sst line per live path-hash file and sst_cover for the sampled offsets. \
-Default --chunks is 20971520, the first max transaction in the stuck worst-case run.\n\
+--rocks-block-cache overrides that preset's cache size and does not change the shard count. A new block size or a switch between baseline and full-filters needs an empty directory.\n\
+--profile crc-rows writes offset records on RocksDB and prints SST bytes per chunk for raw proofs, the production suffix trailer, a prefix trailer, and checksum-only rows. The default sample is 262144 chunks. The uniform shape is capped at 131072. The line extrapolated_partition_sst scales that sample to 75534400 offsets.\n\
 --list-rocks prints the presets and exits.\n\
 --shuffle-paths RUN writes the data paths as runs of RUN consecutive chunks in a seeded random order, like scattered data sync. Each commit still holds the data-path batch size. RUN=1 is fully random. Transaction rows stay in offset order.\n\
 --txs-per-commit N overrides the transaction rows per durable commit. Production commits one block's transactions together, so --small-txs 1 should use the block's transaction count (100 at the expected cap).\n\
 --small-txs N stores one data root every N chunks. Sibling chunks in one transaction share branch bytes. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
 --data-fraction F (default 1, and 0 < F <= 1) writes transactions, placements, and data rows for the first F × --chunks offsets. The transaction shape is the shape of that prefix. The header prints data_fraction and data_chunks.\n\
---with-crc stores every data row as the schema 3.2 record: the proof, then the checksum trailer from encode_offset_meta. It needs --schema v3 and --engine rocks.\n\
---entropy-fill writes a checksum-only row (crc set, no proof) for every offset outside that data region. Rows are written in offset order, one commit per data-path batch. It needs --schema v3 and --engine rocks. After settle the run prints data_rows, entropy_rows, and ChunkMetaByOffset SST bytes per data chunk and per entropy row.\n\
---reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), entropy_range, recall_rows, rmw_path, rmw_root. Schema v3 RocksDB also times content_lookup and content_miss. The data shapes sample the data region only.\n\
-entropy_range is a cold offset_metas_in_range of --range-len consecutive entropy offsets, sampled over the entropy region. recall_rows is the same call for --range-len offsets at a uniform start over the whole partition, so the window can mix data and entropy rows. Both use the cold-cache reopen the other shapes use. Both are skipped, with a printed reason, when there is no entropy region.\n\
+--with-crc stores the proof plus the checksum trailer from encode_offset_meta. It needs --engine rocks.\n\
+--entropy-fill writes checksum-only rows (crc set, no proof) for every offset outside that data region. Rows are written in offset order, one commit per data-path batch. It needs --engine rocks. After settle the run prints data_rows, entropy_rows, and ChunkMetaByOffset SST bytes per data chunk and per entropy row.\n\
+--reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), entropy_range, recall_rows, rmw_path, rmw_root. RocksDB also times content_lookup and content_miss. The data shapes sample the data region only.\n\
+entropy_range is a cold offset_metas_in_range of --range-len consecutive entropy offsets, sampled over the entropy region. recall_rows is the same call for --range-len offsets at a uniform start over the whole partition, so the window can mix data and entropy rows. Both use the cold-cache reopen the other shapes use. Both are skipped, with a printed reason, when there is no entropy region or the engine is not RocksDB.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
-content_lookup is a cold prefix seek of a leaf hash that was stored. content_miss seeks a hash that was not stored. Both run only for schema v3 RocksDB, before rmw_path rewrites proofs.\n\
+content_lookup is a cold prefix seek of a leaf hash that was stored. content_miss seeks a hash that was not stored. Both run only for RocksDB, before rmw_path rewrites proofs.\n\
 Each read line also prints head_p50_us, head_p99_us, and head_max_us for the first 32 samples, and the same for the tail.\n\
 RocksDB prints rocks_bg before and after each shape: running compactions, running flushes, pending flags, and no_file_opens.\n\
 The RocksDB engine line shows max_open_files=-1 file_opening_threads=16. Production open uses the same table cache. The bench open also skips the table-property scan.\n\
-rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit. Schema v3 skips rmw_root: a placement's data-root row is filled once, with the interval, and production does not read-modify-write that row.\n\
+rmw_path rewrites the stored path with one byte changed. rmw_root appends a distinct placement on every sample. Both commit. RocksDB v1 skips rmw_root: a placement's data-root row is filled once, with the interval, and production does not read-modify-write that row.\n\
 Each shape calls posix_fadvise(DONTNEED) on the engine files. It does not drop the host page cache. data_path_random_open keeps the Rocks block cache.\n\
 Each engine prints mem lines. rss_kb is resident. anon_kb is heap. file_kb is mapped file pages. size_kb is virtual.\n\
 --group-commit makes both engines commit {MID_MDBX_TXS_PER_COMMIT} transactions and {MID_MDBX_PATH_BATCH} data-path rows (or --batch, when that is larger). Without it, only --mid MDBX uses those sizes. RocksDB stays at one transaction and --batch rows.\n\
@@ -3052,7 +2880,7 @@ mod tests {
 
     use super::{
         Args, DATA_PROOF_BYTES, DATA_PROOF_LAYERS, Engines, FILLED_MAP_CEILING, HASH_SIZE,
-        HEAD_SAMPLES, IndexSchema, LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH,
+        HEAD_SAMPLES, LEAF_SIZE, MAX_DATA_TX_CHUNKS, MID_CHUNKS, MID_MDBX_PATH_BATCH,
         MID_MDBX_TXS_PER_COMMIT, NOTE_SIZE, PARTITION_CHUNKS, SubmoduleIndex, TX_PROOF_BYTES,
         TX_PROOF_LAYERS, Workload, bloom_bytes, commits_for, data_path_bytes, hash_at, head_tail,
         mdbx_map_bytes, memory_predict, mid_spans, pairing_layers, parse_arg_list, parse_diskstats,
@@ -3205,12 +3033,10 @@ VmHWM:\t   8600000 kB
             rocks: irys_database::submodule::RocksTuning::baseline().with_block_cache(1024),
             dbs: 1,
             group_commit: false,
-            rewrite_filters: false,
             small_tx_chunks: 0,
             mid_spans: Vec::new(),
             shuffle_run: None,
             txs_per_commit: None,
-            schema: IndexSchema::V2,
             uniform_proofs: false,
             data_fraction: 1.0,
             data_chunks: 8,
@@ -3274,7 +3100,6 @@ VmHWM:\t   8600000 kB
         assert_eq!(defaults.rocks.block_cache_bytes, BLOCK_CACHE_BYTES);
         assert!(defaults.rocks.share_resources);
         assert_eq!(defaults.chunks, 4096);
-        assert_eq!(defaults.schema, IndexSchema::V2);
         assert!(!defaults.group_commit);
 
         let grouped = parse(&["--dir", "index-bench", "--mid", "--group-commit"]).unwrap();
@@ -3405,46 +3230,6 @@ VmHWM:\t   8600000 kB
     }
 
     #[test]
-    fn filter_reuse_defaults_to_the_first_max_tx_and_rocks() {
-        let args = parse(&["--dir", "index-bench", "--profile", "filter-reuse"]).unwrap();
-        assert_eq!(args.workload, Workload::FilterReuse);
-        assert_eq!(args.engines, Engines::Rocks);
-        assert_eq!(args.chunks, 20_971_520);
-        assert!(!args.rewrite_filters);
-        assert!(args.rocks.partition_filters);
-        assert!(args.rocks.share_resources);
-
-        let rewrite = parse(&[
-            "--dir",
-            "index-bench",
-            "--profile",
-            "filter-reuse",
-            "--rocks",
-            "full-filters",
-            "--rewrite-filters",
-        ])
-        .unwrap();
-        assert!(rewrite.rewrite_filters);
-        assert!(!rewrite.rocks.partition_filters);
-        assert_eq!(rewrite.rocks.block_cache_bytes, 128 * 1024 * 1024);
-        assert_eq!(rewrite.rocks.cache_shard_bits, 0);
-        assert!(!rewrite.rocks.share_resources);
-
-        assert!(parse(&["--dir", "index-bench", "--rewrite-filters"]).is_err());
-        assert!(
-            parse(&[
-                "--dir",
-                "index-bench",
-                "--profile",
-                "filter-reuse",
-                "--engine",
-                "both"
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
     fn percentiles_use_nearest_rank() {
         let samples = [10, 20, 30, 40];
         assert_eq!(percentile(&samples, 50), 20);
@@ -3562,30 +3347,6 @@ VmHWM:\t   8600000 kB
         assert_eq!(data_path_bytes(&worst, 0).len(), DATA_PROOF_BYTES);
         assert_eq!(data_path_bytes(&worst, 1).len(), DATA_PROOF_BYTES);
 
-        let v3 = parse(&[
-            "--dir",
-            "index-bench",
-            "--schema",
-            "v3",
-            "--engine",
-            "rocks",
-        ])
-        .unwrap();
-        assert_eq!(v3.schema, IndexSchema::V3);
-        assert!(parse(&["--dir", "index-bench", "--schema", "v1"]).is_err());
-        assert!(parse(&["--dir", "index-bench", "--engine", "mdbx", "--schema", "v3"]).is_err());
-        assert!(
-            parse(&[
-                "--dir",
-                "index-bench",
-                "--profile",
-                "filter-reuse",
-                "--schema",
-                "v2"
-            ])
-            .is_err()
-        );
-
         assert!(parse(&["--dir", "index-bench", "--small-txs", "1", "--worst-case"]).is_err());
         assert!(parse(&["--dir", "index-bench", "--small-txs", "0"]).is_err());
         assert!(parse(&["--dir", "index-bench", "--txs-per-commit", "0"]).is_err());
@@ -3604,7 +3365,7 @@ VmHWM:\t   8600000 kB
     }
 
     #[test]
-    fn small_txs_write_one_row_set_per_data_root() -> eyre::Result<()> {
+    fn small_txs_store_a_placement_and_no_tx_path() -> eyre::Result<()> {
         use irys_database::submodule::SubmoduleStore as _;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::PartitionChunkOffset;
@@ -3627,90 +3388,7 @@ VmHWM:\t   8600000 kB
         let dir = TempDirBuilder::new()
             .prefix("index_bench_small_txs")
             .build();
-        assert_eq!(args.schema, IndexSchema::V2);
-        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks, false)?;
-        write_tx_index(&store, &args, 8)?;
-        write_data_paths(&store, &args, 5)?;
-        let mut at = 0_u32;
-        let mut roots = Vec::new();
-        while at < args.chunks {
-            let place = place_tx(&args, at);
-            let tx_hash = hash_at(u64::from(place.start));
-            let root = hash_at(u64::from(place.start) + 0x1000_0000);
-            roots.push(root);
-            let tx_path = store
-                .view(|tx| tx.get_full_tx_path(tx_hash))?
-                .expect("tx path");
-            assert_eq!(tx_path.len(), TX_PROOF_BYTES);
-            let binding = store
-                .view(|tx| tx.get_tx_leaf_binding(tx_hash))?
-                .expect("binding");
-            assert_eq!(binding.data_root, root);
-            let infos = store
-                .view(|tx| tx.get_data_root_infos_for_data_root(root))?
-                .expect("infos");
-            assert_eq!(infos.0.len(), 1);
-            assert_eq!(infos.0[0].data_size, place.leaves * 256 * 1024);
-            assert_eq!(
-                infos.0[0].start_offset.0,
-                i32::try_from(place.start).unwrap()
-            );
-            let job = store
-                .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(place.start)))?
-                .expect("pending job");
-            assert_eq!(job.data_root, root);
-            assert_eq!(job.data_size, place.leaves * 256 * 1024);
-            assert_eq!(job.attempts, 0);
-            assert_eq!(job.block_height, 1);
-            for step in 0..place.stored {
-                let offset = place.start + step;
-                let got = store
-                    .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?
-                    .expect("proof");
-                assert_eq!(got, data_path_bytes(&args, offset));
-                let hashes = store
-                    .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(offset)))?
-                    .expect("hashes");
-                assert_eq!(hashes.tx_path_hash, Some(tx_hash));
-            }
-            at += place.stored;
-        }
-        assert_eq!(roots.len(), 3);
-        assert_eq!(
-            roots.iter().collect::<std::collections::HashSet<_>>().len(),
-            3
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn small_txs_v3_stores_a_placement_and_no_tx_path() -> eyre::Result<()> {
-        use irys_database::submodule::SubmoduleStore as _;
-        use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::PartitionChunkOffset;
-
-        let args = parse(&[
-            "--dir",
-            "index-bench",
-            "--chunks",
-            "5",
-            "--small-txs",
-            "2",
-            "--schema",
-            "v3",
-            "--engine",
-            "rocks",
-            "--reads",
-            "0",
-            "--batch",
-            "5",
-        ])
-        .unwrap();
-        assert_eq!(args.schema, IndexSchema::V3);
-        let dir = TempDirBuilder::new()
-            .prefix("index_bench_small_txs_v3")
-            .build();
-        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks, true)?;
+        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks)?;
         write_tx_index(&store, &args, 8)?;
         write_data_paths(&store, &args, 5)?;
         let mut at = 0_u32;
@@ -3755,8 +3433,8 @@ VmHWM:\t   8600000 kB
     }
 
     #[test]
-    fn rmw_root_on_a_tiny_v3_index_keeps_the_placement() -> eyre::Result<()> {
-        // Breaks if the shape appends an info schema v3 rejects, or if it
+    fn rmw_root_on_a_tiny_rocks_index_keeps_the_placement() -> eyre::Result<()> {
+        // Breaks if the shape appends an info RocksDB v1 rejects, or if it
         // changes the placement data_size that production stored.
         use irys_database::submodule::SubmoduleStore as _;
         use irys_testing_utils::utils::TempDirBuilder;
@@ -3769,8 +3447,6 @@ VmHWM:\t   8600000 kB
             "4",
             "--small-txs",
             "2",
-            "--schema",
-            "v3",
             "--engine",
             "rocks",
             "--reads",
@@ -3779,19 +3455,17 @@ VmHWM:\t   8600000 kB
             "4",
         ])
         .unwrap();
-        let dir = TempDirBuilder::new()
-            .prefix("index_bench_rmw_root_v3")
-            .build();
-        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks, true)?;
+        let dir = TempDirBuilder::new().prefix("index_bench_rmw_root").build();
+        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks)?;
         write_tx_index(&store, &args, 8)?;
         let before = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
             .expect("placement");
         let outcome = super::rmw_root_sample(&store, &args, 0)?;
         let super::RmwRoot::Skipped(reason) = outcome else {
-            panic!("v3 rmw_root wrote a data-root row");
+            panic!("rocks rmw_root wrote a data-root row");
         };
-        assert!(reason.contains("schema v3"), "{reason}");
+        assert!(reason.contains("RocksDB v1"), "{reason}");
         assert!(reason.contains("read-modify-write"), "{reason}");
         let after = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
@@ -3811,8 +3485,6 @@ VmHWM:\t   8600000 kB
             "index-bench",
             "--chunks",
             "75534400",
-            "--schema",
-            "v3",
             "--engine",
             "rocks",
             "--data-fraction",
@@ -3830,8 +3502,6 @@ VmHWM:\t   8600000 kB
             "10",
             "--small-txs",
             "3",
-            "--schema",
-            "v3",
             "--engine",
             "rocks",
             "--data-fraction",
@@ -3850,8 +3520,6 @@ VmHWM:\t   8600000 kB
             "--mid-txs",
             "--engine",
             "rocks",
-            "--schema",
-            "v3",
             "--data-fraction",
             "0.5",
         ])
@@ -3863,28 +3531,9 @@ VmHWM:\t   8600000 kB
 
         assert!(parse(&["--dir", "index-bench", "--data-fraction", "0"]).is_err());
         assert!(parse(&["--dir", "index-bench", "--data-fraction", "1.1"]).is_err());
-        assert!(
-            parse(&[
-                "--dir",
-                "index-bench",
-                "--entropy-fill",
-                "--engine",
-                "rocks"
-            ])
-            .is_err()
-        );
-        assert!(
-            parse(&[
-                "--dir",
-                "index-bench",
-                "--with-crc",
-                "--schema",
-                "v3",
-                "--engine",
-                "both"
-            ])
-            .is_err()
-        );
+        assert!(parse(&["--dir", "index-bench", "--entropy-fill"]).is_err());
+        assert!(parse(&["--dir", "index-bench", "--with-crc", "--engine", "both"]).is_err());
+        assert!(parse(&["--dir", "index-bench", "--with-crc", "--engine", "rocks"]).is_ok());
         let defaults = parse(&["--dir", "index-bench"]).unwrap();
         assert_eq!(defaults.data_chunks, defaults.chunks);
         assert!(!defaults.with_crc);
@@ -3906,8 +3555,6 @@ VmHWM:\t   8600000 kB
             "4",
             "--small-txs",
             "2",
-            "--schema",
-            "v3",
             "--engine",
             "rocks",
             "--with-crc",
@@ -3918,7 +3565,7 @@ VmHWM:\t   8600000 kB
         ])
         .unwrap();
         let dir = TempDirBuilder::new().prefix("index_bench_with_crc").build();
-        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks, true)?;
+        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks)?;
         write_tx_index(&store, &args, 8)?;
         write_data_paths(&store, &args, 4)?;
         for (offset, crc) in [
@@ -3955,8 +3602,6 @@ VmHWM:\t   8600000 kB
             "4",
             "--small-txs",
             "2",
-            "--schema",
-            "v3",
             "--engine",
             "rocks",
             "--data-fraction",
@@ -3975,7 +3620,7 @@ VmHWM:\t   8600000 kB
             .prefix("index_bench_entropy_fill")
             .build();
         let path = dir.path().join("rocks");
-        let store = SubmoduleIndex::open_rocks_bench(&path, args.rocks, true)?;
+        let store = SubmoduleIndex::open_rocks_bench(&path, args.rocks)?;
         write_tx_index(&store, &args, 8)?;
         write_data_paths(&store, &args, 2)?;
         write_entropy_rows(&store, &args, 2)?;
@@ -4015,7 +3660,7 @@ VmHWM:\t   8600000 kB
         assert!(size.sst_bytes > 0);
         drop(store);
         super::read_phase(&path, "rocks", &args, &|dir| {
-            SubmoduleIndex::open_rocks_bench(dir, args.rocks, true)
+            SubmoduleIndex::open_rocks_bench(dir, args.rocks)
         })?;
         Ok(())
     }

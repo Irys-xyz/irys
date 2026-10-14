@@ -44,7 +44,7 @@ use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 #[cfg(feature = "bench")]
 use irys_database::submodule::RocksTuning;
 #[cfg(test)]
-use irys_database::submodule::tables::SUBMODULE_SCHEMA_V3;
+use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
 use irys_database::submodule::{
     SubmoduleIndex, SubmoduleRead, SubmoduleStore as _, install_process_rocks_resources,
     tables::{
@@ -305,7 +305,7 @@ fn paths_in_tx(
     let mut data_paths: HashMap<ChunkPathHash, Option<ChunkDataPath>> = HashMap::new();
     let mut out = BTreeMap::new();
     for (offset, hashes) in rows {
-        // Schema v3 exposes the data root in `tx_path_hash` and stores no tx path.
+        // RocksDB v1 exposes the data root in `tx_path_hash` and stores no tx path.
         let tx_path = match hashes.tx_path_hash {
             Some(hash) if tx.stores_tx_paths() => cached_bytes(&mut tx_paths, hash, || {
                 index_read_metrics::note("tx_path");
@@ -1606,7 +1606,7 @@ fn submodule_reserve_len(
     })
 }
 
-/// A leftover sidecar is not the checksum. Schema 3.2 stores it in the offset row.
+/// A leftover sidecar is not the checksum. RocksDB v1 stores it in the offset row.
 fn forget_chunks_crc(dir: &Path) {
     let path = dir.join("chunks.crc");
     match fs::remove_file(&path) {
@@ -5808,7 +5808,7 @@ impl StorageModule {
                 self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
             let submodule_end = *interval.end();
             submodule.db.update(|tx| {
-                // Schema v3 data-root rows belong to their intervals. Clearing
+                // RocksDB v1 data-root rows belong to their intervals. Clearing
                 // the interval removes the row. Trimming the info list here
                 // would delete rows whose interval fragments remain.
                 if tx.intervals_own_data_root_rows() {
@@ -8457,10 +8457,10 @@ mod tests {
         let index =
             open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
         let schema = fs::read_to_string(module_dir.join("rocks").join("SCHEMA"))?;
-        assert_eq!(schema, SUBMODULE_SCHEMA_V3);
+        assert_eq!(schema, SUBMODULE_SCHEMA_ROCKS_V1);
         assert!(!module_dir.join("db").join("mdbx.dat").exists());
 
-        // Schema v3 drops a data path that no interval covers. The interval
+        // RocksDB v1 drops a data path that no interval covers. The interval
         // hash is what a later read reports as `tx_path_hash`.
         let offset = PartitionChunkOffset::from(7);
         let root = H256::repeat_byte(1);
@@ -8739,7 +8739,7 @@ mod tests {
         assert_eq!(mdbx_schema_row(&db_dir)?, None);
         assert_eq!(
             fs::read_to_string(module_dir.join("rocks").join("SCHEMA"))?,
-            SUBMODULE_SCHEMA_V3
+            SUBMODULE_SCHEMA_ROCKS_V1
         );
         Ok(())
     }
@@ -8795,7 +8795,7 @@ mod tests {
         submodule.db.set_wal_backstop(Duration::from_secs(60));
         let data_root = H256::repeat_byte(4);
         let syncs_before = submodule.db.wal_sync_count();
-        // Schema v3 stores the data-root row on the interval. A row with no
+        // RocksDB v1 stores the data-root row on the interval. A row with no
         // interval is refused. The registration stays unsynced.
         submodule.db.update_registration(|tx| {
             tx.add_tx_leaf_binding(
@@ -8835,7 +8835,7 @@ mod tests {
                 .is_empty()
         );
 
-        // A synced write that is not the chunk commit. Schema v3 has no
+        // A synced write that is not the chunk commit. RocksDB v1 has no
         // path-hash family, and clearing the interval here would drop the
         // registration this write is meant to cover.
         submodule.db.update(|tx| {
@@ -9164,7 +9164,7 @@ mod tests {
         Ok(())
     }
 
-    /// Schema v3: a filled placement stays consistent across a second
+    /// RocksDB v1: a filled placement stays consistent across a second
     /// registration, an in-range pending move, and a settle.
     #[test]
     fn rocks_settle_advance_and_reregister_stay_consistent() -> eyre::Result<()> {
@@ -9620,7 +9620,7 @@ mod tests {
                     data_root,
                     prefix_hash: H256::repeat_byte(1),
                 };
-                // Schema v3 writes the interval only when this batch also stores
+                // RocksDB v1 writes the interval only when this batch also stores
                 // the leaf. That interval is what lets a pre-clear proof commit
                 // on RocksDB. MDBX stores the proof either way.
                 let folded = DataTransactionLedger::fold_tx_root_leaf(data_root, leaf.prefix_hash);
@@ -10063,7 +10063,7 @@ mod tests {
 
         let schema = dir.path().join("schema");
         std::fs::create_dir_all(&schema).unwrap();
-        std::fs::write(schema.join("SCHEMA"), b"irys-submodule-rocks 1\n").unwrap();
+        std::fs::write(schema.join("SCHEMA"), b"not-this-release\n").unwrap();
         assert!(refuse_foreign_index(&schema, false).is_err());
     }
 

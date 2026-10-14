@@ -33,9 +33,7 @@ use super::db::{
 };
 use super::interval::IntervalRow;
 #[cfg(feature = "rocksdb")]
-use super::rocks::{
-    LegacySstSpan, RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning,
-};
+use super::rocks::{RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning};
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
@@ -91,7 +89,7 @@ pub trait SubmoduleRead {
 
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
 
-    /// `false` on schema v3. That layout does not store tx-path bytes.
+    /// `false` on RocksDB v1. That layout does not store tx-path bytes.
     fn stores_tx_paths(&self) -> bool {
         true
     }
@@ -192,8 +190,8 @@ pub trait SubmoduleRead {
 
     /// Partition offsets whose stored data-proof leaf is `content_hash`.
     ///
-    /// Schema v3 seeks `ChunkOffsetsByContentHash`. The result is sorted.
-    /// An absent hash is an empty vec. Schema v2 and MDBX return an error.
+    /// RocksDB v1 seeks `ChunkOffsetsByContentHash`. The result is sorted.
+    /// An absent hash is an empty vec. MDBX returns an error.
     /// They do not return an empty vec.
     fn offsets_for_content_hash(
         &self,
@@ -202,16 +200,16 @@ pub trait SubmoduleRead {
         eyre::bail!("content-hash offset index is not supported on this schema")
     }
 
-    /// Schema 3.2 stores a packed-chunk checksum in the offset row.
+    /// RocksDB v1 stores a packed-chunk checksum in the offset row.
     ///
-    /// The default is false. MDBX and schema v2 do not.
+    /// The default is false. MDBX does not.
     fn stores_offset_crc(&self) -> bool {
         false
     }
 
     /// Proof and checksum at `offset`. `Ok(None)` when the key is absent.
     ///
-    /// The default is the schema v2 proof with no checksum. A checksum-only
+    /// The default is the MDBX proof with no checksum. A checksum-only
     /// row returns `proof: None`.
     fn get_offset_meta(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>> {
         Ok(self
@@ -224,7 +222,7 @@ pub trait SubmoduleRead {
 
     /// Stored offset rows in `[start, end]`, including checksum-only rows.
     ///
-    /// The default is empty. Schema v2 and MDBX do not scan this family to
+    /// The default is empty. MDBX does not scan this family to
     /// answer a checksum read.
     fn offset_metas_in_range(
         &self,
@@ -288,7 +286,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
 
     /// Store each chunk's data path under its offset, and the hash on the offset row.
     ///
-    /// The tx-path interval is left in place. Schema v3 skips an offset that
+    /// The tx-path interval is left in place. RocksDB v1 skips an offset that
     /// no interval covers and returns it. Those bytes are not stored. v2 and
     /// MDBX always store and return an empty list.
     fn write_data_path_updates(
@@ -321,8 +319,8 @@ pub trait SubmoduleWrite: SubmoduleRead {
 
     /// Fill the placement that starts at `start`.
     ///
-    /// Schema v2 appends `info` the same way as [`Self::add_data_root_info`].
-    /// Schema v3 updates that one interval and its data-root row. The interval
+    /// MDBX appends `info` the same way as [`Self::add_data_root_info`].
+    /// RocksDB v1 updates that one interval and its data-root row. The interval
     /// must already exist and must name `data_root`.
     fn add_data_root_info_at(
         &mut self,
@@ -333,7 +331,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
         self.add_data_root_info(data_root, info)
     }
 
-    /// Schema v3 stores a data-root row on its interval. A later info trim
+    /// RocksDB v1 stores a data-root row on its interval. A later info trim
     /// must not delete those rows while the interval remains.
     fn intervals_own_data_root_rows(&self) -> bool {
         false
@@ -360,7 +358,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
 
     /// Ledger, height, and tx index for intervals assigned later in this batch.
     ///
-    /// Schema v2 ignores this. Schema v3 copies it onto each new placement.
+    /// MDBX ignores this. RocksDB v1 copies it onto each new placement.
     /// A writer that does not call it leaves those fields unset.
     fn note_placement_origin(
         &mut self,
@@ -374,7 +372,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
     /// Replace each offset row with the packed checksum and optional proof.
     ///
     /// A proof that no interval covers is returned and not stored. Its
-    /// checksum is not stored either. Schema v2 and MDBX ignore `crc` and
+    /// checksum is not stored either. MDBX ignores `crc` and
     /// write proofs through [`Self::write_data_path_updates`].
     fn write_packed_offset_rows(
         &mut self,
@@ -428,7 +426,7 @@ pub trait SubmoduleStore: Send + Sync {
     /// An empty list, or spans that hold no presence row, does not commit.
     /// One commit covers every span that has a row. Cost is one seek per span
     /// per presence family, plus the rows removed. RocksDB deletes the offset
-    /// rows with `DeleteRange`. Schema v3 reads the data-proof values in each
+    /// rows with `DeleteRange`. RocksDB v1 reads the data-proof values in each
     /// span that has rows and point-deletes the matching content-hash keys in
     /// that same batch. A span with no row does not read values. MDBX walks
     /// a cursor inside each span.
@@ -461,7 +459,7 @@ pub trait SubmoduleStore: Send + Sync {
     /// Remove the reset marker. Same sync as `update`.
     fn clear_reset_in_progress(&self) -> eyre::Result<()>;
 
-    /// Schema 3.2 stores a packed-chunk checksum in the offset row.
+    /// RocksDB v1 stores a packed-chunk checksum in the offset row.
     fn stores_offset_crc(&self) -> bool {
         false
     }
@@ -478,7 +476,7 @@ pub trait SubmoduleStore: Send + Sync {
 
     /// On an entropy span, keep checksum-only rows and drop proof rows.
     ///
-    /// The default drops every presence row. Schema v2 and MDBX have no
+    /// The default drops every presence row. MDBX has no
     /// checksum row to keep.
     fn retain_entropy_crc_rows(
         &self,
@@ -1297,7 +1295,7 @@ impl SubmoduleIndex {
 
     /// Rows that are not owned by a live placement.
     ///
-    /// Schema v3 checks both directions: intervals and data-root rows, pending
+    /// RocksDB v1 checks both directions: intervals and data-root rows, pending
     /// values, data paths, and the content-hash index. MDBX and schema v2
     /// return an empty list. A non-empty list is a leak or a half-written
     /// placement, including an interval that still awaits its data-root info.
@@ -1311,7 +1309,7 @@ impl SubmoduleIndex {
 
     /// `true` when this index stores tx-path bytes.
     ///
-    /// MDBX and a RocksDB schema-v2 directory do. Schema v3 derives them.
+    /// MDBX and a RocksDB schema-v2 directory do. RocksDB v1 derives them.
     pub fn stores_tx_paths(&self) -> bool {
         match self {
             Self::Mdbx(_) => true,
@@ -1320,7 +1318,7 @@ impl SubmoduleIndex {
         }
     }
 
-    /// Bind a schema-v3 index to one partition and one packing identity.
+    /// Bind a RocksDB v1 index to one partition and one packing identity.
     ///
     /// The first call writes a missing value. A later different value refuses.
     /// MDBX and schema v2 ignore this. `clear` drops the partition binding.
@@ -1355,7 +1353,7 @@ impl SubmoduleIndex {
     ///
     /// This open skips the table-property scan during `DB::Open`.
     /// Production [`Self::open_rocks`] keeps every SST open and exports tickers.
-    /// An empty directory is schema v3.
+    /// An empty directory is RocksDB v1.
     #[cfg(feature = "rocksdb")]
     pub fn open_rocks_with(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
         Ok(Self::Rocks(RocksSubmoduleStore::open_with_stats(
@@ -1363,19 +1361,13 @@ impl SubmoduleIndex {
         )?))
     }
 
-    /// Bench open. `schema_v3` selects the layout of an empty directory.
+    /// Bench open of an empty directory as RocksDB v1.
     ///
-    /// Same table cache as [`Self::open_rocks_with`]. A schema file that names
-    /// the other layout is refused.
+    /// Same table cache as [`Self::open_rocks_with`]. A schema file that is
+    /// not the RocksDB v1 marker is refused.
     #[cfg(feature = "rocksdb")]
-    pub fn open_rocks_bench(
-        path: impl AsRef<Path>,
-        tuning: RocksTuning,
-        schema_v3: bool,
-    ) -> eyre::Result<Self> {
-        Ok(Self::Rocks(RocksSubmoduleStore::open_bench(
-            path, tuning, schema_v3,
-        )?))
+    pub fn open_rocks_bench(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
+        Ok(Self::Rocks(RocksSubmoduleStore::open_bench(path, tuning)?))
     }
 
     /// SST and blob files per column family. Empty on MDBX.
@@ -1387,36 +1379,9 @@ impl SubmoduleIndex {
         }
     }
 
-    /// Bench entry for a schema-v1 Rocks directory. Does not rewrite the marker.
-    #[cfg(feature = "rocksdb")]
-    pub fn open_rocks_v1_probe(path: impl AsRef<Path>, tuning: RocksTuning) -> eyre::Result<Self> {
-        Ok(Self::Rocks(RocksSubmoduleStore::open_v1_probe(
-            path, tuning,
-        )?))
-    }
-
-    /// Point read of one v1 path-hash row. `Ok(false)` is a missing key.
-    #[cfg(feature = "rocksdb")]
-    pub fn legacy_path_hash_present(&self, offset: PartitionChunkOffset) -> eyre::Result<bool> {
-        match self {
-            Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
-            Self::Rocks(store) => store.legacy_path_hash_present(offset),
-        }
-    }
-
-    /// Rewrite the v1 path-hash SST with this open's table options.
-    #[cfg(feature = "rocksdb")]
-    pub fn compact_legacy_path_hashes(&self) -> eyre::Result<()> {
-        match self {
-            Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
-            Self::Rocks(store) => store.compact_legacy_path_hashes(),
-        }
-    }
-
     /// Replace offset-family values. The bytes are stored as given.
     ///
-    /// Schema 3.2 writes `ChunkMetaByOffset`. Schema v2 writes
-    /// `ChunkDataPathByOffset`.
+    /// RocksDB v1 writes `ChunkMetaByOffset`.
     #[cfg(feature = "rocksdb")]
     pub fn write_raw_data_paths(
         &self,
@@ -1434,15 +1399,6 @@ impl SubmoduleIndex {
         match self {
             Self::Mdbx(_) => eyre::bail!("offset-row compact is rocks only"),
             Self::Rocks(store) => store.compact_data_paths(),
-        }
-    }
-
-    /// Live SST files in the v1 path-hash family.
-    #[cfg(feature = "rocksdb")]
-    pub fn legacy_path_hash_ssts(&self) -> eyre::Result<Vec<LegacySstSpan>> {
-        match self {
-            Self::Mdbx(_) => eyre::bail!("legacy path-hash probe is rocks only"),
-            Self::Rocks(store) => store.legacy_path_hash_ssts(),
         }
     }
 
@@ -1813,9 +1769,9 @@ mod tests {
     fn put_registration(store: &SubmoduleIndex, offset: u32, byte: u8) -> eyre::Result<()> {
         store.update_registration(|tx| {
             let at = PartitionChunkOffset::from(offset);
-            // Schema v3 stores a data path only under a live interval.
-            ensure_v3_cover(tx, at)?;
-            // Schema v3 presence is the data-path bytes. The hash row is v2.
+            // RocksDB v1 stores a data path only under a live interval.
+            ensure_placement_cover(tx, at)?;
+            // RocksDB v1 presence is the data-path bytes. The hash row is v2.
             tx.add_full_data_path(at, vec![byte])?;
             tx.set_path_hashes_by_offset(
                 at,
@@ -1827,7 +1783,7 @@ mod tests {
         })
     }
 
-    /// Schema v3 names the data root through the leaf binding. v2 stores the hash as given.
+    /// RocksDB v1 names the data root through the leaf binding. v2 stores the hash as given.
     fn bind_as_root(tx: &mut dyn SubmoduleWrite, hash: H256) -> eyre::Result<()> {
         if !tx.intervals_own_data_root_rows() {
             return Ok(());
@@ -1842,8 +1798,8 @@ mod tests {
     }
 
     /// A one-offset interval so a data-path write at `offset` has coverage.
-    /// Schema v3 drops a data path that no interval covers. Other offsets stay untouched.
-    fn ensure_v3_cover(
+    /// RocksDB v1 drops a data path that no interval covers. Other offsets stay untouched.
+    fn ensure_placement_cover(
         tx: &mut dyn SubmoduleWrite,
         offset: PartitionChunkOffset,
     ) -> eyre::Result<()> {
@@ -1963,7 +1919,7 @@ mod tests {
         Ok(())
     }
 
-    /// Schema v2 merges adjacent copies of one tx path. Each tx start still
+    /// MDBX merges adjacent copies of one tx path. Each tx start still
     /// resolves inside that one interval.
     #[test]
     fn merged_identical_tx_paths_keep_each_tx_start() -> eyre::Result<()> {
@@ -2133,7 +2089,7 @@ mod tests {
                 )?;
                 let at_30 = tx.placement_at(PartitionChunkOffset::from(30))?;
                 if !store.stores_tx_paths() {
-                    let at_30 = at_30.expect("schema v3 keeps the placement without a tx path");
+                    let at_30 = at_30.expect("RocksDB v1 keeps the placement without a tx path");
                     assert_eq!(at_30.data_root, root_a);
                     assert_eq!(at_30.tx_start_offset, RelativeChunkOffset(30));
                     return Ok(());
@@ -2267,7 +2223,7 @@ mod tests {
                 bind_as_root(tx, old_tx)?;
                 bind_as_root(tx, new_tx)?;
                 bind_as_root(tx, tail_tx)?;
-                // The interval goes in before the data path so schema v3 keeps the bytes.
+                // The interval goes in before the data path so RocksDB v1 keeps the bytes.
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
                     ChunkPathHashes {
@@ -2612,7 +2568,7 @@ mod tests {
                 if tx.intervals_own_data_root_rows() {
                     assert!(
                         uncovered.is_none(),
-                        "schema v3 drops a data path that has no interval"
+                        "RocksDB v1 drops a data path that has no interval"
                     );
                 } else {
                     assert!(
@@ -2682,7 +2638,7 @@ mod tests {
             store.update(|tx| {
                 for key in keys {
                     let offset = PartitionChunkOffset::from(key);
-                    ensure_v3_cover(tx, offset)?;
+                    ensure_placement_cover(tx, offset)?;
                     tx.write_data_path_updates(vec![(
                         offset,
                         H256::repeat_byte((key % 200) as u8),
@@ -2703,7 +2659,7 @@ mod tests {
                     PartitionChunkOffset::from(1),
                     PartitionChunkOffset::from(5),
                 )?;
-                // Schema v3 deletes pending in the same batch as the interval clear.
+                // RocksDB v1 deletes pending in the same batch as the interval clear.
                 assert_eq!(removed, if v3 { 0 } else { 2 });
                 assert!(
                     tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?
@@ -2807,8 +2763,8 @@ mod tests {
                     PartitionChunkOffset::from(0),
                     PartitionChunkOffset::from(0),
                 )?;
-                // The clear removed coverage. Schema v3 keeps the new bytes only under a new interval.
-                ensure_v3_cover(tx, PartitionChunkOffset::from(0))?;
+                // The clear removed coverage. RocksDB v1 keeps the new bytes only under a new interval.
+                ensure_placement_cover(tx, PartitionChunkOffset::from(0))?;
                 tx.write_data_path_updates(vec![(
                     PartitionChunkOffset::from(0),
                     H256::repeat_byte(8),
@@ -2843,7 +2799,7 @@ mod tests {
                     tx.get_path_hashes_by_offset(PartitionChunkOffset::from(5))?
                         .is_none()
                 );
-                ensure_v3_cover(tx, PartitionChunkOffset::from(6))?;
+                ensure_placement_cover(tx, PartitionChunkOffset::from(6))?;
                 tx.add_full_data_path(PartitionChunkOffset::from(6), vec![5])?;
                 tx.set_path_hashes_by_offset(PartitionChunkOffset::from(6), hashes.clone())?;
                 Ok(())
@@ -2997,8 +2953,8 @@ mod tests {
             put_registration(store, 1, 1)?;
             assert_eq!(store.group_sync_count(), 0);
             store.update(|tx| {
-                // Schema v3 presence is the data-path bytes. The hash row is v2.
-                ensure_v3_cover(tx, PartitionChunkOffset::from(2))?;
+                // RocksDB v1 presence is the data-path bytes. The hash row is v2.
+                ensure_placement_cover(tx, PartitionChunkOffset::from(2))?;
                 tx.add_full_data_path(PartitionChunkOffset::from(2), vec![2])?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),
@@ -3058,7 +3014,7 @@ mod tests {
                     Some(tx_hash),
                 )?;
                 if tx.intervals_own_data_root_rows() {
-                    // The max offset needs its own interval or schema v3 drops that data path.
+                    // The max offset needs its own interval or RocksDB v1 drops that data path.
                     tx.add_tx_path_hash_to_offset_range(max, max, Some(tx_hash))?;
                     tx.add_data_root_info_at(PartitionChunkOffset::from(1), data_root, &info)?;
                 } else {
@@ -3211,7 +3167,7 @@ mod tests {
             let published = store.published_generation();
             assert!(published > store.durable_generation());
             store.update(|tx| {
-                ensure_v3_cover(tx, PartitionChunkOffset::from(2))?;
+                ensure_placement_cover(tx, PartitionChunkOffset::from(2))?;
                 tx.add_full_data_path(PartitionChunkOffset::from(2), vec![2])?;
                 tx.set_path_hashes_by_offset(
                     PartitionChunkOffset::from(2),

@@ -20,8 +20,8 @@ use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_database::submodule::tables::{
-    Metadata, SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3,
-    SUBMODULE_SCHEMA_V3_1, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxPathIntervalByStart,
+    Metadata, SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_ROCKS_V1,
+    TxPathIntervalByStart, unrecognised_rocks_layout,
 };
 use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
 use irys_database::tables::{IrysDataTxHeaders, IrysTables, MigratedBlockHashes};
@@ -86,18 +86,16 @@ Release 4.0.8 submodule indexes are schema v1 (one tx hash per offset, no
 interval table, no RocksDB). Baseline numbers are the v2 interval read.
   cp -a path/to/submodule/db /tmp/submodule-db.copy
   cargo run -p irys-database --bin submodule-index-migrate -- /tmp/submodule-db.copy
-submodule-index-convert writes RocksDB schema v3 and checks each stored tx
+submodule-index-convert writes RocksDB v1 and checks each stored tx
 path against a derive. See `submodule-index-convert --help`. 4.0.8 has no
-RocksDB index. A rocks SCHEMA of \"irys-submodule-rocks 1\" is refused.
-A SCHEMA of schema v2 or schema v3 opens. Schema v3 stores no tx path, so
-baseline-stored does not apply. derive-real and derive-synthetic call the
-production derive.
+RocksDB index. A rocks SCHEMA that is not RocksDB v1 is refused.
+RocksDB v1 stores no tx path, so baseline-stored does not apply.
+derive-real and derive-synthetic call the production derive.
 ";
 
 const DEFAULT_CHUNK: u64 = 262_144;
 const DEFAULT_SAMPLES: usize = 1000;
 const DEFAULT_SPAN_END: u32 = 10_000_000;
-const ROCKS_V1_SCHEMA: &str = "irys-submodule-rocks 1\n";
 const BUCKETS: [&str; 6] = ["1", "2-10", "11-100", "101-1000", "1001-10000", ">10000"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -465,7 +463,7 @@ fn run_baseline(index_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> 
         let index = open_index(index_path, engine, args.migrate_index)?;
         if !index.stores_tx_paths() {
             eyre::bail!(
-                "schema v3 does not store a tx path. baseline-stored times that read. Use --mode derive-real or --mode derive-synthetic."
+                "RocksDB v1 does not store a tx path. baseline-stored times that read. Use --mode derive-real or --mode derive-synthetic."
             );
         }
         harvest_offsets(&index, engine, args, &mdbx_intervals)?
@@ -971,7 +969,7 @@ fn v1_index_message(path: &Path) -> String {
         "submodule index {} has no v2 schema row. Release 4.0.8 stores one tx-path hash per offset and has no interval table. Baseline times the v2 interval read. Do not migrate a live directory.\n\
 cp -a {} /tmp/submodule-db.copy\n\
 cargo run -p irys-database --bin submodule-index-migrate -- /tmp/submodule-db.copy\n\
-submodule-index-convert mdbx-to-rocks writes RocksDB schema v3. It needs the consensus database and the partition geometry. See `submodule-index-convert --help`.\n\
+submodule-index-convert mdbx-to-rocks writes RocksDB v1. It needs the consensus database and the partition geometry. See `submodule-index-convert --help`.\n\
 Or pass --migrate-index when the directory name contains \"copy\". 4.0.8 did not ship a RocksDB index.",
         path.display(),
         path.display()
@@ -979,26 +977,10 @@ Or pass --migrate-index when the directory name contains \"copy\". 4.0.8 did not
 }
 
 fn accept_rocks_schema(text: &str) -> eyre::Result<()> {
-    if text == ROCKS_V1_SCHEMA {
-        eyre::bail!(
-            "SCHEMA is irys-submodule-rocks 1 (per-offset rows). This bench measures the v2 interval read and does not convert. Release 4.0.8 did not ship this RocksDB engine."
-        );
+    if text == SUBMODULE_SCHEMA_ROCKS_V1 {
+        return Ok(());
     }
-    if text == SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX {
-        eyre::bail!(
-            "SCHEMA is irys-submodule-index 3, which has no column family ChunkOffsetsByContentHash. Delete the directory and rerun submodule-index-convert (mdbx-to-rocks or rocks-to-v3)."
-        );
-    }
-    if text == SUBMODULE_SCHEMA_V3_1 {
-        eyre::bail!(
-            "SCHEMA is irys-submodule-index 3.1. Chunk checksums live in the offset row on schema 3.2. Run `submodule-index-convert v31-to-v32` into a new directory, then `submodule-index-convert verify-rocks`."
-        );
-    }
-    if text != SUBMODULE_SCHEMA && text != SUBMODULE_SCHEMA_V3 {
-        let shown: String = text.chars().take(80).collect();
-        eyre::bail!("unrecognized RocksDB SCHEMA: {shown}");
-    }
-    Ok(())
+    eyre::bail!("{}", unrecognised_rocks_layout(text))
 }
 
 fn open_rocks_index(path: &Path) -> eyre::Result<SubmoduleIndex> {
@@ -1944,23 +1926,17 @@ mod tests {
     }
 
     #[test]
-    fn rocks_schema_v2_and_v3_open() {
-        use irys_database::submodule::tables::{
-            SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_1,
-            SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX,
-        };
+    fn public_rocks_marker_opens_and_a_foreign_marker_is_refused() {
+        use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
 
-        super::accept_rocks_schema(SUBMODULE_SCHEMA).unwrap();
-        super::accept_rocks_schema(SUBMODULE_SCHEMA_V3).unwrap();
-        let old = super::accept_rocks_schema(SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX).unwrap_err();
+        super::accept_rocks_schema(SUBMODULE_SCHEMA_ROCKS_V1).unwrap();
+        let foreign = super::accept_rocks_schema("foreign-layout\n").unwrap_err();
+        let message = foreign.to_string();
         assert!(
-            old.to_string().contains("ChunkOffsetsByContentHash"),
-            "{old}"
+            message.contains("unrecognised RocksDB index layout"),
+            "{message}"
         );
-        let v31 = super::accept_rocks_schema(SUBMODULE_SCHEMA_V3_1).unwrap_err();
-        assert!(v31.to_string().contains("v31-to-v32"), "{v31}");
-        assert!(super::accept_rocks_schema("irys-submodule-rocks 1\n").is_err());
-        assert!(super::accept_rocks_schema("nope").is_err());
+        assert!(message.contains("RocksDB v1 only"), "{message}");
     }
 
     #[test]

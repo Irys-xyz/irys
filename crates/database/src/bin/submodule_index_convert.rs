@@ -1,15 +1,15 @@
-//! Offline copy between a submodule index and RocksDB schema v3.
+//! Offline copy between an MDBX submodule index and RocksDB v1.
 //!
 //! Stop the node first. This tool takes the engine lock and refuses to run
 //! when that lock is already held. The directory name does not need to contain
 //! `copy`.
 //!
-//! `mdbx-to-rocks` and `rocks-to-v3` write schema 3.2. `v31-to-v32` wraps a
-//! schema 3.1 index into schema 3.2. `rocks-to-mdbx` rebuilds MDBX schema v2
-//! from schema 3.2 and drops checksum-only rows. Each stored tx path must equal the path
-//! derived from the consensus database. A mismatch aborts and names the
-//! partition offset. The ledger offset is
-//! `slot * chunks_per_partition + partition_offset`.
+//! `mdbx-to-rocks` writes RocksDB v1 from an MDBX schema v1 or v2 index.
+//! `rocks-to-mdbx` rebuilds MDBX schema v2 from RocksDB v1. It drops
+//! checksum-only rows and copies the proof bytes from the offset record.
+//! Each stored tx path must equal the path derived from the consensus
+//! database. A mismatch aborts and names the partition offset. The ledger
+//! offset is `slot * chunks_per_partition + partition_offset`.
 //!
 //! The source is never modified, including a schema v1 MDBX directory.
 //! The completion marker is written last. A crash before that marker leaves
@@ -22,29 +22,22 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use irys_database::submodule::tables::{
-    SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_1,
-};
 use irys_database::submodule::{
-    ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, convert_rocks_v2_to_v3,
-    convert_rocks_v31_to_v32, verify_mdbx_and_rocks, verify_rocks_v2_and_v3,
-    verify_rocks_v31_and_v32, verify_rocks_v32_records,
+    ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, verify_mdbx_and_rocks,
+    verify_rocks_records,
 };
 use irys_database::{consensus_db_args, submodule_db_args};
 use irys_types::config::DatabaseConfig;
 
 const USAGE: &str = "\
 usage:
-  submodule-index-convert mdbx-to-rocks [flags] <db-dir> <rocks-v3-dir>
-  submodule-index-convert rocks-to-v3   [flags] <rocks-v2-dir> <rocks-v3-dir>
-  submodule-index-convert v31-to-v32    [flags] <rocks-3.1-dir> <rocks-3.2-dir>
-  submodule-index-convert rocks-to-mdbx [flags] <rocks-v3-dir> <db-dir>
-  submodule-index-convert verify        [flags] <db-dir> <rocks-v3-dir>
+  submodule-index-convert mdbx-to-rocks [flags] <db-dir> <rocks-dir>
+  submodule-index-convert rocks-to-mdbx [flags] <rocks-dir> <db-dir>
+  submodule-index-convert verify        [flags] <db-dir> <rocks-dir>
   submodule-index-convert verify-rocks  [flags] <rocks-left-dir> <rocks-right-dir>
 
-v31-to-v32 does not read the consensus database. verify-rocks of a schema 3.1
-directory against schema 3.2, or of two schema 3.2 directories, does not either.
-The flags below are required for every other command.
+verify-rocks compares two RocksDB v1 directories. It does not read the
+consensus database. The flags below are required for every other command.
 
 required flags:
   --consensus-db <dir>           node consensus database.
@@ -61,7 +54,7 @@ optional:
   --replace-incomplete           delete a target only when it contains a CONVERTING
                                  file written by this tool, and none of chunks.dat,
                                  chunks.crc, packing_params.toml, intervals.json, a consensus
-                                 database, a v1 or v2 index, or a completed v3 index.
+                                 database, an MDBX index, or a completed RocksDB v1 index.
                                  An older incomplete directory without CONVERTING
                                  is not deleted. Remove that directory by hand.
                                  Illegal on verify and verify-rocks.
@@ -83,9 +76,8 @@ ledger offset = slot * chunks_per_partition + partition offset.
 The tool derives the tx path at that offset and requires the stored bytes to
 be identical. A mismatch aborts and prints the partition offset.
 The source is never modified. A schema v1 MDBX index is read as v1.
-rocks-to-mdbx reads schema 3.2 only. It drops checksum-only rows and strips
-the record header from proof rows. A schema v2 RocksDB index uses rocks-to-v3
-first. A schema 3.1 index uses v31-to-v32 first. Direct 3.1 to MDBX is refused.
+rocks-to-mdbx reads RocksDB v1 only. It drops checksum-only rows and copies
+the proof bytes from the offset record.
 
 An empty submodule index succeeds and the report shows zero copied rows.
 A placement the consensus database cannot resolve fails the run. The target
@@ -114,18 +106,11 @@ Read num_chunks_in_partition and the chunk size from the chain config.
     --chunks-per-partition <n> --chunk-size <bytes> \\
     <submodule>/db <submodule>/rocks
 
-A RocksDB schema v2 index uses rocks-to-v3 with the same flags, then
-verify-rocks. A schema 3.1 index uses v31-to-v32, then verify-rocks, with no
-consensus flags. Replace rocks/ with the new directory only when verify-rocks
-prints no mismatch. database.submodule_index stays rocksdb.
+  submodule-index-convert verify-rocks <submodule>/rocks <other>/rocks
 
-  submodule-index-convert v31-to-v32 <submodule>/rocks <submodule>/rocks-3.2
-  submodule-index-convert verify-rocks <submodule>/rocks <submodule>/rocks-3.2
-
-rocks-to-mdbx writes an MDBX schema v2 index for this build. It reads schema
-3.2 only. A schema v2 RocksDB index uses rocks-to-v3 first. A schema 3.1
-index uses v31-to-v32 first. The node migrates a schema v1 db/ (release
-4.0.x) to MDBX schema v2 in place. Release 4.0.x cannot read the result.
+rocks-to-mdbx writes an MDBX schema v2 index for this build. It reads
+RocksDB v1 only. The node migrates a schema v1 db/ (release 4.0.x) to
+MDBX schema v2 in place. Release 4.0.x cannot read the result.
 There is no rollback from 4.1.0 to 4.0.x.
 
 verify and verify-rocks exit 1 when a public read differs or when a placement
@@ -151,29 +136,8 @@ fn run() -> eyre::Result<ExitCode> {
         eyre::bail!("source and target are the same path");
     }
     match tool.command {
-        Command::V31ToV32 => {
-            let stats = convert_rocks_v31_to_v32(
-                &tool.left,
-                &tool.right,
-                tool.replace_incomplete,
-                tool.dry_run,
-            )?;
-            print!("{stats}");
-        }
         Command::VerifyRocks => {
-            let left_schema = std::fs::read_to_string(tool.left.join("SCHEMA")).unwrap_or_default();
-            let report = if left_schema == SUBMODULE_SCHEMA_V3_1 {
-                verify_rocks_v31_and_v32(&tool.left, &tool.right)?
-            } else if left_schema == SUBMODULE_SCHEMA_V3 {
-                verify_rocks_v32_records(&tool.left, &tool.right)?
-            } else if left_schema == SUBMODULE_SCHEMA {
-                let options = consensus_options(&tool)?;
-                verify_rocks_v2_and_v3(&tool.left, &tool.right, &options)?
-            } else {
-                eyre::bail!(
-                    "verify-rocks left schema is {left_schema:?}. Use a schema v2, 3.1, or 3.2 directory."
-                );
-            };
+            let report = verify_rocks_records(&tool.left, &tool.right)?;
             print!("{report}");
             if report.has_mismatch() {
                 eyre::bail!("read equivalence mismatch");
@@ -184,10 +148,6 @@ fn run() -> eyre::Result<ExitCode> {
             match command {
                 Command::MdbxToRocks => {
                     let stats = convert_mdbx_to_rocks(&tool.left, &tool.right, &options)?;
-                    print!("{stats}");
-                }
-                Command::RocksToV3 => {
-                    let stats = convert_rocks_v2_to_v3(&tool.left, &tool.right, &options)?;
                     print!("{stats}");
                 }
                 Command::RocksToMdbx => {
@@ -201,15 +161,15 @@ fn run() -> eyre::Result<ExitCode> {
                         eyre::bail!("read equivalence mismatch");
                     }
                 }
-                Command::V31ToV32 | Command::VerifyRocks => unreachable!("handled above"),
+                Command::VerifyRocks => unreachable!("handled above"),
             }
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// Consensus flags for a command that derives tx paths. `v31-to-v32` and a
-/// schema 3.1 or 3.2 `verify-rocks` do not call this.
+/// Consensus flags for a command that derives tx paths.
+/// `verify-rocks` does not call this.
 fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     let Some(consensus_db) = tool.consensus_db.clone() else {
         eyre::bail!("--consensus-db is required for this command");
@@ -242,8 +202,6 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
 #[derive(Clone, Copy)]
 enum Command {
     MdbxToRocks,
-    RocksToV3,
-    V31ToV32,
     RocksToMdbx,
     Verify,
     VerifyRocks,
@@ -274,8 +232,6 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     }
     let command = match command.as_str() {
         "mdbx-to-rocks" => Command::MdbxToRocks,
-        "rocks-to-v3" => Command::RocksToV3,
-        "v31-to-v32" => Command::V31ToV32,
         "rocks-to-mdbx" => Command::RocksToMdbx,
         "verify" => Command::Verify,
         "verify-rocks" => Command::VerifyRocks,
@@ -358,9 +314,8 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
-    // Schema 3.1 and 3.2 verify-rocks are structural. Schema v2 verify-rocks
-    // still needs the consensus flags; `run` checks that after it reads SCHEMA.
-    let structural = matches!(command, Command::V31ToV32 | Command::VerifyRocks);
+    // verify-rocks compares two RocksDB v1 directories and needs no consensus flags.
+    let structural = matches!(command, Command::VerifyRocks);
     if !structural
         && (consensus_db.is_none()
             || ledger_id.is_none()

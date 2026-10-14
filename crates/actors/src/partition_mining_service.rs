@@ -78,11 +78,11 @@ pub struct PartitionMiningServiceInner {
 
 /// What the derive job must compare against the rebuilt path.
 enum DerivePlacement {
-    /// Schema v2 stores no placement identity.
+    /// MDBX stores no placement identity on the derive path.
     Skip,
-    /// Schema v3 row for this offset.
+    /// RocksDB v1 row for this offset.
     Check(irys_database::tx_path_derive::PlacementCheck),
-    /// Schema v3 has no usable row. The job fails with this text.
+    /// RocksDB v1 has no usable row. The job fails with this text.
     Missing(String),
 }
 
@@ -576,7 +576,7 @@ impl PartitionMiningServiceInner {
     /// Start a derive for `offset`. `None` when this miner has no consensus
     /// database, the partition has no ledger slot, or the submodule is missing.
     ///
-    /// The job checks the derived root against `data_path` and, on schema v3,
+    /// The job checks the derived root against `data_path` and, on RocksDB v1,
     /// against the stored placement. A mismatch fails the job.
     fn spawn_tx_path_derive(
         &self,
@@ -613,7 +613,7 @@ impl PartitionMiningServiceInner {
         }))
     }
 
-    /// Schema v2 skips the placement check. Schema v3 requires the stored row.
+    /// MDBX skips the placement check. RocksDB v1 requires the stored row.
     fn placement_for_derive(&self, offset: PartitionChunkOffset) -> Option<DerivePlacement> {
         let (_, submodule) = self.storage_module.get_submodule_for_offset(offset).ok()?;
         if submodule.db.stores_tx_paths() {

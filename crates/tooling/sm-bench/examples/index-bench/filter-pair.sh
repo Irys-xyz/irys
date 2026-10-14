@@ -21,7 +21,7 @@ run() { local name=$1; shift
 pgrep -f "submodule-index-bench-.* --dir|irys-sm-bench --dir" > /dev/null && die "another bench running"
 src=/mnt/sm-3/loadtest/index-bench/rocks
 test -f "$src/CURRENT" && test -f "$src/000009.sst" && test -f "$src/SCHEMA" || die "source incomplete"
-printf "irys-submodule-rocks 1\n" | cmp -s - "$src/SCHEMA" || die "source SCHEMA not v1"
+printf "irys-submodule-index rocksdb 1\n" | cmp -s - "$src/SCHEMA" || die "source SCHEMA not RocksDB v1"
 for name in baseline partition-filters; do
   dest="/mnt/sm-3/loadtest/rocks-filter-$name/index-bench"
   rm -rf "$dest"; mkdir -p "$dest"; cp -a "$src" "$dest/rocks"

@@ -797,7 +797,7 @@ pub struct PlacementCheck {
 
 /// The derived path must prove the same chunk the miner holds.
 ///
-/// `placement` is required on schema v3. A mismatch is an error the caller drops.
+/// `placement` is required on RocksDB v1. A mismatch is an error the caller drops.
 pub fn cross_check_derived(
     derived: &DerivedTxPath,
     ledger_offset: u64,

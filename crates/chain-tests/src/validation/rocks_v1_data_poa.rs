@@ -1,4 +1,4 @@
-//! Schema v3 stores no tx path. A mined data chunk must derive one, and
+//! RocksDB v1 stores no tx path. A mined data chunk must derive one, and
 //! `poa_is_valid` must accept it. These tests run a node whose submodule
 //! index is RocksDB and wait until a canonical block carries that PoA.
 //!
@@ -15,7 +15,7 @@ use crate::utils::{self, IrysNodeTest};
 use irys_actors::block_producer::BlockProducerCommand;
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::submodule::tables::SUBMODULE_SCHEMA_V3;
+use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
 use irys_database::tx_path_derive::derive_tx_path_at_offset;
 use irys_domain::ChunkType;
 use irys_testing_utils::initialize_tracing;
@@ -52,7 +52,7 @@ fn rocks_config(chunks_in_partition: u64, blocks_in_epoch: u64) -> NodeConfig {
     config
 }
 
-fn assert_rocks_v3(base: &Path) -> eyre::Result<()> {
+fn assert_rocks_v1(base: &Path) -> eyre::Result<()> {
     let modules = base.join("storage_modules");
     let mut found = 0_u32;
     for entry in std::fs::read_dir(&modules).wrap_err("read storage_modules")? {
@@ -62,17 +62,13 @@ fn assert_rocks_v3(base: &Path) -> eyre::Result<()> {
         }
         let text = std::fs::read_to_string(&schema)?;
         eyre::ensure!(
-            text == SUBMODULE_SCHEMA_V3,
-            "{} is {text:?}, want schema v3",
+            text == SUBMODULE_SCHEMA_ROCKS_V1,
+            "{} is {text:?}, want RocksDB v1",
             schema.display()
         );
         found += 1;
     }
-    eyre::ensure!(
-        found > 0,
-        "no rocks schema v3 index under {}",
-        modules.display()
-    );
+    eyre::ensure!(found > 0, "no RocksDB v1 index under {}", modules.display());
     Ok(())
 }
 
@@ -86,7 +82,7 @@ async fn start_rocks_node(
     StorageSubmodulesConfig::load_for_test(node.cfg.base_directory.clone(), submodules)?;
     let node = node.start_and_wait_for_packing("GENESIS", 30).await;
     node.stop_mining();
-    assert_rocks_v3(&node.node_ctx.config.node_config.base_directory)?;
+    assert_rocks_v1(&node.node_ctx.config.node_config.base_directory)?;
     Ok((node, signer))
 }
 
@@ -240,7 +236,7 @@ fn assert_derived_tx_index(
 /// produces a Submit data PoA and, once the txs promote, a Publish data PoA.
 /// Both go through validation on a schema-v3 index.
 #[test_log::test(tokio::test)]
-async fn heavy_test_rocks_v3_submit_and_publish_data_poa() -> eyre::Result<()> {
+async fn heavy_test_rocks_v1_submit_and_publish_data_poa() -> eyre::Result<()> {
     initialize_tracing();
     let (node, signer) = start_rocks_node(rocks_config(4, 100), 3).await?;
 
@@ -282,7 +278,7 @@ async fn heavy_test_rocks_v3_submit_and_publish_data_poa() -> eyre::Result<()> {
 
 /// A chunk-aligned OneYear tx is mined as a data chunk on the term ledger.
 #[test_log::test(tokio::test)]
-async fn heavy_test_rocks_v3_term_ledger_data_poa() -> eyre::Result<()> {
+async fn heavy_test_rocks_v1_term_ledger_data_poa() -> eyre::Result<()> {
     initialize_tracing();
     let mut config = rocks_config(4, 2);
     config.consensus.get_mut().hardforks.cascade = Some(Cascade {
@@ -321,7 +317,7 @@ async fn heavy_test_rocks_v3_term_ledger_data_poa() -> eyre::Result<()> {
 /// slot 1. The later slots stay empty, and the eight chunks occupy slot 0
 /// and slot 1.
 #[test_log::test(tokio::test)]
-async fn heavy_test_rocks_v3_nonzero_slot_data_poa() -> eyre::Result<()> {
+async fn heavy_test_rocks_v1_nonzero_slot_data_poa() -> eyre::Result<()> {
     initialize_tracing();
     // Testing config activates Cascade, so genesis assigns Publish, Submit,
     // OneYear, and ThirtyDay. The fifth module is the capacity partition
@@ -356,7 +352,7 @@ async fn heavy_test_rocks_v3_nonzero_slot_data_poa() -> eyre::Result<()> {
 
 /// A chunk-aligned ThirtyDay tx is mined as a data chunk on that ledger.
 #[test_log::test(tokio::test)]
-async fn heavy_test_rocks_v3_thirty_day_data_poa() -> eyre::Result<()> {
+async fn heavy_test_rocks_v1_thirty_day_data_poa() -> eyre::Result<()> {
     initialize_tracing();
     let mut config = rocks_config(4, 2);
     config.consensus.get_mut().hardforks.cascade = Some(Cascade {
@@ -395,7 +391,7 @@ async fn heavy_test_rocks_v3_thirty_day_data_poa() -> eyre::Result<()> {
 /// proofs promotion requires, so the spare capacity partition becomes Submit
 /// slot 1. The PoA is mined there while Publish still has no data.
 #[test_log::test(tokio::test)]
-async fn heavy_test_rocks_v3_submit_nonzero_slot_data_poa() -> eyre::Result<()> {
+async fn heavy_test_rocks_v1_submit_nonzero_slot_data_poa() -> eyre::Result<()> {
     initialize_tracing();
     let mut config = rocks_config(4, 2);
     // One signer produces one ingress proof. Promotion needs two, so the
@@ -442,7 +438,7 @@ async fn heavy_test_rocks_v3_submit_nonzero_slot_data_poa() -> eyre::Result<()> 
 /// A solution whose derive already failed is dropped before a block is built.
 /// The node then mines a later block.
 #[test_log::test(tokio::test)]
-async fn heavy_test_rocks_v3_failed_derive_drops_the_solution() -> eyre::Result<()> {
+async fn heavy_test_rocks_v1_failed_derive_drops_the_solution() -> eyre::Result<()> {
     initialize_tracing();
     let (node, _signer) = start_rocks_node(rocks_config(4, 100), 3).await?;
     let before = irys_actors::tx_path_derive_failed_for_test();

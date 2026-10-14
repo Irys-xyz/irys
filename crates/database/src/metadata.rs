@@ -11,11 +11,11 @@ pub enum MetadataKey {
     /// Set before a storage-module reset clears the index. Open finishes the
     /// clear while this row is present. It is not a schema version.
     SubmoduleResetInProgress = 2,
-    /// Partition this schema-v3 index was bound to. Absent until the module
+    /// Partition this RocksDB v1 index was bound to. Absent until the module
     /// is assigned. A later different hash refuses to open.
     PartitionHash = 3,
     /// Hash of the packing address, iterations, chunk size, and chain id.
-    /// A mismatch refuses to open a schema-v3 index.
+    /// A mismatch refuses to open a RocksDB v1 index.
     PackingParamsHash = 4,
     /// Set after a scan of a fully packed module finds a checksum on every
     /// offset. Absent means unset. Reset deletes the key. `clear` does not.

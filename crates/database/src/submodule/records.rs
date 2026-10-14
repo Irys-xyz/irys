@@ -1,4 +1,4 @@
-//! RocksDB schema v3 records.
+//! RocksDB v1 records.
 //!
 //! One fixed big-endian layout. No SCALE and no Compact. A row belongs to
 //! one placement: the data-root point key is removed in the same batch as
@@ -8,7 +8,7 @@ use irys_types::{H256, PartitionChunkOffset, RelativeChunkOffset};
 
 use super::tables::{OffsetMeta, PendingBodyMigration};
 
-/// Format byte at the end of a schema 3.2 offset value.
+/// Format byte at the end of a RocksDB v1 offset value.
 const OFFSET_META_FORMAT: u8 = 1;
 /// The value begins with a data proof.
 const OFFSET_FLAG_HAS_PROOF: u8 = 0x01;
@@ -31,8 +31,7 @@ const OFFSET_FLAG_CRC_PRESENT: u8 = 0x02;
 /// +4.10 on the largest; as a prefix it costs +1.09 and +2.86 B/chunk more.
 /// Prefix wins only on unrelated (uniform) proofs, by ~1.06 B/chunk, which is
 /// not the stored shape. The format byte can sit last because RocksDB values
-/// are length-delimited; a schema 3.1 raw proof is told apart by the schema
-/// marker, never by these bytes.
+/// are length-delimited. The schema marker names the layout. These bytes do not.
 pub fn encode_offset_meta(meta: &OffsetMeta) -> eyre::Result<Vec<u8>> {
     let proof = meta.proof.as_deref().unwrap_or(&[]);
     let has_proof = meta.proof.is_some();
@@ -60,7 +59,7 @@ pub fn encode_offset_meta(meta: &OffsetMeta) -> eyre::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decode one schema 3.2 offset value. A raw schema 3.1 proof does not decode.
+/// Decode one RocksDB v1 offset value.
 pub fn decode_offset_meta(bytes: &[u8]) -> eyre::Result<OffsetMeta> {
     if bytes.len() < 2 {
         eyre::bail!("offset row is {} bytes", bytes.len());
@@ -113,17 +112,14 @@ pub(super) const PENDING_LEN: usize = 56;
 pub(super) const UNSET_U32: u32 = u32::MAX;
 pub(super) const UNSET_U64: u64 = u64::MAX;
 
-/// Column families this process opens for one index directory.
+/// The only RocksDB layout this process opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IndexLayout {
-    /// Compact rows, including stored tx paths. MDBX, and a RocksDB
-    /// directory whose schema file is still version 2.
-    V2,
     /// Fixed records. Tx paths are not stored.
-    V3,
+    RocksV1,
 }
 
-/// Locator copied onto intervals assigned after [`IndexLayout::V3`] sees it.
+/// Locator copied onto intervals assigned after a RocksDB v1 open sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PlacementOrigin {
     pub ledger: u32,
@@ -133,7 +129,7 @@ pub(super) struct PlacementOrigin {
 
 /// Inclusive placement stored under its start offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct V3Placement {
+pub(super) struct PlacementRecord {
     pub end: u32,
     pub data_root: [u8; 32],
     pub tx_start: i32,
@@ -144,9 +140,9 @@ pub(super) struct V3Placement {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct V3Interval {
+pub(super) struct PlacementSpan {
     pub start: u32,
-    pub value: V3Placement,
+    pub value: PlacementRecord,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,7 +152,7 @@ pub(super) struct DataRootPlacement {
     pub data_size: u64,
 }
 
-pub(super) fn encode_placement(value: &V3Placement) -> [u8; PLACEMENT_LEN] {
+pub(super) fn encode_placement(value: &PlacementRecord) -> [u8; PLACEMENT_LEN] {
     let mut out = [0_u8; PLACEMENT_LEN];
     out[0..4].copy_from_slice(&value.end.to_be_bytes());
     out[4..36].copy_from_slice(&value.data_root);
@@ -168,14 +164,14 @@ pub(super) fn encode_placement(value: &V3Placement) -> [u8; PLACEMENT_LEN] {
     out
 }
 
-pub(super) fn decode_placement(bytes: &[u8]) -> eyre::Result<V3Placement> {
+pub(super) fn decode_placement(bytes: &[u8]) -> eyre::Result<PlacementRecord> {
     if bytes.len() != PLACEMENT_LEN {
         eyre::bail!(
             "placement interval value is {} bytes, expected {PLACEMENT_LEN}",
             bytes.len()
         );
     }
-    Ok(V3Placement {
+    Ok(PlacementRecord {
         end: u32::from_be_bytes(bytes[0..4].try_into().expect("4")),
         data_root: bytes[4..36].try_into().expect("32"),
         tx_start: i32::from_be_bytes(bytes[36..40].try_into().expect("4")),
@@ -277,12 +273,12 @@ pub(super) fn fresh_placement(
     end: u32,
     data_root: H256,
     origin: Option<PlacementOrigin>,
-) -> V3Placement {
+) -> PlacementRecord {
     let (ledger, block_height, tx_index) = match origin {
         Some(origin) => (origin.ledger, origin.block_height, origin.tx_index),
         None => (UNSET_U32, UNSET_U64, UNSET_U32),
     };
-    V3Placement {
+    PlacementRecord {
         end,
         data_root: data_root.0,
         tx_start: 0,
@@ -294,11 +290,11 @@ pub(super) fn fresh_placement(
 }
 
 /// A placement still waiting for its `DataRootInfo` in this batch.
-pub(super) fn awaits_info(value: &V3Placement) -> bool {
+pub(super) fn awaits_info(value: &PlacementRecord) -> bool {
     value.tx_start == 0 && value.data_size == 0 && value.data_root != [0; 32]
 }
 
-pub(super) fn same_identity(left: &V3Placement, right: &V3Placement) -> bool {
+pub(super) fn same_identity(left: &PlacementRecord, right: &PlacementRecord) -> bool {
     left.data_root == right.data_root
         && left.tx_start == right.tx_start
         && left.data_size == right.data_size
@@ -313,12 +309,12 @@ pub(super) fn same_identity(left: &V3Placement, right: &V3Placement) -> bool {
 /// `None` removes coverage. Fragments keep the parent record. Adjacent rows
 /// merge when every identity field matches. An all-zero data root does not
 /// merge: the caller did not name a placement.
-pub(super) fn plan_v3(
-    existing: &[V3Interval],
+pub(super) fn plan_placement(
+    existing: &[PlacementSpan],
     start: u32,
     end: u32,
-    next: Option<V3Placement>,
-) -> (Vec<u32>, Vec<V3Interval>) {
+    next: Option<PlacementRecord>,
+) -> (Vec<u32>, Vec<PlacementSpan>) {
     if start > end {
         return (Vec::new(), Vec::new());
     }
@@ -341,15 +337,15 @@ pub(super) fn plan_v3(
     }
     if let Some(mut value) = next {
         value.end = end;
-        kept.push(V3Interval { start, value });
+        kept.push(PlacementSpan { start, value });
     }
     let merged = merge_adjacent(kept);
     diff(existing, &merged)
 }
 
-fn merge_adjacent(mut rows: Vec<V3Interval>) -> Vec<V3Interval> {
+fn merge_adjacent(mut rows: Vec<PlacementSpan>) -> Vec<PlacementSpan> {
     rows.sort_by_key(|row| row.start);
-    let mut out: Vec<V3Interval> = Vec::new();
+    let mut out: Vec<PlacementSpan> = Vec::new();
     for row in rows {
         if let Some(prev) = out.last_mut()
             && same_identity(&prev.value, &row.value)
@@ -363,10 +359,10 @@ fn merge_adjacent(mut rows: Vec<V3Interval>) -> Vec<V3Interval> {
     out
 }
 
-fn diff(existing: &[V3Interval], merged: &[V3Interval]) -> (Vec<u32>, Vec<V3Interval>) {
+fn diff(existing: &[PlacementSpan], merged: &[PlacementSpan]) -> (Vec<u32>, Vec<PlacementSpan>) {
     let mut delete = Vec::new();
     let mut put = Vec::new();
-    let mut old: Vec<&V3Interval> = existing.iter().collect();
+    let mut old: Vec<&PlacementSpan> = existing.iter().collect();
     for row in merged {
         if let Some(pos) = old
             .iter()
@@ -437,8 +433,8 @@ mod tests {
         assert!(decode_offset_meta(&[OFFSET_FLAG_HAS_PROOF, OFFSET_META_FORMAT]).is_err());
     }
 
-    fn placed(end: u32, byte: u8, size: u64) -> V3Placement {
-        V3Placement {
+    fn placed(end: u32, byte: u8, size: u64) -> PlacementRecord {
+        PlacementRecord {
             end,
             data_root: [byte; 32],
             tx_start: 0,
@@ -451,7 +447,7 @@ mod tests {
 
     #[test]
     fn placement_bytes_round_trip() {
-        let value = V3Placement {
+        let value = PlacementRecord {
             end: 9,
             data_root: [7; 32],
             tx_start: -3,
@@ -465,11 +461,11 @@ mod tests {
 
     #[test]
     fn adjacent_same_identity_is_one_interval() {
-        let left = V3Interval {
+        let left = PlacementSpan {
             start: 0,
             value: placed(4, 1, 10),
         };
-        let (delete, put) = plan_v3(&[left], 5, 9, Some(placed(0, 1, 10)));
+        let (delete, put) = plan_placement(&[left], 5, 9, Some(placed(0, 1, 10)));
         assert!(delete.is_empty());
         assert_eq!(put.len(), 1);
         assert_eq!(put[0].start, 0);
@@ -478,11 +474,11 @@ mod tests {
 
     #[test]
     fn a_different_data_root_does_not_merge() {
-        let left = V3Interval {
+        let left = PlacementSpan {
             start: 0,
             value: placed(4, 1, 10),
         };
-        let (_delete, put) = plan_v3(&[left], 5, 9, Some(placed(0, 2, 10)));
+        let (_delete, put) = plan_placement(&[left], 5, 9, Some(placed(0, 2, 10)));
         assert_eq!(put.len(), 1);
         assert_eq!(put[0].start, 5);
     }

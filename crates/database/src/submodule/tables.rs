@@ -17,29 +17,29 @@ use std::fmt;
 /// only when the new rows are complete. Any other row is refused.
 pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 
-/// Schema file and metadata row for a RocksDB index that stores placements,
-/// inline data proofs, chunk checksums in the offset row, and
-/// `ChunkOffsetsByContentHash`. MDBX stays on [`SUBMODULE_SCHEMA`].
-pub const SUBMODULE_SCHEMA_V3: &str = "irys-submodule-index 3.2\n";
-
-/// RocksDB column family for a schema 3.2 offset record.
+/// Schema file and metadata row for a RocksDB v1 index.
 ///
-/// The value is the versioned proof and checksum. Schema 3.1 and schema v2
-/// keep the raw proof in `ChunkDataPathByOffset`. MDBX uses that table name
-/// and stores only the proof.
+/// The layout stores placements, inline data proofs, chunk checksums in the
+/// offset row, and `ChunkOffsetsByContentHash`. MDBX stays on
+/// [`SUBMODULE_SCHEMA`]. Any other `rocks/SCHEMA` text is refused.
+pub const SUBMODULE_SCHEMA_ROCKS_V1: &str = "irys-submodule-index rocksdb 1\n";
+
+/// RocksDB column family for a RocksDB v1 offset record.
+///
+/// The value is the versioned proof and checksum. MDBX uses
+/// `ChunkDataPathByOffset` and stores only the proof.
 pub const CHUNK_META_BY_OFFSET_CF: &str = "ChunkMetaByOffset";
 
-/// Schema 3.1 marker. The offset value is the raw proof and has no checksum.
+/// One message for every `rocks/` marker this build does not read.
 ///
-/// Open refuses this file. `submodule-index-convert v31-to-v32` writes a new
-/// directory. The node does not rewrite 3.1 in place.
-pub const SUBMODULE_SCHEMA_V3_1: &str = "irys-submodule-index 3.1\n";
-
-/// Schema v3 marker that does not name the content-hash offset index.
-///
-/// Open refuses this file. It does not create `ChunkOffsetsByContentHash`
-/// empty, because every stored proof would then lack its reverse row.
-pub const SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX: &str = "irys-submodule-index 3\n";
+/// The text names RocksDB v1 and the recovery (move the directory aside and
+/// convert from MDBX, or reset the storage module). It does not name any
+/// other layout.
+pub fn unrecognised_rocks_layout(marker: &str) -> String {
+    format!(
+        "unrecognised RocksDB index layout {marker:?}; this build reads RocksDB v1 only. If this directory came from a pre-release build, move it aside and convert from MDBX or reset the storage module"
+    )
+}
 
 /// Metadata row written while a conversion into MDBX is still copying.
 ///
@@ -63,11 +63,9 @@ tables! {
 
     /// One data proof at a partition offset.
     ///
-    /// MDBX, RocksDB schema v2, and RocksDB schema 3.1 use this name. The
-    /// value is the raw proof. RocksDB schema 3.2 stores the versioned
-    /// offset record in [`CHUNK_META_BY_OFFSET_CF`]. Offset order keeps
-    /// compaction on sequential keys. The 32-byte hash stays on
-    /// [`ChunkPathHashesByOffset`] for schema v2 because callers return it.
+    /// MDBX uses this name. The value is the raw proof. RocksDB v1 stores the
+    /// versioned offset record in [`CHUNK_META_BY_OFFSET_CF`]. Offset order
+    /// keeps compaction on sequential keys.
     table ChunkDataPathByOffset {
         type Key = PartitionChunkOffset;
         type Value = ChunkDataPath;
@@ -129,7 +127,7 @@ tables! {
 
 }
 
-/// Decoded [`CHUNK_META_BY_OFFSET_CF`] value on schema 3.2.
+/// Decoded [`CHUNK_META_BY_OFFSET_CF`] value on RocksDB v1.
 ///
 /// `crc` is `None` when the row does not carry a checksum. That is unknown,
 /// not a stored zero. `proof` is `None` on an entropy checksum row. A data
@@ -154,7 +152,7 @@ pub struct PackedOffsetRow {
 
 /// One tx placement as a reader sees it.
 ///
-/// Schema v2 leaves `ledger`, `block_height`, and `tx_index` empty. The data
+/// MDBX leaves `ledger`, `block_height`, and `tx_index` empty. The data
 /// root comes from the tx-path leaf binding, and the unclipped start and
 /// `data_size` come from [`DataRootInfo`]. `start` and `end` are the clipped
 /// interval stored for this submodule.

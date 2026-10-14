@@ -20,7 +20,7 @@ mod promote_after_submit_expiry;
 mod publish_after_submit_expiry_filtered;
 mod reorg_submit_expiry;
 mod reward_address_coinbase;
-mod rocks_v3_data_poa;
+mod rocks_v1_data_poa;
 mod same_block_promotion;
 mod slow_path_submit_expiry;
 mod unpledge_partition;

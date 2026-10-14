@@ -1,7 +1,7 @@
 //! Offline copy between submodule indexes.
 //!
-//! `mdbx-to-rocks` and `rocks-to-v3` write a RocksDB schema v3 index.
-//! `rocks-to-mdbx` rebuilds an MDBX schema v2 index from schema 3.2. Each
+//! `mdbx-to-rocks` writes a RocksDB v1 index.
+//! `rocks-to-mdbx` rebuilds an MDBX schema v2 index from RocksDB v1. Each
 //! stored tx path must equal the path derived from the consensus database.
 //! A mismatch aborts and names the partition offset.
 //!
@@ -58,9 +58,8 @@ use super::tables::v1::ChunkDataPathByPathHash;
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
     DataRootInfosByDataRoot, Metadata, PendingBodyMigration, PendingBodyMigrationsByOffset,
-    SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_1,
-    SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding, TxLeafBindingByTxPathHash,
-    TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
+    SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
+    TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
 };
 
 const CONVERTING_FILE: &str = "CONVERTING";
@@ -102,7 +101,7 @@ pub struct EngineEquivalenceReport {
     pub pending_mismatches: u64,
     pub reset_marker_mismatch: u64,
     pub schema_mismatch: u64,
-    /// Parseable proof leaves plus reverse rows examined on the schema v3 side.
+    /// Parseable proof leaves plus reverse rows examined on the RocksDB v1 side.
     pub content_offsets_checked: u64,
     /// A proof leaf with no reverse row, or a reverse row whose proof leaf differs.
     pub content_offset_mismatches: u64,
@@ -111,9 +110,9 @@ pub struct EngineEquivalenceReport {
     /// Placements past the consensus frontier. The node has not indexed them yet.
     /// A non-zero count is a mismatch: verify must not accept a partial index.
     pub skipped_frontier: u64,
-    /// Schema v3 rows `audit_index` rejected. Zero on MDBX and schema v2.
+    /// RocksDB v1 rows `audit_index` rejected. Zero on MDBX and schema v2.
     pub index_audit_findings: u64,
-    /// Schema 3.2 checksum that is not the value verify expected.
+    /// RocksDB v1 checksum that is not the value verify expected.
     pub mismatch_chunk_crc: u64,
     pub samples: Vec<EngineMismatch>,
 }
@@ -453,7 +452,7 @@ impl RowSource for RocksSubmoduleStore {
         after: Option<PartitionChunkOffset>,
         limits: Limits,
     ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkDataPath)>> {
-        // Schema v2 stores the raw proof under this name. Schema 3.2 reads
+        // MDBX stores the raw proof under this name. RocksDB v1 reads
         // `ChunkMetaByOffset` through `read_offset_row_keys`.
         self.read_cf_batch(
             ChunkDataPathByOffset::NAME,
@@ -485,7 +484,7 @@ impl RowSource for RocksSubmoduleStore {
         limit: usize,
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let name = match table {
-            // Schema v2. Schema 3.2 offset keys use `read_offset_row_keys`.
+            // MDBX. RocksDB v1 offset keys use `read_offset_row_keys`.
             OffsetTable::DataPaths => ChunkDataPathByOffset::NAME,
             OffsetTable::Pending => PendingBodyMigrationsByOffset::NAME,
         };
@@ -497,7 +496,7 @@ impl RowSource for RocksSubmoduleStore {
     }
 }
 
-/// Copies a v1 or v2 MDBX submodule index into a new RocksDB schema v3 directory.
+/// Copies a v1 or v2 MDBX submodule index into a new RocksDB RocksDB v1 directory.
 ///
 /// The source is opened read-only. A v1 index is converted from its own rows.
 /// It is not migrated. Each stored tx path must match the path derived from
@@ -535,113 +534,13 @@ pub fn convert_mdbx_to_rocks(
     Ok(finish_stats(stats, started, source_v1))
 }
 
-/// Copies a completed RocksDB schema v2 index into a new schema v3 directory.
-///
-/// The source is not modified. The check is the same as [`convert_mdbx_to_rocks`]:
-/// the derived tx path must equal the stored bytes, or the run aborts with the
-/// partition offset.
-pub fn convert_rocks_v2_to_v3(
-    v2_dir: &Path,
-    v3_dir: &Path,
-    options: &ConvertOptions,
-) -> eyre::Result<ConvertStats> {
-    let started = Instant::now();
-    guard_paths(v2_dir, v3_dir, options)?;
-    let map = require_map(options)?;
-    let db = open_consensus(options)?;
-    require_rocks_schema(v2_dir, SUBMODULE_SCHEMA, "schema v2")?;
-    let src = map_open(RocksSubmoduleStore::open_read_only(v2_dir))?;
-    if !src.stores_tx_paths() {
-        eyre::bail!("source {} is not a schema v2 index.", v2_dir.display());
-    }
-    if src.reset_in_progress()? {
-        return Ok(finish_stats(
-            write_reset_rocks(v3_dir, options, false)?,
-            started,
-            false,
-        ));
-    }
-    Ok(finish_stats(
-        copy_v2_rocks(&src, v3_dir, options, &db, &map)?,
-        started,
-        false,
-    ))
-}
-
-/// Wraps a schema 3.1 index into a new schema 3.2 directory.
-///
-/// Proof rows are copied with the checksum unset. No entropy rows are
-/// written: this pass does not read `chunks.dat`. Other families are copied
-/// as stored. The source is not modified. The schema file is written last.
-pub fn convert_rocks_v31_to_v32(
-    src_dir: &Path,
-    dst_dir: &Path,
-    replace_incomplete: bool,
-    dry_run: bool,
-) -> eyre::Result<ConvertStats> {
-    let started = Instant::now();
-    if same_path(src_dir, dst_dir) {
-        eyre::bail!(
-            "source and target are the same path ({})",
-            src_dir.display()
-        );
-    }
-    require_rocks_schema(src_dir, SUBMODULE_SCHEMA_V3_1, "schema 3.1")?;
-    let src = map_open(RocksSubmoduleStore::open_read_only_v31(src_dir))?;
-    if dry_run {
-        let mut data_paths = 0_u64;
-        let mut after = None;
-        loop {
-            let keys = src.read_offset_row_keys(after, 1024)?;
-            let Some(last) = keys.last().copied() else {
-                break;
-            };
-            data_paths = data_paths.saturating_add(u64::try_from(keys.len()).unwrap_or(u64::MAX));
-            after = Some(last);
-        }
-        return Ok(ConvertStats {
-            data_paths,
-            reset_marker: src.reset_in_progress()?,
-            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            ..ConvertStats::default()
-        });
-    }
-    prepare_rocks_target(dst_dir, replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting_v3(dst_dir))?;
-    let (data_paths, _) = src.copy_wrapping_proofs(&dst)?;
-    let reset_marker = src.reset_in_progress()?;
-    dst.seal_and_stamp()?;
-    clear_converting_sentinel(dst_dir)?;
-    Ok(ConvertStats {
-        data_paths,
-        reset_marker,
-        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        ..ConvertStats::default()
-    })
-}
-
-/// Compares schema 3.1 proofs with the schema 3.2 records they were wrapped into.
-///
-/// The target checksum must be unset. A checksum-only row on the target is a
-/// mismatch: this conversion does not invent one.
-pub fn verify_rocks_v31_and_v32(
-    src_dir: &Path,
-    dst_dir: &Path,
-) -> eyre::Result<EngineEquivalenceReport> {
-    require_rocks_schema(src_dir, SUBMODULE_SCHEMA_V3_1, "schema 3.1")?;
-    require_rocks_v3(dst_dir)?;
-    let src = map_open(RocksSubmoduleStore::open_read_only_v31(src_dir))?;
-    let dst = map_open(RocksSubmoduleStore::open_read_only(dst_dir))?;
-    verify_wrapped_records(&src, &dst, true)
-}
-
-/// Compares two schema 3.2 indexes, including the checksum on each offset row.
-pub fn verify_rocks_v32_records(
+/// Compares two RocksDB v1 indexes, including the checksum on each offset row.
+pub fn verify_rocks_records(
     left_dir: &Path,
     right_dir: &Path,
 ) -> eyre::Result<EngineEquivalenceReport> {
-    require_rocks_v3(left_dir)?;
-    require_rocks_v3(right_dir)?;
+    require_rocks_v1(left_dir)?;
+    require_rocks_v1(right_dir)?;
     let left = map_open(RocksSubmoduleStore::open_read_only(left_dir))?;
     let right = map_open(RocksSubmoduleStore::open_read_only(right_dir))?;
     verify_wrapped_records(&left, &right, false)
@@ -704,7 +603,7 @@ fn verify_wrapped_records(
     Ok(report)
 }
 
-/// Rebuilds an MDBX schema v2 index from a RocksDB schema v3 index.
+/// Rebuilds an MDBX schema v2 index from a RocksDB RocksDB v1 index.
 ///
 /// Tx paths and leaf bindings are derived from the consensus database. A
 /// stored height, tx index, or data root that disagrees with that derive
@@ -720,7 +619,7 @@ pub fn convert_rocks_to_mdbx(
     guard_paths(rocks_dir, mdbx_dir, options)?;
     let map = require_map(options)?;
     let db = open_consensus(options)?;
-    require_rocks_v3(rocks_dir)?;
+    require_rocks_v1(rocks_dir)?;
     let src = map_open(RocksSubmoduleStore::open_read_only(rocks_dir))?;
     if src.reset_in_progress()? {
         return Ok(finish_stats(
@@ -736,14 +635,14 @@ pub fn convert_rocks_to_mdbx(
         options.allow_unresolved,
     )?;
     let stats = if options.dry_run {
-        let stats = copy_v3_into_v2(&src, None, options, &db, &map)?;
+        let stats = copy_rocks_into_mdbx(&src, None, options, &db, &map)?;
         refuse_unresolved(&stats, options)?;
         stats
     } else {
         let args = exclusive_args(options);
         prepare_mdbx_target(mdbx_dir, args.clone(), options.replace_incomplete)?;
         let dst = map_open(MdbxSubmoduleStore::open_for_convert(mdbx_dir, args))?;
-        let stats = copy_v3_into_v2(&src, Some(&dst), options, &db, &map)?;
+        let stats = copy_rocks_into_mdbx(&src, Some(&dst), options, &db, &map)?;
         refuse_unresolved(&stats, options)?;
         dst.put_schema_bytes(SUBMODULE_SCHEMA.as_bytes())?;
         clear_converting_sentinel(mdbx_dir)?;
@@ -752,7 +651,7 @@ pub fn convert_rocks_to_mdbx(
     Ok(finish_stats(stats, started, false))
 }
 
-/// Compares a schema v2 MDBX index with a schema v3 RocksDB index.
+/// Compares a schema v2 MDBX index with a RocksDB v1 RocksDB index.
 ///
 /// Data paths, pending jobs, and placement fields are read from both engines.
 /// The tx path is the stored v2 bytes on one side and the path derived from
@@ -771,7 +670,7 @@ pub fn verify_mdbx_and_rocks(
     guard_paths(mdbx_dir, rocks_dir, options)?;
     let map = require_map(options)?;
     let db = open_consensus(options)?;
-    require_rocks_v3(rocks_dir)?;
+    require_rocks_v1(rocks_dir)?;
     let opened = map_open(open_mdbx_source(mdbx_dir, exclusive_args(options)))?;
     let rocks = map_open(RocksSubmoduleStore::open_read_only(rocks_dir))?;
     match opened {
@@ -780,43 +679,18 @@ pub fn verify_mdbx_and_rocks(
                 verify_reset_target(true, &rocks)
             } else {
                 let schema = mdbx.schema_bytes()?;
-                verify_v2_and_v3(&mdbx, &rocks, schema, &db, &map)
+                verify_mdbx_rows_against_rocks(&mdbx, &rocks, schema, &db, &map)
             }
         }
         OpenedMdbx::V1(env) => {
             if reset_marker_on(&env)? {
                 verify_reset_target(true, &rocks)
             } else {
-                verify_v1_and_v3(&env, &rocks, &db, &map)
+                verify_mdbx_v1_against_rocks(&env, &rocks, &db, &map)
             }
         }
-        OpenedMdbx::Empty(env) => verify_empty_and_v3(&env, &rocks),
+        OpenedMdbx::Empty(env) => verify_empty_and_rocks(&env, &rocks),
     }
-}
-
-/// Compares a schema v2 RocksDB index with a schema v3 RocksDB index.
-///
-/// The tx-path check is the same as [`verify_mdbx_and_rocks`].
-pub fn verify_rocks_v2_and_v3(
-    v2_dir: &Path,
-    v3_dir: &Path,
-    options: &ConvertOptions,
-) -> eyre::Result<EngineEquivalenceReport> {
-    if options.dry_run {
-        eyre::bail!("--dry-run is not valid for verify-rocks");
-    }
-    guard_paths(v2_dir, v3_dir, options)?;
-    let map = require_map(options)?;
-    let db = open_consensus(options)?;
-    require_rocks_schema(v2_dir, SUBMODULE_SCHEMA, "schema v2")?;
-    require_rocks_v3(v3_dir)?;
-    let v2 = map_open(RocksSubmoduleStore::open_read_only(v2_dir))?;
-    let v3 = map_open(RocksSubmoduleStore::open_read_only(v3_dir))?;
-    if !v2.stores_tx_paths() {
-        eyre::bail!("source {} is not a schema v2 index", v2_dir.display());
-    }
-    let schema = v2.schema_bytes()?;
-    verify_v2_and_v3(&v2, &v3, schema, &db, &map)
 }
 
 struct PlacementMap {
@@ -908,7 +782,7 @@ fn open_consensus(options: &ConvertOptions) -> eyre::Result<DatabaseEnv> {
     Ok(db)
 }
 
-fn copy_v2_into_v3<S>(
+fn copy_mdbx_into_rocks<S>(
     src: &S,
     dst: Option<&RocksSubmoduleStore>,
     options: &ConvertOptions,
@@ -955,7 +829,7 @@ where
             if let Some(dst) = dst {
                 dst.update(|tx| {
                     for item in &prepared {
-                        write_v3_placement(tx, item)?;
+                        write_rocks_placement(tx, item)?;
                     }
                     Ok(())
                 })?;
@@ -1043,7 +917,7 @@ where
     })
 }
 
-fn copy_v3_into_v2(
+fn copy_rocks_into_mdbx(
     src: &RocksSubmoduleStore,
     dst: Option<&MdbxSubmoduleStore>,
     options: &ConvertOptions,
@@ -1062,7 +936,7 @@ fn copy_v3_into_v2(
     let mut infos = 0_u64;
     let mut skipped_frontier = 0_u64;
     loop {
-        let batch = src.read_v3_placements(after, limit)?;
+        let batch = src.read_placements(after, limit)?;
         let Some(last) = batch.last().map(|row| row.start) else {
             break;
         };
@@ -1289,7 +1163,7 @@ fn prepare_v2_placement<S: SubmoduleStore>(
 
 /// One v3 placement per tx inside a stored interval.
 ///
-/// Schema v2 merges adjacent offsets that share a tx-path hash. Two txs with
+/// MDBX merges adjacent offsets that share a tx-path hash. Two txs with
 /// the same bytes then occupy one interval. Cuts are the interval start plus
 /// every info start strictly inside it, the same cuts a placement read uses.
 /// The first segment must equal the stored bytes. Later segments use the
@@ -1474,7 +1348,10 @@ fn tx_segments(
     out
 }
 
-fn write_v3_placement(tx: &mut dyn SubmoduleWrite, item: &PreparedPlacement) -> eyre::Result<()> {
+fn write_rocks_placement(
+    tx: &mut dyn SubmoduleWrite,
+    item: &PreparedPlacement,
+) -> eyre::Result<()> {
     tx.note_placement_origin(item.ledger_id, item.block_height, item.tx_index)?;
     tx.add_tx_leaf_binding(
         item.path_hash,
@@ -1594,7 +1471,7 @@ fn write_v2_placement(tx: &mut dyn SubmoduleWrite, item: &RebuiltPlacement) -> e
     Ok(())
 }
 
-fn verify_v2_and_v3<S>(
+fn verify_mdbx_rows_against_rocks<S>(
     v2: &S,
     v3: &RocksSubmoduleStore,
     v2_schema: Option<Vec<u8>>,
@@ -1724,7 +1601,7 @@ where
         },
         &mut |after| {
             Ok(v3
-                .read_v3_placements(after, VERIFY_KEYS)?
+                .read_placements(after, VERIFY_KEYS)?
                 .into_iter()
                 .map(|row| row.start)
                 .collect())
@@ -1811,7 +1688,7 @@ fn compare_one_placement<S: SubmoduleStore>(
                     report,
                     "interval",
                     format!(
-                        "offset {} is past the consensus frontier but v3 has a placement",
+                        "offset {} is past the consensus frontier but RocksDB has a placement",
                         key.0
                     ),
                 );
@@ -1985,7 +1862,7 @@ fn verify_markers<S: SubmoduleStore>(
     }
     let v3_schema = v3.schema_bytes()?;
     let v2_ok = v2_schema.as_deref() == Some(SUBMODULE_SCHEMA.as_bytes());
-    let v3_ok = v3_schema.as_deref() == Some(SUBMODULE_SCHEMA_V3.as_bytes());
+    let v3_ok = v3_schema.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
     if !v2_ok || !v3_ok {
         report.schema_mismatch = 1;
         note(report, "schema", "metadata".to_owned());
@@ -2003,33 +1880,12 @@ fn rocks_schema_text(path: &Path) -> eyre::Result<Option<String>> {
         .map(Some)
 }
 
-fn require_rocks_schema(path: &Path, expected: &str, label: &str) -> eyre::Result<()> {
+fn require_rocks_v1(path: &Path) -> eyre::Result<()> {
     match rocks_schema_text(path)? {
-        Some(text) if text == expected => Ok(()),
-        _ => eyre::bail!(
-            "rocks index {} has no {label} SCHEMA marker",
-            path.display()
-        ),
-    }
-}
-
-fn require_rocks_v3(path: &Path) -> eyre::Result<()> {
-    match rocks_schema_text(path)? {
-        Some(text) if text == SUBMODULE_SCHEMA_V3 => Ok(()),
-        Some(text) if text == SUBMODULE_SCHEMA_V3_1 => eyre::bail!(
-            "rocks index {} is schema 3.1. Run `submodule-index-convert v31-to-v32` into a new directory, then `verify-rocks`, and replace the live index only after verify succeeds.",
-            path.display()
-        ),
-        Some(text) if text == SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX => eyre::bail!(
-            "rocks index {} is schema v3 without column family ChunkOffsetsByContentHash. This open does not backfill and will not create an empty family: every stored proof would lack its reverse row. Delete this directory and rerun `submodule-index-convert` (`mdbx-to-rocks` or `rocks-to-v3`).",
-            path.display()
-        ),
-        Some(text) if text == SUBMODULE_SCHEMA => eyre::bail!(
-            "rocks index {} is schema v2. Run `submodule-index-convert rocks-to-v3` to write schema 3.2. `rocks-to-mdbx` reads schema 3.2 only.",
-            path.display()
-        ),
-        _ => eyre::bail!(
-            "rocks index {} has no schema v3 SCHEMA marker",
+        Some(text) if text == SUBMODULE_SCHEMA_ROCKS_V1 => Ok(()),
+        Some(text) => eyre::bail!("{}", super::tables::unrecognised_rocks_layout(&text)),
+        None => eyre::bail!(
+            "rocks index {} has no RocksDB v1 SCHEMA marker",
             path.display()
         ),
     }
@@ -2379,13 +2235,13 @@ where
         options.allow_unresolved,
     )?;
     if options.dry_run {
-        let stats = copy_v2_into_v3(src, None, options, db, map)?;
+        let stats = copy_mdbx_into_rocks(src, None, options, db, map)?;
         refuse_unresolved(&stats, options)?;
         return Ok(stats);
     }
     prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
-    let stats = copy_v2_into_v3(src, Some(&dst), options, db, map)?;
+    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
+    let stats = copy_mdbx_into_rocks(src, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
     dst.seal_and_stamp()?;
     clear_converting_sentinel(dir)?;
@@ -2397,7 +2253,7 @@ fn write_empty_rocks(dir: &Path, options: &ConvertOptions) -> eyre::Result<Conve
         return Ok(ConvertStats::default());
     }
     prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
+    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
     if options.fail_after_batches == Some(0) {
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
@@ -2419,7 +2275,7 @@ fn write_reset_rocks(
         });
     }
     prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
+    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
     if options.fail_after_batches == Some(0) {
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
@@ -2469,13 +2325,13 @@ fn copy_v1_rocks(
         options.allow_unresolved,
     )?;
     if options.dry_run {
-        let stats = copy_v1_into_v3(env, None, options, db, map)?;
+        let stats = copy_mdbx_v1_into_rocks(env, None, options, db, map)?;
         refuse_unresolved(&stats, options)?;
         return Ok(stats);
     }
     prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting_v3(dir))?;
-    let stats = copy_v1_into_v3(env, Some(&dst), options, db, map)?;
+    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
+    let stats = copy_mdbx_v1_into_rocks(env, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
     dst.seal_and_stamp()?;
     clear_converting_sentinel(dir)?;
@@ -2589,7 +2445,7 @@ struct V1Sink<'a> {
 
 /// One streaming read of the v1 hash table. Placements and their data paths
 /// share a durable commit, up to `batch_rows` placements or `batch_value_bytes`.
-fn copy_v1_into_v3(
+fn copy_mdbx_v1_into_rocks(
     env: &DatabaseEnv,
     dst: Option<&RocksSubmoduleStore>,
     options: &ConvertOptions,
@@ -2830,7 +2686,7 @@ fn flush_v1_out(sink: &mut V1Sink<'_>) -> eyre::Result<()> {
     if let Some(dst) = sink.dst {
         dst.update(|tx| {
             for item in items {
-                write_v3_placement(tx, &item.placement)?;
+                write_rocks_placement(tx, &item.placement)?;
                 for (offset, path) in item.paths {
                     require_interval(tx, offset, "data path")?;
                     tx.add_full_data_path(offset, path)?;
@@ -3161,14 +3017,14 @@ fn v1_placement_start_ok(
         .any(|info| info.start_offset.0 == at))
 }
 
-fn verify_v1_and_v3(
+fn verify_mdbx_v1_against_rocks(
     env: &DatabaseEnv,
     v3: &RocksSubmoduleStore,
     db: &DatabaseEnv,
     map: &PlacementMap,
 ) -> eyre::Result<EngineEquivalenceReport> {
     let mut report = EngineEquivalenceReport::default();
-    if v3.schema_bytes()?.as_deref() != Some(SUBMODULE_SCHEMA_V3.as_bytes()) {
+    if v3.schema_bytes()?.as_deref() != Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()) {
         report.schema_mismatch = 1;
         note(&mut report, "schema", "metadata".to_owned());
     }
@@ -3198,9 +3054,9 @@ fn verify_v1_and_v3(
         )
     })?;
     report.skipped_orphans = report.skipped_orphans.saturating_add(orphans);
-    note_v3_placements_absent_from_v1(env, v3, &mut report)?;
+    note_rocks_placements_absent_from_v1(env, v3, &mut report)?;
     compare_v1_pending(env, v3, &written, &frontier, &mut report)?;
-    note_extra_v3_offset_rows(v3, &written, &frontier, &mut report)?;
+    note_extra_rocks_offset_rows(v3, &written, &frontier, &mut report)?;
     verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     Ok(report)
@@ -3240,7 +3096,7 @@ fn compare_v1_interval(
                 report,
                 "interval",
                 format!(
-                    "offset {} is past the consensus frontier but v3 has a placement",
+                    "offset {} is past the consensus frontier but RocksDB has a placement",
                     start.0
                 ),
             );
@@ -3397,7 +3253,7 @@ fn note_v1_frontier_segment(
             report,
             "interval",
             format!(
-                "offset {} is past the consensus frontier but v3 has a placement",
+                "offset {} is past the consensus frontier but RocksDB has a placement",
                 seg_start.0
             ),
         );
@@ -3450,14 +3306,14 @@ fn compare_v1_paths(
     Ok(())
 }
 
-fn note_v3_placements_absent_from_v1(
+fn note_rocks_placements_absent_from_v1(
     env: &DatabaseEnv,
     v3: &RocksSubmoduleStore,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     let mut after = None;
     loop {
-        let batch = v3.read_v3_placements(after, VERIFY_KEYS)?;
+        let batch = v3.read_placements(after, VERIFY_KEYS)?;
         if batch.is_empty() {
             break;
         }
@@ -3477,7 +3333,7 @@ fn note_v3_placements_absent_from_v1(
     Ok(())
 }
 
-fn note_extra_v3_offset_rows(
+fn note_extra_rocks_offset_rows(
     v3: &RocksSubmoduleStore,
     written: &FrontierSkips,
     frontier: &FrontierSkips,
@@ -3586,21 +3442,9 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
         );
     }
     match rocks_schema_text(path)? {
-        Some(text) if text == SUBMODULE_SCHEMA || text == SUBMODULE_SCHEMA_V3 => {
+        Some(text) if text == SUBMODULE_SCHEMA_ROCKS_V1 => {
             eyre::bail!(
                 "target {} is a completed RocksDB index. Refusing to replace it.",
-                path.display()
-            );
-        }
-        Some(text) if text == SUBMODULE_SCHEMA_V3_1 => {
-            eyre::bail!(
-                "target {} is schema 3.1. Refusing to delete it. `v31-to-v32` writes a new directory.",
-                path.display()
-            );
-        }
-        Some(text) if text == SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX => {
-            eyre::bail!(
-                "target {} is schema v3 without column family ChunkOffsetsByContentHash. Refusing to delete it. Delete this directory by hand and rerun the converter.",
                 path.display()
             );
         }
@@ -3743,7 +3587,7 @@ fn clear_converting_sentinel(path: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
-fn verify_empty_and_v3(
+fn verify_empty_and_rocks(
     env: &DatabaseEnv,
     v3: &RocksSubmoduleStore,
 ) -> eyre::Result<EngineEquivalenceReport> {
@@ -3759,11 +3603,11 @@ fn verify_reset_target(
         report.reset_marker_mismatch = 1;
         note(&mut report, "reset_marker", "metadata".to_owned());
     }
-    if v3.schema_bytes()?.as_deref() != Some(SUBMODULE_SCHEMA_V3.as_bytes()) {
+    if v3.schema_bytes()?.as_deref() != Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()) {
         report.schema_mismatch = 1;
         note(&mut report, "schema", "metadata".to_owned());
     }
-    if !v3.read_v3_placements(None, 1)?.is_empty() {
+    if !v3.read_placements(None, 1)?.is_empty() {
         report.intervals_mismatches = 1;
         note(&mut report, "interval", "reset or empty source".to_owned());
     }
@@ -3804,14 +3648,14 @@ mod tests {
     use super::super::store::{MdbxSubmoduleStore, SubmoduleStore};
     use super::super::tables::{
         ChunkPathHashes, DataRootInfo, DataRootInfos, PackedOffsetRow, PendingBodyMigration,
-        SUBMODULE_SCHEMA_V3, SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX, TxLeafBinding,
+        SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
     };
     use super::{
-        ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, convert_rocks_v2_to_v3,
-        verify_mdbx_and_rocks, verify_rocks_v2_and_v3, verify_rocks_v32_records,
+        ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, verify_mdbx_and_rocks,
+        verify_rocks_records,
     };
     use crate::db::IrysDatabaseExt as _;
-    use crate::submodule::rocks::{RocksSubmoduleStore, RocksTuning};
+    use crate::submodule::rocks::RocksSubmoduleStore;
     use crate::tables::IrysTables;
     use crate::tx_path_derive::{derive_tx_path_at_offset, tx_path_hash};
     use crate::{
@@ -4072,7 +3916,7 @@ mod tests {
         Ok(())
     }
 
-    fn assert_v3(store: &impl SubmoduleStore, consensus: &Path) -> eyre::Result<()> {
+    fn assert_rocks(store: &impl SubmoduleStore, consensus: &Path) -> eyre::Result<()> {
         let pair = derived_pair(consensus)?;
         store.view(|tx| {
             assert_eq!(tx.get_tx_path_by_offset(PartitionChunkOffset(0))?, None);
@@ -4220,13 +4064,13 @@ mod tests {
         assert_copy_counts(&stats);
         assert_eq!(
             fs::read_to_string(rocks.join("SCHEMA"))?,
-            SUBMODULE_SCHEMA_V3
+            SUBMODULE_SCHEMA_ROCKS_V1
         );
         assert!(!rocks.join("CONVERTING").exists());
         assert_equivalent(&verify_mdbx_and_rocks(&mdbx, &rocks, &options)?);
         {
             let opened = RocksSubmoduleStore::open(&rocks)?;
-            assert_v3(&opened, &consensus)?;
+            assert_rocks(&opened, &consensus)?;
         }
         assert_v2(
             &MdbxSubmoduleStore::open(&mdbx, testing_args()?)?,
@@ -4255,7 +4099,7 @@ mod tests {
         );
         assert!(hwm > 0, "VmHWM was not readable");
         // VmRSS is the whole process. A parallel `cargo test` counts other
-        // tests that open a schema v3 index while this one runs. The round
+        // tests that open a RocksDB v1 index while this one runs. The round
         // trip on its own is far below this bound.
         assert!(growth < 512 * 1024, "round trip grew RSS by {growth} KiB");
         Ok(())
@@ -4300,7 +4144,7 @@ mod tests {
         assert!(format!("{err:#}").contains("injected"), "{err:#}");
         assert_eq!(
             fs::read_to_string(rocks.join("SCHEMA"))?,
-            SUBMODULE_SCHEMA_V3
+            SUBMODULE_SCHEMA_ROCKS_V1
         );
         let open_err = MdbxSubmoduleStore::open(&mdbx_back, testing_args()?).unwrap_err();
         let message = format!("{open_err:#}");
@@ -4320,24 +4164,18 @@ mod tests {
     }
 
     #[test]
-    fn old_v3_marker_is_replaced_only_when_asked() -> eyre::Result<()> {
-        let root = temp("convert-old-v3");
+    fn foreign_marker_is_not_replaced() -> eyre::Result<()> {
+        let root = temp("convert-foreign-marker");
         let path = root.path().join("rocks");
         fs::create_dir_all(&path)?;
-        fs::write(path.join("SCHEMA"), SUBMODULE_SCHEMA_V3_NO_CONTENT_INDEX)?;
+        let marker = b"foreign-layout\n";
+        fs::write(path.join("SCHEMA"), marker)?;
         fs::write(path.join("CURRENT"), b"MANIFEST-000001\n")?;
         let err = super::prepare_rocks_target(&path, false).unwrap_err();
-        assert!(
-            err.to_string().contains("ChunkOffsetsByContentHash"),
-            "{err}"
-        );
-        assert!(path.join("SCHEMA").is_file());
+        assert!(err.to_string().contains("existing index schema"), "{err}");
         let err = super::prepare_rocks_target(&path, true).unwrap_err();
-        assert!(
-            err.to_string().contains("ChunkOffsetsByContentHash"),
-            "{err}"
-        );
-        assert!(path.join("SCHEMA").is_file());
+        assert!(err.to_string().contains("existing index schema"), "{err}");
+        assert_eq!(fs::read(path.join("SCHEMA"))?, marker);
         assert!(path.join("CURRENT").is_file());
         Ok(())
     }
@@ -4526,40 +4364,6 @@ mod tests {
     }
 
     #[test]
-    fn convert_rocks_v2_into_v3_and_back() -> eyre::Result<()> {
-        let root = temp("convert-rocks-v2");
-        let consensus = root.path().join("consensus");
-        write_chain(&consensus)?;
-        let v2 = root.path().join("rocks-v2");
-        let v3 = root.path().join("rocks-v3");
-        let back = root.path().join("db-back");
-        let options = options_for(&consensus)?;
-        {
-            let store = RocksSubmoduleStore::open_v2_with(&v2, RocksTuning::baseline())?;
-            write_index(&store, &consensus)?;
-        }
-        let err = convert_rocks_to_mdbx(&v2, &back, &options).unwrap_err();
-        assert!(format!("{err:#}").contains("rocks-to-v3"), "{err:#}");
-
-        let stats = convert_rocks_v2_to_v3(&v2, &v3, &options)?;
-        assert_copy_counts(&stats);
-        assert_eq!(fs::read_to_string(v3.join("SCHEMA"))?, SUBMODULE_SCHEMA_V3);
-        let report = verify_rocks_v2_and_v3(&v2, &v3, &options)?;
-        assert_equivalent(&report);
-        assert_v3(&RocksSubmoduleStore::open(&v3)?, &consensus)?;
-        assert_v2(&RocksSubmoduleStore::open(&v2)?, &consensus)?;
-
-        let back_stats = convert_rocks_to_mdbx(&v3, &back, &options)?;
-        assert_copy_counts(&back_stats);
-        assert_equivalent(&verify_mdbx_and_rocks(&back, &v3, &options)?);
-        assert_v2(
-            &MdbxSubmoduleStore::open(&back, testing_args()?)?,
-            &consensus,
-        )?;
-        Ok(())
-    }
-
-    #[test]
     fn replace_refuses_storage_files_consensus_v1_and_a_held_lock() -> eyre::Result<()> {
         let root = temp("convert-refuse-delete");
         let consensus = populate_mdbx(root.path())?;
@@ -4649,7 +4453,7 @@ mod tests {
 
         let completed = root.path().join("completed-v3");
         fs::create_dir_all(&completed)?;
-        fs::write(completed.join("SCHEMA"), SUBMODULE_SCHEMA_V3)?;
+        fs::write(completed.join("SCHEMA"), SUBMODULE_SCHEMA_ROCKS_V1)?;
         fs::write(
             completed.join("CONVERTING"),
             super::SUBMODULE_CONVERT_INCOMPLETE,
@@ -4972,7 +4776,7 @@ mod tests {
         assert!(!rocks.join("CONVERTING").exists());
         assert_eq!(
             fs::read_to_string(rocks.join("SCHEMA"))?,
-            SUBMODULE_SCHEMA_V3
+            SUBMODULE_SCHEMA_ROCKS_V1
         );
         let opened = RocksSubmoduleStore::open(&rocks)?;
         opened.view(|tx| {
@@ -5277,7 +5081,7 @@ mod tests {
         let err = convert_rocks_to_mdbx(&rocks, &back, &options).unwrap_err();
         assert!(format!("{err:#}").contains("may be running"), "{err:#}");
         drop(child);
-        assert_v3(&RocksSubmoduleStore::open(&rocks)?, &consensus)?;
+        assert_rocks(&RocksSubmoduleStore::open(&rocks)?, &consensus)?;
         Ok(())
     }
 
@@ -5342,7 +5146,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_rocks_v32_records_counts_one_offset_crc_difference() -> eyre::Result<()> {
+    fn verify_rocks_records_counts_one_offset_crc_difference() -> eyre::Result<()> {
         fn write_crc(dir: &Path, crc: u32) -> eyre::Result<()> {
             let store = RocksSubmoduleStore::open(dir)?;
             store.update(|tx| {
@@ -5363,10 +5167,10 @@ mod tests {
         write_crc(left.path(), 0x1111_1111)?;
         write_crc(right.path(), 0x2222_2222)?;
         write_crc(same.path(), 0x1111_1111)?;
-        let differ = verify_rocks_v32_records(left.path(), right.path())?;
+        let differ = verify_rocks_records(left.path(), right.path())?;
         assert!(differ.offsets_checked > 0, "{differ}");
         assert!(differ.mismatch_chunk_crc > 0, "{differ}");
-        let equal = verify_rocks_v32_records(left.path(), same.path())?;
+        let equal = verify_rocks_records(left.path(), same.path())?;
         assert_eq!(equal.mismatch_chunk_crc, 0, "{equal}");
         Ok(())
     }

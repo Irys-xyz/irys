@@ -338,7 +338,7 @@ pub fn add_tx_path_hash_to_offset_range<T: DbTxMut + DbTx>(
 /// Store each chunk's data path under its offset, and the hash on the offset row.
 ///
 /// `updates` may arrive in any offset order. The tx-path interval is unchanged.
-/// MDBX always stores every update. The returned list is empty. Schema v3
+/// MDBX always stores every update. The returned list is empty. RocksDB v1
 /// reports offsets it skipped from its own writer.
 pub fn write_data_path_updates<T: DbTxMut + DbTx>(
     tx: &T,
