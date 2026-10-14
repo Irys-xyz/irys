@@ -1090,7 +1090,6 @@ impl StorageModule {
     /// One entropy sweep when the disk is free, plus entropy already in memory.
     /// The service tick calls this after the packed-write flush.
     pub fn pump_entropy_reads(&self) {
-        self.poll_acks();
         if self.disk.recall_pending() || self.disk.writes_active() {
             return;
         }
@@ -1100,7 +1099,6 @@ impl StorageModule {
         } else {
             self.sweep_one();
         }
-        self.poll_acks();
     }
 
     /// Occupy entropy targets and return. The sweep packs them later.
@@ -1389,7 +1387,6 @@ impl StorageModule {
     pub(super) fn drive_group(&self, group: u64) -> Result<(), WriteDataChunkError> {
         let mut deadline = Instant::now() + SWEEP_WAIT;
         loop {
-            self.poll_acks();
             if let Some(result) = self.take_group_result(group) {
                 return result;
             }
@@ -1397,7 +1394,6 @@ impl StorageModule {
             // the wall clock so the wait does not run until recall goes idle.
             // A group that finished during the wait keeps that result.
             if Instant::now() >= deadline || !self.disk.yield_to_recall_until(deadline) {
-                self.poll_acks();
                 if let Some(result) = self.take_group_result(group) {
                     return result;
                 }
@@ -1424,7 +1420,6 @@ impl StorageModule {
             // the disk is idle. Wake then, so this caller retries when the
             // span becomes eligible. The sweep give-up still bounds the wait.
             let seen = self.disk.wake.epoch();
-            self.poll_acks();
             if let Some(result) = self.take_group_result(group) {
                 return result;
             }
@@ -1489,7 +1484,6 @@ impl StorageModule {
     pub(super) fn drain_entropy_queue(&self) {
         let mut idle_deadline: Option<Instant> = None;
         loop {
-            self.poll_acks();
             if self.entropy_idle() {
                 return;
             }
@@ -1501,7 +1495,6 @@ impl StorageModule {
                 continue;
             }
             let seen = self.disk.wake.epoch();
-            self.poll_acks();
             if self.entropy_idle() {
                 return;
             }
@@ -2415,8 +2408,6 @@ impl StorageModule {
         self.disk.notify();
     }
 
-    pub(super) fn poll_acks(&self) {}
-
     fn commit_packed(
         &self,
         offset: PartitionChunkOffset,
@@ -2669,7 +2660,6 @@ impl StorageModule {
             let epoch = self.disk.wake.epoch();
             if epoch != seen {
                 drop(guard);
-                self.poll_acks();
                 seen = epoch;
                 continue;
             }
@@ -2854,7 +2844,6 @@ impl StorageModule {
         // Recall sets `recall_waiters` before it reads, and it already pinned
         // the index gap. Submit nothing until that hold drops.
         if self.disk.recall_pending() {
-            self.poll_acks();
             return;
         }
         // Completion rewrites wait out an active recall. They do not take the
@@ -2870,7 +2859,6 @@ impl StorageModule {
         // this thread after `chunks.dat` is fdatasync'd. Submitting them to
         // the drain here would wait on this hold.
         let chunk_io = self.disk.index_gap.hold_for_chunk_io();
-        self.poll_acks();
         if self.disk.recall_pending() {
             drop(chunk_io);
             return;
@@ -2974,7 +2962,6 @@ impl StorageModule {
             }
         }
         self.service_lane_handoff();
-        self.poll_acks();
     }
 }
 

@@ -3008,7 +3008,6 @@ impl StorageModule {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.fail_queued_sweeps();
-        self.poll_acks();
 
         for (_, submodule) in self.submodules.iter() {
             submodule.db.set_reset_in_progress()?;
