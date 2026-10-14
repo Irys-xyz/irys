@@ -1,6 +1,6 @@
 # irys-sm-bench
 
-Phase 1 storage-module load bench. One `StorageModule`, one submodule, one disk-lane thread, the real index drain, and the real submodule MDBX. No network, consensus, VDF, or actor runtime.
+Phase 1 storage-module load bench. One `StorageModule`, one submodule, one disk-lane thread, the real index drain, and the real submodule index. No network, consensus, VDF, or actor runtime.
 
 Recall reads use a read-only entropy file. Ingest, migration, and serve reads of written chunks use a write file. Both descriptors hang off the same lane, so one spindle schedules both.
 
