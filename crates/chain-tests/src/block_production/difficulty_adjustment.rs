@@ -125,6 +125,7 @@ async fn spiky_slow_heavy4_tip_updated_correctly_in_forks_with_variying_cumulati
             block_hash: block.block_hash,
             commitment_transactions: transactions.all_system_txs().cloned().collect(),
             data_transactions: transactions.all_data_txs().cloned().collect(),
+            custody_proofs: transactions.custody_proofs.clone(),
         };
         let sealed_block = Arc::new(SealedBlock::new(Arc::clone(block), body)?);
 

@@ -91,6 +91,15 @@ fn fixture_ingress_proof() -> wire::IngressProof {
     canonical_ingress_proof().into()
 }
 
+fn fixture_custody_proof() -> irys_types::custody::CustodyProof {
+    irys_types::custody::CustodyProof {
+        challenged_miner: test_address(0xAA),
+        partition_hash: test_h256(0x11),
+        challenge_seed: test_h256(0x22),
+        openings: Vec::new(),
+    }
+}
+
 fn fixture_block_body() -> wire::BlockBody {
     canonical_block_body().into()
 }
@@ -172,6 +181,7 @@ fn fixture_block_header_none() -> wire::IrysBlockHeader {
         oracle_irys_price: irys_types::storage_pricing::Amount::new(U256::from(100_u64)),
         ema_irys_price: irys_types::storage_pricing::Amount::new(U256::from(95_u64)),
         treasury: U256::from(999_999_u64),
+        custody_proofs_root: None,
     });
     header.into()
 }
@@ -229,6 +239,7 @@ fn fixture_block_body_none() -> wire::BlockBody {
         block_hash: test_h256(0xBB),
         data_transactions: vec![fixture_data_tx_header_none()],
         commitment_transactions: vec![fixture_commitment_v2_stake()],
+        custody_proofs: Vec::new(),
     }
 }
 
@@ -412,6 +423,8 @@ fixture_tests! {
         wire::GossipDataV2::BlockBody(fixture_block_body_none()),
     v2_gossip_data_ingress_proof =>
         wire::GossipDataV2::IngressProof(fixture_ingress_proof()),
+    v2_gossip_data_custody_proof =>
+        wire::GossipDataV2::CustodyProof(fixture_custody_proof()),
     v2_gossip_data_execution_payload =>
         wire::GossipDataV2::ExecutionPayload(fixture_execution_payload()),
 
@@ -742,6 +755,7 @@ assert_fixture_coverage!(
     wire::GossipDataV2::BlockBody(_) => "v2_gossip_data_block_body",
     wire::GossipDataV2::ExecutionPayload(_) => "v2_gossip_data_execution_payload",
     wire::GossipDataV2::IngressProof(_) => "v2_gossip_data_ingress_proof",
+    wire::GossipDataV2::CustodyProof(_) => "v2_gossip_data_custody_proof",
 );
 
 assert_fixture_coverage!(
@@ -867,6 +881,10 @@ fn all_wire_types_have_fixture_coverage() {
         ),
         (
             "IngressProofV1Inner",
+            "tested via IngressProof version-tagged enum",
+        ),
+        (
+            "IngressProofV2Inner",
             "tested via IngressProof version-tagged enum",
         ),
     ];

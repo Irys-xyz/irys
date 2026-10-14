@@ -9,7 +9,8 @@ pub use facade::*;
 pub use types::*;
 
 use crate::block_tree_service::ReorgEvent;
-use crate::chunk_ingress_service::ChunkIngressState;
+use crate::chunk_ingress_service::facade::ChunkIngressFacadeImpl;
+use crate::chunk_ingress_service::{ChunkIngressError, ChunkIngressState, IngressProofError};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -19,9 +20,12 @@ use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file}
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_storage::RecoveredMempoolState;
 use irys_types::CommitmentTypeV2;
+use irys_types::TxChunkOffset;
+use irys_types::chunk::UnpackedChunk;
+use irys_types::ingress::IngressProof;
 use irys_types::{
-    BoundedFee, Config, H256, IrysTransactionCommon, IrysTransactionId, NodeConfig, SealedBlock,
-    U256, app_state::DatabaseProvider,
+    Base64, BoundedFee, Config, H256, IrysTransactionCommon, IrysTransactionId, NodeConfig,
+    SealedBlock, U256, app_state::DatabaseProvider,
 };
 use irys_types::{
     CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,
@@ -214,6 +218,15 @@ pub enum MempoolServiceMessage {
     /// Avoid holding the guard across long‑running operations to prevent
     /// reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
+    /// Ingest a blob-derived data transaction with its pre-computed ingress proof
+    /// and zero-padded chunk data. Created by the blob extraction service.
+    IngestBlobDerivedTx {
+        tx_header: DataTransactionHeader,
+        ingress_proof: IngressProof,
+        chunk_data: Vec<u8>,
+        data_path: Base64,
+        per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
+    },
 }
 
 impl MempoolServiceMessage {
@@ -232,6 +245,7 @@ impl MempoolServiceMessage {
             Self::UpdateStakeAndPledgeWhitelist(_, _) => "UpdateStakeAndPledgeWhitelist",
             Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
             Self::GetReadGuard(_) => "GetReadGuard",
+            Self::IngestBlobDerivedTx { .. } => "IngestBlobDerivedTx",
         }
     }
 }
@@ -343,8 +357,138 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
+            MempoolServiceMessage::IngestBlobDerivedTx {
+                tx_header,
+                ingress_proof,
+                chunk_data,
+                data_path,
+                per_chunk_commitments,
+            } => {
+                self.handle_ingest_blob_derived_tx(
+                    tx_header,
+                    ingress_proof,
+                    chunk_data,
+                    data_path,
+                    per_chunk_commitments,
+                )
+                .await;
+            }
         }
         Ok(())
+    }
+
+    async fn handle_ingest_blob_derived_tx(
+        &self,
+        tx_header: DataTransactionHeader,
+        ingress_proof: IngressProof,
+        chunk_data: Vec<u8>,
+        data_path: Base64,
+        per_chunk_commitments: Vec<(u32, irys_types::kzg::KzgCommitmentBytes)>,
+    ) {
+        if let Err(reason) = ingress_proof.check_version_accepted(
+            self.config.consensus.accept_kzg_ingress_proofs,
+            self.config.consensus.require_kzg_ingress_proofs,
+        ) {
+            warn!(
+                data_root = %tx_header.data_root,
+                reason,
+                "Dropping blob-derived tx: proof version rejected by config"
+            );
+            return;
+        }
+
+        let data_root = tx_header.data_root;
+        if ingress_proof.data_root() != data_root {
+            warn!(
+                tx.data_root = %data_root,
+                proof.data_root = %ingress_proof.data_root(),
+                "Dropping blob-derived tx: data root does not match the ingress proof"
+            );
+            return;
+        }
+        let data_size = tx_header.data_size;
+        let chunk_len = match u64::try_from(chunk_data.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                warn!(data_root = %data_root, "Chunk data length overflows u64");
+                return;
+            }
+        };
+        if chunk_len != data_size {
+            warn!(
+                data_root = %data_root,
+                data_size,
+                chunk_data_len = chunk_len,
+                "Dropping blob-derived tx: chunk length does not match the transaction"
+            );
+            return;
+        }
+        debug!(
+            data_root = %data_root,
+            data_size,
+            chunk_data_len = chunk_len,
+            "Ingesting blob-derived data transaction",
+        );
+
+        if let Err(e) = self.handle_data_tx_ingress_message_api(tx_header).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to ingest blob-derived data tx");
+            return;
+        }
+
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size,
+            data_path,
+            bytes: Base64(chunk_data),
+            tx_offset: TxChunkOffset(0),
+        };
+        if let Err(e) = self.handle_chunk_ingress_message(chunk).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to cache blob chunk data");
+            return;
+        }
+
+        if let Err(e) = self.handle_ingest_ingress_proof(ingress_proof).await {
+            warn!(data_root = %data_root, error = ?e, "Failed to store blob ingress proof");
+        }
+
+        if !per_chunk_commitments.is_empty() {
+            if let Err(e) = self
+                .irys_db
+                .update_scoped(|rw_tx| {
+                    irys_database::store_per_chunk_kzg_commitments(
+                        rw_tx,
+                        data_root,
+                        &per_chunk_commitments,
+                    )
+                    .map_err(|e| reth_db::DatabaseError::Other(e.to_string()))
+                })
+                .and_then(|result| result)
+            {
+                warn!(
+                    data_root = %data_root,
+                    error = %e,
+                    "Failed to store per-chunk KZG commitments for blob"
+                );
+            }
+        }
+    }
+
+    async fn handle_chunk_ingress_message(
+        &self,
+        chunk: UnpackedChunk,
+    ) -> Result<(), ChunkIngressError> {
+        ChunkIngressFacadeImpl::from(&self.service_senders)
+            .handle_chunk_ingress(chunk)
+            .await
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        ChunkIngressFacadeImpl::from(&self.service_senders)
+            .handle_ingest_ingress_proof(ingress_proof)
+            .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]

@@ -81,6 +81,8 @@ pub struct IrysBlockHeaderV1Inner {
     pub oracle_irys_price: IrysTokenPrice,
     pub ema_irys_price: IrysTokenPrice,
     pub treasury: U256,
+    #[serde(default)]
+    pub custody_proofs_root: Option<BlockHash>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +97,8 @@ pub struct BlockBody {
     pub block_hash: BlockHash,
     pub data_transactions: Vec<DataTransactionHeader>,
     pub commitment_transactions: Vec<CommitmentTransaction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custody_proofs: Vec<irys_types::custody::CustodyProof>,
 }
 
 // conversions (mirror structs)
@@ -116,6 +120,7 @@ super::impl_mirror_from!(irys_types::IrysBlockHeaderV1 => IrysBlockHeaderV1Inner
     last_diff_timestamp, previous_solution_hash, last_epoch_hash, chunk_hash,
     previous_block_hash, previous_cumulative_diff, reward_address, reward_amount,
     miner_address, timestamp, evm_block_hash, oracle_irys_price, ema_irys_price, treasury,
+    custody_proofs_root,
     // vdf_limiter_info is moved verbatim: both sides are now the canonical
     // irys_types::VDFLimiterInfo (shared stable protocol DTO), so no .into().
     vdf_limiter_info,
@@ -135,7 +140,7 @@ impl From<std::sync::Arc<irys_types::IrysBlockHeader>> for IrysBlockHeader {
 }
 
 super::impl_mirror_from!(irys_types::BlockBody => BlockBody {
-    block_hash,
+    block_hash, custody_proofs,
 } convert_iter { data_transactions, commitment_transactions });
 
 impl From<std::sync::Arc<irys_types::BlockBody>> for BlockBody {

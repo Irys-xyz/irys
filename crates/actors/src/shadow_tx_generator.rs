@@ -909,7 +909,8 @@ impl<'a> ShadowTxGenerator<'a> {
                         | TransactionPacket::TermFeeReward(_)
                         | TransactionPacket::IngressProofReward(_)
                         | TransactionPacket::PermFeeRefund(_)
-                        | TransactionPacket::UpdateRewardAddress(_) => {
+                        | TransactionPacket::UpdateRewardAddress(_)
+                        | TransactionPacket::CustodyPenalty(_) => {
                             unreachable!("commitment refund iterator contains only refund packets")
                         }
                     },

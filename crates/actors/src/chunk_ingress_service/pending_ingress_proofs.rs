@@ -38,10 +38,10 @@ impl PendingIngressProofs {
     /// proof is not stored). Replacing an existing id always succeeds.
     pub(crate) fn put(&mut self, proof: IngressProof) -> bool {
         let id = proof.id();
-        let new_anchor = proof.anchor;
+        let new_anchor = proof.anchor();
         if let Some(existing) = self.by_id.get(&id) {
-            if existing.anchor != new_anchor {
-                self.unindex(id, existing.anchor);
+            if existing.anchor() != new_anchor {
+                self.unindex(id, existing.anchor());
                 self.index(id, new_anchor);
             }
             self.by_id.insert(id, proof);
@@ -118,7 +118,7 @@ mod tests {
         assert!(cache.put(first));
         let mut replacement = dummy_proof(1, b);
         // same signature → same id, different anchor
-        replacement.anchor = b;
+        replacement.set_anchor(b);
         assert_eq!(replacement.id(), id);
         assert!(cache.put(replacement));
         assert_eq!(cache.len(), 1);

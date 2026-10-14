@@ -2057,6 +2057,7 @@ mod tests {
             block_hash: header.block_hash,
             data_transactions: data_txs,
             commitment_transactions: commitment_txs,
+            custody_proofs: Vec::new(),
         };
 
         // Execute ordering function
@@ -2138,6 +2139,7 @@ mod tests {
             block_hash: header.block_hash,
             data_transactions: data_txs,
             commitment_transactions: commitment_txs,
+            custody_proofs: Vec::new(),
         };
 
         // Execute ordering function - it should return an error
@@ -2218,6 +2220,7 @@ mod tests {
             block_hash: header.block_hash,
             data_transactions: data_txs,
             commitment_transactions: commitment_txs,
+            custody_proofs: Vec::new(),
         };
 
         let result = SealedBlock::new(header, body);
@@ -2275,6 +2278,7 @@ mod tests {
             block_hash: header.block_hash,
             data_transactions: data_txs,
             commitment_transactions: commitment_txs,
+            custody_proofs: Vec::new(),
         };
 
         // Execute ordering function - should return error
@@ -2344,6 +2348,7 @@ mod tests {
             block_hash: header.block_hash,
             data_transactions: data_txs,
             commitment_transactions: commitment_txs,
+            custody_proofs: Vec::new(),
         };
 
         // Execute ordering function
