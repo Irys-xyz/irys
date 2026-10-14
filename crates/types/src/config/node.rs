@@ -640,7 +640,8 @@ pub struct StorageSyncConfig {
     /// The write is in the WAL page cache. It becomes durable at the next
     /// synced write on that database, when this backstop syncs the WAL, or
     /// on clean shutdown. `0` makes the backstop thread sync as soon as it
-    /// wakes. MDBX ignores this key and keeps its own 50 ms group.
+    /// wakes. MDBX ignores this key. Open leaves group commit off, so each
+    /// MDBX registration is durable before the write returns.
     #[serde(default = "default_index_wal_backstop_ms")]
     pub index_wal_backstop_ms: u64,
     /// Threads that prefetch tx headers when a data solution has no stored tx path.
