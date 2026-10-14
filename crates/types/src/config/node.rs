@@ -608,6 +608,20 @@ pub struct StorageSyncConfig {
     /// every span as large enough to issue at once.
     #[serde(default = "default_entropy_read_batch_bytes")]
     pub entropy_read_batch_bytes: u64,
+    /// Extra bytes a short ingress span may read past its last queued chunk.
+    ///
+    /// The whole pread still stops at [`Self::entropy_sweep_max_bytes`], at
+    /// the transaction's last chunk in this module, and at the submodule.
+    /// The extra entropy is cached. `0` does not read ahead.
+    #[serde(default = "default_entropy_readahead_bytes")]
+    pub entropy_readahead_bytes: u64,
+    /// Cap, in bytes, on the per-module entropy read-ahead cache.
+    ///
+    /// The oldest pad is dropped first. `0` keeps nothing. Reset, a
+    /// partition-hash change, and a pause drop the cache. A write drops
+    /// that offset.
+    #[serde(default = "default_entropy_readahead_cache_bytes")]
+    pub entropy_readahead_cache_bytes: u64,
     /// Seconds between completion rewrites of each submodule's `intervals.json`.
     ///
     /// A write-ahead transition is still stored immediately: `Interrupted`
@@ -723,6 +737,8 @@ impl Default for StorageSyncConfig {
             entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
             entropy_read_grace_ms: default_entropy_read_grace_ms(),
             entropy_read_batch_bytes: default_entropy_read_batch_bytes(),
+            entropy_readahead_bytes: default_entropy_readahead_bytes(),
+            entropy_readahead_cache_bytes: default_entropy_readahead_cache_bytes(),
             drop_recall_page_cache: false,
             recall_direct_io: default_recall_direct_io(),
             intervals_persist_secs: default_intervals_persist_secs(),
@@ -798,6 +814,19 @@ pub const DEFAULT_ENTROPY_READ_GRACE_MS: u64 = 20;
 /// The pread is still bounded by [`DEFAULT_ENTROPY_SWEEP_MAX_BYTES`].
 pub const DEFAULT_ENTROPY_READ_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Extra bytes read past a short ingress span.
+///
+/// The same 4 MiB as [`DEFAULT_ENTROPY_SWEEP_MAX_BYTES`]. A one-chunk span
+/// can grow to that cap. A larger value cannot be issued until the sweep
+/// cap is raised, because one pread stays inside the recall margin.
+pub const DEFAULT_ENTROPY_READAHEAD_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Per-module cap on cached read-ahead entropy.
+///
+/// 64 MiB is 256 chunks. That covers the in-flight window of a few
+/// concurrent uploads on one HDD module. Older pads are dropped first.
+pub const DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
 fn default_entropy_sweep_max_bytes() -> u64 {
     DEFAULT_ENTROPY_SWEEP_MAX_BYTES
 }
@@ -812,6 +841,14 @@ fn default_entropy_read_grace_ms() -> u64 {
 
 fn default_entropy_read_batch_bytes() -> u64 {
     DEFAULT_ENTROPY_READ_BATCH_BYTES
+}
+
+fn default_entropy_readahead_bytes() -> u64 {
+    DEFAULT_ENTROPY_READAHEAD_BYTES
+}
+
+fn default_entropy_readahead_cache_bytes() -> u64 {
+    DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES
 }
 
 fn default_pending_body_hold_timeout() -> Duration {
@@ -1661,6 +1698,9 @@ impl NodeConfig {
                 // Tests drive the sweep themselves and must not sleep on a grace.
                 entropy_read_grace_ms: 0,
                 entropy_read_batch_bytes: 256 * 1024,
+                // Tests count one pread per span. Read-ahead would add bytes.
+                entropy_readahead_bytes: 0,
+                entropy_readahead_cache_bytes: 0,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
                 // Tests read `intervals.json` as soon as `sync` returns.
@@ -1872,6 +1912,8 @@ impl NodeConfig {
                 entropy_coalesce_hole_bytes: DEFAULT_ENTROPY_COALESCE_HOLE_BYTES,
                 entropy_read_grace_ms: DEFAULT_ENTROPY_READ_GRACE_MS,
                 entropy_read_batch_bytes: DEFAULT_ENTROPY_READ_BATCH_BYTES,
+                entropy_readahead_bytes: DEFAULT_ENTROPY_READAHEAD_BYTES,
+                entropy_readahead_cache_bytes: DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES,
                 drop_recall_page_cache: false,
                 recall_direct_io: default_recall_direct_io(),
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,

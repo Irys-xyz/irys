@@ -21,6 +21,16 @@
 //! is issued at once. A packing span is issued at once. A lone chunk is
 //! issued when the grace ends. Recall, a packed-write hold, and the
 //! in-flight budget still gate the read.
+//! A short ingress span may read past its last queued chunk, up to
+//! `entropy_readahead_bytes` and never past `entropy_sweep_max_bytes`,
+//! the transaction's last chunk in this module, or the submodule. That
+//! extension is forward from this span. An out-of-order upload writes a
+//! high offset first, and the holes behind that offset are the bytes
+//! still needed, so the window is not the highest Data offset. The extra
+//! entropy stays in a cache of at most `entropy_readahead_cache_bytes`.
+//! The oldest pad is dropped first. A pad is used only while its offset
+//! is still `Entropy` and the generation matches. Reset, a partition-hash
+//! change, `pause_data_writes`, and a write at the offset drop pads.
 //! New submits stop when another command would put the in-flight set past
 //! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
 //! The file lock is dropped before the lane moves on.
@@ -208,6 +218,101 @@ struct SweepSlot {
     /// When this slot joined the sweep queue. A short span waits from the
     /// oldest slot, so a neighbor does not restart the grace.
     enqueued_at: Instant,
+    /// Entropy taken from the read-ahead cache. Not pending-map entropy:
+    /// the interval is checked again before the XOR.
+    cached_entropy: Option<Vec<u8>>,
+}
+
+/// One reserved offset. The third field is entropy already in `pending`.
+/// The fourth is a read-ahead cache pad. Only one of them is set.
+type SelectedOffset = (PartitionChunkOffset, u64, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Disk entropy read past a demand span. Oldest first.
+#[derive(Debug, Default)]
+pub(super) struct EntropyPadCache {
+    order: std::collections::VecDeque<PartitionChunkOffset>,
+    pads: HashMap<PartitionChunkOffset, CachedPad>,
+    bytes: u64,
+}
+
+#[derive(Debug)]
+struct CachedPad {
+    bytes: Vec<u8>,
+    generation: u64,
+}
+
+impl EntropyPadCache {
+    pub(super) fn clear(&mut self) {
+        self.order.clear();
+        self.pads.clear();
+        self.bytes = 0;
+    }
+
+    pub(super) fn invalidate(&mut self, offset: PartitionChunkOffset) {
+        self.remove(offset);
+    }
+
+    pub(super) fn invalidate_range(
+        &mut self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) {
+        let offsets: Vec<_> = self
+            .pads
+            .keys()
+            .copied()
+            .filter(|offset| *offset >= start && *offset <= end)
+            .collect();
+        for offset in offsets {
+            self.invalidate(offset);
+        }
+    }
+
+    fn remove(&mut self, offset: PartitionChunkOffset) -> Option<CachedPad> {
+        let pad = self.pads.remove(&offset)?;
+        self.bytes = self.bytes.saturating_sub(pad.bytes.len() as u64);
+        if let Some(pos) = self.order.iter().position(|item| *item == offset) {
+            self.order.remove(pos);
+        }
+        Some(pad)
+    }
+
+    /// Drop the pad. `Some` only when the generation still matches.
+    fn take(&mut self, offset: PartitionChunkOffset, generation: u64) -> Option<Vec<u8>> {
+        let pad = self.remove(offset)?;
+        (pad.generation == generation).then_some(pad.bytes)
+    }
+
+    /// Keep `bytes` for `offset`. Evict the oldest pads until it fits.
+    /// A pad larger than `cap` is not stored. Returns whether it was stored.
+    fn insert(
+        &mut self,
+        offset: PartitionChunkOffset,
+        bytes: Vec<u8>,
+        generation: u64,
+        cap: u64,
+    ) -> bool {
+        let len = bytes.len() as u64;
+        if cap == 0 || len == 0 || len > cap {
+            return false;
+        }
+        self.remove(offset);
+        while self.bytes.saturating_add(len) > cap {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(pad) = self.pads.remove(&old) {
+                self.bytes = self.bytes.saturating_sub(pad.bytes.len() as u64);
+            }
+        }
+        if self.bytes.saturating_add(len) > cap {
+            return false;
+        }
+        self.bytes = self.bytes.saturating_add(len);
+        self.order.push_back(offset);
+        self.pads.insert(offset, CachedPad { bytes, generation });
+        true
+    }
 }
 
 /// One body whose entropy targets are reserved and not yet in the sweep queue.
@@ -218,7 +323,7 @@ struct OccupiedChunk {
     priority: WritePriority,
     waited: bool,
     notify: Option<SweepNotify>,
-    selected: Vec<(PartitionChunkOffset, u64, Option<Vec<u8>>)>,
+    selected: Vec<SelectedOffset>,
 }
 
 enum OccupyFailure {
@@ -271,6 +376,12 @@ pub(super) struct DiskGate {
     /// Queued chunks served by those preads. Hole bytes are not slots.
     #[cfg(any(test, feature = "bench"))]
     pub(super) entropy_pread_slots: AtomicU64,
+    /// Read-ahead pads copied into a sweep slot.
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) entropy_readahead_hits: AtomicU64,
+    /// Read-ahead pads stored after a pread.
+    #[cfg(any(test, feature = "bench"))]
+    pub(super) entropy_readahead_stores: AtomicU64,
     /// Non-recall `pread`s from `read_chunks`. One contiguous disk run is one
     /// call when the run fits the recall range.
     #[cfg(test)]
@@ -513,6 +624,10 @@ impl DiskGate {
             entropy_pread_bytes: AtomicU64::new(0),
             #[cfg(any(test, feature = "bench"))]
             entropy_pread_slots: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench"))]
+            entropy_readahead_hits: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench"))]
+            entropy_readahead_stores: AtomicU64::new(0),
             #[cfg(test)]
             source_preads: AtomicU64::new(0),
             #[cfg(test)]
@@ -1098,7 +1213,7 @@ impl StorageModule {
                     let offsets = occupied
                         .selected
                         .iter()
-                        .map(|(offset, _, _)| *offset)
+                        .map(|(offset, ..)| *offset)
                         .collect();
                     held.push(occupied);
                     items.push(BatchEnqueueItem::Queued(offsets));
@@ -1164,7 +1279,7 @@ impl StorageModule {
                 .collect()
         };
 
-        let mut selected: Vec<(PartitionChunkOffset, u64, Option<Vec<u8>>)> = Vec::new();
+        let mut selected: Vec<SelectedOffset> = Vec::new();
         {
             let mut pending = self.pending_writes.write().unwrap();
             if self.data_writes_paused() {
@@ -1202,7 +1317,30 @@ impl StorageModule {
             }
             for (partition_offset, pending_entropy) in planned {
                 pending.occupancy.insert(partition_offset, generation);
-                selected.push((partition_offset, generation, pending_entropy));
+                // A cache pad is disk entropy, not a pending write. Take it
+                // under this lock so a write cannot invalidate between the
+                // check and the take.
+                let cached_entropy = if pending_entropy.is_none() {
+                    self.entropy_cache
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take(partition_offset, generation)
+                } else {
+                    None
+                };
+                if cached_entropy.is_some() {
+                    super::super::index_read_metrics::note_readahead_hit();
+                    #[cfg(any(test, feature = "bench"))]
+                    self.disk
+                        .entropy_readahead_hits
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                selected.push((
+                    partition_offset,
+                    generation,
+                    pending_entropy,
+                    cached_entropy,
+                ));
             }
             if selected.is_empty() {
                 return Ok(None);
@@ -1235,7 +1373,7 @@ impl StorageModule {
                 chunk
                     .selected
                     .iter()
-                    .any(|(_, generation, _)| *generation != generation_now)
+                    .any(|(_, generation, _, _)| *generation != generation_now)
             });
         if stale {
             drop(queue);
@@ -1257,7 +1395,7 @@ impl StorageModule {
                 },
             );
             let enqueued_at = Instant::now();
-            for (offset, generation, pending_entropy) in chunk.selected {
+            for (offset, generation, pending_entropy, cached_entropy) in chunk.selected {
                 queue.slots.push(SweepSlot {
                     group: group_id,
                     offset,
@@ -1267,6 +1405,7 @@ impl StorageModule {
                     generation,
                     priority: chunk.priority,
                     pending_entropy,
+                    cached_entropy,
                     byte_len,
                     enqueued_at,
                 });
@@ -1285,7 +1424,7 @@ impl StorageModule {
     fn release_occupied(&self, occupied: impl IntoIterator<Item = OccupiedChunk>) {
         for chunk in occupied {
             let byte_len = chunk.unpacked.len() as u64;
-            for (offset, generation, _) in chunk.selected {
+            for (offset, generation, ..) in chunk.selected {
                 self.release_queued_offset(offset, generation, byte_len);
             }
         }
@@ -1525,14 +1664,14 @@ impl StorageModule {
             if !queue
                 .slots
                 .iter()
-                .any(|slot| slot.priority == best && slot.pending_entropy.is_some())
+                .any(|slot| slot.priority == best && memory_entropy(slot))
             {
                 return false;
             }
             let mut ready = Vec::new();
             let mut keep = Vec::new();
             for slot in queue.slots.drain(..) {
-                if slot.pending_entropy.is_some() && slot.priority == best {
+                if memory_entropy(&slot) && slot.priority == best {
                     ready.push(slot);
                 } else {
                     keep.push(slot);
@@ -1582,9 +1721,9 @@ impl StorageModule {
         }
 
         let start = span[0].offset;
-        let end = span[span.len() - 1].offset;
+        let read_end = self.issued_read_end(&span);
         let chunk_len = chunk_size as usize;
-        let span_chunks = (end.0 - start.0 + 1) as usize;
+        let span_chunks = (read_end.0 - start.0 + 1) as usize;
         let (file_arc, file_offset) = match self.locate_io(start, true) {
             Ok((file, offset, _)) => (file, offset),
             Err(error) => {
@@ -1632,6 +1771,7 @@ impl StorageModule {
         }
         let chunk_size = self.config.consensus.chunk_size.max(1);
         let mut spans = Vec::new();
+        let mut read_ends = Vec::new();
         let mut guards = Vec::with_capacity(INFLIGHT_WRITES);
         while spans.len() < INFLIGHT_WRITES {
             if self.disk.recall_pending() || self.disk.writes_active() {
@@ -1640,12 +1780,20 @@ impl StorageModule {
             let Some(span) = self.take_ready_span() else {
                 break;
             };
-            let bytes = pread_span_bytes(&span, chunk_size);
+            // Only the first span of a pass may read ahead. A later span
+            // means other chunk work was already queued.
+            let read_end = if spans.is_empty() {
+                self.issued_read_end(&span)
+            } else {
+                span[span.len() - 1].offset
+            };
+            let bytes = span_command_bytes(span[0].offset.0, read_end.0, chunk_size);
             if !self.disk.try_submit_read(INFLIGHT_WRITES, bytes) {
                 self.restore_span(span);
                 break;
             }
             spans.push(span);
+            read_ends.push(read_end);
             guards.push(OpGuard {
                 disk: &self.disk,
                 bytes,
@@ -1656,10 +1804,10 @@ impl StorageModule {
         }
         let results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(spans.len());
-            for (span, guard) in spans.iter().zip(guards) {
+            for ((span, read_end), guard) in spans.iter().zip(read_ends).zip(guards) {
                 handles.push(scope.spawn(move || {
                     let _guard = guard;
-                    self.read_span_inflight(span)
+                    self.read_span_inflight(span, read_end)
                 }));
             }
             handles
@@ -1675,12 +1823,15 @@ impl StorageModule {
         }
     }
 
-    fn read_span_inflight(&self, span: &[SweepSlot]) -> Result<SpanLoad, WriteDataChunkError> {
+    fn read_span_inflight(
+        &self,
+        span: &[SweepSlot],
+        read_end: PartitionChunkOffset,
+    ) -> Result<SpanLoad, WriteDataChunkError> {
         let start = span[0].offset;
-        let end = span[span.len() - 1].offset;
         let chunk_size = self.config.consensus.chunk_size.max(1);
         let chunk_len = chunk_size as usize;
-        let span_chunks = (end.0 - start.0 + 1) as usize;
+        let span_chunks = (read_end.0 - start.0 + 1) as usize;
         let (file, file_offset) = self
             .locate_io(start, true)
             .map_err(WriteDataChunkError::Other)
@@ -1757,6 +1908,12 @@ impl StorageModule {
                 return;
             }
         };
+        self.remember_readahead(
+            start,
+            buf,
+            pending_submit.iter().map(|(slot, _)| slot.offset),
+            &verdicts,
+        );
         for (slot, entropy) in pending_submit {
             let at = slot.offset.0.saturating_sub(start.0) as usize;
             if matches!(
@@ -1814,6 +1971,146 @@ impl StorageModule {
         }
     }
 
+    /// Last chunk offset this pread covers. A short ingress span grows
+    /// forward when no other chunk command is waiting.
+    fn issued_read_end(&self, span: &[SweepSlot]) -> PartitionChunkOffset {
+        let end = span[span.len() - 1].offset;
+        let ahead = self.config.node_config.storage.entropy_readahead_bytes;
+        if ahead == 0
+            || span
+                .iter()
+                .any(|slot| slot.priority != WritePriority::Ingress)
+        {
+            return end;
+        }
+        // Other sweep slots are chunk work. Packed bytes still in the
+        // pending map are a write the lane has not issued yet. Bytes
+        // already pwritten (`written_ahead`) wait on the durable point
+        // and do not take the disk.
+        if !self.disk.queue().slots.is_empty() {
+            return end;
+        }
+        {
+            let pending = self.pending_writes.read().unwrap();
+            if !pending.is_empty() {
+                return end;
+            }
+        }
+        let Some(tx_end) = self.tx_range_end(end) else {
+            return end;
+        };
+        if tx_end <= end.0 {
+            return end;
+        }
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let span_bytes = span_command_bytes(span[0].offset.0, end.0, chunk);
+        let room = self.hold_cap_bytes().saturating_sub(span_bytes);
+        let extra_chunks = ahead.min(room) / chunk;
+        if extra_chunks == 0 {
+            return end;
+        }
+        let extra = u32::try_from(extra_chunks).unwrap_or(u32::MAX);
+        let mut last = end.0.saturating_add(extra).min(tx_end);
+        if let Ok((interval, _)) = self.get_submodule_for_offset(end) {
+            last = last.min(interval.end().0);
+        }
+        PartitionChunkOffset(last)
+    }
+
+    /// Last partition offset of the transaction that covers `offset`,
+    /// clipped to this partition. `None` when the offset is not indexed.
+    fn tx_range_end(&self, offset: PartitionChunkOffset) -> Option<u32> {
+        let placement = self.data_root_and_tx_offset_span(offset, offset).ok()?;
+        let (_root, tx_offset, data_size) = placement.into_iter().next().flatten()?;
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let chunks = data_size.div_ceil(chunk);
+        if chunks == 0 {
+            return None;
+        }
+        let last_tx = u32::try_from(chunks - 1).ok()?;
+        let start = offset.0.checked_sub(u32::from(tx_offset))?;
+        let tx_last = start.checked_add(last_tx)?;
+        let partition_last = u32::try_from(
+            self.config
+                .consensus
+                .num_chunks_in_partition
+                .saturating_sub(1),
+        )
+        .unwrap_or(u32::MAX);
+        Some(tx_last.min(partition_last))
+    }
+
+    /// Keep entropy the pread covered and this span did not pack.
+    ///
+    /// Lock order is the interval map, then `pending_writes`, then the
+    /// cache. A write takes `pending_writes` and then the cache, so it
+    /// cannot land between the check and the insert.
+    fn remember_readahead(
+        &self,
+        start: PartitionChunkOffset,
+        buf: &[u8],
+        packed: impl Iterator<Item = PartitionChunkOffset>,
+        verdicts: &[super::chunk_crc::CrcVerdict],
+    ) {
+        let cap = self
+            .config
+            .node_config
+            .storage
+            .entropy_readahead_cache_bytes;
+        if cap == 0 {
+            return;
+        }
+        let chunk_len = self.config.consensus.chunk_size.max(1) as usize;
+        if chunk_len == 0 || !buf.len().is_multiple_of(chunk_len) {
+            return;
+        }
+        let packed: std::collections::HashSet<u32> = packed.map(|offset| offset.0).collect();
+        let generation = self.index_write_generation.load(Ordering::SeqCst);
+        let intervals = self.intervals.read().unwrap();
+        let pending = self.pending_writes.read().unwrap();
+        if self.index_write_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let mut cache = self
+            .entropy_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let count = buf.len() / chunk_len;
+        for step in 0..count {
+            let off = start.0.saturating_add(step as u32);
+            if packed.contains(&off) {
+                continue;
+            }
+            let offset = PartitionChunkOffset(off);
+            if pending.contains_key(&offset)
+                || pending.written_ahead.contains_key(&offset)
+                || pending.occupancy.contains_key(&offset)
+            {
+                continue;
+            }
+            if !intervals
+                .get_at_point(offset)
+                .is_some_and(|kind| *kind == ChunkType::Entropy)
+            {
+                continue;
+            }
+            if matches!(
+                verdicts.get(step),
+                Some(super::chunk_crc::CrcVerdict::Mismatch)
+            ) {
+                continue;
+            }
+            let at = step * chunk_len;
+            if cache.insert(offset, buf[at..at + chunk_len].to_vec(), generation, cap) {
+                super::super::index_read_metrics::note_readahead_store();
+                #[cfg(any(test, feature = "bench"))]
+                self.disk
+                    .entropy_readahead_stores
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
     fn restore_span(&self, span: Vec<SweepSlot>) {
         self.disk.queue().slots.extend(span);
     }
@@ -1863,7 +2160,7 @@ impl StorageModule {
         let chunk_size = self.config.consensus.chunk_size.max(1);
         let mut groups: HashMap<i64, Vec<SpanAnchor>> = HashMap::new();
         for (index, slot) in slots.iter().enumerate() {
-            if slot.pending_entropy.is_some() {
+            if memory_entropy(slot) {
                 continue;
             }
             let lone = i64::try_from(index)
@@ -1951,7 +2248,11 @@ impl StorageModule {
             self.fail_queued_group(group);
             return;
         }
-        let Some(entropy) = slot.pending_entropy.clone() else {
+        let Some(entropy) = slot
+            .pending_entropy
+            .clone()
+            .or_else(|| slot.cached_entropy.clone())
+        else {
             self.fail_slot(
                 slot,
                 WriteDataChunkError::Other(eyre::eyre!("missing buffered entropy")),
@@ -2172,6 +2473,10 @@ impl StorageModule {
         }
         pending.insert(offset, (packed, ChunkType::Data));
         pending.priorities.insert(offset, priority);
+        self.entropy_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .invalidate(offset);
         pending.queued_at.insert(offset, Instant::now());
         pending.proofs.insert(offset, proof);
         *self.last_pending_write.write().unwrap() = Instant::now();
@@ -2196,12 +2501,25 @@ impl StorageModule {
 
     /// Entropy preads issued on this module: count, bytes, queued slots.
     #[cfg(any(test, feature = "bench"))]
-    pub fn bench_entropy_reads(&self) -> (u64, u64, u64) {
+    pub fn bench_entropy_reads(&self) -> (u64, u64, u64, u64, u64) {
         (
             self.disk.entropy_preads.load(Ordering::Relaxed),
             self.disk.entropy_pread_bytes.load(Ordering::Relaxed),
             self.disk.entropy_pread_slots.load(Ordering::Relaxed),
+            self.disk.entropy_readahead_hits.load(Ordering::Relaxed),
+            self.disk.entropy_readahead_stores.load(Ordering::Relaxed),
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn entropy_cache_offsets_for_test(&self) -> Vec<u32> {
+        let cache = self
+            .entropy_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut offsets: Vec<u32> = cache.pads.keys().map(|offset| offset.0).collect();
+        offsets.sort_unstable();
+        offsets
     }
 
     #[cfg(test)]
@@ -2554,7 +2872,7 @@ impl StorageModule {
         queue
             .slots
             .iter()
-            .any(|slot| slot.priority == best && slot.pending_entropy.is_some())
+            .any(|slot| slot.priority == best && memory_entropy(slot))
     }
 
     fn disk_lane_pass(&self) {
@@ -2718,6 +3036,10 @@ fn span_command_bytes(start: u32, end: u32, chunk_size: u64) -> u64 {
     u64::from(end.saturating_sub(start).saturating_add(1)).saturating_mul(chunk_size)
 }
 
+fn memory_entropy(slot: &SweepSlot) -> bool {
+    slot.pending_entropy.is_some() || slot.cached_entropy.is_some()
+}
+
 /// Pread bytes of one formed span, holes included.
 fn span_disk_bytes(span: &DiskSpan, slots: &[SweepSlot], chunk_size: u64) -> u64 {
     let mut low = u32::MAX;
@@ -2782,13 +3104,6 @@ fn disk_span_from(anchors: &[SpanAnchor]) -> DiskSpan {
         indexes: anchors.iter().map(|anchor| anchor.index).collect(),
         start: anchors[0].offset,
     }
-}
-
-fn pread_span_bytes(span: &[SweepSlot], chunk_size: u64) -> u64 {
-    let (Some(first), Some(last)) = (span.first(), span.last()) else {
-        return 0;
-    };
-    (u64::from(last.offset.0.saturating_sub(first.offset.0)) + 1).saturating_mul(chunk_size)
 }
 
 fn clone_error(error: &WriteDataChunkError) -> WriteDataChunkError {
@@ -2996,6 +3311,7 @@ mod tests {
             generation: 0,
             priority: super::WritePriority::Ingress,
             pending_entropy: None,
+            cached_entropy: None,
             byte_len: 32,
             enqueued_at,
         }
@@ -3311,6 +3627,8 @@ mod tests {
                 entropy_coalesce_hole_bytes: chunk_size * hole_chunks,
                 entropy_read_grace_ms: grace_ms,
                 entropy_read_batch_bytes: chunk_size * max_chunks,
+                entropy_readahead_bytes: 0,
+                entropy_readahead_cache_bytes: 0,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
                 intervals_persist_secs: 0,

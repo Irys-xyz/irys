@@ -1382,6 +1382,9 @@ mod tests {
             node::DEFAULT_ENTROPY_COALESCE_HOLE_BYTES;
         expected_config.storage.entropy_read_grace_ms = node::DEFAULT_ENTROPY_READ_GRACE_MS;
         expected_config.storage.entropy_read_batch_bytes = node::DEFAULT_ENTROPY_READ_BATCH_BYTES;
+        expected_config.storage.entropy_readahead_bytes = node::DEFAULT_ENTROPY_READAHEAD_BYTES;
+        expected_config.storage.entropy_readahead_cache_bytes =
+            node::DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES;
         expected_config.storage.intervals_persist_secs = node::DEFAULT_INTERVALS_PERSIST_SECS;
         // Omitted `min_durable_interval_ms` takes the production default (250).
         // `NodeConfig::testing()` pins 0 and must not be the expectation here.

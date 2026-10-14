@@ -38,6 +38,8 @@ pub(crate) struct OpenRequest<'a> {
     pub entropy_sweep_max_bytes: u64,
     pub entropy_read_grace_ms: u64,
     pub entropy_read_batch_bytes: u64,
+    pub entropy_readahead_bytes: u64,
+    pub entropy_readahead_cache_bytes: u64,
     pub intervals_persist_secs: u64,
     /// `0` runs a durable point on every gap. The bench default is the node
     /// default, 250, for HDD storage modules.
@@ -88,6 +90,8 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         entropy_sweep_max_bytes: request.entropy_sweep_max_bytes,
         entropy_read_grace_ms: request.entropy_read_grace_ms,
         entropy_read_batch_bytes: request.entropy_read_batch_bytes,
+        entropy_readahead_bytes: request.entropy_readahead_bytes,
+        entropy_readahead_cache_bytes: request.entropy_readahead_cache_bytes,
         intervals_persist_secs: request.intervals_persist_secs,
         min_durable_interval_ms: request.min_durable_interval_ms,
         durable_headroom_permille: request.durable_headroom_permille,
@@ -276,6 +280,8 @@ mod tests {
             entropy_sweep_max_bytes: CHUNK_SIZE,
             entropy_read_grace_ms: 0,
             entropy_read_batch_bytes: CHUNK_SIZE,
+            entropy_readahead_bytes: 0,
+            entropy_readahead_cache_bytes: 0,
             intervals_persist_secs: 0,
             min_durable_interval_ms: 0,
             durable_headroom_permille: 1000,

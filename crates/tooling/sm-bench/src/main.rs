@@ -159,6 +159,12 @@ struct Args {
     /// Bytes a span must cover before it skips the read grace.
     #[arg(long, default_value_t = irys_types::DEFAULT_ENTROPY_READ_BATCH_BYTES)]
     entropy_read_batch_bytes: u64,
+    /// Extra bytes a short ingress span reads past its last queued chunk. `0` does not.
+    #[arg(long, default_value_t = irys_types::DEFAULT_ENTROPY_READAHEAD_BYTES)]
+    entropy_readahead_bytes: u64,
+    /// Cap on cached read-ahead entropy. `0` keeps nothing.
+    #[arg(long, default_value_t = irys_types::DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES)]
+    entropy_readahead_cache_bytes: u64,
     /// Transaction size mix `chunks:weight,...`.
     #[arg(long, default_value = "1:40,4:25,16:20,64:10,256:5")]
     ingest_mix: String,
@@ -397,6 +403,8 @@ fn run() -> eyre::Result<i32> {
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
         entropy_read_grace_ms: args.entropy_read_grace_ms,
         entropy_read_batch_bytes: args.entropy_read_batch_bytes,
+        entropy_readahead_bytes: args.entropy_readahead_bytes,
+        entropy_readahead_cache_bytes: args.entropy_readahead_cache_bytes,
         intervals_persist_secs: args.intervals_persist_secs,
         min_durable_interval_ms: args.min_durable_interval_ms,
         durable_headroom_permille: args.durable_headroom_permille,
@@ -511,6 +519,8 @@ fn run() -> eyre::Result<i32> {
     });
     header["entropy_read_grace_ms"] = serde_json::json!(args.entropy_read_grace_ms);
     header["entropy_read_batch_bytes"] = serde_json::json!(args.entropy_read_batch_bytes);
+    header["entropy_readahead_bytes"] = serde_json::json!(args.entropy_readahead_bytes);
+    header["entropy_readahead_cache_bytes"] = serde_json::json!(args.entropy_readahead_cache_bytes);
     header["min_durable_interval_ms"] = serde_json::json!(args.min_durable_interval_ms);
     header["durable_headroom_permille"] = serde_json::json!(args.durable_headroom_permille);
     header["recall_direct_io"] = serde_json::json!(args.recall_direct_io);
@@ -940,10 +950,15 @@ async fn execute(
     } else {
         0
     };
-    let (entropy_preads, entropy_pread_bytes, entropy_pread_slots) =
-        io.module.bench_entropy_reads();
+    let (
+        entropy_preads,
+        entropy_pread_bytes,
+        entropy_pread_slots,
+        entropy_readahead_hits,
+        entropy_readahead_stores,
+    ) = io.module.bench_entropy_reads();
     eprintln!(
-        "irys-sm-bench: entropy_preads={entropy_preads} entropy_pread_bytes={entropy_pread_bytes} entropy_pread_slots={entropy_pread_slots}"
+        "irys-sm-bench: entropy_preads={entropy_preads} entropy_pread_bytes={entropy_pread_bytes} entropy_pread_slots={entropy_pread_slots} entropy_readahead_hits={entropy_readahead_hits} entropy_readahead_stores={entropy_readahead_stores}"
     );
     write_summary(
         &out.join("summary.json"),

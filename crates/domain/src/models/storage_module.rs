@@ -745,6 +745,10 @@ pub struct StorageModule {
     /// In-memory chunk buffer awaiting disk write. Occupancy (index ops in
     /// flight) lives under this same lock.
     pending_writes: RwLock<PendingWrites>,
+    /// Entropy read past a demand span. Lock order: `intervals`, then
+    /// `pending_writes`, then this cache. A write takes `pending_writes`
+    /// and then this cache.
+    entropy_cache: Mutex<disk_lane::EntropyPadCache>,
     /// Shared with submodule drains so tests can fail the next index commit.
     #[cfg(any(test, feature = "test-utils"))]
     index_commit_fail_next: Arc<AtomicBool>,
@@ -1946,6 +1950,7 @@ impl StorageModule {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             pending_writes: RwLock::new(PendingWrites::default()),
+            entropy_cache: Mutex::new(disk_lane::EntropyPadCache::default()),
             #[cfg(any(test, feature = "test-utils"))]
             index_commit_fail_next,
             reset_incomplete: AtomicBool::new(false),
@@ -2197,7 +2202,12 @@ impl StorageModule {
         next: Option<PartitionAssignment>,
         update_height: u64,
     ) {
+        let old_hash = assignment.as_ref().map(|current| current.partition_hash);
+        let new_hash = next.map(|current| current.partition_hash);
         *assignment = next;
+        if old_hash != new_hash {
+            self.entropy_cache.lock().unwrap().clear();
+        }
         for (_, submodule) in self.submodules.iter() {
             let params = PackingParams {
                 packing_address: self.config.node_config.miner_address(),
@@ -2428,6 +2438,7 @@ impl StorageModule {
             let _pending = self.pending_writes.write().unwrap();
             self.data_writes_paused.store(true, Ordering::SeqCst);
             self.index_write_generation.fetch_add(1, Ordering::SeqCst);
+            self.entropy_cache.lock().unwrap().clear();
         }
         // Slots already queued must not be packed into a paused module.
         self.fail_queued_sweeps();
@@ -2899,6 +2910,7 @@ impl StorageModule {
             pending.pwrite_at.clear();
             pending.proofs.clear();
             pending.written_ahead.clear();
+            self.entropy_cache.lock().unwrap().clear();
         }
         // A recall may already have queued a suspect against the old bytes.
         // Confirming it after this clear would judge the wiped module.
@@ -5296,6 +5308,7 @@ impl StorageModule {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(offset);
+        self.entropy_cache.lock().unwrap().invalidate(offset);
     }
 
     /// Contiguous repair ranges. The storage-module service drains these.
@@ -5672,6 +5685,7 @@ impl StorageModule {
         // A raw write has no data-path proof. Drop a proof left by a packed
         // chunk this write replaced, so the fsync cannot publish that path.
         pending.proofs.remove(&chunk_offset);
+        self.entropy_cache.lock().unwrap().invalidate(chunk_offset);
         *self.last_pending_write.write().unwrap() = Instant::now();
         drop(pending);
         // The lane writes the next window when it is woken.
@@ -5723,6 +5737,10 @@ impl StorageModule {
             pending
                 .written_ahead
                 .retain(|offset, _| *offset < start || *offset > end);
+            self.entropy_cache
+                .lock()
+                .unwrap()
+                .invalidate_range(start, end);
         }
         self.cancel_sweep_range(start, end);
     }
@@ -7387,6 +7405,7 @@ impl StorageModule {
             let priority = pending.priorities.get(offset).copied();
             let queued = pending.queued_at.get(offset).copied();
             pending.pwrite_at.insert(*offset, at);
+            self.entropy_cache.lock().unwrap().invalidate(*offset);
             if priority == Some(disk_lane::WritePriority::Ingress)
                 && let Some(queued) = queued
             {
@@ -11228,6 +11247,219 @@ mod tests {
         Ok(())
     }
 
+    /// Four-chunk partition. `readahead` and `cache_bytes` are the two new knobs.
+    /// Grace is 0 so a lone ingress chunk is issued in this call.
+    fn readahead_module(
+        prefix: &str,
+        readahead: u64,
+        cache_bytes: u64,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                entropy_sweep_max_bytes: chunk_size * 4,
+                entropy_read_grace_ms: 0,
+                entropy_read_batch_bytes: chunk_size * 4,
+                entropy_readahead_bytes: readahead,
+                entropy_readahead_cache_bytes: cache_bytes,
+                min_durable_interval_ms: 0,
+                intervals_persist_secs: 0,
+                ..StorageSyncConfig::default()
+            },
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::repeat_byte(0x11),
+                }),
+                // Absolute. `assign_partition` writes `packing_params.toml` at
+                // `submodule.path`, and a relative name would miss this temp dir.
+                submodules: vec![(
+                    partition_chunk_offset_ii!(0, 3),
+                    tmp_dir.path().join("hdd0"),
+                )],
+            },
+            &config,
+        )?;
+        Ok((tmp_dir, storage))
+    }
+
+    fn index_four_chunks(storage: &StorageModule) -> eyre::Result<Vec<UnpackedChunk>> {
+        let signer = IrysSigner::random_signer(&storage.config.consensus);
+        let data = (0..4_u8)
+            .flat_map(|byte| vec![byte; 32])
+            .collect::<Vec<_>>();
+        let tx = signer.sign_transaction(signer.create_transaction(data, H256::zero())?)?;
+        let unpacked = tx.data_chunks()?;
+        assert_eq!(unpacked.len(), 4, "one tx covers the partition");
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        storage.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 3)),
+            0,
+        )?;
+        Ok(unpacked)
+    }
+
+    fn synced_packed_rows(storage: &StorageModule) -> eyre::Result<Vec<(Vec<u8>, Option<u32>)>> {
+        storage.sync_pending_chunks()?;
+        let loaded = storage.read_chunks(partition_chunk_offset_ii!(0, 3))?;
+        let mut rows = Vec::new();
+        for offset in 0..4_u32 {
+            let key = PartitionChunkOffset::from(offset);
+            let (bytes, kind) = loaded.get(&key).expect("packed chunk");
+            assert_eq!(*kind, ChunkType::Data, "offset {offset}");
+            let crc = storage.offset_meta_for_test(key)?.and_then(|row| row.crc);
+            rows.push((bytes.clone(), crc));
+        }
+        Ok(rows)
+    }
+
+    #[test]
+    fn readahead_hit_avoids_a_second_read() -> eyre::Result<()> {
+        let chunk = 32_u64;
+        let (_dir, storage) = readahead_module("readahead_hit", chunk * 4, chunk * 4)?;
+        storage.pack_with_zeros();
+        let unpacked = index_four_chunks(&storage)?;
+        // Offset 2 arrives before 1. The first pread already covers both.
+        storage.write_data_chunk(&unpacked[0])?;
+        assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            storage.disk.entropy_pread_bytes.load(Ordering::SeqCst),
+            chunk * 4
+        );
+        assert_eq!(storage.entropy_cache_offsets_for_test(), vec![1, 2, 3]);
+        for index in [2_usize, 1, 3] {
+            storage.write_data_chunk(&unpacked[index])?;
+        }
+        assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            storage.disk.entropy_readahead_hits.load(Ordering::SeqCst),
+            3
+        );
+        assert_eq!(
+            storage.disk.entropy_readahead_stores.load(Ordering::SeqCst),
+            3
+        );
+        assert!(storage.entropy_cache_offsets_for_test().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn migration_deposit_does_not_read_ahead() -> eyre::Result<()> {
+        let chunk = 32_u64;
+        let (_dir, storage) = readahead_module("readahead_migration", chunk * 4, chunk * 4)?;
+        storage.pack_with_zeros();
+        let unpacked = index_four_chunks(&storage)?;
+        storage.deposit_data_chunk(&unpacked[0])?;
+        storage.drive_entropy_queue_for_test();
+        assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            storage.disk.entropy_pread_bytes.load(Ordering::SeqCst),
+            chunk
+        );
+        assert_eq!(
+            storage.disk.entropy_readahead_stores.load(Ordering::SeqCst),
+            0
+        );
+        assert!(storage.entropy_cache_offsets_for_test().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn readahead_cache_drops_on_reset_reassignment_and_write() -> eyre::Result<()> {
+        let chunk = 32_u64;
+        {
+            let (_dir, storage) = readahead_module("readahead_reset", chunk * 4, chunk * 4)?;
+            storage.pack_with_zeros();
+            let unpacked = index_four_chunks(&storage)?;
+            storage.write_data_chunk(&unpacked[0])?;
+            assert_eq!(storage.entropy_cache_offsets_for_test(), vec![1, 2, 3]);
+            storage.reset()?;
+            assert!(storage.entropy_cache_offsets_for_test().is_empty());
+        }
+        {
+            let (_dir, storage) = readahead_module("readahead_reassign", chunk * 4, chunk * 4)?;
+            storage.pack_with_zeros();
+            let unpacked = index_four_chunks(&storage)?;
+            storage.write_data_chunk(&unpacked[0])?;
+            let assignment = storage.partition_assignment().expect("assigned");
+            storage.assign_partition(assignment, 7);
+            assert_eq!(
+                storage.entropy_cache_offsets_for_test(),
+                vec![1, 2, 3],
+                "a height update keeps pads for the same partition hash"
+            );
+            let mut changed = assignment;
+            changed.partition_hash = H256::repeat_byte(0x5C);
+            storage.assign_partition(changed, 8);
+            assert!(storage.entropy_cache_offsets_for_test().is_empty());
+        }
+        {
+            let (_dir, storage) = readahead_module("readahead_write", chunk * 4, chunk * 4)?;
+            storage.pack_with_zeros();
+            let unpacked = index_four_chunks(&storage)?;
+            storage.write_data_chunk(&unpacked[0])?;
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(2),
+                vec![0_u8; 32],
+                ChunkType::Entropy,
+            ));
+            assert_eq!(storage.entropy_cache_offsets_for_test(), vec![1, 3]);
+            // The entropy overwrite has to reach the file. A pad still in
+            // `pending` would pack this chunk with no second pread.
+            storage.sync_pending_chunks()?;
+            storage.write_data_chunk(&unpacked[2])?;
+            assert_eq!(storage.disk.entropy_preads.load(Ordering::SeqCst), 2);
+            assert!(!storage.entropy_cache_offsets_for_test().contains(&2));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn readahead_does_not_change_packed_bytes() -> eyre::Result<()> {
+        let chunk = 32_u64;
+        let (_off_dir, off) = readahead_module("readahead_bytes_off", 0, 0)?;
+        let (_on_dir, on) = readahead_module("readahead_bytes_on", chunk * 4, chunk * 4)?;
+        for storage in [&off, &on] {
+            storage.pack_with_zeros();
+            let unpacked = index_four_chunks(storage)?;
+            for body in &unpacked {
+                storage.write_data_chunk(body)?;
+            }
+        }
+        let off_rows = synced_packed_rows(&off)?;
+        let on_rows = synced_packed_rows(&on)?;
+        assert_eq!(off_rows, on_rows);
+        for (bytes, crc) in &on_rows {
+            assert_eq!(*crc, Some(chunk_crc::checksum(bytes)));
+        }
+        assert_eq!(off.disk.entropy_preads.load(Ordering::SeqCst), 4);
+        assert_eq!(on.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            on.disk.entropy_pread_bytes.load(Ordering::SeqCst),
+            chunk * 4
+        );
+        Ok(())
+    }
+
     fn durable_body_module(
         prefix: &str,
         chunks: u64,
@@ -11255,6 +11487,8 @@ mod tests {
                 entropy_coalesce_hole_bytes: sweep_bytes,
                 entropy_read_grace_ms: 0,
                 entropy_read_batch_bytes: sweep_bytes,
+                entropy_readahead_bytes: 0,
+                entropy_readahead_cache_bytes: 0,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
                 intervals_persist_secs: 0,

@@ -293,6 +293,34 @@ static ENTROPY_SPAN_SLOT_READS: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+static READAHEAD_STORES: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.entropy_readahead_stores_total")
+        .with_description(
+            "Entropy pads stored after a pread that read past its queued chunks. One count is one chunk.",
+        )
+        .build()
+});
+
+static READAHEAD_HITS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.entropy_readahead_hits_total")
+        .with_description(
+            "Sweep slots packed from the entropy read-ahead cache. One count is one chunk that did not read chunks.dat.",
+        )
+        .build()
+});
+
+/// One pad kept from a read-ahead pread.
+pub(super) fn note_readahead_store() {
+    READAHEAD_STORES.add(1, &[]);
+}
+
+/// One sweep slot that took a cached pad.
+pub(super) fn note_readahead_hit() {
+    READAHEAD_HITS.add(1, &[]);
+}
+
 /// One entropy pread about to be issued. `slots` is the queued chunks it
 /// serves. `bytes` is the pread, including a hole.
 pub(super) fn note_entropy_pread(slots: u64, bytes: u64) {
