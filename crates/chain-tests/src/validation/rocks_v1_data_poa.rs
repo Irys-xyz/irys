@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 
 use eyre::WrapErr as _;
 
-use crate::utils::{self, IrysNodeTest};
+use crate::utils::{self, IrysNodeTest, TimeMode};
 use irys_actors::block_producer::BlockProducerCommand;
 use irys_chain::IrysNodeCtx;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -78,7 +78,9 @@ async fn start_rocks_node(
 ) -> eyre::Result<(IrysNodeTest<IrysNodeCtx>, IrysSigner)> {
     let signer = config.new_random_signer();
     config.fund_genesis_accounts(vec![&signer]);
-    let node = IrysNodeTest::new_genesis(config);
+    // mine_until can take MINE_UNTIL_BLOCKS blocks. On the real clock that is
+    // ~1 s each and outlasts the heavy-test kill, hiding the miss report.
+    let node = IrysNodeTest::new_genesis(config).with_time_mode(TimeMode::Accelerated);
     StorageSubmodulesConfig::load_for_test(node.cfg.base_directory.clone(), submodules)?;
     let node = node.start_and_wait_for_packing("GENESIS", 30).await;
     node.stop_mining();
