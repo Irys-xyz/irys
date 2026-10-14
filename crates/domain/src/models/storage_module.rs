@@ -436,14 +436,14 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 ///
 /// # State machine
 ///
-/// | Transition | When it is stored | Class | Under 16 MiB/s ingest |
-/// | --- | --- | --- | --- |
-/// | `Entropy` / `Uninitialized` / `Data` → `Interrupted` for offsets about to be written | Before the `pwrite`, atomic replace | Write-ahead | Was once per durable gap (~0.96/s). A covered span does not write again |
-/// | Ahead `Entropy` / `Uninitialized` → `Interrupted` on disk only | Same rewrite, up to 512 MiB forward inside the submodule | Write-ahead coalesce | About one rewrite per 512 MiB (~0.03/s) while the frontier is contiguous |
-/// | `Interrupted` → `Data` or `Entropy` | After `fdatasync` and the presence commit. At most every `intervals_persist_secs`, sooner on the next write-ahead rewrite, on `force_sync`, or on clean shutdown | Completion | Was ~0.96/s. Now rides the write-ahead or the 30 s timer |
-/// | Failed `pwrite` → live `Uninitialized`, file stays `Interrupted` | No extra rewrite. Load maps both to `Uninitialized` | Completion lag is safe | Rare |
-/// | Any → `Uninitialized` on reset | After the index clear. A metadata marker covers a crash before the file rewrite | Write-ahead | Rare |
-/// | `index_transaction_data`, group commit, chunk `fdatasync` | Not an interval rewrite | Durable point is the chunk `fdatasync` plus the presence commit | `fdatasync` stays ~0.96/s |
+/// | Transition | When it is stored | Class |
+/// | --- | --- | --- |
+/// | `Entropy` / `Uninitialized` / `Data` → `Interrupted` for offsets about to be written | Before the `pwrite`, atomic replace. A span already marked is not rewritten | Write-ahead |
+/// | Ahead `Entropy` / `Uninitialized` → `Interrupted` on disk only | Same rewrite, up to 512 MiB forward inside the submodule | Write-ahead coalesce |
+/// | `Interrupted` → `Data` or `Entropy` | After `fdatasync` and the presence commit. At most every `intervals_persist_secs`, sooner on the next write-ahead rewrite, on `force_sync`, or on clean shutdown | Completion |
+/// | Failed `pwrite` → live `Uninitialized`, file stays `Interrupted` | No extra rewrite. Load maps both to `Uninitialized` | Completion lag is safe |
+/// | Any → `Uninitialized` on reset | After the index clear. A metadata marker covers a crash before the file rewrite | Write-ahead |
+/// | `index_transaction_data`, group commit, chunk `fdatasync` | Not an interval rewrite | Durable point is the chunk `fdatasync` plus the presence commit |
 ///
 /// `intervals_persist_secs = 0` does both file rewrites on every sync and
 /// does not mark ahead. Offsets still queued or parked are stored as
@@ -3089,15 +3089,10 @@ impl StorageModule {
         }
     }
 
-    /// Synchronizes chunks to disk when sufficient writes have accumulated
+    /// Wake the disk lane to drain pending chunk runs.
     ///
-    /// Process:
-    /// 1. Collects pending writes that meet threshold for each submodule
-    /// 2. Acquires write lock only if batched writes exist
-    /// 3. Writes chunks to disk and removes them from pending queue
-    ///
-    /// The sync threshold is configured via `min_writes_before_sync` to optimize
-    /// disk writes and minimize fragmentation.
+    /// Does not force a short tail out. Shutdown, recovery, and an idle module
+    /// use [`Self::force_sync_pending_chunks`].
     pub fn sync_pending_chunks(&self) -> eyre::Result<()> {
         self.sync_pending_chunks_inner(false)
     }
@@ -3110,12 +3105,6 @@ impl StorageModule {
     /// prevents efficient disk striping and increases on-disk fragmentation.
     /// Normal writers must use [`Self::sync_pending_chunks`], which preserves
     /// the configured batching threshold.
-    ///
-    /// Process:
-    /// 1. Collects pending writes for each submodule
-    /// 2. Acquires write lock only if some pending writes exist
-    /// 3. Writes chunks to disk and removes them from pending queue
-    ///
     pub fn force_sync_pending_chunks(&self) -> eyre::Result<()> {
         // Deposited bodies are not in the packed map yet. Pack them first so
         // the flush below persists the bytes the caller asked to finish.
@@ -3791,26 +3780,8 @@ impl StorageModule {
         Ok(uncovered)
     }
 
-    /// Persists partition interval data to individual submodules.
-    ///
-    /// # Overview
-    /// While the parent StorageModule maintains a global view of all partition intervals
-    /// across its submodules, each submodule records its own localized view. This function:
-    ///
-    /// 1. Takes the global intervals from the StorageModule
-    /// 2. For each submodule, extracts only the interval portions relevant to that submodule
-    /// 3. Writes the filtered intervals to an `intervals.json` file in each submodule's directory
-    ///
-    /// # Parameters
-    /// * `intervals` - Reference to the global StorageIntervals containing all chunk mappings
-    /// * `submodules` - Map of submodule intervals to their respective submodule instances
-    ///
-    /// # Returns
-    /// * `eyre::Result<()>` - Success or error during the write operation
-    ///
-    /// # Note
-    /// If a submodule has no intervals after filtering, a default `Uninitialized` interval
-    /// is created spanning the submodule's entire range to ensure consistency.
+    /// Write each submodule's slice of the live interval map.
+    /// An empty slice is stored as one `Uninitialized` span covering that submodule.
     pub fn write_intervals_to_submodules(&self) -> eyre::Result<()> {
         // A running lane writes the files itself. This caller waits. A stopped
         // lane, and the lane thread, write here.
@@ -4385,28 +4356,10 @@ impl StorageModule {
         }
     }
 
-    /// Reconstructs the global StorageIntervals by loading and merging interval data from all submodules.
+    /// Merge every submodule `intervals.json` into one map.
     ///
-    /// # Overview
-    /// This function rebuilds a complete view of all chunk storage intervals by:
-    ///
-    /// 1. Creating an empty global intervals container
-    /// 2. Reading each submodule's `intervals.json` file
-    /// 3. Merging all submodule intervals into the global container
-    ///
-    /// # Parameters
-    /// * `submodules` - Map containing all storage submodules
-    ///
-    /// # Returns
-    /// * `StorageIntervals` - A complete, merged map of all intervals across all submodules
-    ///
-    /// # Errors
-    /// A submodule `intervals.json` that cannot be read or parsed. The error
-    /// names that file. Stop the node, move the file aside, and reset that
-    /// storage module so it can repack.
-    ///
-    /// # Panics
-    /// * If unable to lock a submodule's intervals file mutex
+    /// `Interrupted` becomes `Uninitialized`. A file that cannot be read or
+    /// parsed returns an error that names that path.
     fn load_intervals_from_submodules(
         submodules: &SubmoduleMap,
         module_id: usize,
@@ -7555,19 +7508,9 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Writes chunk data to physical storage and updates state tracking
-    ///    DO NOT USE THIS FUNCTION STANDALONE
-    ///    READ `sync_pending_chunks_inner`
-    ///    notable hazards: fsync is NOT called, and the interval files are NOT updated by this function
-    /// Process:
-    /// 1. Locates correct submodule for chunk offset
-    /// 2. Sets the chunk status to Interrupted before writing
-    /// 3. Writes the intervals file to persist the Interrupted status
-    /// 4. Calculates physical storage position
-    /// 5. Writes chunk data to disk
-    /// 6. Updates interval tracking with new chunk state
-    ///
-    /// Note: Chunk size must match size in StorageModule.config
+    /// Test-only positional write. Does not `fsync` and does not rewrite
+    /// `intervals.json`. The live map is updated after the write. Callers
+    /// that need a durable image use [`Self::sync_pending_chunks_inner`].
     #[cfg(test)]
     fn write_chunk_internal(
         &self,
