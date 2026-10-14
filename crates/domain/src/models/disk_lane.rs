@@ -1,64 +1,20 @@
-//! Disk lane for one storage module.
+//! One thread per storage module. Callers enqueue. This thread locks `chunks.dat`.
 //!
-//! Callers enqueue. This lane decides when `chunks.dat` is locked.
-//! Order: mining recall, then a ready packed write, then an entropy read.
-//! A mining recall issues its `pread`s immediately. Packed writes already
-//! in the kernel keep running beside those `pread`s. The lane submits no
-//! new write until the recall drops the disk. It sorts a reorder buffer of
-//! pending chunks by offset and joins adjacent chunks into one `pwrite` of
-//! at most `WRITE_RUN_MAX_BYTES`. Each packed chunk enters that buffer on
-//! its own, with its own priority and queue time. A caller that already
-//! holds neighboring chunks publishes that run in one insert, so the lane
-//! cannot read a prefix of it. A short run waits for
-//! that size, a recall flush, the pending set at `num_writes_before_sync`,
-//! or `reorder_grace` only while the chunk disk is busy. A busy pass writes
-//! every full run and every aged short run, in offset order. An idle disk
-//! writes every short run already queued.
-//! A short entropy span waits out `entropy_read_grace_ms` for a neighbor,
-//! including while the disk is idle. The oldest chunk in the span starts
-//! the wait, so a neighbor does not restart it. A span that already reaches
-//! `entropy_read_batch_bytes`, and never more than `entropy_sweep_max_bytes`,
-//! is issued at once. A packing span is issued at once. A lone chunk is
-//! issued when the grace ends. Recall, a packed-write hold, and the
-//! in-flight budget still gate the read.
-//! A short ingress span may read past its last queued chunk, up to
-//! `entropy_readahead_bytes` and never past `entropy_sweep_max_bytes`,
-//! the transaction's last chunk in this module, or the submodule. That
-//! extension is forward from this span. An out-of-order upload writes a
-//! high offset first, and the holes behind that offset are the bytes
-//! still needed, so the window is not the highest Data offset. The extra
-//! entropy stays in a cache of at most `entropy_readahead_cache_bytes`.
-//! The oldest pad is dropped first. A pad is used only while its offset
-//! is still `Entropy` and the generation matches. Reset, a partition-hash
-//! change, `pause_data_writes`, and a write at the offset drop pads.
-//! New submits stop when another command would put the in-flight set past
-//! 500 ms, or when `INFLIGHT_WRITES` commands are already out.
-//! The file lock is dropped before the lane moves on.
-//! A data-path row and its packed-byte checksum are written only after this
-//! gap's `chunks.dat` fdatasync.
-//! One index batch per submodule covers those rows. A synced RocksDB batch
-//! also covers registrations still waiting on group commit.
-//! `min_durable_interval_ms` can defer that pair. The node default is 250 ms
-//! for HDD storage modules (16–28 MiB/s stays under saturation, about
-//! +100 ms durable p99). `0` syncs on every gap and does not defer. Pwrites
-//! still run. Force, shutdown, drop, pending bytes over the headroom line,
-//! and the pending-byte ceiling do not defer it. The interval is the longest
-//! wait. Recall does not wait on a deferred pair.
-//! This thread stores a write-ahead `Interrupted` mark in `intervals.json`
-//! before those `pwrite`s. The mark covers the bytes the checksum will
-//! describe. A completion
-//! (`Data` or `Entropy`) is rewritten
-//! with the next write-ahead, on the persist interval, or on shutdown.
-//! Another thread posts a full interval rewrite here.
+//! Order is mining recall, then a ready packed write, then an entropy read.
+//! A recall `pread` does not cancel a `pwrite` already in the kernel. This
+//! thread submits no new write while `recall_waiters` is set.
 //!
-//! `StorageModuleService` starts one thread per module. That thread runs the
-//! sweep and the packed flush. It sleeps on the gate condvar and wakes when
-//! work is queued, a call finishes, a recall hold changes, or another
-//! thread posts a flush or an interval write. Ingress
-//! and data sync wait on the group result and do not lock the file. A mining
-//! recall still `pread`s on the mining thread and keeps two of those calls
-//! in the kernel. This thread submits no new write while the recall count
-//! is set. Writes already handed to the kernel run on.
+//! Presence rows and packed-byte checksums are written only after this gap's
+//! `chunks.dat` fdatasync. `min_durable_interval_ms` can defer that pair.
+//! `0` does not. Force, shutdown, drop, pending bytes over the headroom line,
+//! and the pending-byte ceiling do not defer it. Recall does not wait on a
+//! deferred pair. `intervals.json` gets an `Interrupted` mark before the
+//! `pwrite`s. A completion is rewritten with the next write-ahead, on the
+//! persist interval, or on shutdown.
+//!
+//! Reset, a partition-hash change, `pause_data_writes`, and a write at the
+//! offset drop read-ahead pads still in the cache. The generation has to
+//! match.
 
 use std::{
     collections::HashMap,
@@ -2446,8 +2402,6 @@ impl StorageModule {
         self.disk.notify();
     }
 
-    /// Packed bytes are already in the reorder buffer when the sweep returns.
-    /// The data-path row is written later, after this gap's fdatasync.
     pub(super) fn poll_acks(&self) {}
 
     fn commit_packed(
