@@ -1857,9 +1857,11 @@ impl StorageModule {
 
             let submodules_intervals_file = PathBuf::from(&intervals_file_path);
 
-            // Ensure the intervals.json has a default range
-            ensure_default_intervals(&submodule_interval, &submodules_intervals_file)
-                .expect("to ensure default intervals exist for submodule");
+            ensure_default_intervals(
+                &submodule_interval,
+                &submodules_intervals_file,
+                &submodule_db,
+            )?;
 
             // The submodule_map maps submodule intervals to specific instance of StorageSubmodule
             // that maintains system resources connected to the files in that submodule
@@ -7907,31 +7909,38 @@ pub fn write_entropy_intervals(path: &Path, chunks: u32) -> eyre::Result<()> {
 fn ensure_default_intervals(
     submodule_interval: &Interval<PartitionChunkOffset>,
     intervals_path: &Path,
+    index: &SubmoduleIndex,
 ) -> eyre::Result<()> {
+    let empty = match fs::metadata(intervals_path) {
+        Ok(meta) => meta.len() == 0,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(err) => {
+            return Err(err).wrap_err_with(|| intervals_file_error(intervals_path, "stat"));
+        }
+    };
+    if !empty {
+        return Ok(());
+    }
+    // A default file labels the whole span Uninitialized, and open then drops
+    // every placement under it. Only a module with no tx intervals may start
+    // from scratch.
+    let indexed = index.view(|tx| {
+        tx.tx_intervals_in_range(submodule_interval.start(), submodule_interval.end())
+    })?;
+    if !indexed.is_empty() {
+        return Err(eyre!(
+            "intervals.json at {} is missing or empty, but the submodule index holds {} tx intervals. Starting would label the span Uninitialized and drop them. Restore intervals.json, or stop the node and clear this submodule directory (index, intervals.json, chunks.dat) so it can repack.",
+            intervals_path.display(),
+            indexed.len()
+        ));
+    }
     let mut intervals = StorageIntervals::new();
     intervals
         .insert_merge_touching_if_values_equal(*submodule_interval, ChunkType::Uninitialized)
         .expect("to insert a default interval to the submodule intervals");
-
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(intervals_path)
-        .wrap_err_with(|| {
-            format!(
-                "Failed to create or open intervals file at {}",
-                intervals_path.display()
-            )
-        })?;
-
-    let file_size = file.metadata()?.len();
-    if file_size == 0 {
-        let mut file = get_atomic_file(intervals_path)?;
-        file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
-        file.commit()?;
-    }
+    let mut file = get_atomic_file(intervals_path)?;
+    file.write_all(serde_json::to_string(&intervals)?.as_bytes())?;
+    file.commit()?;
     Ok(())
 }
 
@@ -9452,6 +9461,31 @@ mod tests {
         let mut file = get_atomic_file(&path)?;
         file.write_all(serde_json::to_string(&map)?.as_bytes())?;
         file.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_or_empty_intervals_file_refuses_an_indexed_module() -> eyre::Result<()> {
+        for empty_file in [false, true] {
+            for_each_index_engine("intervals_missing", |config, storage| {
+                seed_mixed_index(&storage)?;
+                storage.suppress_interval_flush_for_test();
+                let path = submodule_interval_path(&storage, 0);
+                drop(storage);
+                if empty_file {
+                    fs::write(&path, b"")?;
+                } else {
+                    fs::remove_file(&path)?;
+                }
+                let Err(err) = reopen_presence(config) else {
+                    eyre::bail!("open relabelled an indexed span as Uninitialized");
+                };
+                assert!(format!("{err:#}").contains("missing or empty"), "{err:#}");
+                // Refusing leaves the index for the operator to restore.
+                fs::write(&path, b"")?;
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 
