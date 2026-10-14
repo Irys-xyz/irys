@@ -103,7 +103,7 @@ pub enum MigrationError {
     #[error("Missing block or tx data for migration: {0}")]
     MissingData(String),
     /// Catch-all variant for other errors.
-    #[error("Ingress proof error: {0}")]
+    #[error("Chunk migration error: {0}")]
     Other(String),
 }
 
@@ -909,11 +909,11 @@ impl ChunkMigrationService {
             data_sync_service
                 .start()
                 .await
-                .expect("DataSync Service encountered an irrecoverable error")
+                .expect("Chunk migration service encountered an irrecoverable error")
         });
 
         TokioServiceHandle {
-            name: "data_sync_service".to_string(),
+            name: "chunk_migration_service".to_string(),
             handle,
             shutdown_signal: shutdown_tx,
         }
@@ -921,14 +921,14 @@ impl ChunkMigrationService {
 
     #[tracing::instrument(name = "chunk_migration_service_start", level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
-        tracing::info!("starting DataSync Service");
+        tracing::info!("starting chunk migration service");
 
         loop {
             tokio::select! {
                 biased;
 
                 _ = &mut self.shutdown => {
-                    tracing::info!("Shutdown signal received for DataSync Service");
+                    tracing::info!("Shutdown signal received for chunk migration service");
                     break;
                 }
 
@@ -953,7 +953,7 @@ impl ChunkMigrationService {
             self.inner.handle_message(msg);
         }
 
-        tracing::info!("shutting down DataSync Service gracefully");
+        tracing::info!("shutting down chunk migration service gracefully");
         Ok(())
     }
 }

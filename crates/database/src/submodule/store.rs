@@ -8,10 +8,9 @@
 //! those three rules; MDBX gets them from its transaction.
 //!
 //! `update` stays durable. [`SubmoduleIndex::update_registration`] is the
-//! same until group commit is enabled. Then the registration is visible
-//! before it returns. MDBX syncs the group on a count, a durable write, or
-//! 50 ms. RocksDB leaves it unsynced until the next synced write, the WAL
-//! backstop, or shutdown. A failed RocksDB WAL sync rejects later `update`
+//! same until group commit is enabled, which production does for RocksDB
+//! only. Then the registration is visible before it returns and stays
+//! unsynced until the next synced write, the WAL backstop, or shutdown. A failed RocksDB WAL sync rejects later `update`
 //! and `update_covered` calls.
 
 use std::path::Path;
@@ -1517,7 +1516,7 @@ impl SubmoduleIndex {
     }
 
     /// Bound how long a RocksDB index may leave an unsynced write in the
-    /// page cache. MDBX ignores this and keeps its 50 ms group delay.
+    /// page cache. MDBX ignores this.
     ///
     /// [`Duration::ZERO`] makes the backstop thread sync as soon as it
     /// wakes. It does not sync on this thread. Call this before
