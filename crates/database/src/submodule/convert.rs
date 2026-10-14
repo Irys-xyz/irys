@@ -573,13 +573,12 @@ pub fn verify_rocks_records(
     require_rocks_v1(right_dir)?;
     let left = map_open(RocksSubmoduleStore::open_read_only(left_dir))?;
     let right = map_open(RocksSubmoduleStore::open_read_only(right_dir))?;
-    verify_wrapped_records(&left, &right, false)
+    verify_wrapped_records(&left, &right)
 }
 
 fn verify_wrapped_records(
     left: &RocksSubmoduleStore,
     right: &RocksSubmoduleStore,
-    crc_unset_on_right: bool,
 ) -> eyre::Result<EngineEquivalenceReport> {
     let mut report = EngineEquivalenceReport::default();
     if left.reset_in_progress()? != right.reset_in_progress()? {
@@ -615,12 +614,7 @@ fn verify_wrapped_records(
                 }
                 let left_crc = left_rows[index].as_ref().and_then(|meta| meta.crc);
                 let right_crc = right_rows[index].as_ref().and_then(|meta| meta.crc);
-                let crc_bad = if crc_unset_on_right {
-                    right_crc.is_some()
-                } else {
-                    left_crc != right_crc
-                };
-                if crc_bad {
+                if left_crc != right_crc {
                     report.mismatch_chunk_crc = report.mismatch_chunk_crc.saturating_add(1);
                     report.offset_mismatches = report.offset_mismatches.saturating_add(1);
                     note(&mut report, "chunk_crc", format!("offset {}", key.0));
