@@ -294,13 +294,17 @@ impl BandwidthWindow {
         }
 
         let now = Instant::now();
-        let cutoff_time = now.checked_sub(window.min(self.window_duration)).unwrap();
+        // `checked_sub` is `None` when the window reaches past the monotonic
+        // origin (the machine has been up for less than the window). Every
+        // bucket is then inside the window. Elapsed time starts at the oldest.
+        let cutoff_time = now.checked_sub(window.min(self.window_duration));
+        let in_window = |timestamp: Instant| cutoff_time.is_none_or(|cutoff| timestamp >= cutoff);
 
         // Sum bytes from buckets within the specified window
         let total_bytes: u64 = self
             .buckets
             .iter()
-            .filter(|(timestamp, _)| *timestamp >= cutoff_time)
+            .filter(|(timestamp, _)| in_window(*timestamp))
             .map(|(_, bytes)| bytes)
             .sum();
 
@@ -308,7 +312,7 @@ impl BandwidthWindow {
         if let Some((oldest_timestamp, _)) = self
             .buckets
             .iter()
-            .find(|(timestamp, _)| *timestamp >= cutoff_time)
+            .find(|(timestamp, _)| in_window(*timestamp))
         {
             let elapsed = now.duration_since(*oldest_timestamp);
             let elapsed_secs = elapsed.as_secs_f64();
@@ -319,5 +323,48 @@ impl BandwidthWindow {
         }
 
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BandwidthWindow;
+    use std::time::{Duration, Instant};
+
+    /// A window longer than monotonic uptime must still count every bucket.
+    /// `Instant::checked_sub` is `None` until the machine has been up for the
+    /// whole window; unwrapping that is a panic on the data-sync task.
+    #[test]
+    fn bandwidth_window_counts_buckets_when_the_window_predates_boot() {
+        let now = Instant::now();
+        let mut span = Duration::from_secs(1);
+        while now.checked_sub(span).is_some() {
+            let Some(next) = span.checked_mul(2) else {
+                span = Duration::MAX;
+                break;
+            };
+            span = next;
+        }
+        assert!(
+            now.checked_sub(span).is_none(),
+            "the window must not fit before the monotonic origin"
+        );
+
+        let mut window = BandwidthWindow::new(Duration::from_secs(10));
+        window.window_duration = span;
+        window.add_bytes(4_096);
+        let oldest = now
+            .checked_sub(Duration::from_millis(100))
+            .expect("host uptime covers 100ms");
+        window.buckets.front_mut().expect("bucket").0 = oldest;
+
+        let bps = window.bytes_per_second_in_window(span);
+        // 4096 bytes over ~100ms is 40960 B/s. A few tens of milliseconds of
+        // scheduling slack stays inside this range; dropping the bucket or
+        // dividing by the whole pre-boot span does not.
+        assert!(
+            (20_000..100_000).contains(&bps),
+            "expected the single bucket over ~100ms, got {bps}"
+        );
     }
 }
