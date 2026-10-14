@@ -173,22 +173,33 @@ pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
     Ok(leaf_proof)
 }
 
-pub fn validate_path(
-    root_hash: [u8; HASH_SIZE],
-    path_buff: &Base64,
-    target_byte_position: u128,
-) -> Result<ValidatePathResult, Error> {
-    // Basic size checks to avoid underflow and malformed proofs
+/// A proof buffer that fails here is invalid for every target.
+///
+/// Size and alignment only. Hash and range checks stay in [`validate_path`],
+/// because those depend on the target byte.
+pub fn ensure_proof_layout(path_buff: &Base64) -> Result<(), Error> {
     let total_len = path_buff.len();
     let leaf_len = HASH_SIZE + NOTE_SIZE;
     eyre::ensure!(total_len >= leaf_len, "Invalid proof: too short");
-
     let branches_len = total_len - leaf_len;
     let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
     eyre::ensure!(
         branches_len.is_multiple_of(branch_item_len),
         "Invalid proof: misaligned branch length"
     );
+    Ok(())
+}
+
+pub fn validate_path(
+    root_hash: [u8; HASH_SIZE],
+    path_buff: &Base64,
+    target_byte_position: u128,
+) -> Result<ValidatePathResult, Error> {
+    ensure_proof_layout(path_buff)?;
+    let total_len = path_buff.len();
+    let leaf_len = HASH_SIZE + NOTE_SIZE;
+    let branches_len = total_len - leaf_len;
+    let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
 
     // Split proof into branches and leaf. Leaf is the final proof and branches
     // are ordered from root to leaf.
