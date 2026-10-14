@@ -367,6 +367,8 @@ struct PendingWrites {
     /// waits out `reorder_grace`. Every aged short run is then eligible. An
     /// idle disk writes them without that wait.
     queued_at: HashMap<PartitionChunkOffset, Instant>,
+    /// When the pwrite of a still-queued chunk returned. Ingress latency only.
+    pwrite_at: HashMap<PartitionChunkOffset, Instant>,
     /// Unpacked bytes waiting on the entropy read. Counted in `pending_write_bytes`.
     queued_unpacked_bytes: u64,
     /// Data-path proof for a packed data chunk. The index row, including the
@@ -390,6 +392,8 @@ struct WrittenAhead {
     chunk_type: ChunkType,
     priority: disk_lane::WritePriority,
     queued_at: Instant,
+    /// When the pwrite returned. `None` if that stamp was not kept.
+    pwrite_at: Option<Instant>,
 }
 
 impl Deref for PendingWrites {
@@ -1148,6 +1152,7 @@ fn read_recall_run(
             let nbytes = n as usize * chunk_len;
             batch.push((piece, file_offset, n, nbytes));
         }
+        let pread_started = Instant::now();
         let loaded = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(batch.len());
             for (piece, file_offset, n, nbytes) in batch {
@@ -1167,6 +1172,7 @@ fn read_recall_run(
                 .map(|handle| handle.join().expect("recall read"))
                 .collect::<Vec<_>>()
         });
+        index_read_metrics::note_recall_pread(pread_started.elapsed());
         for (piece, n, result) in loaded {
             let loaded =
                 result.wrap_err_with(|| format!("recall read at offset {piece} count {n}"))?;
@@ -2890,6 +2896,7 @@ impl StorageModule {
             pending.occupancy.clear();
             pending.priorities.clear();
             pending.queued_at.clear();
+            pending.pwrite_at.clear();
             pending.proofs.clear();
             pending.written_ahead.clear();
         }
@@ -3214,6 +3221,7 @@ impl StorageModule {
                     .queued_at
                     .remove(offset)
                     .unwrap_or_else(Instant::now);
+                let pwrite_at = pending.pwrite_at.remove(offset);
                 pending.priorities.remove(offset);
                 pending.written_ahead.insert(
                     *offset,
@@ -3222,6 +3230,7 @@ impl StorageModule {
                         chunk_type,
                         priority: *priority,
                         queued_at,
+                        pwrite_at,
                     },
                 );
             }
@@ -3355,7 +3364,13 @@ impl StorageModule {
         // One durable index batch per submodule in this gap. It holds the
         // data-path rows for the chunks just synced. A synced RocksDB write
         // also covers registrations still waiting on group commit.
+        let index_started = Instant::now();
         let uncovered = self.commit_presence_rows(&durable_batch)?;
+        // fdatasync has returned and no chunk command is in the kernel.
+        // This commit is HDD-idle time on the lane thread.
+        if self.disk.no_chunk_command() {
+            index_read_metrics::note_disk_idle("durable_point", index_started.elapsed());
+        }
         // A proof with no covering interval was not stored. Put those offsets
         // back to Uninitialized before the completion file is written, and
         // leave them queued. A crash must not reload Data with no proof.
@@ -3394,10 +3409,16 @@ impl StorageModule {
                 continue;
             }
             if pending.get(chunk_offset) == Some(state) {
+                let pwrite_at = pending.pwrite_at.remove(chunk_offset);
+                let priority = pending.priorities.remove(chunk_offset);
                 pending.remove(chunk_offset);
-                pending.priorities.remove(chunk_offset);
                 pending.queued_at.remove(chunk_offset);
                 pending.proofs.remove(chunk_offset);
+                if priority == Some(disk_lane::WritePriority::Ingress)
+                    && let Some(pwrite_at) = pwrite_at
+                {
+                    index_read_metrics::note_ingest_stage("pwrite_to_durable", pwrite_at.elapsed());
+                }
             }
         }
         for (chunk_offset, state, _) in &ahead {
@@ -3409,8 +3430,16 @@ impl StorageModule {
                 .get(chunk_offset)
                 .is_some_and(|ahead| ahead.bytes == state.0 && ahead.chunk_type == state.1)
             {
-                pending.written_ahead.remove(chunk_offset);
+                let parked = pending
+                    .written_ahead
+                    .remove(chunk_offset)
+                    .expect("matched above");
                 pending.proofs.remove(chunk_offset);
+                if parked.priority == disk_lane::WritePriority::Ingress
+                    && let Some(pwrite_at) = parked.pwrite_at
+                {
+                    index_read_metrics::note_ingest_stage("pwrite_to_durable", pwrite_at.elapsed());
+                }
             }
         }
         drop(pending);
@@ -5639,6 +5668,7 @@ impl StorageModule {
         pending.insert(chunk_offset, (bytes, chunk_type));
         pending.priorities.insert(chunk_offset, priority);
         pending.queued_at.insert(chunk_offset, Instant::now());
+        pending.pwrite_at.remove(&chunk_offset);
         // A raw write has no data-path proof. Drop a proof left by a packed
         // chunk this write replaced, so the fsync cannot publish that path.
         pending.proofs.remove(&chunk_offset);
@@ -5683,6 +5713,9 @@ impl StorageModule {
                 .retain(|offset, _| *offset < start || *offset > end);
             pending
                 .queued_at
+                .retain(|offset, _| *offset < start || *offset > end);
+            pending
+                .pwrite_at
                 .retain(|offset, _| *offset < start || *offset > end);
             pending
                 .proofs
@@ -7346,6 +7379,25 @@ impl StorageModule {
         self.note_write_run(run, start_time, write_result)
     }
 
+    /// Stamp the pwrite return and record ingress packed-to-pwrite latency.
+    /// The intervals lock is not held here.
+    fn stamp_pwrite(&self, run: &WriteRun, at: Instant) {
+        let mut pending = self.pending_writes.write().unwrap();
+        for offset in &run.offsets {
+            let priority = pending.priorities.get(offset).copied();
+            let queued = pending.queued_at.get(offset).copied();
+            pending.pwrite_at.insert(*offset, at);
+            if priority == Some(disk_lane::WritePriority::Ingress)
+                && let Some(queued) = queued
+            {
+                index_read_metrics::note_ingest_stage(
+                    "packed_to_pwrite",
+                    at.saturating_duration_since(queued),
+                );
+            }
+        }
+    }
+
     fn note_write_run(
         &self,
         run: &WriteRun,
@@ -7394,6 +7446,7 @@ impl StorageModule {
         }
 
         let completion_time = Instant::now();
+        self.stamp_pwrite(run, completion_time);
         let mut recent_chunk_times = self.recent_chunk_times.write().map_err(|e| {
             eyre::eyre!("Failed to acquire write lock on recent_chunk_times: {}", e)
         })?;
@@ -11081,6 +11134,100 @@ mod tests {
         Ok(())
     }
 
+    fn grace_pack_module(
+        prefix: &str,
+        grace_ms: u64,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                entropy_sweep_max_bytes: chunk_size * 4,
+                entropy_read_grace_ms: grace_ms,
+                entropy_read_batch_bytes: chunk_size * 4,
+                min_durable_interval_ms: 0,
+                intervals_persist_secs: 0,
+                ..StorageSyncConfig::default()
+            },
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 3), "hdd0".into())],
+            },
+            &config,
+        )?;
+        storage.pack_with_zeros();
+        Ok((tmp_dir, storage))
+    }
+
+    fn ingest_packed(storage: &StorageModule, byte: u8) -> eyre::Result<(Vec<u8>, Option<u32>)> {
+        let data_root = H256::from([byte; 32]);
+        let path = vec![byte, 2, 3, 4];
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 32,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        storage.index_transaction_data(
+            &data_tx,
+            &path,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        storage.deposit_data_chunk(&UnpackedChunk {
+            data_root,
+            data_size: 32,
+            data_path: path.into(),
+            bytes: vec![byte; 32].into(),
+            tx_offset: TxChunkOffset::from(0),
+        })?;
+        storage.drive_entropy_queue_for_test();
+        storage.sync_pending_chunks()?;
+        let loaded = storage.read_chunks(partition_chunk_offset_ii!(0, 0))?;
+        let (bytes, _) = loaded
+            .get(&PartitionChunkOffset::from(0))
+            .expect("packed chunk");
+        let crc = storage
+            .offset_meta_for_test(PartitionChunkOffset::from(0))?
+            .and_then(|row| row.crc);
+        Ok((bytes.clone(), crc))
+    }
+
+    #[test]
+    fn entropy_read_grace_does_not_change_packed_bytes() -> eyre::Result<()> {
+        let (_fast_dir, fast) = grace_pack_module("grace_bytes_0", 0)?;
+        let (_slow_dir, slow) = grace_pack_module("grace_bytes_40", 40)?;
+        let (fast_bytes, fast_crc) = ingest_packed(&fast, 0x5A)?;
+        let (slow_bytes, slow_crc) = ingest_packed(&slow, 0x5A)?;
+        assert_eq!(fast_bytes, slow_bytes);
+        assert_eq!(fast_crc, slow_crc);
+        assert_eq!(fast_crc, Some(chunk_crc::checksum(&fast_bytes)));
+        assert_eq!(fast.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        assert_eq!(slow.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
     fn durable_body_module(
         prefix: &str,
         chunks: u64,
@@ -11106,6 +11253,8 @@ mod tests {
                 entropy_sweep_interval_millis: 1000,
                 entropy_sweep_max_bytes: sweep_bytes,
                 entropy_coalesce_hole_bytes: sweep_bytes,
+                entropy_read_grace_ms: 0,
+                entropy_read_batch_bytes: sweep_bytes,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
                 intervals_persist_secs: 0,

@@ -100,6 +100,33 @@ pub(crate) fn preset(name: &str) -> eyre::Result<Plan> {
     match name {
         "recall-1" => Ok(recall_plan("recall-1", 1, 1)),
         "recall-1.8" => Ok(recall_plan("recall-1.8", 9, 5)),
+        "ingest-ooo" => Ok(Plan {
+            name: "ingest-ooo".to_string(),
+            stop_on_fail: true,
+            steps: vec![
+                Step {
+                    name: "idle".to_string(),
+                    secs: 8,
+                    rates: Rates {
+                        recall_num: 1,
+                        recall_den: 1,
+                        ..Rates::idle()
+                    },
+                },
+                Step {
+                    name: "ingest".to_string(),
+                    secs: 20,
+                    rates: Rates {
+                        recall_num: 1,
+                        recall_den: 1,
+                        ingest_mib_s: 8,
+                        migration_mib_s: 0,
+                        serve_per_sec: 0,
+                        serve_seq_pct: 50,
+                    },
+                },
+            ],
+        }),
         "smoke" => Ok(Plan {
             name: "smoke".to_string(),
             stop_on_fail: true,
@@ -117,7 +144,7 @@ pub(crate) fn preset(name: &str) -> eyre::Result<Plan> {
             }],
         }),
         other => Err(eyre!(
-            "unknown preset {other}; expected recall-1, recall-1.8, or smoke"
+            "unknown preset {other}; expected recall-1, recall-1.8, smoke, or ingest-ooo"
         )),
     }
 }

@@ -1377,8 +1377,11 @@ mod tests {
         expected_config.mempool.max_control_plane_concurrent_tasks = 0;
         // An omitted key takes the production default.
         expected_config.storage.entropy_sweep_interval_millis = 1000;
-        expected_config.storage.entropy_sweep_max_bytes = 256 * 1024;
-        expected_config.storage.entropy_coalesce_hole_bytes = 256 * 1024;
+        expected_config.storage.entropy_sweep_max_bytes = node::DEFAULT_ENTROPY_SWEEP_MAX_BYTES;
+        expected_config.storage.entropy_coalesce_hole_bytes =
+            node::DEFAULT_ENTROPY_COALESCE_HOLE_BYTES;
+        expected_config.storage.entropy_read_grace_ms = node::DEFAULT_ENTROPY_READ_GRACE_MS;
+        expected_config.storage.entropy_read_batch_bytes = node::DEFAULT_ENTROPY_READ_BATCH_BYTES;
         expected_config.storage.intervals_persist_secs = node::DEFAULT_INTERVALS_PERSIST_SECS;
         // Omitted `min_durable_interval_ms` takes the production default (250).
         // `NodeConfig::testing()` pins 0 and must not be the expectation here.

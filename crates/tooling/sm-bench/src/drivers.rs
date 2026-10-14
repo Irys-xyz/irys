@@ -71,6 +71,8 @@ pub(crate) struct BenchIo {
     pub serve_busy: AtomicBool,
     pub index_lock: tokio::sync::Mutex<()>,
     pub permits: PermitGauge,
+    /// Shuffle chunk order inside each ingest transaction.
+    pub shuffle_ingest: bool,
 }
 
 pub(crate) fn resume_frontier(module: &StorageModule, start: u32, end: u32) -> u32 {
@@ -955,15 +957,26 @@ async fn write_tx(
     let failed = Arc::new(AtomicBool::new(false));
     let left = Arc::new(AtomicU32::new(chunks));
     let data_size = u64::from(chunks).saturating_mul(io.chunk_size);
-    let mut offset = start;
-    let end = start + chunks;
+    let mut positions: Vec<u32> = (0..chunks).collect();
+    if !migration && io.shuffle_ingest {
+        let mut rng = StdRng::seed_from_u64(io.seed.wrapping_add(u64::from(start)));
+        for i in (1..positions.len()).rev() {
+            let j = rng.gen_range(0..=i);
+            positions.swap(i, j);
+        }
+    }
+    let mut cursor = 0_u32;
     let span = u32::try_from(io.span_limit).unwrap_or(u32::MAX).max(1);
-    while offset < end {
+    while cursor < chunks {
         if stopped(stop) || fatal_reason(io).is_some() {
             failed.store(true, Ordering::Release);
             break;
         }
-        let n = if migration { span.min(end - offset) } else { 1 };
+        let n = if migration {
+            span.min(chunks - cursor)
+        } else {
+            1
+        };
         let batch_bytes = u64::from(n).saturating_mul(io.chunk_size);
         if !pace_bytes(io, kind, pacer, batch_bytes, mib_s, stop).await {
             failed.store(true, Ordering::Release);
@@ -976,7 +989,11 @@ async fn write_tx(
         let gen_started = std::time::Instant::now();
         let mut batch = Vec::with_capacity(usize::try_from(n).unwrap_or(1));
         for step in 0..n {
-            let tx_offset = offset + step - start;
+            let tx_offset = if migration {
+                cursor + step
+            } else {
+                positions[usize::try_from(cursor).unwrap_or(0)]
+            };
             batch.push(unpacked(root, data_size, tx_offset, io.chunk_size));
         }
         record_gen(io, kind, gen_started.elapsed());
@@ -994,7 +1011,8 @@ async fn write_tx(
             }
         } else {
             let chunk = batch.pop().ok_or_else(|| eyre!("empty ingest batch"))?;
-            let part = PartitionChunkOffset::from(offset);
+            let tx_offset = positions[usize::try_from(cursor).unwrap_or(0)];
+            let part = PartitionChunkOffset::from(start + tx_offset);
             let Some(permits) = permits else {
                 return Err(eyre!("ingest concurrency cap is missing"));
             };
@@ -1021,7 +1039,7 @@ async fn write_tx(
                 chunk,
             );
         }
-        offset = offset.saturating_add(n);
+        cursor = cursor.saturating_add(n);
     }
     Ok(())
 }

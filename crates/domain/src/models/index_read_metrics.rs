@@ -235,6 +235,151 @@ pub(super) fn note_recall_io(mode: &'static str) {
     RECALL_IO.add(1, &[KeyValue::new("mode", mode)]);
 }
 
+static RECALL_PREAD_US: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.recall_pread_us_total")
+        .with_description(
+            "Wall time of mining recall pread batches, in microseconds. One sample is one parallel batch, not one pread. Subtract from disk_idle_us_total{reason=recall_hold}: that sleep covers the preads and the gaps between them.",
+        )
+        .build()
+});
+
+/// Wall time of one parallel recall-pread batch.
+pub(super) fn note_recall_pread(elapsed: std::time::Duration) {
+    let us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    RECALL_PREAD_US.add(us, &[]);
+}
+
+static ENTROPY_SPANS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.entropy_spans_total")
+        .with_description("Entropy preads issued. One count is one span.")
+        .build()
+});
+
+static ENTROPY_SPAN_BYTES: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.entropy_span_bytes_total")
+        .with_description(
+            "Bytes of entropy preads issued, holes included. Divide by entropy_spans_total for the mean span.",
+        )
+        .build()
+});
+
+static ENTROPY_SPAN_SLOTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.entropy_span_slots_total")
+        .with_description(
+            "Queued chunks served by entropy preads. A hole is not a slot. Divide by entropy_spans_total for the mean.",
+        )
+        .build()
+});
+
+static ENTROPY_SPAN_READS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.entropy_span_reads_total")
+        .with_description(
+            "Entropy preads by pread size. bytes is 256KiB, 512KiB, 1MiB, 2MiB, 4MiB, 8MiB, or 16MiB+.",
+        )
+        .build()
+});
+
+static ENTROPY_SPAN_SLOT_READS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.entropy_span_slot_reads_total")
+        .with_description(
+            "Entropy preads by queued chunks served. slots is 1, 2, 3-4, 5-8, 9-16, 17-32, or 33+.",
+        )
+        .build()
+});
+
+/// One entropy pread about to be issued. `slots` is the queued chunks it
+/// serves. `bytes` is the pread, including a hole.
+pub(super) fn note_entropy_pread(slots: u64, bytes: u64) {
+    ENTROPY_SPANS.add(1, &[]);
+    ENTROPY_SPAN_BYTES.add(bytes, &[]);
+    ENTROPY_SPAN_SLOTS.add(slots, &[]);
+    ENTROPY_SPAN_READS.add(1, &[KeyValue::new("bytes", span_bytes_bucket(bytes))]);
+    ENTROPY_SPAN_SLOT_READS.add(1, &[KeyValue::new("slots", span_slots_bucket(slots))]);
+}
+
+fn span_bytes_bucket(bytes: u64) -> &'static str {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes <= 256 * KIB {
+        "256KiB"
+    } else if bytes <= 512 * KIB {
+        "512KiB"
+    } else if bytes <= MIB {
+        "1MiB"
+    } else if bytes <= 2 * MIB {
+        "2MiB"
+    } else if bytes <= 4 * MIB {
+        "4MiB"
+    } else if bytes <= 8 * MIB {
+        "8MiB"
+    } else {
+        "16MiB+"
+    }
+}
+
+fn span_slots_bucket(slots: u64) -> &'static str {
+    match slots {
+        0 | 1 => "1",
+        2 => "2",
+        3 | 4 => "3-4",
+        5..=8 => "5-8",
+        9..=16 => "9-16",
+        17..=32 => "17-32",
+        _ => "33+",
+    }
+}
+
+static DISK_IDLE: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.disk_idle_total")
+        .with_description(
+            "Lane sleeps with no chunk command in the kernel. reason is nothing_queued, read_grace, recall_hold, packed_write_hold, exclusive_io, inflight_budget, sync_in_progress, or durable_point. recall_hold includes mining pread time; see recall_pread_us_total.",
+        )
+        .build()
+});
+
+static DISK_IDLE_US: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .u64_counter("irys.storage.disk_idle_us_total")
+        .with_description(
+            "Microseconds of irys.storage.disk_idle_total. durable_point also counts the presence-commit slice after fdatasync, while the lane holds no chunk command.",
+        )
+        .build()
+});
+
+/// One stretch where the lane issued no chunk command and the chunk file was
+/// not held for a syscall.
+pub(super) fn note_disk_idle(reason: &'static str, elapsed: std::time::Duration) {
+    let us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    let labels = [KeyValue::new("reason", reason)];
+    DISK_IDLE.add(1, &labels);
+    DISK_IDLE_US.add(us, &labels);
+}
+
+static INGEST_STAGE_MS: LazyLock<opentelemetry::metrics::Histogram<f64>> = LazyLock::new(|| {
+    global::meter("irys-domain")
+        .f64_histogram("irys.storage.ingest_stage_ms")
+        .with_description(
+            "Ingress chunk latency in milliseconds. queue_to_entropy is sweep enqueue until the entropy pread returns. entropy_to_packed is the XOR and the packed-queue insert. packed_to_pwrite is the packed queue until the pwrite returns. pwrite_to_durable is that return until the durable point drops the offset.",
+        )
+        .with_boundaries(vec![
+            1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0,
+        ])
+        .build()
+});
+
+/// One ingress stage. Other priorities are not recorded.
+pub(super) fn note_ingest_stage(stage: &'static str, elapsed: std::time::Duration) {
+    let ms = elapsed.as_secs_f64() * 1_000.0;
+    INGEST_STAGE_MS.record(ms, &[KeyValue::new("stage", stage)]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DATA_SYNC, INGRESS_SIZE, PLACEMENT, current, with_caller};
@@ -263,5 +408,17 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(seen, PLACEMENT);
+    }
+
+    #[test]
+    fn entropy_span_buckets_split_one_chunk_from_a_run() {
+        assert_eq!(super::span_bytes_bucket(256 * 1024), "256KiB");
+        assert_eq!(super::span_bytes_bucket(256 * 1024 + 1), "512KiB");
+        assert_eq!(super::span_bytes_bucket(4 * 1024 * 1024), "4MiB");
+        assert_eq!(super::span_bytes_bucket(8 * 1024 * 1024 + 1), "16MiB+");
+        assert_eq!(super::span_slots_bucket(1), "1");
+        assert_eq!(super::span_slots_bucket(2), "2");
+        assert_eq!(super::span_slots_bucket(4), "3-4");
+        assert_eq!(super::span_slots_bucket(33), "33+");
     }
 }

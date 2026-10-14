@@ -210,6 +210,7 @@ mod tests {
             num_writes_before_sync: 1,
             intervals_persist_secs: 0,
             min_durable_interval_ms: 0,
+            entropy_read_grace_ms: 0,
             ..StorageSyncConfig::default()
         }
     }

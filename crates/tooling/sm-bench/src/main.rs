@@ -82,7 +82,7 @@ struct Args {
     /// Directory for `header.json`, `samples.jsonl`, `summary.json`, and `steps.jsonl`.
     #[arg(long)]
     out: PathBuf,
-    /// Built-in schedule: `recall-1`, `recall-1.8`, or `smoke`.
+    /// Built-in schedule: `recall-1`, `recall-1.8`, `smoke`, or `ingest-ooo`.
     #[arg(long, conflicts_with = "schedule")]
     preset: Option<String>,
     /// TOML schedule. See the crate README.
@@ -150,8 +150,15 @@ struct Args {
     /// soon as any byte is pending.
     #[arg(long, default_value_t = irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE)]
     durable_headroom_permille: u64,
-    #[arg(long, default_value_t = 262_144)]
+    /// Cap on one entropy pread. The node default is 4 MiB.
+    #[arg(long, default_value_t = irys_types::DEFAULT_ENTROPY_SWEEP_MAX_BYTES)]
     entropy_sweep_max_bytes: u64,
+    /// Milliseconds a short entropy span waits for a neighbor. `0` does not wait.
+    #[arg(long, default_value_t = irys_types::DEFAULT_ENTROPY_READ_GRACE_MS)]
+    entropy_read_grace_ms: u64,
+    /// Bytes a span must cover before it skips the read grace.
+    #[arg(long, default_value_t = irys_types::DEFAULT_ENTROPY_READ_BATCH_BYTES)]
+    entropy_read_batch_bytes: u64,
     /// Transaction size mix `chunks:weight,...`.
     #[arg(long, default_value = "1:40,4:25,16:20,64:10,256:5")]
     ingest_mix: String,
@@ -388,6 +395,8 @@ fn run() -> eyre::Result<i32> {
         write_chunks: u64::from(write_chunks),
         num_writes_before_sync: args.num_writes_before_sync,
         entropy_sweep_max_bytes: args.entropy_sweep_max_bytes,
+        entropy_read_grace_ms: args.entropy_read_grace_ms,
+        entropy_read_batch_bytes: args.entropy_read_batch_bytes,
         intervals_persist_secs: args.intervals_persist_secs,
         min_durable_interval_ms: args.min_durable_interval_ms,
         durable_headroom_permille: args.durable_headroom_permille,
@@ -500,6 +509,8 @@ fn run() -> eyre::Result<i32> {
             "judge_tail_secs scores the last N seconds as well as the whole step. Durable lag inside that window is not a failure. The drain check stays on the whole step.",
         ],
     });
+    header["entropy_read_grace_ms"] = serde_json::json!(args.entropy_read_grace_ms);
+    header["entropy_read_batch_bytes"] = serde_json::json!(args.entropy_read_batch_bytes);
     header["min_durable_interval_ms"] = serde_json::json!(args.min_durable_interval_ms);
     header["durable_headroom_permille"] = serde_json::json!(args.durable_headroom_permille);
     header["recall_direct_io"] = serde_json::json!(args.recall_direct_io);
@@ -576,6 +587,7 @@ fn run() -> eyre::Result<i32> {
         serve_busy: std::sync::atomic::AtomicBool::new(false),
         index_lock: tokio::sync::Mutex::new(()),
         permits: PermitGauge::new(),
+        shuffle_ingest: plan.name == "ingest-ooo",
     });
     opened.start_lane()?;
 
@@ -928,6 +940,11 @@ async fn execute(
     } else {
         0
     };
+    let (entropy_preads, entropy_pread_bytes, entropy_pread_slots) =
+        io.module.bench_entropy_reads();
+    eprintln!(
+        "irys-sm-bench: entropy_preads={entropy_preads} entropy_pread_bytes={entropy_pread_bytes} entropy_pread_slots={entropy_pread_slots}"
+    );
     write_summary(
         &out.join("summary.json"),
         &rows,

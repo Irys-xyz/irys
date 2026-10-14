@@ -583,13 +583,31 @@ pub struct StorageSyncConfig {
     /// when the disk is free. The disk lane does not wait out this interval.
     #[serde(default = "default_entropy_sweep_interval_millis")]
     pub entropy_sweep_interval_millis: u64,
-    /// Max bytes of one entropy pread or pwrite. A hold is at least one chunk.
+    /// Max bytes of one entropy pread. A hold is at least one chunk.
+    /// A coalesced packed `pwrite` uses its own cap. A non-coalesced pwrite
+    /// still uses this one.
     #[serde(default = "default_entropy_sweep_max_bytes")]
     pub entropy_sweep_max_bytes: u64,
     /// Max unread gap, in bytes, a sweep may read through and discard.
     /// Zero bridges no hole.
     #[serde(default = "default_entropy_coalesce_hole_bytes")]
     pub entropy_coalesce_hole_bytes: u64,
+    /// Milliseconds a short entropy span waits for a neighboring chunk.
+    ///
+    /// The wait runs while the disk is idle. The oldest chunk in the span
+    /// starts it, so a neighbor does not restart it. A span that already
+    /// reaches [`Self::entropy_read_batch_bytes`] does not wait. A packing
+    /// span does not wait. A lone chunk is issued when this ends. `0` issues
+    /// every formed span at once.
+    #[serde(default = "default_entropy_read_grace_ms")]
+    pub entropy_read_grace_ms: u64,
+    /// Bytes a span must cover before it is read without
+    /// [`Self::entropy_read_grace_ms`].
+    ///
+    /// [`Self::entropy_sweep_max_bytes`] still limits the pread. `0` treats
+    /// every span as large enough to issue at once.
+    #[serde(default = "default_entropy_read_batch_bytes")]
+    pub entropy_read_batch_bytes: u64,
     /// Seconds between completion rewrites of each submodule's `intervals.json`.
     ///
     /// A write-ahead transition is still stored immediately: `Interrupted`
@@ -703,6 +721,8 @@ impl Default for StorageSyncConfig {
             entropy_sweep_interval_millis: default_entropy_sweep_interval_millis(),
             entropy_sweep_max_bytes: default_entropy_sweep_max_bytes(),
             entropy_coalesce_hole_bytes: default_entropy_coalesce_hole_bytes(),
+            entropy_read_grace_ms: default_entropy_read_grace_ms(),
+            entropy_read_batch_bytes: default_entropy_read_batch_bytes(),
             drop_recall_page_cache: false,
             recall_direct_io: default_recall_direct_io(),
             intervals_persist_secs: default_intervals_persist_secs(),
@@ -758,12 +778,40 @@ fn default_entropy_sweep_interval_millis() -> u64 {
     1000
 }
 
+/// Default cap on one entropy pread.
+///
+/// 4 MiB is about 22 ms at the quiet-drive rate the in-flight budget uses
+/// (182 MiB/s), so one read stays inside a recall's margin. One 256 KiB
+/// chunk is a random read on an HDD and does not fill that margin.
+pub const DEFAULT_ENTROPY_SWEEP_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Default unread gap a sweep may read through. One 256 KiB chunk.
+pub const DEFAULT_ENTROPY_COALESCE_HOLE_BYTES: u64 = 256 * 1024;
+
+/// How long a short entropy span waits for a neighbor, including on an idle disk.
+///
+/// 20 ms collects a burst of concurrent chunk posts and stays well under the
+/// 250 ms durable interval. A lone chunk is late by this much.
+pub const DEFAULT_ENTROPY_READ_GRACE_MS: u64 = 20;
+
+/// Bytes a span must reach before it skips [`DEFAULT_ENTROPY_READ_GRACE_MS`].
+/// The pread is still bounded by [`DEFAULT_ENTROPY_SWEEP_MAX_BYTES`].
+pub const DEFAULT_ENTROPY_READ_BATCH_BYTES: u64 = 4 * 1024 * 1024;
+
 fn default_entropy_sweep_max_bytes() -> u64 {
-    256 * 1024
+    DEFAULT_ENTROPY_SWEEP_MAX_BYTES
 }
 
 fn default_entropy_coalesce_hole_bytes() -> u64 {
-    256 * 1024
+    DEFAULT_ENTROPY_COALESCE_HOLE_BYTES
+}
+
+fn default_entropy_read_grace_ms() -> u64 {
+    DEFAULT_ENTROPY_READ_GRACE_MS
+}
+
+fn default_entropy_read_batch_bytes() -> u64 {
+    DEFAULT_ENTROPY_READ_BATCH_BYTES
 }
 
 fn default_pending_body_hold_timeout() -> Duration {
@@ -1610,6 +1658,9 @@ impl NodeConfig {
                 entropy_sweep_interval_millis: 0,
                 entropy_sweep_max_bytes: 256 * 1024,
                 entropy_coalesce_hole_bytes: 256 * 1024,
+                // Tests drive the sweep themselves and must not sleep on a grace.
+                entropy_read_grace_ms: 0,
+                entropy_read_batch_bytes: 256 * 1024,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
                 // Tests read `intervals.json` as soon as `sync` returns.
@@ -1817,8 +1868,10 @@ impl NodeConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 1000,
-                entropy_sweep_max_bytes: 256 * 1024,
-                entropy_coalesce_hole_bytes: 256 * 1024,
+                entropy_sweep_max_bytes: DEFAULT_ENTROPY_SWEEP_MAX_BYTES,
+                entropy_coalesce_hole_bytes: DEFAULT_ENTROPY_COALESCE_HOLE_BYTES,
+                entropy_read_grace_ms: DEFAULT_ENTROPY_READ_GRACE_MS,
+                entropy_read_batch_bytes: DEFAULT_ENTROPY_READ_BATCH_BYTES,
                 drop_recall_page_cache: false,
                 recall_direct_io: default_recall_direct_io(),
                 intervals_persist_secs: DEFAULT_INTERVALS_PERSIST_SECS,
