@@ -101,13 +101,19 @@ impl super::PackingStrategy for CpuPackingStrategy {
                         entropy_iterations
                     );
 
-                    storage_module_clone.write_entropy_chunk(
+                    let wrote = storage_module_clone.write_entropy_chunk(
                         PartitionChunkOffset::from(i),
                         out,
                         partition_hash,
                     );
                     drop(permit);
                     notify.notify_waiters();
+                    if !wrote {
+                        return Err(format!(
+                            "entropy write refused at offset {i} for SM {storage_module_id}"
+                        ));
+                    }
+                    Ok(())
                 });
 
             handles.push(handle);
@@ -123,14 +129,32 @@ impl super::PackingStrategy for CpuPackingStrategy {
             );
         }
 
-        // Wait for all packing tasks to complete
+        // Wait for all packing tasks to complete. A refused write or a
+        // panicked worker must fail the range so the caller can requeue it.
+        let mut failed = None;
         for handle in handles {
-            if let Err(e) = handle.await {
-                warn!(
-                    target: "irys::packing",
-                    "CPU packing task failed for SM {}: {:?}", storage_module_id, e
-                );
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    warn!(
+                        target: "irys::packing",
+                        "CPU packing task failed for SM {}: {}", storage_module_id, err
+                    );
+                    failed.get_or_insert(err);
+                }
+                Err(err) => {
+                    warn!(
+                        target: "irys::packing",
+                        "CPU packing task failed for SM {}: {:?}", storage_module_id, err
+                    );
+                    failed.get_or_insert(format!(
+                        "CPU packing task failed for SM {storage_module_id}: {err:?}"
+                    ));
+                }
             }
+        }
+        if let Some(err) = failed {
+            return Err(err);
         }
 
         trace!(
@@ -145,5 +169,112 @@ impl super::PackingStrategy for CpuPackingStrategy {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{
+        ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange, ii,
+        partition::PartitionHash, partition_chunk_offset_ii,
+    };
+    use tokio::sync::{Notify, Semaphore};
+
+    use super::super::PackingStrategy as _;
+    use super::CpuPackingStrategy;
+
+    fn test_module(
+        prefix: &str,
+    ) -> (
+        irys_testing_utils::tempfile::TempDir,
+        Arc<irys_types::Config>,
+        Arc<StorageModule>,
+        PartitionHash,
+    ) {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 32,
+            ..consensus
+        });
+        let config = Arc::new(irys_types::Config::new_with_random_peer_id(node_config));
+        let partition_hash = PartitionHash::repeat_byte(0x3C);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), "hdd0".into())],
+        };
+        let module = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        (tmp_dir, config, module, partition_hash)
+    }
+
+    fn strategy(config: Arc<irys_types::Config>) -> CpuPackingStrategy {
+        CpuPackingStrategy::new(
+            config.clone(),
+            Arc::new(Semaphore::new(2)),
+            Arc::new(Notify::new()),
+            tokio::runtime::Handle::current(),
+            config.consensus.chain_id,
+        )
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn refused_entropy_write_fails_cpu_pack() {
+        let (_tmp, config, module, _assigned) = test_module("cpu_refused_write");
+        let other_hash = PartitionHash::repeat_byte(0x11);
+        let result = strategy(config.clone())
+            .pack(
+                &module,
+                PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+                config.node_config.miner_address(),
+                other_hash,
+                module.id,
+                100,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a refused entropy write must fail the pack, got {result:?}"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Uninitialized)
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn cpu_pack_writes_entropy_for_the_assigned_hash() {
+        let (_tmp, config, module, hash) = test_module("cpu_assigned_write");
+        let result = strategy(config.clone())
+            .pack(
+                &module,
+                PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+                config.node_config.miner_address(),
+                hash,
+                module.id,
+                100,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "packing for the assigned hash must succeed, got {result:?}"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Entropy)
+        );
     }
 }

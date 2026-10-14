@@ -302,6 +302,10 @@ impl PackingService {
                 .await
             {
                 warn!(target: "irys::packing", "Local packing failed for SM {}: {}", storage_module_id, e);
+                // The range already left `crc_repairs` when it was sent. A
+                // refused write or a panicked worker has to put it back, or
+                // the offset stays Uninitialized with nothing queued.
+                storage_module.requeue_crc_repair_range(job_chunk_range.0);
             }
 
             sync_with_warning(&storage_module, "local packing completion");
@@ -497,6 +501,67 @@ mod tests {
         partition::{PartitionAssignment, PartitionHash},
     };
     use tokio::sync::Semaphore;
+
+    #[test_log::test(tokio::test)]
+    async fn panicked_pack_worker_requeues_the_range() -> eyre::Result<()> {
+        use irys_types::ii;
+
+        // A chunk smaller than the entropy hash width makes the CPU worker
+        // panic inside `spawn_blocking`. The join must fail the pack, and the
+        // service must put the range back.
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("panicked_pack_requeue")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 16,
+            ..consensus
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = PartitionHash::zero();
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), "hdd0".into())],
+        };
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        let request = PackingRequest::new(
+            storage_module.clone(),
+            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 0)),
+        )?;
+
+        let packing = PackingService::new(Arc::new(config));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = packing.spawn_packing_controllers(runtime_handle.clone());
+        let handle = packing.spawn_tokio_service(runtime_handle);
+        handle.send(request)?;
+
+        let start = std::time::Instant::now();
+        let queued = loop {
+            let ranges = storage_module.take_crc_repair_ranges();
+            if !ranges.is_empty() {
+                break ranges;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                eyre::bail!("a panicked packing worker must put the range back on the CRC queue");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            queued,
+            vec![ii(PartitionChunkOffset(0), PartitionChunkOffset(0))]
+        );
+        Ok(())
+    }
 
     #[test_log::test(tokio::test)]
     async fn test_packing_actor() -> eyre::Result<()> {

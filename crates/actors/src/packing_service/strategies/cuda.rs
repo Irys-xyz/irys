@@ -84,7 +84,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
 
             // Pack batch on GPU
             let handle = runtime_handle.clone().spawn(async move {
-                let out = runtime_handle
+                let packed = runtime_handle
                     .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
                         let mut out: Vec<u8> = Vec::with_capacity(
                             (num_chunks * chunk_size as u32).try_into().unwrap(),
@@ -101,19 +101,37 @@ impl super::PackingStrategy for CudaPackingStrategy {
                         )?;
                         eyre::Result::Ok(out)
                     })
-                    .await
-                    .unwrap() // TODO: error handling
-                    .unwrap();
+                    .await;
+                let out = match packed {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(err)) => {
+                        return Err(format!(
+                            "CUDA packing failed for SM {storage_module_id}: {err:?}"
+                        ));
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "CUDA packing task panicked for SM {storage_module_id}: {err:?}"
+                        ));
+                    }
+                };
 
                 // Write packed chunks
                 for i in 0..num_chunks {
-                    storage_module_clone.write_entropy_chunk(
+                    let wrote = storage_module_clone.write_entropy_chunk(
                         (start + i).into(),
                         out[(i * chunk_size as u32) as usize
                             ..((i + 1) * chunk_size as u32) as usize]
                             .to_vec(),
                         partition_hash,
                     );
+                    if !wrote {
+                        return Err(format!(
+                            "entropy write refused at offset {} during CUDA packing for SM {}",
+                            start + i,
+                            storage_module_id
+                        ));
+                    }
 
                     // Periodic sync
                     if i % short_writes_before_sync == 0 {
@@ -125,6 +143,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
                     }
                 }
                 drop(permit);
+                Ok(())
             });
 
             handles.push(handle);
@@ -141,14 +160,32 @@ impl super::PackingStrategy for CudaPackingStrategy {
             );
         }
 
-        // Wait for all packing tasks to complete
+        // Wait for all packing tasks to complete. A refused write or a
+        // panicked worker must fail the range so the caller can requeue it.
+        let mut failed = None;
         for handle in handles {
-            if let Err(e) = handle.await {
-                warn!(
-                    target: "irys::packing",
-                    "CUDA packing task failed for SM {}: {:?}", storage_module_id, e
-                );
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    warn!(
+                        target: "irys::packing",
+                        "CUDA packing task failed for SM {}: {}", storage_module_id, err
+                    );
+                    failed.get_or_insert(err);
+                }
+                Err(err) => {
+                    warn!(
+                        target: "irys::packing",
+                        "CUDA packing task failed for SM {}: {:?}", storage_module_id, err
+                    );
+                    failed.get_or_insert(format!(
+                        "CUDA packing task failed for SM {storage_module_id}: {err:?}"
+                    ));
+                }
             }
+        }
+        if let Some(err) = failed {
+            return Err(err);
         }
 
         Ok(())
