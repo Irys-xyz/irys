@@ -3424,10 +3424,8 @@ fn write_schema_marker_file(dir: &Path, text: &str) -> eyre::Result<()> {
         file.sync_all().wrap_err("sync schema marker")?;
     }
     fs::rename(&tmp, &final_path).wrap_err("rename schema marker")?;
-    if let Ok(dir_file) = fs::File::open(dir) {
-        let _ = dir_file.sync_all();
-    }
-    Ok(())
+    // Without a durable SCHEMA dirent, reopen refuses CURRENT as incomplete.
+    sync_dir(dir)
 }
 
 /// Families on an existing database, and the names this binary does not use.
@@ -4451,10 +4449,11 @@ impl Rows<'_> {
             return Ok(false);
         };
         if let Some(overlay) = self.overlay
-            && overlay.maps[cf.index()].contains_key(&key)
+            && (overlay.maps[cf.index()].contains_key(&key)
+                || offset_key_in_ranges(&overlay.deleted_ranges[cf.index()], &key))
         {
-            // The overlay entry is a delete or it would have returned above.
-            // Keep scanning the snapshot for a key the overlay does not hide.
+            // A delete or a DeleteRange in this batch hides that key. Keep
+            // scanning the snapshot for a key the overlay does not hide.
             return self.offset_snapshot_has_uncovered_key(cf, start, end);
         }
         Ok(true)
@@ -5066,20 +5065,17 @@ impl SubmoduleRead for Rows<'_> {
         if start > end {
             return Ok(false);
         }
+        // Streams: a partition holds tens of millions of rows.
         let start_key = encode_key(start);
-        let stored = self.collect_raw(Cf::OffsetMeta, Some(&start_key), |key| {
-            PartitionChunkOffset::decode(key)
-                .map(|offset| offset > end)
-                .unwrap_or(true)
-        })?;
+        let mut cursor = self.cursor(Cf::OffsetMeta, Some(&start_key))?;
         let mut expect = u64::from(start.0);
         let last = u64::from(end.0);
-        for (key, bytes) in stored {
+        while let Some((key, bytes)) = cursor.next_kv()? {
             let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
-            if offset != expect {
-                return Ok(true);
+            if offset > last {
+                break;
             }
-            if stored_offset_meta(&bytes)?.crc.is_none() {
+            if offset != expect || stored_offset_meta(&bytes)?.crc.is_none() {
                 return Ok(true);
             }
             expect = expect.saturating_add(1);
@@ -6793,6 +6789,36 @@ mod tests {
                 PartitionChunkOffset::from(10),
             )?;
             assert_eq!(removed, 0);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn range_delete_hides_pending_from_a_later_check_in_the_same_batch() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_range_hides")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        store.update(|tx| {
+            tx.add_pending_body_migration(
+                PartitionChunkOffset::from(3),
+                &PendingBodyMigration {
+                    data_root: H256::repeat_byte(1),
+                    data_size: 32,
+                    start_offset: RelativeChunkOffset(0),
+                    block_height: 1,
+                    attempts: 0,
+                },
+            )
+        })?;
+        store.update(|tx| {
+            let span = (
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(10),
+            );
+            assert_eq!(tx.del_pending_body_migrations_in_range(span.0, span.1)?, 1);
+            assert!(!tx.has_pending_in_inclusive_range(span.0, span.1)?);
             Ok(())
         })?;
         Ok(())

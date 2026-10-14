@@ -139,11 +139,21 @@ impl GroupCommit {
     #[cfg(feature = "rocksdb")]
     pub(super) fn note_wal_failure(&self) {
         self.wal_failed.store(true, Ordering::Release);
+        // Take the lock so a waiter between its check and its wait sees this.
+        drop(self.lock());
+        self.wake.notify_all();
     }
 
     #[cfg(feature = "rocksdb")]
     pub(super) fn wal_failed(&self) -> bool {
         self.wal_failed.load(Ordering::Acquire)
+    }
+
+    fn failed(&self) -> bool {
+        #[cfg(feature = "rocksdb")]
+        return self.wal_failed();
+        #[cfg(not(feature = "rocksdb"))]
+        false
     }
 
     #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
@@ -245,6 +255,9 @@ impl GroupCommit {
         loop {
             if state.synced_generation >= target {
                 return Ok(());
+            }
+            if self.failed() {
+                eyre::bail!("index WAL sync failed before generation {target} became durable");
             }
             if state.stop {
                 let deadline = *stop_deadline.get_or_insert_with(|| Instant::now() + STOP_WAIT);
@@ -432,9 +445,15 @@ fn run_delay(group: &GroupCommit, sync: &mut impl FnMut() -> eyre::Result<()>) {
             let _ = sync();
             return;
         }
-        if sync().is_err() && !group.wait_retry() {
-            let _ = sync();
-            return;
+        if sync().is_err() {
+            // A failed WAL sync is permanent for this index: stop retrying.
+            if group.failed() {
+                return;
+            }
+            if !group.wait_retry() {
+                let _ = sync();
+                return;
+            }
         }
     }
 }
