@@ -14,6 +14,8 @@
 # Creating --stop-file makes the filler exit 0 after the current segment.
 # Default stop file is ./STOP. Default segment is 64 GiB. Default block is 64M.
 # The file must already exist. This script does not allocate it.
+# The path must contain a `loadtest` component, and so must `readlink -f`
+# of the file. A symlink out of `loadtest` is refused before any write.
 
 set -euo pipefail
 
@@ -84,6 +86,32 @@ if [ "$segment_bytes" -le 0 ]; then
     echo "--segment-bytes must be greater than 0" >&2
     exit 1
 fi
+
+has_loadtest() {
+    case "/$1/" in
+        */loadtest/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_loadtest() {
+    local label=$1
+    local path=$2
+    if ! has_loadtest "$path"; then
+        echo "$label $path has no loadtest path component; refusing" >&2
+        exit 1
+    fi
+    if [ -e "$path" ]; then
+        local canon
+        canon=$(readlink -f "$path")
+        if ! has_loadtest "$canon"; then
+            echo "$label resolves to $canon, which has no loadtest path component; refusing" >&2
+            exit 1
+        fi
+    fi
+}
+
+require_loadtest "file" "$file"
 
 cleanup() {
     if [ -n "$pid_file" ]; then
