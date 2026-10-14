@@ -19,10 +19,11 @@
 //! contains `CONVERTING` and none of the protected names (a storage module,
 //! a consensus database, or a finished index).
 //!
-//! Rows are read in bounded batches and written through the store write
-//! path, so each engine uses its own encoding. Each batch commit is durable.
-//! Verification reads both engines through the store read path. The tx path
-//! check compares the stored v2 bytes with a fresh derive.
+//! Rows are written in bounded batches. The RocksDB target disables the WAL.
+//! The seal flush, then the SCHEMA file, makes that copy durable. An MDBX
+//! target commits each batch in durable sync mode. Its schema row stays
+//! incomplete until the last commit. Verification compares stored bytes
+//! with a fresh tx-path derive.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -521,7 +522,7 @@ impl RowSource for RocksSubmoduleStore {
     }
 }
 
-/// Copies a v1 or v2 MDBX submodule index into a new RocksDB RocksDB v1 directory.
+/// Copies a v1 or v2 MDBX submodule index into a new RocksDB v1 directory.
 ///
 /// The source is opened read-only. A v1 index is converted from its own rows.
 /// It is not migrated. Each stored tx path must match the path derived from
@@ -728,7 +729,7 @@ fn count_family_mismatches(
     Ok(mismatches)
 }
 
-/// Rebuilds an MDBX schema v2 index from a RocksDB RocksDB v1 index.
+/// Rebuilds an MDBX schema v2 index from a RocksDB v1 index.
 ///
 /// Tx paths and leaf bindings are derived from the consensus database. A
 /// stored height, tx index, or data root that disagrees with that derive
@@ -1288,7 +1289,7 @@ fn prepare_v2_placement<S: SubmoduleStore>(
     )
 }
 
-/// One v3 placement per tx inside a stored interval.
+/// One RocksDB placement per tx inside a stored interval.
 ///
 /// MDBX merges adjacent offsets that share a tx-path hash. Two txs with
 /// the same bytes then occupy one interval. Cuts are the interval start plus
@@ -3171,7 +3172,7 @@ fn v1_interval_starts_at(env: &DatabaseEnv, offset: PartitionChunkOffset) -> eyr
     Ok(prev.and_then(|row| row.tx_path_hash) != Some(hash))
 }
 
-/// A v3 start is a v1 run start, or an info cut inside that same run.
+/// A rocks placement start is a v1 run start, or an info cut inside that same run.
 fn v1_placement_start_ok(
     env: &DatabaseEnv,
     start: PartitionChunkOffset,
@@ -5220,7 +5221,7 @@ mod tests {
         Ok(())
     }
 
-    /// A large copy used to leave recycled WAL logs. The sealed directory stays under the bound.
+    /// The sealed directory has no recycled WAL files.
     #[test]
     fn convert_large_paths_leave_no_wal() -> eyre::Result<()> {
         const N: u64 = 2_500;
