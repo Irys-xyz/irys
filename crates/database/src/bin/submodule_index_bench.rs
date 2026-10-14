@@ -2789,9 +2789,9 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
     if mid {
         chunks = MID_CHUNKS;
     }
-    let (fraction_numer, fraction_denom, data_fraction) = data_fraction.unwrap_or((1, 1, 1.0));
-    let data_chunks = data_prefix(chunks, fraction_numer, fraction_denom)?;
-    if (fraction_numer != fraction_denom || with_crc || entropy_fill)
+    let (fraction_numerator, fraction_denom, data_fraction) = data_fraction.unwrap_or((1, 1, 1.0));
+    let data_chunks = data_prefix(chunks, fraction_numerator, fraction_denom)?;
+    if (fraction_numerator != fraction_denom || with_crc || entropy_fill)
         && (workload.is_memory() || workload.is_filter_reuse() || workload == Workload::CrcRows)
     {
         eyre::bail!(
