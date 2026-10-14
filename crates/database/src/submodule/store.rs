@@ -2651,7 +2651,7 @@ mod tests {
             })?;
 
             store.update(|tx| {
-                let v3 = tx.intervals_own_data_root_rows();
+                let intervals_own_rows = tx.intervals_own_data_root_rows();
                 tx.clear_paths_in_inclusive_range(
                     PartitionChunkOffset::from(1),
                     PartitionChunkOffset::from(5),
@@ -2661,7 +2661,7 @@ mod tests {
                     PartitionChunkOffset::from(5),
                 )?;
                 // RocksDB v1 deletes pending in the same batch as the interval clear.
-                assert_eq!(removed, if v3 { 0 } else { 2 });
+                assert_eq!(removed, if intervals_own_rows { 0 } else { 2 });
                 assert!(
                     tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?
                         .is_none()
