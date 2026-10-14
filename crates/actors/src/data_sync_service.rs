@@ -754,26 +754,20 @@ impl DataSyncServiceInner {
             };
 
             // Only increase concurrency if peer is highly utilized
-            if utilization_ratio >= 0.8 {
-                if let Some(peer_manager) = peers.get_mut(&peer_addr) {
-                    // Better performing peers get bigger increases
-                    let increase = if health_score >= 0.9 {
-                        5 // Excellent peer, trust it with more
-                    } else if health_score >= 0.7 {
-                        3 // Good peer, moderate increase
-                    } else {
-                        1 // Decent peer, conservative increase
-                    };
-                    debug!(
-                        "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
-                        current_max,
-                        current_max + increase,
-                        peer_addr,
-                        utilization_ratio * 100.0,
-                        health_score
-                    );
-                    peer_manager.set_max_concurrency(current_max + increase);
-                }
+            if utilization_ratio >= 0.8
+                && let Some(peer_manager) = peers.get_mut(&peer_addr)
+            {
+                // Peers below 0.7 already continued. 0.9 and above get the larger step.
+                let increase = if health_score >= 0.9 { 5 } else { 3 };
+                debug!(
+                    "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
+                    current_max,
+                    current_max + increase,
+                    peer_addr,
+                    utilization_ratio * 100.0,
+                    health_score
+                );
+                peer_manager.set_max_concurrency(current_max + increase);
             }
         }
     }
