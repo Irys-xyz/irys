@@ -1545,6 +1545,14 @@ impl StorageModule {
         self.fail_slots(|_| true, &WriteDataChunkError::WritesPaused);
     }
 
+    /// Fail a queued sweep slot at `offset`. The copied pad is stale.
+    pub(super) fn fail_sweep_offset(&self, offset: PartitionChunkOffset) {
+        self.fail_slots(
+            |slot| slot.offset == offset,
+            &WriteDataChunkError::Backpressure,
+        );
+    }
+
     pub(super) fn cancel_sweep_range(
         &self,
         start: PartitionChunkOffset,
@@ -2260,6 +2268,7 @@ impl StorageModule {
             return;
         }
         let offset = slot.offset;
+        let copied_pad = slot.pending_entropy.is_none();
         if self.submodules.get_key_value_at_point(offset).is_err() {
             self.fail_slot(
                 slot,
@@ -2279,19 +2288,15 @@ impl StorageModule {
             slot.priority,
             slot.byte_len,
             (slot.path_hash, (*slot.data_path).clone()),
+            copied_pad,
         );
-        if inserted && priority == WritePriority::Ingress && read_done.is_some() {
+        if inserted.is_ok() && priority == WritePriority::Ingress && read_done.is_some() {
             super::super::index_read_metrics::note_ingest_stage(
                 "entropy_to_packed",
                 pack_started.elapsed(),
             );
         }
-        let error = if inserted {
-            None
-        } else {
-            Some(WriteDataChunkError::WritesPaused)
-        };
-        self.mark_group_slot_done(group, error);
+        self.mark_group_slot_done(group, inserted.err());
     }
 
     fn slot_still_valid(&self, slot: &SweepSlot) -> Result<(), WriteDataChunkError> {
@@ -2300,12 +2305,20 @@ impl StorageModule {
         {
             return Err(WriteDataChunkError::WritesPaused);
         }
-        let occupied = {
+        {
             let pending = self.pending_writes.read().unwrap();
-            pending.occupancy.get(&slot.offset).copied() == Some(slot.generation)
-        };
-        if !occupied {
-            return Err(WriteDataChunkError::WritesPaused);
+            if pending.occupancy.get(&slot.offset).copied() != Some(slot.generation) {
+                return Err(WriteDataChunkError::WritesPaused);
+            }
+            // The pad in the slot was copied earlier. A write that now owns
+            // this offset has newer entropy. XOR would publish the old pad.
+            if slot.cached_entropy.is_some()
+                && slot.pending_entropy.is_none()
+                && (pending.contains_key(&slot.offset)
+                    || pending.written_ahead.contains_key(&slot.offset))
+            {
+                return Err(WriteDataChunkError::Backpressure);
+            }
         }
         if slot.pending_entropy.is_some() {
             return Ok(());
@@ -2412,18 +2425,26 @@ impl StorageModule {
         priority: WritePriority,
         unpacked_len: u64,
         proof: (ChunkPathHash, ChunkDataPath),
-    ) -> bool {
+        copied_pad: bool,
+    ) -> Result<(), WriteDataChunkError> {
         let mut pending = self.pending_writes.write().unwrap();
         pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_sub(unpacked_len);
         if pending.occupancy.get(&offset).copied() != Some(generation) {
-            return false;
+            return Err(WriteDataChunkError::WritesPaused);
+        }
+        // `written_ahead` is a pwrite this commit did not do. Leave it.
+        // A copied pad must not replace entropy that landed after the copy.
+        if pending.written_ahead.contains_key(&offset)
+            || (copied_pad && pending.contains_key(&offset))
+        {
+            pending.occupancy.remove(&offset);
+            return Err(WriteDataChunkError::Backpressure);
         }
         pending.occupancy.remove(&offset);
-        pending.written_ahead.remove(&offset);
         if self.data_writes_paused()
             || self.index_write_generation.load(Ordering::SeqCst) != generation
         {
-            return false;
+            return Err(WriteDataChunkError::WritesPaused);
         }
         pending.insert(offset, (packed, ChunkType::Data));
         pending.priorities.insert(offset, priority);
@@ -2436,7 +2457,7 @@ impl StorageModule {
         *self.last_pending_write.write().unwrap() = Instant::now();
         drop(pending);
         self.disk.notify();
-        true
+        Ok(())
     }
 
     fn hold_cap_bytes(&self) -> u64 {
@@ -3610,5 +3631,208 @@ mod tests {
             &config,
         )?;
         Ok((tmp_dir, module))
+    }
+
+    fn entropy_on_disk(module: &super::super::StorageModule) -> eyre::Result<()> {
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0; 32], super::super::ChunkType::Entropy));
+        module.sync_pending_chunks_inner(true)?;
+        Ok(())
+    }
+
+    fn slot_holding_zero_pad(unpacked: u8) -> super::SweepSlot {
+        let mut slot = sweep_slot(0);
+        slot.unpacked = Arc::new(vec![unpacked; 32]);
+        slot.cached_entropy = Some(vec![0; 32]);
+        slot.byte_len = 32;
+        slot.generation = 0;
+        slot
+    }
+
+    fn arm_slot_group(
+        module: &super::super::StorageModule,
+        slot: super::SweepSlot,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), super::super::WriteDataChunkError>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut queue = module.disk.queue();
+            queue.groups.insert(
+                slot.group,
+                super::SweepGroup {
+                    remaining: 1,
+                    failed: None,
+                    waited: true,
+                    notify: Some(tx),
+                },
+            );
+        }
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .insert(slot.offset, slot.generation);
+        module.disk.queue().slots.push(slot);
+        rx
+    }
+
+    #[test]
+    fn copied_pad_is_not_packed_over_written_ahead() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("stale_pad_ahead", 4, 4, 0)?;
+        entropy_on_disk(&module)?;
+        let offset = PartitionChunkOffset::from(0);
+        {
+            let mut pending = module.pending_writes.write().unwrap();
+            pending.written_ahead.insert(
+                offset,
+                super::super::WrittenAhead {
+                    bytes: vec![0xAB; 32],
+                    chunk_type: super::super::ChunkType::Entropy,
+                    priority: super::WritePriority::Packing,
+                    queued_at: Instant::now(),
+                    pwrite_at: None,
+                },
+            );
+        }
+        let slot = slot_holding_zero_pad(0x11);
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        module.disk.queue().groups.insert(
+            slot.group,
+            super::SweepGroup {
+                remaining: 1,
+                failed: None,
+                waited: true,
+                notify: Some(tx),
+            },
+        );
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .insert(offset, 0);
+        module.pack_one(slot);
+        let finished = rx.try_recv().expect("the slot must finish");
+        assert!(
+            matches!(
+                finished,
+                Err(super::super::WriteDataChunkError::Backpressure)
+            ),
+            "{finished:?}"
+        );
+        let pending = module.pending_writes.read().unwrap();
+        assert!(
+            pending.written_ahead.contains_key(&offset),
+            "commit_packed dropped a written_ahead entry it did not write"
+        );
+        assert!(
+            pending.get(&offset).is_none(),
+            "packed the copied pad into pending: {:?}",
+            pending
+                .get(&offset)
+                .map(|(bytes, kind)| (kind, bytes.first().copied()))
+        );
+        drop(pending);
+        // `pack_one` can refuse before `commit_packed`. This call is the
+        // commit itself: occupancy matches, and the entry must stay.
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .insert(offset, 0);
+        let refused = module.commit_packed(
+            offset,
+            vec![0x11; 32],
+            0,
+            super::WritePriority::Ingress,
+            32,
+            (H256::zero(), Vec::new()),
+            true,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(super::super::WriteDataChunkError::Backpressure)
+            ),
+            "{refused:?}"
+        );
+        let pending = module.pending_writes.read().unwrap();
+        assert!(pending.written_ahead.contains_key(&offset));
+        assert!(pending.get(&offset).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn copied_pad_is_not_packed_over_pending_entropy() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("stale_pad_pending", 4, 4, 0)?;
+        entropy_on_disk(&module)?;
+        let offset = PartitionChunkOffset::from(0);
+        {
+            let mut pending = module.pending_writes.write().unwrap();
+            pending.insert(offset, (vec![0xAB; 32], super::super::ChunkType::Entropy));
+        }
+        let slot = slot_holding_zero_pad(0x11);
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        module.disk.queue().groups.insert(
+            slot.group,
+            super::SweepGroup {
+                remaining: 1,
+                failed: None,
+                waited: true,
+                notify: Some(tx),
+            },
+        );
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .insert(offset, 0);
+        module.pack_one(slot);
+        let finished = rx.try_recv().expect("the slot must finish");
+        assert!(
+            matches!(
+                finished,
+                Err(super::super::WriteDataChunkError::Backpressure)
+            ),
+            "{finished:?}"
+        );
+        let pending = module.pending_writes.read().unwrap();
+        let (bytes, kind) = pending.get(&offset).expect("the new entropy stays queued");
+        assert_eq!(*kind, super::super::ChunkType::Entropy);
+        assert_eq!(bytes.first().copied(), Some(0xAB));
+        Ok(())
+    }
+
+    #[test]
+    fn rewrite_fails_a_queued_pad_before_fold() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("stale_pad_rewrite", 4, 4, 0)?;
+        entropy_on_disk(&module)?;
+        let offset = PartitionChunkOffset::from(0);
+        let mut rx = arm_slot_group(&module, slot_holding_zero_pad(0x11));
+        assert!(module.write_chunk(offset, vec![0xAB; 32], super::super::ChunkType::Entropy));
+        module.sync_pending_chunks_inner(true)?;
+        module.fold_memory_entropy();
+        let pending = module.pending_writes.read().unwrap();
+        if let Some((bytes, kind)) = pending.get(&offset) {
+            assert_ne!(
+                (*kind, bytes.first().copied()),
+                (super::super::ChunkType::Data, Some(0x11)),
+                "packed with the pre-rewrite pad"
+            );
+        }
+        drop(pending);
+        let finished = rx
+            .try_recv()
+            .expect("the rewrite must fail the queued slot");
+        assert!(
+            matches!(
+                finished,
+                Err(super::super::WriteDataChunkError::Backpressure)
+            ),
+            "{finished:?}"
+        );
+        Ok(())
     }
 }

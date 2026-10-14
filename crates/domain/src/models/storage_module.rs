@@ -5725,6 +5725,9 @@ impl StorageModule {
         self.entropy_cache.lock().unwrap().invalidate(chunk_offset);
         *self.last_pending_write.write().unwrap() = Instant::now();
         drop(pending);
+        // A sweep slot may already hold a pad copied before this write.
+        // Fail that slot so a later fold cannot XOR the old bytes.
+        self.fail_sweep_offset(chunk_offset);
         // The lane writes the next window when it is woken.
         self.disk.notify();
         true
