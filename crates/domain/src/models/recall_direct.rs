@@ -93,10 +93,7 @@ pub fn open_recall_direct(path: &Path) -> eyre::Result<Option<File>> {
 }
 
 fn direct_open_unsupported(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
-    )
+    matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP))
 }
 
 fn warn_direct_open_unsupported(path: &Path, error: &io::Error) {

@@ -13110,8 +13110,9 @@ mod tests {
                 completion_time: now,
                 duration: std::time::Duration::from_secs(2),
             });
-        // One chunk over 2s. The 40 stale samples stay in the buffer and must not count.
-        let expected = (chunk + 1) / 2;
+        // One chunk over 2s, same rounding as the meter. The 40 stale samples stay out.
+        let secs = 2;
+        let expected = (chunk + secs / 2) / secs;
         assert_eq!(storage.write_throughput_bps(), expected);
         Ok(())
     }
