@@ -14,6 +14,9 @@
 #
 # This script does not delete bench files. The operator deletes those by hand.
 # It does not use sudo. A permission error on sysfs is left as the shell error.
+#
+# The pid in run.pid next to the sysfs file is signaled. Other processes
+# with the bench's name are left alone. A missing run.pid signals nothing.
 
 set -eu
 
@@ -43,8 +46,20 @@ if [ ! -d "$queue" ]; then
     exit 1
 fi
 
-if command -v pkill >/dev/null 2>&1; then
-    pkill -x irys-sm-bench || true
+# run.sh records its pid beside the sysfs snapshot. Signal that process only.
+pid_file=$(dirname "$orig")/run.pid
+if [ -f "$pid_file" ]; then
+    pid=$(head -n 1 "$pid_file" | tr -d '[:space:]')
+    case "$pid" in
+        '' | *[!0-9]*)
+            echo "run.pid is not a pid: $pid" >&2
+            ;;
+        *)
+            if [ -d "/proc/$pid" ]; then
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+            ;;
+    esac
 fi
 
 while IFS= read -r line || [ -n "$line" ]; do

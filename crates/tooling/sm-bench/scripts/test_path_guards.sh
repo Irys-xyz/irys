@@ -244,6 +244,58 @@ test_ladder_does_not_stash_when_recall_file_escapes() {
     rm -rf "$root"
 }
 
+test_teardown_signals_the_recorded_pid_only() {
+    local name=teardown-pid root sys queue orig err
+    local recorded decoy before
+    if pgrep -x irys-sm-bench >/dev/null 2>&1; then
+        bad "$name" "another irys-sm-bench is already running; not testing pkill"
+        return
+    fi
+    root=$(tmpdir)
+    sys=$root/sys
+    queue=$sys/block/notadisk/queue
+    orig=$root/run/sysfs.txt
+    err=$root/err
+    mkdir -p "$queue" "$root/run"
+    printf '999\n' >"$queue/max_sectors_kb"
+    printf '999\n' >"$queue/read_ahead_kb"
+    printf '999\n' >"$queue/nr_requests"
+    printf 'none\n' >"$queue/scheduler"
+    cat >"$orig" <<'EOF'
+max_sectors_kb=111
+read_ahead_kb=128
+nr_requests=64
+scheduler=[mq-deadline]
+EOF
+    sleep 60 &
+    recorded=$!
+    printf '%s\n' "$recorded" >"$root/run/run.pid"
+    printf '#!/bin/sh\nsleep 60\n' >"$root/irys-sm-bench"
+    chmod +x "$root/irys-sm-bench"
+    "$root/irys-sm-bench" &
+    decoy=$!
+    sleep 0.2
+    before=$fail
+    if ! with_fake_sys "$sys" "$here/teardown.sh" notadisk "$orig" >"$err" 2>&1; then
+        bad "$name" "teardown failed: $(cat "$err")"
+    fi
+    if kill -0 "$recorded" 2>/dev/null; then
+        bad "$name" "recorded pid $recorded is still running"
+    fi
+    if ! kill -0 "$decoy" 2>/dev/null; then
+        bad "$name" "decoy irys-sm-bench $decoy was signaled"
+    fi
+    if ! grep -q '^111$' "$queue/max_sectors_kb"; then
+        bad "$name" "max_sectors_kb=$(cat "$queue/max_sectors_kb" 2>/dev/null || echo missing)"
+    fi
+    if [ "$fail" -eq "$before" ]; then
+        ok "$name"
+    fi
+    kill "$recorded" "$decoy" 2>/dev/null || true
+    wait "$recorded" "$decoy" 2>/dev/null || true
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
