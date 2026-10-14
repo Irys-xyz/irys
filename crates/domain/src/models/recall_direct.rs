@@ -38,13 +38,19 @@ pub(super) const MODE_FALLBACK: &str = "fallback";
 
 #[cfg(test)]
 thread_local! {
-    static FORCE_DIRECT_OPEN_EINVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_DIRECT_OPEN_ERRNO: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
 }
 
 /// Test hook. The next `open_recall_direct` on this thread fails with `EINVAL`.
 #[cfg(test)]
 pub(super) fn force_recall_direct_open_einval(force: bool) {
-    FORCE_DIRECT_OPEN_EINVAL.with(|cell| cell.set(force));
+    force_recall_direct_open_errno(force.then_some(libc::EINVAL));
+}
+
+/// Test hook. `Some(errno)` makes the next `open_recall_direct` on this thread fail.
+#[cfg(test)]
+pub(super) fn force_recall_direct_open_errno(errno: Option<i32>) {
+    FORCE_DIRECT_OPEN_ERRNO.with(|cell| cell.set(errno));
 }
 
 /// `true` when `file` was opened with `O_DIRECT`.
@@ -69,8 +75,8 @@ pub(super) fn fd_is_direct(file: &File) -> bool {
 
 /// Open `path` read-only with `O_DIRECT`.
 ///
-/// `Ok(None)` means the filesystem rejected `O_DIRECT` (`EINVAL`, for example
-/// tmpfs on kernels that do not implement it). The caller keeps the buffered
+/// `Ok(None)` means the filesystem rejected `O_DIRECT` (`EINVAL` or
+/// `EOPNOTSUPP`, for example tmpfs). The caller keeps the buffered
 /// descriptor. One warning is logged for the process. Any other error is
 /// returned.
 pub fn open_recall_direct(path: &Path) -> eyre::Result<Option<File>> {
@@ -87,7 +93,10 @@ pub fn open_recall_direct(path: &Path) -> eyre::Result<Option<File>> {
 }
 
 fn direct_open_unsupported(error: &io::Error) -> bool {
-    error.raw_os_error() == Some(libc::EINVAL)
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
+    )
 }
 
 fn warn_direct_open_unsupported(path: &Path, error: &io::Error) {
@@ -104,8 +113,8 @@ fn warn_direct_open_unsupported(path: &Path, error: &io::Error) {
 #[cfg(target_os = "linux")]
 fn open_direct_file(path: &Path) -> io::Result<File> {
     #[cfg(test)]
-    if FORCE_DIRECT_OPEN_EINVAL.with(std::cell::Cell::get) {
-        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    if let Some(errno) = FORCE_DIRECT_OPEN_ERRNO.with(std::cell::Cell::get) {
+        return Err(io::Error::from_raw_os_error(errno));
     }
     use std::os::unix::fs::OpenOptionsExt as _;
     OpenOptions::new()
@@ -117,6 +126,10 @@ fn open_direct_file(path: &Path) -> io::Result<File> {
 #[cfg(not(target_os = "linux"))]
 fn open_direct_file(path: &Path) -> io::Result<File> {
     let _ = path;
+    #[cfg(test)]
+    if let Some(errno) = FORCE_DIRECT_OPEN_ERRNO.with(std::cell::Cell::get) {
+        return Err(io::Error::from_raw_os_error(errno));
+    }
     Err(io::Error::from_raw_os_error(libc::EINVAL))
 }
 
@@ -271,7 +284,10 @@ fn warn_direct_read_rejected(offset: u64, error: &io::Error) {
 
 #[cfg(test)]
 mod tests {
-    use super::range_is_direct_aligned;
+    use std::io::Write as _;
+
+    use super::{force_recall_direct_open_errno, open_recall_direct, range_is_direct_aligned};
+    use irys_testing_utils::utils::TempDirBuilder;
 
     #[test]
     fn alignment_rejects_a_short_or_shifted_range() {
@@ -280,5 +296,29 @@ mod tests {
         assert!(!range_is_direct_aligned(0, 32));
         assert!(!range_is_direct_aligned(512, 4096));
         assert!(!range_is_direct_aligned(0, 0));
+    }
+
+    #[test]
+    fn eopnotsupp_falls_back_like_einval() {
+        let dir = TempDirBuilder::new().prefix("recall_eopnotsupp").build();
+        let path = dir.path().join("chunks.dat");
+        std::fs::File::create(&path)
+            .expect("chunks.dat")
+            .write_all(&[0])
+            .expect("seed");
+
+        force_recall_direct_open_errno(Some(libc::EOPNOTSUPP));
+        let opened = open_recall_direct(&path).expect("EOPNOTSUPP falls back");
+        assert!(
+            opened.is_none(),
+            "EOPNOTSUPP must keep the buffered descriptor"
+        );
+        force_recall_direct_open_errno(None);
+
+        force_recall_direct_open_errno(Some(libc::EPERM));
+        let err = open_recall_direct(&path).expect_err("EPERM stays fatal");
+        let message = format!("{err:#}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        force_recall_direct_open_errno(None);
     }
 }
