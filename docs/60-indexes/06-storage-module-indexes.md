@@ -156,17 +156,20 @@ key.
 | Key | Name | Value |
 | --- | --- | --- |
 | 1 | schema | Raw marker, 31 bytes. Same bytes as `rocks/SCHEMA`. |
-| 2 | reset | SCALE encoding of a one-byte vector `[0x01]`. Stored bytes are `04 01`. Readers test presence. Delete removes the key. |
+| 2 | reset | Raw byte `01`. Readers test presence. Delete removes the key. |
 | 3 | partition hash | Raw 32 bytes. Absent until the module is assigned. `clear` deletes this key. |
-| 4 | packing identity | Packing-identity bytes are specified with the packing check. |
-| 5 | checksum scan complete | Same `04 01` presence encoding as the reset key. Absent means unset. Reset deletes this key. `clear` does not. |
+| 4 | packing record | 41 bytes: version `1`, packing address (20), iterations (`u32` big-endian), chunk size (`u64` big-endian), chain id (`u64` big-endian). Written on first open or by `mdbx-to-rocks`. Open checks it against the parameters valid for this module. |
+| 5 | checksum scan complete | Raw byte `01`. Absent means unset. Reset deletes this key. `clear` does not. |
+| 6 | feature flags | 24 bytes: `compat`, `ro_compat`, `incompat`, each a little-endian `u64`. Absent means all zeros. |
 
 Point gets only. An unknown discriminant is not decoded. No prefix
 extractor. Bloom is off unless every family has a bloom.
 
 ### Feature flags
 
-Feature-flag bytes are specified with the open check.
+Metadata key 6, described above. RocksDB v1 sets no bits. Open refuses an
+unknown `incompat` bit, refuses a writable open on an unknown `ro_compat`
+bit, and ignores an unknown `compat` bit.
 
 ### default
 
