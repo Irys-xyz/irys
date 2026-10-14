@@ -145,6 +145,27 @@ fn assigned_partition(
     })
 }
 
+/// Cascade active at the Unix epoch. Genesis uses the wall clock, which is
+/// after that instant, so OneYear and ThirtyDay receive partitions. The epoch
+/// lengths stay long so this test does not roll those ledgers.
+fn cascade_since_unix_epoch(config: &mut NodeConfig) {
+    config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+        activation_timestamp: UnixTimestamp::from_secs(0),
+        one_year_epoch_length: 100,
+        thirty_day_epoch_length: 100,
+        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+    });
+}
+
+/// Mine until the canonical height is past `num_blocks_in_epoch`.
+async fn mine_past_epoch(node: &IrysNodeTest<IrysNodeCtx>) -> eyre::Result<()> {
+    let activation = node.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
+    while node.get_canonical_chain_height().await <= activation {
+        node.mine_block().await?;
+    }
+    Ok(())
+}
+
 const MINE_UNTIL_BLOCKS: usize = 96;
 
 async fn mine_until<F>(
@@ -260,21 +281,19 @@ async fn heavy_test_rocks_v1_submit_and_publish_data_poa() -> eyre::Result<()> {
     );
 
     wait_for_data_on_slot(&node, DataLedger::Submit, 0).await?;
-    let submit_poa = mine_until(&node, "submit data poa", |block| {
+    mine_until(&node, "submit data poa", |block| {
         is_data_poa(&block.poa, DataLedger::Submit)
     })
     .await?;
-    assert!(is_data_poa(&submit_poa.poa, DataLedger::Submit));
 
     node.wait_for_ingress_proofs(vec![first.header.id, second.header.id], 40)
         .await?;
     node.mine_block().await?;
     wait_for_data_on_slot(&node, DataLedger::Publish, 0).await?;
-    let publish_poa = mine_until(&node, "publish data poa", |block| {
+    mine_until(&node, "publish data poa", |block| {
         is_data_poa(&block.poa, DataLedger::Publish)
     })
     .await?;
-    assert!(is_data_poa(&publish_poa.poa, DataLedger::Publish));
 
     node.stop().await;
     Ok(())
@@ -285,27 +304,18 @@ async fn heavy_test_rocks_v1_submit_and_publish_data_poa() -> eyre::Result<()> {
 async fn heavy_test_rocks_v1_term_ledger_data_poa() -> eyre::Result<()> {
     initialize_tracing();
     let mut config = rocks_config(4, 2);
-    config.consensus.get_mut().hardforks.cascade = Some(Cascade {
-        activation_timestamp: UnixTimestamp::from_secs(0),
-        one_year_epoch_length: 100,
-        thirty_day_epoch_length: 100,
-        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
-    });
+    cascade_since_unix_epoch(&mut config);
     // Publish, Submit, OneYear, ThirtyDay, and one capacity partition.
     let (node, signer) = start_rocks_node(config, 5).await?;
-    let activation = node.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
-    while node.get_canonical_chain_height().await <= activation {
-        node.mine_block().await?;
-    }
+    mine_past_epoch(&node).await?;
 
     let _tx = post_ledger_tx(&node, &signer, DataLedger::OneYear, aligned_bytes(4, 0x33)).await?;
 
     wait_for_data_on_slot(&node, DataLedger::OneYear, 0).await?;
-    let block = mine_until(&node, "one-year data poa", |block| {
+    mine_until(&node, "one-year data poa", |block| {
         is_data_poa(&block.poa, DataLedger::OneYear)
     })
     .await?;
-    assert!(is_data_poa(&block.poa, DataLedger::OneYear));
 
     node.stop().await;
     Ok(())
@@ -344,8 +354,6 @@ async fn heavy_test_rocks_v1_nonzero_slot_data_poa() -> eyre::Result<()> {
         is_data_poa(&block.poa, DataLedger::Publish) && block.poa.partition_hash == slot_one
     })
     .await?;
-    assert_eq!(block.poa.partition_hash, slot_one);
-    assert!(is_data_poa(&block.poa, DataLedger::Publish));
     assert!(block.poa.partition_chunk_offset < 4);
     // Slot 1 holds the second tx of the block that introduced these chunks.
     assert_derived_tx_index(&node, &block, DataLedger::Publish, 1)?;
@@ -359,17 +367,9 @@ async fn heavy_test_rocks_v1_nonzero_slot_data_poa() -> eyre::Result<()> {
 async fn heavy_test_rocks_v1_thirty_day_data_poa() -> eyre::Result<()> {
     initialize_tracing();
     let mut config = rocks_config(4, 2);
-    config.consensus.get_mut().hardforks.cascade = Some(Cascade {
-        activation_timestamp: UnixTimestamp::from_secs(0),
-        one_year_epoch_length: 100,
-        thirty_day_epoch_length: 100,
-        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
-    });
+    cascade_since_unix_epoch(&mut config);
     let (node, signer) = start_rocks_node(config, 5).await?;
-    let activation = node.node_ctx.config.consensus.epoch.num_blocks_in_epoch;
-    while node.get_canonical_chain_height().await <= activation {
-        node.mine_block().await?;
-    }
+    mine_past_epoch(&node).await?;
 
     let _tx = post_ledger_tx(
         &node,
@@ -380,11 +380,10 @@ async fn heavy_test_rocks_v1_thirty_day_data_poa() -> eyre::Result<()> {
     .await?;
 
     wait_for_data_on_slot(&node, DataLedger::ThirtyDay, 0).await?;
-    let block = mine_until(&node, "thirty-day data poa", |block| {
+    mine_until(&node, "thirty-day data poa", |block| {
         is_data_poa(&block.poa, DataLedger::ThirtyDay)
     })
     .await?;
-    assert!(is_data_poa(&block.poa, DataLedger::ThirtyDay));
 
     node.stop().await;
     Ok(())
@@ -431,8 +430,6 @@ async fn heavy_test_rocks_v1_submit_nonzero_slot_data_poa() -> eyre::Result<()> 
         is_data_poa(&block.poa, DataLedger::Submit) && block.poa.partition_hash == slot_one
     })
     .await?;
-    assert_eq!(block.poa.partition_hash, slot_one);
-    assert!(is_data_poa(&block.poa, DataLedger::Submit));
     assert_derived_tx_index(&node, &block, DataLedger::Submit, 1)?;
 
     node.stop().await;
