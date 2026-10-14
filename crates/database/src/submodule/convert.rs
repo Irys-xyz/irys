@@ -3664,6 +3664,23 @@ fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> e
         write_converting_sentinel(path)?;
         return Ok(());
     }
+    // `SCHEMA` beside `CONVERTING` is a finished RocksDB index. The sentinel
+    // is removed only after that file is durable. Refuse it before any delete.
+    match rocks_schema_text(path)? {
+        Some(text) if text == SUBMODULE_SCHEMA_ROCKS_V1 => {
+            eyre::bail!(
+                "target {} is a completed RocksDB index. Refusing to replace it.",
+                path.display()
+            );
+        }
+        Some(_) => {
+            eyre::bail!(
+                "target {} has an existing index schema. Refusing to delete it.",
+                path.display()
+            );
+        }
+        None => {}
+    }
     refuse_forbidden(path)?;
     if path.join("mdbx.dat").is_file() {
         let args = args.with_exclusive(Some(true));
@@ -4718,6 +4735,51 @@ mod tests {
         let err = super::prepare_rocks_target(&held, true).unwrap_err();
         assert!(format!("{err:#}").contains("may be running"), "{err:#}");
         assert!(held.join("CONVERTING").is_file());
+        Ok(())
+    }
+
+    /// A finished RocksDB index can still hold `CONVERTING` when the process
+    /// dies after `SCHEMA` and before the sentinel is removed. Replacing an
+    /// MDBX target must leave that directory in place.
+    #[test]
+    fn prepare_mdbx_target_refuses_a_finished_rocks_schema() -> eyre::Result<()> {
+        let root = temp("convert-mdbx-target-schema");
+        let finished = root.path().join("finished-rocks");
+        fs::create_dir_all(&finished)?;
+        fs::write(finished.join("SCHEMA"), SUBMODULE_SCHEMA_ROCKS_V1)?;
+        fs::write(finished.join("CURRENT"), b"MANIFEST-000001\n")?;
+        fs::write(
+            finished.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(finished.join("KEEP"), b"keep")?;
+        let err = super::prepare_mdbx_target(&finished, testing_args()?, true).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("completed RocksDB index"), "{text}");
+        assert_eq!(
+            fs::read(finished.join("SCHEMA"))?,
+            SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()
+        );
+        assert_eq!(fs::read(finished.join("CURRENT"))?, b"MANIFEST-000001\n");
+        assert_eq!(fs::read(finished.join("KEEP"))?, b"keep");
+        assert_eq!(
+            fs::read(finished.join("CONVERTING"))?,
+            super::SUBMODULE_CONVERT_INCOMPLETE.as_bytes()
+        );
+
+        let foreign = root.path().join("foreign-schema");
+        fs::create_dir_all(&foreign)?;
+        fs::write(foreign.join("SCHEMA"), b"not-a-submodule\n")?;
+        fs::write(
+            foreign.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(foreign.join("KEEP"), b"keep")?;
+        let err = super::prepare_mdbx_target(&foreign, testing_args()?, true).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("existing index schema"), "{text}");
+        assert_eq!(fs::read(foreign.join("SCHEMA"))?, b"not-a-submodule\n");
+        assert_eq!(fs::read(foreign.join("KEEP"))?, b"keep");
         Ok(())
     }
 
