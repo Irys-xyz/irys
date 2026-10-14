@@ -2451,14 +2451,83 @@ fn push_note(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
+fn has_index_bench(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::Normal(name) if name == "index-bench"))
+}
+
+enum MissingPart {
+    Normal(std::ffi::OsString),
+    CurDir,
+    ParentDir,
+}
+
+/// Canonicalize the deepest existing ancestor, then apply the missing tail.
+/// `..` in that tail is applied, so `index-bench/../../outside` does not keep the component.
+fn resolve_with_ancestor(path: &Path) -> eyre::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        if cursor.as_os_str().is_empty() {
+            cursor = std::env::current_dir()?;
+        }
+        if cursor.exists() || is_symlink(&cursor) {
+            let mut resolved = cursor.canonicalize()?;
+            apply_missing(&mut resolved, &missing)?;
+            return Ok(resolved);
+        }
+        let popped = match cursor.components().next_back() {
+            Some(Component::Normal(name)) => MissingPart::Normal(name.to_os_string()),
+            Some(Component::CurDir) => MissingPart::CurDir,
+            Some(Component::ParentDir) => MissingPart::ParentDir,
+            _ => return Err(eyre::eyre!("{} has no existing ancestor", path.display())),
+        };
+        let Some(parent) = cursor.parent() else {
+            return Err(eyre::eyre!("{} has no existing ancestor", path.display()));
+        };
+        if parent == cursor {
+            return Err(eyre::eyre!("{} has no existing ancestor", path.display()));
+        }
+        missing.push(popped);
+        if parent.as_os_str().is_empty() {
+            cursor = std::env::current_dir()?;
+            continue;
+        }
+        cursor = parent.to_path_buf();
+    }
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+fn apply_missing(base: &mut PathBuf, missing: &[MissingPart]) -> eyre::Result<()> {
+    for part in missing.iter().rev() {
+        match part {
+            MissingPart::Normal(name) => base.push(name),
+            MissingPart::CurDir => {}
+            MissingPart::ParentDir => {
+                if !base.pop() {
+                    return Err(eyre::eyre!("path escapes the filesystem root"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn prepare_dir(path: &Path) -> eyre::Result<()> {
-    let marked = path
-        .components()
-        .any(|component| matches!(component, Component::Normal(name) if name == "index-bench"));
     eyre::ensure!(
-        marked,
+        has_index_bench(path),
         "refusing {}: path needs an index-bench component",
         path.display()
+    );
+    let resolved = resolve_with_ancestor(path)?;
+    eyre::ensure!(
+        has_index_bench(&resolved),
+        "refusing {}: it resolves to {}, which has no index-bench component",
+        path.display(),
+        resolved.display()
     );
     if path.exists() {
         eyre::ensure!(
@@ -2888,6 +2957,65 @@ mod tests {
         rewritten_data_path, sample_offset, seq_offset, shaped_proof, shuffled_runs, tx_count,
         tx_path_bytes, write_data_paths, write_entropy_rows, write_tx_index,
     };
+
+    #[test]
+    fn prepare_dir_does_not_create_through_dotdot() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new().prefix("index-bench-escape-").build();
+        let safe = tmp.path().join("safe/index-bench");
+        std::fs::create_dir_all(&safe).unwrap();
+        let escaped = tmp.path().join("escaped");
+        let via = safe.join("../../escaped");
+        let err = super::prepare_dir(&via).unwrap_err();
+        assert!(
+            !escaped.exists(),
+            "created {} before the canonical check",
+            escaped.display()
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("index-bench"), "{text}");
+    }
+
+    #[test]
+    fn prepare_dir_refuses_a_symlink_that_leaves_index_bench() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new().prefix("index-bench-link-").build();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = tmp.path().join("index-bench");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err = super::prepare_dir(&link).unwrap_err();
+        assert!(outside.read_dir().unwrap().next().is_none());
+        let text = format!("{err:#}");
+        assert!(text.contains("index-bench"), "{text}");
+    }
+
+    #[test]
+    fn prepare_dir_applies_dotdot_through_a_missing_directory() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new().prefix("index-bench-missing-").build();
+        let safe = tmp.path().join("safe/index-bench");
+        std::fs::create_dir_all(&safe).unwrap();
+        let via = safe.join("nope/../../../escaped");
+        let escaped = tmp.path().join("escaped");
+        let err = super::prepare_dir(&via).unwrap_err();
+        assert!(!escaped.exists());
+        assert!(!safe.join("nope").exists());
+        let text = format!("{err:#}");
+        assert!(text.contains("index-bench"), "{text}");
+    }
+
+    #[test]
+    fn prepare_dir_creates_a_missing_directory_under_index_bench() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new().prefix("index-bench-ok-").build();
+        let parent = tmp.path().join("safe/index-bench");
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = parent.join("nested");
+        super::prepare_dir(&dir).unwrap();
+        assert!(dir.is_dir());
+        assert!(dir.read_dir().unwrap().next().is_none());
+    }
 
     #[test]
     fn adjacent_seeds_fill_distinct_bytes() {
