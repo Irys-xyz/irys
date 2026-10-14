@@ -164,13 +164,14 @@ pub(super) fn ensure_mdbx_schema(
                 path.display()
             );
         }
-        SchemaRow::ConvertIncomplete => {
-            eyre::bail!(
-                "submodule index {} is an incomplete MDBX conversion and has no completion marker. Delete this directory and rerun `submodule-index-convert rocks-to-mdbx` with --replace-incomplete. Do not start the node on it. The RocksDB source is unchanged. If a completed rocks/ index has rows written after the switch, that command is also the rollback.",
-                path.display()
-            );
-        }
+        SchemaRow::ConvertIncomplete => return Err(incomplete_mdbx_conversion(path)),
         SchemaRow::Absent if path_hash_rows == 0 && legacy_rows == 0 => {
+            // `CONVERTING` is synced before the convert-incomplete schema row.
+            // A crash in that window has no row and no v1 rows. Stamping it
+            // would publish an empty current index.
+            if converting_sentinel_present(path)? {
+                return Err(incomplete_mdbx_conversion(path));
+            }
             stamp_schema(env)?;
             MigrationStats {
                 detected: DetectedSubmoduleSchema::Empty,
@@ -507,6 +508,24 @@ fn apply_drop(
     write.put::<Metadata>(MetadataKey::DBSchemaVersion, encode_progress(progress))?;
     write.commit()?;
     Ok(false)
+}
+
+fn incomplete_mdbx_conversion(path: &Path) -> eyre::Report {
+    eyre::eyre!(
+        "submodule index {} is an incomplete MDBX conversion and has no completion marker. Delete this directory and rerun `submodule-index-convert rocks-to-mdbx` with --replace-incomplete. Do not start the node on it. The RocksDB source is unchanged. If a completed rocks/ index has rows written after the switch, that command is also the rollback.",
+        path.display()
+    )
+}
+
+/// `true` when `CONVERTING` is the convert-incomplete sentinel.
+fn converting_sentinel_present(path: &Path) -> eyre::Result<bool> {
+    let file_path = path.join("CONVERTING");
+    if !file_path.is_file() {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(&file_path)
+        .map_err(|err| eyre::eyre!("read {}: {err}", file_path.display()))?;
+    Ok(bytes == SUBMODULE_CONVERT_INCOMPLETE.as_bytes())
 }
 
 fn stamp_schema(env: &DatabaseEnv) -> eyre::Result<()> {
@@ -1202,6 +1221,40 @@ mod tests {
         assert_eq!(
             schema_of(&env)?.as_deref(),
             Some(SUBMODULE_SCHEMA.as_bytes())
+        );
+        Ok(())
+    }
+
+    /// `CONVERTING` is written before the convert-incomplete schema row.
+    /// An empty open must not stamp that directory as a current index.
+    #[test]
+    fn converting_sentinel_without_a_schema_row_is_not_stamped() -> eyre::Result<()> {
+        let dir = temp("sm-converting-only");
+        std::fs::write(
+            dir.path().join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        let args = testing_args()?;
+        let err = open_submodule_index(
+            dir.path(),
+            args.clone(),
+            SubmoduleMigrationOptions::default(),
+        )
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("incomplete MDBX conversion"), "{text}");
+        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
+        assert_eq!(schema_of(&env)?, None);
+        drop(env);
+        assert_eq!(
+            std::fs::read(dir.path().join("CONVERTING"))?,
+            super::SUBMODULE_CONVERT_INCOMPLETE.as_bytes()
+        );
+        let err = open_submodule_index(dir.path(), args, SubmoduleMigrationOptions::default())
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("incomplete MDBX conversion"),
+            "{err:#}"
         );
         Ok(())
     }
