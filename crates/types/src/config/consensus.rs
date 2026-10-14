@@ -497,8 +497,19 @@ pub struct DifficultyAdjustmentConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MempoolConsensusConfig {
-    /// Maximum number of data transactions that can be included in a single block
+    /// Maximum number of data transactions that can be included in a single block.
+    /// Counts the term ledgers (Submit, OneYear, ThirtyDay). The Publish ledger
+    /// has its own cap.
     pub max_data_txs_per_block: u64,
+
+    /// Maximum number of transactions in the Publish ledger of one block.
+    ///
+    /// Must be greater than `max_data_txs_per_block`. A publish tx can be
+    /// included only after its ingress proofs arrive, and that arrival is
+    /// uneven. A cap equal to the submit rate cannot clear a burst, so the
+    /// ready set grows without a bound.
+    #[serde(default = "default_max_publish_txs_per_block")]
+    pub max_publish_txs_per_block: u64,
 
     /// Maximum size of a single data transaction, expressed in chunks.
     /// A data tx is rejected (at mempool ingress and consensus prevalidation) when
@@ -528,6 +539,10 @@ pub struct MempoolConsensusConfig {
 
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
+}
+
+fn default_max_publish_txs_per_block() -> u64 {
+    110
 }
 
 /// Recursively sort all object keys in a JSON value for deterministic serialization.
@@ -733,6 +748,8 @@ impl ConsensusConfig {
             mempool: MempoolConsensusConfig {
                 // Maximum number of data transactions that can be included in a single block
                 max_data_txs_per_block: 100,
+                // Above the term-ledger cap so a burst of ingress proofs can clear.
+                max_publish_txs_per_block: 110,
                 // Maximum size of a single data transaction: 20_971_520 chunks = 5 TiB at 256 KiB chunks
                 max_data_tx_chunks: 20_971_520,
                 // Maximum number of commitment transactions allowed in a single block
@@ -889,6 +906,7 @@ impl ConsensusConfig {
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
+                max_publish_txs_per_block: 110,
                 max_data_tx_chunks: 20_971_520,
                 max_commitment_txs_per_block: 100,
                 tx_anchor_expiry_depth: 20,
@@ -1039,6 +1057,7 @@ impl ConsensusConfig {
 
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
+                max_publish_txs_per_block: 110,
                 max_data_tx_chunks: 20_971_520,
                 max_commitment_txs_per_block: 100,
                 tx_anchor_expiry_depth: 50,
@@ -1209,7 +1228,7 @@ mod tests {
         // P2P handshake hash — any mainnet() field or canonical encoding change fails CI.
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("8nKbR4h8hfRPAv3Zh7Fp5TKjAF8MgmnNA6nM5nRdUeF2"), // spellchecker:disable-line
+            H256::from_base58("G5heBnSRbPT1tBFUkeHpWuvGZUF1hapEaosBkkgFeiKD"), // spellchecker:disable-line
             "mainnet consensus-config hash is consensus-frozen"
         );
     }
@@ -1227,8 +1246,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            // Re-pinned after commitment_anchor_expiry_depth 7200 → 8640 (7f100d7a9).
-            H256::from_base58("4tYzvwZudjEbdWmSNENciFzWeZdhYfst6dWvp23JuzoW"),
+            H256::from_base58("HN8GRtD7rYKAprfZq6p2eBrixTVFEhyE4NNCPizKukWb"), // spellchecker:disable-line
             "testnet consensus-config hash is consensus-frozen"
         );
     }
@@ -1307,6 +1325,10 @@ mod tests {
             config.hardforks.delta.is_none(),
             "mainnet Delta is unscheduled"
         );
+
+        // Publish-ledger cap. Above the term-ledger cap so an ingress-proof burst can clear.
+        assert_eq!(config.mempool.max_data_txs_per_block, 100);
+        assert_eq!(config.mempool.max_publish_txs_per_block, 110);
     }
 
     /// Pins the testnet hardfork schedule: the Borealis activation time
@@ -1332,6 +1354,10 @@ mod tests {
             config.hardforks.delta.is_none(),
             "testnet Delta is unscheduled"
         );
+
+        // Publish-ledger cap stays above the term-ledger cap.
+        assert_eq!(config.mempool.max_data_txs_per_block, 100);
+        assert_eq!(config.mempool.max_publish_txs_per_block, 110);
     }
 
     #[test]
@@ -1446,7 +1472,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("26uQbM7kxYCbs3E16sS3VWuHeBWTdTbyZ9TVo2DFxiPu");
+        let expected_hash = H256::from_base58("E7fxtrRXiJiBmC9ZFBpDW8SvUiNe85ZGkaJ8AKNHNYYM");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,

@@ -143,6 +143,8 @@ balance = "0x152cf4e72a974f1c0000"
 
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
+# Above max_data_txs_per_block. Publish inclusion waits on ingress proofs.
+max_publish_txs_per_block = 110
 max_data_tx_chunks = 20971520
 max_commitment_txs_per_block = 100
 tx_anchor_expiry_depth = 20

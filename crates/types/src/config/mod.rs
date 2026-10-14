@@ -106,6 +106,16 @@ impl Config {
             self.consensus.block_migration_depth,
         );
 
+        // A publish cap at or below the term-ledger cap cannot clear a burst of
+        // ingress proofs. The ready set would grow without a bound.
+        ensure!(
+            self.consensus.mempool.max_publish_txs_per_block
+                > self.consensus.mempool.max_data_txs_per_block,
+            "mempool.max_publish_txs_per_block ({}) must be > max_data_txs_per_block ({})",
+            self.consensus.mempool.max_publish_txs_per_block,
+            self.consensus.mempool.max_data_txs_per_block,
+        );
+
         // Commitment anchors must survive at least until their anchor block
         // migrates; but they may outlive the reorg window (resolved from the
         // finalized index below the floor), so they are NOT capped at
@@ -2272,6 +2282,27 @@ mod validate_tests {
         assert!(
             msg.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_publish_cap_not_above_submit_cap() {
+        let mut node_config = NodeConfig::testing();
+        let submit_cap = node_config
+            .consensus_config()
+            .mempool
+            .max_data_txs_per_block;
+        node_config
+            .consensus
+            .get_mut()
+            .mempool
+            .max_publish_txs_per_block = submit_cap;
+        let err = Config::new(node_config, IrysPeerId::random())
+            .validate()
+            .expect_err("publish cap must be above the submit cap");
+        assert!(
+            err.to_string().contains("max_publish_txs_per_block"),
+            "unexpected error: {err}"
         );
     }
 
