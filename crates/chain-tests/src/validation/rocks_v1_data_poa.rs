@@ -145,6 +145,8 @@ fn assigned_partition(
     })
 }
 
+const MINE_UNTIL_BLOCKS: usize = 96;
+
 async fn mine_until<F>(
     node: &IrysNodeTest<IrysNodeCtx>,
     label: &str,
@@ -154,7 +156,9 @@ where
     F: FnMut(&IrysBlockHeader) -> bool,
 {
     let mut seen = Vec::new();
-    for _ in 0..24 {
+    // Any partition can win a block, so a specific one can miss 24 blocks in
+    // a row. 96 keeps the miss rate well under 1%.
+    for _ in 0..MINE_UNTIL_BLOCKS {
         let block = node.mine_block().await?;
         let poa = &block.poa;
         seen.push(format!(
@@ -170,7 +174,7 @@ where
             return Ok(block);
         }
     }
-    eyre::bail!("no {label} in 24 blocks: {seen:?}")
+    eyre::bail!("no {label} in {MINE_UNTIL_BLOCKS} blocks: {seen:?}")
 }
 
 async fn wait_for_data_on_slot(
