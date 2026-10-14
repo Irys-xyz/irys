@@ -20,6 +20,14 @@ pub enum MetadataKey {
     /// Set after a scan of a fully packed module finds a checksum on every
     /// offset. Absent means unset. Reset deletes the key. `clear` does not.
     ChunkCrcComplete = 5,
+    /// Feature bits for a RocksDB v1 index.
+    ///
+    /// Raw 24 bytes: `compat`, `ro_compat`, and `incompat`, each a
+    /// little-endian u64. Absent is the same as all zeros. This release
+    /// defines no bits. An unknown `incompat` bit refuses open. An unknown
+    /// `ro_compat` bit refuses a writable open. An unknown `compat` bit is
+    /// ignored.
+    FeatureFlags = 6,
 }
 
 impl Encode for MetadataKey {
@@ -45,6 +53,7 @@ impl Decode for MetadataKey {
             3 => Ok(Self::PartitionHash),
             4 => Ok(Self::PackingParamsHash),
             5 => Ok(Self::ChunkCrcComplete),
+            6 => Ok(Self::FeatureFlags),
             _ => Err(DatabaseError::Decode),
         }
     }
@@ -83,7 +92,9 @@ mod tests {
     proptest! {
         #[test]
         fn metadata_key_decode_rejects_invalid_discriminants(val in any::<u32>()) {
-            prop_assume!(val != 1 && val != 2 && val != 3 && val != 4 && val != 5);
+            prop_assume!(
+                val != 1 && val != 2 && val != 3 && val != 4 && val != 5 && val != 6
+            );
             let bytes = val.to_le_bytes();
             prop_assert!(MetadataKey::decode(&bytes).is_err());
         }

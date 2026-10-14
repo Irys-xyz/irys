@@ -8545,10 +8545,14 @@ mod tests {
 
         let error =
             open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))
-                .expect_err("incomplete rocks conversion must not open");
+                .expect_err("crashed first open must not open");
         let message = format!("{error:#}");
-        assert!(message.contains("submodule-index-convert"), "{message}");
+        // CURRENT and no CONVERTING is a crashed first open. The converter
+        // flag does not delete that directory.
         assert!(message.contains("SCHEMA"), "{message}");
+        assert!(message.contains("no CONVERTING"), "{message}");
+        assert!(message.contains("Delete this directory"), "{message}");
+        assert!(!message.contains("with --replace-incomplete"), "{message}");
         assert!(!rocks_dir.join("SCHEMA").exists());
         Ok(())
     }

@@ -1135,8 +1135,11 @@ impl RocksSubmoduleStore {
         }
         let lock_file = hold_rocks_lock(&path)?;
         let layout = resolve_layout(&path, None)?;
-        require_offset_meta_family(&path, layout)?;
+        let unknown = existing_unknown_families(&path, layout)?;
+        log_unknown_families(&path, &unknown);
         let db = open_db_read_only(&path)?;
+        // Absent flags are zero. Read-only open does not stamp them.
+        ensure_feature_flags(&db, &path, false, false)?;
         let group = GroupCommit::new();
         let db = Arc::new(db);
         let submodule = submodule_label(&path);
@@ -1264,8 +1267,8 @@ impl RocksSubmoduleStore {
     ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let layout = if stamp_schema {
-            // A directory with CURRENT and no SCHEMA is a crashed conversion
-            // or a crashed first open. Stamping it here would hide missing rows.
+            // CURRENT without SCHEMA, or any other non-empty directory without
+            // SCHEMA, is not a new database. Stamping it would hide a crash.
             refuse_incomplete_directory(&path)?;
             resolve_layout(&path, force)?
         } else {
@@ -1278,8 +1281,13 @@ impl RocksSubmoduleStore {
             force.unwrap_or(IndexLayout::RocksV1)
         };
         let resources = shared_resources_for(tuning, resources)?;
-        require_content_family(&path, layout)?;
-        require_offset_meta_family(&path, layout)?;
+        // An existing database (CURRENT is present) must already contain
+        // every RocksDB v1 family. A missing one is not created empty.
+        // A directory with no CURRENT is new, including a converter target,
+        // and that open creates the families.
+        let unknown = existing_unknown_families(&path, layout)?;
+        log_unknown_families(&path, &unknown);
+        let create_missing = !path.join("CURRENT").is_file();
         let (db, stats) = open_db(
             &path,
             &tuning,
@@ -1287,8 +1295,11 @@ impl RocksSubmoduleStore {
             preload_tables,
             resources.as_deref(),
             layout,
+            create_missing,
+            &unknown,
         )?;
         if stamp_schema {
+            ensure_feature_flags(&db, &path, true, false)?;
             ensure_schema_row(&db, layout)?;
             let marker = path.join(SCHEMA_FILE);
             if !marker.exists() {
@@ -1335,6 +1346,7 @@ impl RocksSubmoduleStore {
             self.flush_families_locked()?;
             self.compact_split_families_locked();
             write_schema_row(&self.db, layout, true)?;
+            ensure_feature_flags(&self.db, &path, true, true)?;
             self.flush_families_locked()?;
             self.compact_split_families_locked();
         }
@@ -3053,11 +3065,16 @@ fn open_db(
     preload_tables: bool,
     resources: Option<&RocksResources>,
     layout: IndexLayout,
+    create_missing: bool,
+    extra_families: &[String],
 ) -> eyre::Result<(DB, Option<Arc<Options>>)> {
     let cache = open_cache(tuning, resources);
     let mut db_opts = Options::default();
-    db_opts.create_if_missing(true);
-    db_opts.create_missing_column_families(true);
+    // Missing families are created only for a new directory. An existing
+    // database lists every family and opens that list, so a family this
+    // binary does not know is not a reason for RocksDB to refuse.
+    db_opts.create_if_missing(create_missing);
+    db_opts.create_missing_column_families(create_missing);
     // Per-database cap so one index cannot take every shared pool thread.
     // The pools themselves are process-wide. This value stays at or below
     // those pools for the baseline (2 jobs asks for 1 flush and 1
@@ -3101,7 +3118,7 @@ fn open_db(
         apply_shared_limits(&mut db_opts, resources)?;
     }
 
-    let families = user_column_families(&cache, tuning, layout);
+    let families = user_column_families(&cache, tuning, layout, extra_families);
     let db = DB::open_cf_descriptors(&db_opts, path, families)
         .wrap_err("open rocksdb submodule index")?;
     let stats = collect_stats.then(|| Arc::new(db_opts));
@@ -3136,6 +3153,7 @@ fn user_column_families(
     cache: &rocksdb::Cache,
     tuning: &RocksTuning,
     layout: IndexLayout,
+    extra_families: &[String],
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     let mut families: Vec<_> = families(layout)
         .map(|cf| {
@@ -3152,6 +3170,14 @@ fn user_column_families(
         rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
         column_options(cache, Cf::Metadata, tuning, layout),
     ));
+    // A family written by a newer binary. Default options, and no reader
+    // or writer in this process uses the handle.
+    for name in extra_families {
+        families.push(rocksdb::ColumnFamilyDescriptor::new(
+            name,
+            Options::default(),
+        ));
+    }
     families
 }
 
@@ -3297,19 +3323,44 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
-/// `CURRENT` without SCHEMA is an unfinished conversion. Open must not
-/// create the marker, or the node would serve a partial index.
+/// A non-empty directory without SCHEMA is not a new database.
+///
+/// `CONVERTING` is an unfinished conversion. `CURRENT` without that file is
+/// a first open that crashed before the marker. A directory that already has
+/// SCHEMA is complete: `CONVERTING` beside it is the crash after the marker
+/// and before the sentinel is removed, and open continues.
 fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
     if path.join(SCHEMA_FILE).exists() {
         return Ok(());
     }
-    if path.join("CURRENT").is_file() {
+    if !directory_has_entries(path)? {
+        return Ok(());
+    }
+    let converting = path.join("CONVERTING").is_file();
+    let current = path.join("CURRENT").is_file();
+    if current && !converting {
         eyre::bail!(
-            "submodule index {} has RocksDB files but no SCHEMA marker, so the conversion is incomplete. Delete this directory and rerun `submodule-index-convert mdbx-to-rocks` with --replace-incomplete. Do not start the node on it. Rollback of a completed RocksDB v1 index is `submodule-index-convert rocks-to-mdbx`.",
+            "submodule index {} has CURRENT but no SCHEMA marker and no CONVERTING sentinel. A first open crashed after RocksDB created its files and before the marker was written. Delete this directory and start the node again. --replace-incomplete does not apply, because that flag only deletes a directory that contains CONVERTING.",
             path.display()
         );
     }
-    Ok(())
+    eyre::bail!(
+        "submodule index {} has no SCHEMA marker, so the directory is incomplete. Delete this directory and rerun `submodule-index-convert` with --replace-incomplete. Do not start the node on it.",
+        path.display()
+    );
+}
+
+fn directory_has_entries(path: &Path) -> eyre::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if !path.is_dir() {
+        return Ok(true);
+    }
+    Ok(fs::read_dir(path)
+        .wrap_err("read rocksdb directory")?
+        .next()
+        .is_some())
 }
 
 fn schema_text(_layout: IndexLayout) -> &'static str {
@@ -3356,45 +3407,158 @@ fn write_schema_marker_file(dir: &Path, text: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-/// A RocksDB v1 directory that already has `CURRENT` must already contain
-/// `ChunkOffsetsByContentHash`. `create_missing_column_families` would
-/// otherwise add the family empty, and every stored proof would lack its
-/// reverse row. An empty directory has no `CURRENT` and is created with the
-/// family.
-fn require_content_family(path: &Path, layout: IndexLayout) -> eyre::Result<()> {
-    if layout != IndexLayout::RocksV1 || !path.join("CURRENT").is_file() {
-        return Ok(());
+/// Families on an existing database, and the names this binary does not use.
+///
+/// `CURRENT` means the directory is not new. Every RocksDB v1 family must
+/// already be there. Creating a missing one would hide lost rows. Families
+/// that are not in this binary are returned so open can pass them to
+/// RocksDB. They are not read or written.
+fn existing_unknown_families(path: &Path, layout: IndexLayout) -> eyre::Result<Vec<String>> {
+    if !path.join("CURRENT").is_file() {
+        return Ok(Vec::new());
     }
     let names = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
-    if names
-        .iter()
-        .any(|name| name == Cf::Content.name_in(IndexLayout::RocksV1))
-    {
-        return Ok(());
+    let mut missing = Vec::new();
+    for cf in families(layout) {
+        let name = cf.name_in(layout);
+        if !names.iter().any(|found| found == name) {
+            missing.push(name);
+        }
     }
-    eyre::bail!(
-        "submodule index {} is missing column family ChunkOffsetsByContentHash. This open does not create it empty. Restore the directory or reset the storage module.",
-        path.display()
+    if !missing.is_empty() {
+        eyre::bail!(
+            "submodule index {} is missing column family {}. This open does not create it empty. Restore the directory or reset the storage module.",
+            path.display(),
+            missing.join(", ")
+        );
+    }
+    let mut unknown = Vec::new();
+    for name in names {
+        if name == rocksdb::DEFAULT_COLUMN_FAMILY_NAME {
+            continue;
+        }
+        if families(layout).any(|cf| cf.name_in(layout) == name) {
+            continue;
+        }
+        unknown.push(name);
+    }
+    Ok(unknown)
+}
+
+fn log_unknown_families(path: &Path, unknown: &[String]) {
+    if unknown.is_empty() {
+        return;
+    }
+    tracing::info!(
+        path = %path.display(),
+        families = %unknown.join(","),
+        "opening column families this binary does not use; default options, and they are not read or written"
     );
 }
 
-/// An existing database must already contain `ChunkMetaByOffset`.
+/// RocksDB v1 defines no feature bits. A later change that old binaries can
+/// ignore sets a `compat` or `ro_compat` bit and keeps this marker. A change
+/// to an existing key or value layout, width, endianness, or meaning needs a
+/// new marker and `submodule-index-convert`.
+const FEATURE_FLAGS_LEN: usize = 24;
+const ROCKS_V1_COMPAT_BITS: u64 = 0;
+const ROCKS_V1_RO_COMPAT_BITS: u64 = 0;
+const ROCKS_V1_INCOMPAT_BITS: u64 = 0;
+
+struct FeatureBits {
+    compat: u64,
+    ro_compat: u64,
+    incompat: u64,
+}
+
+fn u64_le_at(bytes: &[u8], at: usize) -> u64 {
+    let mut buf = [0_u8; 8];
+    buf.copy_from_slice(&bytes[at..at + 8]);
+    u64::from_le_bytes(buf)
+}
+
+fn parse_feature_flags(bytes: &[u8]) -> eyre::Result<FeatureBits> {
+    if bytes.len() != FEATURE_FLAGS_LEN {
+        eyre::bail!(
+            "feature flags are {FEATURE_FLAGS_LEN} bytes, found {}",
+            bytes.len()
+        );
+    }
+    Ok(FeatureBits {
+        compat: u64_le_at(bytes, 0),
+        ro_compat: u64_le_at(bytes, 8),
+        incompat: u64_le_at(bytes, 16),
+    })
+}
+
+fn feature_bit_list(bits: u64) -> String {
+    let mut names = Vec::new();
+    let mut rest = bits;
+    let mut index = 0_u32;
+    while rest != 0 {
+        if rest & 1 == 1 {
+            names.push(index.to_string());
+        }
+        rest >>= 1;
+        index = index.saturating_add(1);
+    }
+    format!("{} ({bits:#x})", names.join(", "))
+}
+
+fn unknown_feature_bits(stored: u64, known: u64) -> u64 {
+    stored & !known
+}
+
+fn refuse_unknown_feature_bits(
+    path: &Path,
+    flags: &FeatureBits,
+    writable: bool,
+) -> eyre::Result<()> {
+    let incompat = unknown_feature_bits(flags.incompat, ROCKS_V1_INCOMPAT_BITS);
+    if incompat != 0 {
+        eyre::bail!(
+            "submodule index {} has incompatible feature bits {}. This binary is too old.",
+            path.display(),
+            feature_bit_list(incompat)
+        );
+    }
+    let ro_compat = unknown_feature_bits(flags.ro_compat, ROCKS_V1_RO_COMPAT_BITS);
+    if writable && ro_compat != 0 {
+        eyre::bail!(
+            "submodule index {} has read-only compatible feature bits {}. This binary is too old for a writable open.",
+            path.display(),
+            feature_bit_list(ro_compat)
+        );
+    }
+    // Unknown compat bits stay stored and do not change this open.
+    let _compat = unknown_feature_bits(flags.compat, ROCKS_V1_COMPAT_BITS);
+    Ok(())
+}
+
+/// Stamp 24 zero bytes when the row is absent on a writable open.
 ///
-/// `create_missing_column_families` would add that family empty and leave
-/// any older rows unread. An empty directory has no `CURRENT` and is
-/// created with the family.
-fn require_offset_meta_family(path: &Path, layout: IndexLayout) -> eyre::Result<()> {
-    if layout != IndexLayout::RocksV1 || !path.join("CURRENT").is_file() {
-        return Ok(());
+/// A present row is checked and left as stored. Read-only open does not write.
+fn ensure_feature_flags(
+    db: &DB,
+    path: &Path,
+    writable: bool,
+    disable_wal: bool,
+) -> eyre::Result<()> {
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::FeatureFlags);
+    match db.get_cf(&handle, &key).wrap_err("read feature flags")? {
+        Some(bytes) => {
+            let flags = parse_feature_flags(&bytes)?;
+            refuse_unknown_feature_bits(path, &flags, writable)
+        }
+        None if writable => {
+            let mut batch = WriteBatch::new();
+            batch.put_cf(&handle, key, [0_u8; FEATURE_FLAGS_LEN]);
+            db.write_opt(batch, &write_opts(true, disable_wal))
+                .wrap_err("write feature flags")
+        }
+        None => Ok(()),
     }
-    let names = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
-    if names.iter().any(|name| name == CHUNK_META_BY_OFFSET_CF) {
-        return Ok(());
-    }
-    eyre::bail!(
-        "submodule index {} is missing column family {CHUNK_META_BY_OFFSET_CF}. This open does not create it empty. Restore the directory or reset the storage module.",
-        path.display()
-    )
 }
 
 fn ensure_schema_row(db: &DB, layout: IndexLayout) -> eyre::Result<()> {
@@ -5618,6 +5782,325 @@ mod tests {
         Ok(())
     }
 
+    /// Metadata key 6. Three little-endian u64 bitsets: compat, ro_compat, incompat.
+    const FEATURE_FLAGS_KEY: [u8; 4] = 6_u32.to_le_bytes();
+
+    fn feature_flag_bytes(compat: u64, ro_compat: u64, incompat: u64) -> [u8; 24] {
+        let mut bytes = [0_u8; 24];
+        bytes[0..8].copy_from_slice(&compat.to_le_bytes());
+        bytes[8..16].copy_from_slice(&ro_compat.to_le_bytes());
+        bytes[16..24].copy_from_slice(&incompat.to_le_bytes());
+        bytes
+    }
+
+    /// Writable reopen has to keep the content family's prefix extractor.
+    /// Read-only open accepts default options. A writable open does not.
+    fn reopen_options(name: &str) -> Options {
+        let mut opts = Options::default();
+        if name == "ChunkOffsetsByContentHash" {
+            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(32));
+        }
+        opts
+    }
+
+    fn reopen_for_edit(path: &Path) -> eyre::Result<DB> {
+        let names = DB::list_cf(&Options::default(), path)?;
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(false);
+        db_opts.create_missing_column_families(false);
+        let families = names.into_iter().map(|name| {
+            let opts = reopen_options(&name);
+            rocksdb::ColumnFamilyDescriptor::new(name, opts)
+        });
+        DB::open_cf_descriptors(&db_opts, path, families).wrap_err("reopen rocksdb for edit")
+    }
+
+    fn read_only_value(path: &Path, family: &str, key: &[u8]) -> eyre::Result<Option<Vec<u8>>> {
+        let names = DB::list_cf(&Options::default(), path)?;
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(false);
+        db_opts.create_missing_column_families(false);
+        let families = names
+            .into_iter()
+            .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
+        let db = DB::open_cf_descriptors_read_only(&db_opts, path, families, false)
+            .wrap_err("read rocksdb")?;
+        let handle = db
+            .cf_handle(family)
+            .ok_or_else(|| eyre::eyre!("missing column family {family}"))?;
+        Ok(db.get_cf(&handle, key)?)
+    }
+
+    fn put_metadata_bytes(path: &Path, key: &[u8], value: &[u8]) -> eyre::Result<()> {
+        let db = reopen_for_edit(path)?;
+        let handle = db
+            .cf_handle("Metadata")
+            .ok_or_else(|| eyre::eyre!("missing Metadata"))?;
+        db.put_cf(&handle, key, value)?;
+        Ok(())
+    }
+
+    fn delete_metadata_bytes(path: &Path, key: &[u8]) -> eyre::Result<()> {
+        let db = reopen_for_edit(path)?;
+        let handle = db
+            .cf_handle("Metadata")
+            .ok_or_else(|| eyre::eyre!("missing Metadata"))?;
+        db.delete_cf(&handle, key)?;
+        Ok(())
+    }
+
+    /// A create, and a later writable open of a database that lost the row,
+    /// both store 24 zero bytes. A read-only open does not write the row.
+    #[test]
+    fn writable_open_stamps_absent_feature_flags_as_zeros() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_feature_stamp")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let zeros = vec![0_u8; 24];
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(zeros.clone())
+        );
+
+        delete_metadata_bytes(&path, &FEATURE_FLAGS_KEY)?;
+        drop(RocksSubmoduleStore::open_read_only(&path)?);
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            None
+        );
+
+        drop(RocksSubmoduleStore::open(&path)?);
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(zeros)
+        );
+        Ok(())
+    }
+
+    /// An unknown family and an unknown compat bit both open. Neither is rewritten.
+    #[test]
+    fn unknown_compat_family_and_bit_open_and_stay_untouched() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_compat")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+
+        let flags = feature_flag_bytes(0b101, 0, 0);
+        let family = "FutureIndex";
+        let payload = b"leave-me";
+        {
+            let mut db = reopen_for_edit(&path)?;
+            db.create_cf(family, &Options::default())?;
+            let meta = db
+                .cf_handle("Metadata")
+                .ok_or_else(|| eyre::eyre!("missing Metadata"))?;
+            db.put_cf(&meta, FEATURE_FLAGS_KEY, flags)?;
+            let extra = db
+                .cf_handle(family)
+                .ok_or_else(|| eyre::eyre!("missing {family}"))?;
+            db.put_cf(&extra, b"k", payload)?;
+        }
+
+        drop(RocksSubmoduleStore::open(&path)?);
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(flags.to_vec())
+        );
+        assert_eq!(
+            read_only_value(&path, family, b"k")?,
+            Some(payload.to_vec())
+        );
+        let names = DB::list_cf(&Options::default(), &path)?;
+        assert!(names.iter().any(|name| name == family), "{names:?}");
+        Ok(())
+    }
+
+    /// Any incompat bit this binary does not define refuses read and write.
+    /// The stored bytes stay.
+    #[test]
+    fn unknown_incompat_bit_refuses_and_keeps_the_row() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_incompat")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let flags = feature_flag_bytes(0, 0, 1 << 3);
+        put_metadata_bytes(&path, &FEATURE_FLAGS_KEY, &flags)?;
+
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("too old"), "{text}");
+        assert!(text.contains("incompatible feature bits 3 (0x8)"), "{text}");
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(flags.to_vec())
+        );
+
+        let err = RocksSubmoduleStore::open_read_only(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("too old"), "{text}");
+        assert!(text.contains("incompatible feature bits 3 (0x8)"), "{text}");
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(flags.to_vec())
+        );
+        Ok(())
+    }
+
+    /// An unknown ro_compat bit refuses a writable open and still allows read-only.
+    #[test]
+    fn unknown_ro_compat_bit_refuses_writable_open_only() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_ro_compat")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let flags = feature_flag_bytes(0, 1, 0);
+        put_metadata_bytes(&path, &FEATURE_FLAGS_KEY, &flags)?;
+
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("too old"), "{text}");
+        assert!(
+            text.contains("read-only compatible feature bits 0 (0x1)"),
+            "{text}"
+        );
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(flags.to_vec())
+        );
+
+        drop(RocksSubmoduleStore::open_read_only(&path)?);
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(flags.to_vec())
+        );
+        Ok(())
+    }
+
+    /// An existing database that lacks any RocksDB v1 family is refused.
+    /// Open does not create the family.
+    #[test]
+    fn missing_placement_family_is_refused_and_not_created() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_missing_placement")
+            .build();
+        let path = dir.path().join("index");
+        let mut db_opts = Options::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+        let families = [
+            "default",
+            "DataRootPlacements",
+            "PendingBodyMigrations",
+            "Metadata",
+            "ChunkOffsetsByContentHash",
+            CHUNK_META_BY_OFFSET_CF,
+        ]
+        .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, reopen_options(name)));
+        {
+            let _db = DB::open_cf_descriptors(&db_opts, &path, families)?;
+        }
+        fs::write(path.join(SCHEMA_FILE), SUBMODULE_SCHEMA_ROCKS_V1)?;
+        let before = DB::list_cf(&Options::default(), &path)?;
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("PlacementIntervals"), "{text}");
+        assert!(text.contains("does not create it empty"), "{text}");
+        let after = DB::list_cf(&Options::default(), &path)?;
+        assert_eq!(before, after);
+        assert!(!after.iter().any(|name| name == "PlacementIntervals"));
+        Ok(())
+    }
+
+    /// `CONVERTING` and no `SCHEMA` is an unfinished conversion. Open writes nothing.
+    #[test]
+    fn converting_only_directory_refuses_and_writes_nothing() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_converting")
+            .build();
+        let path = dir.path().join("index");
+        fs::create_dir_all(&path)?;
+        let sentinel = b"irys-submodule-index convert-incomplete\n";
+        fs::write(path.join("CONVERTING"), sentinel)?;
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("with --replace-incomplete"), "{text}");
+        assert!(text.contains("SCHEMA"), "{text}");
+        assert_eq!(fs::read(path.join("CONVERTING"))?, sentinel);
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&path)? {
+            names.push(entry?.file_name());
+        }
+        names.sort();
+        assert_eq!(names, vec![std::ffi::OsString::from("CONVERTING")]);
+        Ok(())
+    }
+
+    /// A stray file and no `SCHEMA` is not a new database.
+    #[test]
+    fn non_empty_dir_without_schema_refuses_and_writes_nothing() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_stray")
+            .build();
+        let path = dir.path().join("index");
+        fs::create_dir_all(&path)?;
+        fs::write(path.join("notes"), b"stray")?;
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("with --replace-incomplete"), "{text}");
+        assert!(text.contains("SCHEMA"), "{text}");
+        assert_eq!(fs::read(path.join("notes"))?, b"stray");
+        assert!(!path.join("CURRENT").is_file());
+        assert!(!path.join(SCHEMA_FILE).exists());
+        Ok(())
+    }
+
+    /// `CURRENT` without `SCHEMA` and without `CONVERTING` is a crashed first open.
+    /// `--replace-incomplete` does not delete that directory.
+    #[test]
+    fn crashed_first_open_names_delete_not_replace_incomplete() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_fresh_crash")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        fs::remove_file(path.join(SCHEMA_FILE))?;
+        assert!(path.join("CURRENT").is_file());
+        assert!(!path.join("CONVERTING").exists());
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("SCHEMA"), "{text}");
+        assert!(text.contains("Delete this directory"), "{text}");
+        assert!(text.contains("no CONVERTING"), "{text}");
+        assert!(!text.contains("with --replace-incomplete"), "{text}");
+        assert!(!path.join(SCHEMA_FILE).exists());
+        Ok(())
+    }
+
+    /// `SCHEMA` already written, with `CONVERTING` still present, is a finished index.
+    /// The sentinel is removed after the marker. Open must not refuse it.
+    #[test]
+    fn schema_beside_converting_still_opens() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_schema_converting")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let sentinel = b"irys-submodule-index convert-incomplete\n";
+        fs::write(path.join("CONVERTING"), sentinel)?;
+        drop(RocksSubmoduleStore::open(&path)?);
+        assert_eq!(fs::read(path.join("CONVERTING"))?, sentinel);
+        assert_eq!(
+            fs::read_to_string(path.join(SCHEMA_FILE))?,
+            SUBMODULE_SCHEMA_ROCKS_V1
+        );
+        Ok(())
+    }
+
     /// A RocksDB v1 proof outside every interval is not stored. A covered
     /// offset in the same batch still is. The skipped offset is the result.
     #[test]
@@ -5751,7 +6234,7 @@ mod tests {
             }
             assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
         }
-        assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
+        assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         let payload = store.schema_payload()?.expect("schema row");
         assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
         assert!(
@@ -5780,7 +6263,7 @@ mod tests {
 
         let store = RocksSubmoduleStore::open(&path)?;
         assert_eq!(store.cf_key_count(Cf::OffsetMeta)?, 0);
-        assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
+        assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         assert_eq!(
             store.schema_payload()?.expect("schema row"),
             SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()
@@ -6116,7 +6599,7 @@ mod tests {
         ] {
             assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
         }
-        assert_eq!(store.cf_key_count(Cf::Metadata)?, 1);
+        assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         Ok(())
     }
 

@@ -20,6 +20,28 @@ in the metadata schema row, is `irys-submodule-index rocksdb 1`. Any
 other marker is refused. This build does not rewrite it. Move the
 directory aside and convert from MDBX, or reset the storage module.
 
+Feature flags are a metadata row of 24 bytes: three little-endian u64
+bitsets, `compat`, then `ro_compat`, then `incompat`. A missing row
+means all zeros. This release sets no bits. An unknown `incompat` bit
+refuses every open. The error names the bits and says this binary is
+too old. An unknown `ro_compat` bit refuses a writable open and still
+allows a read-only open. An unknown `compat` bit is ignored.
+
+Open reads the on-disk column-family list and opens every family. A
+family this binary does not know gets RocksDB's default options. The
+node does not read, write, or drop it, and logs the name once. A family
+that needs another comparator or a prefix extractor is not ignorable.
+
+A later change that old binaries can ignore sets a `compat` or
+`ro_compat` bit and keeps the RocksDB v1 marker. A change to an existing
+key or value layout, width, endianness, or meaning needs a new marker
+(RocksDB v2) and `submodule-index-convert`.
+
+An existing database must already contain every RocksDB v1 family. Open
+does not create a missing family. Restore the directory or reset the
+storage module. A new directory, and a converter target, still create
+the families.
+
 RocksDB v1 stores the placement, the offset row in `ChunkMetaByOffset`,
 and `ChunkOffsetsByContentHash` (the 32-byte leaf hash, then the
 partition offset, with an empty value). The offset row is the data proof
@@ -53,8 +75,14 @@ and names the partition offset.
 The converter never modifies its source. It reads a schema v1 or v2
 `db/` and writes RocksDB v1 to the target. The completion marker is
 written last. `rocks/SCHEMA` is the RocksDB marker. The MDBX marker is
-the schema row. A crash leaves no marker. The node refuses that
-directory. Run the same command again with `--replace-incomplete`.
+the schema row. A crash leaves no marker and leaves `CONVERTING`. The
+node refuses that directory. Run the same command again with
+`--replace-incomplete`.
+
+A first open that crashes after RocksDB creates `CURRENT` and before it
+writes `SCHEMA` has no `CONVERTING` file. Delete that `rocks/` directory
+and start the node again. `--replace-incomplete` only deletes a
+directory that contains `CONVERTING`.
 
 `rocks-to-mdbx` reads RocksDB v1 only. It drops checksum-only rows and
 copies the proof bytes from the offset record. It does not copy the
