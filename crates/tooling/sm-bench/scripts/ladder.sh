@@ -27,6 +27,10 @@
 # is renamed into loadtest/state-<name>/ before the next run. Nothing is
 # deleted. An existing state directory is an error.
 #
+# The loadtest path and the mount disk are checked before that rename and
+# before max_sectors_kb is written. A path without a loadtest component, or a
+# mount whose disk is not --device, leaves the index files and the queue alone.
+#
 # max_sectors_kb is restored on EXIT, INT, and TERM.
 # The done marker is written when the script exits, including after a failure.
 # Run under setsid and nohup so the ladder does not need a terminal.
@@ -373,6 +377,71 @@ stash() {
         fi
     done
 }
+
+has_loadtest() {
+    case "/$1/" in
+        */loadtest/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_loadtest() {
+    local label=$1
+    local path=$2
+    if ! has_loadtest "$path"; then
+        echo "$label $path has no loadtest path component; refusing" >&2
+        exit 1
+    fi
+    if [ -e "$path" ]; then
+        local canon
+        canon=$(readlink -f "$path")
+        if ! has_loadtest "$canon"; then
+            echo "$label resolves to $canon, which has no loadtest path component; refusing" >&2
+            exit 1
+        fi
+    fi
+}
+
+# Same mount-to-disk check as blk-run.sh. The queue write below must not run
+# for a disk that does not hold the loadtest directory.
+require_mount_device() {
+    local canon=$1
+    local dev=$2
+    local mnt_src mnt
+    if command -v findmnt >/dev/null 2>&1; then
+        mnt_src=$(findmnt -n -o SOURCE -T "$canon" || true)
+        mnt=$(findmnt -n -o TARGET -T "$canon" || true)
+    else
+        mnt_src=$(df -P "$canon" | awk 'NR==2 { print $1 }')
+        mnt=$(df -P "$canon" | awk 'NR==2 { print $6 }')
+    fi
+    if [ -z "${mnt_src:-}" ] || [ -z "${mnt:-}" ]; then
+        echo "no mount for $canon" >&2
+        exit 1
+    fi
+    # findmnt appends a subvolume in brackets. The lab disk does not.
+    mnt_src=${mnt_src%%[*}
+    mnt_src=$(readlink -f "$mnt_src") || {
+        echo "cannot resolve mount source for $canon" >&2
+        exit 1
+    }
+    local mnt_name parent
+    mnt_name=${mnt_src##*/}
+    if [ -e "/sys/class/block/$mnt_name/partition" ]; then
+        parent=$(basename "$(readlink -f "/sys/class/block/$mnt_name/..")")
+    else
+        parent=$mnt_name
+    fi
+    if [ "$parent" != "$dev" ]; then
+        echo "refusing: $canon is on $mnt_name, not $dev" >&2
+        exit 1
+    fi
+}
+
+require_loadtest "loadtest" "$loadtest"
+require_loadtest "recall-file" "$recall_file"
+require_loadtest "write-file" "$write_file"
+require_mount_device "$(readlink -f "$loadtest")" "$device"
 
 if [ -n "$max_sectors_kb" ]; then
     current=$(cat "$queue/max_sectors_kb")

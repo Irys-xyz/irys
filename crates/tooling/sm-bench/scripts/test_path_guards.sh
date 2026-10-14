@@ -70,6 +70,97 @@ test_fill_allows_a_loadtest_file_and_stops_before_write() {
     rm -rf "$root"
 }
 
+seed_module() {
+    local dir=$1 item
+    mkdir -p "$dir"
+    for item in db rocks intervals.json packing_params.toml bench-prepop.json chunks.dat; do
+        printf 'keep-%s\n' "$item" >"$dir/$item"
+    done
+}
+
+state_in_place() {
+    local dir=$1 item
+    for item in db rocks intervals.json packing_params.toml bench-prepop.json chunks.dat; do
+        [ -f "$dir/$item" ] || return 1
+    done
+    [ ! -e "$dir/state-prior" ]
+}
+
+with_fake_sys() {
+    local sys=$1
+    shift
+    unshare --mount --user --map-root-user bash -c '
+        mount --bind "$1" /sys || exit 97
+        shift
+        exec "$@"
+    ' bash "$sys" "$@"
+}
+
+fake_sys() {
+    local sys=$1
+    mkdir -p "$sys/block/loop0/queue"
+    printf '111\n' >"$sys/block/loop0/queue/max_sectors_kb"
+}
+
+test_ladder_does_not_stash_without_loadtest() {
+    local name=ladder-no-loadtest root module sys err
+    root=$(tmpdir)
+    module=$root/var/lib/irys-module
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    fake_sys "$sys"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$sys" "$here/ladder.sh" \
+        --device loop0 --mount /tmp --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0"
+    elif ! grep -q "no loadtest path component" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index state was moved"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_does_not_write_queue_when_mount_disk_differs() {
+    local name=ladder-mount-disk root module sys err
+    root=$(tmpdir)
+    module=$root/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    fake_sys "$sys"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$sys" "$here/ladder.sh" \
+        --device loop0 --mount /tmp --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --max-sectors-kb 64 --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0"
+    elif ! grep -q "not loop0" "$err"; then
+        bad "$name" "stderr did not refuse the disk: $(cat "$err")"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index state was moved"
+    elif ! grep -q '^111$' "$sys/block/loop0/queue/max_sectors_kb"; then
+        bad "$name" "queue value changed: $(cat "$sys/block/loop0/queue/max_sectors_kb")"
+    elif grep -q 'max_sectors_kb=111' "$err"; then
+        bad "$name" "queue was written and restored: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
