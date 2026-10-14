@@ -7625,26 +7625,41 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Calculate write throughput in bytes per second based on chunk records
-    /// Returns 0 if no records are available
+    /// Calculate write throughput in bytes per second based on chunk records.
+    ///
+    /// The buffer holds up to 8_000 samples. Only completions inside the last
+    /// 10 seconds count. A fast burst that then stops reports 0 once that
+    /// window passes, instead of keeping the burst until the count wraps.
+    /// Returns 0 if no record in the window is available.
     pub fn write_throughput_bps(&self) -> u64 {
+        const WINDOW: Duration = Duration::from_secs(10);
         let chunk_size = self.config.consensus.chunk_size;
         let recent_chunk_times = self.recent_chunk_times.read().unwrap();
-
-        if recent_chunk_times.is_empty() {
-            tracing::debug!("write_throughput_bps: empty buffer, returning 0");
-            return 0;
+        let now = Instant::now();
+        let mut count = 0_u64;
+        let mut first_start = None;
+        let mut last_completion = None;
+        for record in recent_chunk_times.iter() {
+            if now.saturating_duration_since(record.completion_time) > WINDOW {
+                continue;
+            }
+            if first_start.is_none() {
+                first_start = Some(record.start_time);
+            }
+            last_completion = Some(record.completion_time);
+            count += 1;
         }
-
-        let front = recent_chunk_times.front().unwrap();
-        let back = recent_chunk_times.back().unwrap();
+        let (Some(start_time), Some(completion_time)) = (first_start, last_completion) else {
+            tracing::debug!("write_throughput_bps: no sample in the 10s window, returning 0");
+            return 0;
+        };
 
         tracing::debug!(
-            "write_throughput_bps: buffer_len={} chunk_size={} front_start={:?} back_completion={:?}",
-            recent_chunk_times.len(),
+            "write_throughput_bps: window_len={} chunk_size={} front_start={:?} back_completion={:?}",
+            count,
             chunk_size,
-            front.start_time,
-            back.completion_time
+            start_time,
+            completion_time
         );
 
         // Calculate the actual time span covered by our records.
@@ -7657,12 +7672,13 @@ impl StorageModule {
         //
         // Behavior:
         // - Computes total bytes written over the time window spanned by the first and last sample.
-        // - If there are no samples, returns 0 (no signal).
+        // - Samples completed more than 10s ago are outside that window.
+        // - If there are no samples in the window, returns 0 (no signal).
         // - If the window is extremely small, we treat it conservatively (see below) to avoid spikes.
-        let time_span = back.completion_time.duration_since(front.start_time);
+        let time_span = completion_time.duration_since(start_time);
 
         // Total bytes processed in this time span: chunk_size × number_of_chunks_in_window
-        let total_bytes = chunk_size * recent_chunk_times.len() as u64;
+        let total_bytes = chunk_size * count;
 
         // Throughput calculation (integer-only to avoid non-deterministic floating point):
         // - For spans >= 1s: return rounded division total_bytes / secs.
@@ -13029,6 +13045,51 @@ mod tests {
         let message = format!("{err:#}");
         assert!(message.contains(&path.display().to_string()), "{message}");
         drop(tmp);
+        Ok(())
+    }
+
+    #[test]
+    fn write_throughput_ignores_samples_older_than_the_window() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = interval_batch_module("throughput_window", 0)?;
+        let chunk = storage.config.consensus.chunk_size;
+        let start = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(30))
+            .expect("the clock can represent 30s ago");
+        let completion = start + std::time::Duration::from_millis(10);
+        {
+            let mut samples = storage.recent_chunk_times.write().unwrap();
+            for index in 0..40_u32 {
+                samples.push(ChunkTimeRecord {
+                    chunk_offset: PartitionChunkOffset::from(index),
+                    start_time: start,
+                    completion_time: completion,
+                    duration: std::time::Duration::from_millis(10),
+                });
+            }
+        }
+        assert_eq!(
+            storage.write_throughput_bps(),
+            0,
+            "a fast window older than 10s must not keep throttling"
+        );
+
+        let now = std::time::Instant::now();
+        let fresh_start = now
+            .checked_sub(std::time::Duration::from_secs(2))
+            .expect("the clock can represent 2s ago");
+        storage
+            .recent_chunk_times
+            .write()
+            .unwrap()
+            .push(ChunkTimeRecord {
+                chunk_offset: PartitionChunkOffset::from(0),
+                start_time: fresh_start,
+                completion_time: now,
+                duration: std::time::Duration::from_secs(2),
+            });
+        // One chunk over 2s. The 40 stale samples stay in the buffer and must not count.
+        let expected = (chunk + 1) / 2;
+        assert_eq!(storage.write_throughput_bps(), expected);
         Ok(())
     }
 
