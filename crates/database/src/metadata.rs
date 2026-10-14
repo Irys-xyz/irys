@@ -7,18 +7,20 @@ use serde::{Deserialize, Serialize};
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum MetadataKey {
+    /// Raw schema text. The same bytes as the `SCHEMA` file. Not SCALE.
     DBSchemaVersion = 1,
-    /// Set before a storage-module reset clears the index. Open finishes the
-    /// clear while this row is present. It is not a schema version.
+    /// Raw byte `01` while a reset is clearing the index. Absent when the
+    /// reset is finished. Not a schema version. Not SCALE.
     SubmoduleResetInProgress = 2,
-    /// Partition this RocksDB v1 index was bound to. Absent until the module
-    /// is assigned. A later different hash refuses to open.
+    /// Raw 32-byte partition hash. Absent until the module is assigned.
+    /// A later different hash refuses to open.
     PartitionHash = 3,
-    /// Hash of the packing address, iterations, chunk size, and chain id.
-    /// A mismatch refuses to open a RocksDB v1 index.
-    PackingParamsHash = 4,
-    /// Set after a scan of a fully packed module finds a checksum on every
-    /// offset. Absent means unset. Reset deletes the key. `clear` does not.
+    /// Raw packing record, 41 bytes: version `u8` = 1, packing address
+    /// 20 bytes, iterations `u32` big-endian, chunk size `u64` big-endian,
+    /// chain id `u64` big-endian. A mismatch refuses to open.
+    PackingRecord = 4,
+    /// Raw byte `01` after a scan finds a checksum on every offset. Absent
+    /// means unset. Reset deletes the key. `clear` does not. Not SCALE.
     ChunkCrcComplete = 5,
     /// Feature bits for a RocksDB v1 index.
     ///
@@ -51,7 +53,7 @@ impl Decode for MetadataKey {
             1 => Ok(Self::DBSchemaVersion),
             2 => Ok(Self::SubmoduleResetInProgress),
             3 => Ok(Self::PartitionHash),
-            4 => Ok(Self::PackingParamsHash),
+            4 => Ok(Self::PackingRecord),
             5 => Ok(Self::ChunkCrcComplete),
             6 => Ok(Self::FeatureFlags),
             _ => Err(DatabaseError::Decode),

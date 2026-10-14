@@ -47,7 +47,17 @@ and `ChunkOffsetsByContentHash` (the 32-byte leaf hash, then the
 partition offset, with an empty value). The offset row is the data proof
 when one is stored, and the CRC32C of the packed chunk when one was
 written. A checksum with no proof is an entropy row. It is not a data
-chunk. The checksum, a flags byte and a format byte are a trailer after
+chunk.
+
+RocksDB v1 metadata values are raw. The packing value is 41 bytes:
+version `1`, the 20-byte packing address, iterations as a big-endian
+`u32`, chunk size as a big-endian `u64`, and chain id as a big-endian
+`u64`. The reset marker and the checksum-complete flag are the raw
+byte `01`. `mdbx-to-rocks` writes the packing record when
+`--packing-address`, `--packing-iterations`, and `--chain-id` are set.
+The node writes it on open when they are not.
+
+The checksum, a flags byte and a format byte are a trailer after
 the proof, not a header: neighbouring proofs share their upper branches,
 and block compression keeps more of that sharing when each value starts
 with the proof (measured at 1–3 bytes per chunk less than a header; see
@@ -67,6 +77,9 @@ v1 directories and does not. The consensus database is
 default), not a submodule `db/`. The ledger offset is
 `slot * chunks_per_partition + partition offset`. `ledger` and `slot`
 are the fields in `<submodule>/packing_params.toml`.
+That file also records `entropy_packing_iterations` and `chunk_size`.
+A file that omits them is filled from the current consensus when the
+node opens the module, then written back.
 `chunks-per-partition` and `chunk-size` come from the chain config.
 Mainnet chunk size is 262144. The tool derives the tx path at that ledger
 offset and requires the stored bytes to be identical. A mismatch aborts

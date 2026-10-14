@@ -4,6 +4,7 @@ pub mod db;
 mod group;
 mod interval;
 mod migrate;
+mod packing;
 mod placement;
 #[cfg(feature = "rocksdb")]
 mod records;
@@ -20,6 +21,9 @@ pub use convert::{
 };
 pub use db::*;
 pub use interval::IntervalRow;
+pub use packing::{
+    PACKING_RECORD_LEN, PACKING_RECORD_VERSION, PackingRecord, packing_params_valid_for_module,
+};
 #[cfg(feature = "rocksdb")]
 pub use records::{decode_offset_meta, encode_offset_meta};
 #[cfg(feature = "rocksdb")]

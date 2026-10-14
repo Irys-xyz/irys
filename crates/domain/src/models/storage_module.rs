@@ -46,7 +46,8 @@ use irys_database::submodule::RocksTuning;
 #[cfg(test)]
 use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
 use irys_database::submodule::{
-    SubmoduleIndex, SubmoduleRead, SubmoduleStore as _, install_process_rocks_resources,
+    PackingRecord, SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
+    install_process_rocks_resources, packing_params_valid_for_module,
     tables::{
         DataRootInfo, DataRootInfos, OffsetMeta, PackedOffsetRow, PendingBodyMigration, Placement,
         TxLeafBinding,
@@ -897,6 +898,14 @@ pub struct PackingParams {
     pub ledger: Option<u32>,
     pub slot: Option<usize>,
     pub last_updated_height: Option<u64>,
+    /// Iterations this module was packed with. Absent on a file written
+    /// before the field existed. Open fills it from the current consensus
+    /// and writes the file back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entropy_packing_iterations: Option<u32>,
+    /// Chunk size this module was packed with. Same backfill as iterations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_size: Option<u64>,
 }
 
 impl PackingParams {
@@ -911,24 +920,64 @@ impl PackingParams {
         let toml = toml::to_string(self).expect("Able to serialize config");
         fs::write(path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
     }
+
+    /// Fills iterations and chunk size from the current consensus when the
+    /// file omitted them. Returns true when a field was filled. The caller
+    /// writes the file back.
+    pub fn backfill_recorded_packing(&mut self, consensus: &irys_types::ConsensusConfig) -> bool {
+        let mut filled = false;
+        if self.entropy_packing_iterations.is_none() {
+            self.entropy_packing_iterations = Some(consensus.entropy_packing_iterations);
+            filled = true;
+        }
+        if self.chunk_size.is_none() {
+            self.chunk_size = Some(consensus.chunk_size);
+            filled = true;
+        }
+        filled
+    }
 }
 
 pub static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 
-/// Address, iterations, chunk size, and chain id. The schema-v3 index stores
-/// this at open and refuses a later mismatch.
-fn packing_identity_hash(
-    address: &IrysAddress,
-    iterations: u32,
-    chunk_size: u64,
+/// Load `packing_params.toml`. When iterations or chunk size are absent,
+/// fill them from the current consensus and write the file back.
+fn ensure_recorded_packing_params(
+    path: &Path,
+    consensus: &irys_types::ConsensusConfig,
+) -> eyre::Result<PackingParams> {
+    let mut params = PackingParams::from_toml(path)?;
+    if params.backfill_recorded_packing(consensus) {
+        params.write_to_disk(path);
+    }
+    Ok(params)
+}
+
+fn packing_record_from_params(
+    params: &PackingParams,
     chain_id: u64,
-) -> [u8; 32] {
-    let mut bytes = Vec::with_capacity(40);
-    bytes.extend_from_slice(address.as_slice());
-    bytes.extend_from_slice(&iterations.to_be_bytes());
-    bytes.extend_from_slice(&chunk_size.to_be_bytes());
-    bytes.extend_from_slice(&chain_id.to_be_bytes());
-    irys_types::hash_sha256(&bytes)
+) -> eyre::Result<PackingRecord> {
+    let iterations = params
+        .entropy_packing_iterations
+        .ok_or_else(|| eyre!("packing params have no entropy_packing_iterations"))?;
+    let chunk_size = params
+        .chunk_size
+        .ok_or_else(|| eyre!("packing params have no chunk_size"))?;
+    Ok(PackingRecord {
+        packing_address: params.packing_address.into(),
+        iterations,
+        chunk_size,
+        chain_id,
+    })
+}
+
+fn expected_packing_record(config: &Config) -> PackingRecord {
+    PackingRecord {
+        packing_address: config.node_config.miner_address().into(),
+        iterations: config.consensus.entropy_packing_iterations,
+        chunk_size: config.consensus.chunk_size,
+        chain_id: config.consensus.chain_id,
+    }
 }
 
 /// Manages chunk storage on a single physical drive
@@ -1735,6 +1784,8 @@ impl StorageModule {
             if !params_path.exists() {
                 let mut params = PackingParams {
                     packing_address: config.node_config.miner_address(),
+                    entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
+                    chunk_size: Some(config.consensus.chunk_size),
                     ..Default::default()
                 };
                 if let Some(pa) = storage_module_info.partition_assignment {
@@ -1791,14 +1842,13 @@ impl StorageModule {
                 }
             }
 
-            let params = PackingParams::from_toml(&params_path)
+            let params = ensure_recorded_packing_params(&params_path, &config.consensus)
                 .wrap_err_with(|| format!("packing params at {}", params_path.display()))?;
-            let packing = packing_identity_hash(
-                &params.packing_address,
-                config.consensus.entropy_packing_iterations,
-                config.consensus.chunk_size,
-                config.consensus.chain_id,
-            );
+            let recorded = packing_record_from_params(&params, config.consensus.chain_id)?;
+            let expected = expected_packing_record(config);
+            if let Err(err) = packing_params_valid_for_module(&recorded, &expected) {
+                return Err(eyre!("{err} at {}", params_path.display()));
+            }
             let bound_partition = params.partition_hash;
 
             let intervals_file_path = sub_base_path.join("intervals.json");
@@ -1839,7 +1889,7 @@ impl StorageModule {
                         e
                     )
                 })?;
-            pack_binds.push((submodule_db, bound_partition, packing));
+            pack_binds.push((submodule_db, bound_partition, recorded));
 
             // Initially just mark the global intervals as Uninitialized for this submodules interval
             global_intervals
@@ -2209,14 +2259,23 @@ impl StorageModule {
             self.entropy_cache.lock().unwrap().clear();
         }
         for (_, submodule) in self.submodules.iter() {
-            let params = PackingParams {
-                packing_address: self.config.node_config.miner_address(),
-                partition_hash: next.map(|assignment| assignment.partition_hash),
-                ledger: next.and_then(|assignment| assignment.ledger_id),
-                slot: next.and_then(|assignment| assignment.slot_index),
-                last_updated_height: Some(update_height),
-            };
             let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
+            let mut params = if params_path.exists() {
+                PackingParams::from_toml(&params_path).expect("packing params to load")
+            } else {
+                PackingParams {
+                    packing_address: self.config.node_config.miner_address(),
+                    ..Default::default()
+                }
+            };
+            params.packing_address = self.config.node_config.miner_address();
+            params.partition_hash = next.map(|assignment| assignment.partition_hash);
+            params.ledger = next.and_then(|assignment| assignment.ledger_id);
+            params.slot = next.and_then(|assignment| assignment.slot_index);
+            params.last_updated_height = Some(update_height);
+            // Keep the iterations this module was packed with. Fill them only
+            // when the file never recorded them.
+            params.backfill_recorded_packing(&self.config.consensus);
             params.write_to_disk(&params_path);
         }
     }
@@ -15014,5 +15073,49 @@ mod tests {
         let equal = durable_point_decision(query);
         assert_eq!(equal.cause, None);
         assert!(equal.headroom_open);
+    }
+
+    #[test]
+    fn packing_params_without_the_new_field_backfills_and_is_rewritten() {
+        let dir = TempDirBuilder::new()
+            .prefix("packing_params_backfill")
+            .build();
+        let path = dir.path().join(PACKING_PARAMS_FILE_NAME);
+        let address = IrysAddress::from([0x11; 20]);
+        let legacy = PackingParams {
+            packing_address: address,
+            ..PackingParams::default()
+        };
+        legacy.write_to_disk(&path);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("entropy_packing_iterations"), "{text}");
+        assert!(!text.contains("chunk_size"), "{text}");
+
+        let consensus = ConsensusConfig::testing();
+        let loaded = ensure_recorded_packing_params(&path, &consensus).unwrap();
+        assert_eq!(
+            loaded.entropy_packing_iterations,
+            Some(consensus.entropy_packing_iterations)
+        );
+        assert_eq!(loaded.chunk_size, Some(consensus.chunk_size));
+        assert_eq!(loaded.packing_address, address);
+
+        let rewritten = fs::read_to_string(&path).unwrap();
+        assert!(
+            rewritten.contains("entropy_packing_iterations"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(&consensus.entropy_packing_iterations.to_string()),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(&format!("chunk_size = {}", consensus.chunk_size)),
+            "{rewritten}"
+        );
+        let again = PackingParams::from_toml(&path).unwrap();
+        assert_eq!(again, loaded);
+        let second = ensure_recorded_packing_params(&path, &consensus).unwrap();
+        assert_eq!(second, loaded);
     }
 }

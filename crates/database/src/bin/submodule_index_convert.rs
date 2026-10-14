@@ -21,12 +21,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr as _;
 
 use irys_database::submodule::{
-    ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, verify_mdbx_and_rocks,
-    verify_rocks_records,
+    ConvertOptions, PackingRecord, convert_mdbx_to_rocks, convert_rocks_to_mdbx,
+    verify_mdbx_and_rocks, verify_rocks_records,
 };
 use irys_database::{consensus_db_args, submodule_db_args};
+use irys_types::IrysAddress;
 use irys_types::config::DatabaseConfig;
 
 const USAGE: &str = "\
@@ -71,6 +73,13 @@ optional:
                                  index always fails. Illegal on verify and
                                  verify-rocks. verify always counts skipped_frontier
                                  as a mismatch.
+  --packing-address <addr>       packing address, base58 or hex. Together with
+                                 --packing-iterations and --chain-id, mdbx-to-rocks
+                                 writes the raw packing record.
+  --packing-iterations <n>       entropy packing iterations stored in that record.
+  --chain-id <n>                 chain id stored in that record.
+                                 The three packing flags must be set together.
+                                 Without them the node writes the record on open.
 
 ledger offset = slot * chunks_per_partition + partition offset.
 The tool derives the tx path at that offset and requires the stored bytes to
@@ -196,7 +205,26 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     options.slot_index = slot_index;
     options.chunks_per_partition = chunks_per_partition;
     options.chunk_size = chunk_size;
+    options.packing_record = packing_record_from_flags(tool, chunk_size)?;
     Ok(options)
+}
+
+fn packing_record_from_flags(
+    tool: &ToolArgs,
+    chunk_size: u64,
+) -> eyre::Result<Option<PackingRecord>> {
+    match (tool.packing_address, tool.packing_iterations, tool.chain_id) {
+        (None, None, None) => Ok(None),
+        (Some(address), Some(iterations), Some(chain_id)) => Ok(Some(PackingRecord {
+            packing_address: address.into(),
+            iterations,
+            chunk_size,
+            chain_id,
+        })),
+        _ => eyre::bail!(
+            "--packing-address, --packing-iterations, and --chain-id must be set together"
+        ),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -217,6 +245,9 @@ struct ToolArgs {
     slot_index: Option<u64>,
     chunks_per_partition: Option<u64>,
     chunk_size: Option<u64>,
+    packing_address: Option<IrysAddress>,
+    packing_iterations: Option<u32>,
+    chain_id: Option<u64>,
     left: PathBuf,
     right: PathBuf,
 }
@@ -249,6 +280,9 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     let mut slot_index = None;
     let mut chunks_per_partition = None;
     let mut chunk_size = None;
+    let mut packing_address = None;
+    let mut packing_iterations = None;
+    let mut chain_id = None;
     let mut positional = Vec::new();
     let mut index = 0;
     while index < raw.len() {
@@ -271,7 +305,10 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
             | "--ledger"
             | "--slot"
             | "--chunks-per-partition"
-            | "--chunk-size" => {
+            | "--chunk-size"
+            | "--packing-address"
+            | "--packing-iterations"
+            | "--chain-id" => {
                 let Some(value) = raw.get(index + 1) else {
                     eprintln!("error: {arg} needs a value");
                     eprintln!("{USAGE}");
@@ -285,6 +322,11 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
                         chunks_per_partition = Some(parse_u64("--chunks-per-partition", value)?)
                     }
                     "--chunk-size" => chunk_size = Some(parse_u64("--chunk-size", value)?),
+                    "--packing-address" => packing_address = Some(parse_address(value)?),
+                    "--packing-iterations" => {
+                        packing_iterations = Some(parse_u32_flag("--packing-iterations", value)?)
+                    }
+                    "--chain-id" => chain_id = Some(parse_u64("--chain-id", value)?),
                     _ => {
                         eprintln!("{USAGE}");
                         std::process::exit(2);
@@ -336,9 +378,21 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         slot_index,
         chunks_per_partition,
         chunk_size,
+        packing_address,
+        packing_iterations,
+        chain_id,
         left: positional.remove(0),
         right: positional.remove(0),
     }))
+}
+
+fn parse_address(text: &str) -> eyre::Result<IrysAddress> {
+    IrysAddress::from_str(text).map_err(|err| eyre::eyre!("--packing-address {text}: {err}"))
+}
+
+fn parse_u32_flag(flag: &str, text: &str) -> eyre::Result<u32> {
+    text.parse::<u32>()
+        .map_err(|err| eyre::eyre!("{flag} {text}: {err}"))
 }
 
 fn parse_u32(text: &str) -> eyre::Result<u32> {

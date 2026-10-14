@@ -1318,22 +1318,23 @@ impl SubmoduleIndex {
         }
     }
 
-    /// Bind a RocksDB v1 index to one partition and one packing identity.
+    /// Bind a RocksDB v1 index to one partition and one packing record.
     ///
-    /// The first call writes a missing value. A later different value refuses.
-    /// MDBX and schema v2 ignore this. `clear` drops the partition binding.
+    /// The first call writes a missing value. A later different value refuses
+    /// and prints both records. MDBX ignores this. `clear` drops the
+    /// partition binding and keeps the packing record.
     pub fn bind_packing_identity(
         &self,
         partition: Option<H256>,
-        packing_hash: &[u8; 32],
+        packing: &crate::submodule::PackingRecord,
     ) -> eyre::Result<()> {
         match self {
             Self::Mdbx(_) => {
-                let _ = (partition, packing_hash);
+                let _ = (partition, packing);
                 Ok(())
             }
             #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.bind_packing_identity(partition, packing_hash),
+            Self::Rocks(store) => store.bind_packing_identity(partition, packing),
         }
     }
 

@@ -276,6 +276,8 @@ pub struct ConvertOptions {
     /// Keep going when a placement is past the consensus frontier.
     /// An empty consensus block index still fails the run.
     pub allow_unresolved: bool,
+    /// When set, the RocksDB target stores this packing record before the marker.
+    pub packing_record: Option<super::PackingRecord>,
 }
 
 impl ConvertOptions {
@@ -297,8 +299,16 @@ impl ConvertOptions {
             fail_after_batches: None,
             dry_run: false,
             allow_unresolved: false,
+            packing_record: None,
         }
     }
+}
+
+fn seal_rocks_target(dst: RocksSubmoduleStore, options: &ConvertOptions) -> eyre::Result<()> {
+    if let Some(record) = options.packing_record {
+        dst.bind_packing_identity(None, &record)?;
+    }
+    dst.seal_and_stamp()
 }
 
 #[derive(Clone, Copy)]
@@ -2243,7 +2253,7 @@ where
     let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
     let stats = copy_mdbx_into_rocks(src, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
-    dst.seal_and_stamp()?;
+    seal_rocks_target(dst, options)?;
     clear_converting_sentinel(dir)?;
     Ok(stats)
 }
@@ -2257,7 +2267,7 @@ fn write_empty_rocks(dir: &Path, options: &ConvertOptions) -> eyre::Result<Conve
     if options.fail_after_batches == Some(0) {
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
-    dst.seal_and_stamp()?;
+    seal_rocks_target(dst, options)?;
     clear_converting_sentinel(dir)?;
     Ok(ConvertStats::default())
 }
@@ -2280,7 +2290,7 @@ fn write_reset_rocks(
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
     dst.set_reset_in_progress()?;
-    dst.seal_and_stamp()?;
+    seal_rocks_target(dst, options)?;
     clear_converting_sentinel(dir)?;
     Ok(ConvertStats {
         reset_marker: true,
@@ -2333,7 +2343,7 @@ fn copy_v1_rocks(
     let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
     let stats = copy_mdbx_v1_into_rocks(env, Some(&dst), options, db, map)?;
     refuse_unresolved(&stats, options)?;
-    dst.seal_and_stamp()?;
+    seal_rocks_target(dst, options)?;
     clear_converting_sentinel(dir)?;
     Ok(stats)
 }
@@ -4102,6 +4112,36 @@ mod tests {
         // tests that open a RocksDB v1 index while this one runs. The round
         // trip on its own is far below this bound.
         assert!(growth < 512 * 1024, "round trip grew RSS by {growth} KiB");
+        Ok(())
+    }
+
+    #[test]
+    fn convert_writes_the_packing_record() -> eyre::Result<()> {
+        use crate::metadata::MetadataKey;
+        use crate::submodule::PackingRecord;
+
+        let root = temp("convert-packing-record");
+        let consensus = root.path().join("consensus");
+        write_chain(&consensus)?;
+        let mdbx = root.path().join("db");
+        {
+            let _store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
+        }
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        let record = PackingRecord {
+            packing_address: [0x22; 20],
+            iterations: 1000,
+            chunk_size: options.chunk_size,
+            chain_id: 1270,
+        };
+        options.packing_record = Some(record);
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let opened = RocksSubmoduleStore::open(&rocks)?;
+        let stored = opened
+            .read_raw_metadata(MetadataKey::PackingRecord)?
+            .expect("packing record");
+        assert_eq!(stored.as_slice(), record.encode().as_slice());
         Ok(())
     }
 

@@ -1626,13 +1626,18 @@ impl EpochSnapshot {
                 submodules: vec![(partition_chunk_offset_ie!(0, num_chunks), path)],
             });
 
-            // Update packing info (so this storage module doesn't get assigned to something else)
+            // Update packing info (so this storage module doesn't get assigned to something else).
+            // Keep the recorded iterations and chunk size.
+            let previous = sm_packing_info[id].1;
             sm_packing_info[id].1 = Some(PackingParams {
                 packing_address: miner,
                 partition_hash: Some(pa.partition_hash),
                 ledger: pa.ledger_id,
                 slot: pa.slot_index,
                 last_updated_height: Some(self.epoch_height),
+                entropy_packing_iterations: previous
+                    .and_then(|params| params.entropy_packing_iterations),
+                chunk_size: previous.and_then(|params| params.chunk_size),
             });
         }
     }

@@ -46,7 +46,7 @@ use irys_types::{
     ChunkDataPath, ChunkPathHash, DataRoot, DatabaseConfig, H256, PartitionChunkOffset, TxPath,
     TxPathHash,
 };
-use reth_db::table::{Compress, Decode, Decompress, Encode, Table};
+use reth_db::table::{Decode, Decompress, Encode, Table};
 use rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, DB, DBCompactionStyle, DBCompressionType, Direction,
     IteratorMode, Options, ReadOptions, WriteBatch, WriteOptions,
@@ -54,6 +54,7 @@ use rocksdb::{
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 use super::interval::{IntervalRow, combine_hashes, coverage_gaps};
+use super::packing::{PackingRecord, packing_params_valid_for_module};
 use super::records::{self, IndexLayout};
 use super::store::PresenceReconcile;
 use super::tables::{
@@ -2631,17 +2632,32 @@ impl RocksSubmoduleStore {
     ///
     /// `partition` of `None` leaves the partition key absent, so a later
     /// assignment can bind it. `clear` deletes that key and keeps the
-    /// packing hash.
+    /// packing record.
     pub fn bind_packing_identity(
         &self,
         partition: Option<H256>,
-        packing_hash: &[u8; 32],
+        packing: &PackingRecord,
     ) -> eyre::Result<()> {
-        self.bind_metadata(
-            MetadataKey::PackingParamsHash,
-            packing_hash,
-            "packing identity",
-        )?;
+        let encoded = packing.encode();
+        match self.read_raw_metadata(MetadataKey::PackingRecord)? {
+            Some(existing) if existing.as_slice() == encoded.as_slice() => {}
+            Some(existing) => {
+                let recorded = match PackingRecord::decode(&existing) {
+                    Ok(record) => packing_params_valid_for_module(&record, packing)
+                        .unwrap_err()
+                        .to_string(),
+                    Err(_) => format!(
+                        "packing identity does not match this storage module. recorded: {} expected: {packing}",
+                        hex_bytes(&existing)
+                    ),
+                };
+                eyre::bail!(
+                    "{recorded} at {}. Refusing to open. Reset the storage module before rebinding. `submodule-index-convert` changes the schema and does not rebind this value.",
+                    self.path.display()
+                )
+            }
+            None => self.write_raw_metadata(MetadataKey::PackingRecord, &encoded)?,
+        }
         if let Some(partition) = partition {
             self.bind_metadata(MetadataKey::PartitionHash, &partition.0, "partition")?;
         }
@@ -2659,7 +2675,7 @@ impl RocksSubmoduleStore {
         }
     }
 
-    fn read_raw_metadata(&self, key: MetadataKey) -> eyre::Result<Option<Vec<u8>>> {
+    pub(super) fn read_raw_metadata(&self, key: MetadataKey) -> eyre::Result<Option<Vec<u8>>> {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         self.db
             .get_cf(&handle, encode_key(key))
@@ -2684,7 +2700,8 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
-    /// Synced metadata write. Same WAL barrier as `update`. Not part of `clear`.
+    /// Synced metadata write. The value is raw. Same WAL barrier as `update`.
+    /// Not part of `clear`.
     fn write_metadata(&self, key: MetadataKey, value: Option<Vec<u8>>) -> eyre::Result<()> {
         self.ensure_writable()?;
         let _guard = self.lock_write();
@@ -2694,7 +2711,7 @@ impl RocksSubmoduleStore {
         let encoded = encode_key(key);
         match &value {
             Some(bytes) => {
-                batch.put_cf(&handle, encoded, compress_value(bytes));
+                batch.put_cf(&handle, encoded, bytes);
             }
             None => batch.delete_cf(&handle, encoded),
         }
@@ -3864,10 +3881,14 @@ fn count_presence_keys(
     Ok(count)
 }
 
-fn compress_value<V: Compress>(value: &V) -> Vec<u8> {
-    let mut buf = Vec::new();
-    value.compress_to_buf(&mut buf);
-    buf
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[derive(Default)]
@@ -5659,7 +5680,7 @@ impl SubmoduleWrite for Batch<'_> {
         }
 
         // The next assignment may name a different partition. The packing
-        // hash stays: reset does not change the miner or the chain.
+        // record stays: reset does not change the miner or the chain.
         self.delete(Cf::Metadata, &encode_key(MetadataKey::PartitionHash));
 
         Ok(())
@@ -6725,13 +6746,25 @@ mod tests {
         let path = dir.path().join("index");
         let partition = H256::repeat_byte(1);
         let other = H256::repeat_byte(2);
-        let packing = [9_u8; 32];
-        let other_packing = [8_u8; 32];
+        let packing = PackingRecord {
+            packing_address: [9_u8; 20],
+            iterations: 7,
+            chunk_size: 32,
+            chain_id: 1,
+        };
+        let other_packing = PackingRecord {
+            iterations: 9,
+            ..packing
+        };
         {
             let store = RocksSubmoduleStore::open(&path)?;
             store.bind_packing_identity(None, &packing)?;
             store.bind_packing_identity(Some(partition), &packing)?;
             store.bind_packing_identity(Some(partition), &packing)?;
+            let stored = store
+                .read_raw_metadata(MetadataKey::PackingRecord)?
+                .expect("packing record");
+            assert_eq!(stored.as_slice(), packing.encode().as_slice());
             let err = store
                 .bind_packing_identity(Some(other), &packing)
                 .unwrap_err();
@@ -6739,8 +6772,13 @@ mod tests {
             let err = store
                 .bind_packing_identity(Some(partition), &other_packing)
                 .unwrap_err();
-            assert!(err.to_string().contains("does not match"), "{err}");
-            assert!(err.to_string().contains("submodule-index-convert"), "{err}");
+            let text = err.to_string();
+            assert!(text.contains("does not match"), "{text}");
+            assert!(text.contains("recorded:"), "{text}");
+            assert!(text.contains("expected:"), "{text}");
+            assert!(text.contains("iterations=7"), "{text}");
+            assert!(text.contains("iterations=9"), "{text}");
+            assert!(text.contains("submodule-index-convert"), "{text}");
         }
         {
             let store = RocksSubmoduleStore::open(&path)?;
@@ -6755,6 +6793,33 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("does not match"), "{err}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_flags_are_written_raw_and_read_as_set() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_raw_flags")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        assert!(!store.reset_in_progress()?);
+        assert!(!store.chunk_crc_complete()?);
+        store.set_reset_in_progress()?;
+        store.set_chunk_crc_complete(true)?;
+        assert_eq!(
+            store
+                .read_raw_metadata(MetadataKey::SubmoduleResetInProgress)?
+                .as_deref(),
+            Some(&[1_u8][..])
+        );
+        assert_eq!(
+            store
+                .read_raw_metadata(MetadataKey::ChunkCrcComplete)?
+                .as_deref(),
+            Some(&[1_u8][..])
+        );
+        assert!(store.reset_in_progress()?);
+        assert!(store.chunk_crc_complete()?);
         Ok(())
     }
 
