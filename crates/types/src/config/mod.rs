@@ -89,6 +89,12 @@ impl Config {
             self.node_config.storage.entropy_sweep_max_bytes > 0,
             "storage.entropy_sweep_max_bytes must be > 0: a hold is at least one chunk"
         );
+        // Packing takes this value modulo each chunk offset (`div_ceil(2)` of
+        // it). Zero panics on the first packed chunk.
+        ensure!(
+            self.node_config.storage.num_writes_before_sync > 0,
+            "storage.num_writes_before_sync must be > 0: packing sync uses it as a divisor"
+        );
         ensure!(
             self.node_config.max_peer_response_bytes > 0,
             "max_peer_response_bytes must be > 0: a zero ceiling rejects every peer response body"
@@ -1696,6 +1702,26 @@ mod tests {
             err.contains("overflows u64"),
             "expected the slot-lifetime overflow guard, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_zero_writes_before_sync() {
+        let mut zero = NodeConfig::testing();
+        zero.storage.num_writes_before_sync = 0;
+        let err = Config::new_with_random_peer_id(zero)
+            .validate()
+            .expect_err("num_writes_before_sync = 0 divides packing sync")
+            .to_string();
+        assert!(
+            err.contains("num_writes_before_sync"),
+            "expected the sync divisor guard, got: {err}"
+        );
+
+        let mut one = NodeConfig::testing();
+        one.storage.num_writes_before_sync = 1;
+        Config::new_with_random_peer_id(one)
+            .validate()
+            .expect("a sync interval of 1 is the testing value");
     }
 
     #[test]
