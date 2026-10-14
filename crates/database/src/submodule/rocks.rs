@@ -1485,6 +1485,49 @@ impl RocksSubmoduleStore {
         Ok(out)
     }
 
+    /// On-disk column family names, including `default`.
+    pub(super) fn column_family_names(&self) -> eyre::Result<Vec<String>> {
+        DB::list_cf(&Options::default(), &self.path).wrap_err("list column families")
+    }
+
+    /// Next raw key/value pairs after `after`, in total order.
+    ///
+    /// A missing family is an empty page. Values are the stored bytes.
+    pub(super) fn read_raw_cf_page(
+        &self,
+        name: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> eyre::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let limit = limit.max(1);
+        let Some(handle) = self.db.cf_handle(name) else {
+            return Ok(Vec::new());
+        };
+        let snap = self.db.snapshot();
+        let mut iter = snap.raw_iterator_cf_opt(handle, full_scan_options());
+        match after {
+            None => iter.seek_to_first(),
+            Some(key) => iter.seek(key),
+        }
+        let mut out = Vec::new();
+        while out.len() < limit {
+            let Some(key) = iter.key() else {
+                break;
+            };
+            if after.is_some_and(|prev| key <= prev) {
+                iter.next();
+                continue;
+            }
+            let owned = key.to_vec();
+            let value = iter.value().unwrap_or(&[]).to_vec();
+            out.push((owned, value));
+            iter.next();
+        }
+        iter.status()
+            .wrap_err_with(|| format!("scan column family {name}"))?;
+        Ok(out)
+    }
+
     /// Next offset-row keys. Values are not decoded.
     ///
     /// RocksDB v1 reads `ChunkMetaByOffset`.

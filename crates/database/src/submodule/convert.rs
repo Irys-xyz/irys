@@ -24,6 +24,7 @@
 //! Verification reads both engines through the store read path. The tx path
 //! check compares the stored v2 bytes with a fresh derive.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -57,9 +58,10 @@ use super::store::{MdbxSubmoduleStore, SubmoduleStore, SubmoduleWrite};
 use super::tables::v1::ChunkDataPathByPathHash;
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfo, DataRootInfos,
-    DataRootInfosByDataRoot, Metadata, PendingBodyMigration, PendingBodyMigrationsByOffset,
-    SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
-    TxLeafBindingByTxPathHash, TxPathByTxPathHash, TxPathInterval, TxPathIntervalByStart,
+    DataRootInfosByDataRoot, Metadata, OffsetMeta, PendingBodyMigration,
+    PendingBodyMigrationsByOffset, SUBMODULE_CONVERT_INCOMPLETE, SUBMODULE_SCHEMA,
+    SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash,
+    TxPathInterval, TxPathIntervalByStart,
 };
 
 const CONVERTING_FILE: &str = "CONVERTING";
@@ -78,6 +80,13 @@ const SAMPLE_LIMIT: usize = 20;
 pub struct EngineMismatch {
     pub kind: &'static str,
     pub at: String,
+}
+
+/// Keys in one column family whose stored bytes differ, or that exist on only one side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FamilyMismatch {
+    pub family: String,
+    pub mismatches: u64,
 }
 
 /// Counts from one streaming compare of the two engines.
@@ -114,6 +123,8 @@ pub struct EngineEquivalenceReport {
     pub index_audit_findings: u64,
     /// RocksDB v1 checksum that is not the value verify expected.
     pub mismatch_chunk_crc: u64,
+    /// Byte mismatches per column family. Every on-disk family is listed, including a zero count.
+    pub family_mismatches: Vec<FamilyMismatch>,
     pub samples: Vec<EngineMismatch>,
 }
 
@@ -133,6 +144,7 @@ impl EngineEquivalenceReport {
             || self.skipped_frontier > 0
             || self.index_audit_findings > 0
             || self.mismatch_chunk_crc > 0
+            || self.family_mismatches.iter().any(|row| row.mismatches > 0)
     }
 }
 
@@ -202,6 +214,9 @@ impl std::fmt::Display for EngineEquivalenceReport {
         writeln!(f, "skipped_frontier: {}", self.skipped_frontier)?;
         writeln!(f, "index_audit_findings: {}", self.index_audit_findings)?;
         writeln!(f, "mismatch_chunk_crc: {}", self.mismatch_chunk_crc)?;
+        for row in &self.family_mismatches {
+            writeln!(f, "family {}: {}", row.family, row.mismatches)?;
+        }
         for sample in &self.samples {
             writeln!(f, "mismatch: {} {}", sample.kind, sample.at)?;
         }
@@ -544,7 +559,12 @@ pub fn convert_mdbx_to_rocks(
     Ok(finish_stats(stats, started, source_v1))
 }
 
-/// Compares two RocksDB v1 indexes, including the checksum on each offset row.
+/// Compares two RocksDB v1 indexes.
+///
+/// Every column family is compared as stored bytes. That includes the
+/// metadata keys for the schema, the partition, the packing record, and any
+/// other metadata key that is present, such as feature flags. Offset proofs
+/// and checksums are also counted on their own.
 pub fn verify_rocks_records(
     left_dir: &Path,
     right_dir: &Path,
@@ -609,8 +629,109 @@ fn verify_wrapped_records(
             Ok(())
         },
     )?;
+    compare_column_families(left, right, &mut report)?;
     note_index_audit(right, &mut report)?;
     Ok(report)
+}
+
+/// Byte-compare every on-disk column family, including an empty one.
+///
+/// A metadata key is part of the `Metadata` family. Schema, partition,
+/// packing, and a feature-flags row are compared when stored and match when
+/// both sides omit the key.
+fn compare_column_families(
+    left: &RocksSubmoduleStore,
+    right: &RocksSubmoduleStore,
+    report: &mut EngineEquivalenceReport,
+) -> eyre::Result<()> {
+    let mut names = BTreeSet::new();
+    names.extend(left.column_family_names()?);
+    names.extend(right.column_family_names()?);
+    for name in names {
+        let mismatches = count_family_mismatches(left, right, &name)?;
+        if mismatches > 0 {
+            note(report, "family", format!("{name} {mismatches}"));
+        }
+        report.family_mismatches.push(FamilyMismatch {
+            family: name,
+            mismatches,
+        });
+    }
+    Ok(())
+}
+
+struct RawPage {
+    rows: Vec<(Vec<u8>, Vec<u8>)>,
+    index: usize,
+}
+
+impl RawPage {
+    fn load(store: &RocksSubmoduleStore, name: &str, after: Option<&[u8]>) -> eyre::Result<Self> {
+        Ok(Self {
+            rows: store.read_raw_cf_page(name, after, VERIFY_KEYS)?,
+            index: 0,
+        })
+    }
+
+    fn current(&self) -> Option<&(Vec<u8>, Vec<u8>)> {
+        self.rows.get(self.index)
+    }
+
+    fn advance(&mut self, store: &RocksSubmoduleStore, name: &str) -> eyre::Result<()> {
+        self.index = self.index.saturating_add(1);
+        if self.index < self.rows.len() {
+            return Ok(());
+        }
+        let Some(after) = self.rows.last().map(|(key, _)| key.clone()) else {
+            return Ok(());
+        };
+        self.rows = store.read_raw_cf_page(name, Some(&after), VERIFY_KEYS)?;
+        self.index = 0;
+        Ok(())
+    }
+}
+
+fn count_family_mismatches(
+    left_store: &RocksSubmoduleStore,
+    right_store: &RocksSubmoduleStore,
+    name: &str,
+) -> eyre::Result<u64> {
+    let mut left = RawPage::load(left_store, name, None)?;
+    let mut right = RawPage::load(right_store, name, None)?;
+    let mut mismatches = 0_u64;
+    loop {
+        enum Side {
+            Same,
+            Left,
+            Right,
+            Value,
+        }
+        let side = match (left.current(), right.current()) {
+            (None, None) => break,
+            (Some(_), None) => Side::Left,
+            (None, Some(_)) => Side::Right,
+            (Some((left_key, left_value)), Some((right_key, right_value))) => {
+                match left_key.cmp(right_key) {
+                    std::cmp::Ordering::Less => Side::Left,
+                    std::cmp::Ordering::Greater => Side::Right,
+                    std::cmp::Ordering::Equal if left_value != right_value => Side::Value,
+                    std::cmp::Ordering::Equal => Side::Same,
+                }
+            }
+        };
+        if !matches!(side, Side::Same) {
+            mismatches = mismatches.saturating_add(1);
+        }
+        match side {
+            Side::Same | Side::Value => {
+                left.advance(left_store, name)?;
+                right.advance(right_store, name)?;
+            }
+            Side::Left => left.advance(left_store, name)?,
+            Side::Right => right.advance(right_store, name)?,
+        }
+    }
+    Ok(mismatches)
 }
 
 /// Rebuilds an MDBX schema v2 index from a RocksDB RocksDB v1 index.
@@ -665,7 +786,9 @@ pub fn convert_rocks_to_mdbx(
 ///
 /// Data paths, pending jobs, and placement fields are read from both engines.
 /// The tx path is the stored v2 bytes on one side and the path derived from
-/// the consensus database on the other. Exit the process when
+/// the consensus database on the other. A checksum on a row whose source has
+/// none, and a checksum-only target row the source does not have, are
+/// mismatches. Exit the process when
 /// [`EngineEquivalenceReport::has_mismatch`] is set.
 ///
 /// Does not migrate and does not write. A v1 MDBX directory is read as v1.
@@ -1547,6 +1670,11 @@ where
         |keys| {
             let left = v2.view(|tx| read_data_paths_at(tx, keys))?;
             let right = v3.view(|tx| read_data_paths_at(tx, keys))?;
+            let right_meta = v3.view(|tx| {
+                keys.iter()
+                    .map(|key| tx.get_offset_meta(*key))
+                    .collect::<eyre::Result<Vec<_>>>()
+            })?;
             for (index, key) in keys.iter().enumerate() {
                 if left[index].is_some()
                     && right[index].is_none()
@@ -1561,6 +1689,12 @@ where
                     report.mismatch_data_path = report.mismatch_data_path.saturating_add(1);
                     note(report, "data_path", format!("offset {}", key.0));
                 }
+                note_mdbx_checksum(
+                    left[index].is_some(),
+                    right_meta[index].as_ref(),
+                    *key,
+                    report,
+                );
                 if let Some(path) = &left[index] {
                     let digest = H256::from(hash_sha256(path));
                     let stored = v2
@@ -1576,6 +1710,43 @@ where
             Ok(())
         },
     )
+}
+
+/// MDBX stores no checksum.
+///
+/// A checksum on a source row is invented. A checksum-only target row whose
+/// source has no proof is not a matching absence.
+fn note_mdbx_checksum(
+    source_has_proof: bool,
+    target: Option<&OffsetMeta>,
+    key: PartitionChunkOffset,
+    report: &mut EngineEquivalenceReport,
+) {
+    let Some(target) = target else {
+        return;
+    };
+    if target.crc.is_none() {
+        return;
+    }
+    if target.proof.is_none() && !source_has_proof {
+        report.mismatch_chunk_crc = report.mismatch_chunk_crc.saturating_add(1);
+        report.offset_mismatches = report.offset_mismatches.saturating_add(1);
+        note(
+            report,
+            "chunk_crc",
+            format!("offset {} checksum-only row is not in the source", key.0),
+        );
+        return;
+    }
+    if source_has_proof {
+        report.mismatch_chunk_crc = report.mismatch_chunk_crc.saturating_add(1);
+        report.offset_mismatches = report.offset_mismatches.saturating_add(1);
+        note(
+            report,
+            "chunk_crc",
+            format!("offset {} checksum is not in the source", key.0),
+        );
+    }
 }
 
 fn read_data_paths_at(
@@ -3302,6 +3473,8 @@ fn compare_v1_paths(
                 report.mismatch_data_path = report.mismatch_data_path.saturating_add(1);
                 note(report, "data_path", format!("offset {}", offset.0));
             }
+            let meta = v3.view(|tx| tx.get_offset_meta(*offset))?;
+            note_mdbx_checksum(true, meta.as_ref(), *offset, report);
             if H256::from(hash_sha256(&path)) != hash {
                 report.mismatch_data_path_hash = report.mismatch_data_path_hash.saturating_add(1);
                 note(report, "data_path_hash", format!("offset {}", offset.0));
@@ -3371,6 +3544,18 @@ fn note_extra_rocks_offset_rows(
                 "data_path",
                 format!("offset {} is only in v3", key.0),
             );
+            let meta = v3.view(|tx| tx.get_offset_meta(*key))?;
+            if meta
+                .as_ref()
+                .is_some_and(|row| row.proof.is_none() && row.crc.is_some())
+            {
+                report.mismatch_chunk_crc = report.mismatch_chunk_crc.saturating_add(1);
+                note(
+                    report,
+                    "chunk_crc",
+                    format!("offset {} checksum-only row is not in the source", key.0),
+                );
+            }
         }
         after = keys.last().copied();
     }
@@ -3643,6 +3828,8 @@ fn verify_reset_target(
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    use eyre::WrapErr as _;
     use std::process::{Child, Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -5182,6 +5369,274 @@ mod tests {
             }
             other => eyre::bail!("unknown lock child {other}"),
         }
+        Ok(())
+    }
+
+    /// On-disk families a RocksDB v1 index stores. `default` is listed too.
+    const INDEX_FAMILIES: [&str; 6] = [
+        "ChunkMetaByOffset",
+        "DataRootPlacements",
+        "PendingBodyMigrations",
+        "PlacementIntervals",
+        "Metadata",
+        "ChunkOffsetsByContentHash",
+    ];
+
+    /// Metadata key this build does not define. A stored row is still compared.
+    const EXTRA_METADATA_KEY: [u8; 4] = (6_u32).to_le_bytes();
+
+    fn family_mismatches(report: &super::EngineEquivalenceReport, name: &str) -> u64 {
+        report
+            .family_mismatches
+            .iter()
+            .find(|row| row.family == name)
+            .unwrap_or_else(|| panic!("no count for {name}: {report}"))
+            .mismatches
+    }
+
+    fn seed_rocks_families(dir: &Path) -> eyre::Result<()> {
+        fs::create_dir_all(dir)?;
+        {
+            let store = RocksSubmoduleStore::open(dir)?;
+            let path_hash = H256::repeat_byte(4);
+            let data_root = H256::repeat_byte(5);
+            store.update(|tx| {
+                tx.add_tx_leaf_binding(
+                    path_hash,
+                    &TxLeafBinding {
+                        data_root,
+                        prefix_hash: H256::repeat_byte(1),
+                    },
+                )?;
+                tx.add_tx_path_hash_to_offset_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(3),
+                    Some(path_hash),
+                )?;
+                tx.add_data_root_info(
+                    data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(1),
+                        data_size: 64,
+                    },
+                )?;
+                tx.add_pending_body_migration(
+                    PartitionChunkOffset::from(0),
+                    &PendingBodyMigration {
+                        data_root,
+                        data_size: 64,
+                        start_offset: RelativeChunkOffset(1),
+                        block_height: 1,
+                        attempts: 0,
+                    },
+                )?;
+                tx.add_full_data_path(PartitionChunkOffset::from(0), indexed_data_leaf(1))?;
+                Ok(())
+            })?;
+            store.bind_packing_identity(Some(H256::repeat_byte(7)), &[9_u8; 32])?;
+        }
+        put_metadata_bytes(dir, &EXTRA_METADATA_KEY, &[0_u8; 24])?;
+        Ok(())
+    }
+
+    fn copy_tree(src: &Path, dst: &Path) -> eyre::Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let to = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &to)?;
+            } else {
+                fs::copy(entry.path(), &to)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_from(src: &Path, dst: &Path) -> eyre::Result<()> {
+        if dst.exists() {
+            fs::remove_dir_all(dst)?;
+        }
+        copy_tree(src, dst)
+    }
+
+    fn open_rocks_rw(dir: &Path) -> eyre::Result<rocksdb::DB> {
+        let names = rocksdb::DB::list_cf(&rocksdb::Options::default(), dir)?;
+        let mut db_opts = rocksdb::Options::default();
+        db_opts.create_if_missing(false);
+        db_opts.create_missing_column_families(false);
+        let families = names
+            .into_iter()
+            .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, rocksdb::Options::default()));
+        rocksdb::DB::open_cf_descriptors(&db_opts, dir, families)
+            .wrap_err("open rocksdb to change one byte")
+    }
+
+    fn put_metadata_bytes(dir: &Path, key: &[u8], value: &[u8]) -> eyre::Result<()> {
+        let db = open_rocks_rw(dir)?;
+        let handle = db
+            .cf_handle("Metadata")
+            .ok_or_else(|| eyre::eyre!("Metadata family missing"))?;
+        db.put_cf(&handle, key, value)
+            .wrap_err("write metadata bytes")?;
+        Ok(())
+    }
+
+    /// Change one stored byte in `family`. `key` selects that row. Otherwise the first row.
+    fn flip_one_stored_byte(dir: &Path, family: &str, key: Option<&[u8]>) -> eyre::Result<()> {
+        let db = open_rocks_rw(dir)?;
+        let handle = db
+            .cf_handle(family)
+            .ok_or_else(|| eyre::eyre!("missing column family {family}"))?;
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_total_order_seek(true);
+        let mut iter = db.raw_iterator_cf_opt(&handle, opts);
+        match key {
+            Some(key) => iter.seek(key),
+            None => iter.seek_to_first(),
+        }
+        let found = iter.key().map(<[u8]>::to_vec);
+        let Some(found) = found else {
+            eyre::bail!("column family {family} has no row to change");
+        };
+        if let Some(key) = key
+            && found.as_slice() != key
+        {
+            eyre::bail!("column family {family} has no row for the requested key");
+        }
+        let mut value = iter.value().unwrap_or(&[]).to_vec();
+        iter.status().wrap_err("read column family")?;
+        drop(iter);
+        if value.is_empty() {
+            value.push(1);
+        } else {
+            value[0] ^= 0x01;
+        }
+        db.put_cf(&handle, found, value)
+            .wrap_err("write the changed row")?;
+        Ok(())
+    }
+
+    #[test]
+    fn verify_rocks_counts_one_byte_in_each_family() -> eyre::Result<()> {
+        let root = temp("verify-rocks-families");
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        seed_rocks_families(&left)?;
+        refresh_from(&left, &right)?;
+        let equal = verify_rocks_records(&left, &right)?;
+        assert!(!equal.has_mismatch(), "{equal}");
+        for name in INDEX_FAMILIES {
+            assert_eq!(family_mismatches(&equal, name), 0, "{equal}");
+        }
+        assert_eq!(family_mismatches(&equal, "default"), 0, "{equal}");
+
+        for family in INDEX_FAMILIES {
+            refresh_from(&left, &right)?;
+            flip_one_stored_byte(&right, family, None)?;
+            let report = verify_rocks_records(&left, &right)?;
+            assert_eq!(family_mismatches(&report, family), 1, "{family}: {report}");
+            assert!(report.has_mismatch(), "{family}: {report}");
+            for other in INDEX_FAMILIES {
+                if other != family {
+                    assert_eq!(
+                        family_mismatches(&report, other),
+                        0,
+                        "{family} also changed {other}: {report}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verify_rocks_counts_one_byte_in_each_identity_key() -> eyre::Result<()> {
+        use crate::metadata::MetadataKey;
+        use reth_db::table::Encode as _;
+
+        let root = temp("verify-rocks-identity");
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        seed_rocks_families(&left)?;
+        let keys = [
+            MetadataKey::DBSchemaVersion.encode(),
+            MetadataKey::PartitionHash.encode(),
+            MetadataKey::PackingParamsHash.encode(),
+            EXTRA_METADATA_KEY,
+        ];
+        for key in keys {
+            refresh_from(&left, &right)?;
+            flip_one_stored_byte(&right, "Metadata", Some(&key))?;
+            let report = verify_rocks_records(&left, &right)?;
+            assert_eq!(family_mismatches(&report, "Metadata"), 1, "{report}");
+            assert!(report.has_mismatch(), "{report}");
+            for name in INDEX_FAMILIES {
+                if name != "Metadata" {
+                    assert_eq!(family_mismatches(&report, name), 0, "{report}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verify_flags_an_invented_checksum() -> eyre::Result<()> {
+        let root = temp("verify-invented-crc");
+        let consensus = populate_mdbx(root.path())?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let options = options_for(&consensus)?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!clean.has_mismatch(), "{clean}");
+        assert_eq!(clean.mismatch_chunk_crc, 0, "{clean}");
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            let proof = opened
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset(0)))?
+                .expect("source proof");
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                    offset: PartitionChunkOffset(0),
+                    crc: Some(0x0102_0304),
+                    proof: Some(proof),
+                }])?;
+                Ok(())
+            })?;
+        }
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(report.mismatch_chunk_crc >= 1, "{report}");
+        assert_eq!(report.mismatch_data_path, 0, "{report}");
+        assert!(report.intervals_checked >= 1, "{report}");
+        assert!(report.has_mismatch(), "{report}");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_flags_a_checksum_only_row_the_source_lacks() -> eyre::Result<()> {
+        let root = temp("verify-crc-only");
+        let consensus = populate_mdbx(root.path())?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let options = options_for(&consensus)?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                    offset: PartitionChunkOffset(50),
+                    crc: Some(7),
+                    proof: None,
+                }])?;
+                Ok(())
+            })?;
+        }
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(report.mismatch_chunk_crc >= 1, "{report}");
+        assert!(report.intervals_checked >= 1, "{report}");
+        assert!(report.offsets_checked >= 1, "{report}");
+        assert!(report.has_mismatch(), "{report}");
         Ok(())
     }
 

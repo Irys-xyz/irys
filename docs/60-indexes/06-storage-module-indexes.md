@@ -71,7 +71,7 @@ The tool takes the index lock and refuses the run when that lock is held.
 The directory name does not need to contain `copy`.
 
 `mdbx-to-rocks`, `rocks-to-mdbx`, and `verify` need the consensus
-database and the partition geometry. `verify-rocks` compares two RocksDB
+database and the partition geometry. `verify-rocks` byte-compares two RocksDB
 v1 directories and does not. The consensus database is
 `irys_consensus_data` under the node's `base_directory` (`.irys` by
 default), not a submodule `db/`. The ledger offset is

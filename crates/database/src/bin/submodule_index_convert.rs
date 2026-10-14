@@ -38,8 +38,10 @@ usage:
   submodule-index-convert verify        [flags] <db-dir> <rocks-dir>
   submodule-index-convert verify-rocks  [flags] <rocks-left-dir> <rocks-right-dir>
 
-verify-rocks compares two RocksDB v1 directories. It does not read the
-consensus database. The flags below are required for every other command.
+verify-rocks compares two RocksDB v1 directories byte for byte. Every
+column family is counted, including metadata identity keys. It does not
+read the consensus database. The flags below are required for every other
+command.
 
 required flags:
   --consensus-db <dir>           node consensus database.
@@ -122,7 +124,7 @@ RocksDB v1 only. The node migrates a schema v1 db/ (release 4.0.x) to
 MDBX schema v2 in place. Release 4.0.x cannot read the result.
 There is no rollback from 4.1.0 to 4.0.x.
 
-verify and verify-rocks exit 1 when a public read differs or when a placement
+verify and verify-rocks exit 1 when a compared value differs or when a placement
 was skipped because the consensus database does not cover it.
 ";
 
