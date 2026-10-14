@@ -761,15 +761,6 @@ impl Cf {
         }
     }
 
-    fn name_in(self, _layout: IndexLayout) -> &'static str {
-        self.name()
-    }
-
-    fn opened_by(self, _layout: IndexLayout) -> bool {
-        let _ = self;
-        true
-    }
-
     /// Offset rows may still live in a blob file from an earlier open.
     /// Baseline stores new values inline and garbage-collects that file.
     /// The `blobs` preset still writes one.
@@ -831,12 +822,7 @@ impl CompactState {
 }
 
 impl SmallFileCompactor {
-    fn start(
-        db: Arc<DB>,
-        threshold: usize,
-        submodule: String,
-        layout: IndexLayout,
-    ) -> eyre::Result<Arc<Self>> {
+    fn start(db: Arc<DB>, threshold: usize, submodule: String) -> eyre::Result<Arc<Self>> {
         let state = Arc::new(CompactState::new());
         let this = Arc::new(Self {
             state: Arc::clone(&state),
@@ -847,7 +833,7 @@ impl SmallFileCompactor {
         }
         let join = std::thread::Builder::new()
             .name("irys-idx-compact".into())
-            .spawn(move || run_small_file_compact(&state, &db, threshold, &submodule, layout))
+            .spawn(move || run_small_file_compact(&state, &db, threshold, &submodule))
             .wrap_err("spawn submodule index small-file compact thread")?;
         {
             let mut slot = this
@@ -877,18 +863,12 @@ impl Drop for SmallFileCompactor {
     }
 }
 
-fn run_small_file_compact(
-    state: &CompactState,
-    db: &DB,
-    threshold: usize,
-    submodule: &str,
-    layout: IndexLayout,
-) {
+fn run_small_file_compact(state: &CompactState, db: &DB, threshold: usize, submodule: &str) {
     loop {
         if state.stop.load(Ordering::Acquire) {
             return;
         }
-        compact_small_files(state, db, threshold, submodule, layout);
+        compact_small_files(state, db, threshold, submodule);
         if state.stop.load(Ordering::Acquire) {
             return;
         }
@@ -906,18 +886,12 @@ fn run_small_file_compact(
     }
 }
 
-fn compact_small_files(
-    state: &CompactState,
-    db: &DB,
-    threshold: usize,
-    submodule: &str,
-    layout: IndexLayout,
-) {
+fn compact_small_files(state: &CompactState, db: &DB, threshold: usize, submodule: &str) {
     if threshold == 0 {
         return;
     }
     let limit = threshold as u64;
-    for cf in families(layout) {
+    for cf in families() {
         if state.stop.load(Ordering::Acquire) {
             return;
         }
@@ -943,7 +917,7 @@ fn compact_small_files(
         state.files_after.fetch_add(after, Ordering::Relaxed);
         tracing::info!(
             submodule,
-            cf = cf.name_in(layout),
+            cf = cf.name(),
             files_before = before,
             files_after = after,
             bytes,
@@ -1136,7 +1110,7 @@ impl RocksSubmoduleStore {
         }
         let lock_file = hold_rocks_lock(&path)?;
         let layout = resolve_layout(&path, None)?;
-        let unknown = existing_unknown_families(&path, layout)?;
+        let unknown = existing_unknown_families(&path)?;
         log_unknown_families(&path, &unknown);
         let db = open_db_read_only(&path)?;
         // Absent flags are zero. Read-only open does not stamp them.
@@ -1146,7 +1120,7 @@ impl RocksSubmoduleStore {
         let submodule = submodule_label(&path);
         Ok(Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
-            compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone(), layout)?,
+            compact: SmallFileCompactor::start(Arc::clone(&db), 0, submodule.clone())?,
             db,
             resources: None,
             write: Arc::new(Mutex::new(())),
@@ -1286,7 +1260,7 @@ impl RocksSubmoduleStore {
         // every RocksDB v1 family. A missing one is not created empty.
         // A directory with no CURRENT is new, including a converter target,
         // and that open creates the families.
-        let unknown = existing_unknown_families(&path, layout)?;
+        let unknown = existing_unknown_families(&path)?;
         log_unknown_families(&path, &unknown);
         let create_missing = !path.join("CURRENT").is_file();
         let (db, stats) = open_db(
@@ -1301,10 +1275,10 @@ impl RocksSubmoduleStore {
         )?;
         if stamp_schema {
             ensure_feature_flags(&db, &path, true, false)?;
-            ensure_schema_row(&db, layout)?;
+            ensure_schema_row(&db)?;
             let marker = path.join(SCHEMA_FILE);
             if !marker.exists() {
-                write_schema_marker_file(&path, schema_text(layout))?;
+                write_schema_marker_file(&path, SUBMODULE_SCHEMA_ROCKS_V1)?;
             }
         }
         let group = GroupCommit::new();
@@ -1316,7 +1290,6 @@ impl RocksSubmoduleStore {
                 Arc::clone(&db),
                 tuning.small_file_compact_threshold,
                 submodule.clone(),
-                layout,
             )?,
             db,
             resources,
@@ -1340,13 +1313,12 @@ impl RocksSubmoduleStore {
     /// SST is compacted so the finished directory is not a pile of flushes.
     pub(super) fn seal_and_stamp(self) -> eyre::Result<()> {
         let path = self.path.clone();
-        let layout = self.layout;
         {
             self.ensure_writable()?;
             let _guard = self.lock_write();
             self.flush_families_locked()?;
             self.compact_split_families_locked();
-            write_schema_row(&self.db, layout, true)?;
+            write_schema_row(&self.db, true)?;
             ensure_feature_flags(&self.db, &path, true, true)?;
             self.flush_families_locked()?;
             self.compact_split_families_locked();
@@ -1354,11 +1326,11 @@ impl RocksSubmoduleStore {
         drop(self);
         remove_rocks_wal_files(&path)?;
         sync_dir(&path)?;
-        write_schema_marker_file(&path, schema_text(layout))
+        write_schema_marker_file(&path, SUBMODULE_SCHEMA_ROCKS_V1)
     }
 
     fn flush_families_locked(&self) -> eyre::Result<()> {
-        for cf in families(self.layout) {
+        for cf in families() {
             let handle = cf_handle(&self.db, cf)?;
             self.db.flush_cf(&handle).wrap_err("flush column family")?;
         }
@@ -1367,7 +1339,7 @@ impl RocksSubmoduleStore {
 
     /// Merge a family that flushed more than one SST. One file is left as it is.
     fn compact_split_families_locked(&self) {
-        for cf in families(self.layout) {
+        for cf in families() {
             let Ok(handle) = cf_handle(&self.db, cf) else {
                 continue;
             };
@@ -1386,7 +1358,7 @@ impl RocksSubmoduleStore {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let key = encode_key(MetadataKey::DBSchemaVersion);
         match self.db.get_cf(&handle, key).wrap_err("read schema row")? {
-            Some(bytes) => decode_schema_payload(self.layout, &bytes).map(Some),
+            Some(bytes) => Ok(Some(bytes)),
             None => Ok(None),
         }
     }
@@ -1554,7 +1526,7 @@ impl RocksSubmoduleStore {
         after: Option<PartitionChunkOffset>,
         limit: usize,
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        self.read_cf_keys(Cf::Pending.name_in(self.layout), after, limit)
+        self.read_cf_keys(Cf::Pending.name(), after, limit)
     }
 
     /// Next RocksDB v1 placements after `after`, in start-offset order.
@@ -1885,14 +1857,14 @@ impl RocksSubmoduleStore {
             "irys.rocksdb.memtable_bytes",
             submodule,
         );
-        for cf in families(self.layout) {
+        for cf in families() {
             let Ok(handle) = cf_handle(&self.db, cf) else {
                 continue;
             };
             let name = if matches!(cf, Cf::OffsetMeta) {
                 self.offset_family_name()
             } else {
-                cf.name_in(self.layout)
+                cf.name()
             };
             set_cf_gauge(
                 &self.db,
@@ -2056,7 +2028,7 @@ impl RocksSubmoduleStore {
             .write
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for cf in families(self.layout) {
+        for cf in families() {
             let handle = cf_handle(&self.db, cf)?;
             self.db.flush_cf(&handle).wrap_err("flush column family")?;
             self.db
@@ -2086,7 +2058,7 @@ impl RocksSubmoduleStore {
             .ok_or_else(|| eyre::eyre!("rocksdb.dbstats has no cumulative stall line"))?;
         let mut pending_compaction_bytes = 0_u64;
         let mut flushes = 0_u64;
-        for cf in families(self.layout) {
+        for cf in families() {
             let handle = cf_handle(&self.db, cf)?;
             pending_compaction_bytes = pending_compaction_bytes.saturating_add(int_property_cf(
                 &self.db,
@@ -2289,7 +2261,7 @@ impl RocksSubmoduleStore {
     #[cfg(test)]
     fn flush_memtables(&self) -> eyre::Result<()> {
         let _guard = self.lock_write();
-        for cf in families(self.layout) {
+        for cf in families() {
             let handle = cf_handle(&self.db, cf)?;
             self.db.flush_cf(&handle).wrap_err("flush column family")?;
         }
@@ -2334,7 +2306,7 @@ impl RocksSubmoduleStore {
     /// Keep flushed L0 files in place so a test can pile up tiny SSTs.
     #[cfg(test)]
     fn disable_auto_compaction(&self) -> eyre::Result<()> {
-        for cf in families(self.layout) {
+        for cf in families() {
             let handle = cf_handle(&self.db, cf)?;
             self.db
                 .set_options_cf(handle, &[("disable_auto_compactions", "true")])
@@ -2348,7 +2320,7 @@ impl RocksSubmoduleStore {
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let key = encode_key(MetadataKey::DBSchemaVersion);
         match self.db.get_cf(&handle, key).wrap_err("read schema row")? {
-            Some(bytes) => decode_schema_payload(self.layout, &bytes).map(Some),
+            Some(bytes) => Ok(Some(bytes)),
             None => Ok(None),
         }
     }
@@ -3224,10 +3196,10 @@ fn user_column_families(
     layout: IndexLayout,
     extra_families: &[String],
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
-    let mut families: Vec<_> = families(layout)
+    let mut families: Vec<_> = families()
         .map(|cf| {
             rocksdb::ColumnFamilyDescriptor::new(
-                cf.name_in(layout),
+                cf.name(),
                 column_options(cache, cf, tuning, layout),
             )
         })
@@ -3432,10 +3404,6 @@ fn directory_has_entries(path: &Path) -> eyre::Result<bool> {
         .is_some())
 }
 
-fn schema_text(_layout: IndexLayout) -> &'static str {
-    SUBMODULE_SCHEMA_ROCKS_V1
-}
-
 /// Schema file already on disk, or RocksDB v1 for an empty directory.
 ///
 /// Any other marker is refused. This open does not rewrite it.
@@ -3482,14 +3450,14 @@ fn write_schema_marker_file(dir: &Path, text: &str) -> eyre::Result<()> {
 /// already be there. Creating a missing one would hide lost rows. Families
 /// that are not in this binary are returned so open can pass them to
 /// RocksDB. They are not read or written.
-fn existing_unknown_families(path: &Path, layout: IndexLayout) -> eyre::Result<Vec<String>> {
+fn existing_unknown_families(path: &Path) -> eyre::Result<Vec<String>> {
     if !path.join("CURRENT").is_file() {
         return Ok(Vec::new());
     }
     let names = DB::list_cf(&Options::default(), path).wrap_err("list column families")?;
     let mut missing = Vec::new();
-    for cf in families(layout) {
-        let name = cf.name_in(layout);
+    for cf in families() {
+        let name = cf.name();
         if !names.iter().any(|found| found == name) {
             missing.push(name);
         }
@@ -3506,7 +3474,7 @@ fn existing_unknown_families(path: &Path, layout: IndexLayout) -> eyre::Result<V
         if name == rocksdb::DEFAULT_COLUMN_FAMILY_NAME {
             continue;
         }
-        if families(layout).any(|cf| cf.name_in(layout) == name) {
+        if families().any(|cf| cf.name() == name) {
             continue;
         }
         unknown.push(name);
@@ -3630,14 +3598,14 @@ fn ensure_feature_flags(
     }
 }
 
-fn ensure_schema_row(db: &DB, layout: IndexLayout) -> eyre::Result<()> {
-    write_schema_row(db, layout, false)
+fn ensure_schema_row(db: &DB) -> eyre::Result<()> {
+    write_schema_row(db, false)
 }
 
-fn write_schema_row(db: &DB, layout: IndexLayout, disable_wal: bool) -> eyre::Result<()> {
+fn write_schema_row(db: &DB, disable_wal: bool) -> eyre::Result<()> {
     let handle = cf_handle(db, Cf::Metadata)?;
     let key = encode_key(MetadataKey::DBSchemaVersion);
-    let expected = schema_value(layout);
+    let expected = SUBMODULE_SCHEMA_ROCKS_V1.as_bytes();
     match db.get_cf(&handle, &key).wrap_err("read schema row")? {
         Some(found) if found == expected => Ok(()),
         Some(found) => eyre::bail!(
@@ -3697,16 +3665,8 @@ fn sync_dir(dir: &Path) -> eyre::Result<()> {
         .wrap_err("sync rocksdb directory")
 }
 
-fn schema_value(_layout: IndexLayout) -> Vec<u8> {
-    SUBMODULE_SCHEMA_ROCKS_V1.as_bytes().to_vec()
-}
-
-fn decode_schema_payload(_layout: IndexLayout, bytes: &[u8]) -> eyre::Result<Vec<u8>> {
-    Ok(bytes.to_vec())
-}
-
-fn families(layout: IndexLayout) -> impl Iterator<Item = Cf> {
-    Cf::ALL.into_iter().filter(move |cf| cf.opened_by(layout))
+fn families() -> impl Iterator<Item = Cf> {
+    Cf::ALL.into_iter()
 }
 
 /// Counters a bench step can subtract. Stall time, flush count, WAL syncs,
@@ -4305,7 +4265,7 @@ impl<'a> Batch<'a> {
 
     fn commit(&self, sync: bool, disable_wal: bool, submodule: &str) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
-        for cf in families(self.layout) {
+        for cf in families() {
             let handle = cf_handle(self.db, cf)?;
             // One range tombstone covers the family. A point delete per key
             // would read every value, including blobs, into this batch.
@@ -5727,7 +5687,7 @@ impl SubmoduleWrite for Batch<'_> {
     }
 
     fn clear(&mut self) -> eyre::Result<()> {
-        for cf in families(self.layout) {
+        for cf in families() {
             if matches!(cf, Cf::Metadata) {
                 continue;
             }
@@ -6306,11 +6266,11 @@ mod tests {
             "clear took {elapsed:?}"
         );
 
-        for cf in families(store.layout) {
+        for cf in families() {
             if matches!(cf, Cf::Metadata) {
                 continue;
             }
-            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
+            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name());
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         let payload = store.schema_payload()?.expect("schema row");
@@ -6718,7 +6678,7 @@ mod tests {
             Cf::Pending,
             Cf::Content,
         ] {
-            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
+            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name());
         }
 
         place_span(&store, 1, 2, root_a, 1, 9, 0, &[1], Some(1))?;
@@ -6732,7 +6692,7 @@ mod tests {
             Cf::Pending,
             Cf::Content,
         ] {
-            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name_in(store.layout));
+            assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name());
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         Ok(())
