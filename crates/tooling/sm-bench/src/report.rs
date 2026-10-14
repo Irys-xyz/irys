@@ -824,7 +824,15 @@ fn phase_line(
     )
 }
 
+/// A finished step with no failure reasons passes. An interrupt is not a pass.
+pub(crate) fn step_passed(interrupted: bool, reasons: &[String]) -> bool {
+    !interrupted && reasons.iter().all(|reason| reason == "interrupted")
+}
+
 fn step_verdict(passed: bool, reasons: &[String]) -> String {
+    if reasons.iter().any(|reason| reason == "interrupted") {
+        return "INTERRUPTED".to_string();
+    }
     if passed {
         return "PASS".to_string();
     }
@@ -1121,6 +1129,59 @@ mod tests {
             "tail 240s: ingest enq/dur 21.0/21.0 MiB/s  mig enq/dur 0.0/0.0 MiB/s  skips=0  start_p99_us=620000  start_max_us=940000  FAIL"
         ));
         assert!(text.contains("tail: ingest enqueued is short"));
+    }
+
+    fn interrupted_row(passed: bool, reasons: Vec<String>) -> StepRow {
+        StepRow {
+            name: "load".to_string(),
+            passed,
+            soft_fail: false,
+            reasons,
+            measured: measured(0),
+            recall: DriverBucket::default(),
+            ingest: DriverBucket::default(),
+            migration: DriverBucket::default(),
+            serve: DriverBucket::default(),
+            rocks: None,
+            durable_points: irys_domain::DurablePointCounts::default(),
+            tail: None,
+            page_cache: None,
+        }
+    }
+
+    #[test]
+    fn an_interrupted_step_is_not_a_pass() {
+        let reasons = vec!["interrupted".to_string()];
+        assert!(!step_passed(true, &reasons));
+        assert!(step_passed(false, &[]));
+        assert!(!step_passed(false, &["serve short".to_string()]));
+    }
+
+    #[test]
+    fn the_table_marks_an_interrupted_step() {
+        let reasons = vec!["interrupted".to_string()];
+        let text = table(&[interrupted_row(false, reasons)], "");
+        assert!(text.contains("  INTERRUPTED\n"), "{text}");
+        assert!(text.contains("  - interrupted\n"), "{text}");
+        assert!(!text.contains("  PASS\n"), "{text}");
+    }
+
+    #[test]
+    fn summary_does_not_pass_an_interrupted_step() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new().prefix("sm-bench-interrupt-").build();
+        let path = tmp.path().join("summary.json");
+        let reasons = vec!["interrupted".to_string()];
+        let passed = step_passed(true, &reasons);
+        let row = interrupted_row(passed, reasons);
+        write_summary(&path, &[row], false, 1, true, &[], "direct").unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["exit_code"], 1);
+        assert_eq!(value["interrupted"], true);
+        assert_eq!(value["steps"][0]["passed"], false);
+        assert_eq!(value["steps"][0]["reasons"][0], "interrupted");
     }
 
     #[test]

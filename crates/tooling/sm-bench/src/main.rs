@@ -36,7 +36,7 @@ use crate::module::{OpenRequest, flush_batch, open_module, pending_ceiling, span
 use crate::prepop::prepopulate;
 use crate::report::{
     PageCacheSpan, RocksStepStats, SampleWriter, StepLog, StepRow, git_info, index_banner,
-    plan_steps, read_page_cache, sample_line, write_json, write_summary, write_table,
+    plan_steps, read_page_cache, sample_line, step_passed, write_json, write_summary, write_table,
 };
 use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
@@ -932,13 +932,7 @@ async fn execute(
         }
     }
     let passed = !scored_fail && !interrupted;
-    let code = if interrupted && !scored_fail {
-        1
-    } else if scored_fail {
-        2
-    } else {
-        0
-    };
+    let code = bench_exit_code(interrupted, scored_fail);
     let (
         entropy_preads,
         entropy_pread_bytes,
@@ -961,6 +955,17 @@ async fn execute(
     let table_head = format!("recall_io={recall_io}\n{index_line}");
     write_table(&out.join("table.txt"), &rows, &table_head)?;
     Ok(code)
+}
+
+/// An interrupt with no scored failure exits 1. A scored failure exits 2.
+fn bench_exit_code(interrupted: bool, scored_fail: bool) -> i32 {
+    if interrupted && !scored_fail {
+        1
+    } else if scored_fail {
+        2
+    } else {
+        0
+    }
 }
 
 struct StepOutcome {
@@ -1094,7 +1099,7 @@ async fn run_step(
     if interrupted {
         reasons.insert(0, "interrupted".to_string());
     }
-    let passed = reasons.iter().all(|reason| reason == "interrupted");
+    let passed = step_passed(interrupted, &reasons);
     let soft_fail = !passed && !interrupted && findings.iter().all(|finding| finding.soft);
     let page_cache = page_cache_start
         .zip(read_page_cache())
@@ -1513,6 +1518,14 @@ mod tests {
         assert_eq!(parsed(&[]).judge_tail_secs, DEFAULT_JUDGE_TAIL_SECS);
         assert_eq!(parsed(&["--judge-tail-secs", "0"]).judge_tail_secs, 0);
         assert_eq!(parsed(&["--judge-tail-secs", "90"]).judge_tail_secs, 90);
+    }
+
+    #[test]
+    fn an_interrupt_without_a_scored_failure_exits_1() {
+        assert_eq!(bench_exit_code(true, false), 1);
+        assert_eq!(bench_exit_code(true, true), 2);
+        assert_eq!(bench_exit_code(false, true), 2);
+        assert_eq!(bench_exit_code(false, false), 0);
     }
 
     #[test]
