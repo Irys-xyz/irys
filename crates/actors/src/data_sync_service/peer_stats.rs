@@ -26,6 +26,11 @@ pub struct PeerStats {
     pub baseline_concurrency: u32,
     pub current_max_concurrency: u32,
     pub max_concurrency: u32,
+    /// Ceiling for [`Self::max_concurrency`]. This is the value computed in
+    /// [`Self::new`]: the bandwidth-scaled count, or the 10 MiB sweep span
+    /// when that is larger. `baseline_concurrency` can be 1 while the sweep
+    /// span is 64, so a small multiple of the baseline would cut that span.
+    pub concurrency_ceiling: u32,
     pub bandwidth_rating: BandwidthRating,
     pub timeout: Duration,
 
@@ -79,6 +84,7 @@ impl PeerStats {
             baseline_concurrency,
             current_max_concurrency: baseline_concurrency,
             max_concurrency,
+            concurrency_ceiling: max_concurrency,
             bandwidth_rating: BandwidthRating::Medium,
             timeout,
             consecutive_failures: 0,

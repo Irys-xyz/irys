@@ -71,9 +71,16 @@ impl PeerBandwidthManager {
         self.peer_stats.max_concurrency as usize
     }
 
-    /// Set max concurrency (upper bound)
+    /// Construction-time ceiling. [`Self::set_max_concurrency`] will not go above it.
+    pub fn concurrency_ceiling(&self) -> usize {
+        self.peer_stats.concurrency_ceiling as usize
+    }
+
+    /// Set max concurrency (upper bound). Values above [`Self::concurrency_ceiling`]
+    /// clamp to that ceiling, so a healthy peer cannot grow an unbounded in-flight allowance.
     pub fn set_max_concurrency(&mut self, concurrency: usize) {
-        self.peer_stats.max_concurrency = concurrency as u32;
+        let capped = concurrency.min(self.concurrency_ceiling());
+        self.peer_stats.max_concurrency = capped as u32;
     }
 
     /// Get current max concurrency (dynamic limit)
@@ -119,5 +126,53 @@ impl PeerBandwidthManager {
 
     pub fn is_throughput_improving(&self) -> bool {
         self.peer_stats.is_throughput_improving()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerBandwidthManager;
+    use irys_types::{
+        Config, IrysAddress, IrysPeerId, NodeConfig, PeerAddress, PeerListItem, PeerScore,
+        ProtocolVersion,
+    };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    /// The optimizer adds 3 or 5 every tick. That step has to stop at the
+    /// ceiling `PeerStats::new` already computed, and a later step must be
+    /// able to return to that ceiling after a lower value.
+    #[test]
+    fn set_max_concurrency_does_not_exceed_the_construction_ceiling() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let miner = IrysAddress::from([3_u8; 20]);
+        let api = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9);
+        let peer = PeerListItem {
+            peer_id: IrysPeerId::from(miner),
+            mining_address: miner,
+            address: PeerAddress {
+                gossip: api,
+                api,
+                ..Default::default()
+            },
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            is_online: true,
+            protocol_version: ProtocolVersion::default(),
+            ..Default::default()
+        };
+        let mut manager = PeerBandwidthManager::new(&miner, &peer, &config);
+        let ceiling = manager.max_concurrency();
+        assert!(
+            ceiling > 1,
+            "ceiling {ceiling} is too small to prove the cap"
+        );
+
+        manager.set_max_concurrency(ceiling + 5);
+        assert_eq!(manager.max_concurrency(), ceiling);
+
+        manager.set_max_concurrency(1);
+        assert_eq!(manager.max_concurrency(), 1);
+
+        manager.set_max_concurrency(ceiling + 5);
+        assert_eq!(manager.max_concurrency(), ceiling);
     }
 }

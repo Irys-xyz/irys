@@ -768,16 +768,24 @@ impl DataSyncServiceInner {
                 && let Some(peer_manager) = peers.get_mut(&peer_addr)
             {
                 // Peers below 0.7 already continued. 0.9 and above get the larger step.
+                // The step stops at the ceiling from peer construction. That ceiling
+                // is the bandwidth scale or the 10 MiB sweep span, whichever is larger.
                 let increase = if health_score >= 0.9 { 5 } else { 3 };
+                let next = current_max
+                    .saturating_add(increase)
+                    .min(peer_manager.concurrency_ceiling());
+                if next == current_max {
+                    continue;
+                }
                 debug!(
                     "Increasing max concurrency from {} to {} for peer {} (utilization: {:.1}%, health: {:.2})",
                     current_max,
-                    current_max + increase,
+                    next,
                     peer_addr,
                     utilization_ratio * 100.0,
                     health_score
                 );
-                peer_manager.set_max_concurrency(current_max + increase);
+                peer_manager.set_max_concurrency(next);
             }
         }
     }
