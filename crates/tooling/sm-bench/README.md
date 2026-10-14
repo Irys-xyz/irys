@@ -171,8 +171,6 @@ crates/tooling/sm-bench/scripts/teardown.sh sdc /mnt/sm-2/loadtest/sysfs-orig.tx
 
 The ops repo's sm-loadtest playbooks cover the same provisioning and teardown.
 
-`examples/index-bench/` holds old wrappers for `submodule-index-bench`. That binary is not in this tree. Nothing there is called by this bench.
-
 ## Host run
 
 Record the queue settings before you change them:
