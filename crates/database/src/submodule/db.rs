@@ -690,7 +690,6 @@ pub fn read_reset_marker<T: DbTx>(tx: &T) -> eyre::Result<bool> {
     }
 }
 
-/// clear db
 pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<ChunkPathHashesByOffset>()?;
     tx.clear::<ChunkDataPathByOffset>()?;

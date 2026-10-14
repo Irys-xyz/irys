@@ -21,17 +21,10 @@ const OFFSET_FLAG_CRC_PRESENT: u8 = 0x02;
 /// is the flag being unset. The leaf is the last 64 bytes of the proof, not
 /// of this value.
 ///
-/// Why the metadata is a trailer, not a header: neighbouring chunks' proofs
-/// share their upper merkle branches, so consecutive values in an SST block
-/// begin with long identical runs. RocksDB delta-encodes keys, not values, so
-/// that sharing is only recovered by block compression (LZ4), which finds it
-/// most cheaply when every value starts with it. Measured after compaction
-/// (`submodule_index_bench --profile crc-rows`, which still writes both
-/// layouts): CRC as trailer costs +5.77 B/chunk on mid-size shared proofs and
-/// +4.10 on the largest; as a prefix it costs +1.09 and +2.86 B/chunk more.
-/// Prefix wins only on unrelated (uniform) proofs, by ~1.06 B/chunk, which is
-/// not the stored shape. The format byte can sit last because RocksDB values
-/// are length-delimited. The schema marker names the layout. These bytes do not.
+/// The trailer follows the proof so LZ4 sees the shared upper branches of
+/// neighbouring proofs at the start of each value. A measured checksum prefix
+/// costs more bytes on that shape. Values are length-delimited, so the format
+/// byte can sit last. The schema marker names the layout.
 pub fn encode_offset_meta(meta: &OffsetMeta) -> eyre::Result<Vec<u8>> {
     let proof = meta.proof.as_deref().unwrap_or(&[]);
     let has_proof = meta.proof.is_some();
