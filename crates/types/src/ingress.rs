@@ -274,7 +274,10 @@ pub struct IngressProofV2 {
 const INGRESS_V2_CHAIN_ID_BYTES: usize = 8;
 
 impl IngressProofV2 {
-    /// True when `signer` produced this proof's opening at [`derive_possession_point`].
+    /// True when this proof's opening verifies at `signer`'s [`derive_possession_point`].
+    ///
+    /// The check cannot tell who computed the opening: the point depends only on
+    /// public values, so any party able to evaluate the polynomial can build it.
     pub fn possession_holds(&self, signer: &crate::IrysAddress) -> eyre::Result<bool> {
         use crate::kzg::{
             compute_composite_commitment, default_kzg_settings, derive_possession_point,

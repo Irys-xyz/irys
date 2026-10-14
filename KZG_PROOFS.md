@@ -226,7 +226,7 @@ The **composite commitment** prevents this:
 composite = SHA256("IRYS_KZG_INGRESS_V2" || kzg_commitment || signer_address || data_root || y || proof)
 ```
 
-The domain separator (`IRYS_KZG_INGRESS_V2`) prevents cross-protocol confusion. The signer address, data root, and possession opening (`y`, `proof`) are inside the hash the signature covers. A second miner who re-signs a published `(data_root, kzg_commitment)` without holding the chunk bytes cannot produce an opening that verifies at `derive_possession_point(signer, data_root)`. The possession point uses the separate domain `IRYS_KZG_POSSESSION_V1`.
+The domain separator (`IRYS_KZG_INGRESS_V2`) prevents cross-protocol confusion. The signer address, data root, and possession opening (`y`, `proof`) are inside the hash the signature covers. A second miner who re-signs a published `(data_root, kzg_commitment)` cannot reuse the published opening, because it does not verify at that miner's own `derive_possession_point(signer, data_root)`. The opening does not show that the signer held the chunk bytes: the aggregate commitment is a linear fold of public data, so anyone holding the chunks, or only the 128 KiB fold of their blobs, can compute a valid opening for any signer. The possession point uses the separate domain `IRYS_KZG_POSSESSION_V1`.
 
 ### Version gating
 
