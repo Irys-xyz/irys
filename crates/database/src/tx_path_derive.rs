@@ -893,8 +893,9 @@ mod tests {
     };
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        DataLedger, DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysBlockHeader,
-        PartitionChunkOffset, generate_data_root, generate_leaves_from_data_roots, resolve_proofs,
+        Base64, DataLedger, DataTransactionHeader, DataTransactionLedger, H256, H256List,
+        IrysBlockHeader, PartitionChunkOffset, Proof, generate_data_root,
+        generate_leaves_from_data_roots, resolve_proofs, validate_path,
     };
     use reth_db::mdbx::DatabaseArguments;
 
@@ -1029,6 +1030,183 @@ mod tests {
                 assert_eq!(one, all[index], "count {count} index {index}");
             }
         }
+    }
+
+    /// Producer cross-check versus the validator byte formula.
+    ///
+    /// A ledger offset is accepted only when both accept it, the proof bytes match
+    /// `merklize_tx_root`, the addressed data chunk is the chunk `assign_tx_index`
+    /// selected, and the miner prefix length equals the validator trim.
+    #[test]
+    fn unaligned_offsets_agree_with_the_validator_byte() {
+        let chunk_size = 32_u64;
+        let patterns: &[(&str, &[u64], u64, Option<&[bool]>)] = &[
+            ("one-partial", &[40], 0, Some(&[true, true])),
+            ("one-byte", &[1], 0, Some(&[true])),
+            (
+                "two-partial",
+                &[40, 40],
+                0,
+                Some(&[true, true, true, false]),
+            ),
+            (
+                "three-odd",
+                &[33, 33, 32],
+                0,
+                Some(&[true, true, true, false, false]),
+            ),
+            ("mixed", &[32, 40, 32], 7, Some(&[true, true, true, true])),
+            ("zero-middle", &[32, 0, 32], 0, Some(&[true, true])),
+            ("five-leaves", &[40, 32, 1, 64, 33], 3, None),
+            ("four-widths", &[10, 20, 32, 31], 10, None),
+        ];
+        for &(name, sizes, start, expected) in patterns {
+            agree_on_pattern(name, sizes, start, chunk_size, expected);
+        }
+    }
+
+    fn agree_on_pattern(
+        name: &str,
+        sizes: &[u64],
+        start: u64,
+        chunk_size: u64,
+        expected: Option<&[bool]>,
+    ) {
+        let mut headers = Vec::with_capacity(sizes.len());
+        let mut chunk_total = 0_u64;
+        for (index, &size) in sizes.iter().enumerate() {
+            let mut header = tx_at(u64::try_from(index).unwrap_or(0).saturating_add(1), size);
+            if size > 0 {
+                let (data_root, _) = data_tree(size, chunk_size);
+                header.data_root = data_root;
+            }
+            chunk_total = chunk_total.saturating_add(size.div_ceil(chunk_size));
+            headers.push(header);
+        }
+        let bounds = super::BlockBounds {
+            height: 1,
+            block_hash: hid(1),
+            start,
+            end: start.saturating_add(chunk_total),
+        };
+        let (merkle_root, merkle_proofs) = DataTransactionLedger::merklize_tx_root(&headers);
+        let mut accepted = Vec::new();
+        for offset in start..bounds.end {
+            let (tx_index, tx_start) =
+                super::assign_tx_index(&headers, &bounds, offset, chunk_size)
+                    .unwrap_or_else(|error| panic!("{name} offset {offset}: {error}"));
+            let (tx_root, proof) = proof_for_headers(&headers, tx_index)
+                .unwrap_or_else(|error| panic!("{name} offset {offset}: {error}"));
+            assert_eq!(tx_root, merkle_root, "{name} offset {offset} root");
+            assert_eq!(
+                proof.proof, merkle_proofs[tx_index].proof,
+                "{name} offset {offset} proof bytes"
+            );
+            let local = usize::try_from(offset - tx_start).unwrap_or(usize::MAX);
+            let size = headers[tx_index].data_size;
+            let (data_root, data_proofs) = data_tree(size, chunk_size);
+            assert_eq!(headers[tx_index].data_root, data_root);
+            let data_path = &data_proofs[local].proof;
+            let derived = derived_for(&headers, tx_index, &proof, tx_root, data_root, start);
+            let cross = super::cross_check_derived(&derived, offset, chunk_size, data_path, None);
+            let byte = u128::from(offset - start) * u128::from(chunk_size);
+            let validator =
+                validate_path(tx_root.0, &Base64(proof.proof.clone()), byte).and_then(|tx_path| {
+                    let tx_byte = byte - tx_path.min_byte_range;
+                    let data = validate_path(data_root.0, &Base64(data_path.clone()), tx_byte)?;
+                    Ok((tx_path, data, tx_byte))
+                });
+            match (cross, validator) {
+                (Ok(()), Ok((tx_path, data, tx_byte))) => {
+                    let owner = owning_index(&headers, tx_path.min_byte_range);
+                    assert_eq!(owner, Some(tx_index), "{name} offset {offset} owner");
+                    let span = data.max_byte_range - data.min_byte_range;
+                    let trim = u128::from(chunk_size).min(span);
+                    let end = usize::try_from(data.max_byte_range).unwrap_or(usize::MAX);
+                    let rem = end % (chunk_size as usize);
+                    let miner_span = if rem == 0 { chunk_size as usize } else { rem };
+                    assert_eq!(
+                        miner_span as u128, trim,
+                        "{name} offset {offset} span {miner_span} trim {trim}"
+                    );
+                    assert!(
+                        tx_byte >= data.min_byte_range && tx_byte <= data.max_byte_range,
+                        "{name} offset {offset} data byte {tx_byte}"
+                    );
+                    accepted.push(true);
+                }
+                (Err(cross_error), Err(_)) => {
+                    let text = cross_error.to_string();
+                    assert!(
+                        text.contains("does not prove offset")
+                            || text.contains("data_root mismatch")
+                            || text.contains("range does not contain"),
+                        "{name} offset {offset}: {text}"
+                    );
+                    accepted.push(false);
+                }
+                (Ok(()), Err(error)) => {
+                    panic!("{name} offset {offset}: cross ok, validator {error}")
+                }
+                (Err(error), Ok(_)) => {
+                    panic!("{name} offset {offset}: validator ok, cross {error}")
+                }
+            }
+        }
+        if let Some(expected) = expected {
+            assert_eq!(accepted, expected, "{name}");
+        }
+    }
+
+    fn data_tree(size: u64, chunk_size: u64) -> (H256, Vec<Proof>) {
+        let bytes = vec![0x5A_u8; usize::try_from(size).unwrap_or(0)];
+        let root = generate_data_root(
+            irys_types::generate_leaves(
+                std::iter::once(Ok(bytes)),
+                usize::try_from(chunk_size).unwrap_or(1),
+            )
+            .expect("leaves"),
+        )
+        .expect("data root");
+        let data_root = H256(root.id);
+        let proofs = irys_types::resolve_proofs(root, None).expect("data proofs");
+        (data_root, proofs)
+    }
+
+    fn derived_for(
+        headers: &[DataTransactionHeader],
+        tx_index: usize,
+        proof: &Proof,
+        tx_root: H256,
+        data_root: H256,
+        ledger_start: u64,
+    ) -> super::DerivedTxPath {
+        super::DerivedTxPath {
+            height: 1,
+            block_hash: hid(1),
+            ledger: DataLedger::Publish,
+            tx_index,
+            tx_id: headers[tx_index].id,
+            tx_count: headers.len(),
+            data_root,
+            tx_root,
+            ledger_start,
+            tx_ledger_start: ledger_start,
+            proof: proof.clone(),
+            db_nanos: 0,
+            cpu_nanos: 0,
+        }
+    }
+
+    fn owning_index(headers: &[DataTransactionHeader], target: u128) -> Option<usize> {
+        let mut cursor = 0_u128;
+        for (index, header) in headers.iter().enumerate() {
+            if cursor == target && header.data_size > 0 {
+                return Some(index);
+            }
+            cursor = cursor.saturating_add(u128::from(header.data_size));
+        }
+        None
     }
 
     fn set_ledger(
