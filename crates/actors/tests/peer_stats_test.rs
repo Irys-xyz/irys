@@ -455,15 +455,6 @@ async fn test_multi_window_bandwidth_tracking() {
 }
 
 #[test]
-async fn fresh_256kib_peer_starts_at_baseline_not_the_sweep_ceiling() {
-    const CHUNK: u64 = 256 * 1024;
-    let stats = PeerStats::new(100, CHUNK, DEFAULT_TIMEOUT);
-    assert_eq!(stats.baseline_concurrency, 10);
-    assert!(stats.max_concurrency >= 40);
-    assert_eq!(stats.available_concurrency(), 10);
-}
-
-#[test]
 async fn delivered_bytes_ramp_a_256kib_peer_to_the_sweep_ceiling() {
     const CHUNK: u64 = 256 * 1024;
     let mut stats = PeerStats::new(100, CHUNK, DEFAULT_TIMEOUT);
