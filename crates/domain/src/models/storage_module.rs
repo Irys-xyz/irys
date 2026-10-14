@@ -7985,32 +7985,6 @@ pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
     Ok(intervals)
 }
 
-/// Loads storage module info from disk
-pub fn read_info_file(path: &Path) -> eyre::Result<StorageModuleInfo> {
-    let mut info_file = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
-
-    let mut contents = String::new();
-    info_file.read_to_string(&mut contents).unwrap();
-    let info = serde_json::from_str(&contents)?;
-    Ok(info)
-}
-
-/// Saves storage module info to disk
-pub fn write_info_file(path: &Path, info: &StorageModuleInfo) -> eyre::Result<()> {
-    let mut info_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .unwrap_or_else(|_| panic!("Failed to open: {}", path.display()));
-
-    info_file.write_all(serde_json::to_string_pretty(info)?.as_bytes())?;
-    Ok(())
-}
-
 fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
     let mut hasher = sha::Sha256::new();
     hasher.update(message);
