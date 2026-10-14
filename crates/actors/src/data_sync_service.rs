@@ -557,10 +557,20 @@ impl DataSyncServiceInner {
     pub fn tick(&mut self) -> eyre::Result<()> {
         let mut orchestrator_ids: Vec<_> = self.chunk_orchestrators.keys().copied().collect();
         orchestrator_ids.sort_unstable();
+        // A module that was fully Data at the last peer sync has an orchestrator
+        // and no bandwidth managers. Discovery of a new Entropy interval is the
+        // first time that hole can be fetched, so attach the slot's assignees
+        // before this tick dispatches.
+        let mut sync_new_entropy = false;
         for id in &orchestrator_ids {
             if let Some(orchestrator) = self.chunk_orchestrators.get_mut(id) {
                 orchestrator.prepare_tick();
+                sync_new_entropy |= orchestrator.note_new_entropy_without_peers();
             }
+        }
+        if sync_new_entropy {
+            self.sync_peer_partition_assignments();
+            self.update_orchestrator_peers();
         }
         if !orchestrator_ids.is_empty() {
             // Term-ledger SMs (especially Submit) visit first in each pass so
@@ -2624,6 +2634,165 @@ mod peer_chunk_validation_tests {
             !matches!(request.request_state, ChunkRequestState::Blocked(_)),
             "a foreign chunk is not a local index miss: {:?}",
             request.request_state
+        );
+    }
+}
+
+#[cfg(test)]
+mod entropy_peer_sync_tests {
+    use super::DataSyncServiceInner;
+    use crate::chunk_fetcher::MockChunkFetcher;
+    use crate::services::ServiceSenders;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
+        NodeConfig, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
+        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{Arc, RwLock},
+    };
+
+    /// A module that was entirely non-entropy at the last peer sync has no
+    /// bandwidth managers. The first entropy interval must attach the slot's
+    /// assignees, or the hole waits for the next epoch assignment update.
+    #[tokio::test]
+    async fn new_entropy_interval_syncs_peers_when_the_module_has_none() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let assignee = IrysAddress::from([0xA1; 20]);
+        let pa = PartitionAssignment {
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+            miner_address: assignee,
+            partition_hash: H256::from([0x31; 32]),
+        };
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 2,
+                    partition_assignment: Some(pa),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+                },
+                &config,
+            )
+            .expect("storage module"),
+        );
+        assert!(
+            sm.get_intervals(ChunkType::Entropy).is_empty(),
+            "the module starts with no entropy, so peer sync must skip it"
+        );
+
+        let env = open_or_create_db(
+            tmp.path().join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("db");
+        let db = DatabaseProvider(Arc::new(env));
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let api = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19091);
+        let peers = vec![PeerListItem {
+            peer_id: IrysPeerId::from(assignee),
+            mining_address: assignee,
+            address: PeerAddress {
+                gossip: api,
+                api,
+                ..Default::default()
+            },
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            is_online: true,
+            protocol_version: ProtocolVersion::default(),
+            ..Default::default()
+        }];
+        let peer_list = PeerList::from_peers(
+            peers,
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        {
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            genesis.test_sign();
+        }
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        {
+            let tip = block_tree_guard.read().tip;
+            let mut tree = block_tree_guard.write();
+            let entry = tree.blocks.get_mut(&tip).expect("genesis entry");
+            let mut snapshot = irys_domain::EpochSnapshot::default();
+            snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+            entry.epoch_snapshot = Arc::new(snapshot);
+        }
+
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            Arc::new(RwLock::new(vec![sm.clone()])),
+            peer_list,
+            db,
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize))),
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+
+        assert!(
+            inner
+                .active_peer_bandwidth_managers
+                .read()
+                .unwrap()
+                .is_empty(),
+            "no entropy at startup means no peer managers"
+        );
+        assert!(
+            inner.chunk_orchestrators[&sm.id].current_peers.is_empty(),
+            "the orchestrator has nobody to fetch from"
+        );
+
+        sm.pack_with_zeros();
+        assert!(
+            !sm.get_intervals(ChunkType::Entropy).is_empty(),
+            "packing opens an entropy interval"
+        );
+        inner.tick().expect("tick");
+
+        let managers = inner.active_peer_bandwidth_managers.read().unwrap();
+        let manager = managers
+            .get(&assignee)
+            .expect("the slot assignee must gain a bandwidth manager");
+        assert!(
+            manager.partition_assignments.contains(&pa),
+            "the manager must record this partition assignment"
+        );
+        drop(managers);
+        assert!(
+            inner.chunk_orchestrators[&sm.id]
+                .current_peers
+                .contains(&assignee),
+            "discovery must publish the new manager to the orchestrator"
         );
     }
 }

@@ -188,6 +188,10 @@ pub struct ChunkOrchestrator {
     /// (`u32::MAX` means "start at the write head") so abandoned low-offset
     /// gaps are visited only after the frontier has been scanned.
     scan_cursor: u32,
+    /// Entropy intervals seen on the previous discovery pass, `(start, end)`.
+    /// A new interval while [`Self::current_peers`] is empty means this module
+    /// had no peer managers when assignments were last synchronized.
+    seen_entropy_intervals: Vec<(u32, u32)>,
     pub current_peers: Vec<IrysAddress>,
     block_tree: BlockTreeReadGuard,
     pub storage_module: Arc<StorageModule>,
@@ -251,6 +255,7 @@ impl ChunkOrchestrator {
             } else {
                 0
             },
+            seen_entropy_intervals: Vec::new(),
             recent_chunk_times: CircularBuffer::new(8000),
             current_peers: Default::default(),
             block_tree,
@@ -278,6 +283,24 @@ impl ChunkOrchestrator {
 
     pub(crate) const fn ledger_id(&self) -> u32 {
         self.ledger_id
+    }
+
+    /// True when this pass saw an Entropy interval that was not present last
+    /// pass and the orchestrator still has no peers. The caller syncs partition
+    /// assignments for that module. The epoch refresh stays in place.
+    pub(crate) fn note_new_entropy_without_peers(&mut self) -> bool {
+        let next: Vec<(u32, u32)> = self
+            .storage_module
+            .get_intervals(ChunkType::Entropy)
+            .iter()
+            .map(|interval| (interval.start().0, interval.end().0))
+            .collect();
+        let has_new = next
+            .iter()
+            .any(|interval| !self.seen_entropy_intervals.contains(interval));
+        let needs_sync = has_new && !next.is_empty() && self.current_peers.is_empty();
+        self.seen_entropy_intervals = next;
+        needs_sync
     }
 
     /// Refresh local scheduler state. Dispatch is driven separately by
