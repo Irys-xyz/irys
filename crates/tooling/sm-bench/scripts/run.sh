@@ -11,7 +11,8 @@
 # A flag wins over the environment.
 #
 # Guards, all of them refuse the run:
-#   pm2 app "Irys Node" is online (or pm2 jlist cannot be read)
+#   pm2 is installed and the app "Irys Node" is online, or its jlist cannot be read
+#   a missing pm2 binary is allowed
 #   the mount has less than MIN_FREE_GIB free (default 500)
 #   loadtest, the recall file, or the write file has no `loadtest` path component
 # The queue settings are written to <out>/sysfs.txt before the bench starts.
