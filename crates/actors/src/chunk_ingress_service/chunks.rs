@@ -2,8 +2,8 @@ use super::ChunkIngressMessage;
 use super::ChunkIngressServiceInner;
 use super::ingress_proofs::generate_and_store_ingress_proof_from_leaves;
 use super::metrics::{
-    record_chunk_duplicate, record_chunk_ingested, record_enqueue_duration, record_flush_failure,
-    record_validation_duration,
+    record_chunk_duplicate, record_chunk_error, record_chunk_ingested, record_enqueue_duration,
+    record_flush_failure, record_validation_duration,
 };
 
 use irys_database::{
@@ -84,6 +84,41 @@ pub(crate) fn should_schedule_pending_drain_after_park(
             Some(min) => data_size >= min,
         },
     }
+}
+
+/// Whether a popped pending chunk must be put back after a drain error.
+///
+/// `body_committed` is true only after the cache batch commits. Until then the
+/// pending map is the only copy of the body. Validation rejects are permanent
+/// and stay dropped. An error after the commit stays dropped: the cache row
+/// holds the body.
+#[must_use]
+pub(crate) fn should_restore_pending_chunk_on_drain_error(
+    err: &ChunkIngressError,
+    body_committed: bool,
+) -> bool {
+    if body_committed {
+        return false;
+    }
+    !is_permanent_chunk_reject(err)
+}
+
+fn is_permanent_chunk_reject(err: &ChunkIngressError) -> bool {
+    matches!(
+        err,
+        ChunkIngressError::Critical(
+            CriticalChunkIngressError::InvalidProof
+                | CriticalChunkIngressError::InvalidDataHash
+                | CriticalChunkIngressError::InvalidChunkSize
+                | CriticalChunkIngressError::InvalidDataSize
+                | CriticalChunkIngressError::InvalidOffset(_)
+        ) | ChunkIngressError::Advisory(
+            AdvisoryChunkIngressError::PreHeaderOversizedBytes
+                | AdvisoryChunkIngressError::PreHeaderOversizedDataPath
+                | AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap
+                | AdvisoryChunkIngressError::PreHeaderInvalidOffset(_)
+        )
+    )
 }
 
 /// Selects the authoritative data_size from multiple storage modules.
@@ -238,12 +273,73 @@ impl ChunkIngressServiceInner {
         }
     }
 
+    /// Re-ingress chunks popped for one data root.
+    ///
+    /// A pre-commit error puts the chunk back and schedules another drain: the
+    /// uploader will not resend a body that was already parked. A validation
+    /// reject stays dropped. An error after the cache commit stays dropped.
+    pub(super) async fn finish_pending_drain(
+        &self,
+        data_root: DataRoot,
+        chunks: Vec<UnpackedChunk>,
+    ) {
+        let mut restore = Vec::new();
+        for chunk in chunks {
+            let chunk = Arc::new(chunk);
+            match self.ingest_chunk(Arc::clone(&chunk)).await {
+                Ok(()) => {}
+                Err(failure) => {
+                    record_chunk_error(failure.error.error_type(), failure.error.is_advisory());
+                    error!(
+                        "Failed to handle pending chunk ingress for data_root {:?}: {:?}",
+                        data_root, failure.error
+                    );
+                    if should_restore_pending_chunk_on_drain_error(
+                        &failure.error,
+                        failure.body_committed,
+                    ) {
+                        restore.push(chunk);
+                    }
+                }
+            }
+        }
+        if restore.is_empty() {
+            return;
+        }
+        {
+            let mut pending = self.pending_chunks.write().await;
+            for chunk in restore {
+                pending.put(Arc::try_unwrap(chunk).unwrap_or_else(|chunk| (*chunk).clone()));
+            }
+        }
+        debug!(
+            chunk.data_root = %data_root,
+            "Pre-commit drain error; scheduling another ProcessPendingChunks"
+        );
+        if let Err(error) = self
+            .service_senders
+            .chunk_ingress
+            .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_root))
+        {
+            warn!(
+                chunk.data_root = %data_root,
+                ?error,
+                "Failed to schedule ProcessPendingChunks after a pre-commit drain error"
+            );
+        }
+    }
+
     #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
     pub(crate) async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
     ) -> Result<(), ChunkIngressError> {
-        let chunk = Arc::new(chunk);
+        self.ingest_chunk(Arc::new(chunk))
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    async fn ingest_chunk(&self, chunk: Arc<UnpackedChunk>) -> Result<(), IngressFailure> {
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
         let chunk_size = self.config.consensus.chunk_size;
@@ -647,7 +743,11 @@ impl ChunkIngressServiceInner {
             .instrument(info_span!("chunk.write_storage_modules"))
             .await;
         remember_after_module_writes(&self.recent_valid_chunks, chunk_path_hash, write_result)
-            .await?;
+            .await
+            .map_err(|error| IngressFailure {
+                error,
+                body_committed: true,
+            })?;
 
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_root;
@@ -671,7 +771,11 @@ impl ChunkIngressServiceInner {
         // validates every chunk can produce the same proof it could before the
         // compact-leaf refactor. Storage-module durability separately authorizes
         // body reclamation; leaf presence alone is never an eviction fence.
-        self.try_generate_ingress_proof_for_root(chunk_data_root, chunk_size)?;
+        self.try_generate_ingress_proof_for_root(chunk_data_root, chunk_size)
+            .map_err(|error| IngressFailure {
+                error,
+                body_committed: true,
+            })?;
 
         // Storage-module writes retain their normal batching/striping policy.
         Ok(())
@@ -888,6 +992,34 @@ impl ChunkIngressServiceInner {
     }
 }
 
+/// Ingress failure, and whether the chunk body is already in the cache.
+struct IngressFailure {
+    error: ChunkIngressError,
+    /// True only after `queued_write.committed()` succeeds.
+    body_committed: bool,
+}
+
+impl From<ChunkIngressError> for IngressFailure {
+    fn from(error: ChunkIngressError) -> Self {
+        Self {
+            error,
+            body_committed: false,
+        }
+    }
+}
+
+impl From<CriticalChunkIngressError> for IngressFailure {
+    fn from(error: CriticalChunkIngressError) -> Self {
+        ChunkIngressError::from(error).into()
+    }
+}
+
+impl From<AdvisoryChunkIngressError> for IngressFailure {
+    fn from(error: AdvisoryChunkIngressError) -> Self {
+        ChunkIngressError::from(error).into()
+    }
+}
+
 /// Reasons why Chunk Ingress might fail
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ChunkIngressError {
@@ -1019,6 +1151,7 @@ pub fn generate_ingress_proof(
 mod tests {
     use super::*;
     use irys_database::db_cache::CachedDataRoot;
+    use irys_types::TxChunkOffset;
     use irys_types::UnixTimestamp;
     use proptest::prelude::*;
     use rstest::rstest;
@@ -1045,6 +1178,50 @@ mod tests {
     fn ingress_gate_proceeds_when_size_confirmed_and_block_set_populated() {
         let cdr = cdr_gate_fixture(true, vec![H256::random()], vec![H256::random()], None);
         assert!(!should_skip_ingress_proof_generation(&cdr));
+    }
+
+    /// A database error before the cache commit is the only copy of the body.
+    #[test]
+    fn precommit_database_error_restores_pending_chunk() {
+        let err = ChunkIngressError::Critical(CriticalChunkIngressError::DatabaseError);
+        assert!(should_restore_pending_chunk_on_drain_error(&err, false));
+        assert!(!should_restore_pending_chunk_on_drain_error(&err, true));
+        let overloaded = ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded);
+        assert!(should_restore_pending_chunk_on_drain_error(
+            &overloaded,
+            false
+        ));
+    }
+
+    /// Validation rejects stay dropped. So does any error after the cache commit.
+    #[test]
+    fn validation_and_post_commit_errors_do_not_restore_pending_chunk() {
+        let validation = [
+            ChunkIngressError::Critical(CriticalChunkIngressError::InvalidProof),
+            ChunkIngressError::Critical(CriticalChunkIngressError::InvalidDataHash),
+            ChunkIngressError::Critical(CriticalChunkIngressError::InvalidChunkSize),
+            ChunkIngressError::Critical(CriticalChunkIngressError::InvalidDataSize),
+            ChunkIngressError::Critical(CriticalChunkIngressError::InvalidOffset("offset".into())),
+            ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderOversizedBytes),
+            ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderOversizedDataPath),
+            ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap),
+            ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderInvalidOffset(
+                "offset".into(),
+            )),
+        ];
+        for err in &validation {
+            assert!(
+                !should_restore_pending_chunk_on_drain_error(err, false),
+                "{err:?}"
+            );
+        }
+        let overloaded = ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded);
+        assert!(!should_restore_pending_chunk_on_drain_error(
+            &overloaded,
+            true
+        ));
+        let other = ChunkIngressError::Critical(CriticalChunkIngressError::Other("sm".into()));
+        assert!(!should_restore_pending_chunk_on_drain_error(&other, true));
     }
 
     /// Pre-header park (no CDR at first look): any post-park CDR should drain.
@@ -1313,5 +1490,178 @@ mod tests {
         .await?;
         assert!(recent.read().await.contains(&path_hash));
         Ok(())
+    }
+
+    /// Closed cache writer: ingress reaches `queue_write` and fails before the
+    /// batch commits. The drain must put that body back and schedule another drain.
+    #[tokio::test]
+    async fn drain_restores_chunk_when_precommit_database_error() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-drain-restore")
+            .build();
+        let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let chunk = valid_single_chunk(vec![7_u8; 32]);
+        let data_root = chunk.data_root;
+        let tx_offset = chunk.tx_offset;
+        insert_unconfirmed_cdr(&inner.irys_db, data_root, chunk.data_size);
+        inner.pending_chunks.write().await.put(chunk);
+
+        inner.process_pending_chunks_for_root(data_root).await;
+
+        let pending = inner.pending_chunks.read().await;
+        let parked = pending
+            .get(&data_root)
+            .and_then(|chunks| chunks.peek(&tx_offset));
+        assert!(
+            parked.is_some(),
+            "pre-commit database error must put the chunk back on its data root"
+        );
+        drop(pending);
+
+        let (msg, _) = receivers
+            .chunk_ingress
+            .try_recv()
+            .expect("pre-commit database error must schedule another drain")
+            .into_parts();
+        assert!(matches!(
+            msg,
+            ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root
+        ));
+    }
+
+    /// A validation reject is permanent. The drain must not put it back.
+    #[tokio::test]
+    async fn drain_drops_validation_failure_without_redrain() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-drain-drop")
+            .build();
+        let (inner, mut receivers) = test_ingress_inner(&tmp, 8, 8);
+        let chunk = UnpackedChunk {
+            data_root: H256([0x11; 32]),
+            data_size: 33,
+            data_path: Default::default(),
+            bytes: vec![1_u8; 33].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+        let data_root = chunk.data_root;
+        let tx_offset = chunk.tx_offset;
+        inner.pending_chunks.write().await.put(chunk);
+
+        inner.process_pending_chunks_for_root(data_root).await;
+
+        let pending = inner.pending_chunks.read().await;
+        assert!(
+            pending
+                .get(&data_root)
+                .and_then(|chunks| chunks.peek(&tx_offset))
+                .is_none(),
+            "validation failure must stay dropped"
+        );
+        assert!(receivers.chunk_ingress.try_recv().is_err());
+    }
+
+    fn test_ingress_inner(
+        tmp: &impl AsRef<std::path::Path>,
+        max_chunks_per_item: usize,
+        preheader_cap: usize,
+    ) -> (ChunkIngressServiceInner, crate::services::ServiceReceivers) {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_domain::{BlockTree, BlockTreeReadGuard, StorageModulesReadGuard};
+        use irys_testing_utils::new_mock_signed_header;
+        use irys_types::{Config, NodeConfig};
+        use reth::tasks::TaskExecutor;
+        use reth_db::mdbx::DatabaseArguments;
+        use std::num::NonZeroUsize;
+
+        let mut node_config = NodeConfig::testing();
+        {
+            let consensus = node_config.consensus.get_mut();
+            consensus.chunk_size = 32;
+            consensus.num_chunks_in_partition = 5;
+        }
+        node_config.base_directory = tmp.as_ref().to_path_buf();
+        node_config.mempool.max_chunks_per_item = max_chunks_per_item;
+        node_config.mempool.max_preheader_chunks_per_item = preheader_cap;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let db_env = open_or_create_db(
+            tmp.as_ref().join("db"),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing database arguments"),
+        )
+        .expect("open test database");
+        let irys_db = DatabaseProvider(std::sync::Arc::new(db_env));
+
+        let (service_senders, receivers) = crate::test_helpers::build_test_service_senders();
+        let block_tree_read_guard =
+            BlockTreeReadGuard::new(std::sync::Arc::new(std::sync::RwLock::new(BlockTree::new(
+                &new_mock_signed_header(),
+                config.consensus.clone(),
+            ))));
+        let inner = ChunkIngressServiceInner {
+            block_tree_read_guard,
+            config,
+            exec: TaskExecutor::test(),
+            irys_db,
+            message_handler_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            control_plane_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            max_concurrent_tasks: 1,
+            max_control_plane_tasks: 1,
+            service_senders,
+            storage_modules_guard: StorageModulesReadGuard::new(std::sync::Arc::new(
+                std::sync::RwLock::new(Vec::new()),
+            )),
+            recent_valid_chunks: RwLock::new(LruCache::new(NonZeroUsize::new(8).expect("nonzero"))),
+            pending_chunks: std::sync::Arc::new(RwLock::new(
+                super::super::PriorityPendingChunks::new(8, preheader_cap),
+            )),
+            pending_ingress_proofs: std::sync::Mutex::new(
+                super::super::pending_ingress_proofs::PendingIngressProofs::new(8),
+            ),
+            chunk_data_writer: super::super::chunk_data_writer::ChunkDataWriter::closed_for_test(),
+            ingress_proof_generation_state: super::super::IngressProofGenerationState::new(),
+            http_ingress_open: std::sync::Arc::new(std::sync::Mutex::new(true)),
+        };
+        (inner, receivers)
+    }
+
+    fn insert_unconfirmed_cdr(db: &DatabaseProvider, data_root: H256, data_size: u64) {
+        use irys_database::cache_data_root;
+        use irys_database::db::IrysDatabaseExt as _;
+        use irys_types::{
+            DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata,
+        };
+
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update_eyre(|tx| cache_data_root(tx, &header, None).map(|_| ()))
+            .expect("insert cached data root");
+    }
+
+    fn valid_single_chunk(bytes: Vec<u8>) -> UnpackedChunk {
+        let chunk_size = bytes.len();
+        let leaves = irys_types::generate_leaves(std::iter::once(Ok(bytes.clone())), chunk_size)
+            .expect("leaves");
+        let root = irys_types::generate_data_root(leaves).expect("root");
+        let data_root = H256(root.id);
+        let proof = irys_types::resolve_proofs(root, None)
+            .expect("proofs")
+            .into_iter()
+            .next()
+            .expect("one proof");
+        UnpackedChunk {
+            data_root,
+            data_size: chunk_size as u64,
+            data_path: proof.proof.into(),
+            bytes: bytes.into(),
+            tx_offset: TxChunkOffset::from(0),
+        }
     }
 }

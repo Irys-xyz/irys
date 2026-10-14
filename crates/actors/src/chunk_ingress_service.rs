@@ -240,15 +240,7 @@ impl ChunkIngressServiceInner {
         let option_chunks_map = self.pending_chunks.write().await.pop(&data_root);
         if let Some(chunks_map) = option_chunks_map {
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-            for chunk in chunks {
-                if let Err(err) = self.handle_chunk_ingress_message(chunk).await {
-                    metrics::record_chunk_error(err.error_type(), err.is_advisory());
-                    error!(
-                        "Failed to handle pending chunk ingress for data_root {:?}: {:?}",
-                        data_root, err
-                    );
-                }
-            }
+            self.finish_pending_drain(data_root, chunks).await;
         }
     }
 }
