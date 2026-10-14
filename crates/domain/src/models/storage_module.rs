@@ -43,6 +43,7 @@ use derive_more::derive::{Deref, DerefMut};
 use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 #[cfg(feature = "bench")]
 use irys_database::submodule::RocksTuning;
+use irys_database::submodule::db::placement_overlaps_inclusive_span;
 #[cfg(test)]
 use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
 use irys_database::submodule::{
@@ -5877,24 +5878,25 @@ impl StorageModule {
                     let Some(infos) = tx.get_data_root_infos_for_data_root(*data_root)? else {
                         continue;
                     };
-                    let remaining: Vec<_> = infos
-                        .0
-                        .into_iter()
-                        .filter(|di| {
-                            // Keep the placement iff its full on-disk extent
-                            // [start_offset, start_offset + ceil(data_size / chunk_size) - 1]
-                            // does NOT intersect the orphaned range. Matching on
-                            // start_offset alone would leave a stale entry for a
-                            // placement that begins before the range (e.g. a
-                            // cross-partition placement in a higher module, whose
-                            // start_offset is negative) but extends into it.
-                            let extent_start = di.start_offset.0;
-                            let extent_chunks =
-                                di.data_size.div_ceil(self.config.consensus.chunk_size) as i32;
-                            let extent_end = (extent_start + extent_chunks).saturating_sub(1);
-                            extent_end < range_start as i32 || extent_start > range_end as i32
-                        })
-                        .collect();
+                    let mut remaining = Vec::new();
+                    for di in infos.0 {
+                        // Keep the placement iff its full on-disk extent
+                        // [start_offset, start_offset + ceil(data_size / chunk_size) - 1]
+                        // does NOT intersect the orphaned range. Matching on
+                        // start_offset alone would leave a stale entry for a
+                        // placement that begins before the range (e.g. a
+                        // cross-partition placement in a higher module, whose
+                        // start_offset is negative) but extends into it.
+                        let overlaps = placement_overlaps_inclusive_span(
+                            &di,
+                            start,
+                            end,
+                            self.config.consensus.chunk_size,
+                        )?;
+                        if !overlaps {
+                            remaining.push(di);
+                        }
+                    }
                     tx.set_data_root_infos_for_data_root(*data_root, DataRootInfos(remaining))?;
                 }
                 Ok(())
@@ -6126,11 +6128,15 @@ impl StorageModule {
         let overlap = storage_range
             .intersection(&chunk_range)
             .ok_or_else(|| eyre::eyre!("chunk_range does not overlap storage module range"))?;
-        let start = overlap.start() - storage_range.start();
-        let end = overlap.end() - storage_range.start();
+        let start = *(overlap.start() - storage_range.start());
+        let end = *(overlap.end() - storage_range.start());
         let partition_overlap = PartitionChunkRange(ii(
-            PartitionChunkOffset::from(start),
-            PartitionChunkOffset::from(end),
+            PartitionChunkOffset(
+                u32::try_from(start).wrap_err("partition overlap start does not fit in u32")?,
+            ),
+            PartitionChunkOffset(
+                u32::try_from(end).wrap_err("partition overlap end does not fit in u32")?,
+            ),
         ));
         let relative = *chunk_range.start() as i64 - *storage_range.start() as i64;
         let start_offset = RelativeChunkOffset::from(i32::try_from(relative)?);
@@ -6707,7 +6713,10 @@ impl StorageModule {
         ledger_offset: LedgerChunkOffset,
     ) -> Result<Option<PackedChunk>> {
         let range = self.get_storage_module_ledger_offsets()?;
-        let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
+        let delta = *(ledger_offset - range.start());
+        let partition_offset = PartitionChunkOffset(
+            u32::try_from(delta).wrap_err("partition offset does not fit in u32")?,
+        );
 
         self.generate_full_chunk(partition_offset)
     }
@@ -6909,12 +6918,15 @@ impl StorageModule {
                     {
                         placement_index += 1;
                     }
-                    out[idx] = placements
+                    out[idx] = match placements
                         .get(placement_index)
                         .filter(|placement| placement.start <= cur && placement.end >= cur)
-                        .and_then(|placement| {
-                            Self::tx_offset_in_placement(placement, cur, chunk_size)
-                        });
+                    {
+                        Some(placement) => {
+                            Self::tx_offset_in_placement(placement, cur, chunk_size)?
+                        }
+                        None => None,
+                    };
                     if cur == sub_last {
                         break;
                     }
@@ -6936,30 +6948,38 @@ impl StorageModule {
     /// `tx_offset` is `partition_offset - placement.tx_start_offset`.
     ///
     /// The offset must fall inside `data_size`. The start can be negative when
-    /// the tx begins before this module.
+    /// the tx begins before this module. A partition offset that does not fit
+    /// in `i32` is an error.
     fn tx_offset_in_placement(
         placement: &Placement,
         partition_offset: PartitionChunkOffset,
         chunk_size: u64,
-    ) -> Option<(DataRoot, TxChunkOffset, u64)> {
-        let partition_rel = RelativeChunkOffset::from(partition_offset);
+    ) -> eyre::Result<Option<(DataRoot, TxChunkOffset, u64)>> {
+        let partition_rel =
+            RelativeChunkOffset(i32::try_from(partition_offset.0).map_err(|_| {
+                eyre!(
+                    "partition offset {} does not fit in i32",
+                    partition_offset.0
+                )
+            })?);
         if placement.tx_start_offset > partition_rel {
-            return None;
+            return Ok(None);
         }
         let tx_offset_i32 = *partition_rel - *placement.tx_start_offset;
         if tx_offset_i32 < 0 {
-            return None;
+            return Ok(None);
         }
-        let tx_offset_u32 = tx_offset_i32 as u32;
+        let tx_offset_u32 = u32::try_from(tx_offset_i32)
+            .map_err(|_| eyre!("tx offset {tx_offset_i32} does not fit in u32"))?;
         let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
         if chunk_byte_offset >= placement.data_size {
-            return None;
+            return Ok(None);
         }
-        Some((
+        Ok(Some((
             placement.data_root,
             TxChunkOffset::from(tx_offset_u32),
             placement.data_size,
-        ))
+        )))
     }
 
     /// Placement of one partition offset: `(data_root, tx_offset, data_size)`.
@@ -6978,11 +6998,7 @@ impl StorageModule {
         };
         index_read_metrics::note("tx_path");
         index_read_metrics::note("tx_leaf");
-        Ok(Self::tx_offset_in_placement(
-            &placement,
-            partition_offset,
-            chunk_size,
-        ))
+        Self::tx_offset_in_placement(&placement, partition_offset, chunk_size)
     }
 
     /// Whether the local index can resolve `data_root` + placement for `partition_offset`.
@@ -7761,11 +7777,13 @@ impl StorageModule {
             chunk_range,
             storage_module_range
         );
-        let start = chunk_range.start() - storage_module_range.start();
-        let end = chunk_range.end() - storage_module_range.start();
+        let start = *(chunk_range.start() - storage_module_range.start());
+        let end = *(chunk_range.end() - storage_module_range.start());
         Ok(PartitionChunkRange(ii(
-            PartitionChunkOffset::from(start),
-            PartitionChunkOffset::from(end),
+            PartitionChunkOffset(
+                u32::try_from(start).wrap_err("partition start does not fit in u32")?,
+            ),
+            PartitionChunkOffset(u32::try_from(end).wrap_err("partition end does not fit in u32")?),
         )))
     }
 
@@ -7793,8 +7811,7 @@ impl StorageModule {
         if local_offset < 0 {
             return Err(eyre::eyre!("chunk offset not in storage module"));
         }
-        // no need to worry about this conversion failing since we are already handling the negative case
-        Ok(local_offset as u32)
+        Ok(u32::try_from(local_offset)?)
     }
 
     /// Counts the lane keeps for a load-test sample. Production code does not call this.
@@ -8221,6 +8238,52 @@ mod tests {
         ledger_chunk_offset_ii, partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
+
+    fn sample_placement(tx_start: i32, data_size: u64) -> Placement {
+        Placement {
+            data_root: H256::repeat_byte(1),
+            tx_start_offset: RelativeChunkOffset(tx_start),
+            data_size,
+            ledger: None,
+            start: PartitionChunkOffset(0),
+            end: PartitionChunkOffset(u32::MAX),
+            block_height: None,
+            tx_index: None,
+        }
+    }
+
+    #[test]
+    fn tx_offset_above_i32_max_is_an_error() {
+        let err = StorageModule::tx_offset_in_placement(
+            &sample_placement(0, u64::MAX),
+            PartitionChunkOffset((i32::MAX as u32) + 1),
+            1,
+        )
+        .expect_err("partition offset above i32::MAX");
+        assert!(err.to_string().contains("does not fit in i32"), "{err}");
+    }
+
+    #[test]
+    fn tx_offset_counts_chunks_from_the_tx_start() -> eyre::Result<()> {
+        let got = StorageModule::tx_offset_in_placement(
+            &sample_placement(-1, 100),
+            PartitionChunkOffset(4),
+            8,
+        )?;
+        let (root, offset, size) = got.expect("inside the extent");
+        assert_eq!(root, H256::repeat_byte(1));
+        assert_eq!(offset, TxChunkOffset::from(5_u32));
+        assert_eq!(size, 100);
+        assert!(
+            StorageModule::tx_offset_in_placement(
+                &sample_placement(0, 8),
+                PartitionChunkOffset(1),
+                8,
+            )?
+            .is_none()
+        );
+        Ok(())
+    }
 
     fn index_database(engine: SubmoduleIndexEngine) -> DatabaseConfig {
         DatabaseConfig {

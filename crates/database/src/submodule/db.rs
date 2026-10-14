@@ -607,20 +607,29 @@ pub fn list_data_root_infos<T: DbTx>(
 /// `true` when the placement extent overlaps the inclusive span.
 ///
 /// Extent is `[start_offset, start_offset + ceil(data_size / chunk_size) - 1]`.
-/// A zero `chunk_size` overlaps, so the placement is not kept.
-pub(super) fn placement_overlaps_inclusive_span(
+/// A zero `chunk_size` overlaps, so the placement is not kept. The chunk
+/// count and both span offsets must fit in `i32`.
+pub fn placement_overlaps_inclusive_span(
     info: &DataRootInfo,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
     chunk_size: u64,
-) -> bool {
+) -> eyre::Result<bool> {
     if chunk_size == 0 {
-        return true;
+        return Ok(true);
     }
     let extent_start = info.start_offset.0;
-    let extent_chunks = info.data_size.div_ceil(chunk_size) as i32;
-    let extent_end = (extent_start + extent_chunks).saturating_sub(1);
-    !(extent_end < start.0 as i32 || extent_start > end.0 as i32)
+    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
+        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
+    let extent_end = extent_start
+        .checked_add(extent_chunks)
+        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
+        .saturating_sub(1);
+    let span_start = i32::try_from(start.0)
+        .map_err(|_| eyre::eyre!("partition offset {} does not fit in i32", start.0))?;
+    let span_end = i32::try_from(end.0)
+        .map_err(|_| eyre::eyre!("partition offset {} does not fit in i32", end.0))?;
+    Ok(!(extent_end < span_start || extent_start > span_end))
 }
 
 /// Placements that miss every span. `None` when nothing overlapped.
@@ -628,22 +637,24 @@ pub(super) fn trim_data_root_placements(
     infos: DataRootInfos,
     spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
     chunk_size: u64,
-) -> Option<DataRootInfos> {
+) -> eyre::Result<Option<DataRootInfos>> {
     let mut changed = false;
-    let remaining = infos
-        .0
-        .into_iter()
-        .filter(|info| {
-            let hit = spans.iter().any(|(start, end)| {
-                placement_overlaps_inclusive_span(info, *start, *end, chunk_size)
-            });
-            if hit {
-                changed = true;
+    let mut remaining = Vec::new();
+    for info in infos.0 {
+        let mut hit = false;
+        for (start, end) in spans {
+            if placement_overlaps_inclusive_span(&info, *start, *end, chunk_size)? {
+                hit = true;
+                break;
             }
-            !hit
-        })
-        .collect();
-    changed.then_some(DataRootInfos(remaining))
+        }
+        if hit {
+            changed = true;
+        } else {
+            remaining.push(info);
+        }
+    }
+    Ok(changed.then_some(DataRootInfos(remaining)))
 }
 
 /// Durable row written before a reset clears the index.
@@ -901,6 +912,78 @@ mod tests {
     use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::DbTx as _;
+
+    #[test]
+    fn placement_extent_above_i32_max_is_an_error() {
+        let info = DataRootInfo {
+            start_offset: RelativeChunkOffset(0),
+            data_size: (i32::MAX as u64) + 1,
+        };
+        let err = super::placement_overlaps_inclusive_span(
+            &info,
+            PartitionChunkOffset(0),
+            PartitionChunkOffset(1),
+            1,
+        )
+        .expect_err("chunk count above i32::MAX");
+        assert!(err.to_string().contains("does not fit in i32"), "{err}");
+
+        let narrow = DataRootInfo {
+            start_offset: RelativeChunkOffset(0),
+            data_size: 1,
+        };
+        let err = super::placement_overlaps_inclusive_span(
+            &narrow,
+            PartitionChunkOffset((i32::MAX as u32) + 1),
+            PartitionChunkOffset((i32::MAX as u32) + 1),
+            1,
+        )
+        .expect_err("span offset above i32::MAX");
+        assert!(err.to_string().contains("does not fit in i32"), "{err}");
+    }
+
+    #[test]
+    fn placement_extent_overlap_uses_the_chunk_count() -> eyre::Result<()> {
+        let info = DataRootInfo {
+            start_offset: RelativeChunkOffset(0),
+            data_size: 10,
+        };
+        assert!(super::placement_overlaps_inclusive_span(
+            &info,
+            PartitionChunkOffset(0),
+            PartitionChunkOffset(0),
+            8,
+        )?);
+        assert!(!super::placement_overlaps_inclusive_span(
+            &info,
+            PartitionChunkOffset(2),
+            PartitionChunkOffset(3),
+            8,
+        )?);
+        assert!(super::placement_overlaps_inclusive_span(
+            &info,
+            PartitionChunkOffset(9),
+            PartitionChunkOffset(9),
+            0,
+        )?);
+        let negative = DataRootInfo {
+            start_offset: RelativeChunkOffset(-2),
+            data_size: 3,
+        };
+        assert!(super::placement_overlaps_inclusive_span(
+            &negative,
+            PartitionChunkOffset(0),
+            PartitionChunkOffset(0),
+            1,
+        )?);
+        assert!(!super::placement_overlaps_inclusive_span(
+            &negative,
+            PartitionChunkOffset(1),
+            PartitionChunkOffset(1),
+            1,
+        )?);
+        Ok(())
+    }
 
     #[test]
     fn db_compact_dataroot_info() -> eyre::Result<()> {

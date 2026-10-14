@@ -154,7 +154,7 @@ fn placements_for_interval<R: SubmoduleRead + ?Sized>(
         if seg_end < query_start || *cut > query_end {
             continue;
         }
-        let Some(info) = covering_info(&infos.0, *cut) else {
+        let Some(info) = covering_info(&infos.0, *cut)? else {
             continue;
         };
         out.push(Placement {
@@ -176,18 +176,26 @@ fn placements_for_interval<R: SubmoduleRead + ?Sized>(
 /// This is the same selection `StorageModule::resolve_placement` used before
 /// the placement read lived here. An empty list, or a list whose first start
 /// is still above the probe, is not a covering placement.
-fn covering_info(infos: &[DataRootInfo], probe: PartitionChunkOffset) -> Option<DataRootInfo> {
+fn covering_info(
+    infos: &[DataRootInfo],
+    probe: PartitionChunkOffset,
+) -> eyre::Result<Option<DataRootInfo>> {
     if infos.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut sorted = infos.to_vec();
     sorted.sort_unstable();
-    let probe_rel = RelativeChunkOffset::from(probe);
+    let probe_rel = RelativeChunkOffset(
+        i32::try_from(probe.0)
+            .map_err(|_| eyre!("partition offset {} does not fit in i32", probe.0))?,
+    );
     let index = sorted
         .partition_point(|info| info.start_offset <= probe_rel)
         .saturating_sub(1);
-    let info = sorted.get(index)?;
-    (info.start_offset <= probe_rel).then(|| info.clone())
+    let Some(info) = sorted.get(index) else {
+        return Ok(None);
+    };
+    Ok((info.start_offset <= probe_rel).then(|| info.clone()))
 }
 
 /// Real data root for a stored tx path, checked against the proof leaf.
@@ -217,4 +225,20 @@ fn data_root_for_stored_path<R: SubmoduleRead + ?Sized>(
         binding.prefix_hash,
     );
     Ok(Some(binding.data_root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn covering_info_rejects_an_offset_above_i32_max() {
+        let infos = [DataRootInfo {
+            start_offset: RelativeChunkOffset(0),
+            data_size: 1,
+        }];
+        let err = covering_info(&infos, PartitionChunkOffset((i32::MAX as u32) + 1))
+            .expect_err("offset above i32::MAX");
+        assert!(err.to_string().contains("does not fit in i32"), "{err}");
+    }
 }

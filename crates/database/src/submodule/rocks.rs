@@ -1414,6 +1414,8 @@ impl RocksSubmoduleStore {
             .ok_or_else(|| eyre::eyre!("missing column family {cf}"))?;
         let mut opts = ReadOptions::default();
         opts.fill_cache(false);
+        // A prefix extractor stops `Next` unless the seek is total order.
+        opts.set_total_order_seek(true);
         let encoded = after.map(encode_key);
         let mode = match &encoded {
             None => IteratorMode::Start,
@@ -1461,6 +1463,8 @@ impl RocksSubmoduleStore {
             .ok_or_else(|| eyre::eyre!("missing column family {cf}"))?;
         let mut opts = ReadOptions::default();
         opts.fill_cache(false);
+        // A prefix extractor stops `Next` unless the seek is total order.
+        opts.set_total_order_seek(true);
         let encoded = after.map(encode_key);
         let snap = self.db.snapshot();
         let mut iter = snap.raw_iterator_cf_opt(handle, opts);
@@ -2465,12 +2469,15 @@ impl RocksSubmoduleStore {
         }
         {
             let handle = cf_handle(&self.db, Cf::Content)?;
-            for item in snap.iterator_cf(&handle, IteratorMode::Start) {
-                let (key, value) = item.wrap_err("scan content-hash offset index")?;
+            let mut iter = snap.raw_iterator_cf_opt(&handle, full_scan_options());
+            iter.seek_to_first();
+            while let Some(key) = iter.key() {
+                let key_owned = key.to_vec();
+                let value = iter.value().unwrap_or(&[]).to_vec();
                 if !value.is_empty() {
                     findings.push("content-hash row value is not empty".to_string());
                 }
-                match records::decode_content_key(&key) {
+                match records::decode_content_key(&key_owned) {
                     Some((_, offset)) if covers(offset.0) => {}
                     Some((_, offset)) => findings.push(format!(
                         "content-hash row at {} is outside every interval",
@@ -2478,7 +2485,9 @@ impl RocksSubmoduleStore {
                     )),
                     None => findings.push("content-hash key does not decode".to_string()),
                 }
+                iter.next();
             }
+            iter.status().wrap_err("scan content-hash offset index")?;
         }
         let content = self.audit_content_index()?;
         if content.missing_reverse != 0 {
@@ -4359,6 +4368,11 @@ impl Rows<'_> {
 
     fn cursor(&self, cf: Cf, start: Option<&[u8]>) -> eyre::Result<MergeCursor<'_>> {
         let handle = cf_handle(self.db, cf)?;
+        // A prefix extractor stops `Next` at the first prefix unless the
+        // iterator is total order. Prefix lookups do not use this cursor.
+        // The block cache stays on: pending and data-root reads are hot.
+        let mut opts = ReadOptions::default();
+        opts.set_total_order_seek(true);
         let mode = match start {
             Some(key) => IteratorMode::From(key, Direction::Forward),
             None => IteratorMode::Start,
@@ -4367,14 +4381,14 @@ impl Rows<'_> {
             .overlay
             .map(|overlay| overlay.deleted_ranges[cf.index()].clone())
             .unwrap_or_default();
-        let db = self
-            .snap
-            .iterator_cf(&handle, mode)
-            .filter_map(move |item| match item {
-                Ok((key, _)) if offset_key_in_ranges(&hidden, &key) => None,
-                Ok((key, value)) => Some(Ok((key.into_vec(), value.into_vec()))),
-                Err(err) => Some(Err(eyre::eyre!("{err}"))),
-            });
+        let db =
+            self.snap
+                .iterator_cf_opt(&handle, opts, mode)
+                .filter_map(move |item| match item {
+                    Ok((key, _)) if offset_key_in_ranges(&hidden, &key) => None,
+                    Ok((key, value)) => Some(Ok((key.into_vec(), value.into_vec()))),
+                    Err(err) => Some(Err(eyre::eyre!("{err}"))),
+                });
         let cleared = self
             .overlay
             .is_some_and(|overlay| overlay.cleared[cf.index()]);
@@ -6560,6 +6574,63 @@ mod tests {
             }
             Ok(())
         })
+    }
+
+    /// A full scan of `ChunkOffsetsByContentHash` has to cross prefixes.
+    ///
+    /// The family uses a 32-byte prefix extractor. An iterator that leaves
+    /// `total_order_seek` off is not required to return the next hash.
+    /// `audit_index` and `Rows::cursor` both walk every key.
+    #[test]
+    fn content_prefix_scans_see_every_hash() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_content_order")
+            .build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[], None)?;
+        let inside = content_index_key(H256::repeat_byte(1), 1);
+        let outside = content_index_key(H256::repeat_byte(0xFE), 100);
+        let handle = cf_handle(&store.db, Cf::Content)?;
+        store.db.put_cf(&handle, inside, [])?;
+        store.db.put_cf(&handle, outside, [])?;
+        store.db.flush_cf(&handle)?;
+
+        let findings = store.audit_index()?;
+        assert!(
+            findings
+                .iter()
+                .any(|line| { line.contains("content-hash row at 100 is outside every interval") }),
+            "{findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|line| { !line.contains("content-hash row at 1 is outside every interval") }),
+            "{findings:?}"
+        );
+
+        let snap = store.db.snapshot();
+        let rows = Rows {
+            db: store.db.as_ref(),
+            snap: &snap,
+            overlay: None,
+            layout: store.layout,
+        };
+        let mut cursor = rows.cursor(Cf::Content, None)?;
+        let mut seen = Vec::new();
+        while let Some((key, value)) = cursor.next_kv()? {
+            assert!(value.is_empty(), "content value is empty");
+            seen.push(key);
+        }
+        assert_eq!(seen, vec![inside.to_vec(), outside.to_vec()], "{seen:?}");
+        Ok(())
+    }
+
+    fn content_index_key(hash: H256, offset: u32) -> [u8; 36] {
+        let mut key = [0_u8; 36];
+        key[..32].copy_from_slice(&hash.0);
+        key[32..].copy_from_slice(&offset.to_be_bytes());
+        key
     }
 
     /// Overwrite, uninitialized rollback, expiry, and reset leave no row

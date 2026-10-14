@@ -1223,10 +1223,10 @@ fn spans_need_coverage_drop(
     }
     for (_, infos) in tx.data_root_entries()? {
         for info in &infos.0 {
-            if spans.iter().any(|(start, end)| {
-                super::db::placement_overlaps_inclusive_span(info, *start, *end, chunk_size)
-            }) {
-                return Ok(true);
+            for &(start, end) in spans {
+                if super::db::placement_overlaps_inclusive_span(info, start, end, chunk_size)? {
+                    return Ok(true);
+                }
             }
         }
     }
@@ -1247,7 +1247,7 @@ fn drop_coverage_rows(
         return Ok(());
     }
     for (root, infos) in tx.data_root_entries()? {
-        if let Some(remaining) = trim_data_root_placements(infos, spans, chunk_size) {
+        if let Some(remaining) = trim_data_root_placements(infos, spans, chunk_size)? {
             tx.set_data_root_infos_for_data_root(root, remaining)?;
         }
     }

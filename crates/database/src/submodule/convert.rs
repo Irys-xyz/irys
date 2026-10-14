@@ -1392,7 +1392,7 @@ fn split_stored_interval(
             path_hash: seg_hash,
             data_root: derived.data_root,
             prefix_hash: header.prefix_hash,
-            info: select_covering_info(&infos, seg_start),
+            info: select_covering_info(&infos, seg_start)?,
             ledger_id: map.ledger.get_id(),
             block_height: derived.height,
             tx_index,
@@ -1439,18 +1439,23 @@ fn derive_at(
 fn select_covering_info(
     infos: &[DataRootInfo],
     probe: PartitionChunkOffset,
-) -> Option<DataRootInfo> {
+) -> eyre::Result<Option<DataRootInfo>> {
     if infos.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut sorted = infos.to_vec();
     sorted.sort_unstable();
-    let probe_rel = RelativeChunkOffset::from(probe);
+    let probe_rel = RelativeChunkOffset(
+        i32::try_from(probe.0)
+            .map_err(|_| eyre::eyre!("partition offset {} does not fit in i32", probe.0))?,
+    );
     let index = sorted
         .partition_point(|info| info.start_offset <= probe_rel)
         .saturating_sub(1);
-    let info = sorted.get(index)?;
-    (info.start_offset <= probe_rel).then(|| info.clone())
+    let Some(info) = sorted.get(index) else {
+        return Ok(None);
+    };
+    Ok((info.start_offset <= probe_rel).then(|| info.clone()))
 }
 
 /// Inclusive segments of `[start, end]`. A negative info start does not cut.

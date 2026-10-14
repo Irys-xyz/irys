@@ -65,6 +65,139 @@ with the proof (measured at 1–3 bytes per chunk less than a header; see
 derives that path from the consensus database. MDBX keeps
 `ChunkDataPathByOffset` and stores only the proof.
 
+## RocksDB v1 format
+
+One RocksDB directory per submodule. The comparator is bytewise. Numeric
+fields below are big-endian except the Metadata key and the CRC32C word.
+Baseline compression is LZ4. Baseline block size is 64 KiB. Baseline uses
+a two-level index. A bloom, when present, is a full filter at 10 bits per
+key. Partitioned filters are on in the baseline when that family has a
+bloom. Blob files are off in the baseline. The offset family still runs
+blob GC so an older blob file can be rewritten inline.
+
+`rocks/SCHEMA` and Metadata key 1 store the same raw bytes:
+`irys-submodule-index rocksdb 1\n` (31 bytes, newline included).
+
+A full scan of a family that has a prefix extractor sets
+`total_order_seek`. A prefix lookup leaves that flag off and sets
+`prefix_same_as_start`.
+
+### ChunkMetaByOffset
+
+Key: partition offset, `u32`, 4 bytes.
+
+Value: the proof bytes when the proof flag is set, then the CRC32C `u32`
+little-endian when the checksum flag is set, then `flags u8`, then
+`format u8 = 1`. Flag `0x01` means a proof is present. Flag `0x02` means
+the CRC32C word is present. Any other flag bit, or a format byte other
+than 1, fails decode. A stored CRC of 0 is a real checksum. Unknown is
+the checksum flag being unset. A checksum-only row is 6 bytes. A proof
+with a checksum is `proof_len + 6`. A proof without a checksum is
+`proof_len + 2`. An empty proof, or bytes before a checksum-only trailer,
+is not a row. Both fields absent deletes the row.
+
+No prefix extractor. Bloom is off in the baseline. It is on when the
+offset-family bloom or the all-family bloom is selected.
+
+### PlacementIntervals
+
+Key: inclusive start, `u32`, 4 bytes.
+
+Value: 64 bytes. `end u32` at 0, data root 32 bytes at 4, `tx_start i32`
+at 36, `data_size u64` at 40, `ledger u32` at 48, `block_height u64` at
+52, `tx_index u32` at 60. `u32::MAX` and `u64::MAX` read back as unset
+for the ledger, the height, and the tx index.
+
+No prefix extractor. Bloom is off unless every family has a bloom.
+
+### DataRootPlacements
+
+Key: data root, 32 bytes, then the interval start `u32`. 36 bytes. No
+separator.
+
+Value: 16 bytes. `end u32`, `tx_start i32`, `data_size u64`.
+
+No prefix extractor. A read seeks the 32-byte data root. Bloom is off
+unless every family has a bloom. A whole-key bloom cannot answer that
+seek.
+
+### PendingBodyMigrations
+
+Key: clipped partition start, `u32`, 4 bytes. The MDBX name is
+`PendingBodyMigrationsByOffset`. Resume deletes the old key and writes
+the new key. The key is a cursor, not a stored end.
+
+Value: 56 bytes. Data root 32 bytes at 0, `data_size u64` at 32,
+unclipped `start_offset i32` at 40, `block_height u64` at 44, `attempts
+u32` at 52. No unset sentinel.
+
+No prefix extractor. Bloom is off unless every family has a bloom.
+
+### ChunkOffsetsByContentHash
+
+Key: leaf content hash, 32 bytes, then the partition offset `u32`. 36
+bytes. The hash is the leaf in the last 64 bytes of the proof. A shorter
+proof has no row. A checksum-only row has no row. The checksum is not
+part of the key.
+
+Value: empty. A non-empty value is a finding.
+
+Prefix extractor `rocksdb.FixedPrefix.32`. Memtable prefix bloom ratio
+0.1. `whole_key_filtering` is false. The bloom is always on, 10 bits per
+prefix. A lookup of one hash sets `prefix_same_as_start` and does not set
+`total_order_seek`. A scan of every hash sets `total_order_seek`.
+
+### Metadata
+
+Key: `u32` little-endian, 4 bytes. This is not the big-endian `u32` used
+by the other families. The little-endian key matches the MDBX metadata
+key.
+
+| Key | Name | Value |
+| --- | --- | --- |
+| 1 | schema | Raw marker, 31 bytes. Same bytes as `rocks/SCHEMA`. |
+| 2 | reset | SCALE encoding of a one-byte vector `[0x01]`. Stored bytes are `04 01`. Readers test presence. Delete removes the key. |
+| 3 | partition hash | Raw 32 bytes. Absent until the module is assigned. `clear` deletes this key. |
+| 4 | packing identity | Packing-identity bytes are specified with the packing check. |
+| 5 | checksum scan complete | Same `04 01` presence encoding as the reset key. Absent means unset. Reset deletes this key. `clear` does not. |
+
+Point gets only. An unknown discriminant is not decoded. No prefix
+extractor. Bloom is off unless every family has a bloom.
+
+### Feature flags
+
+Feature-flag bytes are specified with the open check.
+
+### default
+
+Empty. Created so open does not attach a private cache. Same options as
+Metadata, so no prefix extractor. Not a schema table.
+
+### Ceilings
+
+Partition offsets are `u32`. A key cannot name an offset above
+`2^32 - 1`. A writer that builds a partition offset from a wider integer
+uses `try_from` and returns an error.
+
+`tx_start` is `i32`. It is a value field on the placement, the data-root
+row, and the pending row. A start that does not fit in `i32` is an error.
+A negative start means the tx began before this module. Big-endian order
+places a negative `tx_start` after every non-negative value. No scan
+orders by that field.
+
+A placement extent is `[tx_start, tx_start + ceil(data_size / chunk_size) - 1]`.
+The chunk count and a partition offset used in that comparison must fit
+in `i32`. A value that does not fit is an error.
+
+`data_size` is `u64` and is not narrowed on encode. `ledger` and
+`tx_index` use `u32::MAX` as unset, so a stored id must not be that
+value. `block_height` uses `u64::MAX` as unset.
+
+An inclusive offset span is deleted and bounded as a half-open range.
+The exclusive end is `end + 1`. When `end` is `u32::MAX`, the end key is
+the 4-byte max key plus a trailing `0`, which sorts after every 4-byte
+offset.
+
 The converter is `submodule-index-convert` in the `irys-database` crate.
 Build it with the `rocksdb` feature. Stop the node before you run it.
 The tool takes the index lock and refuses the run when that lock is held.
