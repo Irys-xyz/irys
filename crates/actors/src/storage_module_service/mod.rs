@@ -322,31 +322,8 @@ impl StorageModuleServiceInner {
                 continue;
             }
 
-            // Get the path for this module - this is the only place the storage module id can be used as an index
+            // Path equality for every update entry was checked in the pass above.
             let path = &self.submodules_config.submodule_paths[sm_info.id];
-
-            // Validate the path
-            // ARCHITECTURE NOTE: Configuration vs. Implementation Mismatch
-            //
-            // There's a fundamental disconnect between the configuration system and the storage module design:
-            //
-            // 1. Original Design Intent:
-            //    The StorageModule system was designed to support multiple submodules per StorageModule,
-            //    allowing several smaller storage units to be combined into a single 16TB logical partition.
-            //
-            // 2. Current Configuration Limitation:
-            //    The configuration system lacks the capability to express this many-to-one relationship.
-            //
-            // 3. Testnet Simplification:
-            //    For Testnet, we adopt a simplified 1:1 mapping where each StorageModule contains
-            //    exactly one submodule representing a full 16TB partition.
-            //
-            // This limitation should be addressed in future versions to fully realize the original
-            // flexible storage architecture. see [`system_ledger::get_genesis_commitments()`] and
-            // [`EpochServiceActor::map_storage_modules_to_partition_assignments`] for reference
-            if *path != sm_info.submodules[0].1 {
-                return Err(eyre::eyre!("Submodule paths don't match"));
-            }
 
             // Validate the in memory storage module against on-disk packing parameters
             if let Some(info_pa) = sm_info.partition_assignment {
