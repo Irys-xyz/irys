@@ -774,14 +774,6 @@ impl DataSyncServiceInner {
                     );
                     peer_manager.set_max_concurrency(current_max + increase);
                 }
-            } else {
-                // debug!(
-                //     "Not increasing concurrency for peer {} max_concurrency {} (concurrent utilization: {:.1}%, health: {:.2})",
-                //     peer_addr,
-                //     current_max,
-                //     utilization_ratio * 100.0,
-                //     health_score
-                // );
             }
         }
     }
