@@ -357,7 +357,7 @@ impl StorageModuleServiceInner {
                         // Index repair runs below for ledger-assigned modules.
                         // Direct ledger A→B reassignment uses the mining-bus
                         // reset path, not this presence scan.
-                        existing.assign_partition(info_pa, update_height);
+                        existing.assign_partition(info_pa, update_height)?;
                     }
                 }
             }

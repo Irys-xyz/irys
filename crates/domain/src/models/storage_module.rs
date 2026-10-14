@@ -911,16 +911,26 @@ pub struct PackingParams {
 }
 
 impl PackingParams {
-    /// Loads the [`PackingParams`] from a TOML file at the given path
+    /// Loads the [`PackingParams`] from a TOML file at the given path.
+    /// A read or parse error names `path`.
     pub fn from_toml(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        let contents = fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&contents)?;
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path)
+            .wrap_err_with(|| format!("packing params at {}", path.display()))?;
+        let config: Self = toml::from_str(&contents)
+            .wrap_err_with(|| format!("packing params at {}", path.display()))?;
         Ok(config)
     }
 
-    pub fn write_to_disk(&self, path: &Path) {
-        let toml = toml::to_string(self).expect("Able to serialize config");
-        fs::write(path, toml).unwrap_or_else(|_| panic!("Failed to write config to {:?}", path));
+    /// Replace `path` by writing a temp file and renaming it, the same way
+    /// `intervals.json` is replaced. A crash during the write leaves the
+    /// previous file in place.
+    pub fn write_to_disk(&self, path: &Path) -> eyre::Result<()> {
+        let toml = toml::to_string(self).wrap_err("serialize packing params")?;
+        let mut file = get_atomic_file(path)?;
+        file.write_all(toml.as_bytes())?;
+        file.commit()?;
+        Ok(())
     }
 
     /// Fills iterations and chunk size from the current consensus when the
@@ -950,7 +960,7 @@ fn ensure_recorded_packing_params(
 ) -> eyre::Result<PackingParams> {
     let mut params = PackingParams::from_toml(path)?;
     if params.backfill_recorded_packing(consensus) {
-        params.write_to_disk(path);
+        params.write_to_disk(path)?;
     }
     Ok(params)
 }
@@ -1795,11 +1805,12 @@ impl StorageModule {
                     params.ledger = pa.ledger_id;
                     params.slot = pa.slot_index;
                 }
-                params.write_to_disk(&params_path);
+                params.write_to_disk(&params_path)?;
             } else {
-                // Load the packing params and check to see if they match
-                let mut params =
-                    PackingParams::from_toml(&params_path).expect("packing params to load");
+                // Load the packing params and check to see if they match.
+                // A short or corrupt file is an open error. It must not abort
+                // the process before the address check.
+                let mut params = PackingParams::from_toml(&params_path)?;
 
                 ensure!(
                     params.packing_address == config.node_config.miner_address(),
@@ -1840,7 +1851,7 @@ impl StorageModule {
                     params.ledger = want_ledger;
                     params.slot = want_slot;
                     params.last_updated_height = Some(0);
-                    params.write_to_disk(&params_path);
+                    params.write_to_disk(&params_path)?;
                 }
             }
 
@@ -2234,38 +2245,40 @@ impl StorageModule {
         ))
     }
 
-    pub fn assign_partition(&self, partition_assignment: PartitionAssignment, update_height: u64) {
+    pub fn assign_partition(
+        &self,
+        partition_assignment: PartitionAssignment,
+        update_height: u64,
+    ) -> eyre::Result<()> {
         let mut pa = self.partition_assignment.write().unwrap();
-        self.store_assignment(&mut pa, Some(partition_assignment), update_height);
+        self.store_assignment(&mut pa, Some(partition_assignment), update_height)
     }
 
     /// Clears the current partition assignment and persists the change on disk.
     ///
     /// Writes `packing_params.toml` with `partition_hash = None`, `ledger = None`,
     /// `slot = None`, and updates `last_updated_height`. In-memory assignment is set to `None`.
-    pub fn clear_assignment(&self, update_height: u64) {
+    pub fn clear_assignment(&self, update_height: u64) -> eyre::Result<()> {
         let mut pa = self.partition_assignment.write().unwrap();
-        self.store_assignment(&mut pa, None, update_height);
+        self.store_assignment(&mut pa, None, update_height)
     }
 
     /// Store `next` and write each submodule's `packing_params.toml`.
-    /// The caller holds the assignment write lock.
+    /// The caller holds the assignment write lock. A parse or write error
+    /// leaves the in-memory assignment unchanged.
     fn store_assignment(
         &self,
         assignment: &mut Option<PartitionAssignment>,
         next: Option<PartitionAssignment>,
         update_height: u64,
-    ) {
+    ) -> eyre::Result<()> {
         let old_hash = assignment.as_ref().map(|current| current.partition_hash);
         let new_hash = next.map(|current| current.partition_hash);
-        *assignment = next;
-        if old_hash != new_hash {
-            self.entropy_cache.lock().unwrap().clear();
-        }
+        let mut updated = Vec::new();
         for (_, submodule) in self.submodules.iter() {
             let params_path = submodule.path.join(PACKING_PARAMS_FILE_NAME);
             let mut params = if params_path.exists() {
-                PackingParams::from_toml(&params_path).expect("packing params to load")
+                PackingParams::from_toml(&params_path)?
             } else {
                 PackingParams {
                     packing_address: self.config.node_config.miner_address(),
@@ -2280,8 +2293,16 @@ impl StorageModule {
             // Keep the iterations this module was packed with. Fill them only
             // when the file never recorded them.
             params.backfill_recorded_packing(&self.config.consensus);
-            params.write_to_disk(&params_path);
+            updated.push((params_path, params));
         }
+        for (path, params) in &updated {
+            params.write_to_disk(path)?;
+        }
+        *assignment = next;
+        if old_hash != new_hash {
+            self.entropy_cache.lock().unwrap().clear();
+        }
+        Ok(())
     }
 
     /// Returns the StorageModules partition_hash if assigned
@@ -3064,7 +3085,7 @@ impl StorageModule {
     ) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let mut assignment = self.partition_assignment.write().unwrap();
         let interval = self.reset()?;
-        self.store_assignment(&mut assignment, next, update_height);
+        self.store_assignment(&mut assignment, next, update_height)?;
         Ok(interval)
     }
 
@@ -11518,7 +11539,7 @@ mod tests {
             let unpacked = index_four_chunks(&storage)?;
             storage.write_data_chunk(&unpacked[0])?;
             let assignment = storage.partition_assignment().expect("assigned");
-            storage.assign_partition(assignment, 7);
+            storage.assign_partition(assignment, 7)?;
             assert_eq!(
                 storage.entropy_cache_offsets_for_test(),
                 vec![1, 2, 3],
@@ -11526,7 +11547,7 @@ mod tests {
             );
             let mut changed = assignment;
             changed.partition_hash = H256::repeat_byte(0x5C);
-            storage.assign_partition(changed, 8);
+            storage.assign_partition(changed, 8)?;
             assert!(storage.entropy_cache_offsets_for_test().is_empty());
         }
         {
@@ -13090,6 +13111,78 @@ mod tests {
         // One chunk over 2s. The 40 stale samples stay in the buffer and must not count.
         let expected = (chunk + 1) / 2;
         assert_eq!(storage.write_throughput_bps(), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_packing_params_names_its_path() -> eyre::Result<()> {
+        let (tmp, config, storage) = interval_batch_module("corrupt_packing", 0)?;
+        let path = tmp.path().join("sub").join(PACKING_PARAMS_FILE_NAME);
+        drop(storage);
+        fs::write(&path, b"not toml {{{")?;
+        let opened = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
+            },
+            &config,
+        );
+        let err = opened.expect_err("a corrupt packing_params.toml must not panic");
+        let message = format!("{err:#}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A later assignment must not panic, and must not publish, when the
+    /// file on disk no longer parses.
+    #[test]
+    fn corrupt_packing_params_fail_assignment_store() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("corrupt_packing_store")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1_000,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        // Absolute. `store_assignment` writes `submodule.path`, not
+        // `base_directory.join`.
+        let sub = tmp.path().join("sub");
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ii!(0, 3), sub.clone())],
+            },
+            &config,
+        )?;
+        let path = sub.join(PACKING_PARAMS_FILE_NAME);
+        fs::write(&path, b"not toml {{{")?;
+        let err = storage
+            .assign_partition(
+                PartitionAssignment {
+                    partition_hash: H256::repeat_byte(0x44),
+                    miner_address: config.node_config.miner_address(),
+                    ledger_id: None,
+                    slot_index: None,
+                },
+                2,
+            )
+            .expect_err("a corrupt packing_params.toml must not panic the assignment store");
+        let message = format!("{err:#}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(storage.partition_assignment().is_none());
         Ok(())
     }
 
@@ -15185,7 +15278,7 @@ mod tests {
             packing_address: address,
             ..PackingParams::default()
         };
-        legacy.write_to_disk(&path);
+        legacy.write_to_disk(&path).expect("write packing params");
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("entropy_packing_iterations"), "{text}");
         assert!(!text.contains("chunk_size"), "{text}");

@@ -185,7 +185,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         .join(PACKING_PARAMS_FILE_NAME);
     let mut params = PackingParams::from_toml(&params_path).expect("packing params to load");
     params.last_updated_height = None;
-    params.write_to_disk(&params_path);
+    params.write_to_disk(&params_path)?;
 
     // 5. Mine another epoch to get peer partition assigned to data ledger slot
     info!("Mining second epoch to assign peer to data ledger slot...");

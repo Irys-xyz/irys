@@ -874,7 +874,7 @@ mod tests {
             ledger_id: None,
             slot_index: None,
         };
-        module.assign_partition(assign(hash_a), 1);
+        module.assign_partition(assign(hash_a), 1)?;
         let first = vec![0x11_u8; CHUNK];
         assert!(module.write_entropy_chunk(PartitionChunkOffset::from(0), first.clone(), hash_a));
         module.sync_pending_chunks()?;
