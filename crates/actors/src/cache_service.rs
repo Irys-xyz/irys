@@ -74,23 +74,12 @@ pub enum CacheServiceAction {
     /// Sent by the mempool when txs are pruned (anchor expired) to prevent stale
     /// txid references from blocking publish candidate selection.
     PruneTxidsFromCachedDataRoots(HashMap<H256, Vec<H256>>),
-    /// Remove a specific block hash from `CachedDataRoot.block_set`.
-    /// `block_set` is a non-trusted hint (consensus now uses
-    /// `tx_inclusion::find_canonical_ledger_range`); this action exists so
-    /// observers that detect stale entries can scrub them without waiting
-    /// for the next confirmation to overwrite the hint.
+    /// Remove a block hash from `CachedDataRoot.block_set`.
     ///
-    /// **Status: intentionally parked primitive — no live production emitter.**
-    /// The original emitter (validator `get_assigned_ingress_proofs` walk
-    /// over `block_set` → `AssignedProofBlockMissing` recovery) was deleted
-    /// in commit 7da520194 when the validator was rewritten to use
-    /// `tx_inclusion::find_canonical_ledger_range` (no longer walks
-    /// `block_set`). The action + worker + handler are kept so future
-    /// stale-entry observers can wire in without rebuilding the primitive.
-    /// The `prune_block_hash_from_block_set_removes_stale_hash` test below
-    /// covers this path despite there being no current producer; treat any
-    /// "this is unused, delete it" review feedback against this primitive
-    /// as already-considered (REVIEW.md P2 #8).
+    /// `block_set` is a hint. Consensus reads
+    /// `tx_inclusion::find_canonical_ledger_range`. No production sender
+    /// emits this action. The handler stays so a stale hash can be removed,
+    /// and `prune_block_hash_from_block_set_removes_stale_hash` covers it.
     PruneBlockHashFromBlockSet {
         data_root: DataRoot,
         block_hash: H256,
@@ -186,8 +175,7 @@ impl InnerCacheTask {
             .get_block_bounds(ledger_id, LedgerChunkOffset::from(chunk_offset))
         {
             Ok(block_bounds) => {
-                // Genesis block (height 0) never enters block_index as it has no submit ledger
-                // data, use saturating_sub (defensive).
+                // Height 0 has no submit-ledger rows in the block index.
                 prune_height = Some(block_bounds.height.saturating_sub(1));
             }
             // Nothing indexed at this offset (yet) — fall through to the
@@ -220,8 +208,7 @@ impl InnerCacheTask {
                     chunk_offset
                 )
             })?;
-            // Genesis block (height 0) never enters canonical chain with submit ledger data,
-            // but use saturating_sub (defensive) for consistency
+            // Height 0 has no submit-ledger rows on the canonical chain.
             prune_height = Some(block_height.saturating_sub(1));
         }
 
@@ -2625,14 +2612,8 @@ mod tests {
         Ok(())
     }
 
-    // Verifies that `PruneBlockHashFromBlockSet` removes a stale block hash from
-    // `CachedDataRoot.block_set` and leaves other hashes untouched.
-    //
-    // NOTE: This exercises an intentionally parked primitive — no live
-    // production emitter sends `PruneBlockHashFromBlockSet` after the
-    // `AssignedProofBlockMissing` recovery walk was deleted (commit
-    // 7da520194). The test is kept so the primitive stays wirable for
-    // future stale-entry observers. See the action's doc-comment.
+    // `PruneBlockHashFromBlockSet` removes one stale hash and leaves the rest.
+    // No production sender emits the action. This test keeps the handler honest.
     #[tokio::test]
     async fn prune_block_hash_from_block_set_removes_stale_hash() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
