@@ -161,6 +161,89 @@ test_ladder_does_not_write_queue_when_mount_disk_differs() {
     rm -rf "$root"
 }
 
+queue_files() {
+    local queue=$1
+    mkdir -p "$queue"
+    printf '111\n' >"$queue/max_sectors_kb"
+    printf '128\n' >"$queue/read_ahead_kb"
+    printf '64\n' >"$queue/nr_requests"
+    printf '[mq-deadline] none\n' >"$queue/scheduler"
+}
+
+test_run_refuses_a_missing_path_that_escapes_loadtest() {
+    local name=run-dotdot root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest" "$root/sys/block/none/queue"
+    queue_files "$root/sys/block/none/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device none --mount /tmp \
+        --loadtest "$root/safe/loadtest" \
+        --recall-file "$root/safe/loadtest/../../escaped-recall.dat" \
+        --write-file "$root/safe/loadtest/write-region.dat" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0: $(cat "$err")"
+    elif ! grep -q "no loadtest path component" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_allows_a_missing_path_under_loadtest() {
+    local name=run-allow-missing root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest" "$root/sys/block/none/queue"
+    queue_files "$root/sys/block/none/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device none --mount /tmp \
+        --loadtest "$root/safe/loadtest/newdir" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused a path under loadtest: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_does_not_stash_when_recall_file_escapes() {
+    local name=ladder-recall-dotdot root module sys err
+    root=$(tmpdir)
+    module=$root/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$sys/block/none/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$sys" "$here/ladder.sh" \
+        --device none --mount /tmp --loadtest "$module" \
+        --recall-file "$module/../../escaped-recall.dat" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0"
+    elif ! grep -q "no loadtest path component" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index state was moved"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then

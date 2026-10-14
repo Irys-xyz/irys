@@ -15,6 +15,7 @@
 #   a missing pm2 binary is allowed
 #   the mount has less than MIN_FREE_GIB free (default 500)
 #   loadtest, the recall file, or the write file has no `loadtest` path component
+#   on the given path, or on the deepest existing ancestor plus the missing tail
 # The queue settings are written to <out>/sysfs.txt before the bench starts.
 #
 # The bench's exit code is appended to <out>/bench.out. This script exits 0
@@ -132,6 +133,43 @@ has_loadtest() {
     esac
 }
 
+# Canonicalize the deepest existing ancestor, then apply the missing tail.
+# `..` in that tail is applied, so loadtest/../../outside does not keep the component.
+resolve_path() {
+    local path=$1
+    local -a missing=()
+    local base parent
+    while [ ! -e "$path" ] && [ ! -L "$path" ]; do
+        base=$(basename -- "$path")
+        parent=$(dirname -- "$path")
+        if [ "$parent" = "$path" ]; then
+            echo "cannot resolve $1" >&2
+            return 1
+        fi
+        missing+=("$base")
+        if [ -z "$parent" ]; then
+            path=.
+            break
+        fi
+        path=$parent
+    done
+    local canon part
+    local i
+    canon=$(readlink -f "$path") || return 1
+    for ((i = ${#missing[@]} - 1; i >= 0; i--)); do
+        part=${missing[$i]}
+        if [ "$part" = "." ]; then
+            continue
+        fi
+        if [ "$part" = ".." ]; then
+            canon=$(dirname -- "$canon")
+            continue
+        fi
+        canon=$canon/$part
+    done
+    printf '%s\n' "$canon"
+}
+
 require_loadtest() {
     local label=$1
     local path=$2
@@ -139,13 +177,11 @@ require_loadtest() {
         echo "$label $path has no loadtest path component; refusing" >&2
         exit 1
     fi
-    if [ -e "$path" ]; then
-        local canon
-        canon=$(readlink -f "$path")
-        if ! has_loadtest "$canon"; then
-            echo "$label resolves to $canon, which has no loadtest path component; refusing" >&2
-            exit 1
-        fi
+    local resolved
+    resolved=$(resolve_path "$path") || exit 1
+    if ! has_loadtest "$resolved"; then
+        echo "$label resolves to $resolved, which has no loadtest path component; refusing" >&2
+        exit 1
     fi
 }
 

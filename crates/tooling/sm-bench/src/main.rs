@@ -30,7 +30,7 @@ use crate::drivers::{
     purge_migrations, recall_driver, resume_frontier, serve_driver, take_fatal,
 };
 use crate::guard::{
-    CHUNK_SIZE, check_written_extents, create_small, has_loadtest_component, require_loadtest,
+    CHUNK_SIZE, check_written_extents, create_small, require_loadtest, require_loadtest_ancestor,
 };
 use crate::module::{OpenRequest, flush_batch, open_module, pending_ceiling, span_limit};
 use crate::prepop::prepopulate;
@@ -307,9 +307,9 @@ fn run() -> eyre::Result<i32> {
         .init();
 
     let args = Args::parse();
-    refuse_without_loadtest("dir", &args.dir)?;
-    refuse_without_loadtest("recall-file", &args.recall_file)?;
-    refuse_without_loadtest("write-file", &args.write_file)?;
+    require_loadtest_ancestor("dir", &args.dir)?;
+    require_loadtest_ancestor("recall-file", &args.recall_file)?;
+    require_loadtest_ancestor("write-file", &args.write_file)?;
     if args.num_writes_before_sync == 0 || args.entropy_sweep_max_bytes == 0 {
         return Err(eyre!("sync and entropy sweep sizes must be greater than 0"));
     }
@@ -634,17 +634,6 @@ fn run() -> eyre::Result<i32> {
             eprintln!("irys-sm-bench: {error}");
             Ok(if code == 0 { 2 } else { code })
         }
-    }
-}
-
-fn refuse_without_loadtest(label: &str, path: &Path) -> eyre::Result<()> {
-    if has_loadtest_component(path) {
-        Ok(())
-    } else {
-        Err(eyre!(
-            "{label} {} has no `loadtest` path component; refusing to run",
-            path.display()
-        ))
     }
 }
 

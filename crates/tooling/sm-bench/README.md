@@ -8,7 +8,7 @@ The `bench` feature on `irys-domain` is required. Production builds leave it off
 
 ## Safety guard
 
-The bench refuses to start unless the canonical `--dir`, `--recall-file`, and `--write-file` paths each contain a path component named `loadtest`. The same check runs on the path text before any file is created. There is no override.
+The bench refuses to start unless `--dir`, `--recall-file`, and `--write-file` each contain a path component named `loadtest`. Before any file is created, the bench canonicalizes the deepest existing ancestor of each path and refuses when that resolved path has no `loadtest` component. There is no override.
 
 The bench does not truncate, resize, or `fallocate` either file. A missing file is an error. It does not create `chunks.dat`. If that name already exists under `--dir`, the bench warns and leaves it closed.
 
