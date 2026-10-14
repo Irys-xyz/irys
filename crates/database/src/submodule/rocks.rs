@@ -211,8 +211,8 @@ pub struct RocksTuning {
     /// is about 4 GiB with these buffers, so a bench step never fills a log.
     /// A non-zero value switches once the live logs pass it. RocksDB applies
     /// the value only when the database has more than one column family.
-    /// This store has the default family plus the layout's families. Schema
-    /// v3 is six, including `ChunkOffsetsByContentHash`.
+    /// This store has the default family plus six user families, including
+    /// `ChunkOffsetsByContentHash`.
     ///
     /// The switch flushes every column family that still references the
     /// oldest log. Each non-empty family writes an L0 SST, and compaction
@@ -242,14 +242,9 @@ pub struct RocksTuning {
     /// Does not change `partition_filters`. An existing SST keeps its own
     /// filter until compaction rewrites the file.
     pub bloom_all_families: bool,
-    /// Bloom on the offset family. RocksDB v1 names it `ChunkMetaByOffset`.
-    /// RocksDB v1 reads the stored
-    /// record before every proof write (to keep the content-hash rows exact),
-    /// and for a new offset that read misses. Off by default: on a full partition with
-    /// fully random write order the filter did not change proof-write time
-    /// (137 vs 134 min); that cost comes from compacting the random-keyed
-    /// content-hash family, and the ingest ladder did not see either. The
-    /// `datapath-bloom` preset turns it on for A/B.
+    /// Bloom on `ChunkMetaByOffset`. A proof write reads the stored row first,
+    /// and a new offset misses. Off by default: a full-partition measurement
+    /// did not change proof-write time. The `datapath-bloom` preset turns it on.
     pub data_path_bloom: bool,
     /// Use the process-wide block cache, write-buffer manager, and Env pools.
     ///
@@ -964,7 +959,7 @@ pub struct RocksSubmoduleStore {
     stats: Option<Arc<Options>>,
     /// Submodule directory name. Metric label. Not an absolute path.
     submodule: String,
-    /// Chosen from the SCHEMA file before `DB::open`. An empty directory is v3.
+    /// Chosen from the SCHEMA file before `DB::open`. An empty directory is RocksDB v1.
     layout: IndexLayout,
     /// A read-only open refuses every write, including compaction and the schema stamp.
     read_only: bool,
@@ -3256,18 +3251,9 @@ fn column_options(
     // reads the value, and an iterator seek never consults a filter, so
     // the filter is a second I/O and a cache resident on those families.
     //
-    // Offset-family Gets run only after the offset row already names a data-path
-    // hash. Interval reads are floor seeks and range scans. Pending point
-    // Gets use a key the pending scan just returned; that scan is itself
-    // an iterator. `optimize_filters_for_hits` would still build a filter
-    // for every non-bottom SST and pin the L0 copy. That is the resident
-    // set this skips, including while the rows are still in L0.
-    //
-    // PathHashes misses when no data-path row is stored yet (an indexed
-    // offset whose body is absent). TxPath, TxLeaf, and a v2 DataRoots
-    // family are hash keys a caller may not have stored. Those keep the
-    // bloom. v3 DataRootPlacements is read with prefix seeks and does not. A v3
-    // data-path get is not gated by a path-hash row.
+    // Offset, interval, pending, and data-root reads seek a key the caller
+    // already has. A bloom there is a second read and a pinned L0 filter.
+    // Content is the miss: the lookup knows the hash and not the offset.
     // Partitioned filters are the production shape. See
     // `RocksTuning::partition_filters`. `all-blooms` restores the filter
     // on the other families.
@@ -3860,7 +3846,7 @@ fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<boo
 
 /// `true` when `key` is an offset inside one of `ranges`.
 ///
-/// Hash keys are 32 bytes. They do not decode as offsets and are not hidden.
+/// A key that is not a 4-byte offset is not hidden. Content and data-root keys are 36 bytes.
 fn offset_key_in_ranges(ranges: &[(u32, u32)], key: &[u8]) -> bool {
     let Ok(offset) = PartitionChunkOffset::decode(key) else {
         return false;
