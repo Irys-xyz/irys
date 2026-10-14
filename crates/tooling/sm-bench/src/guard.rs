@@ -327,6 +327,7 @@ mod tests {
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&escaped)
             .unwrap();
         file.write_all(&[0xAB]).unwrap();
