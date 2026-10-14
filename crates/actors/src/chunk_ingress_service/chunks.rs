@@ -551,19 +551,36 @@ impl ChunkIngressServiceInner {
                 // This may be legitimate (tx with larger size not yet processed).
                 // Park the chunk for the time being — same TOCTOU as the
                 // pre-header path if ProcessPendingChunks runs before this put.
+                // Same cap as that path: `put` would LRU-evict an accepted sibling.
                 let data_root = chunk.data_root;
                 let claimed_size = chunk.data_size;
+                let tx_offset = chunk.tx_offset;
+                let preheader_chunks_per_item = std::cmp::min(
+                    max_chunks_per_item,
+                    self.config.mempool.max_preheader_chunks_per_item,
+                );
+                {
+                    let mut pending_chunks_guard = self.pending_chunks.write().await;
+                    let current_chunk_count = pending_chunks_guard
+                        .get(&data_root)
+                        .map(lru::LruCache::len)
+                        .unwrap_or(0);
+                    if current_chunk_count >= preheader_chunks_per_item {
+                        warn!(
+                            "Dropping oversized-claim chunk for {} at offset {}: cache full ({}/{})",
+                            &data_root, &tx_offset, current_chunk_count, preheader_chunks_per_item
+                        );
+                        return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
+                    }
+                    pending_chunks_guard.put(Arc::unwrap_or_clone(chunk));
+                }
                 info!(
                     chunk.data_root = %data_root,
-                    chunk.tx_offset = %chunk.tx_offset,
+                    chunk.tx_offset = %tx_offset,
                     claimed_data_size = claimed_size,
                     cached_data_size = data_size,
                     "Parked chunk: claims larger data_size than unconfirmed CachedDataRoot"
                 );
-                self.pending_chunks
-                    .write()
-                    .await
-                    .put(Arc::unwrap_or_clone(chunk));
                 // Only re-drain if CDR grew enough to accept this claim;
                 // otherwise leave parked for the larger TX's ProcessPendingChunks.
                 self.maybe_rescue_after_park(data_root, Some(claimed_size));
@@ -1558,6 +1575,87 @@ mod tests {
             "validation failure must stay dropped"
         );
         assert!(receivers.chunk_ingress.try_recv().is_err());
+    }
+
+    /// A larger unconfirmed claim must not LRU-evict an already parked sibling.
+    #[tokio::test]
+    async fn larger_claim_park_rejects_when_preheader_cap_is_full() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-claim-cap")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 2, 2);
+        let data_root = H256([0x22; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, data_root, 10);
+        {
+            let mut pending = inner.pending_chunks.write().await;
+            for offset in 0..2_u32 {
+                pending.put(UnpackedChunk {
+                    data_root,
+                    data_size: 20,
+                    data_path: Default::default(),
+                    bytes: vec![offset as u8].into(),
+                    tx_offset: TxChunkOffset::from(offset),
+                });
+            }
+        }
+        let incoming = UnpackedChunk {
+            data_root,
+            data_size: 20,
+            data_path: Default::default(),
+            bytes: vec![9_u8].into(),
+            tx_offset: TxChunkOffset::from(2),
+        };
+        let err = inner
+            .handle_chunk_ingress_message(incoming)
+            .await
+            .expect_err("full root must reject the larger-claim park");
+        assert!(
+            matches!(
+                err,
+                ChunkIngressError::Advisory(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap)
+            ),
+            "{err:?}"
+        );
+        let pending = inner.pending_chunks.read().await;
+        let parked = pending.get(&data_root).expect("root stays parked");
+        assert!(parked.peek(&TxChunkOffset::from(0)).is_some());
+        assert!(parked.peek(&TxChunkOffset::from(1)).is_some());
+        assert!(parked.peek(&TxChunkOffset::from(2)).is_none());
+        assert_eq!(parked.len(), 2);
+    }
+
+    /// Under the cap, the larger-claim path still parks the chunk.
+    #[tokio::test]
+    async fn larger_claim_park_stores_when_under_cap() {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("ingress-claim-under-cap")
+            .build();
+        let (inner, _receivers) = test_ingress_inner(&tmp, 2, 2);
+        let data_root = H256([0x33; 32]);
+        insert_unconfirmed_cdr(&inner.irys_db, data_root, 10);
+        inner.pending_chunks.write().await.put(UnpackedChunk {
+            data_root,
+            data_size: 20,
+            data_path: Default::default(),
+            bytes: vec![1_u8].into(),
+            tx_offset: TxChunkOffset::from(0),
+        });
+        let incoming = UnpackedChunk {
+            data_root,
+            data_size: 20,
+            data_path: Default::default(),
+            bytes: vec![2_u8].into(),
+            tx_offset: TxChunkOffset::from(1),
+        };
+        inner
+            .handle_chunk_ingress_message(incoming)
+            .await
+            .expect("under-cap larger claim parks");
+        let pending = inner.pending_chunks.read().await;
+        let parked = pending.get(&data_root).expect("root stays parked");
+        assert!(parked.peek(&TxChunkOffset::from(0)).is_some());
+        assert!(parked.peek(&TxChunkOffset::from(1)).is_some());
+        assert_eq!(parked.len(), 2);
     }
 
     fn test_ingress_inner(
