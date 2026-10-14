@@ -425,8 +425,8 @@ impl ChunkIngressServiceInner {
                     pending_chunks_guard.put(Arc::unwrap_or_clone(chunk));
                 }
 
-                // Visible park signal: previous builds returned Ok silently,
-                // which made holder-side cache misses look like "gossip worked".
+                // A parked chunk is not stored. Log that, so Ok is not read as
+                // a completed ingress.
                 info!(
                     chunk.data_root = %data_root,
                     chunk.tx_offset = %tx_offset,
