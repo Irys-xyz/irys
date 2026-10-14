@@ -234,7 +234,7 @@ fn assert_derived_tx_index(
 
 /// Two chunk-aligned publish txs share one block. After migration the miner
 /// produces a Submit data PoA and, once the txs promote, a Publish data PoA.
-/// Both go through validation on a schema-v3 index.
+/// Both go through validation on a RocksDB v1 index.
 #[test_log::test(tokio::test)]
 async fn heavy_test_rocks_v1_submit_and_publish_data_poa() -> eyre::Result<()> {
     initialize_tracing();

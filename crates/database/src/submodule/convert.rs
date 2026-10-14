@@ -4301,9 +4301,10 @@ mod tests {
         );
         assert!(hwm > 0, "VmHWM was not readable");
         // VmRSS is the whole process. A parallel `cargo test` counts other
-        // tests that open a RocksDB v1 index while this one runs. The round
-        // trip on its own is far below this bound.
-        assert!(growth < 512 * 1024, "round trip grew RSS by {growth} KiB");
+        // tests that open a RocksDB v1 index while this one runs (the
+        // per-family verify tests open several at once). The round trip on
+        // its own is far below this bound.
+        assert!(growth < 1024 * 1024, "round trip grew RSS by {growth} KiB");
         Ok(())
     }
 
@@ -5438,7 +5439,15 @@ mod tests {
                 tx.add_full_data_path(PartitionChunkOffset::from(0), indexed_data_leaf(1))?;
                 Ok(())
             })?;
-            store.bind_packing_identity(Some(H256::repeat_byte(7)), &[9_u8; 32])?;
+            store.bind_packing_identity(
+                Some(H256::repeat_byte(7)),
+                &crate::submodule::packing::PackingRecord {
+                    packing_address: [9_u8; 20],
+                    iterations: 10,
+                    chunk_size: 262_144,
+                    chain_id: 1270,
+                },
+            )?;
         }
         put_metadata_bytes(dir, &EXTRA_METADATA_KEY, &[0_u8; 24])?;
         Ok(())
@@ -5567,7 +5576,7 @@ mod tests {
         let keys = [
             MetadataKey::DBSchemaVersion.encode(),
             MetadataKey::PartitionHash.encode(),
-            MetadataKey::PackingParamsHash.encode(),
+            MetadataKey::PackingRecord.encode(),
             EXTRA_METADATA_KEY,
         ];
         for key in keys {
