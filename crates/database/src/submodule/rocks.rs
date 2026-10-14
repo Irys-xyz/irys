@@ -3545,7 +3545,7 @@ fn column_options(
     // PathHashes misses when no data-path row is stored yet (an indexed
     // offset whose body is absent). TxPath, TxLeaf, and a v2 DataRoots
     // family are hash keys a caller may not have stored. Those keep the
-    // bloom. v3 DataRootPlacements is prefix-seeked and does not. A v3
+    // bloom. v3 DataRootPlacements is read with prefix seeks and does not. A v3
     // data-path get is not gated by a path-hash row.
     // Partitioned filters are the production shape. See
     // `RocksTuning::partition_filters`. `all-blooms` restores the filter
@@ -8349,16 +8349,26 @@ mod tests {
         Ok(text)
     }
 
+    /// The newest `OPTIONS-<number>` file. RocksDB keeps the previous one too,
+    /// and `read_dir` order is not creation order.
     fn persisted_options(path: &Path) -> eyre::Result<String> {
-        let mut found = None;
+        let mut newest: Option<(u64, PathBuf)> = None;
         for entry in fs::read_dir(path).wrap_err("read db dir")? {
             let entry = entry?;
             let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("OPTIONS-") {
-                found = Some(fs::read_to_string(entry.path()).wrap_err("read OPTIONS")?);
+            let Some(number) = name
+                .to_string_lossy()
+                .strip_prefix("OPTIONS-")
+                .and_then(|n| n.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(seen, _)| number > *seen) {
+                newest = Some((number, entry.path()));
             }
         }
-        found.ok_or_else(|| eyre::eyre!("no OPTIONS file in {}", path.display()))
+        let (_, file) =
+            newest.ok_or_else(|| eyre::eyre!("no OPTIONS file in {}", path.display()))?;
+        fs::read_to_string(file).wrap_err("read OPTIONS")
     }
 }

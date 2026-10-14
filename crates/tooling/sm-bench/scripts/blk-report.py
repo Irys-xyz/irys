@@ -1344,7 +1344,7 @@ def render_text(report: dict) -> str:
                 f"  zone model clamped {step['clamped_requests']} requests"
                 " (transfer estimate longer than service; positioning set to 0)"
             )
-        lines.append("  transitions (who seeked to whom), by positioning:")
+        lines.append("  transitions (which category the head moved from and to), by positioning:")
         if not step["transitions"]:
             lines.append("    (none)")
         for row in step["transitions"]:

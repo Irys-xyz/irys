@@ -2901,21 +2901,21 @@ fn parse_data_fraction(text: &str) -> eyre::Result<(u64, u64, f64)> {
     } else {
         format!("{whole}{frac}")
     };
-    let numer: u64 = digits
+    let numerator: u64 = digits
         .parse()
         .map_err(|_| eyre::eyre!("--data-fraction {text} is too large"))?;
     eyre::ensure!(
-        numer > 0 && numer <= denom,
+        numerator > 0 && numerator <= denom,
         "--data-fraction must be > 0 and <= 1"
     );
-    Ok((numer, denom, numer as f64 / denom as f64))
+    Ok((numerator, denom, numerator as f64 / denom as f64))
 }
 
-/// First `numer/denom` of `chunks`, rounded down. At least one offset.
-fn data_prefix(chunks: u32, numer: u64, denom: u64) -> eyre::Result<u32> {
-    eyre::ensure!(denom > 0 && numer > 0 && numer <= denom);
+/// First `numerator/denom` of `chunks`, rounded down. At least one offset.
+fn data_prefix(chunks: u32, numerator: u64, denom: u64) -> eyre::Result<u32> {
+    eyre::ensure!(denom > 0 && numerator > 0 && numerator <= denom);
     let chunks_u = u64::from(chunks);
-    let n = chunks_u / denom * numer + (chunks_u % denom) * numer / denom;
+    let n = chunks_u / denom * numerator + (chunks_u % denom) * numerator / denom;
     eyre::ensure!(
         n > 0,
         "--data-fraction covers no offsets of --chunks {chunks}"
