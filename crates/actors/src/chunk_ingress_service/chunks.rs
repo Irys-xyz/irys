@@ -316,17 +316,21 @@ impl ChunkIngressServiceInner {
             chunk.data_root = %data_root,
             "Pre-commit drain error; scheduling another ProcessPendingChunks"
         );
-        if let Err(error) = self
-            .service_senders
-            .chunk_ingress
-            .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_root))
-        {
-            warn!(
-                chunk.data_root = %data_root,
-                ?error,
-                "Failed to schedule ProcessPendingChunks after a pre-commit drain error"
-            );
-        }
+        // Delay the retry so a persistent database error does not spin.
+        let senders = self.service_senders.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(PENDING_DRAIN_RETRY_DELAY).await;
+            if let Err(error) = senders
+                .chunk_ingress
+                .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_root))
+            {
+                warn!(
+                    chunk.data_root = %data_root,
+                    ?error,
+                    "Failed to schedule ProcessPendingChunks after a pre-commit drain error"
+                );
+            }
+        });
     }
 
     #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
@@ -1164,6 +1168,9 @@ pub fn generate_ingress_proof(
     Ok(proof)
 }
 
+/// Wait before redraining a data root after a pre-commit error.
+const PENDING_DRAIN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1535,11 +1542,18 @@ mod tests {
         );
         drop(pending);
 
-        let (msg, _) = receivers
-            .chunk_ingress
-            .try_recv()
-            .expect("pre-commit database error must schedule another drain")
-            .into_parts();
+        assert!(
+            receivers.chunk_ingress.try_recv().is_err(),
+            "the redrain waits instead of spinning"
+        );
+        let (msg, _) = tokio::time::timeout(
+            PENDING_DRAIN_RETRY_DELAY * 5,
+            receivers.chunk_ingress.recv(),
+        )
+        .await
+        .expect("pre-commit database error must schedule another drain")
+        .expect("ingress channel open")
+        .into_parts();
         assert!(matches!(
             msg,
             ChunkIngressMessage::ProcessPendingChunks(root) if root == data_root
