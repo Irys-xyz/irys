@@ -1,15 +1,10 @@
 //! Background drain for `PendingBodyMigrationsByOffset`.
 //!
-//! `on_block_migrated` commits chunk **indexes** in block order and returns. The
-//! chunk **bodies** those indexes describe are copied out of the chunk cache
-//! (or, for Publish, the durable Submit replica) by this worker at whatever
-//! speed the target disk allows. A huge or slow body write therefore never
-//! delays the next block's indexes — the failure that froze n3's Publish
-//! ledger behind a single 4 GiB Submit tx.
-//!
-//! The rows are the backlog of record: they survive restarts and outlive a
-//! dropped wake-up. Every submodule is its own MDBX env and its own IO domain,
-//! so a pass fans out one blocking task per submodule with outstanding rows.
+//! `on_block_migrated` commits chunk indexes in block order and returns.
+//! This worker copies the bodies from the chunk cache, or, for Publish, from
+//! a durable Submit replica. The rows survive a restart and a missed wake-up.
+//! Each submodule has its own index environment, so a pass runs one blocking
+//! task per submodule that still has rows.
 
 use super::{MigrationError, load_chunks_for_migration, write_chunks_to_module};
 use crate::DataSyncServiceMessage;

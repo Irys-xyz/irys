@@ -257,16 +257,9 @@ impl ChunkMigrationServiceInner {
             }
         }
 
-        // Process transactions in the order the block encodes them
-        // (`block.data_ledgers: Vec<…>`), not HashMap iteration order. The
-        // block producer encodes the Vec as Publish → Submit → [OneYear,
-        // ThirtyDay] (see `block_producer.rs::data_ledgers`), and that order
-        // is part of the consensus-signed payload — every node sees the same
-        // sequence. Iterating the HashMap instead would give non-deterministic
-        // ordering across nodes and runs, which doesn't affect final storage
-        // state (each ledger writes into its own storage modules) but does
-        // produce divergent log/trace output and divergent intermediate
-        // crash-recovery state.
+        // Follow `block.data_ledgers` order. HashMap iteration would make the
+        // crash-recovery intermediate state depend on hash order. Final
+        // storage does not: each ledger writes its own modules.
         let mut touched = Vec::new();
         for ledger_entry in block.data_ledgers.iter() {
             let Ok(ledger) = DataLedger::try_from(ledger_entry.ledger_id) else {
@@ -882,7 +875,6 @@ impl ChunkMigrationService {
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         let config = config.clone();
-        // let block_index = block_index.clone();
         let storage_modules_guard = storage_modules_guard.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
