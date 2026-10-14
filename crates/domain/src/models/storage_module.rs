@@ -453,10 +453,11 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// A completion is never stored before its chunk `fdatasync` and presence
 /// commit. A write-ahead mark is never dropped or delayed. Clean shutdown
 /// force-syncs first, so nothing is pending, then writes the live map and
-/// drops the ahead mask. A restart does not turn valid entropy into
-/// `Uninitialized`. A crash leaves the mask on disk. An image built from
-/// the live map keeps `Interrupted` for offsets still in `pending.chunks`
-/// or `pending.written_ahead`, and keeps those offsets in the mask.
+/// drops the ahead mask. A crash leaves that mark on disk. Load turns it
+/// into `Uninitialized`, including entropy that this process only marked
+/// ahead and did not rewrite. An image built from the live map keeps
+/// `Interrupted` for offsets still in `pending.chunks` or
+/// `pending.written_ahead`, and keeps those offsets in the mask.
 ///
 /// The packed-byte checksum is not a file. It is committed in the same index
 /// batch as the presence row, after the chunk `fdatasync` and before the
