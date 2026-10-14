@@ -6724,20 +6724,43 @@ impl StorageModule {
             .ok_or_eyre("storage module has no partition")?;
         let caller = index_read_metrics::caller();
         let mut out = BTreeMap::new();
-        for (offset, (data_root, data_size, data_path, tx_offset, crc)) in metas {
+        for (offset, meta) in metas {
             let Some((mut bytes, kind)) = bodies.remove(&offset) else {
                 if start == end {
                     return Err(eyre!("Could not find chunk bytes on disk"));
                 }
                 continue;
             };
+            // Bytes not yet committed with their index row would be served
+            // under the previous row's proof.
+            if self.crc_bytes_are_unsettled(offset) {
+                continue;
+            }
+            let (mut data_root, mut data_size, mut data_path, mut tx_offset, crc) = meta;
             let (_, submodule) = self.get_submodule_for_offset(offset)?;
-            if submodule.db.stores_offset_crc() && !self.crc_bytes_are_unsettled(offset) {
+            if submodule.db.stores_offset_crc() {
                 let complete = submodule.crc_complete.load(Ordering::SeqCst);
                 match chunk_crc::classify(crc, &bytes, complete) {
                     chunk_crc::CrcVerdict::Mismatch => {
                         match self.note_if_crc_mismatch(offset, kind, caller)? {
-                            CrcConfirm::NotConfirmed(fresh) => bytes = fresh,
+                            // A commit landed after the row was read: serve the
+                            // fresh bytes only with the row committed with them.
+                            CrcConfirm::NotConfirmed(fresh) => {
+                                let Some((root, size, path, tx, fresh_crc)) =
+                                    self.chunk_index_metas(offset, offset)?.remove(&offset)
+                                else {
+                                    continue;
+                                };
+                                if matches!(
+                                    chunk_crc::classify(fresh_crc, &fresh, complete),
+                                    chunk_crc::CrcVerdict::Mismatch
+                                ) {
+                                    continue;
+                                }
+                                (data_root, data_size, data_path, tx_offset) =
+                                    (root, size, path, tx);
+                                bytes = fresh;
+                            }
                             CrcConfirm::Confirmed | CrcConfirm::Unsettled => continue,
                         }
                     }

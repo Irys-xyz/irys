@@ -729,13 +729,15 @@ mod tests {
     }
 
     /// A stored data proof whose packed bytes were flipped is omitted and repaired.
-    #[test]
-    fn rocks_flipped_data_proof_is_omitted_from_generate_full_chunks() -> eyre::Result<()> {
+    /// RocksDB Publish module with one durable data chunk at offset 0.
+    fn durable_data_chunk_module(
+        prefix: &str,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
         use irys_types::ledger_chunk_offset_ii;
         use irys_types::partition::PartitionAssignment;
         use irys_types::{DataLedger, DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange};
 
-        let tmp = TempDirBuilder::new().prefix("crc_serve_flip").build();
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: CHUNK as u64,
@@ -789,6 +791,30 @@ mod tests {
         )?;
         module.write_data_chunk(&unpacked[0])?;
         module.sync_pending_chunks()?;
+        Ok((tmp, module))
+    }
+
+    #[test]
+    fn rocks_pending_entropy_is_not_served_with_the_stored_data_proof() -> eyre::Result<()> {
+        let (_tmp, module) = durable_data_chunk_module("crc_serve_pending")?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0xEE_u8; CHUNK],
+            ChunkType::Entropy,
+        ));
+        let served = module
+            .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?;
+        assert!(served.is_empty(), "unsettled bytes were served: {served:?}");
+        module.sync_pending_chunks()?;
+        let served = module
+            .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?;
+        assert!(served.is_empty(), "entropy has no data proof: {served:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn rocks_flipped_data_proof_is_omitted_from_generate_full_chunks() -> eyre::Result<()> {
+        let (tmp, module) = durable_data_chunk_module("crc_serve_flip")?;
         let before_flip = module
             .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?;
         assert_eq!(before_flip.len(), 1, "the stored proof is served");
