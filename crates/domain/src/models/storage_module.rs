@@ -2348,6 +2348,20 @@ impl StorageModule {
         *pa
     }
 
+    /// The assignment and the height it was stored at. The height is read
+    /// from `packing_params.toml` under the assignment lock, so it belongs
+    /// to this assignment. `None` when the file never recorded one.
+    pub fn partition_assignment_with_height(
+        &self,
+    ) -> eyre::Result<(Option<PartitionAssignment>, Option<u64>)> {
+        let pa = self.partition_assignment.read().unwrap();
+        let Some((_, submodule)) = self.submodules.iter().next() else {
+            return Ok((*pa, None));
+        };
+        let params = PackingParams::from_toml(submodule.path.join(PACKING_PARAMS_FILE_NAME))?;
+        Ok((*pa, params.last_updated_height))
+    }
+
     pub fn last_pending_write(&self) -> Instant {
         *self.last_pending_write.read().unwrap()
     }

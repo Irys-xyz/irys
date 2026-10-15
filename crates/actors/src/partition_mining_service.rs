@@ -234,7 +234,7 @@ impl PartitionMiningServiceInner {
         // notice also names a hash that the same epoch backfilled onto a new
         // slot. The storage task can install that slot before this task reads
         // the notice. Resetting then would store capacity over it.
-        if self.assigned_ledger_slot() {
+        if self.ledger_slot_stored_since(update_height) {
             self.expiry_reset_pending = false;
             debug!(
                 storage_module.partition_hash = ?partition_hash,
@@ -277,7 +277,7 @@ impl PartitionMiningServiceInner {
         }
         // A ledger installed while the reset was pending owns the module.
         // Retrying the capacity reset would remove that slot.
-        if self.assigned_ledger_slot() {
+        if self.ledger_slot_stored_since(self.expiry_update_height) {
             self.expiry_reset_pending = false;
             return;
         }
@@ -304,19 +304,28 @@ impl PartitionMiningServiceInner {
         }
     }
 
-    /// The module is on a ledger slot. The assignment update clears that
-    /// index and stores the final slot. This service must not replace it
-    /// with capacity.
-    fn assigned_ledger_slot(&self) -> bool {
-        self.storage_module
-            .partition_assignment()
-            .is_some_and(|assignment| assignment.ledger_id.is_some())
+    /// The module is on a ledger slot stored at or after the expiry height.
+    /// That is the epoch's new slot: the assignment update clears its index
+    /// and this service must not replace it with capacity. A slot stored
+    /// earlier is the one expiring, and is reset.
+    fn ledger_slot_stored_since(&self, update_height: u64) -> bool {
+        match self.storage_module.partition_assignment_with_height() {
+            Ok((Some(assignment), Some(height))) => {
+                assignment.ledger_id.is_some() && height >= update_height
+            }
+            Ok(_) => false,
+            // The reset reads the same file and fails into the retry path.
+            Err(err) => {
+                debug!("expiry check could not read packing params: {err}");
+                false
+            }
+        }
     }
 
     /// Reset and store capacity (same partition and miner, no ledger slot)
     /// before the assignment write lock is released. A failed reset leaves
     /// the previous assignment in place. Do not call this when
-    /// [`Self::assigned_ledger_slot`] is set.
+    /// [`Self::ledger_slot_stored_since`] holds.
     fn expire_to_capacity(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let Some(current) = self.storage_module.partition_assignment() else {
             eyre::bail!("partition assignment missing during expiry reset");
@@ -1212,6 +1221,69 @@ mod tests {
         );
         assert!(!inner.expiry_reset_pending);
         assert!(receivers.packing.try_recv().is_err());
+    }
+
+    /// A ledger slot stored before the notice is the slot that expired. The
+    /// notice resets it to capacity and queues packing.
+    #[test]
+    fn expiry_notice_resets_a_ledger_stored_before_it() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x78);
+        let submit = PartitionAssignment {
+            partition_hash,
+            miner_address: config.node_config.miner_address(),
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(submit),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the notice");
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.partition_hash, partition_hash);
+        assert_eq!(assignment.ledger_id, None);
+        assert_eq!(assignment.slot_index, None);
+        assert!(!inner.expiry_reset_pending);
+        assert!(receivers.packing.try_recv().is_ok());
     }
 
     /// The consumer half of the in-process VDF re-anchor: `handle_reanchored` — the
