@@ -5730,7 +5730,7 @@ mod tests {
         convert_rocks_to_mdbx(&rocks, &back, &options)?;
         let forward = verify_mdbx_and_rocks(&back, &rocks, &options)?;
         assert!(forward.has_mismatch(), "{forward}");
-        let mut rollback = options.clone();
+        let mut rollback = options;
         rollback.rollback = true;
         let report = verify_mdbx_and_rocks(&back, &rocks, &rollback)?;
         assert!(!report.has_mismatch(), "{report}");
