@@ -194,6 +194,20 @@ with_fake_sys() {
     ' bash "$sys" "$@"
 }
 
+# Optional bind of $2 onto $3 inside the same mount namespace. An empty $2 skips it.
+with_binds() {
+    local sys=$1 src=$2 dst=$3
+    shift 3
+    unshare --mount --user --map-root-user bash -c '
+        mount --bind "$1" /sys || exit 97
+        if [ -n "$2" ]; then
+            mount --bind "$2" "$3" || exit 97
+        fi
+        shift 3
+        exec "$@"
+    ' bash "$sys" "$src" "$dst" "$@"
+}
+
 fake_sys() {
     local sys=$1
     mkdir -p "$sys/block/loop0/queue"
@@ -313,6 +327,130 @@ test_run_allows_a_missing_path_under_loadtest() {
     else
         ok "$name"
     fi
+    rm -rf "$root"
+}
+
+cmdline_has() {
+    local pid=$1 needle=$2
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q "$needle"
+}
+
+test_ladder_term_stops_the_run_and_restores_the_queue() {
+    local name=ladder-term root module sys err outer
+    local bench_pid run_parent ladder_pid tries
+    root=$(tmpdir)
+    module=$root/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$sys/block/none/queue"
+    queue_files "$sys/block/none/queue"
+    cat >"$root/bench" <<EOF
+#!/bin/bash
+printf '%s\n' "\$\$" > "$root/bench.pid"
+exec sleep 60
+EOF
+    chmod +x "$root/bench"
+    MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device none --mount /tmp --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --max-sectors-kb 64 --run only-run \
+        >"$err" 2>&1 &
+    outer=$!
+    if ! wait_file "$root/bench.pid"; then
+        bad "$name" "bench did not start: $(cat "$err" 2>/dev/null)"
+    else
+        bench_pid=$(cat "$root/bench.pid")
+        run_parent=$(ps -o ppid= -p "$bench_pid" | tr -d '[:space:]')
+        ladder_pid=$(ps -o ppid= -p "$run_parent" | tr -d '[:space:]')
+        if ! cmdline_has "$ladder_pid" "ladder.sh"; then
+            bad "$name" "parent $ladder_pid is not ladder.sh"
+        else
+            kill -TERM "$ladder_pid" 2>/dev/null || true
+            tries=0
+            while alive "$bench_pid" || alive "$ladder_pid"; do
+                tries=$((tries + 1))
+                if [ "$tries" -ge 20 ]; then
+                    break
+                fi
+                sleep 0.1
+            done
+            if alive "$bench_pid"; then
+                bad "$name" "bench $bench_pid still running after TERM"
+            elif alive "$ladder_pid"; then
+                bad "$name" "ladder $ladder_pid still running after TERM"
+            elif ! grep -q '^111$' "$sys/block/none/queue/max_sectors_kb"; then
+                bad "$name" "queue was not restored: $(cat "$sys/block/none/queue/max_sectors_kb" 2>/dev/null)"
+            else
+                ok "$name"
+            fi
+        fi
+    fi
+    kill "$outer" 2>/dev/null || true
+    if [ -s "$root/bench.pid" ]; then
+        kill "$(cat "$root/bench.pid")" 2>/dev/null || true
+    fi
+    wait "$outer" 2>/dev/null || true
+    rm -rf "$root"
+}
+
+test_ladder_term_stops_the_tracer() {
+    local name=ladder-trace-term root module sys err outer
+    local tracer_pid ladder_pid tries
+    root=$(tmpdir)
+    module=$root/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$sys/block/none/queue"
+    queue_files "$sys/block/none/queue"
+    printf '#!/bin/sh\nexit 0\n' >"$root/bench"
+    chmod +x "$root/bench"
+    cat >"$root/blk-run.sh" <<EOF
+#!/bin/bash
+printf '%s\n' "\$\$" > "$root/tracer.pid"
+exec sleep 60
+EOF
+    chmod +x "$root/blk-run.sh"
+    MIN_FREE_GIB=0 with_binds "$sys" "$root/blk-run.sh" "$here/blk-run.sh" "$here/ladder.sh" \
+        --device none --mount /tmp --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --max-sectors-kb 64 --trace --run only-run \
+        >"$err" 2>&1 &
+    outer=$!
+    if ! wait_file "$root/tracer.pid"; then
+        bad "$name" "tracer did not start: $(cat "$err" 2>/dev/null)"
+    else
+        tracer_pid=$(cat "$root/tracer.pid")
+        ladder_pid=$(ps -o ppid= -p "$tracer_pid" | tr -d '[:space:]')
+        if ! cmdline_has "$ladder_pid" "ladder.sh"; then
+            bad "$name" "parent $ladder_pid is not ladder.sh"
+        else
+            kill -TERM "$ladder_pid" 2>/dev/null || true
+            tries=0
+            while alive "$tracer_pid" || alive "$ladder_pid"; do
+                tries=$((tries + 1))
+                if [ "$tries" -ge 20 ]; then
+                    break
+                fi
+                sleep 0.1
+            done
+            if alive "$tracer_pid"; then
+                bad "$name" "tracer $tracer_pid still running after TERM"
+            elif alive "$ladder_pid"; then
+                bad "$name" "ladder $ladder_pid still running after TERM"
+            elif ! grep -q '^111$' "$sys/block/none/queue/max_sectors_kb"; then
+                bad "$name" "queue was not restored: $(cat "$sys/block/none/queue/max_sectors_kb" 2>/dev/null)"
+            else
+                ok "$name"
+            fi
+        fi
+    fi
+    kill "$outer" 2>/dev/null || true
+    if [ -s "$root/tracer.pid" ]; then
+        kill "$(cat "$root/tracer.pid")" 2>/dev/null || true
+    fi
+    wait "$outer" 2>/dev/null || true
     rm -rf "$root"
 }
 

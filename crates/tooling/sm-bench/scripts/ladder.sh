@@ -31,7 +31,9 @@
 # before max_sectors_kb is written. A path without a loadtest component, or a
 # mount whose disk is not --device, leaves the index files and the queue alone.
 #
-# max_sectors_kb is restored on EXIT, INT, and TERM.
+# max_sectors_kb is restored on EXIT, INT, and TERM. The current run and the
+# tracer are stopped before that restore. A foreground wait would defer the
+# trap until the bench exited, so both are backgrounded.
 # The done marker is written when the script exits, including after a failure.
 # Run under setsid and nohup so the ladder does not need a terminal.
 #
@@ -298,6 +300,9 @@ sectors_changed=0
 restore_value=
 restored_now=
 done_written=0
+run_pid=
+trace_pid=
+pause_pid=
 
 write_queue() {
     local key=$1
@@ -334,8 +339,27 @@ mark_done() {
     fi
 }
 
+stop_jobs() {
+    if [ -n "${run_pid:-}" ]; then
+        kill -TERM "$run_pid" 2>/dev/null || true
+        wait "$run_pid" 2>/dev/null || true
+        run_pid=
+    fi
+    if [ -n "${trace_pid:-}" ]; then
+        kill -TERM "$trace_pid" 2>/dev/null || true
+        wait "$trace_pid" 2>/dev/null || true
+        trace_pid=
+    fi
+    if [ -n "${pause_pid:-}" ]; then
+        kill -TERM "$pause_pid" 2>/dev/null || true
+        wait "$pause_pid" 2>/dev/null || true
+        pause_pid=
+    fi
+}
+
 on_exit() {
     local rc=$?
+    stop_jobs
     restore_sectors
     mark_done "$rc"
 }
@@ -344,6 +368,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 fail() {
+    stop_jobs
     restore_sectors
     echo "$* restored max_sectors_kb=${restored_now:-unknown} $(date -Is)" | tee "$done_file" >&2
     done_written=1
@@ -523,23 +548,42 @@ run_one() {
     fi
     if [ "$trace" = 1 ]; then
         "$here/blk-run.sh" "$device" "$loadtest" "$out" >"$out/blk-run.out" 2>&1 &
-        local bp=$!
-        sleep 5
-        if ! kill -0 "$bp" 2>/dev/null; then
+        trace_pid=$!
+        # wait, not a foreground sleep: a trapped TERM interrupts wait.
+        sleep 5 &
+        pause_pid=$!
+        wait "$pause_pid" || true
+        pause_pid=
+        if ! kill -0 "$trace_pid" 2>/dev/null; then
             cat "$out/blk-run.out" "$out/bpftrace.err" 2>/dev/null || true
             echo "blk-run failed to start for $name" >&2
             return 1
         fi
-        "${cmd[@]}" || return 1
+        "${cmd[@]}" &
+        run_pid=$!
+        local rc=0
+        wait "$run_pid" || rc=$?
+        run_pid=
+        if [ "$rc" -ne 0 ]; then
+            return 1
+        fi
         # TERM, not INT: a background job of a non-interactive shell ignores
         # SIGINT, so blk-run.sh would never see it. blk-run.sh traps TERM.
-        kill -TERM "$bp" 2>/dev/null || true
-        wait "$bp" || true
+        kill -TERM "$trace_pid" 2>/dev/null || true
+        wait "$trace_pid" || true
+        trace_pid=
         if ! python3 "$here/blk-report.py" "$out" >"$out/blk-report.out" 2>"$out/blk-report.err"; then
             echo "blk-report failed" >>"$out/blk-report.out"
         fi
     else
-        "${cmd[@]}" || return 1
+        "${cmd[@]}" &
+        run_pid=$!
+        local rc=0
+        wait "$run_pid" || rc=$?
+        run_pid=
+        if [ "$rc" -ne 0 ]; then
+            return 1
+        fi
     fi
 }
 
