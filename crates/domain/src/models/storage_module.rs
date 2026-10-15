@@ -5236,6 +5236,46 @@ impl StorageModule {
         }
     }
 
+    /// Re-read a proof that has no checksum, under `sync_in_progress`.
+    ///
+    /// The caller loaded that proof before `yield_to_writes`. Serve the pair
+    /// read while this lock is held. No proof means the row is checksum-only,
+    /// so omit it. A mismatch is omitted too. A missing checksum stays unknown
+    /// and is not queued as a repair.
+    ///
+    /// Lock order matches `finish_durable_point`: this lock, then
+    /// `pending_writes`, then `chunks.dat`.
+    fn reload_unchecksummed_chunk(
+        &self,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<(ChunkBytes, DataRoot, u64, Base64, TxChunkOffset)>> {
+        let _sync_guard = self
+            .sync_in_progress
+            .lock()
+            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        if self.crc_bytes_are_unsettled(offset) {
+            return Ok(None);
+        }
+        let bytes = self.pread_settled_chunk(offset)?;
+        if self.crc_bytes_are_unsettled(offset) {
+            return Ok(None);
+        }
+        let Some((data_root, data_size, data_path, tx_offset, crc)) =
+            self.chunk_index_metas(offset, offset)?.remove(&offset)
+        else {
+            return Ok(None);
+        };
+        let (_, submodule) = self.get_submodule_for_offset(offset)?;
+        let complete = submodule.crc_complete.load(Ordering::SeqCst);
+        if matches!(
+            chunk_crc::classify(crc, &bytes, complete),
+            chunk_crc::CrcVerdict::Mismatch
+        ) {
+            return Ok(None);
+        }
+        Ok(Some((bytes, data_root, data_size, data_path, tx_offset)))
+    }
+
     /// One `pread` of the buffered `chunks.dat` descriptor.
     ///
     /// The caller holds `sync_in_progress`, so no pwrite runs during this read.
@@ -6879,6 +6919,9 @@ impl StorageModule {
     }
 
     /// One packed chunk at a partition offset.
+    ///
+    /// A proof with no checksum is served only with bytes read again while
+    /// `sync_in_progress` is held. A later commit must not keep the old proof.
     pub fn generate_full_chunk(
         &self,
         partition_offset: PartitionChunkOffset,
@@ -6893,8 +6936,9 @@ impl StorageModule {
     /// One index view loads every proof and the checksum stored beside it.
     /// The body read does not scan those rows again. An offset with no stored
     /// chunk is absent. A one-offset span still errors when the index names a
-    /// chunk the disk does not hold. A checksum mismatch is omitted. Unknown
-    /// stays in the result.
+    /// chunk the disk does not hold. A checksum mismatch is omitted. A row
+    /// with no checksum is served only after a re-read under the sync lock.
+    /// A checksum-only row has no proof and is omitted.
     pub fn generate_full_chunks(
         &self,
         start: PartitionChunkOffset,
@@ -6955,7 +6999,20 @@ impl StorageModule {
                             CrcConfirm::Confirmed | CrcConfirm::Unsettled => continue,
                         }
                     }
-                    chunk_crc::CrcVerdict::Unknown => chunk_crc::note_unknown(caller),
+                    chunk_crc::CrcVerdict::Unknown => {
+                        chunk_crc::note_unknown(caller);
+                        // The proof above was loaded before `yield_to_writes`.
+                        // A commit can replace the bytes while this read waits.
+                        // Serve only the pair read while the sync lock is held.
+                        match self.reload_unchecksummed_chunk(offset)? {
+                            Some((fresh, root, size, path, tx)) => {
+                                (data_root, data_size, data_path, tx_offset) =
+                                    (root, size, path, tx);
+                                bytes = fresh;
+                            }
+                            None => continue,
+                        }
+                    }
                     chunk_crc::CrcVerdict::Match | chunk_crc::CrcVerdict::Skip => {}
                 }
             }
@@ -15776,10 +15833,7 @@ mod tests {
                 partition_assignment: assignment,
                 submodules: vec![(partition_chunk_offset_ii!(0, 7), "sub".into())],
             };
-            let params_path = tmp
-                .path()
-                .join("sub")
-                .join(PACKING_PARAMS_FILE_NAME);
+            let params_path = tmp.path().join("sub").join(PACKING_PARAMS_FILE_NAME);
 
             let first = StorageModule::new(&info(Some(assignment(hash_a))), &config)?;
             assert_eq!(
@@ -15800,7 +15854,10 @@ mod tests {
 
             let unassigned = StorageModule::new(&info(None), &config)?;
             let params = PackingParams::from_toml(&params_path)?;
-            assert_eq!(params.partition_hash, None, "{engine:?}: hash was not cleared");
+            assert_eq!(
+                params.partition_hash, None,
+                "{engine:?}: hash was not cleared"
+            );
             assert!(
                 unassigned.get_intervals(ChunkType::Entropy).is_empty(),
                 "{engine:?}: unassign kept entropy labels {:?}",
@@ -15860,6 +15917,82 @@ mod tests {
             }
             Err(err) => return Err(eyre!(err)),
         }
+        Ok(())
+    }
+
+    /// A proof with no checksum must not be paired with bytes a later commit
+    /// wrote. A stable proof-only row is still served.
+    #[test]
+    fn proof_only_row_is_not_served_under_a_later_entropy_commit() -> eyre::Result<()> {
+        let (_dir, storage) = readahead_module("proof_only_serve", 0, 0)?;
+        storage.pack_with_zeros();
+        let unpacked = index_four_chunks(&storage)?;
+        let offset = PartitionChunkOffset::from(0);
+        storage.write_data_chunk(&unpacked[0])?;
+        storage.sync_pending_chunks()?;
+        storage.set_offset_crc_for_test(offset, None)?;
+        // A second offset with no checksum keeps the scan from latching
+        // `crc_complete` when this offset is rewritten. The read stays unknown.
+        storage.set_offset_crc_for_test(PartitionChunkOffset::from(1), None)?;
+        storage.clear_chunk_crc_complete()?;
+        assert!(!storage.chunk_crc_complete_for_test());
+        let row = storage.offset_meta_for_test(offset)?.expect("row");
+        assert!(row.proof.is_some() && row.crc.is_none());
+
+        let stable = storage.generate_full_chunks(offset, offset)?;
+        assert_eq!(stable.len(), 1, "a stable proof-only row must still be served");
+        assert_ne!(stable[&offset].bytes.0, vec![0xEE_u8; 32]);
+
+        storage.pause_next_sync_at(SyncPausePoint::AfterPresenceCopy);
+        let storage_ref = &storage;
+        let outcome = std::thread::scope(|scope| -> eyre::Result<()> {
+            struct ReleasePause<'a>(&'a StorageModule);
+            impl Drop for ReleasePause<'_> {
+                fn drop(&mut self) {
+                    self.0.release_sync_pause();
+                }
+            }
+            let _release = ReleasePause(storage_ref);
+            let writer = scope.spawn(move || {
+                assert!(storage_ref.write_chunk(offset, vec![0xEE; 32], ChunkType::Entropy));
+                storage_ref.force_sync_pending_chunks()
+            });
+            assert!(
+                storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                "entropy commit did not pause"
+            );
+            let paused = storage_ref
+                .offset_meta_for_test(offset)?
+                .expect("paused row");
+            assert!(paused.proof.is_some() && paused.crc.is_none());
+
+            let before = storage_ref.index_view_count();
+            let (tx, rx) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let served = storage_ref.generate_full_chunks(offset, offset);
+                let _ = tx.send(served);
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while storage_ref.index_view_count() == before {
+                if Instant::now() >= deadline {
+                    eyre::bail!("reader did not load the old row");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            storage_ref.release_sync_pause();
+            let served = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("reader finished")?;
+            writer.join().expect("writer")?;
+            assert!(
+                served.is_empty(),
+                "entropy bytes were served under the proof loaded before the commit: {served:?}"
+            );
+            let finished = storage.offset_meta_for_test(offset)?.expect("finished row");
+            assert!(finished.crc.is_some() && finished.proof.is_none());
+            Ok(())
+        });
+        outcome?;
         Ok(())
     }
 }
