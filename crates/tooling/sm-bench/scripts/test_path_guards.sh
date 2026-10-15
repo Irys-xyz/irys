@@ -80,6 +80,120 @@ test_fill_refuses_a_symlink_pid_and_log() {
     rm -rf "$root"
 }
 
+test_fill_refuses_a_log_through_a_symlink_parent() {
+    local name=fill-log-parent root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/loadtest" "$root/outside"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    printf 'DATA_OK' >"$root/outside/keep"
+    ln -s "$root/outside" "$root/loadtest/link"
+    touch "$root/STOP"
+    if "$here/fill.sh" --file "$root/loadtest/data" --log "$root/loadtest/link/notes.txt" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif [ -e "$root/outside/notes.txt" ]; then
+        bad "$name" "log was created outside loadtest: $(cat "$root/outside/notes.txt")"
+    elif ! cmp -s <(printf 'DATA_OK') "$root/outside/keep"; then
+        bad "$name" "outside bytes changed"
+    elif ! cmp -s <(printf 'LIVE-NODE-BYTES') "$root/loadtest/data"; then
+        bad "$name" "data file changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_fill_refuses_to_append_a_log_through_a_symlink_parent() {
+    local name=fill-log-parent-append root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/loadtest" "$root/outside"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    printf 'LOG-ORIGINAL\n' >"$root/outside/notes.txt"
+    ln -s "$root/outside" "$root/loadtest/link"
+    touch "$root/STOP"
+    if "$here/fill.sh" --file "$root/loadtest/data" --log "$root/loadtest/link/notes.txt" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif ! cmp -s <(printf 'LOG-ORIGINAL\n') "$root/outside/notes.txt"; then
+        bad "$name" "log was appended outside loadtest: $(cat "$root/outside/notes.txt")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_fill_refuses_a_log_under_a_missing_dir_through_a_symlink() {
+    local name=fill-log-ancestor root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/loadtest" "$root/outside"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    ln -s "$root/outside" "$root/loadtest/link"
+    touch "$root/STOP"
+    if "$here/fill.sh" --file "$root/loadtest/data" \
+        --log "$root/loadtest/link/sub/notes.txt" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif [ -e "$root/outside/sub" ] || [ -e "$root/outside/notes.txt" ]; then
+        bad "$name" "mkdir followed the symlink ancestor"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_fill_appends_a_log_when_the_symlink_stays_under_loadtest() {
+    local name=fill-log-parent-inside root
+    root=$(tmpdir)
+    mkdir -p "$root/loadtest/real"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    ln -s "$root/loadtest/real" "$root/loadtest/link"
+    touch "$root/STOP"
+    if ! "$here/fill.sh" --file "$root/loadtest/data" --log "$root/loadtest/link/notes.txt" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$root/err" 2>&1; then
+        bad "$name" "fill.sh refused a log that stays under loadtest: $(cat "$root/err")"
+    elif [ ! -f "$root/loadtest/real/notes.txt" ]; then
+        bad "$name" "log was not written under loadtest"
+    elif ! grep -q '^# start ' "$root/loadtest/real/notes.txt"; then
+        bad "$name" "log has no start line: $(cat "$root/loadtest/real/notes.txt")"
+    elif ! grep -q '^# stopped at 0 ' "$root/loadtest/real/notes.txt"; then
+        bad "$name" "log has no stop line: $(cat "$root/loadtest/real/notes.txt")"
+    elif ! cmp -s <(printf 'LIVE-NODE-BYTES') "$root/loadtest/data"; then
+        bad "$name" "data file changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_fill_creates_a_missing_log_dir_under_loadtest() {
+    local name=fill-log-missing-dir root
+    root=$(tmpdir)
+    mkdir -p "$root/loadtest"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    touch "$root/STOP"
+    if ! "$here/fill.sh" --file "$root/loadtest/data" \
+        --log "$root/loadtest/fresh/notes.txt" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$root/err" 2>&1; then
+        bad "$name" "fill.sh refused a new directory under loadtest: $(cat "$root/err")"
+    elif [ ! -f "$root/loadtest/fresh/notes.txt" ]; then
+        bad "$name" "log was not created"
+    elif ! grep -q '^# start ' "$root/loadtest/fresh/notes.txt"; then
+        bad "$name" "log has no start line"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_fill_refuses_a_pid_file_through_a_symlink_parent() {
     local name=fill-pid-parent root err
     root=$(tmpdir)
@@ -158,7 +272,7 @@ test_fill_allows_a_loadtest_file_and_stops_before_write() {
     mkdir -p "$root/loadtest"
     printf 'LIVE-NODE-BYTES' >"$file"
     touch "$root/STOP"
-    if ! "$here/fill.sh" --file "$file" --log "$root/fill.log" --stop-file "$root/STOP" --segment-bytes 16 >"$root/err" 2>&1; then
+    if ! "$here/fill.sh" --file "$file" --log "$root/loadtest/fill.log" --stop-file "$root/STOP" --segment-bytes 16 >"$root/err" 2>&1; then
         bad "$name" "fill.sh refused a loadtest path: $(cat "$root/err")"
     elif ! cmp -s <(printf 'LIVE-NODE-BYTES') "$file"; then
         bad "$name" "file bytes changed"

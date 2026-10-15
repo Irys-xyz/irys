@@ -19,6 +19,8 @@
 # --pid-file must pass that check too. It is created with O_EXCL, and an
 # existing symlink is not removed. TERM and INT stop the dd process group.
 # A --log symlink is refused unless the target stays under loadtest.
+# The log parent is resolved the same way. mkdir and append follow a
+# symlink ancestor, so a parent outside loadtest is refused first.
 
 set -euo pipefail
 
@@ -114,6 +116,27 @@ require_loadtest() {
     fi
 }
 
+# Walk to the existing ancestor. mkdir -p would create the missing tail
+# there, including through a symlink above a directory that does not exist yet.
+require_log_parent() {
+    local parent=$1
+    local next canon
+    while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+        next=$(dirname -- "$parent")
+        if [ "$next" = "$parent" ]; then
+            break
+        fi
+        parent=$next
+    done
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+        canon=$(readlink -f "$parent") || exit 1
+        if ! has_loadtest "$canon"; then
+            echo "log parent resolves to $canon, which has no loadtest path component; refusing" >&2
+            exit 1
+        fi
+    fi
+}
+
 require_loadtest "file" "$file"
 
 pid_created=0
@@ -138,6 +161,7 @@ trap 'cleanup; exit 130' INT
 if [ -L "$log" ]; then
     require_loadtest "log" "$log"
 fi
+require_log_parent "$(dirname -- "$log")"
 
 if [ -n "$pid_file" ]; then
     require_loadtest "pid-file" "$pid_file"
