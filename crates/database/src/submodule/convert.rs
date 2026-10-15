@@ -124,6 +124,8 @@ pub struct EngineEquivalenceReport {
     pub index_audit_findings: u64,
     /// RocksDB v1 checksum that is not the value verify expected.
     pub mismatch_chunk_crc: u64,
+    /// RocksDB checksums a rollback copy does not carry (`rollback` verify only).
+    pub dropped_checksums: u64,
     /// Byte mismatches per column family. Every on-disk family is listed, including a zero count.
     pub family_mismatches: Vec<FamilyMismatch>,
     pub samples: Vec<EngineMismatch>,
@@ -215,6 +217,7 @@ impl std::fmt::Display for EngineEquivalenceReport {
         writeln!(f, "skipped_frontier: {}", self.skipped_frontier)?;
         writeln!(f, "index_audit_findings: {}", self.index_audit_findings)?;
         writeln!(f, "mismatch_chunk_crc: {}", self.mismatch_chunk_crc)?;
+        writeln!(f, "dropped_checksums: {}", self.dropped_checksums)?;
         for row in &self.family_mismatches {
             writeln!(f, "family {}: {}", row.family, row.mismatches)?;
         }
@@ -289,6 +292,10 @@ pub struct ConvertOptions {
     pub fail_after_batches: Option<u32>,
     /// Validate, scan, and report. Do not create or write the target.
     pub dry_run: bool,
+    /// `verify` of a `rocks-to-mdbx` copy. MDBX stores no checksums, so a
+    /// RocksDB checksum the node wrote after the forward conversion is
+    /// counted in `dropped_checksums` instead of as a mismatch.
+    pub rollback: bool,
     /// Keep going when a placement is past the consensus frontier.
     /// An empty consensus block index still fails the run.
     pub allow_unresolved: bool,
@@ -314,6 +321,7 @@ impl ConvertOptions {
             chunk_size: 0,
             fail_after_batches: None,
             dry_run: false,
+            rollback: false,
             allow_unresolved: false,
             packing_record: None,
         }
@@ -807,7 +815,7 @@ pub fn verify_mdbx_and_rocks(
                 verify_reset_target(true, &rocks)
             } else {
                 let schema = mdbx.schema_bytes()?;
-                verify_mdbx_rows_against_rocks(&mdbx, &rocks, schema, &db, &map)
+                verify_mdbx_rows_against_rocks(&mdbx, &rocks, schema, &db, &map, options.rollback)
             }
         }
         OpenedMdbx::V1(env) => {
@@ -1610,12 +1618,13 @@ fn verify_mdbx_rows_against_rocks<S>(
     v2_schema: Option<Vec<u8>>,
     db: &DatabaseEnv,
     map: &PlacementMap,
+    rollback: bool,
 ) -> eyre::Result<EngineEquivalenceReport>
 where
     S: RowSource + SubmoduleStore,
 {
     let mut report = EngineEquivalenceReport::default();
-    verify_data_paths(v2, v3, &mut report)?;
+    verify_data_paths(v2, v3, rollback, &mut report)?;
     verify_placements(v2, v3, db, map, &mut report)?;
     verify_pending_rows(v2, v3, &mut report)?;
     verify_markers(v2, v3, v2_schema, &mut report)?;
@@ -1659,6 +1668,7 @@ fn note_index_audit(
 fn verify_data_paths<S>(
     v2: &S,
     v3: &RocksSubmoduleStore,
+    rollback: bool,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()>
 where
@@ -1693,6 +1703,7 @@ where
                     left[index].is_some(),
                     right_meta[index].as_ref(),
                     *key,
+                    rollback,
                     report,
                 );
                 if let Some(path) = &left[index] {
@@ -1720,12 +1731,18 @@ fn note_mdbx_checksum(
     source_has_proof: bool,
     target: Option<&OffsetMeta>,
     key: PartitionChunkOffset,
+    rollback: bool,
     report: &mut EngineEquivalenceReport,
 ) {
     let Some(target) = target else {
         return;
     };
     if target.crc.is_none() {
+        return;
+    }
+    if rollback {
+        // The MDBX side is the copy here, and MDBX has no checksum column.
+        report.dropped_checksums = report.dropped_checksums.saturating_add(1);
         return;
     }
     if target.proof.is_none() && !source_has_proof {
@@ -3474,7 +3491,8 @@ fn compare_v1_paths(
                 note(report, "data_path", format!("offset {}", offset.0));
             }
             let meta = v3.view(|tx| tx.get_offset_meta(*offset))?;
-            note_mdbx_checksum(true, meta.as_ref(), *offset, report);
+            // A rollback copy is always MDBX v2, never v1.
+            note_mdbx_checksum(true, meta.as_ref(), *offset, false, report);
             if H256::from(hash_sha256(&path)) != hash {
                 report.mismatch_data_path_hash = report.mismatch_data_path_hash.saturating_add(1);
                 note(report, "data_path_hash", format!("offset {}", offset.0));
@@ -3763,8 +3781,8 @@ fn converting_sentinel_present(path: &Path) -> eyre::Result<bool> {
     if !file_path.is_file() {
         return Ok(false);
     }
-    let bytes = fs::read(&file_path).wrap_err("read CONVERTING")?;
-    Ok(bytes == SUBMODULE_CONVERT_INCOMPLETE.as_bytes())
+    // Any file counts: a crash between create and write leaves it short.
+    Ok(true)
 }
 
 fn write_converting_sentinel(path: &Path) -> eyre::Result<()> {
@@ -5681,6 +5699,42 @@ mod tests {
         assert_eq!(report.mismatch_data_path, 0, "{report}");
         assert!(report.intervals_checked >= 1, "{report}");
         assert!(report.has_mismatch(), "{report}");
+        Ok(())
+    }
+
+    /// After the node writes checksums on RocksDB, a rocks-to-mdbx copy has
+    /// none. Forward verify flags that; rollback verify reports it as dropped.
+    #[test]
+    fn rollback_verify_accepts_a_copy_that_dropped_node_checksums() -> eyre::Result<()> {
+        let root = temp("verify-rollback-crc");
+        let consensus = populate_mdbx(root.path())?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let back = root.path().join("back");
+        let options = options_for(&consensus)?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            let proof = opened
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset(0)))?
+                .expect("source proof");
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                    offset: PartitionChunkOffset(0),
+                    crc: Some(0x0102_0304),
+                    proof: Some(proof),
+                }])?;
+                Ok(())
+            })?;
+        }
+        convert_rocks_to_mdbx(&rocks, &back, &options)?;
+        let forward = verify_mdbx_and_rocks(&back, &rocks, &options)?;
+        assert!(forward.has_mismatch(), "{forward}");
+        let mut rollback = options.clone();
+        rollback.rollback = true;
+        let report = verify_mdbx_and_rocks(&back, &rocks, &rollback)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert!(report.dropped_checksums >= 1, "{report}");
         Ok(())
     }
 

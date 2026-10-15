@@ -55,6 +55,10 @@ required flags:
   --chunk-size <bytes>           consensus chunk size (mainnet is 262144)
 
 optional:
+  --rollback                     verify only: the <db-dir> is a rocks-to-mdbx copy.
+                                 MDBX has no checksum column, so checksums the node
+                                 wrote on RocksDB are counted as dropped_checksums
+                                 and are not a mismatch.
   --replace-incomplete           delete a target only when it contains a CONVERTING
                                  file written by this tool, and none of chunks.dat,
                                  chunks.crc, packing_params.toml, intervals.json, a consensus
@@ -202,6 +206,7 @@ fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
     options.replace_incomplete = tool.replace_incomplete;
     options.dry_run = tool.dry_run;
     options.allow_unresolved = tool.allow_unresolved;
+    options.rollback = tool.rollback;
     options.consensus_db = Some(consensus_db);
     options.ledger_id = ledger_id;
     options.slot_index = slot_index;
@@ -242,6 +247,7 @@ struct ToolArgs {
     replace_incomplete: bool,
     dry_run: bool,
     allow_unresolved: bool,
+    rollback: bool,
     consensus_db: Option<PathBuf>,
     ledger_id: Option<u32>,
     slot_index: Option<u64>,
@@ -277,6 +283,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
     let mut replace_incomplete = false;
     let mut dry_run = false;
     let mut allow_unresolved = false;
+    let mut rollback = false;
     let mut consensus_db = None;
     let mut ledger_id = None;
     let mut slot_index = None;
@@ -301,6 +308,10 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
             }
             "--allow-unresolved" => {
                 allow_unresolved = true;
+                index += 1;
+            }
+            "--rollback" => {
+                rollback = true;
                 index += 1;
             }
             "--consensus-db"
@@ -358,6 +369,11 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
+    if rollback && !matches!(command, Command::Verify) {
+        eprintln!("error: --rollback is only valid for verify");
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    }
     // verify-rocks compares two RocksDB v1 directories and needs no consensus flags.
     let structural = matches!(command, Command::VerifyRocks);
     if !structural
@@ -375,6 +391,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         replace_incomplete,
         dry_run,
         allow_unresolved,
+        rollback,
         consensus_db,
         ledger_id,
         slot_index,

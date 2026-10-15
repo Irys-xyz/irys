@@ -523,9 +523,8 @@ fn converting_sentinel_present(path: &Path) -> eyre::Result<bool> {
     if !file_path.is_file() {
         return Ok(false);
     }
-    let bytes = std::fs::read(&file_path)
-        .map_err(|err| eyre::eyre!("read {}: {err}", file_path.display()))?;
-    Ok(bytes == SUBMODULE_CONVERT_INCOMPLETE.as_bytes())
+    // Any file counts: a crash between create and write leaves it short.
+    Ok(true)
 }
 
 fn stamp_schema(env: &DatabaseEnv) -> eyre::Result<()> {
@@ -1256,6 +1255,28 @@ mod tests {
             format!("{err:#}").contains("incomplete MDBX conversion"),
             "{err:#}"
         );
+        Ok(())
+    }
+
+    /// A crash between create and write leaves a short sentinel. It still
+    /// marks an unfinished conversion.
+    #[test]
+    fn torn_converting_sentinel_is_not_stamped() -> eyre::Result<()> {
+        let dir = temp("sm-converting-torn");
+        std::fs::write(dir.path().join("CONVERTING"), b"")?;
+        let args = testing_args()?;
+        let err = open_submodule_index(
+            dir.path(),
+            args.clone(),
+            SubmoduleMigrationOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("incomplete MDBX conversion"),
+            "{err:#}"
+        );
+        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args)?;
+        assert_eq!(schema_of(&env)?, None);
         Ok(())
     }
 

@@ -273,14 +273,16 @@ submodule-index-convert rocks-to-mdbx \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <submodule>/rocks <new-db-dir>
-submodule-index-convert verify \
+submodule-index-convert verify --rollback \
   --consensus-db <node>/.irys/irys_consensus_data \
   --ledger <id> --slot <slot> \
   --chunks-per-partition <n> --chunk-size <bytes> \
   <new-db-dir> <submodule>/rocks
 ```
 
-Replace `db/` with `<new-db-dir>` only after verify passes. Move
+`--rollback` is required here: MDBX has no checksum column, so the
+checksums the node wrote on RocksDB are reported as `dropped_checksums`,
+not as mismatches. Replace `db/` with `<new-db-dir>` only after verify passes. Move
 `rocks/` out of the submodule directory (for example, rename it to
 `rocks.retired`); the node refuses to open MDBX while `rocks/` is
 present. Set `database.submodule_index` to `mdbx`. Start the node.
