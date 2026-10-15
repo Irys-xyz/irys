@@ -1306,7 +1306,10 @@ impl InnerCacheTask {
 
     /// Scans ingress proofs with capacity-aware deletion and regeneration:
     /// - (a) Promoted + expired: delete
-    /// - (b) Unpromoted + expired + at capacity: delete
+    /// - (b) Unpromoted + expired + at capacity: delete, except a proof this
+    ///   node produced while a cached body for that root is still unpersisted.
+    ///   That proof is reanchored. The cap is for chunk bytes; the proof row
+    ///   is what keeps those bytes servable.
     /// - (c) Unpromoted + expired + under capacity + local author: regenerate
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_ingress_proofs(&self) -> eyre::Result<()> {
@@ -1394,9 +1397,33 @@ impl InnerCacheTask {
                 let is_locally_produced = address == local_addr;
 
                 if at_capacity {
-                    // Unpromoted + expired + at capacity: delete
-                    to_delete.push((data_root, compact, false));
-                    debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                    // A local unpromoted proof is the fence for cached bodies
+                    // no module has persisted. Deleting it in this pass makes
+                    // the body prune treat those bytes as unprotected.
+                    if is_locally_produced
+                        && any_unpromoted
+                        && self.cached_body_still_unpersisted(&tx, data_root)?
+                    {
+                        match check_result.regeneration_action {
+                            RegenAction::Reanchor => {
+                                to_reanchor.push(proof);
+                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for reanchoring; cached bodies are unpersisted");
+                            }
+                            RegenAction::Regenerate => {
+                                to_regen.push(proof);
+                                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired local proof for full regeneration; cached bodies are unpersisted");
+                            }
+                            RegenAction::DoNotRegenerate => {
+                                error!(
+                                    "Cache is at capacity and the local proof for data root {} is expired with unpromoted txs and unpersisted cached bodies, but it does not meet reanchoring or regeneration criteria. Leaving the proof in place.",
+                                    &data_root
+                                );
+                            }
+                        }
+                    } else {
+                        to_delete.push((data_root, compact, false));
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                    }
                 } else if is_locally_produced && any_unpromoted {
                     match check_result.regeneration_action {
                         RegenAction::Reanchor => {
@@ -1549,11 +1576,56 @@ impl InnerCacheTask {
         if !to_reanchor.is_empty() {
             info!(
                 proofs.regenerated = to_reanchor.len(),
-                "Reanchored expired local ingress proofs (under capacity)"
+                "Reanchored expired local ingress proofs"
             );
         }
 
         Ok(())
+    }
+
+    /// True when `data_root` still has a cached body that no storage module
+    /// reports as persisted `Data`. An unreadable module is not that report:
+    /// the proof stays, and a later pass can delete it once the read succeeds
+    /// and every cached offset is persisted.
+    fn cached_body_still_unpersisted<T: reth_db::transaction::DbTx>(
+        &self,
+        tx: &T,
+        data_root: DataRoot,
+    ) -> eyre::Result<bool> {
+        use reth_db::cursor::DbDupCursorRO as _;
+
+        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        let mut walker = cursor.walk_dup(Some(data_root), None)?;
+        let mut offsets = BTreeSet::new();
+        while let Some((key, entry)) = walker.next().transpose()? {
+            if key != data_root {
+                break;
+            }
+            offsets.insert(entry.index);
+        }
+        drop(walker);
+        drop(cursor);
+        if offsets.is_empty() {
+            return Ok(false);
+        }
+
+        let modules = self.storage_modules_guard.read().clone();
+        let mut persisted = BTreeSet::new();
+        for storage_module in &modules {
+            match storage_module.durable_tx_offsets_for_data_root(data_root, &offsets) {
+                Ok(durable) => persisted.extend(durable),
+                Err(error) => {
+                    warn!(
+                        chunk.data_root = ?data_root,
+                        storage_module = %storage_module.id,
+                        ?error,
+                        "Keeping local ingress proof: storage metadata is unreadable"
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(offsets.iter().any(|offset| !persisted.contains(offset)))
     }
 
     fn spawn_pruning_task(
@@ -2304,6 +2376,202 @@ mod tests {
         );
         assert!(old_body_survives_capacity_prune(true, true, true)?);
         Ok(())
+    }
+
+    /// At the hard cap, an expired local proof is the only fence for a cached
+    /// body this node has not persisted. `prune_cache` must keep both.
+    #[tokio::test]
+    async fn capacity_prune_keeps_unpersisted_body_behind_expired_local_proof() -> eyre::Result<()>
+    {
+        let (proofs, chunks) = prune_cache_expired_proof(0, true, false, 1, None)?;
+        assert_eq!(
+            proofs, 1,
+            "an expired local proof must stay while a cached body is unpersisted"
+        );
+        assert_eq!(chunks, 1, "the unpersisted body must stay with that proof");
+        Ok(())
+    }
+
+    /// One persisted offset does not release the proof while another cached
+    /// offset of the same root is still unpersisted.
+    #[tokio::test]
+    async fn capacity_prune_keeps_local_proof_while_any_cached_body_is_unpersisted()
+    -> eyre::Result<()> {
+        let (proofs, chunks) = prune_cache_expired_proof(0, true, false, 2, Some(&[0]))?;
+        assert_eq!(
+            proofs, 1,
+            "an unpersisted sibling still needs the local proof"
+        );
+        assert_eq!(
+            chunks, 2,
+            "neither cached body is deleted with the proof in place"
+        );
+        Ok(())
+    }
+
+    /// Orders the cap must still allow: no cached body, every cached body
+    /// persisted, a remote proof, a fully promoted local proof, and a cache
+    /// that is under the hard cap.
+    #[tokio::test]
+    async fn capacity_prune_still_drops_proofs_that_do_not_fence_unpersisted_bodies()
+    -> eyre::Result<()> {
+        let (proofs, chunks) = prune_cache_expired_proof(0, true, false, 0, None)?;
+        assert_eq!(
+            proofs, 0,
+            "no cached body: the expired local proof is deleted"
+        );
+        assert_eq!(chunks, 0);
+
+        let (proofs, chunks) = prune_cache_expired_proof(0, true, false, 1, Some(&[0]))?;
+        assert_eq!(
+            proofs, 0,
+            "persisted Data: the expired local proof is deleted"
+        );
+        assert_eq!(
+            chunks, 1,
+            "the durable reclaim still needs the ingress hash"
+        );
+
+        let (proofs, chunks) = prune_cache_expired_proof(0, false, false, 1, None)?;
+        assert_eq!(proofs, 0, "a remote proof is not a local fence");
+        assert_eq!(
+            chunks, 0,
+            "the migrated body this node does not store is reclaimed"
+        );
+
+        let (proofs, chunks) = prune_cache_expired_proof(0, true, true, 1, None)?;
+        assert_eq!(
+            proofs, 0,
+            "a fully promoted local proof still expires at capacity"
+        );
+        assert_eq!(chunks, 0, "promotion removes the unpromoted fence");
+
+        let (proofs, chunks) = prune_cache_expired_proof(10_000, true, false, 1, None)?;
+        assert_eq!(
+            proofs, 1,
+            "under the hard cap the local proof is not deleted"
+        );
+        assert_eq!(
+            chunks, 1,
+            "under the prune threshold the body is not scanned"
+        );
+        Ok(())
+    }
+
+    /// One `prune_cache` over an expired proof and `chunk_count` old migrated
+    /// bodies. Returns `(proof rows left, cached chunk index rows left)`.
+    ///
+    /// `persisted_offsets` of `Some` installs one module that reports those
+    /// partition offsets as persisted `Data`. `None` installs no module.
+    fn prune_cache_expired_proof(
+        max_cache_size_bytes: u64,
+        local_proof: bool,
+        promoted: bool,
+        chunk_count: u32,
+        persisted_offsets: Option<&[u32]>,
+    ) -> eyre::Result<(usize, usize)> {
+        let mut node_config = NodeConfig::testing();
+        node_config.cache.max_cache_size_bytes = max_cache_size_bytes;
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let data_size = 32_u64.saturating_mul(u64::from(chunk_count.max(1)));
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let data_root = tx_header.data_root;
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            database::insert_tx_header(wtx, &tx_header)?;
+            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+            if promoted {
+                irys_database::set_data_tx_promoted_height(wtx, &tx_header.id, 2)
+                    .map_err(|e| eyre::eyre!("set_data_tx_promoted_height: {e:?}"))?;
+            }
+            for offset in 0..chunk_count {
+                let chunk = UnpackedChunk {
+                    data_root,
+                    data_size,
+                    data_path: Base64(vec![offset as u8]),
+                    bytes: Base64(vec![2_u8; 8]),
+                    tx_offset: TxChunkOffset::from(offset),
+                };
+                database::cache_chunk(wtx, &chunk)?;
+            }
+            if chunk_count > 0 {
+                let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+                let mut walk = cur.walk_dup(Some(data_root), None)?;
+                while let Some((_k, entry)) = walk.next().transpose()? {
+                    wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+                    let mut updated = entry.clone();
+                    updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                    wtx.put::<CachedChunksIndex>(data_root, updated)?;
+                }
+            }
+            let mut proof = IngressProof::default();
+            proof.data_root = data_root;
+            proof.anchor = H256::random();
+            let address = if local_proof {
+                config.irys_signer().address()
+            } else {
+                IrysAddress::random()
+            };
+            irys_database::store_external_ingress_proof_checked(wtx, &proof, address)?;
+            eyre::Ok(())
+        })??;
+
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let storage_modules_guard = match persisted_offsets {
+            Some(offsets) => storage_modules_guard_with_durable(
+                sm_dir.path().to_path_buf(),
+                data_root,
+                data_size,
+                offsets,
+            )?,
+            None => test_storage_modules_guard(),
+        };
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+            storage_modules_guard,
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        service_task.prune_cache(10)?;
+
+        let proofs = db.view_eyre(|rtx| {
+            Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
+        })?;
+        let chunks = db.view_eyre(|rtx| {
+            let mut cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let walker = cursor.walk_dup(Some(data_root), None)?;
+            let rows = walker.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows.len())
+        })?;
+        Ok((proofs, chunks))
     }
 
     /// After open drops a placement, capacity prune must keep the replica's
@@ -3594,10 +3862,12 @@ mod tests {
         Ok(())
     }
 
-    /// Regression: when the cache is at capacity, a locally-produced expired
-    /// proof with unpromoted txs must be deleted (not regenerated), and the
-    /// content-checked delete path (`delete_ingress_proof_if_unchanged`) must
-    /// be used so a concurrently-refreshed proof is preserved.
+    /// Regression: when the cache is at capacity and this root has no cached
+    /// chunk body, a locally-produced expired proof with unpromoted txs must
+    /// be deleted (not regenerated). The content-checked delete path
+    /// (`delete_ingress_proof_if_unchanged`) must be used so a
+    /// concurrently-refreshed proof is preserved. A cached unpersisted body
+    /// is a different case: that proof is reanchored.
     ///
     /// Setup:
     /// - `max_cache_size_bytes = 0` → `at_capacity = true` (0 >= 0)
