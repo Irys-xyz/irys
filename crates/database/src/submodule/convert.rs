@@ -5990,6 +5990,17 @@ mod tests {
         let report = verify_mdbx_and_rocks(&back, &rocks, &rollback)?;
         assert!(!report.has_mismatch(), "{report}");
         assert!(report.dropped_checksums >= 1, "{report}");
+        assert_eq!(report.mismatch_data_path, 0, "{report}");
+
+        // A dropped checksum must not hide another family.
+        {
+            let copy = MdbxSubmoduleStore::open(&back, testing_args()?)?;
+            copy.update(|tx| tx.add_full_data_path(PartitionChunkOffset(0), b"changed".to_vec()))?;
+        }
+        let changed = verify_mdbx_and_rocks(&back, &rocks, &rollback)?;
+        assert!(changed.has_mismatch(), "{changed}");
+        assert!(changed.mismatch_data_path >= 1, "{changed}");
+        assert!(changed.dropped_checksums >= 1, "{changed}");
         Ok(())
     }
 
