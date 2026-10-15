@@ -53,8 +53,10 @@ allows a read-only open. An unknown `compat` bit is ignored.
 Open reads the on-disk column-family list and opens every family. A
 family this binary does not know is opened with auto compaction
 disabled, so this process does not rewrite that family's SSTs. The node
-does not read, write, or drop it, and logs the name once. A family that
-needs another comparator or a prefix extractor is not ignorable.
+does not read, write, or drop it, and logs the name once. A writable
+open refuses a family whose stored options set a prefix extractor.
+Recovery would flush that family's WAL with default table options and
+drop the extractor. A read-only open does not flush, so it still opens.
 
 A later change that old binaries can ignore sets a `compat` or
 `ro_compat` bit and keeps the RocksDB v1 marker. A change to an existing

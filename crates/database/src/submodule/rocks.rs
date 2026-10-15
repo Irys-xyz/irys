@@ -1256,6 +1256,9 @@ impl RocksSubmoduleStore {
         // and that open creates the families.
         let unknown = existing_unknown_families(&path)?;
         log_unknown_families(&path, &unknown);
+        // Recovery flushes a non-empty memtable with the options of this
+        // open. Default options drop a prefix extractor. Refuse before open.
+        refuse_unknown_prefix_extractor(&path, &unknown)?;
         let create_missing = !path.join("CURRENT").is_file();
         let (db, stats) = open_db(
             &path,
@@ -3484,6 +3487,70 @@ fn existing_unknown_families(path: &Path) -> eyre::Result<Vec<String>> {
         unknown.push(name);
     }
     Ok(unknown)
+}
+
+/// A prefix extractor on an unknown family is not recoverable here.
+///
+/// Writable recovery flushes any WAL tail into an L0 SST using the options
+/// passed to this open. Default table options have no prefix extractor.
+/// `nullptr` and a missing key are the families this process may open.
+/// Read-only open does not flush, so it does not call this.
+fn refuse_unknown_prefix_extractor(path: &Path, unknown: &[String]) -> eyre::Result<()> {
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let opts = latest_options_text(path)?;
+    for name in unknown {
+        match cf_options_value(&opts, name, "prefix_extractor").as_deref() {
+            None | Some("nullptr") => {}
+            Some(extractor) => {
+                eyre::bail!(
+                    "submodule index {} has column family {name} with prefix extractor {extractor}. A writable open would recover that family's WAL with default table options and drop the extractor. This open does not rewrite it.",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn latest_options_text(path: &Path) -> eyre::Result<String> {
+    let mut newest: Option<(u64, PathBuf)> = None;
+    for entry in fs::read_dir(path).wrap_err("read rocksdb directory")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(number) = name
+            .to_string_lossy()
+            .strip_prefix("OPTIONS-")
+            .and_then(|rest| rest.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(seen, _)| number > *seen) {
+            newest = Some((number, entry.path()));
+        }
+    }
+    let (_, file) = newest.ok_or_else(|| {
+        eyre::eyre!(
+            "submodule index {} has an unknown column family and no OPTIONS file. This open does not recover it with default table options.",
+            path.display()
+        )
+    })?;
+    fs::read_to_string(file).wrap_err("read rocksdb OPTIONS")
+}
+
+fn cf_options_value(opts: &str, cf: &str, key: &str) -> Option<String> {
+    let header = format!("[CFOptions \"{cf}\"]");
+    let start = opts.find(&header)? + header.len();
+    let rest = &opts[start..];
+    let section = match rest.find("\n[") {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+    let prefix = format!("{key}=");
+    section
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(ToString::to_string))
 }
 
 fn log_unknown_families(path: &Path, unknown: &[String]) {
@@ -6575,6 +6642,11 @@ mod tests {
         drop(RocksSubmoduleStore::open(&path)?);
         let opts = persisted_options(&path)?;
         assert_eq!(
+            cf_option(&opts, family, "prefix_extractor").as_deref(),
+            Some("nullptr"),
+            "a family with no prefix extractor still opens"
+        );
+        assert_eq!(
             cf_option(&opts, family, "disable_auto_compactions").as_deref(),
             Some("true"),
             "{opts}"
@@ -6587,6 +6659,47 @@ mod tests {
         assert_eq!(
             read_only_value(&path, family, b"k")?,
             Some(b"leave-me".to_vec())
+        );
+        Ok(())
+    }
+
+    /// A newer family with a prefix extractor is not opened for write.
+    /// Recovery would flush its WAL with default table options and drop the
+    /// extractor. Read-only open does not flush, so the key stays readable.
+    #[test]
+    fn unknown_prefix_family_refuses_writable_open_and_keeps_the_key() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_unknown_prefix")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+
+        let family = "FuturePrefixed";
+        let payload = b"leave-me";
+        {
+            let mut db = reopen_for_edit(&path)?;
+            let mut opts = Options::default();
+            opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+            db.create_cf(family, &opts)?;
+            let extra = db
+                .cf_handle(family)
+                .ok_or_else(|| eyre::eyre!("missing {family}"))?;
+            db.put_cf(&extra, b"k", payload)?;
+        }
+
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains(family), "{text}");
+        assert!(text.contains("prefix extractor"), "{text}");
+        assert_eq!(
+            read_only_value(&path, family, b"k")?,
+            Some(payload.to_vec()),
+            "the refused open must not rewrite the family"
+        );
+        drop(RocksSubmoduleStore::open_read_only(&path)?);
+        assert_eq!(
+            read_only_value(&path, family, b"k")?,
+            Some(payload.to_vec())
         );
         Ok(())
     }
