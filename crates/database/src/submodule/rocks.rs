@@ -189,9 +189,11 @@ pub struct RocksTuning {
     /// open's default; the binding does not set a recovery mode) and for
     /// `kSkipAnyCorruptedRecords`. Open sets the count back to 0 for
     /// `kTolerateCorruptedTailRecords` and `kAbsoluteConsistency`. A write
-    /// with `disableWAL` is rejected while the count is non-zero. This store
-    /// does not use `disableWAL`, `WAL_ttl_seconds`, or `WAL_size_limit_MB`.
-    /// Those last two also force the count to 0.
+    /// with `disableWAL` is rejected while the count is non-zero. Production
+    /// writes keep the WAL. The converting open sets this count to 0 so its
+    /// bulk load can disable the WAL. `WAL_ttl_seconds` and
+    /// `WAL_size_limit_MB` are unset; either one would also force the count
+    /// to 0.
     pub recycle_log_file_num: usize,
     /// `true` syncs the WAL, the MANIFEST, SST files, and blob files with
     /// `fsync`. `false` uses `fdatasync`.
