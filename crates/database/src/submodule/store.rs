@@ -2732,6 +2732,39 @@ mod tests {
         })
     }
 
+    /// The only interval starts before the span, and no key is `>=` the span
+    /// start. MDBX `seek` is `set_range` and returns `None` there. The span
+    /// still overlaps that row, so the tail is punched.
+    #[test]
+    fn last_interval_overlaps_a_span_when_seek_misses() -> eyre::Result<()> {
+        each_engine("submodule_last_interval_seek", |store| {
+            let root = H256::repeat_byte(1);
+            let prefix = H256::repeat_byte(2);
+            store.update(|tx| install_placement(tx, 0, 9, root, prefix, 0, 32))?;
+            let span = [(PartitionChunkOffset::from(8), PartitionChunkOffset::from(9))];
+            assert!(
+                store.view(|tx| tx.tx_intervals_overlap_ranges(&span))?,
+                "interval [0, 9] covers span [8, 9]"
+            );
+            store.drop_uninitialized_coverage(&span, 32)?;
+            let at_zero = store
+                .view(|tx| tx.tx_interval_at(PartitionChunkOffset::from(0)))?
+                .expect("remnant");
+            assert_eq!(at_zero.end, PartitionChunkOffset::from(7));
+            assert!(
+                store
+                    .view(|tx| tx.tx_interval_at(PartitionChunkOffset::from(8)))?
+                    .is_none()
+            );
+            let infos = store
+                .view(|tx| tx.get_data_root_infos_for_data_root(root))?
+                .expect("info extent does not overlap the tail");
+            assert_eq!(infos.0.len(), 1);
+            assert_eq!(infos.0[0].data_size, 32);
+            Ok(())
+        })
+    }
+
     /// Fragmented spans delete only the rows they cover. A later put in the
     /// same batch stays. Overlapping spans count a key once.
     #[test]

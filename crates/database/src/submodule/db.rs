@@ -627,12 +627,16 @@ pub fn tx_intervals_overlap_ranges<T: DbTx>(
     let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
     for (start, end) in spans {
         let landed = cursor.seek(start)?;
+        // `seek` is the first key `>= start`. `None` means every key is lower,
+        // so the last row is the floor. The same miss is `cursor.last()` in
+        // `intervals_touching_spans`.
         let floor = match landed {
             Some((key, _)) if key > start => match cursor.prev()? {
                 Some(previous) => Some(previous),
                 None => cursor.seek(start)?,
             },
-            other => other,
+            None => cursor.last()?,
+            Some(pair) => Some(pair),
         };
         let Some((key, value)) = floor else {
             continue;
