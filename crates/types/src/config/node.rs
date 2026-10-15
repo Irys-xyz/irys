@@ -650,7 +650,9 @@ pub struct StorageSyncConfig {
     /// The derive starts when the solution is found. Block production awaits it
     /// when it builds the PoA, so parent selection, mempool selection, and the
     /// Reth payload build run while the headers are read. `1` reads headers on
-    /// the derive thread. `0` is raised to 1. The default is 16.
+    /// the derive thread. `0` is raised to 1. The pool is
+    /// `min(configured, available_parallelism)` and at least 1. The default
+    /// is 16.
     #[serde(default = "default_tx_path_derive_threads")]
     pub tx_path_derive_threads: usize,
     /// Minimum milliseconds between durable points.
@@ -692,7 +694,7 @@ pub struct StorageSyncConfig {
     /// which stays under the line. A 24 MiB/s stream fills the recall's
     /// second and queues more than 26 MiB, so the next point is immediate.
     /// `1000` puts the line on the ceiling. `0` runs a point as soon as any
-    /// byte is pending.
+    /// byte is pending, except while a recall flush is owed.
     #[serde(default = "default_durable_headroom_permille")]
     pub durable_headroom_permille: u64,
     /// Accepted so an older config that set this key still loads.
@@ -761,11 +763,8 @@ pub const DEFAULT_INDEX_WAL_BACKSTOP_MS: u64 = 1000;
 /// Default tx-header prefetch threads. See [`StorageSyncConfig::tx_path_derive_threads`].
 pub const DEFAULT_TX_PATH_DERIVE_THREADS: usize = 16;
 
-/// Default gap between durable points, in milliseconds.
-///
-/// 250 is for HDD storage modules. A 16–28 MiB/s ingest at one recall per
-/// second stays under saturation and durable p99 rises by about 100 ms.
-/// `0` syncs on every gap.
+/// Default gap between durable points, in milliseconds. See
+/// [`StorageSyncConfig::min_durable_interval_ms`].
 pub const DEFAULT_MIN_DURABLE_INTERVAL_MS: u64 = 250;
 
 /// Default headroom line, in parts per thousand of the pending-byte ceiling.
