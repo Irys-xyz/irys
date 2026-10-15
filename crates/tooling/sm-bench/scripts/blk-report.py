@@ -2,10 +2,10 @@
 """Split a blk-run.sh trace into per-file disk time.
 
 Zone rate is linear in LBA fraction: 266 MiB/s at the first sector, 130 MiB/s
-at the last. Sections 103 and 104 of the disk-lane notebook measured about
-266 MiB/s on the outer tracks of this HDD. The write region in allocation
-group 18 (groups 0-20) filled at about 146 MiB/s, which is this line there.
-Override with --zone-outer and --zone-inner.
+at the last. Outer-track sequential fills on the lab HDD measured about
+266 MiB/s. The write region in allocation group 18 (groups 0-20) filled at
+about 146 MiB/s, which is this line there. Override with --zone-outer and
+--zone-inner.
 
 Service time is complete - max(issue, previous completion), in completion
 order. The actuator is serial, so the sum is busy time. Positioning is
