@@ -491,6 +491,9 @@ enum SyncPausePoint {
     AfterPresenceCopy,
     /// The interval map is copied. `intervals.json` is not locked yet.
     AfterIntervalSnapshot,
+    /// `reset` has cleared `pending` once. The interval map is still the
+    /// pre-reset labels.
+    AfterResetPendingClear,
 }
 
 /// One armed pause. The durable point waits until the test releases it.
@@ -3058,6 +3061,10 @@ impl StorageModule {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.fail_queued_sweeps();
+        // A body write can occupy after the clear above and before the
+        // interval map flips. The test freezes that window here.
+        #[cfg(test)]
+        self.wait_if_sync_paused(SyncPausePoint::AfterResetPendingClear);
 
         for (_, submodule) in self.submodules.iter() {
             submodule.db.set_reset_in_progress()?;
@@ -3098,6 +3105,26 @@ impl StorageModule {
         // `Uninitialized` after it.
         self.persist_intervals_authoritative(true)
             .wrap_err("Could not update submodule interval files")?;
+        // A body drain can pass the first clear, pack, and insert `Data`
+        // after this map is `Uninitialized`. `commit_packed` does not read
+        // the map. Drop that insert. Leave `data_writes_paused` alone: a
+        // caller that paused before reset still resumes.
+        {
+            let mut pending = self.pending_writes.write().unwrap();
+            self.index_write_generation.fetch_add(1, Ordering::SeqCst);
+            for (_, submodule) in self.submodules.iter() {
+                submodule.index_drain.wait_idle();
+            }
+            pending.chunks.clear();
+            pending.occupancy.clear();
+            pending.priorities.clear();
+            pending.queued_at.clear();
+            pending.pwrite_at.clear();
+            pending.proofs.clear();
+            pending.written_ahead.clear();
+            self.entropy_cache.lock().unwrap().clear();
+        }
+        self.fail_queued_sweeps();
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetIntervals)?;
 
@@ -15990,6 +16017,100 @@ mod tests {
             );
             let finished = storage.offset_meta_for_test(offset)?.expect("finished row");
             assert!(finished.crc.is_some() && finished.proof.is_none());
+            Ok(())
+        });
+        outcome?;
+        Ok(())
+    }
+
+    /// A body write that packs after `reset` has cleared `pending`, and before
+    /// the interval map flips, must not survive the reset.
+    #[test]
+    fn reset_drops_a_data_write_that_lands_after_the_pending_clear() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("reset_late_data")
+            .with_tracing()
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 5,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
+            },
+            &config,
+        )?;
+        storage_module.pack_with_zeros();
+        storage_module.force_sync_pending_chunks()?;
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 5,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        storage_module.index_transaction_data(
+            &data_tx,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: 5,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0, 1, 2, 3, 4].into(),
+            tx_offset: TxChunkOffset::from(0),
+        };
+
+        storage_module.pause_next_sync_at(SyncPausePoint::AfterResetPendingClear);
+        let storage_ref = &storage_module;
+        let outcome = std::thread::scope(|scope| -> eyre::Result<()> {
+            struct ReleasePause<'a>(&'a StorageModule);
+            impl Drop for ReleasePause<'_> {
+                fn drop(&mut self) {
+                    self.0.release_sync_pause();
+                }
+            }
+            let _release = ReleasePause(storage_ref);
+            let reset_thread = scope.spawn(move || storage_ref.reset());
+            assert!(
+                storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                "reset did not pause after the pending clear"
+            );
+            storage_ref
+                .write_data_chunk(&chunk)
+                .expect("body write in the reset window");
+            assert!(
+                storage_ref.has_pending_writes(),
+                "the body write did not land after the clear"
+            );
+            storage_ref.release_sync_pause();
+            reset_thread.join().expect("reset thread")?;
+            assert!(
+                !storage_ref.has_pending_writes(),
+                "reset kept a body write that landed after its pending clear"
+            );
+            assert_eq!(
+                storage_ref.get_intervals(ChunkType::Uninitialized),
+                vec![partition_chunk_offset_ii!(0, 4)]
+            );
             Ok(())
         });
         outcome?;
