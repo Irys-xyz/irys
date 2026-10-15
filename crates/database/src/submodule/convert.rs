@@ -2613,9 +2613,6 @@ struct V1Ready {
     placement: PreparedPlacement,
     paths: Vec<(PartitionChunkOffset, ChunkDataPath)>,
     path_bytes: usize,
-    /// The path bytes were larger than one batch. Write the placement, then
-    /// scan this range once. Short runs keep `paths` and do not scan again.
-    rescan: bool,
 }
 
 struct V1Out {
@@ -2690,14 +2687,7 @@ fn copy_mdbx_v1_into_rocks(
             let batch = read_v1_hash_batch(env, after, limits)?;
             if batch.is_empty() {
                 if let Some(run) = open.take() {
-                    close_v1_run(
-                        &mut src,
-                        &mut sink,
-                        run,
-                        std::mem::take(&mut paths),
-                        path_bytes,
-                        rescan,
-                    )?;
+                    close_v1_run(&mut src, &mut sink, run, std::mem::take(&mut paths), rescan)?;
                 }
                 break;
             }
@@ -2705,7 +2695,6 @@ fn copy_mdbx_v1_into_rocks(
                 let mut closed = Vec::new();
                 migrate::absorb(&mut open, offset.0, hashes.tx_path_hash, &mut closed);
                 if let Some(run) = closed.pop() {
-                    let taken_bytes = path_bytes;
                     let taken_rescan = rescan;
                     path_bytes = 0;
                     rescan = false;
@@ -2714,7 +2703,6 @@ fn copy_mdbx_v1_into_rocks(
                         &mut sink,
                         run,
                         std::mem::take(&mut paths),
-                        taken_bytes,
                         taken_rescan,
                     )?;
                 }
@@ -2775,7 +2763,6 @@ fn close_v1_run(
     sink: &mut V1Sink<'_>,
     run: OpenRun,
     mut paths: Vec<(PartitionChunkOffset, ChunkDataPath)>,
-    _path_bytes: usize,
     rescan: bool,
 ) -> eyre::Result<()> {
     let prepared = prepare_v1_placement(src.env, src.db, src.cache, src.map, &run)?;
@@ -2800,7 +2787,6 @@ fn close_v1_run(
                     placement,
                     paths: Vec::new(),
                     path_bytes: 0,
-                    rescan: false,
                 },
             )?;
         }
@@ -2827,7 +2813,6 @@ fn close_v1_run(
                 placement,
                 paths: seg_paths,
                 path_bytes: seg_bytes,
-                rescan: false,
             },
         )?;
     }
@@ -2856,13 +2841,11 @@ fn push_v1_ready(sink: &mut V1Sink<'_>, ready: V1Ready) -> eyre::Result<()> {
     sink.stats.intervals = sink.stats.intervals.saturating_add(1);
     sink.stats.tx_paths = sink.stats.intervals;
     sink.stats.tx_leaf_bindings = sink.stats.intervals;
-    if !ready.rescan {
-        sink.stats.data_paths = sink
-            .stats
-            .data_paths
-            .saturating_add(u64::try_from(ready.paths.len()).unwrap_or(u64::MAX));
-        sink.stats.path_hashes = sink.stats.data_paths;
-    }
+    sink.stats.data_paths = sink
+        .stats
+        .data_paths
+        .saturating_add(u64::try_from(ready.paths.len()).unwrap_or(u64::MAX));
+    sink.stats.path_hashes = sink.stats.data_paths;
     if ready.placement.info.is_some() {
         sink.stats.data_roots = sink.stats.data_roots.saturating_add(1);
     }
