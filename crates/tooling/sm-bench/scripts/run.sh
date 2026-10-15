@@ -112,7 +112,7 @@ case "$device" in
 esac
 
 case "$name" in
-    *[!A-Za-z0-9._-]*)
+    . | .. | *[!A-Za-z0-9._-]*)
         echo "run name must be a single path component: $name" >&2
         exit 1
         ;;

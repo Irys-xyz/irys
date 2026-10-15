@@ -308,6 +308,85 @@ test_run_refuses_a_missing_path_that_escapes_loadtest() {
     rm -rf "$root"
 }
 
+test_run_rejects_a_dotdot_name() {
+    local name=run-name-dotdot root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest" "$root/out" "$root/sys/block/none/queue"
+    queue_files "$root/sys/block/none/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name .. --device none --mount /tmp \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0"
+    elif ! grep -q "single path component" "$err"; then
+        bad "$name" "stderr did not refuse the name: $(cat "$err")"
+    elif [ -e "$root/sysfs.txt" ] || [ -e "$root/run.pid" ]; then
+        bad "$name" "run files were written above --out-root"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_rejects_a_dot_name() {
+    local name=run-name-dot root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest" "$root/out" "$root/sys/block/none/queue"
+    queue_files "$root/sys/block/none/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name . --device none --mount /tmp \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0"
+    elif ! grep -q "single path component" "$err"; then
+        bad "$name" "stderr did not refuse the name: $(cat "$err")"
+    elif [ -e "$root/out/sysfs.txt" ]; then
+        bad "$name" "run files were written into --out-root itself"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_rejects_a_dotdot_name() {
+    local name=ladder-name-dotdot root module sys err
+    root=$(tmpdir)
+    module=$root/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$sys/block/none/queue" "$root/out"
+    queue_files "$sys/block/none/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device none --mount /tmp --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --run '.. only' \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0"
+    elif ! grep -q "single path component" "$err"; then
+        bad "$name" "stderr did not refuse the name: $(cat "$err")"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index state was moved"
+    elif [ -e "$root/sysfs.txt" ]; then
+        bad "$name" "run files were written above --out-root"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_run_refuses_a_device_that_is_not_the_mount_disk() {
     local name=run-mount-disk root err
     root=$(tmpdir)
