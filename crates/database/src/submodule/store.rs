@@ -26,23 +26,24 @@ use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 
 use super::db::{
-    delete_presence_in_ranges, delete_reset_marker, has_pending_body_migration_in_range,
-    list_data_root_infos, presence_in_ranges, put_reset_marker, read_reset_marker,
-    trim_data_root_placements, tx_interval_at, tx_interval_overlaps, tx_intervals_in_range,
+    clear_tx_intervals_in_ranges, del_pending_body_migrations_in_ranges, delete_presence_in_ranges,
+    delete_reset_marker, ensure_span_offsets_fit_i32, has_pending_in_ranges,
+    info_overlaps_coalesced_spans, list_data_root_infos, presence_in_ranges, put_reset_marker,
+    read_reset_marker, trim_data_root_placements, tx_interval_at, tx_intervals_in_range,
+    tx_intervals_overlap_ranges,
 };
-use super::interval::IntervalRow;
+use super::interval::{IntervalRow, coalesce_inclusive_spans};
 #[cfg(feature = "rocksdb")]
 use super::rocks::{RocksBackground, RocksIngestStats, RocksSubmoduleStore, RocksTuning};
 use super::{
     add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path, add_full_tx_path,
     add_pending_body_migration, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
     add_tx_path_hash_to_offset_range, clear_paths_in_inclusive_range, clear_submodule_database,
-    del_path_hashes_by_offset, del_pending_body_migration, del_pending_body_migrations_in_range,
-    first_missing_path_hash_offset_in_tx, get_data_path_by_offset,
-    get_data_root_infos_for_data_root, get_full_tx_path, get_path_hashes_by_offset,
-    get_pending_body_migration, get_tx_leaf_binding, get_tx_path_by_offset,
-    missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range, pending_body_migrations_from,
-    set_data_root_infos_for_data_root, set_path_hashes_by_offset,
+    del_path_hashes_by_offset, del_pending_body_migration, first_missing_path_hash_offset_in_tx,
+    get_data_path_by_offset, get_data_root_infos_for_data_root, get_full_tx_path,
+    get_path_hashes_by_offset, get_pending_body_migration, get_tx_leaf_binding,
+    get_tx_path_by_offset, missing_path_hash_ranges_in_tx, path_hashes_in_inclusive_range,
+    pending_body_migrations_from, set_data_root_infos_for_data_root, set_path_hashes_by_offset,
     tables::{
         ChunkPathHashes, DataRootInfo, DataRootInfos, OffsetMeta, PackedOffsetRow,
         PendingBodyMigration, Placement, TxLeafBinding,
@@ -124,6 +125,22 @@ pub trait SubmoduleRead {
         end: PartitionChunkOffset,
     ) -> eyre::Result<bool>;
 
+    /// `true` when any span holds a pending-job key.
+    ///
+    /// The default asks once per span. An engine overrides this with one
+    /// cursor that seeks across the gaps. Recovery uses the override.
+    fn has_pending_in_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<bool> {
+        for &(start, end) in ranges {
+            if start <= end && self.has_pending_in_inclusive_range(start, end)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// `true` when a tx-path interval overlaps `[start, end]`.
     ///
     /// The value holds the inclusive end, so the scan reads it.
@@ -132,6 +149,21 @@ pub trait SubmoduleRead {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<bool>;
+
+    /// `true` when any interval overlaps any span.
+    ///
+    /// The default asks once per span. An engine overrides this with one cursor.
+    fn tx_intervals_overlap_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<bool> {
+        for &(start, end) in ranges {
+            if start <= end && self.tx_interval_overlaps(start, end)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 
     /// Every data-root row.
     ///
@@ -352,6 +384,40 @@ pub trait SubmoduleWrite: SubmoduleRead {
         end: PartitionChunkOffset,
     ) -> eyre::Result<usize>;
 
+    /// Delete jobs whose keys lie in any span. Returns how many were removed.
+    ///
+    /// Touching spans are one range. Recovery calls this once. A loop of
+    /// [`Self::del_pending_body_migrations_in_range`] opens a cursor per span,
+    /// and on RocksDB each non-empty span can add a range tombstone. The next
+    /// iterator rebuilds that tombstone map.
+    fn del_pending_body_migrations_in_ranges(
+        &mut self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<usize> {
+        let mut removed = 0_usize;
+        for &(start, end) in ranges {
+            if start <= end {
+                removed =
+                    removed.saturating_add(self.del_pending_body_migrations_in_range(start, end)?);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Remove tx-path coverage for every span.
+    ///
+    /// The default clears one span at a time. An engine overrides this with
+    /// one read of the rows that touch the spans.
+    fn clear_tx_coverage_in_ranges(
+        &mut self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<()> {
+        for &(start, end) in ranges {
+            self.add_tx_path_hash_to_offset_range(start, end, None)?;
+        }
+        Ok(())
+    }
+
     /// Delete index rows. Does not delete the schema-version metadata row.
     fn clear(&mut self) -> eyre::Result<()>;
 
@@ -423,8 +489,8 @@ pub trait SubmoduleStore: Send + Sync {
     ///
     /// Presence is the offset path-hash row and the offset data-path row.
     /// An empty list, or spans that hold no presence row, does not commit.
-    /// One commit covers every span that has a row. Cost is one seek per span
-    /// per presence family, plus the rows removed. RocksDB deletes the offset
+    /// One commit covers every span that has a row. One cursor per presence
+    /// family seeks across the gaps, plus the rows removed. RocksDB deletes the offset
     /// rows with `DeleteRange`. RocksDB v1 reads the data-proof values in each
     /// span that has rows and point-deletes the matching content-hash keys in
     /// that same batch. A span with no row does not read values. MDBX walks
@@ -946,7 +1012,14 @@ macro_rules! impl_submodule_read {
                 start: PartitionChunkOffset,
                 end: PartitionChunkOffset,
             ) -> eyre::Result<bool> {
-                has_pending_body_migration_in_range(self.tx, start, end)
+                has_pending_in_ranges(self.tx, &[(start, end)])
+            }
+
+            fn has_pending_in_ranges(
+                &self,
+                ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+            ) -> eyre::Result<bool> {
+                has_pending_in_ranges(self.tx, ranges)
             }
 
             fn tx_interval_overlaps(
@@ -954,7 +1027,14 @@ macro_rules! impl_submodule_read {
                 start: PartitionChunkOffset,
                 end: PartitionChunkOffset,
             ) -> eyre::Result<bool> {
-                tx_interval_overlaps(self.tx, start, end)
+                tx_intervals_overlap_ranges(self.tx, &[(start, end)])
+            }
+
+            fn tx_intervals_overlap_ranges(
+                &self,
+                ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+            ) -> eyre::Result<bool> {
+                tx_intervals_overlap_ranges(self.tx, ranges)
             }
 
             fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
@@ -1084,7 +1164,21 @@ impl SubmoduleWrite for MdbxWrite<'_> {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<usize> {
-        del_pending_body_migrations_in_range(self.tx, start, end)
+        del_pending_body_migrations_in_ranges(self.tx, &[(start, end)])
+    }
+
+    fn del_pending_body_migrations_in_ranges(
+        &mut self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<usize> {
+        del_pending_body_migrations_in_ranges(self.tx, ranges)
+    }
+
+    fn clear_tx_coverage_in_ranges(
+        &mut self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<()> {
+        clear_tx_intervals_in_ranges(self.tx, ranges)
     }
 
     fn clear(&mut self) -> eyre::Result<()> {
@@ -1135,7 +1229,7 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         if ranges.iter().all(|(start, end)| start > end) {
             return Ok(PresenceReconcile::default());
         }
-        // One seek per span per family. A miss does not open a write txn.
+        // One cursor per family seeks across the gaps. A miss does not open a write txn.
         let present = self.env.view_eyre(|tx| presence_in_ranges(tx, ranges))?;
         if !present {
             return Ok(PresenceReconcile::default());
@@ -1215,17 +1309,23 @@ fn spans_need_coverage_drop(
     spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
     chunk_size: u64,
 ) -> eyre::Result<bool> {
-    for &(start, end) in spans {
-        if tx.has_pending_in_inclusive_range(start, end)? || tx.tx_interval_overlaps(start, end)? {
-            return Ok(true);
-        }
+    let spans = coalesce_inclusive_spans(spans);
+    if spans.is_empty() {
+        return Ok(false);
     }
-    for (_, infos) in tx.data_root_entries()? {
+    // Pending and interval hits return before any `i32` span check. A span
+    // offset that does not fit is only an error on the data-root scan.
+    if tx.has_pending_in_ranges(&spans)? || tx.tx_intervals_overlap_ranges(&spans)? {
+        return Ok(true);
+    }
+    let entries = tx.data_root_entries()?;
+    if chunk_size != 0 && entries.iter().any(|(_, infos)| !infos.0.is_empty()) {
+        ensure_span_offsets_fit_i32(&spans)?;
+    }
+    for (_, infos) in entries {
         for info in &infos.0 {
-            for &(start, end) in spans {
-                if super::db::placement_overlaps_inclusive_span(info, start, end, chunk_size)? {
-                    return Ok(true);
-                }
+            if info_overlaps_coalesced_spans(info, &spans, chunk_size)? {
+                return Ok(true);
             }
         }
     }
@@ -1237,16 +1337,20 @@ fn drop_coverage_rows(
     spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
     chunk_size: u64,
 ) -> eyre::Result<()> {
-    let intervals_own_rows = tx.intervals_own_data_root_rows();
-    for &(start, end) in spans {
-        tx.add_tx_path_hash_to_offset_range(start, end, None)?;
-        tx.del_pending_body_migrations_in_range(start, end)?;
+    let spans = coalesce_inclusive_spans(spans);
+    if spans.is_empty() {
+        return Ok(());
     }
+    let intervals_own_rows = tx.intervals_own_data_root_rows();
+    // One interval pass and one pending pass. A loop here used to open a
+    // cursor per fragment and, on RocksDB, emit one range tombstone per span.
+    tx.clear_tx_coverage_in_ranges(&spans)?;
+    tx.del_pending_body_migrations_in_ranges(&spans)?;
     if intervals_own_rows {
         return Ok(());
     }
     for (root, infos) in tx.data_root_entries()? {
-        if let Some(remaining) = trim_data_root_placements(infos, spans, chunk_size)? {
+        if let Some(remaining) = trim_data_root_placements(infos, &spans, chunk_size)? {
             tx.set_data_root_infos_for_data_root(root, remaining)?;
         }
     }
@@ -2624,6 +2728,103 @@ mod tests {
             );
             let none = store.view(|tx| tx.pending_body_migrations_from(None, Some(0)))?;
             assert!(none.is_empty());
+            Ok(())
+        })
+    }
+
+    /// Fragmented spans delete only the rows they cover. A later put in the
+    /// same batch stays. Overlapping spans count a key once.
+    #[test]
+    fn fragmented_spans_drop_only_the_rows_they_cover() -> eyre::Result<()> {
+        each_engine("submodule_fragmented_spans", |store| {
+            let kept = H256::repeat_byte(5);
+            let root = H256::repeat_byte(7);
+            store.update(|tx| {
+                install_placement(tx, 0, 0, H256::repeat_byte(1), H256::repeat_byte(2), 0, 32)?;
+                install_placement(tx, 2, 3, H256::repeat_byte(3), H256::repeat_byte(4), 2, 64)?;
+                install_placement(tx, 5, 5, kept, H256::repeat_byte(6), 5, 32)?;
+                install_placement(tx, 8, 8, H256::repeat_byte(8), H256::repeat_byte(9), 8, 32)?;
+                for offset in [0_u32, 2, 9] {
+                    tx.add_pending_body_migration(
+                        PartitionChunkOffset::from(offset),
+                        &pending_job(root),
+                    )?;
+                }
+                tx.add_pending_body_migration(PartitionChunkOffset::from(5), &pending_job(kept))?;
+                Ok(())
+            })?;
+            store.drop_uninitialized_coverage(
+                &[
+                    (PartitionChunkOffset::from(0), PartitionChunkOffset::from(0)),
+                    (PartitionChunkOffset::from(2), PartitionChunkOffset::from(3)),
+                    (PartitionChunkOffset::from(9), PartitionChunkOffset::from(9)),
+                ],
+                32,
+            )?;
+            store.view(|tx| {
+                assert!(tx.tx_interval_at(PartitionChunkOffset::from(0))?.is_none());
+                assert!(tx.tx_interval_at(PartitionChunkOffset::from(2))?.is_none());
+                assert!(tx.tx_interval_at(PartitionChunkOffset::from(5))?.is_some());
+                assert!(tx.tx_interval_at(PartitionChunkOffset::from(8))?.is_some());
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(0))?
+                        .is_none()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(2))?
+                        .is_none()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(5))?
+                        .is_some()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(9))?
+                        .is_none()
+                );
+                Ok(())
+            })?;
+            let orphans = store.audit_index()?;
+            assert!(orphans.is_empty(), "{orphans:?}");
+            store.update(|tx| {
+                for offset in [0_u32, 3, 7, 8] {
+                    tx.add_pending_body_migration(
+                        PartitionChunkOffset::from(offset),
+                        &pending_job(root),
+                    )?;
+                }
+                // Offset 5 is still pending from the drop above, so [0, 7] holds 0, 3, 5, and 7.
+                let removed = tx.del_pending_body_migrations_in_ranges(&[
+                    (PartitionChunkOffset::from(0), PartitionChunkOffset::from(5)),
+                    (PartitionChunkOffset::from(3), PartitionChunkOffset::from(7)),
+                ])?;
+                assert_eq!(removed, 4);
+                tx.add_pending_body_migration(PartitionChunkOffset::from(0), &pending_job(root))?;
+                Ok(())
+            })?;
+            store.view(|tx| {
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(0))?
+                        .is_some()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(3))?
+                        .is_none()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(5))?
+                        .is_none()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(7))?
+                        .is_none()
+                );
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(8))?
+                        .is_some()
+                );
+                Ok(())
+            })?;
             Ok(())
         })
     }

@@ -3,6 +3,8 @@
 //! One placement is one inclusive interval. Intervals in a submodule do not
 //! overlap. The same tx hash on two touching spans is one row.
 
+use std::collections::{BTreeMap, HashSet};
+
 use irys_types::{H256, PartitionChunkOffset};
 
 use super::tables::ChunkPathHashes;
@@ -144,26 +146,19 @@ fn merge_adjacent(mut rows: Vec<IntervalRow>) -> Vec<IntervalRow> {
 }
 
 fn diff(existing: &[IntervalRow], merged: &[IntervalRow]) -> IntervalEdit {
-    let mut delete = Vec::new();
+    // Keyed by start. `position` + `Vec::remove` copies the tail on every hit,
+    // so one edit of a fragmented submodule is quadratic in the window.
+    let mut old: BTreeMap<PartitionChunkOffset, IntervalRow> =
+        existing.iter().map(|row| (row.start, *row)).collect();
     let mut put = Vec::new();
-    let mut old: Vec<&IntervalRow> = existing.iter().collect();
     for row in merged {
-        if let Some(pos) = old
-            .iter()
-            .position(|candidate| candidate.start == row.start)
-        {
-            let previous = old.remove(pos);
-            if previous.end != row.end || previous.tx_path_hash != row.tx_path_hash {
-                put.push(*row);
-            }
-        } else {
-            put.push(*row);
+        match old.remove(&row.start) {
+            Some(previous)
+                if previous.end == row.end && previous.tx_path_hash == row.tx_path_hash => {}
+            Some(_) | None => put.push(*row),
         }
     }
-    for row in old {
-        delete.push(row.start);
-    }
-    delete.sort_by_key(|start| start.0);
+    let delete: Vec<_> = old.into_keys().collect();
     put.sort_by_key(|row| row.start);
     IntervalEdit { delete, put }
 }
@@ -174,34 +169,150 @@ fn diff(existing: &[IntervalRow], merged: &[IntervalRow]) -> IntervalEdit {
 /// still names it. An interval outside `existing` can still name the hash.
 /// The caller scans the submodule before it deletes the path.
 pub(super) fn dropped_tx_hashes(existing: &[IntervalRow], edit: &IntervalEdit) -> Vec<H256> {
-    let mut dropped = Vec::new();
+    let deleted: HashSet<PartitionChunkOffset> = edit.delete.iter().copied().collect();
+    let put_at: BTreeMap<PartitionChunkOffset, H256> = edit
+        .put
+        .iter()
+        .map(|row| (row.start, row.tx_path_hash))
+        .collect();
+    // A put names the hash, and so does a row the edit did not touch.
+    let mut kept: HashSet<H256> = edit.put.iter().map(|row| row.tx_path_hash).collect();
     for row in existing {
-        let replaced_with_other = edit
-            .put
-            .iter()
-            .any(|put| put.start == row.start && put.tx_path_hash != row.tx_path_hash);
-        let removed = edit.delete.contains(&row.start) || replaced_with_other;
-        if !removed || dropped.contains(&row.tx_path_hash) {
+        if deleted.contains(&row.start) || put_at.contains_key(&row.start) {
             continue;
         }
-        let kept_here = edit
-            .put
-            .iter()
-            .any(|put| put.tx_path_hash == row.tx_path_hash)
-            || existing.iter().any(|other| {
-                other.tx_path_hash == row.tx_path_hash
-                    && !edit.delete.contains(&other.start)
-                    && edit.put.iter().all(|put| put.start != other.start)
-            });
-        if !kept_here {
+        kept.insert(row.tx_path_hash);
+    }
+    let mut dropped = Vec::new();
+    let mut seen = HashSet::new();
+    for row in existing {
+        let replaced = put_at
+            .get(&row.start)
+            .is_some_and(|hash| *hash != row.tx_path_hash);
+        let removed = deleted.contains(&row.start) || replaced;
+        if !removed || !seen.insert(row.tx_path_hash) {
+            continue;
+        }
+        if !kept.contains(&row.tx_path_hash) {
             dropped.push(row.tx_path_hash);
         }
     }
     dropped
 }
 
+/// Overlapping or touching inclusive spans become one span. Inverted spans drop.
+///
+/// Touching means the next start is `end + 1`. A gap stays a gap: the offset
+/// in that gap is still live and must not share a range tombstone.
+pub(super) fn coalesce_inclusive_spans(
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> Vec<(PartitionChunkOffset, PartitionChunkOffset)> {
+    let mut ordered: Vec<(u32, u32)> = spans
+        .iter()
+        .filter(|(start, end)| start.0 <= end.0)
+        .map(|(start, end)| (start.0, end.0))
+        .collect();
+    ordered.sort_unstable();
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for (start, end) in ordered {
+        if let Some(prev) = out.last_mut() {
+            let touches = match prev.1.checked_add(1) {
+                Some(next) => start <= next,
+                // `prev` already ends at `u32::MAX`, so it covers every later offset.
+                None => true,
+            };
+            if touches {
+                if end > prev.1 {
+                    prev.1 = end;
+                }
+                continue;
+            }
+        }
+        out.push((start, end));
+    }
+    out.into_iter()
+        .map(|(start, end)| (PartitionChunkOffset(start), PartitionChunkOffset(end)))
+        .collect()
+}
+
+/// Span index that contains `offset`. `spans` is the output of [`coalesce_inclusive_spans`].
+#[cfg(test)]
+pub(super) fn coalesced_span_index(
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    offset: u32,
+) -> Option<usize> {
+    let idx = spans.partition_point(|(start, _)| start.0 <= offset);
+    idx.checked_sub(1)
+        .filter(|&index| spans[index].1.0 >= offset)
+}
+
+/// Remove every coalesced span from `existing` in one pass.
+///
+/// A hole that ends at `u32::MAX` has no right remnant. Adjacent rows with
+/// the same tx hash still merge, including a remnant that touches a neighbor
+/// the hole did not cover.
+pub(super) fn clear_coverage(
+    existing: &[IntervalRow],
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> IntervalEdit {
+    let spans = coalesce_inclusive_spans(spans);
+    if spans.is_empty() || existing.is_empty() {
+        return IntervalEdit {
+            delete: Vec::new(),
+            put: Vec::new(),
+        };
+    }
+    let mut rows = existing.to_vec();
+    rows.sort_by_key(|row| row.start);
+    let mut kept = Vec::new();
+    let mut span_index = 0_usize;
+    for row in &rows {
+        while span_index < spans.len() && spans[span_index].1 < row.start {
+            span_index += 1;
+        }
+        let mut cursor = row.start;
+        let mut local = span_index;
+        let mut alive = true;
+        while local < spans.len() && spans[local].0 <= row.end {
+            let (hole_start, hole_end) = spans[local];
+            if hole_end < cursor {
+                local += 1;
+                continue;
+            }
+            if cursor < hole_start {
+                kept.push(IntervalRow {
+                    start: cursor,
+                    end: PartitionChunkOffset(hole_start.0 - 1),
+                    tx_path_hash: row.tx_path_hash,
+                });
+            }
+            match hole_end.0.checked_add(1) {
+                Some(next) if next <= row.end.0 => {
+                    cursor = PartitionChunkOffset(next);
+                    local += 1;
+                }
+                _ => {
+                    alive = false;
+                    break;
+                }
+            }
+        }
+        if alive && cursor <= row.end {
+            kept.push(IntervalRow {
+                start: cursor,
+                end: row.end,
+                tx_path_hash: row.tx_path_hash,
+            });
+        }
+    }
+    let merged = merge_adjacent(kept);
+    diff(&rows, &merged)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     fn row(start: u32, end: u32, byte: u8) -> IntervalRow {
@@ -323,6 +434,101 @@ mod tests {
         assert_eq!(
             dropped_tx_hashes(&existing, &edit),
             vec![H256::repeat_byte(1)]
+        );
+    }
+
+    #[test]
+    fn touching_spans_coalesce_and_a_gap_stays_open() {
+        let spans = coalesce_inclusive_spans(&[
+            (at(3), at(4)),
+            (at(0), at(1)),
+            (at(8), at(7)),
+            (at(2), at(2)),
+        ]);
+        assert_eq!(spans, vec![(at(0), at(4))]);
+        let split = coalesce_inclusive_spans(&[(at(0), at(1)), (at(8), at(8)), (at(6), at(6))]);
+        assert_eq!(split, vec![(at(0), at(1)), (at(6), at(6)), (at(8), at(8))]);
+        assert_eq!(coalesced_span_index(&split, 6), Some(1));
+        assert_eq!(coalesced_span_index(&split, 5), None);
+        assert_eq!(coalesced_span_index(&split, 7), None);
+        // A span that already ends at u32::MAX covers every later offset.
+        // [1, 2] and [u32::MAX, u32::MAX] do not touch: the gap between them stays.
+        let maxed = coalesce_inclusive_spans(&[(at(0), at(u32::MAX)), (at(5), at(5))]);
+        assert_eq!(maxed, vec![(at(0), at(u32::MAX))]);
+        let split_max = coalesce_inclusive_spans(&[(at(1), at(2)), (at(u32::MAX), at(u32::MAX))]);
+        assert_eq!(
+            split_max,
+            vec![(at(1), at(2)), (at(u32::MAX), at(u32::MAX))]
+        );
+    }
+
+    fn apply_edit(rows: &mut Vec<IntervalRow>, edit: &IntervalEdit) {
+        rows.retain(|row| !edit.delete.contains(&row.start));
+        for put in &edit.put {
+            if let Some(slot) = rows.iter_mut().find(|row| row.start == put.start) {
+                *slot = *put;
+            } else {
+                rows.push(*put);
+            }
+        }
+        rows.sort_by_key(|row| row.start);
+    }
+
+    #[test]
+    fn clear_coverage_matches_one_span_at_a_time() {
+        let cases = [
+            vec![row(0, 10, 1)],
+            vec![row(0, 5, 1), row(6, 10, 1)],
+            vec![row(0, 1, 1), row(3, 4, 2), row(8, 9, 1)],
+            vec![row(0, u32::MAX, 1)],
+        ];
+        let punches = [
+            vec![(at(2), at(4))],
+            vec![(at(2), at(4)), (at(6), at(6))],
+            vec![(at(0), at(10))],
+            vec![(at(4), at(6)), (at(5), at(8))],
+            vec![(at(u32::MAX), at(u32::MAX))],
+        ];
+        for existing in cases {
+            for spans in &punches {
+                let mut folded = existing.clone();
+                for (start, end) in spans {
+                    let edit = plan_coverage(&folded, *start, *end, None);
+                    apply_edit(&mut folded, &edit);
+                }
+                let mut once = existing.clone();
+                apply_edit(&mut once, &clear_coverage(&existing, spans));
+                assert_eq!(once, folded, "spans {spans:?} existing {existing:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn clear_coverage_stays_linear_in_fragment_count() {
+        let n = 20_000_u32;
+        let existing: Vec<_> = (0..n).map(|i| row(i * 2, i * 2, (i % 200) as u8)).collect();
+        let spans: Vec<_> = (0..n).map(|i| (at(i * 2), at(i * 2))).collect();
+        let started = Instant::now();
+        let edit = clear_coverage(&existing, &spans);
+        let elapsed = started.elapsed();
+        assert_eq!(edit.delete.len(), n as usize);
+        assert!(edit.put.is_empty());
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "clear of {n} fragments took {elapsed:?}"
+        );
+
+        // The last row uses hash byte 199 and stays. Every other residue is
+        // only on a deleted row, so the drop list has the other 199 hashes.
+        let partial: Vec<_> = (0..n - 1).map(|i| (at(i * 2), at(i * 2))).collect();
+        let started = Instant::now();
+        let dropped = dropped_tx_hashes(&existing, &clear_coverage(&existing, &partial));
+        let elapsed = started.elapsed();
+        assert!(!dropped.contains(&H256::repeat_byte(199)));
+        assert_eq!(dropped.len(), 199);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "dropped-hash scan of {n} rows took {elapsed:?}"
         );
     }
 

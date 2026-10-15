@@ -31,7 +31,7 @@
 //! keep a private cache. `max_open_files` stays `-1`: a finite cap drops
 //! table readers and reloads the filter on the next read.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
@@ -53,7 +53,7 @@ use rocksdb::{
 };
 
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
-use super::interval::{IntervalRow, combine_hashes, coverage_gaps};
+use super::interval::{IntervalRow, coalesce_inclusive_spans, combine_hashes, coverage_gaps};
 use super::packing::{PackingRecord, packing_params_valid_for_module};
 use super::records::{self, IndexLayout};
 use super::store::PresenceReconcile;
@@ -2132,35 +2132,61 @@ impl RocksSubmoduleStore {
         if ranges.iter().all(|(start, end)| start > end) {
             return Ok(PresenceReconcile::default());
         }
+        let spans = coalesced_u32_spans(ranges);
+        if spans.is_empty() {
+            return Ok(PresenceReconcile::default());
+        }
         let _guard = self.lock_write();
         let snap = self.db.snapshot();
         let path_hash_rows = 0_u64;
-        let mut data_path_rows = 0_u64;
-        let mut deletes = Vec::new();
+        let mut counts = vec![0_u64; spans.len()];
+        let mut sparse_keys = vec![Vec::<Vec<u8>>::new(); spans.len()];
         let mut content_deletes = Vec::new();
-        for &(start, end) in ranges {
-            if start > end {
-                continue;
+        // One iterator for every span. A fresh iterator per span rebuilds the
+        // range-tombstone map, which dominates when the family is fragmented.
+        scan_offset_spans(&self.db, &snap, Cf::OffsetMeta, &spans, |key, value| {
+            let offset = PartitionChunkOffset::decode(key)?;
+            let Some(index) = span_of(&spans, offset.0) else {
+                return Ok(false);
+            };
+            counts[index] = counts[index].saturating_add(1);
+            if (counts[index] as usize) <= RANGE_TOMBSTONE_KEY_LIMIT {
+                sparse_keys[index].push(key.to_vec());
             }
-            let data_count = count_presence_keys(&self.db, &snap, Cf::OffsetMeta, start, end)?;
-            data_path_rows = data_path_rows.saturating_add(data_count);
-            if data_count > 0 {
-                deletes.push((Cf::OffsetMeta, start, end));
-
-                content_deletes.extend(content_keys_for_proofs(&self.db, &snap, start, end)?);
+            let meta = stored_offset_meta(value)?;
+            if let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) {
+                content_deletes.push(records::content_key(&hash, offset).to_vec());
             }
-        }
+            Ok(false)
+        })?;
         drop(snap);
-        if deletes.is_empty() {
+        let data_path_rows = counts
+            .iter()
+            .fold(0_u64, |sum, count| sum.saturating_add(*count));
+        if data_path_rows == 0 {
             return Ok(PresenceReconcile {
                 path_hash_rows,
                 data_path_rows,
             });
         }
         let mut batch = WriteBatch::new();
-        for (cf, start, end) in deletes {
-            let handle = cf_handle(&self.db, cf)?;
-            batch.delete_range_cf(&handle, encode_key(start), exclusive_end_key(end));
+        let data = cf_handle(&self.db, Cf::OffsetMeta)?;
+        for (index, count) in counts.iter().copied().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            if sparse_keys[index].len() as u64 == count {
+                for key in &sparse_keys[index] {
+                    batch.delete_cf(&data, key);
+                }
+            } else {
+                let (start, end) = spans[index];
+                batch.delete_range_cf(
+                    &data,
+                    encode_key(PartitionChunkOffset(start)),
+                    exclusive_end_key(PartitionChunkOffset(end)),
+                );
+            }
         }
         if !content_deletes.is_empty() {
             let handle = cf_handle(&self.db, Cf::Content)?;
@@ -2194,35 +2220,26 @@ impl RocksSubmoduleStore {
         if ranges.iter().all(|(start, end)| start > end) {
             return Ok(PresenceReconcile::default());
         }
+        let spans = coalesced_u32_spans(ranges);
+        if spans.is_empty() {
+            return Ok(PresenceReconcile::default());
+        }
         let _guard = self.lock_write();
         let snap = self.db.snapshot();
         let mut deletes = Vec::new();
         let mut content_deletes = Vec::new();
-        for &(start, end) in ranges {
-            if start > end {
-                continue;
-            }
-            let handle = cf_handle(&self.db, Cf::OffsetMeta)?;
-            let mut opts = full_scan_options();
-            opts.set_iterate_upper_bound(exclusive_end_key(end));
-            let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
-            iter.seek(encode_key(start));
-            while let Some(key) = iter.key() {
-                let key_owned = key.to_vec();
-                let value = iter.value().unwrap_or(&[]).to_vec();
-                if let Ok(offset) = PartitionChunkOffset::decode(&key_owned) {
-                    let meta = stored_offset_meta(&value)?;
-                    if meta.proof.is_some() {
-                        deletes.push(key_owned);
-                        if let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) {
-                            content_deletes.push(records::content_key(&hash, offset).to_vec());
-                        }
-                    }
+        scan_offset_spans(&self.db, &snap, Cf::OffsetMeta, &spans, |key, value| {
+            let meta = stored_offset_meta(value)?;
+            if meta.proof.is_some() {
+                deletes.push(key.to_vec());
+                if let Ok(offset) = PartitionChunkOffset::decode(key)
+                    && let Some(hash) = meta.proof.as_deref().and_then(content_hash_of)
+                {
+                    content_deletes.push(records::content_key(&hash, offset).to_vec());
                 }
-                iter.next();
             }
-            iter.status().wrap_err("scan entropy offset rows")?;
-        }
+            Ok(false)
+        })?;
         drop(snap);
         let data_path_rows = u64::try_from(deletes.len()).unwrap_or(u64::MAX);
         if deletes.is_empty() {
@@ -3803,35 +3820,6 @@ fn content_hash_of(proof: &[u8]) -> Option<H256> {
     irys_types::ProofDeserialize::hash(&leaf).map(H256)
 }
 
-/// Content-hash keys for parseable proofs in `[start, end]`.
-fn content_keys_for_proofs(
-    db: &DB,
-    snap: &rocksdb::Snapshot<'_>,
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-) -> eyre::Result<Vec<Vec<u8>>> {
-    let handle = cf_handle(db, Cf::OffsetMeta)?;
-    let mut opts = full_scan_options();
-    opts.set_iterate_upper_bound(exclusive_end_key(end));
-    let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
-    iter.seek(encode_key(start));
-    let mut keys = Vec::new();
-    while let Some(key) = iter.key() {
-        let key_owned = key.to_vec();
-        let value = iter.value().unwrap_or(&[]).to_vec();
-        if let Ok(offset) = PartitionChunkOffset::decode(&key_owned) {
-            let meta = stored_offset_meta(&value)?;
-            if let Some(hash) = meta.proof.as_deref().and_then(content_hash_of) {
-                keys.push(records::content_key(&hash, offset).to_vec());
-            }
-        }
-        iter.next();
-    }
-    iter.status()
-        .wrap_err("scan data proofs for content-hash keys")?;
-    Ok(keys)
-}
-
 /// `true` when the family has a key. Does not read the value.
 fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<bool> {
     let handle = cf_handle(db, cf)?;
@@ -3842,39 +3830,227 @@ fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<boo
     Ok(present)
 }
 
+/// Point-delete a span that holds at most this many keys.
+///
+/// A `DeleteRange` is a range tombstone. The next iterator rebuilds the
+/// fragment map for every tombstone in the family. Many single-key spans
+/// therefore stay point deletes. A dense span is still one `DeleteRange`.
+const RANGE_TOMBSTONE_KEY_LIMIT: usize = 64;
+
+struct SpanKeys {
+    count: usize,
+    keys: Vec<Vec<u8>>,
+}
+
+fn note_span_key(hit: &mut SpanKeys, key: &[u8]) {
+    hit.count = hit.count.saturating_add(1);
+    if hit.keys.len() < RANGE_TOMBSTONE_KEY_LIMIT {
+        hit.keys.push(key.to_vec());
+    }
+}
+
 /// `true` when `key` is an offset inside one of `ranges`.
 ///
-/// A key that is not a 4-byte offset is not hidden. Content and data-root keys are 36 bytes.
+/// `ranges` is sorted and disjoint (see [`insert_deleted_range`]). A key that
+/// is not a 4-byte offset is not hidden. Content and data-root keys are 36 bytes.
 fn offset_key_in_ranges(ranges: &[(u32, u32)], key: &[u8]) -> bool {
     let Ok(offset) = PartitionChunkOffset::decode(key) else {
         return false;
     };
-    ranges
-        .iter()
-        .any(|(start, end)| offset.0 >= *start && offset.0 <= *end)
+    span_of(ranges, offset.0).is_some()
 }
 
-/// Keys in `[start, end]`. Does not read values.
-fn count_presence_keys(
+/// Index of the coalesced span that contains `offset`.
+fn span_of(spans: &[(u32, u32)], offset: u32) -> Option<usize> {
+    let idx = spans.partition_point(|(start, _)| *start <= offset);
+    idx.checked_sub(1).filter(|&index| spans[index].1 >= offset)
+}
+
+/// Insert `[start, end]` and merge anything it touches.
+///
+/// The vec stays sorted and disjoint, so [`offset_key_in_ranges`] can binary search.
+fn insert_deleted_range(ranges: &mut Vec<(u32, u32)>, start: u32, end: u32) {
+    if start > end {
+        return;
+    }
+    let mut start = start;
+    let mut end = end;
+    let index = ranges.partition_point(|(_, span_end)| match span_end.checked_add(1) {
+        Some(next) => next < start,
+        None => false,
+    });
+    while index < ranges.len() {
+        let (span_start, span_end) = ranges[index];
+        let starts_after = match end.checked_add(1) {
+            Some(next) => span_start > next,
+            None => false,
+        };
+        if starts_after {
+            break;
+        }
+        if span_start < start {
+            start = span_start;
+        }
+        if span_end > end {
+            end = span_end;
+        }
+        ranges.remove(index);
+    }
+    ranges.insert(index, (start, end));
+}
+
+fn coalesced_u32_spans(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> Vec<(u32, u32)> {
+    coalesce_inclusive_spans(ranges)
+        .into_iter()
+        .map(|(start, end)| (start.0, end.0))
+        .collect()
+}
+
+/// Visit keys that fall in `spans`. `visit` returns `Ok(true)` to stop.
+///
+/// One iterator. A key in a gap seeks to the next span instead of walking
+/// that gap. The upper bound is the exclusive end of the last span.
+fn scan_offset_spans(
     db: &DB,
     snap: &rocksdb::Snapshot<'_>,
     cf: Cf,
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-) -> eyre::Result<u64> {
+    spans: &[(u32, u32)],
+    mut visit: impl FnMut(&[u8], &[u8]) -> eyre::Result<bool>,
+) -> eyre::Result<()> {
+    if spans.is_empty() {
+        return Ok(());
+    }
     let handle = cf_handle(db, cf)?;
-    let mut opts = ReadOptions::default();
-    opts.fill_cache(false);
-    opts.set_iterate_upper_bound(exclusive_end_key(end));
+    let mut opts = full_scan_options();
+    opts.set_iterate_upper_bound(exclusive_end_key(PartitionChunkOffset(
+        spans[spans.len() - 1].1,
+    )));
     let mut iter = snap.raw_iterator_cf_opt(&handle, opts);
-    iter.seek(encode_key(start));
-    let mut count = 0_u64;
-    while iter.key().is_some() {
-        count = count.saturating_add(1);
+    let mut span_index = 0_usize;
+    iter.seek(encode_key(PartitionChunkOffset(spans[0].0)));
+    while let Some(key) = iter.key() {
+        let key_owned = key.to_vec();
+        let value_owned = iter.value().unwrap_or(&[]).to_vec();
+        let Ok(offset) = PartitionChunkOffset::decode(&key_owned) else {
+            iter.next();
+            continue;
+        };
+        while span_index < spans.len() && offset.0 > spans[span_index].1 {
+            span_index += 1;
+        }
+        if span_index >= spans.len() {
+            break;
+        }
+        if offset.0 < spans[span_index].0 {
+            iter.seek(encode_key(PartitionChunkOffset(spans[span_index].0)));
+            continue;
+        }
+        if visit(&key_owned, &value_owned)? {
+            break;
+        }
         iter.next();
     }
-    iter.status().wrap_err("count presence keys")?;
-    Ok(count)
+    iter.status().wrap_err("scan offset spans")?;
+    Ok(())
+}
+
+fn row_overlaps_spans(spans: &[(u32, u32)], row_start: u32, row_end: u32) -> bool {
+    let idx = spans.partition_point(|(start, _)| *start <= row_end);
+    let Some(index) = idx.checked_sub(1) else {
+        return false;
+    };
+    let (span_start, span_end) = spans[index];
+    row_start <= span_end && row_end >= span_start
+}
+
+fn row_touches_spans(spans: &[(u32, u32)], row_start: u32, row_end: u32) -> bool {
+    let idx = spans.partition_point(|(start, _)| *start <= row_start);
+    for index in [idx.checked_sub(1), Some(idx)].into_iter().flatten() {
+        if index >= spans.len() {
+            continue;
+        }
+        let (span_start, span_end) = spans[index];
+        let right = span_end.saturating_add(1);
+        if row_start <= right && row_end.saturating_add(1) >= span_start {
+            return true;
+        }
+    }
+    false
+}
+
+/// Punch every span out of `existing`. `existing` is sorted by start.
+///
+/// A hole that ends at `u32::MAX` leaves no right remnant. Adjacent rows with
+/// the same placement identity merge, including a remnant that touches a
+/// neighbor outside the hole.
+fn punch_placement_spans(
+    existing: &[records::PlacementSpan],
+    spans: &[(u32, u32)],
+) -> (Vec<u32>, Vec<records::PlacementSpan>) {
+    if spans.is_empty() || existing.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut kept = Vec::new();
+    let mut span_index = 0_usize;
+    for row in existing {
+        while span_index < spans.len() && spans[span_index].1 < row.start {
+            span_index += 1;
+        }
+        let mut cursor = row.start;
+        let mut local = span_index;
+        let mut alive = true;
+        while local < spans.len() && spans[local].0 <= row.value.end {
+            let (hole_start, hole_end) = spans[local];
+            if hole_end < cursor {
+                local += 1;
+                continue;
+            }
+            if cursor < hole_start {
+                let mut left = *row;
+                left.start = cursor;
+                left.value.end = hole_start - 1;
+                kept.push(left);
+            }
+            match hole_end.checked_add(1) {
+                Some(next) if next <= row.value.end => {
+                    cursor = next;
+                    local += 1;
+                }
+                _ => {
+                    alive = false;
+                    break;
+                }
+            }
+        }
+        if alive && cursor <= row.value.end {
+            let mut remnant = *row;
+            remnant.start = cursor;
+            kept.push(remnant);
+        }
+    }
+    kept.sort_by_key(|row| row.start);
+    let mut merged: Vec<records::PlacementSpan> = Vec::new();
+    for row in kept {
+        if let Some(prev) = merged.last_mut()
+            && records::same_identity(&prev.value, &row.value)
+            && prev.value.end.checked_add(1) == Some(row.start)
+        {
+            prev.value.end = row.value.end;
+            continue;
+        }
+        merged.push(row);
+    }
+    let mut old: BTreeMap<u32, records::PlacementSpan> =
+        existing.iter().map(|row| (row.start, *row)).collect();
+    let mut put = Vec::new();
+    for row in &merged {
+        match old.remove(&row.start) {
+            Some(previous) if previous.value == row.value => {}
+            Some(_) | None => put.push(*row),
+        }
+    }
+    let delete: Vec<_> = old.into_keys().collect();
+    (delete, put)
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -4018,22 +4194,31 @@ impl<'a> Batch<'a> {
             None => None,
         };
         let (delete, put) = records::plan_placement(&existing, start.0, end.0, next);
-        let touched: Vec<u32> = delete
+        self.apply_placement_edit(&existing, &delete, &put)
+    }
+
+    fn apply_placement_edit(
+        &mut self,
+        existing: &[records::PlacementSpan],
+        delete: &[u32],
+        put: &[records::PlacementSpan],
+    ) -> eyre::Result<()> {
+        let by_start: HashMap<u32, &records::PlacementSpan> =
+            existing.iter().map(|row| (row.start, row)).collect();
+        let touched: HashSet<u32> = delete
             .iter()
             .copied()
             .chain(put.iter().map(|row| row.start))
             .collect();
         self.unfilled.retain(|(start, _)| !touched.contains(start));
-        for start_at in &delete {
-            if let Some(old) = existing.iter().find(|row| row.start == *start_at) {
+        for start_at in delete {
+            if let Some(old) = by_start.get(start_at) {
                 self.delete_data_root_point(&H256(old.value.data_root), *start_at);
             }
             self.delete(Cf::Interval, &encode_key(PartitionChunkOffset(*start_at)));
         }
-        for row in &put {
-            if let Some(old) = existing
-                .iter()
-                .find(|candidate| candidate.start == row.start)
+        for row in put {
+            if let Some(old) = by_start.get(&row.start)
                 && old.value.data_root != row.value.data_root
             {
                 self.delete_data_root_point(&H256(old.value.data_root), row.start);
@@ -4050,6 +4235,20 @@ impl<'a> Batch<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Clear every span in one read of the intervals that touch them.
+    fn clear_placement_spans(
+        &mut self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<()> {
+        let spans = coalesced_u32_spans(ranges);
+        if spans.is_empty() {
+            return Ok(());
+        }
+        let existing = self.rows().placements_touching_spans(&spans)?;
+        let (delete, put) = punch_placement_spans(&existing, &spans);
+        self.apply_placement_edit(&existing, &delete, &put)
     }
 
     fn delete_data_root_point(&mut self, data_root: &H256, start: u32) {
@@ -4211,10 +4410,58 @@ impl<'a> Batch<'a> {
         if !self.rows().offset_range_has_key(cf, start, end)? {
             return Ok(());
         }
+        self.remember_deleted_offset_range(cf, start, end);
+        Ok(())
+    }
+
+    /// Record a `DeleteRange` the commit will emit. Does not seek.
+    ///
+    /// The caller already knows the span holds a key. An empty span must not
+    /// call this: a tombstone over no key still costs the next iterator.
+    fn remember_deleted_offset_range(
+        &mut self,
+        cf: Cf,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) {
         let index = cf.index();
         self.overlay.maps[index].retain(|key, _| !offset_key_in_ranges(&[(start.0, end.0)], key));
-        self.overlay.deleted_ranges[index].push((start.0, end.0));
-        Ok(())
+        insert_deleted_range(&mut self.overlay.deleted_ranges[index], start.0, end.0);
+    }
+
+    /// Drop visible keys in `ranges`. A span with few keys is point deletes.
+    ///
+    /// One snapshot pass places each key. Touching spans share one tombstone
+    /// when the span is dense. The count is the keys visible at this call.
+    fn delete_offset_spans(
+        &mut self,
+        cf: Cf,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<usize> {
+        let spans = coalesced_u32_spans(ranges);
+        if spans.is_empty() {
+            return Ok(0);
+        }
+        let hits = self.rows().visible_span_keys(cf, &spans)?;
+        let mut removed = 0_usize;
+        for (span, hit) in spans.iter().zip(hits) {
+            if hit.count == 0 {
+                continue;
+            }
+            removed = removed.saturating_add(hit.count);
+            if hit.keys.len() == hit.count {
+                for key in hit.keys {
+                    self.delete(cf, &key);
+                }
+            } else {
+                self.remember_deleted_offset_range(
+                    cf,
+                    PartitionChunkOffset(span.0),
+                    PartitionChunkOffset(span.1),
+                );
+            }
+        }
+        Ok(removed)
     }
 
     /// Point-delete reverse rows for proofs currently visible in `[start, end]`.
@@ -4666,6 +4913,226 @@ impl Rows<'_> {
             });
         }
         Ok(out)
+    }
+
+    /// Visible keys in each span. At most [`RANGE_TOMBSTONE_KEY_LIMIT`] keys are stored.
+    fn visible_span_keys(&self, cf: Cf, spans: &[(u32, u32)]) -> eyre::Result<Vec<SpanKeys>> {
+        let mut hits = spans
+            .iter()
+            .map(|_| SpanKeys {
+                count: 0,
+                keys: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let index = cf.index();
+        let cleared = self.overlay.is_some_and(|overlay| overlay.cleared[index]);
+        if !cleared {
+            scan_offset_spans(self.db, self.snap, cf, spans, |key, _| {
+                let hidden = self.overlay.is_some_and(|overlay| {
+                    overlay.maps[index].contains_key(key)
+                        || offset_key_in_ranges(&overlay.deleted_ranges[index], key)
+                });
+                if !hidden
+                    && let Ok(offset) = PartitionChunkOffset::decode(key)
+                    && let Some(span_index) = span_of(spans, offset.0)
+                {
+                    note_span_key(&mut hits[span_index], key);
+                }
+                Ok(false)
+            })?;
+        }
+        if let Some(overlay) = self.overlay {
+            for (key, value) in &overlay.maps[index] {
+                if value.is_none() {
+                    continue;
+                }
+                let Ok(offset) = PartitionChunkOffset::decode(key) else {
+                    continue;
+                };
+                let Some(span_index) = span_of(spans, offset.0) else {
+                    continue;
+                };
+                note_span_key(&mut hits[span_index], key);
+            }
+        }
+        Ok(hits)
+    }
+
+    fn pending_hit_in_spans(&self, spans: &[(u32, u32)]) -> eyre::Result<bool> {
+        if spans.is_empty() {
+            return Ok(false);
+        }
+        let index = Cf::Pending.index();
+        if let Some(overlay) = self.overlay {
+            let overlay_hit = overlay.maps[index]
+                .iter()
+                .any(|(key, value)| value.is_some() && offset_key_in_ranges(spans, key));
+            if overlay_hit || overlay.cleared[index] {
+                return Ok(overlay_hit);
+            }
+        }
+        let mut hit = false;
+        scan_offset_spans(self.db, self.snap, Cf::Pending, spans, |key, _| {
+            let hidden = self.overlay.is_some_and(|overlay| {
+                overlay.maps[index].contains_key(key)
+                    || offset_key_in_ranges(&overlay.deleted_ranges[index], key)
+            });
+            if !hidden {
+                hit = true;
+                return Ok(true);
+            }
+            Ok(false)
+        })?;
+        Ok(hit)
+    }
+
+    fn intervals_overlap_u32_spans(&self, spans: &[(u32, u32)]) -> eyre::Result<bool> {
+        if spans.is_empty() {
+            return Ok(false);
+        }
+        let index = Cf::Interval.index();
+        let cleared = self.overlay.is_some_and(|overlay| overlay.cleared[index]);
+        if let Some(overlay) = self.overlay {
+            for (key, value) in &overlay.maps[index] {
+                let Some(bytes) = value else {
+                    continue;
+                };
+                let Ok(start) = PartitionChunkOffset::decode(key) else {
+                    continue;
+                };
+                let record = records::decode_placement(bytes)?;
+                if row_overlaps_spans(spans, start.0, record.end) {
+                    return Ok(true);
+                }
+            }
+            if cleared {
+                return Ok(false);
+            }
+        }
+        let handle = cf_handle(self.db, Cf::Interval)?;
+        let mut opts = full_scan_options();
+        opts.set_iterate_upper_bound(exclusive_end_key(PartitionChunkOffset(
+            spans[spans.len() - 1].1,
+        )));
+        let mut iter = self.snap.raw_iterator_cf_opt(&handle, opts);
+        for &(start, end) in spans {
+            iter.seek_for_prev(encode_key(PartitionChunkOffset(start)));
+            if iter.key().is_none() {
+                iter.seek(encode_key(PartitionChunkOffset(start)));
+            }
+            while let Some(key) = iter.key() {
+                let key_owned = key.to_vec();
+                let value_owned = iter.value().unwrap_or(&[]).to_vec();
+                let Ok(offset) = PartitionChunkOffset::decode(&key_owned) else {
+                    iter.next();
+                    continue;
+                };
+                if offset.0 > end {
+                    break;
+                }
+                let hidden = self.overlay.is_some_and(|overlay| {
+                    overlay.maps[index].contains_key(key_owned.as_slice())
+                        || offset_key_in_ranges(&overlay.deleted_ranges[index], &key_owned)
+                });
+                if !hidden {
+                    let record = records::decode_placement(&value_owned)?;
+                    if offset.0 <= end && record.end >= start {
+                        iter.status().wrap_err("scan interval overlap")?;
+                        return Ok(true);
+                    }
+                    if record.end < start && offset.0 < start {
+                        iter.seek(encode_key(PartitionChunkOffset(start)));
+                        continue;
+                    }
+                }
+                iter.next();
+            }
+        }
+        iter.status().wrap_err("scan interval overlap")?;
+        Ok(false)
+    }
+
+    /// Placement rows that overlap a span or touch a neighbor, one iterator.
+    fn placements_touching_spans(
+        &self,
+        spans: &[(u32, u32)],
+    ) -> eyre::Result<Vec<records::PlacementSpan>> {
+        if spans.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = Cf::Interval.index();
+        let mut rows: BTreeMap<u32, records::PlacementRecord> = BTreeMap::new();
+        let cleared = self.overlay.is_some_and(|overlay| overlay.cleared[index]);
+        if !cleared {
+            let handle = cf_handle(self.db, Cf::Interval)?;
+            let last = spans[spans.len() - 1].1;
+            let upper = match last.checked_add(1) {
+                Some(next) => exclusive_end_key(PartitionChunkOffset(next)),
+                None => exclusive_end_key(PartitionChunkOffset(u32::MAX)),
+            };
+            let mut opts = full_scan_options();
+            opts.set_iterate_upper_bound(upper);
+            let mut iter = self.snap.raw_iterator_cf_opt(&handle, opts);
+            for &(start, end) in spans {
+                let right = end.saturating_add(1);
+                iter.seek_for_prev(encode_key(PartitionChunkOffset(start)));
+                if iter.key().is_none() {
+                    iter.seek(encode_key(PartitionChunkOffset(start)));
+                }
+                while let Some(key) = iter.key() {
+                    let key_owned = key.to_vec();
+                    let value_owned = iter.value().unwrap_or(&[]).to_vec();
+                    let Ok(offset) = PartitionChunkOffset::decode(&key_owned) else {
+                        iter.next();
+                        continue;
+                    };
+                    if offset.0 > right {
+                        break;
+                    }
+                    let hidden = self.overlay.is_some_and(|overlay| {
+                        overlay.maps[index].contains_key(key_owned.as_slice())
+                            || offset_key_in_ranges(&overlay.deleted_ranges[index], &key_owned)
+                    });
+                    if !hidden {
+                        let value = records::decode_placement(&value_owned)?;
+                        if value.end.saturating_add(1) < start && offset.0 < start {
+                            iter.seek(encode_key(PartitionChunkOffset(start)));
+                            continue;
+                        }
+                        if offset.0 <= right && value.end.saturating_add(1) >= start {
+                            rows.insert(offset.0, value);
+                        }
+                    }
+                    if offset.0 >= right {
+                        break;
+                    }
+                    iter.next();
+                }
+            }
+            iter.status().wrap_err("scan placement spans")?;
+        }
+        if let Some(overlay) = self.overlay {
+            for (key, value) in &overlay.maps[index] {
+                let Ok(offset) = PartitionChunkOffset::decode(key) else {
+                    continue;
+                };
+                match value {
+                    None => {
+                        rows.remove(&offset.0);
+                    }
+                    Some(bytes) => {
+                        let record = records::decode_placement(bytes)?;
+                        if row_touches_spans(spans, offset.0, record.end) {
+                            rows.insert(offset.0, record);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .map(|(start, value)| records::PlacementSpan { start, value })
+            .collect())
     }
 
     fn data_root_rows(
@@ -5185,6 +5652,20 @@ impl SubmoduleRead for Rows<'_> {
         Ok(rows.iter().any(|row| row.start <= end && row.end >= start))
     }
 
+    fn has_pending_in_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<bool> {
+        self.pending_hit_in_spans(&coalesced_u32_spans(ranges))
+    }
+
+    fn tx_intervals_overlap_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<bool> {
+        self.intervals_overlap_u32_spans(&coalesced_u32_spans(ranges))
+    }
+
     fn tx_interval_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
         self.interval_covering(offset)
     }
@@ -5397,6 +5878,20 @@ impl SubmoduleRead for Batch<'_> {
         end: PartitionChunkOffset,
     ) -> eyre::Result<bool> {
         self.rows().tx_interval_overlaps(start, end)
+    }
+
+    fn has_pending_in_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<bool> {
+        self.rows().has_pending_in_ranges(ranges)
+    }
+
+    fn tx_intervals_overlap_ranges(
+        &self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<bool> {
+        self.rows().tx_intervals_overlap_ranges(ranges)
     }
 
     fn tx_interval_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
@@ -5668,6 +6163,20 @@ impl SubmoduleWrite for Batch<'_> {
         Ok(removed)
     }
 
+    fn del_pending_body_migrations_in_ranges(
+        &mut self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<usize> {
+        self.delete_offset_spans(Cf::Pending, ranges)
+    }
+
+    fn clear_tx_coverage_in_ranges(
+        &mut self,
+        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    ) -> eyre::Result<()> {
+        self.clear_placement_spans(ranges)
+    }
+
     fn clear(&mut self) -> eyre::Result<()> {
         for cf in families() {
             if matches!(cf, Cf::Metadata) {
@@ -5707,6 +6216,149 @@ mod tests {
     use crate::submodule::SubmoduleIndex;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{H256, RelativeChunkOffset};
+
+    #[test]
+    fn offset_range_membership_is_logarithmic() {
+        fn linear(ranges: &[(u32, u32)], offset: u32) -> bool {
+            ranges
+                .iter()
+                .any(|(start, end)| offset >= *start && offset <= *end)
+        }
+        let small_n = 4_000_u32;
+        let small: Vec<(u32, u32)> = (0..small_n).map(|i| (i, i)).collect();
+        let started = Instant::now();
+        let mut linear_hits = 0_usize;
+        for _ in 0..small_n {
+            if linear(&small, small_n - 1) {
+                linear_hits += 1;
+            }
+        }
+        let linear_elapsed = started.elapsed();
+        eprintln!(
+            "linear membership worst-case n={small_n} probes={small_n} took {linear_elapsed:?} hits={linear_hits}"
+        );
+
+        let n = 100_000_u32;
+        let ranges: Vec<(u32, u32)> = (0..n).map(|i| (i, i)).collect();
+        let started = Instant::now();
+        let mut hits = 0_usize;
+        let last = encode_key(PartitionChunkOffset(n - 1));
+        for probe in 0..n {
+            if offset_key_in_ranges(&ranges, &last) {
+                hits += 1;
+            }
+            if probe == 499 && started.elapsed() > Duration::from_millis(250) {
+                panic!(
+                    "membership still linear after {} probes: {:?}",
+                    probe + 1,
+                    started.elapsed()
+                );
+            }
+        }
+        let elapsed = started.elapsed();
+        eprintln!("offset_key_in_ranges worst-case n={n} probes={n} took {elapsed:?} hits={hits}");
+        assert_eq!(hits, n as usize);
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    #[test]
+    fn deleted_ranges_merge_touching_spans() {
+        let mut ranges = Vec::new();
+        insert_deleted_range(&mut ranges, 0, 1);
+        insert_deleted_range(&mut ranges, 3, 4);
+        insert_deleted_range(&mut ranges, 2, 2);
+        assert_eq!(ranges, vec![(0, 4)]);
+        insert_deleted_range(&mut ranges, 8, 8);
+        insert_deleted_range(&mut ranges, 6, 6);
+        assert_eq!(ranges, vec![(0, 4), (6, 6), (8, 8)]);
+        assert!(offset_key_in_ranges(
+            &ranges,
+            &encode_key(PartitionChunkOffset(6))
+        ));
+        assert!(!offset_key_in_ranges(
+            &ranges,
+            &encode_key(PartitionChunkOffset(5))
+        ));
+        assert!(!offset_key_in_ranges(
+            &ranges,
+            &encode_key(PartitionChunkOffset(7))
+        ));
+        assert!(!offset_key_in_ranges(&ranges, b"not-an-offset"));
+    }
+
+    #[test]
+    fn many_disjoint_spans_share_one_pending_pass() -> eyre::Result<()> {
+        let n = 2_000_u32;
+        let dir = TempDirBuilder::new().prefix("submodule_span_pass").build();
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        store.disable_auto_compaction()?;
+        let job = PendingBodyMigration {
+            data_root: H256::repeat_byte(1),
+            data_size: 32,
+            start_offset: RelativeChunkOffset(0),
+            block_height: 1,
+            attempts: 0,
+        };
+        let survivor = PartitionChunkOffset::from(n * 2 + 3);
+        store.update(|tx| {
+            tx.add_pending_body_migration(survivor, &job)?;
+            for i in 0..n {
+                tx.add_pending_body_migration(PartitionChunkOffset::from(i * 2), &job)?;
+            }
+            Ok(())
+        })?;
+        let plant = Instant::now();
+        store.update(|tx| {
+            for i in 0..n {
+                let offset = PartitionChunkOffset::from(i * 2);
+                tx.del_pending_body_migrations_in_range(offset, offset)?;
+            }
+            Ok(())
+        })?;
+        let plant_elapsed = plant.elapsed();
+        eprintln!("plant {n} single-key range tombstones took {plant_elapsed:?}");
+        store.flush_memtables()?;
+        assert!(
+            store
+                .view(|tx| tx.get_pending_body_migration(survivor))?
+                .is_some(),
+            "a key outside every span stays"
+        );
+
+        let misses: Vec<_> = (0..n)
+            .map(|i| {
+                let offset = PartitionChunkOffset::from(i * 2 + 1);
+                (offset, offset)
+            })
+            .collect();
+        let started = Instant::now();
+        let hit = store.view(|tx| tx.has_pending_in_ranges(&misses))?;
+        let batched = started.elapsed();
+        eprintln!(
+            "has_pending_in_ranges {n} misses over {n} tombstones took {batched:?} hit={hit}"
+        );
+        assert!(!hit);
+        assert!(batched < Duration::from_secs(8), "{batched:?}");
+
+        let sample = 400_u32;
+        let started = Instant::now();
+        let mut seen = 0_u32;
+        store.view(|tx| {
+            for i in 0..sample {
+                let offset = PartitionChunkOffset::from(i * 2 + 1);
+                if tx.has_pending_in_inclusive_range(offset, offset)? {
+                    seen = seen.saturating_add(1);
+                }
+            }
+            Ok(())
+        })?;
+        let per_span = started.elapsed();
+        eprintln!(
+            "has_pending_in_inclusive_range x{sample} over {n} tombstones took {per_span:?} hits={seen}"
+        );
+        assert_eq!(seen, 0);
+        Ok(())
+    }
 
     #[test]
     fn reopen_reads_the_row_and_keeps_the_schema_across_clear() -> eyre::Result<()> {

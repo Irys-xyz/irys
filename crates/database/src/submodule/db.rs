@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use irys_types::{
@@ -24,7 +25,8 @@ pub use super::migrate::{
 };
 
 use super::interval::{
-    IntervalEdit, IntervalRow, combine_hashes, coverage_gaps, dropped_tx_hashes, plan_coverage,
+    IntervalEdit, IntervalRow, clear_coverage, coalesce_inclusive_spans, combine_hashes,
+    coverage_gaps, dropped_tx_hashes, plan_coverage,
 };
 use super::tables::{
     ChunkDataPathByOffset, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos, Metadata,
@@ -386,61 +388,77 @@ pub fn clear_paths_in_inclusive_range<T: DbTxMut + DbTx>(
 
 /// `true` when a presence row's key lies in any inclusive span.
 ///
-/// One seek per span per presence family. The seek stops at the first hit.
+/// One cursor per presence family. It seeks to the next span and does not
+/// walk keys that sit in the gaps. A new cursor per span would reopen the
+/// table once per fragment.
 pub(super) fn presence_in_ranges<T: DbTx>(
     tx: &T,
     ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
 ) -> eyre::Result<bool> {
-    for &(start, end) in ranges {
-        if start > end {
-            continue;
-        }
-        if offset_key_in_range::<ChunkPathHashesByOffset, T>(tx, start, end)?
-            || offset_key_in_range::<ChunkDataPathByOffset, T>(tx, start, end)?
-        {
-            return Ok(true);
-        }
+    let spans = coalesce_inclusive_spans(ranges);
+    if spans.is_empty() {
+        return Ok(false);
     }
-    Ok(false)
+    if offset_key_in_spans::<ChunkPathHashesByOffset, T>(tx, &spans)? {
+        return Ok(true);
+    }
+    offset_key_in_spans::<ChunkDataPathByOffset, T>(tx, &spans)
 }
 
 /// Delete presence rows in each inclusive span. Returns `(path-hash rows, data-path rows)`.
+///
+/// One cursor per family collects the keys, then the deletes run. A cursor
+/// and a delete cannot share the table.
 pub(super) fn delete_presence_in_ranges<T: DbTxMut + DbTx>(
     tx: &T,
     ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
 ) -> eyre::Result<(u64, u64)> {
-    let mut path_hash_rows = 0_u64;
-    let mut data_path_rows = 0_u64;
-    for &(start, end) in ranges {
-        if start > end {
-            continue;
-        }
-        path_hash_rows += u64::try_from(delete_offset_rows::<ChunkPathHashesByOffset, T>(
-            tx, start, end,
-        )?)
-        .unwrap_or(u64::MAX);
-        data_path_rows += u64::try_from(delete_offset_rows::<ChunkDataPathByOffset, T>(
-            tx, start, end,
-        )?)
-        .unwrap_or(u64::MAX);
+    let spans = coalesce_inclusive_spans(ranges);
+    if spans.is_empty() {
+        return Ok((0, 0));
     }
+    let path_hash_rows = u64::try_from(delete_offset_rows_in_spans::<ChunkPathHashesByOffset, T>(
+        tx, &spans,
+    )?)
+    .unwrap_or(u64::MAX);
+    let data_path_rows = u64::try_from(delete_offset_rows_in_spans::<ChunkDataPathByOffset, T>(
+        tx, &spans,
+    )?)
+    .unwrap_or(u64::MAX);
     Ok((path_hash_rows, data_path_rows))
 }
 
-fn offset_key_in_range<OffsetTable, T>(
+/// `true` when any key of `OffsetTable` lies in a coalesced span.
+///
+/// `spans` must be sorted and disjoint. The cursor seeks across a gap.
+fn offset_key_in_spans<OffsetTable, T>(
     tx: &T,
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
 ) -> eyre::Result<bool>
 where
     OffsetTable: Table<Key = PartitionChunkOffset>,
     T: DbTx,
 {
+    if spans.is_empty() {
+        return Ok(false);
+    }
     let mut cursor = tx.cursor_read::<OffsetTable>()?;
-    Ok(match cursor.seek(start)? {
-        Some((key, _)) => key <= end,
-        None => false,
-    })
+    let mut span_index = 0_usize;
+    let mut current = cursor.seek(spans[0].0)?;
+    while let Some((offset, _)) = current {
+        while span_index < spans.len() && offset > spans[span_index].1 {
+            span_index += 1;
+        }
+        if span_index >= spans.len() {
+            return Ok(false);
+        }
+        if offset < spans[span_index].0 {
+            current = cursor.seek(spans[span_index].0)?;
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// get DataRootInfos for the `data_root`
@@ -544,16 +562,20 @@ pub fn del_pending_body_migrations_in_range<T: DbTxMut + DbTx>(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<usize> {
-    if start > end {
-        return Ok(0);
-    }
-    let orphaned: Vec<PartitionChunkOffset> = {
-        let mut cursor = tx.cursor_read::<PendingBodyMigrationsByOffset>()?;
-        cursor
-            .walk_range(start..=end)?
-            .map(|row| row.map(|(offset, _)| offset))
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    del_pending_body_migrations_in_ranges(tx, &[(start, end)])
+}
+
+/// Delete jobs whose keys lie in any span. Touching spans are one range.
+///
+/// One cursor seeks from span to span. Recovery should call this once with
+/// the whole list. A loop of [`del_pending_body_migrations_in_range`] opens
+/// a cursor per fragment.
+pub fn del_pending_body_migrations_in_ranges<T: DbTxMut + DbTx>(
+    tx: &T,
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<usize> {
+    let spans = coalesce_inclusive_spans(ranges);
+    let orphaned = collect_keys_in_spans::<PendingBodyMigrationsByOffset, T>(tx, &spans)?;
     for offset in &orphaned {
         tx.delete::<PendingBodyMigrationsByOffset>(*offset, None)?;
     }
@@ -566,15 +588,16 @@ pub fn has_pending_body_migration_in_range<T: DbTx>(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<bool> {
-    if start > end {
-        return Ok(false);
-    }
-    let mut cursor = tx.cursor_read::<PendingBodyMigrationsByOffset>()?;
-    Ok(cursor
-        .walk_range(start..=end)?
-        .next()
-        .transpose()?
-        .is_some())
+    has_pending_in_ranges(tx, &[(start, end)])
+}
+
+/// `true` when a pending-job key lies in any span. One cursor for the list.
+pub fn has_pending_in_ranges<T: DbTx>(
+    tx: &T,
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<bool> {
+    let spans = coalesce_inclusive_spans(ranges);
+    offset_key_in_spans::<PendingBodyMigrationsByOffset, T>(tx, &spans)
 }
 
 /// `true` when a tx-path interval overlaps `[start, end]`.
@@ -586,11 +609,45 @@ pub fn tx_interval_overlaps<T: DbTx>(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<bool> {
-    if start > end {
+    tx_intervals_overlap_ranges(tx, &[(start, end)])
+}
+
+/// `true` when any interval overlaps any span.
+///
+/// One cursor. A span whose floor row ends before the span seeks to the span
+/// start instead of walking every interval in the gap.
+pub fn tx_intervals_overlap_ranges<T: DbTx>(
+    tx: &T,
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<bool> {
+    let spans = coalesce_inclusive_spans(ranges);
+    if spans.is_empty() {
         return Ok(false);
     }
-    let rows = intervals_touching(tx, start, end)?;
-    Ok(rows.iter().any(|row| row.start <= end && row.end >= start))
+    let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
+    for (start, end) in spans {
+        let landed = cursor.seek(start)?;
+        let floor = match landed {
+            Some((key, _)) if key > start => match cursor.prev()? {
+                Some(previous) => Some(previous),
+                None => cursor.seek(start)?,
+            },
+            other => other,
+        };
+        let Some((key, value)) = floor else {
+            continue;
+        };
+        if key <= end && value.end >= start {
+            return Ok(true);
+        }
+        if key < start
+            && let Some((next_key, _)) = cursor.seek(start)?
+            && next_key <= end
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Every data-root row.
@@ -632,23 +689,67 @@ pub fn placement_overlaps_inclusive_span(
     Ok(!(extent_end < span_start || extent_start > span_end))
 }
 
+/// `true` when `info` overlaps one coalesced span.
+///
+/// `spans` is sorted and disjoint. The rightmost span that starts at or
+/// before the extent end is the only candidate: an earlier span ends before
+/// that one starts, so a miss there is a miss for the rest.
+pub(super) fn info_overlaps_coalesced_spans(
+    info: &DataRootInfo,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    chunk_size: u64,
+) -> eyre::Result<bool> {
+    if chunk_size == 0 {
+        return Ok(true);
+    }
+    if spans.is_empty() {
+        return Ok(false);
+    }
+    let extent_start = info.start_offset.0;
+    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
+        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
+    let extent_end = extent_start
+        .checked_add(extent_chunks)
+        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
+        .saturating_sub(1);
+    if extent_end < 0 {
+        return Ok(false);
+    }
+    let extent_end_u = u32::try_from(extent_end).unwrap_or(u32::MAX);
+    let idx = spans.partition_point(|(start, _)| start.0 <= extent_end_u);
+    let Some(index) = idx.checked_sub(1) else {
+        return Ok(false);
+    };
+    placement_overlaps_inclusive_span(info, spans[index].0, spans[index].1, chunk_size)
+}
+
+/// Every span offset must fit in `i32`, matching [`placement_overlaps_inclusive_span`].
+pub(super) fn ensure_span_offsets_fit_i32(
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<()> {
+    for (start, end) in spans {
+        i32::try_from(start.0)
+            .map_err(|_| eyre::eyre!("partition offset {} does not fit in i32", start.0))?;
+        i32::try_from(end.0)
+            .map_err(|_| eyre::eyre!("partition offset {} does not fit in i32", end.0))?;
+    }
+    Ok(())
+}
+
 /// Placements that miss every span. `None` when nothing overlapped.
 pub(super) fn trim_data_root_placements(
     infos: DataRootInfos,
     spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
     chunk_size: u64,
 ) -> eyre::Result<Option<DataRootInfos>> {
+    let spans = coalesce_inclusive_spans(spans);
+    if chunk_size != 0 && !infos.0.is_empty() {
+        ensure_span_offsets_fit_i32(&spans)?;
+    }
     let mut changed = false;
     let mut remaining = Vec::new();
     for info in infos.0 {
-        let mut hit = false;
-        for (start, end) in spans {
-            if placement_overlaps_inclusive_span(&info, *start, *end, chunk_size)? {
-                hit = true;
-                break;
-            }
-        }
-        if hit {
+        if info_overlaps_coalesced_spans(&info, &spans, chunk_size)? {
             changed = true;
         } else {
             remaining.push(info);
@@ -772,6 +873,54 @@ fn floor_interval<T: DbTx>(
     }))
 }
 
+/// Rows that overlap a span or touch it on either side.
+///
+/// The floor row can start far below the span. The cursor seeks to that floor
+/// and then to the next span. It does not `next` across the gap.
+fn intervals_touching_spans<T: DbTx>(
+    tx: &T,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<Vec<IntervalRow>> {
+    if spans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
+    let mut rows = Vec::new();
+    for &(start, end) in spans {
+        let right_limit = end.0.saturating_add(1);
+        let mut current = match cursor.seek(start)? {
+            Some((key, _)) if key > start => cursor.prev()?,
+            Some(pair) => Some(pair),
+            None => cursor.last()?,
+        };
+        if current.is_none() {
+            current = cursor.seek(start)?;
+        }
+        while let Some((key, value)) = current {
+            if key.0 > right_limit {
+                break;
+            }
+            if value.end.0.saturating_add(1) < start.0 && key < start {
+                current = cursor.seek(start)?;
+                continue;
+            }
+            let touches = key.0 <= right_limit && value.end.0.saturating_add(1) >= start.0;
+            if touches && rows.last().is_none_or(|row: &IntervalRow| row.start != key) {
+                rows.push(IntervalRow {
+                    start: key,
+                    end: value.end,
+                    tx_path_hash: value.tx_path_hash,
+                });
+            }
+            if key.0 >= right_limit {
+                break;
+            }
+            current = cursor.next()?;
+        }
+    }
+    Ok(rows)
+}
+
 fn intervals_touching<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
@@ -846,14 +995,14 @@ fn drop_unreferenced_tx_paths<T: DbTxMut + DbTx>(
     existing: &[IntervalRow],
     edit: &IntervalEdit,
 ) -> eyre::Result<()> {
-    let mut dropped = dropped_tx_hashes(existing, edit);
+    let mut dropped: HashSet<H256> = dropped_tx_hashes(existing, edit).into_iter().collect();
     if dropped.is_empty() {
         return Ok(());
     }
     let mut cursor = tx.cursor_read::<TxPathIntervalByStart>()?;
     for row in cursor.walk(None)? {
         let (_, interval) = row?;
-        dropped.retain(|hash| *hash != interval.tx_path_hash);
+        dropped.remove(&interval.tx_path_hash);
         if dropped.is_empty() {
             return Ok(());
         }
@@ -863,6 +1012,83 @@ fn drop_unreferenced_tx_paths<T: DbTxMut + DbTx>(
         tx.delete::<TxLeafBindingByTxPathHash>(hash, None)?;
     }
     Ok(())
+}
+
+/// Clear tx-path coverage for every span, then drop unreferenced paths once.
+///
+/// One cursor loads the rows that touch the spans. A per-span assign would
+/// open that cursor again for each fragment and scan the path table each time.
+pub(super) fn clear_tx_intervals_in_ranges<T: DbTxMut + DbTx>(
+    tx: &T,
+    ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<()> {
+    let spans = coalesce_inclusive_spans(ranges);
+    if spans.is_empty() {
+        return Ok(());
+    }
+    let existing = intervals_touching_spans(tx, &spans)?;
+    let edit = clear_coverage(&existing, &spans);
+    for key in &edit.delete {
+        tx.delete::<TxPathIntervalByStart>(*key, None)?;
+    }
+    for row in &edit.put {
+        tx.put::<TxPathIntervalByStart>(
+            row.start,
+            TxPathInterval {
+                end: row.end,
+                tx_path_hash: row.tx_path_hash,
+            },
+        )?;
+    }
+    drop_unreferenced_tx_paths(tx, &existing, &edit)
+}
+
+fn collect_keys_in_spans<OffsetTable, T>(
+    tx: &T,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<Vec<PartitionChunkOffset>>
+where
+    OffsetTable: Table<Key = PartitionChunkOffset>,
+    T: DbTx,
+{
+    if spans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cursor = tx.cursor_read::<OffsetTable>()?;
+    let mut keys = Vec::new();
+    let mut span_index = 0_usize;
+    let mut current = cursor.seek(spans[0].0)?;
+    while let Some((offset, _)) = current {
+        while span_index < spans.len() && offset > spans[span_index].1 {
+            span_index += 1;
+        }
+        if span_index >= spans.len() {
+            break;
+        }
+        if offset < spans[span_index].0 {
+            current = cursor.seek(spans[span_index].0)?;
+            continue;
+        }
+        keys.push(offset);
+        current = cursor.next()?;
+    }
+    Ok(keys)
+}
+
+fn delete_offset_rows_in_spans<OffsetTable, T>(
+    tx: &T,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+) -> eyre::Result<usize>
+where
+    OffsetTable: Table<Key = PartitionChunkOffset>,
+    T: DbTxMut + DbTx,
+{
+    let keys = collect_keys_in_spans::<OffsetTable, T>(tx, spans)?;
+    let removed = keys.len();
+    for key in keys {
+        tx.delete::<OffsetTable>(key, None)?;
+    }
+    Ok(removed)
 }
 
 fn delete_offset_rows<OffsetTable, T>(
