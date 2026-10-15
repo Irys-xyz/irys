@@ -97,8 +97,42 @@ fn apply_missing(base: &mut PathBuf, missing: &[MissingPart]) -> eyre::Result<()
     Ok(())
 }
 
+/// Absolute path with `.` and `..` collapsed and symlinks left in place.
+/// That is the directory the operator named, not the one a symlink reaches.
+fn lexical_absolute(path: &Path) -> eyre::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Ok(out)
+}
+
+fn lexical_parent(path: &Path) -> eyre::Result<PathBuf> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    lexical_absolute(parent)
+}
+
 /// Refuse unless the path keeps a `loadtest` component after the deepest
-/// existing ancestor is canonicalized. Checked before any file is created.
+/// existing ancestor is canonicalized, and that parent is the directory named
+/// on the command line. A missing final component makes `create_dir_all`
+/// follow a symlink ancestor. Checked before any file is created.
 pub(crate) fn require_loadtest_ancestor(label: &str, path: &Path) -> eyre::Result<PathBuf> {
     if !has_loadtest_component(path) {
         return Err(eyre!(
@@ -111,6 +145,19 @@ pub(crate) fn require_loadtest_ancestor(label: &str, path: &Path) -> eyre::Resul
         return Err(eyre!(
             "{label} resolves to {}, which has no `loadtest` path component; refusing to run",
             resolved.display()
+        ));
+    }
+    let named_parent = lexical_parent(path)?;
+    let resolved_parent = match resolved.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("/"),
+    };
+    if named_parent != resolved_parent {
+        return Err(eyre!(
+            "refusing {label} {}: it resolves under {}, not {}",
+            path.display(),
+            resolved_parent.display(),
+            named_parent.display()
         ));
     }
     Ok(resolved)
@@ -374,6 +421,93 @@ mod tests {
         assert!(!safe.join("nope").exists());
         let text = format!("{err:#}");
         assert!(text.contains("loadtest"), "{text}");
+    }
+
+    #[test]
+    fn create_small_refuses_a_missing_loadtest_through_a_symlink_ancestor() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-link-ancestor-")
+            .build();
+        let live = tmp.path().join("live");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live.join("LIVE"), b"live").unwrap();
+        let link = tmp.path().join("link");
+        symlink(&live, &link).unwrap();
+        let path = link.join("loadtest/recall.dat");
+        let err = create_small(&path, CHUNK_SIZE, true).unwrap_err();
+        assert!(
+            !live.join("loadtest").exists(),
+            "created loadtest through the symlink"
+        );
+        assert!(!live.join("loadtest").join("recall.dat").exists());
+        assert_eq!(fs::read(live.join("LIVE")).unwrap(), b"live");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("resolves under"),
+            "missing loadtest through a symlink was accepted: {text}"
+        );
+    }
+
+    #[test]
+    fn require_loadtest_ancestor_refuses_a_missing_dir_through_a_symlink() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-link-dir-")
+            .build();
+        let live = tmp.path().join("live");
+        fs::create_dir_all(&live).unwrap();
+        let link = tmp.path().join("link");
+        symlink(&live, &link).unwrap();
+        let path = link.join("loadtest");
+        let err = require_loadtest_ancestor("dir", &path).unwrap_err();
+        assert!(!live.join("loadtest").exists());
+        let text = format!("{err:#}");
+        assert!(text.contains("resolves under"), "{text}");
+    }
+
+    #[test]
+    fn create_small_refuses_a_symlink_parent_that_stays_under_loadtest() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-link-inside-")
+            .build();
+        let real = tmp.path().join("safe/loadtest/real");
+        fs::create_dir_all(&real).unwrap();
+        symlink(&real, tmp.path().join("safe/loadtest/link")).unwrap();
+        let path = tmp.path().join("safe/loadtest/link/recall.dat");
+        let err = create_small(&path, CHUNK_SIZE, true).unwrap_err();
+        assert!(
+            !real.join("recall.dat").exists(),
+            "created the file through a symlink parent"
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("resolves under"), "{text}");
+    }
+
+    #[test]
+    fn create_small_creates_a_missing_loadtest_directory() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-missing-dir-")
+            .build();
+        let safe = tmp.path().join("safe");
+        fs::create_dir_all(&safe).unwrap();
+        let path = safe.join("loadtest/recall.dat");
+        assert!(create_small(&path, CHUNK_SIZE, true).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().len(), CHUNK_SIZE);
+        assert!(!safe.join("recall.dat").exists());
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444);
+    }
+
+    #[test]
+    fn require_loadtest_ancestor_allows_a_missing_child_of_the_named_directory() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-named-child-")
+            .build();
+        let dir = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recall.dat");
+        let resolved = require_loadtest_ancestor("recall-file", &path).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&dir).unwrap().join("recall.dat"));
+        assert!(!path.exists());
     }
 
     #[test]
