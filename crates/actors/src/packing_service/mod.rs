@@ -1094,4 +1094,126 @@ mod tests {
         )
         .unwrap()
     }
+
+    /// `wait_for_pending_room` must stay pending while the module is at its
+    /// byte ceiling, then return once a later sync drops below that ceiling.
+    ///
+    /// The disk lane is stopped. A non-force sync parks the bytes when the
+    /// durable interval has not elapsed and the backlog is not over the
+    /// ceiling. Headroom at 1000 permille keeps `pending == ceiling` inside
+    /// that line, so the wait's own sync does not clear the queue.
+    #[test_log::test(tokio::test)]
+    async fn pending_room_wait_stays_blocked_until_the_ceiling_clears() -> eyre::Result<()> {
+        const CHUNK: u64 = 32;
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("pending_room_wait")
+            .with_tracing()
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            chunk_size: CHUNK,
+            num_chunks_in_partition: 4,
+            ..consensus
+        });
+        node_config.storage = StorageSyncConfig {
+            num_writes_before_sync: 1,
+            max_pending_write_bytes: Some(CHUNK),
+            min_durable_interval_ms: 60_000,
+            durable_headroom_permille: 1000,
+            ..StorageSyncConfig::default()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: PartitionHash::zero(),
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(
+                ie(PartitionChunkOffset(0), PartitionChunkOffset(4)),
+                "hdd0".into(),
+            )],
+        };
+        let module = Arc::new(StorageModule::new(&info, &config)?);
+        assert!(
+            module.write_chunk(
+                PartitionChunkOffset(0),
+                vec![1_u8; CHUNK as usize],
+                ChunkType::Entropy,
+            ),
+            "seed write"
+        );
+        module.force_sync_pending_chunks()?;
+        assert_eq!(
+            module.pending_write_bytes(),
+            0,
+            "the first point must drain"
+        );
+        assert!(
+            module.write_chunk(
+                PartitionChunkOffset(1),
+                vec![2_u8; CHUNK as usize],
+                ChunkType::Entropy,
+            ),
+            "ceiling write"
+        );
+        assert!(
+            !module.has_pending_room(),
+            "one chunk at the ceiling leaves no pending room, pending={} ceiling={}",
+            module.pending_write_bytes(),
+            module.pending_memory_ceiling_bytes()
+        );
+
+        let waited = Arc::clone(&module);
+        let waiting =
+            tokio::spawn(async move { wait_for_pending_room(&waited, "pending-room test").await });
+
+        // The queued chunk stays Uninitialized until the wait's first sync
+        // pwrites it. Entropy plus a full ceiling means that sync parked the
+        // bytes and the poll loop is the only way the wait is still running.
+        let started = std::time::Instant::now();
+        loop {
+            if waiting.is_finished() {
+                let result = waiting.await.expect("wait task");
+                eyre::bail!("wait returned while the module was still at the ceiling: {result:?}");
+            }
+            let parked = module.get_chunk_type(&PartitionChunkOffset(1))
+                == Some(ChunkType::Entropy)
+                && !module.has_pending_room();
+            if parked {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(2) {
+                eyre::bail!(
+                    "the first sync did not park the ceiling chunk, type={:?} pending={}",
+                    module.get_chunk_type(&PartitionChunkOffset(1)),
+                    module.pending_write_bytes()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // One poll is 20 ms. The wait must still be pending after that sleep.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !waiting.is_finished(),
+            "wait returned after a poll while the ceiling was still full"
+        );
+        assert!(!module.has_pending_room());
+
+        module.force_sync_pending_chunks()?;
+        assert!(
+            module.has_pending_room(),
+            "force sync must drop the parked bytes under the ceiling"
+        );
+        let joined = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .expect("wait did not return after the ceiling was cleared");
+        let result = joined.expect("wait task panicked");
+        assert!(result.is_ok(), "{result:?}");
+        Ok(())
+    }
 }
