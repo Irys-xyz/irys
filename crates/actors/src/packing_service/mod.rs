@@ -167,6 +167,7 @@ impl PackingService {
                     notify.clone(),
                     runtime_handle,
                     packing_config.chain_id,
+                    packing_config.concurrency,
                 ))
             }
             #[cfg(feature = "nvidia")]
