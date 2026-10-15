@@ -15,8 +15,11 @@
 # This script does not delete bench files. The operator deletes those by hand.
 # It does not use sudo. A permission error on sysfs is left as the shell error.
 #
-# The pid in run.pid next to the sysfs file is signaled. Other processes
-# with the bench's name are left alone. A missing run.pid signals nothing.
+# The pid in run.pid next to the sysfs file is signaled. When that pid is a
+# process group leader, the whole group is signaled so a child does not keep
+# writing. The queue is restored only after that pid is gone (a zombie is
+# gone: it is not doing I/O). Other processes are left alone. A missing
+# run.pid signals nothing.
 
 set -eu
 
@@ -46,7 +49,46 @@ if [ ! -d "$queue" ]; then
     exit 1
 fi
 
-# run.sh records its pid beside the sysfs snapshot. Signal that process only.
+# run.sh records the bench pid beside the sysfs snapshot. Signal that
+# process only, then wait until it is gone before the queue write below.
+proc_busy() {
+    if [ ! -d "/proc/$1" ]; then
+        return 1
+    fi
+    state=$(awk '/^State:/{print $2}' "/proc/$1/status" 2>/dev/null || true)
+    if [ -z "$state" ] || [ "$state" = "Z" ]; then
+        return 1
+    fi
+    return 0
+}
+
+wait_until_idle() {
+    pid=$1
+    pgid=$2
+    i=0
+    while proc_busy "$pid"; do
+        i=$((i + 1))
+        if [ "$i" -ge 50 ]; then
+            if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
+                kill -KILL "-$pgid" 2>/dev/null || true
+            else
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+            i=0
+            while proc_busy "$pid"; do
+                i=$((i + 1))
+                if [ "$i" -ge 20 ]; then
+                    echo "run pid $pid did not exit; not restoring the queue" >&2
+                    exit 1
+                fi
+                sleep 0.1
+            done
+            return 0
+        fi
+        sleep 0.1
+    done
+}
+
 pid_file=$(dirname "$orig")/run.pid
 if [ -f "$pid_file" ]; then
     pid=$(head -n 1 "$pid_file" | tr -d '[:space:]')
@@ -55,8 +97,14 @@ if [ -f "$pid_file" ]; then
             echo "run.pid is not a pid: $pid" >&2
             ;;
         *)
-            if [ -d "/proc/$pid" ]; then
-                kill -TERM "$pid" 2>/dev/null || true
+            if proc_busy "$pid"; then
+                pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
+                if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
+                    kill -TERM "-$pgid" 2>/dev/null || true
+                else
+                    kill -TERM "$pid" 2>/dev/null || true
+                fi
+                wait_until_idle "$pid" "$pgid"
             fi
             ;;
     esac

@@ -17,6 +17,8 @@
 #   loadtest, the recall file, or the write file has no `loadtest` path component
 #   on the given path, or on the deepest existing ancestor plus the missing tail
 # The queue settings are written to <out>/sysfs.txt before the bench starts.
+# <out>/run.pid is the bench process, not this shell. The bench runs in its
+# own process group. TERM and INT stop that group.
 #
 # The bench's exit code is appended to <out>/bench.out. This script exits 0
 # after a bench failure so a ladder can continue. A guard failure exits 1.
@@ -254,28 +256,44 @@ fi
 } >"$out/sysfs.txt"
 
 sp=
+bp=
+# A TERM trap does not run during a foreground command. Background the bench
+# and wait, so TERM stops it before this shell exits. Monitor mode gives the
+# bench its own process group; it is turned off again so job notices stay quiet.
 cleanup() {
+    trap - EXIT TERM INT
+    if [ -n "${bp:-}" ]; then
+        kill -TERM -- "-$bp" 2>/dev/null || kill -TERM "$bp" 2>/dev/null || true
+        wait "$bp" 2>/dev/null || true
+        bp=
+    fi
     if [ -n "${sp:-}" ]; then
-        kill "$sp" 2>/dev/null || true
+        kill -TERM "$sp" 2>/dev/null || true
         wait "$sp" 2>/dev/null || true
         sp=
     fi
 }
 trap cleanup EXIT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 130' INT
 
+set -m
 "$here/sample.sh" "$device" "$out" &
 sp=$!
-echo $$ >"$out/run.pid"
-
 set +e
 "$bench" \
     --dir "$loadtest" \
     --recall-file "$recall_file" \
     --write-file "$write_file" \
     --out "$out" \
-    "${bench_args[@]}" >"$out/bench.out" 2>&1
+    "${bench_args[@]}" >"$out/bench.out" 2>&1 &
+bp=$!
+set +m
+printf '%s\n' "$bp" >"$out/run.pid"
+wait "$bp"
 rc=$?
 set -e
+bp=
 echo "exit=$rc" >>"$out/bench.out"
 echo "# done $(date -Is)" >>"$out/bench.out"
 exit 0
