@@ -4067,6 +4067,18 @@ impl StorageModule {
         }
         let period = self.intervals_persist_period();
         let snapshot_epoch = self.load_interval_image_epoch();
+        // Due-ness does not need the interval map. A lane pass with nothing
+        // due must not clone that map: after a crash it is the fragment list.
+        let due_starts = {
+            let disk = self.lock_interval_disk();
+            if !self.interval_snapshot_current(snapshot_epoch) {
+                return Ok(());
+            }
+            Self::due_completion_starts(&disk, &self.submodules, period, force)
+        };
+        if due_starts.is_empty() {
+            return Ok(());
+        }
         let memory = self
             .intervals
             .read()
@@ -4076,8 +4088,24 @@ impl StorageModule {
         if !self.interval_snapshot_current(snapshot_epoch) {
             return Ok(());
         }
+        // A reset can clear `dirty` while the map is cloned.
+        let touched = Self::due_completion_starts(&disk, &self.submodules, period, force);
+        if touched.is_empty() {
+            return Ok(());
+        }
+        let projection = Self::project_interval_file(&memory, &disk.mask)?;
+        drop(disk);
+        self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)
+    }
+
+    fn due_completion_starts(
+        disk: &IntervalDisk,
+        submodules: &SubmoduleMap,
+        period: Duration,
+        force: bool,
+    ) -> BTreeSet<PartitionChunkOffset> {
         let mut touched = BTreeSet::new();
-        for (interval, _) in self.submodules.iter() {
+        for (interval, _) in submodules.iter() {
             let start = interval.start();
             if !disk.dirty.contains(&start) {
                 continue;
@@ -4090,12 +4118,7 @@ impl StorageModule {
                 touched.insert(start);
             }
         }
-        if touched.is_empty() {
-            return Ok(());
-        }
-        let projection = Self::project_interval_file(&memory, &disk.mask)?;
-        drop(disk);
-        self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)
+        touched
     }
 
     /// Write the live map and replace the ahead mask. Offsets still in
@@ -15806,6 +15829,36 @@ mod tests {
                 vec![partition_chunk_offset_ii!(0, 7)],
                 "{engine:?}"
             );
+        }
+        Ok(())
+    }
+
+    /// An idle completion flush must not clone the interval map. The caller
+    /// holds the write lock, so a clone blocks until that lock drops.
+    #[test]
+    fn idle_interval_flush_does_not_lock_the_map() -> eyre::Result<()> {
+        let (_tmp, _config, storage) =
+            open_presence_module_with("idle_flush", SubmoduleIndexEngine::Mdbx, 30)?;
+        let intervals = Arc::clone(&storage.intervals);
+        let guard = intervals.write().unwrap();
+        let returned = std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let result = storage.flush_interval_completions_locked(false);
+                let _ = tx.send(result);
+            });
+            // Release the map after the wait so a flush that cloned it can
+            // finish. The timeout is the result that matters.
+            let returned = rx.recv_timeout(Duration::from_secs(2));
+            drop(guard);
+            returned
+        });
+        match returned {
+            Ok(result) => result?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                eyre::bail!("idle flush waited on the interval map while no completion was due");
+            }
+            Err(err) => return Err(eyre!(err)),
         }
         Ok(())
     }
