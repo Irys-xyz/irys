@@ -1199,9 +1199,10 @@ impl DataSyncServiceInner {
                 continue;
             };
 
-            // Check to see if the storage module has any entropy (packed) chunks that need data
-            let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
-            if entropy_intervals.is_empty() {
+            // Check to see if the storage module has any entropy (packed) chunks that need data.
+            // The live interval map is enough: rebuilding every span is the cost that
+            // stalls a fragmented module, and pending-only entropy appears after the next sync.
+            if !storage_module_has_entropy(&storage_module) {
                 debug!("StorageModule has no entropy chunks\n{:?}", pa);
                 continue;
             }
@@ -1281,33 +1282,21 @@ impl DataSyncServiceInner {
     }
 
     fn residual_data_roots_in_caller(storage_module: &StorageModule) -> Vec<DataRoot> {
-        let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
+        // Sample a bounded prefix of each entropy span. Walking a packing tail
+        // offset by offset is one iteration per chunk in the partition.
+        let (low, high) = sample_residual_entropy_offsets(storage_module);
         let mut roots = Vec::new();
         let mut seen = HashSet::new();
-        let mut sampled = 0_usize;
-
-        for interval in entropy_intervals {
-            for offset_u32 in *interval.start()..=*interval.end() {
-                if sampled >= MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN {
-                    return roots;
-                }
-                // Prefer low offsets (residual holes under the frontier / packing tail).
-                if offset_u32 >= chunk_orchestrator::LOW_OFFSET_PROBE_THRESHOLD {
-                    // Still allow a few high-offset samples if we have no roots yet,
-                    // but skip bulk packing-tail entropy once we already have candidates.
-                    if !roots.is_empty() {
-                        continue;
-                    }
-                }
-                sampled += 1;
-                let part_off = PartitionChunkOffset::from(offset_u32);
-                if let Ok(Some((data_root, _))) =
-                    storage_module.data_root_and_tx_offset_at(part_off)
-                    && seen.insert(data_root)
-                {
-                    roots.push(data_root);
-                }
-            }
+        for offset in low {
+            push_residual_root(storage_module, offset, &mut roots, &mut seen);
+        }
+        // High samples exist only to fill the cap when the low holes produced
+        // no indexed root. A root from the low holes ends the scan.
+        if !roots.is_empty() {
+            return roots;
+        }
+        for offset in high {
+            push_residual_root(storage_module, offset, &mut roots, &mut seen);
         }
         roots
     }
@@ -1452,10 +1441,7 @@ impl DataSyncServiceInner {
                     .chunk_orchestrators
                     .get(&sm_id)
                     .and_then(ChunkOrchestrator::get_max_chunk_offset)
-                && storage_module
-                    .get_intervals(ChunkType::Entropy)
-                    .iter()
-                    .any(|iv| *iv.start() <= *max_offset)
+                && storage_module_has_entropy_at_or_below(&storage_module, max_offset)
             {
                 let managers = self.active_peer_bandwidth_managers.read().unwrap();
                 let matching = managers
@@ -1555,6 +1541,92 @@ impl DataSyncServiceInner {
         }
         peers
     }
+}
+
+fn storage_module_has_entropy(storage_module: &StorageModule) -> bool {
+    storage_module
+        .intervals()
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(_, chunk_type)| *chunk_type == ChunkType::Entropy)
+}
+
+fn storage_module_has_entropy_at_or_below(
+    storage_module: &StorageModule,
+    max_offset: PartitionChunkOffset,
+) -> bool {
+    storage_module
+        .intervals()
+        .read()
+        .unwrap()
+        .iter()
+        .any(|(interval, chunk_type)| {
+            *chunk_type == ChunkType::Entropy && *interval.start() <= *max_offset
+        })
+}
+
+fn push_residual_root(
+    storage_module: &StorageModule,
+    offset: u32,
+    roots: &mut Vec<DataRoot>,
+    seen: &mut HashSet<DataRoot>,
+) {
+    let part_off = PartitionChunkOffset::from(offset);
+    if let Ok(Some((data_root, _))) = storage_module.data_root_and_tx_offset_at(part_off)
+        && seen.insert(data_root)
+    {
+        roots.push(data_root);
+    }
+}
+
+/// At most [`MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN`] entropy offsets. Low offsets
+/// come first. A span wider than the remaining budget contributes only its
+/// prefix, never one step per chunk.
+fn sample_residual_entropy_offsets(storage_module: &StorageModule) -> (Vec<u32>, Vec<u32>) {
+    let intervals = storage_module.intervals().read().unwrap();
+    let mut low = Vec::new();
+    let mut high = Vec::new();
+    let mut sampled = 0_usize;
+    let threshold = chunk_orchestrator::LOW_OFFSET_PROBE_THRESHOLD;
+    for (interval, chunk_type) in intervals.iter() {
+        if sampled >= MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN {
+            break;
+        }
+        if *chunk_type != ChunkType::Entropy {
+            continue;
+        }
+        let start = *interval.start();
+        let end = *interval.end();
+        if start < threshold {
+            let low_end = end.min(threshold - 1);
+            sampled = take_offset_prefix(start, low_end, sampled, &mut low);
+        }
+        if sampled >= MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN || end < threshold {
+            continue;
+        }
+        let high_start = start.max(threshold);
+        if high_start <= end {
+            sampled = take_offset_prefix(high_start, end, sampled, &mut high);
+        }
+    }
+    (low, high)
+}
+
+fn take_offset_prefix(start: u32, end: u32, mut sampled: usize, out: &mut Vec<u32>) -> usize {
+    if start > end {
+        return sampled;
+    }
+    let mut offset = start;
+    while sampled < MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN {
+        out.push(offset);
+        sampled += 1;
+        if offset == end {
+            break;
+        }
+        offset += 1;
+    }
+    sampled
 }
 
 impl DataSyncService {
@@ -2801,6 +2873,93 @@ mod entropy_peer_sync_tests {
                 .current_peers
                 .contains(&assignee),
             "discovery must publish the new manager to the orchestrator"
+        );
+    }
+}
+
+#[cfg(test)]
+mod residual_scan_tests {
+    use super::DataSyncServiceInner;
+    use super::chunk_orchestrator::LOW_OFFSET_PROBE_THRESHOLD;
+    use irys_domain::{ChunkType, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::irys::IrysSigner;
+    use irys_types::{
+        Config, ConsensusConfig, DataTransactionLedger, H256, LedgerChunkOffset, LedgerChunkRange,
+        NodeConfig, PartitionChunkOffset, ledger_chunk_offset_ii, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
+    };
+    use nodit::interval::ii;
+    use std::time::Instant;
+
+    /// A few indexed low holes plus one packing-tail interval must not walk
+    /// the tail offset by offset. The tail is what a full partition looks like.
+    #[test]
+    fn residual_root_scan_skips_a_high_entropy_span() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: 4,
+            num_chunks_in_recall_range: 2,
+            entropy_packing_iterations: 1,
+            ..ConsensusConfig::testing()
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+            },
+            &config,
+        )
+        .expect("storage module");
+        sm.pack_with_zeros();
+
+        let data = vec![7_u8; 32];
+        let signer = IrysSigner::random_signer(&config.consensus);
+        let tx = signer
+            .create_transaction(data, H256::zero())
+            .expect("transaction");
+        let tx = signer.sign_transaction(tx).expect("signed transaction");
+        let data_root = tx.header.data_root;
+        let (_tx_root, proofs) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )
+        .expect("index");
+
+        let tail_end = LOW_OFFSET_PROBE_THRESHOLD.saturating_add(100_000_000);
+        {
+            let mut intervals = sm.intervals().write().unwrap();
+            intervals
+                .insert_strict(
+                    ii(
+                        PartitionChunkOffset::from(LOW_OFFSET_PROBE_THRESHOLD),
+                        PartitionChunkOffset::from(tail_end),
+                    ),
+                    ChunkType::Entropy,
+                )
+                .expect("high entropy span");
+        }
+
+        let started = Instant::now();
+        let roots = DataSyncServiceInner::residual_data_roots_in_caller(&sm);
+        let elapsed = started.elapsed();
+        eprintln!("scale_residual roots={} elapsed={elapsed:?}", roots.len());
+        assert!(
+            roots.contains(&data_root),
+            "the low indexed hole must still be reported"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "high entropy span of 100_000_000 offsets took {elapsed:?}"
         );
     }
 }

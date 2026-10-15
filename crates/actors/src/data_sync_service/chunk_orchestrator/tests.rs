@@ -2020,3 +2020,152 @@ async fn entropy_peer_check_without_peers_is_throttled() {
         "a second check inside the throttle window does not resync"
     );
 }
+
+/// Rebuild of every fragmented interval on a tick is the cost that stalled
+/// data sync after a crash. The tick may visit only its probe budget.
+#[test_log::test(tokio::test)]
+async fn fragmented_entropy_tick_does_not_rebuild_every_interval() {
+    const FRAGMENTS: u32 = 100_000;
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = u64::from(FRAGMENTS) * 2;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    // Do not pack. `pack_with_zeros` syncs every chunk in the partition.
+    let info = StorageModuleInfo {
+        id: 0,
+        partition_assignment: Some(PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([1_u8; 20]),
+            partition_hash: H256::random(),
+        }),
+        submodules: vec![(
+            partition_chunk_offset_ie!(0, num_chunks as u32),
+            "chunks".into(),
+        )],
+    };
+    let sm = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+    {
+        let mut intervals = sm.intervals().write().unwrap();
+        let covered: Vec<_> = intervals.iter().map(|(interval, _)| *interval).collect();
+        for interval in covered {
+            let _ = intervals.cut(interval);
+        }
+        for index in 0..FRAGMENTS {
+            let offset = PartitionChunkOffset::from(index * 2);
+            intervals
+                .insert_strict(ii(offset, offset), ChunkType::Entropy)
+                .expect("disjoint entropy point");
+        }
+    }
+    let mut orch = make_orchestrator_with_ledger_chunks(sm.clone(), &config, num_chunks);
+
+    let _ = sm.get_intervals(ChunkType::Entropy);
+    let started = Instant::now();
+    let rebuilt = sm.get_intervals(ChunkType::Entropy);
+    let rebuild = started.elapsed();
+    assert_eq!(rebuilt.len(), usize::try_from(FRAGMENTS).unwrap());
+
+    let started = Instant::now();
+    let found_new = orch.note_new_entropy_without_peers();
+    let note = started.elapsed();
+    assert!(found_new, "the first peerless check must see the fragments");
+
+    let started = Instant::now();
+    orch.prepare_tick();
+    let tick = started.elapsed();
+
+    eprintln!(
+        "scale_intervals fragments={FRAGMENTS} rebuild={rebuild:?} note_new_entropy={note:?} prepare_tick={tick:?} queued={}",
+        orch.chunk_requests.len()
+    );
+
+    assert!(
+        tick.saturating_mul(4) < rebuild,
+        "prepare_tick {tick:?} rebuilt entropy intervals ({rebuild:?}) for {FRAGMENTS} fragments"
+    );
+    assert!(
+        note.saturating_mul(3) < rebuild,
+        "entropy peer check {note:?} rebuilt entropy intervals ({rebuild:?})"
+    );
+    assert!(
+        orch.chunk_requests.len() <= 1_000,
+        "a tick enqueues at most the pending budget, not every fragment"
+    );
+}
+
+/// Missing-index blocks are retained so a later re-arm can retry them. The
+/// retained set has to stay a small multiple of the pending budget: the
+/// interval map is the source of the offsets that did not fit.
+#[test_log::test(tokio::test)]
+async fn blocked_offsets_stay_within_four_pending_budgets() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 64, 2);
+    let sm = packed_sm(&config, 64);
+    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 64);
+    let peer = IrysAddress::from([4_u8; 20]);
+
+    for offset in 0..32_u32 {
+        insert_requested(&mut orch, PartitionChunkOffset::from(offset), peer);
+        orch.mark_chunk_blocked(
+            PartitionChunkOffset::from(offset),
+            ChunkBlockReason::MissingDataRootIndex,
+        )
+        .expect("block");
+    }
+
+    let blocked = orch
+        .chunk_requests
+        .values()
+        .filter(|request| {
+            matches!(
+                request.request_state,
+                ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+            )
+        })
+        .count();
+    assert_eq!(blocked, 8, "2 pending slots * 4 blocked budgets");
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32)),
+        "re-arm walks the lowest blocked offsets, so those stay"
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(31_u32)),
+        "offsets past the blocked budget are rediscovered from the interval map"
+    );
+}
+
+/// The term-ledger write head is re-queued every tick while it is Entropy.
+/// Dropping it from a full blocked set would fetch it again on the next tick.
+#[test_log::test(tokio::test)]
+async fn blocked_cap_keeps_the_term_ledger_write_head() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 16, 2);
+    let sm = packed_sm_for_ledger(&config, 16, DataLedger::Submit);
+    let mut orch = make_orchestrator_with_ledger_total(sm, &config, DataLedger::Submit, 16);
+    let peer = IrysAddress::from([5_u8; 20]);
+    let frontier = PartitionChunkOffset::from(15_u32);
+
+    for offset in 0..16_u32 {
+        insert_requested(&mut orch, PartitionChunkOffset::from(offset), peer);
+        orch.mark_chunk_blocked(
+            PartitionChunkOffset::from(offset),
+            ChunkBlockReason::MissingDataRootIndex,
+        )
+        .expect("block");
+    }
+
+    let blocked = orch
+        .chunk_requests
+        .values()
+        .filter(|request| matches!(request.request_state, ChunkRequestState::Blocked(_)))
+        .count();
+    assert_eq!(blocked, 8);
+    assert!(orch.chunk_requests.contains_key(&frontier));
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32))
+    );
+}

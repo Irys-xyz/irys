@@ -13,6 +13,7 @@ use irys_types::{
     DataLedger, IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
     UnpackedChunk, app_state::DatabaseProvider, hardfork_config::DataLedgerLookup,
 };
+use nodit::interval::ii;
 use std::{
     collections::{HashMap, HashSet, VecDeque, hash_map},
     sync::{Arc, RwLock},
@@ -44,6 +45,13 @@ const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// discovery cursor eventually rediscovers the discarded Entropy offset. As
 /// on restart, rediscovery resets that offset's ephemeral backoff.
 const DELAYED_REQUEST_LIMIT_MULTIPLIER: usize = 1;
+
+/// Blocked offsets are local progress blockers, not a second hot queue.
+/// Keep a few budgets of the lowest offsets for re-arm. On a term ledger also
+/// keep the write head: dropping it would enqueue it again on the next tick.
+/// Every offset that does not fit stays in the interval map and is found again
+/// when the scan cursor wraps.
+const BLOCKED_REQUEST_LIMIT_MULTIPLIER: usize = 4;
 
 /// How to request a missing body from a selected peer.
 ///
@@ -191,10 +199,16 @@ pub struct ChunkOrchestrator {
     /// (`u32::MAX` means "start at the write head") so abandoned low-offset
     /// gaps are visited only after the frontier has been scanned.
     scan_cursor: u32,
-    /// Entropy intervals seen on the previous discovery pass, `(start, end)`.
-    /// A new interval while [`Self::current_peers`] is empty means this module
-    /// had no peer managers when assignments were last synchronized.
-    seen_entropy_intervals: HashSet<(u32, u32)>,
+    /// Fingerprint of live Entropy intervals from the last peerless check.
+    /// Zero means that pass saw no Entropy. A change while
+    /// [`Self::current_peers`] is empty means this module had no peer managers
+    /// when assignments were last synchronized. The interval list itself is
+    /// not stored: a fragmented module can hold hundreds of thousands of spans.
+    seen_entropy_fingerprint: u64,
+    /// False until a peerless check has stored [`Self::seen_entropy_fingerprint`].
+    /// A peer list clears this so the next peerless period treats Entropy that
+    /// is already on the module as new.
+    entropy_fingerprint_ready: bool,
     last_entropy_peer_check: Option<Instant>,
     pub current_peers: Vec<IrysAddress>,
     block_tree: BlockTreeReadGuard,
@@ -259,7 +273,8 @@ impl ChunkOrchestrator {
             } else {
                 0
             },
-            seen_entropy_intervals: HashSet::new(),
+            seen_entropy_fingerprint: 0,
+            entropy_fingerprint_ready: false,
             last_entropy_peer_check: None,
             recent_chunk_times: CircularBuffer::new(8000),
             current_peers: Default::default(),
@@ -296,9 +311,11 @@ impl ChunkOrchestrator {
     pub(crate) fn note_new_entropy_without_peers(&mut self) -> bool {
         // Runs every tick. A fragmented module holds hundreds of thousands of
         // entropy intervals, so scan only when the answer can matter (no
-        // peers) and at most once per ENTROPY_PEER_CHECK_INTERVAL.
+        // peers) and at most once per ENTROPY_PEER_CHECK_INTERVAL. The scan
+        // is a fingerprint of the live map, not a rebuilt interval list.
         if !self.current_peers.is_empty() {
-            self.seen_entropy_intervals.clear();
+            self.seen_entropy_fingerprint = 0;
+            self.entropy_fingerprint_ready = false;
             return false;
         }
         let now = Instant::now();
@@ -309,16 +326,14 @@ impl ChunkOrchestrator {
             return false;
         }
         self.last_entropy_peer_check = Some(now);
-        let next: HashSet<(u32, u32)> = self
-            .storage_module
-            .get_intervals(ChunkType::Entropy)
-            .iter()
-            .map(|interval| (interval.start().0, interval.end().0))
-            .collect();
-        let has_new = next
-            .iter()
-            .any(|interval| !self.seen_entropy_intervals.contains(interval));
-        self.seen_entropy_intervals = next;
+        let fingerprint = entropy_interval_fingerprint(&self.storage_module);
+        let has_new = if self.entropy_fingerprint_ready {
+            fingerprint != self.seen_entropy_fingerprint
+        } else {
+            fingerprint != 0
+        };
+        self.seen_entropy_fingerprint = fingerprint;
+        self.entropy_fingerprint_ready = true;
         has_new
     }
 
@@ -659,12 +674,10 @@ impl ChunkOrchestrator {
 
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
         let mut requests_to_add = max_requests.saturating_sub(hot_count);
-
-        // Local Entropy intervals do not distinguish a natural term-ledger gap
-        // from a required body that is temporarily unavailable. Keep both
-        // unresolved: fair circular discovery plus delayed retries provides
-        // eventual reconciliation without falsely marking a 404 synchronized.
-        let entropy_intervals = self.storage_module.get_intervals(ChunkType::Entropy);
+        // A full hot budget has nothing new to queue. Do not walk entropy intervals.
+        if requests_to_add == 0 {
+            return;
+        }
 
         let max_offset = *max_chunk_offset;
 
@@ -675,11 +688,10 @@ impl ChunkOrchestrator {
         // head first. The service dispatcher also visits term SMs before
         // Publish so a permanent backlog cannot skip this offset; Publish
         // later copies Submit data and needs Submit replicas on the frontier.
-        if requests_to_add > 0
-            && self.prioritizes_write_frontier()
-            && entropy_intervals
-                .iter()
-                .any(|interval| *interval.start() <= max_offset && max_offset <= *interval.end())
+        // `get_chunk_type` sees pending writes; the scan below reads the live
+        // interval map only.
+        if self.prioritizes_write_frontier()
+            && self.is_entropy(PartitionChunkOffset::from(max_offset))
             && self.enqueue_pending(PartitionChunkOffset::from(max_offset), now, true)
         {
             requests_to_add -= 1;
@@ -689,6 +701,10 @@ impl ChunkOrchestrator {
             return;
         }
 
+        // Local Entropy intervals do not distinguish a natural term-ledger gap
+        // from a required body that is temporarily unavailable. Keep both
+        // unresolved: fair circular discovery plus delayed retries provides
+        // eventual reconciliation without falsely marking a 404 synchronized.
         let max_probes = max_requests.saturating_mul(4).max(max_requests);
         let mut probes = 0_usize;
         if self.prioritizes_write_frontier() {
@@ -705,12 +721,13 @@ impl ChunkOrchestrator {
                 if range_start > range_end {
                     continue;
                 }
-                for interval in entropy_intervals.iter().rev() {
-                    let start = (*interval.start()).max(range_start);
-                    let end = (*interval.end()).min(range_end).min(max_offset);
-                    if start > end {
-                        continue;
-                    }
+                let budget = max_probes.saturating_sub(probes);
+                if budget == 0 {
+                    break;
+                }
+                let runs =
+                    entropy_scan_runs(&self.storage_module, range_start, range_end, true, budget);
+                for (start, end) in runs {
                     for interval_step in (start..=end).rev() {
                         if self.note_scan_offset(
                             interval_step,
@@ -736,12 +753,13 @@ impl ChunkOrchestrator {
                 if range_start > range_end {
                     continue;
                 }
-                for interval in &entropy_intervals {
-                    let start = (*interval.start()).max(range_start);
-                    let end = (*interval.end()).min(range_end).min(max_offset);
-                    if start > end {
-                        continue;
-                    }
+                let budget = max_probes.saturating_sub(probes);
+                if budget == 0 {
+                    break;
+                }
+                let runs =
+                    entropy_scan_runs(&self.storage_module, range_start, range_end, false, budget);
+                for (start, end) in runs {
                     for interval_step in start..=end {
                         if self.note_scan_offset(
                             interval_step,
@@ -800,7 +818,12 @@ impl ChunkOrchestrator {
         } else {
             interval_step.saturating_add(1)
         };
-        if self.enqueue_pending(PartitionChunkOffset::from(interval_step), now, false) {
+        // The scan reads the live interval map. Pending Data is still Entropy
+        // there until the write is synced, so confirm the point before enqueue.
+        // The probe is counted either way and the cursor has moved on.
+        if self.is_entropy(PartitionChunkOffset::from(interval_step))
+            && self.enqueue_pending(PartitionChunkOffset::from(interval_step), now, false)
+        {
             *requests_to_add = requests_to_add.saturating_sub(1);
             if *requests_to_add == 0 {
                 return true;
@@ -1307,34 +1330,40 @@ impl ChunkOrchestrator {
         offset: PartitionChunkOffset,
         outcome: &super::DataSyncWriteOutcome,
     ) -> bool {
-        let Some(request) = self.chunk_requests.get_mut(&offset) else {
-            return false;
+        let applied = {
+            let Some(request) = self.chunk_requests.get_mut(&offset) else {
+                return false;
+            };
+            match outcome {
+                super::DataSyncWriteOutcome::AlreadyDurable => {
+                    request.request_state = ChunkRequestState::Completed;
+                    metrics::record_data_sync_chunk_stored();
+                    metrics::record_data_sync_fetch_by_source("local_cache", "success");
+                    true
+                }
+                super::DataSyncWriteOutcome::AwaitingDurability => {
+                    request.request_state = ChunkRequestState::AwaitingDurability(Instant::now());
+                    metrics::record_data_sync_fetch_by_source("local_cache", "success");
+                    true
+                }
+                super::DataSyncWriteOutcome::MissingDataRootIndex => {
+                    request.request_state =
+                        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex);
+                    request.excluded.clear();
+                    metrics::record_data_sync_chunk_blocked(
+                        ChunkBlockReason::MissingDataRootIndex.as_metric_label(),
+                    );
+                    metrics::record_data_sync_fetch_by_source("local_cache", "write_failed");
+                    true
+                }
+                super::DataSyncWriteOutcome::NoWriteableOffset
+                | super::DataSyncWriteOutcome::Other(_) => false,
+            }
         };
-        match outcome {
-            super::DataSyncWriteOutcome::AlreadyDurable => {
-                request.request_state = ChunkRequestState::Completed;
-                metrics::record_data_sync_chunk_stored();
-                metrics::record_data_sync_fetch_by_source("local_cache", "success");
-                true
-            }
-            super::DataSyncWriteOutcome::AwaitingDurability => {
-                request.request_state = ChunkRequestState::AwaitingDurability(Instant::now());
-                metrics::record_data_sync_fetch_by_source("local_cache", "success");
-                true
-            }
-            super::DataSyncWriteOutcome::MissingDataRootIndex => {
-                request.request_state =
-                    ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex);
-                request.excluded.clear();
-                metrics::record_data_sync_chunk_blocked(
-                    ChunkBlockReason::MissingDataRootIndex.as_metric_label(),
-                );
-                metrics::record_data_sync_fetch_by_source("local_cache", "write_failed");
-                true
-            }
-            super::DataSyncWriteOutcome::NoWriteableOffset
-            | super::DataSyncWriteOutcome::Other(_) => false,
+        if applied && matches!(outcome, super::DataSyncWriteOutcome::MissingDataRootIndex) {
+            self.trim_blocked_requests();
         }
+        applied
     }
 
     fn retry_delay(chunk_offset: PartitionChunkOffset, retry_round: u32) -> Duration {
@@ -1367,6 +1396,37 @@ impl ChunkOrchestrator {
         metrics::record_data_sync_retry_delay(self.ledger_id, delay);
         metrics::record_data_sync_peers_exhausted(self.ledger_id);
         self.trim_delayed_requests();
+    }
+
+    fn trim_blocked_requests(&mut self) {
+        let limit = (self.config.data_sync.max_pending_chunk_requests as usize)
+            .saturating_mul(BLOCKED_REQUEST_LIMIT_MULTIPLIER)
+            .max(1);
+        let protected = if self.prioritizes_write_frontier() {
+            self.get_max_chunk_offset().map(|(offset, _)| offset)
+        } else {
+            None
+        };
+        let mut blocked_count = self
+            .chunk_requests
+            .values()
+            .filter(|request| matches!(request.request_state, ChunkRequestState::Blocked(_)))
+            .count();
+        while blocked_count > limit {
+            let Some(offset) = self
+                .chunk_requests
+                .iter()
+                .filter_map(|(&offset, request)| {
+                    matches!(request.request_state, ChunkRequestState::Blocked(_)).then_some(offset)
+                })
+                .filter(|offset| Some(*offset) != protected)
+                .max()
+            else {
+                break;
+            };
+            self.chunk_requests.remove(&offset);
+            blocked_count -= 1;
+        }
     }
 
     fn trim_delayed_requests(&mut self) {
@@ -1850,19 +1910,22 @@ impl ChunkOrchestrator {
         chunk_offset: PartitionChunkOffset,
         reason: ChunkBlockReason,
     ) -> eyre::Result<()> {
-        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
-            eyre::eyre!("mark_chunk_blocked for unknown offset: {:?}", chunk_offset)
-        })?;
-        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
-            return Err(eyre::eyre!(
-                "mark_chunk_blocked expected Requested state at {:?}, got {:?}",
-                chunk_offset,
-                request.request_state
-            ));
+        {
+            let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+                eyre::eyre!("mark_chunk_blocked for unknown offset: {:?}", chunk_offset)
+            })?;
+            if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+                return Err(eyre::eyre!(
+                    "mark_chunk_blocked expected Requested state at {:?}, got {:?}",
+                    chunk_offset,
+                    request.request_state
+                ));
+            }
+            request.request_state = ChunkRequestState::Blocked(reason);
+            // Clear peer exclusions — the failure is local, not peer-specific.
+            request.excluded.clear();
         }
-        request.request_state = ChunkRequestState::Blocked(reason);
-        // Clear peer exclusions — the failure is local, not peer-specific.
-        request.excluded.clear();
+        self.trim_blocked_requests();
         Ok(())
     }
 
@@ -2118,6 +2181,113 @@ pub struct OrchestrationMetrics {
     pub oldest_ready_age: Duration,
     pub scan_cursor: u32,
     pub total_throughput_bps: u64,
+}
+
+/// Entropy runs from the live interval map inside `[range_start, range_end]`.
+///
+/// Returned width is at most `max_offsets`. A packing tail is clipped to that
+/// budget. Reverse scans keep the high end of each run. Pending writes are
+/// not in this map; the caller checks chunk type before it enqueues.
+fn entropy_scan_runs(
+    storage_module: &StorageModule,
+    range_start: u32,
+    range_end: u32,
+    reverse: bool,
+    max_offsets: usize,
+) -> Vec<(u32, u32)> {
+    if max_offsets == 0 || range_start > range_end {
+        return Vec::new();
+    }
+    let intervals = storage_module.intervals().read().unwrap();
+    let query = ii(
+        PartitionChunkOffset::from(range_start),
+        PartitionChunkOffset::from(range_end),
+    );
+    let mut left = max_offsets;
+    let mut runs = Vec::new();
+    let mut push = |start: u32, end: u32, chunk_type: &ChunkType| -> bool {
+        if *chunk_type == ChunkType::Entropy
+            && let Some(run) =
+                clip_entropy_run(start, end, range_start, range_end, reverse, &mut left)
+        {
+            runs.push(run);
+        }
+        left == 0
+    };
+    if reverse {
+        for (interval, chunk_type) in intervals.overlapping(query).rev() {
+            if push(*interval.start(), *interval.end(), chunk_type) {
+                break;
+            }
+        }
+    } else {
+        for (interval, chunk_type) in intervals.overlapping(query) {
+            if push(*interval.start(), *interval.end(), chunk_type) {
+                break;
+            }
+        }
+    }
+    runs
+}
+
+fn clip_entropy_run(
+    start: u32,
+    end: u32,
+    range_start: u32,
+    range_end: u32,
+    reverse: bool,
+    left: &mut usize,
+) -> Option<(u32, u32)> {
+    if *left == 0 {
+        return None;
+    }
+    let start = start.max(range_start);
+    let end = end.min(range_end);
+    if start > end {
+        return None;
+    }
+    let span = u64::from(end - start) + 1;
+    let take = span.min(u64::from(u32::MAX)).min(*left as u64) as u32;
+    if take == 0 {
+        return None;
+    }
+    let delta = take - 1;
+    let run = if reverse {
+        (end - delta, end)
+    } else {
+        (start, start + delta)
+    };
+    *left -= take as usize;
+    Some(run)
+}
+
+/// Mix of live Entropy spans. Zero only when the map has none. Count is mixed
+/// in so a split that preserves a start/end xor still changes the value, and
+/// the low bit is forced on so a non-empty map cannot hash to zero.
+fn entropy_interval_fingerprint(storage_module: &StorageModule) -> u64 {
+    let intervals = storage_module.intervals().read().unwrap();
+    let mut mixed = 0_u64;
+    let mut count = 0_u64;
+    for (interval, chunk_type) in intervals.iter() {
+        if *chunk_type != ChunkType::Entropy {
+            continue;
+        }
+        count += 1;
+        let start = u64::from(*interval.start());
+        let end = u64::from(*interval.end());
+        mixed = mixed
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(start)
+            .wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            .wrapping_add(end);
+    }
+    if count == 0 {
+        return 0;
+    }
+    mixed
+        .wrapping_mul(0x9E37_79B1_85EB_CA87)
+        .wrapping_add(count)
+        | 1
 }
 
 #[cfg(test)]
