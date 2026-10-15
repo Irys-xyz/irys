@@ -4288,7 +4288,7 @@ impl StorageModule {
                 continue;
             }
             match image.get_at_point(*offset).copied() {
-                Some(ChunkType::Uninitialized) | Some(ChunkType::Interrupted) => {}
+                Some(ChunkType::Uninitialized | ChunkType::Interrupted) => {}
                 _ => continue,
             }
             Self::cut_then_insert_interval_if_touching(image, *offset, *label);

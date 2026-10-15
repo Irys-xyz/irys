@@ -1464,9 +1464,7 @@ mod tests {
             "a span hole was not a miss: {notes:?}"
         );
         assert!(
-            !notes
-                .iter()
-                .any(|note| *note == ("serve_span", "storage_module", "error")),
+            !notes.contains(&("serve_span", "storage_module", "error")),
             "a span hole was counted as a read error: {notes:?}"
         );
     }
