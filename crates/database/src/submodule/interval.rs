@@ -157,7 +157,7 @@ fn reset_diff_merged_rows() {
 
 #[cfg(test)]
 fn diff_merged_rows() -> usize {
-    DIFF_MERGED_ROWS.with(|cell| cell.get())
+    DIFF_MERGED_ROWS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

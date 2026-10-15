@@ -1384,7 +1384,7 @@ fn reset_interval_rows_read() {
 
 #[cfg(test)]
 fn interval_rows_read() -> usize {
-    INTERVAL_ROWS_READ.with(|cell| cell.get())
+    INTERVAL_ROWS_READ.with(std::cell::Cell::get)
 }
 
 /// Remaining intervals grouped by the data root their leaf binding names.

@@ -3024,20 +3024,14 @@ thread_local! {
     static VERIFY_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
 fn reset_verify_views() {
-    #[cfg(test)]
     VERIFY_VIEWS.with(|cell| cell.set(0));
 }
 
+#[cfg(test)]
 fn verify_views() -> usize {
-    #[cfg(test)]
-    {
-        VERIFY_VIEWS.with(|cell| cell.get())
-    }
-    #[cfg(not(test))]
-    {
-        0
-    }
+    VERIFY_VIEWS.with(std::cell::Cell::get)
 }
 
 fn note_verify_view() {
@@ -3045,20 +3039,14 @@ fn note_verify_view() {
     VERIFY_VIEWS.with(|cell| cell.set(cell.get().saturating_add(1)));
 }
 
+#[cfg(test)]
 fn reset_v1_data_path_reads() {
-    #[cfg(test)]
     V1_DATA_PATH_READS.with(|cell| cell.set(0));
 }
 
+#[cfg(test)]
 fn v1_data_path_reads() -> usize {
-    #[cfg(test)]
-    {
-        V1_DATA_PATH_READS.with(|cell| cell.get())
-    }
-    #[cfg(not(test))]
-    {
-        0
-    }
+    V1_DATA_PATH_READS.with(std::cell::Cell::get)
 }
 
 fn read_v1_data_path(
