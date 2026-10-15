@@ -522,8 +522,7 @@ pub enum PreValidationError {
     CachePoisoned { at: &'static str },
 
     /// Parent block referenced by an incoming pre-validated block was not
-    /// present in the cache. Reorg-driven cache prunes can race with this
-    /// path; previously panicked.
+    /// present in the cache. A reorg prune can remove it before this path runs.
     #[error("parent block {parent_hash} not in cache (expected at height {expected_height})")]
     ParentNotInCache {
         parent_hash: H256,
@@ -5346,9 +5345,7 @@ async fn generate_expected_shadow_transactions(
     //     data → NodeFault (a bug in our own code, not the peer's block).
     //
     // There is no peer-attributable failure mode here, so the blanket
-    // `node_fault` mapping is the correct classification — NOT something
-    // to "split into DB-vs-logic" later. (A prior TODO here suggested
-    // that split; on audit it was speculative and the TODO was removed.)
+    // `node_fault` mapping is the correct classification.
     let expired_ledger_fees = if is_epoch_block {
         // `block.ledger_total_chunks(..)` is each ledger's cumulative total_chunks
         // at this block, read from the header after prevalidation confirmed it
