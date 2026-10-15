@@ -5,6 +5,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_TX_PATH_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_tx_path_spawn() {
+    FAIL_NEXT_TX_PATH_SPAWN.with(|flag| flag.set(true));
+}
+
+/// Test seam for an OS thread start that fails. Production spawn does not.
+fn take_spawn_failure() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_NEXT_TX_PATH_SPAWN.with(|flag| flag.replace(false))
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 /// Most tx-path derives that may run at once.
 ///
 /// Each derive is its own OS thread plus a consensus read of every tx header
@@ -171,7 +193,8 @@ impl TxPathJob {
     /// [`Self::spawn`] when fewer than [`MAX_TX_PATH_DERIVES`] jobs are running.
     ///
     /// `None` means this winner must not start another thread. The caller
-    /// skips the chunk. The in-flight jobs keep their slots until they finish.
+    /// skips the chunk. That is also the result when the OS cannot create
+    /// the thread. The in-flight jobs keep their slots until they finish.
     pub fn try_spawn<F>(work: F) -> Option<Self>
     where
         F: FnOnce() -> eyre::Result<TxPath> + Send + 'static,
@@ -186,18 +209,12 @@ impl TxPathJob {
         let permit = try_permit(counter, limit)?;
         let slot = new_slot();
         let worker = Arc::clone(&slot);
-        let started = std::thread::Builder::new()
-            .name("tx-path-derive".to_owned())
-            .spawn(move || {
-                let result = run_derive(work);
-                // Free the slot before waiters observe the result. A waiter
-                // that starts the next derive must not see this job as still
-                // in flight.
-                drop(permit);
-                finish_job(&worker, result);
-            });
+        let started = spawn_derive(permit, worker, work);
         if let Err(error) = started {
-            finish_job(&slot, Err(error.to_string()));
+            // The worker never ran. A job here would stop the recall scan
+            // on a derive that cannot finish.
+            finish_job(&slot, Err(error));
+            return None;
         }
         Some(Self { slot })
     }
@@ -246,6 +263,29 @@ impl TxPathJob {
             }
         }
     }
+}
+
+fn spawn_derive<F>(permit: DerivePermit, worker: Arc<TxPathSlot>, work: F) -> Result<(), String>
+where
+    F: FnOnce() -> eyre::Result<TxPath> + Send + 'static,
+{
+    if take_spawn_failure() {
+        // The closure never starts, so it cannot drop the permit.
+        drop(permit);
+        return Err("thread start failed".to_owned());
+    }
+    std::thread::Builder::new()
+        .name("tx-path-derive".to_owned())
+        .spawn(move || {
+            let result = run_derive(work);
+            // Free the slot before waiters observe the result. A waiter
+            // that starts the next derive must not see this job as still
+            // in flight.
+            drop(permit);
+            finish_job(&worker, result);
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn new_slot() -> Arc<TxPathSlot> {
@@ -347,7 +387,7 @@ impl Partition {
 
 #[cfg(test)]
 mod tests {
-    use super::{TxPathError, TxPathJob};
+    use super::{TxPathError, TxPathJob, fail_next_tx_path_spawn};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
@@ -475,5 +515,27 @@ mod tests {
         let path = job.wait(Duration::from_secs(2)).expect("released");
         assert_eq!(path, vec![4]);
         assert_eq!(job.try_get().expect("done").expect("path"), vec![4]);
+    }
+
+    /// A process that cannot create the worker thread must not hand the miner
+    /// a finished job. The recall scan treats `Some` as the solution and stops.
+    #[test]
+    fn failed_thread_start_does_not_return_a_job() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+        fail_next_tx_path_spawn();
+        assert!(
+            TxPathJob::try_spawn_limited(|| Ok(vec![1]), &IN_FLIGHT, 1).is_none(),
+            "a thread that did not start is not a solution"
+        );
+        assert_eq!(
+            IN_FLIGHT.load(Ordering::SeqCst),
+            0,
+            "the permit is released when the thread does not start"
+        );
+        let job = TxPathJob::try_spawn_limited(|| Ok(vec![7]), &IN_FLIGHT, 1)
+            .expect("the slot is free after the failed start");
+        assert_eq!(job.wait(Duration::from_secs(2)).expect("ran"), vec![7]);
+        assert_eq!(IN_FLIGHT.load(Ordering::SeqCst), 0);
     }
 }
