@@ -19,7 +19,9 @@
 #   --device is not the disk that holds the loadtest directory
 # The queue settings are written to <out>/sysfs.txt before the bench starts.
 # <out>/run.pid is the bench process, not this shell. The bench runs in its
-# own process group. TERM and INT stop that group.
+# own process group. TERM and INT stop that group. The EXIT trap removes
+# run.pid after that process is gone, so a later teardown cannot signal a
+# reused pid.
 #
 # The bench's exit code is appended to <out>/bench.out. This script exits 0
 # after a bench failure so a ladder can continue. A guard failure exits 1.
@@ -317,6 +319,9 @@ cleanup() {
         kill -TERM "$sp" 2>/dev/null || true
         wait "$sp" 2>/dev/null || true
         sp=
+    fi
+    if [ -n "${out:-}" ]; then
+        rm -f "$out/run.pid"
     fi
 }
 trap cleanup EXIT

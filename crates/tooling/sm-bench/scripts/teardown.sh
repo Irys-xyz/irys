@@ -16,11 +16,13 @@
 # This script does not delete bench files. The operator deletes those by hand.
 # It does not use sudo. A permission error on sysfs is left as the shell error.
 #
-# The pid in run.pid next to the sysfs file is signaled. When that pid is a
-# process group leader, the whole group is signaled so a child does not keep
-# writing. The queue is restored only after that pid is gone (a zombie is
-# gone: it is not doing I/O). Other processes are left alone. A missing
-# run.pid signals nothing.
+# The pid in run.pid next to the sysfs file is signaled when its comm is
+# irys-sm-bench. When that pid is a process group leader, the whole group is
+# signaled so a child does not keep writing. The queue is restored only after
+# that pid is gone (a zombie is gone: it is not doing I/O). A missing, empty,
+# or non-numeric run.pid exits before any queue write. A live pid whose comm
+# is not irys-sm-bench exits the same way. Other processes are left alone.
+# A numeric pid that is already gone has finished I/O, so the queue is restored.
 
 set -eu
 
@@ -91,24 +93,32 @@ wait_until_idle() {
 }
 
 pid_file=$(dirname "$orig")/run.pid
-if [ -f "$pid_file" ]; then
-    pid=$(head -n 1 "$pid_file" | tr -d '[:space:]')
-    case "$pid" in
-        '' | *[!0-9]*)
-            echo "run.pid is not a pid: $pid" >&2
-            ;;
-        *)
-            if proc_busy "$pid"; then
-                pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
-                if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
-                    kill -TERM "-$pgid" 2>/dev/null || true
-                else
-                    kill -TERM "$pid" 2>/dev/null || true
-                fi
-                wait_until_idle "$pid" "$pgid"
-            fi
-            ;;
-    esac
+if [ ! -f "$pid_file" ]; then
+    echo "run.pid is missing: $pid_file" >&2
+    exit 1
+fi
+pid=$(head -n 1 "$pid_file" | tr -d '[:space:]')
+case "$pid" in
+    '' | *[!0-9]*)
+        echo "run.pid is not a pid: $pid" >&2
+        exit 1
+        ;;
+esac
+if [ -d "/proc/$pid" ]; then
+    comm=$(tr -d '[:space:]' < "/proc/$pid/comm" 2>/dev/null || true)
+    if [ "$comm" != "irys-sm-bench" ]; then
+        echo "run pid $pid is ${comm:-unknown}, not irys-sm-bench; not restoring the queue" >&2
+        exit 1
+    fi
+    if proc_busy "$pid"; then
+        pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
+        if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
+            kill -TERM "-$pgid" 2>/dev/null || true
+        else
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+        wait_until_idle "$pid" "$pgid"
+    fi
 fi
 
 while IFS= read -r line || [ -n "$line" ]; do

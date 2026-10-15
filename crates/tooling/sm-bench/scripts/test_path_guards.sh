@@ -861,6 +861,7 @@ scheduler=[mq-deadline]
 EOF
     cat >"$root/leader.sh" <<EOF
 #!/bin/bash
+printf '%s' irys-sm-bench > /proc/\$\$/comm
 printf '%s\n' "\$\$" > "$root/leader.pid"
 trap 'sleep 0.3; cat "$queue/max_sectors_kb" > "$root/queue_seen"; exit 0' TERM
 sleep 60 &
@@ -918,7 +919,7 @@ read_ahead_kb=128
 nr_requests=64
 scheduler=[mq-deadline]
 EOF
-    sleep 60 &
+    python3 -c 'import time; open("/proc/self/comm","w").write("irys-sm-bench"); time.sleep(60)' &
     recorded=$!
     printf '%s\n' "$recorded" >"$root/run/run.pid"
     printf '#!/bin/sh\nsleep 60\n' >"$root/irys-sm-bench"
@@ -1024,6 +1025,11 @@ read_ahead_kb=128
 nr_requests=64
 scheduler=[mq-deadline]
 EOF
+    # A finished pid is enough. The charset case is not a live bench.
+    sleep 0.1 &
+    dead=$!
+    wait "$dead" 2>/dev/null || true
+    printf '%s\n' "$dead" >"$root/out/run.pid"
     if ! with_fake_sys "$sys" "$here/teardown.sh" dm-0 "$root/out/sysfs.txt" >"$err" 2>&1; then
         bad "$name" "teardown.sh rejected dm-0: $(cat "$err")"
     elif grep -q "alphanumeric" "$err"; then
@@ -1089,6 +1095,148 @@ EOF
         ok "$name-blk-run-dotdot"
     fi
 
+    rm -rf "$root"
+}
+
+queue_restore_fixture() {
+    local root=$1
+    local sys=$root/sys
+    local queue=$sys/block/notadisk/queue
+    local orig=$root/run/sysfs.txt
+    mkdir -p "$queue" "$root/run"
+    printf '999\n' >"$queue/max_sectors_kb"
+    printf '999\n' >"$queue/read_ahead_kb"
+    printf '999\n' >"$queue/nr_requests"
+    printf 'none\n' >"$queue/scheduler"
+    cat >"$orig" <<'EOF'
+max_sectors_kb=111
+read_ahead_kb=128
+nr_requests=64
+scheduler=[mq-deadline]
+EOF
+}
+
+test_teardown_does_not_restore_when_the_pid_is_not_numeric() {
+    local name=teardown-bad-pid root err
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    printf 'not-a-pid\n' >"$root/run/run.pid"
+    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown exited 0 for a non-numeric pid"
+    elif ! grep -q "not a pid" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue changed: $(cat "$root/sys/block/notadisk/queue/max_sectors_kb")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_teardown_does_not_restore_when_the_pid_file_is_missing() {
+    local name=teardown-missing-pid root err
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown exited 0 with no run.pid"
+    elif ! grep -q "missing" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue changed: $(cat "$root/sys/block/notadisk/queue/max_sectors_kb")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_teardown_does_not_restore_when_the_pid_file_is_empty() {
+    local name=teardown-empty-pid root err
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    : >"$root/run/run.pid"
+    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown exited 0 for an empty run.pid"
+    elif ! grep -q "not a pid" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_teardown_does_not_signal_a_pid_whose_comm_is_not_the_bench() {
+    local name=teardown-wrong-comm root err sleeper
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    sleep 60 &
+    sleeper=$!
+    printf '%s\n' "$sleeper" >"$root/run/run.pid"
+    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown exited 0 for comm $(cat "/proc/$sleeper/comm" 2>/dev/null || echo gone)"
+    elif ! alive "$sleeper"; then
+        bad "$name" "sleep $sleeper was signaled"
+    elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue changed while the other process was alive"
+    else
+        ok "$name"
+    fi
+    kill "$sleeper" 2>/dev/null || true
+    wait "$sleeper" 2>/dev/null || true
+    rm -rf "$root"
+}
+
+test_teardown_restores_when_the_numeric_pid_is_already_gone() {
+    local name=teardown-dead-pid root err dead
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    sleep 30 &
+    dead=$!
+    kill "$dead" 2>/dev/null || true
+    wait "$dead" 2>/dev/null || true
+    printf '%s\n' "$dead" >"$root/run/run.pid"
+    if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown refused a dead pid: $(cat "$err")"
+    elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue was not restored"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_removes_the_pid_after_the_bench_exits() {
+    local name=run-pid-removed root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    cat >"$root/bench" <<'EOF'
+#!/bin/bash
+printf '%s' irys-sm-bench > /proc/$$/comm
+exit 0
+EOF
+    chmod +x "$root/bench"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh failed: $(cat "$err")"
+    elif [ -e "$root/out/t/run.pid" ]; then
+        bad "$name" "run.pid still present after the bench exited: $(cat "$root/out/t/run.pid")"
+    else
+        ok "$name"
+    fi
     rm -rf "$root"
 }
 
