@@ -1678,20 +1678,47 @@ where
         &mut |after| v2.read_offset_keys(OffsetTable::DataPaths, after, VERIFY_KEYS),
         &mut |after| v3.read_offset_row_keys(after, VERIFY_KEYS),
         |keys| {
-            let left = v2.view(|tx| read_data_paths_at(tx, keys))?;
+            note_verify_view();
+            let (left, stored_hashes) = v2.view(|tx| {
+                let paths = read_data_paths_at(tx, keys)?;
+                let hashes = keys
+                    .iter()
+                    .map(|key| tx.get_path_hashes_by_offset(*key))
+                    .collect::<eyre::Result<Vec<_>>>()?;
+                Ok((paths, hashes))
+            })?;
             let right = v3.view(|tx| read_data_paths_at(tx, keys))?;
             let right_meta = v3.view(|tx| {
                 keys.iter()
                     .map(|key| tx.get_offset_meta(*key))
                     .collect::<eyre::Result<Vec<_>>>()
             })?;
+            let orphan_keys: Vec<_> = keys
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| left[*index].is_some() && right[*index].is_none())
+                .map(|(_, key)| *key)
+                .collect();
+            let orphan_intervals = if orphan_keys.is_empty() {
+                Vec::new()
+            } else {
+                note_verify_view();
+                v2.view(|tx| {
+                    orphan_keys
+                        .iter()
+                        .map(|key| tx.tx_interval_at(*key))
+                        .collect::<eyre::Result<Vec<_>>>()
+                })?
+            };
+            let mut orphan_at = 0_usize;
             for (index, key) in keys.iter().enumerate() {
-                if left[index].is_some()
-                    && right[index].is_none()
-                    && v2.view(|tx| tx.tx_interval_at(*key))?.is_none()
-                {
-                    report.skipped_orphans = report.skipped_orphans.saturating_add(1);
-                    continue;
+                if left[index].is_some() && right[index].is_none() {
+                    let interval = orphan_intervals[orphan_at].as_ref();
+                    orphan_at = orphan_at.saturating_add(1);
+                    if interval.is_none() {
+                        report.skipped_orphans = report.skipped_orphans.saturating_add(1);
+                        continue;
+                    }
                 }
                 report.offsets_checked = report.offsets_checked.saturating_add(1);
                 if left[index] != right[index] {
@@ -1708,8 +1735,8 @@ where
                 );
                 if let Some(path) = &left[index] {
                     let digest = H256::from(hash_sha256(path));
-                    let stored = v2
-                        .view(|tx| tx.get_path_hashes_by_offset(*key))?
+                    let stored = stored_hashes[index]
+                        .as_ref()
                         .and_then(|hashes| hashes.data_path_hash);
                     if stored != Some(digest) {
                         report.mismatch_data_path_hash =
@@ -2992,6 +3019,32 @@ thread_local! {
     static V1_DATA_PATH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static VERIFY_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn reset_verify_views() {
+    #[cfg(test)]
+    VERIFY_VIEWS.with(|cell| cell.set(0));
+}
+
+fn verify_views() -> usize {
+    #[cfg(test)]
+    {
+        VERIFY_VIEWS.with(|cell| cell.get())
+    }
+    #[cfg(not(test))]
+    {
+        0
+    }
+}
+
+fn note_verify_view() {
+    #[cfg(test)]
+    VERIFY_VIEWS.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
 fn reset_v1_data_path_reads() {
     #[cfg(test)]
     V1_DATA_PATH_READS.with(|cell| cell.set(0));
@@ -3015,7 +3068,26 @@ fn read_v1_data_path(
 ) -> eyre::Result<ChunkDataPath> {
     #[cfg(test)]
     V1_DATA_PATH_READS.with(|cell| cell.set(cell.get().saturating_add(1)));
-    env.view_eyre(|tx| match tx.get::<ChunkDataPathByPathHash>(hash) {
+    env.view_eyre(|tx| v1_data_path_in_tx(tx, offset, hash))
+}
+
+fn read_v1_data_paths(
+    env: &DatabaseEnv,
+    rows: &[(PartitionChunkOffset, H256)],
+) -> eyre::Result<Vec<ChunkDataPath>> {
+    env.view_eyre(|tx| {
+        rows.iter()
+            .map(|(offset, hash)| v1_data_path_in_tx(tx, *offset, *hash))
+            .collect()
+    })
+}
+
+fn v1_data_path_in_tx(
+    tx: &impl reth_db::transaction::DbTx,
+    offset: PartitionChunkOffset,
+    hash: H256,
+) -> eyre::Result<ChunkDataPath> {
+    match tx.get::<ChunkDataPathByPathHash>(hash) {
         Ok(Some(path)) => Ok(path),
         Ok(None) => eyre::bail!(
             "submodule index v1 data path for offset {} hash {hash:x} is missing",
@@ -3026,7 +3098,7 @@ fn read_v1_data_path(
             offset.0
         ),
         Err(err) => Err(err.into()),
-    })
+    }
 }
 
 fn read_v1_tx_path(env: &DatabaseEnv, hash: H256) -> eyre::Result<Option<TxPath>> {
@@ -3485,28 +3557,46 @@ fn compare_v1_paths(
             break;
         }
         let mut passed = false;
+        let mut rows = Vec::new();
         for (offset, hashes) in &batch {
             if *offset > end {
                 passed = true;
                 break;
             }
-            let Some(hash) = hashes.data_path_hash else {
-                continue;
-            };
-            let path = read_v1_data_path(env, *offset, hash)?;
-            let right = v3.view(|tx| tx.get_data_path_by_offset(*offset))?;
-            report.offsets_checked = report.offsets_checked.saturating_add(1);
-            if right.as_ref() != Some(&path) {
-                report.offset_mismatches = report.offset_mismatches.saturating_add(1);
-                report.mismatch_data_path = report.mismatch_data_path.saturating_add(1);
-                note(report, "data_path", format!("offset {}", offset.0));
+            if let Some(hash) = hashes.data_path_hash {
+                rows.push((*offset, hash));
             }
-            let meta = v3.view(|tx| tx.get_offset_meta(*offset))?;
-            // A rollback copy is always MDBX v2, never v1.
-            note_mdbx_checksum(true, meta.as_ref(), *offset, false, report);
-            if H256::from(hash_sha256(&path)) != hash {
-                report.mismatch_data_path_hash = report.mismatch_data_path_hash.saturating_add(1);
-                note(report, "data_path_hash", format!("offset {}", offset.0));
+        }
+        if !rows.is_empty() {
+            note_verify_view();
+            let paths = read_v1_data_paths(env, &rows)?;
+            note_verify_view();
+            let (rights, metas) = v3.view(|tx| {
+                let rights = rows
+                    .iter()
+                    .map(|(offset, _)| tx.get_data_path_by_offset(*offset))
+                    .collect::<eyre::Result<Vec<_>>>()?;
+                let metas = rows
+                    .iter()
+                    .map(|(offset, _)| tx.get_offset_meta(*offset))
+                    .collect::<eyre::Result<Vec<_>>>()?;
+                Ok((rights, metas))
+            })?;
+            for (index, (offset, hash)) in rows.iter().enumerate() {
+                let path = &paths[index];
+                report.offsets_checked = report.offsets_checked.saturating_add(1);
+                if rights[index].as_ref() != Some(path) {
+                    report.offset_mismatches = report.offset_mismatches.saturating_add(1);
+                    report.mismatch_data_path = report.mismatch_data_path.saturating_add(1);
+                    note(report, "data_path", format!("offset {}", offset.0));
+                }
+                // A rollback copy is always MDBX v2, never v1.
+                note_mdbx_checksum(true, metas[index].as_ref(), *offset, false, report);
+                if H256::from(hash_sha256(path)) != *hash {
+                    report.mismatch_data_path_hash =
+                        report.mismatch_data_path_hash.saturating_add(1);
+                    note(report, "data_path_hash", format!("offset {}", offset.0));
+                }
             }
         }
         let last = batch.last().map(|(key, _)| *key);
@@ -3886,7 +3976,8 @@ mod tests {
     };
     use super::{
         ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, reset_v1_data_path_reads,
-        v1_data_path_reads, verify_mdbx_and_rocks, verify_rocks_records,
+        reset_verify_views, v1_data_path_reads, verify_mdbx_and_rocks, verify_rocks_records,
+        verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -5290,6 +5381,41 @@ mod tests {
             assert!(tx.placement_at(PartitionChunkOffset(4))?.is_some());
             Ok(())
         })?;
+        Ok(())
+    }
+
+    /// Path hashes for a v2 batch are read in the same view as the data paths.
+    #[test]
+    fn verify_loads_path_hashes_in_the_data_path_view() -> eyre::Result<()> {
+        let root = temp("convert-verify-views");
+        let consensus = populate_mdbx(root.path())?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let options = options_for(&consensus)?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        reset_verify_views();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(verify_views(), 1, "two proof rows share one source view");
+        Ok(())
+    }
+
+    /// One v1 interval's data paths and offset metas are two views, not one per chunk.
+    #[test]
+    fn verify_v1_loads_each_path_batch_in_two_views() -> eyre::Result<()> {
+        const N: u64 = 3;
+        let root = temp("convert-verify-v1-views");
+        let consensus = write_v1_one_tx_partition(root.path(), N)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        reset_verify_views();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(verify_views(), 2);
         Ok(())
     }
 
