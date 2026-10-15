@@ -1403,6 +1403,205 @@ EOF
     rm -rf "$root"
 }
 
+block_dev() {
+    local cand
+    for cand in loop0 dm-0; do
+        if [ -b "/dev/$cand" ]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+prepare_blk_run_fakes() {
+    local root=$1
+    local dev=$2
+    local sys=$root/sys
+    mkdir -p "$root/bin" "$sys/class/block/$dev" "$sys/block/$dev" "$root/safe/loadtest" "$root/trace"
+    printf '2048\n' >"$sys/class/block/$dev/size"
+    printf '0 0 0 0 0 0 0 0 0 1 0\n' >"$sys/block/$dev/stat"
+    cat >"$root/bin/findmnt" <<EOF
+#!/bin/bash
+case "\$*" in
+    *SOURCE*) printf '%s\n' "/dev/$dev" ;;
+    *TARGET*) printf '%s\n' "/tmp" ;;
+esac
+EOF
+    chmod +x "$root/bin/findmnt"
+}
+
+test_blk_run_term_does_not_wait_out_sleep() {
+    local name=blk-run-term-sleep root err dev outer blk tries
+    root=$(tmpdir)
+    err=$root/err
+    dev=$(block_dev) || {
+        bad "$name" "no loop0 or dm-0 block device"
+        rm -rf "$root"
+        return
+    }
+    prepare_blk_run_fakes "$root" "$dev"
+    # bpftrace exits on SIGINT. GNU sleep ignores SIGINT, so the stub cannot be sleep.
+    cat >"$root/bin/bpftrace" <<EOF
+#!/bin/bash
+printf '%s\n' "\$\$" > "$root/bpf.pid"
+exec python3 -c 'import signal,sys,time
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+time.sleep(120)'
+EOF
+    cat >"$root/bin/sleep" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$root/sleep.log"
+exec /bin/sleep "\$@"
+EOF
+    cat >"$root/extent-snap.sh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$root/bin/bpftrace" "$root/bin/sleep" "$root/extent-snap.sh"
+    PATH="$root/bin:$PATH" with_binds "$root/sys" "$root/extent-snap.sh" "$here/extent-snap.sh" \
+        "$here/blk-run.sh" "$dev" "$root/safe/loadtest" "$root/trace" >"$err" 2>&1 &
+    outer=$!
+    tries=0
+    while [ ! -f "$root/sleep.log" ] || ! grep -qx 30 "$root/sleep.log"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 50 ] || ! alive "$outer"; then
+            bad "$name" "did not reach sleep 30: $(cat "$err" 2>/dev/null) sleep=$(cat "$root/sleep.log" 2>/dev/null)"
+            kill "$outer" 2>/dev/null || true
+            wait "$outer" 2>/dev/null || true
+            rm -rf "$root"
+            return
+        fi
+        sleep 0.1
+    done
+    blk=$(ps -o ppid= -p "$(cat "$root/bpf.pid")" | tr -d '[:space:]')
+    kill -TERM "$blk" 2>/dev/null || true
+    tries=0
+    while alive "$blk"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 30 ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if alive "$blk"; then
+        bad "$name" "blk-run $blk still running 3s after TERM during sleep"
+    elif ! alive "$(cat "$root/bpf.pid")"; then
+        ok "$name"
+    else
+        bad "$name" "bpftrace still running after TERM"
+    fi
+    kill -9 "$blk" "$(cat "$root/bpf.pid" 2>/dev/null)" "$outer" 2>/dev/null || true
+    wait "$outer" 2>/dev/null || true
+    rm -rf "$root"
+}
+
+test_blk_run_term_does_not_wait_out_the_snapshot() {
+    local name=blk-run-term-snap root err dev outer blk snap tries
+    root=$(tmpdir)
+    err=$root/err
+    dev=$(block_dev) || {
+        bad "$name" "no loop0 or dm-0 block device"
+        rm -rf "$root"
+        return
+    }
+    prepare_blk_run_fakes "$root" "$dev"
+    # bpftrace exits on SIGINT. GNU sleep ignores SIGINT, so the stub cannot be sleep.
+    cat >"$root/bin/bpftrace" <<EOF
+#!/bin/bash
+printf '%s\n' "\$\$" > "$root/bpf.pid"
+exec python3 -c 'import signal,sys,time
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+time.sleep(120)'
+EOF
+    cat >"$root/extent-snap.sh" <<EOF
+#!/bin/bash
+n=\$(cat "$root/snap.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$root/snap.count"
+printf '%s\n' "\$\$" > "$root/snap.pid"
+if [ "\$n" -eq 1 ]; then
+    exec /bin/sleep 30
+fi
+exit 0
+EOF
+    chmod +x "$root/bin/bpftrace" "$root/extent-snap.sh"
+    PATH="$root/bin:$PATH" with_binds "$root/sys" "$root/extent-snap.sh" "$here/extent-snap.sh" \
+        "$here/blk-run.sh" "$dev" "$root/safe/loadtest" "$root/trace" >"$err" 2>&1 &
+    outer=$!
+    if ! wait_file "$root/snap.pid" || ! wait_file "$root/bpf.pid"; then
+        bad "$name" "snapshot did not start: $(cat "$err" 2>/dev/null)"
+        kill "$outer" 2>/dev/null || true
+        wait "$outer" 2>/dev/null || true
+        rm -rf "$root"
+        return
+    fi
+    blk=$(ps -o ppid= -p "$(cat "$root/bpf.pid")" | tr -d '[:space:]')
+    snap=$(cat "$root/snap.pid")
+    kill -TERM "$blk" 2>/dev/null || true
+    tries=0
+    while alive "$blk" || alive "$snap"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 30 ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if alive "$blk"; then
+        bad "$name" "blk-run $blk still running 3s after TERM during snapshot"
+    elif alive "$snap"; then
+        bad "$name" "snapshot $snap still running after TERM"
+    else
+        ok "$name"
+    fi
+    kill -9 "$blk" "$snap" "$(cat "$root/bpf.pid" 2>/dev/null)" "$outer" 2>/dev/null || true
+    wait "$outer" 2>/dev/null || true
+    rm -rf "$root"
+}
+
+test_blk_run_snapshots_when_bpftrace_exits() {
+    local name=blk-run-snap-exit root err dev outer
+    root=$(tmpdir)
+    err=$root/err
+    dev=$(block_dev) || {
+        bad "$name" "no loop0 or dm-0 block device"
+        rm -rf "$root"
+        return
+    }
+    prepare_blk_run_fakes "$root" "$dev"
+    cat >"$root/bin/bpftrace" <<EOF
+#!/bin/bash
+printf '%s\n' "\$\$" > "$root/bpf.pid"
+exec /bin/sleep 1.2
+EOF
+    cat >"$root/bin/sleep" <<'EOF'
+#!/bin/bash
+if [ "$1" = "30" ]; then
+    exec /bin/sleep 0.05
+fi
+exec /bin/sleep "$@"
+EOF
+    cat >"$root/extent-snap.sh" <<EOF
+#!/bin/bash
+n=\$(cat "$root/snap.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$root/snap.count"
+exit 0
+EOF
+    chmod +x "$root/bin/bpftrace" "$root/bin/sleep" "$root/extent-snap.sh"
+    if ! PATH="$root/bin:$PATH" with_binds "$root/sys" "$root/extent-snap.sh" "$here/extent-snap.sh" \
+        "$here/blk-run.sh" "$dev" "$root/safe/loadtest" "$root/trace" >"$err" 2>&1; then
+        bad "$name" "blk-run failed: $(cat "$err")"
+    elif [ ! -s "$root/snap.count" ] || [ "$(cat "$root/snap.count")" -lt 1 ]; then
+        bad "$name" "no snapshot was taken"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then

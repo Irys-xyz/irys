@@ -135,6 +135,8 @@ EOF
 
 bpid=
 spid=
+sleep_pid=
+snap_pid=
 cleaned=0
 
 cleanup() {
@@ -144,6 +146,18 @@ cleanup() {
     fi
     cleaned=1
     trap '' INT TERM EXIT
+    # A foreground sleep or snapshot would hold this trap until it returned.
+    # Those commands are waited in the background, so kill them here.
+    if [ -n "$sleep_pid" ]; then
+        kill -TERM "$sleep_pid" 2>/dev/null || true
+        wait "$sleep_pid" 2>/dev/null || true
+        sleep_pid=
+    fi
+    if [ -n "$snap_pid" ]; then
+        kill -TERM "$snap_pid" 2>/dev/null || true
+        wait "$snap_pid" 2>/dev/null || true
+        snap_pid=
+    fi
     if [ -n "$bpid" ]; then
         kill -INT "$bpid" 2>/dev/null || true
         child=$(ps -o pid= --ppid "$bpid" 2>/dev/null || true)
@@ -185,7 +199,10 @@ else
 fi
 bpid=$!
 
-sleep 1 || true
+sleep 1 &
+sleep_pid=$!
+wait "$sleep_pid" || true
+sleep_pid=
 if ! kill -0 "$bpid" 2>/dev/null; then
     echo "bpftrace exited at start" >&2
     if [ -f "$out/bpftrace.err" ]; then
@@ -230,12 +247,21 @@ with open(path, "a", encoding="utf-8") as out:
 PY
 spid=$!
 
-"$snap" "$mnt" "$canon" "$out" || echo "extent-snap failed" >&2
+"$snap" "$mnt" "$canon" "$out" &
+snap_pid=$!
+wait "$snap_pid" || echo "extent-snap failed" >&2
+snap_pid=
 
 while kill -0 "$bpid" 2>/dev/null; do
-    sleep 30 || true
+    sleep 30 &
+    sleep_pid=$!
+    wait "$sleep_pid" || true
+    sleep_pid=
     if ! kill -0 "$bpid" 2>/dev/null; then
         break
     fi
-    "$snap" "$mnt" "$canon" "$out" || echo "extent-snap failed" >&2
+    "$snap" "$mnt" "$canon" "$out" &
+    snap_pid=$!
+    wait "$snap_pid" || echo "extent-snap failed" >&2
+    snap_pid=
 done
