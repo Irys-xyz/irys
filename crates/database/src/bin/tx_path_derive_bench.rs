@@ -8,7 +8,7 @@ use std::fs::{self, File};
 use std::io::Error as IoError;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use eyre::eyre;
@@ -64,8 +64,9 @@ stored read. Mining does not call this binary.
                           name must contain \"copy\". Not timed.
 --migrate-index           Migrate a v1 MDBX submodule copy in place. The directory
                           name must contain \"copy\". Not timed.
---prepare DIR             Write a small V3 fixture and exit:
-                          DIR/consensus and DIR/submodule-db.copy.
+--prepare DIR             Write a small V3 fixture and exit. DIR's name must
+                          contain \"copy\". Writes DIR/consensus and
+                          DIR/submodule-db.copy.
 
 Cold drops file cache with posix_fadvise(DONTNEED) before each sample. Pages
 this process still has mapped can stay resident. A RocksDB block cache is not
@@ -1161,32 +1162,147 @@ fn engine_name(engine: Engine) -> &'static str {
     }
 }
 
-fn require_copy_dir(path: &Path, kind: &str) -> eyre::Result<()> {
-    let marked = |candidate: &Path| {
-        candidate
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.to_ascii_lowercase().contains("copy"))
+fn name_has_copy(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().contains("copy"))
+}
+
+enum MissingPart {
+    Normal(std::ffi::OsString),
+    CurDir,
+    ParentDir,
+}
+
+/// Canonicalize the deepest existing ancestor, then apply the missing tail.
+/// `..` in that tail is applied, so `copy/../../outside` does not keep the name.
+fn resolve_with_ancestor(path: &Path) -> eyre::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        if cursor.as_os_str().is_empty() {
+            cursor = std::env::current_dir()?;
+        }
+        if cursor.exists() || is_symlink(&cursor) {
+            let mut resolved = cursor.canonicalize()?;
+            apply_missing(&mut resolved, &missing)?;
+            return Ok(resolved);
+        }
+        let popped = match cursor.components().next_back() {
+            Some(Component::Normal(name)) => MissingPart::Normal(name.to_os_string()),
+            Some(Component::CurDir) => MissingPart::CurDir,
+            Some(Component::ParentDir) => MissingPart::ParentDir,
+            _ => {
+                eyre::bail!("{} has no existing ancestor", path.display())
+            }
+        };
+        let Some(parent) = cursor.parent() else {
+            eyre::bail!("{} has no existing ancestor", path.display())
+        };
+        if parent == cursor {
+            eyre::bail!("{} has no existing ancestor", path.display())
+        }
+        missing.push(popped);
+        if parent.as_os_str().is_empty() {
+            cursor = std::env::current_dir()?;
+            continue;
+        }
+        cursor = parent.to_path_buf();
+    }
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+fn apply_missing(base: &mut PathBuf, missing: &[MissingPart]) -> eyre::Result<()> {
+    for part in missing.iter().rev() {
+        match part {
+            MissingPart::Normal(name) => base.push(name),
+            MissingPart::CurDir => {}
+            MissingPart::ParentDir => {
+                if !base.pop() {
+                    eyre::bail!("path escapes the filesystem root");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Absolute path with `.` and `..` collapsed and symlinks left in place.
+/// That is the directory the operator named, not the one a symlink reaches.
+fn lexical_absolute(path: &Path) -> eyre::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
     };
-    if !marked(path) {
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Ok(out)
+}
+
+fn lexical_parent(path: &Path) -> eyre::Result<PathBuf> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    lexical_absolute(parent)
+}
+
+/// Resolve `path`, then refuse when that parent is not the directory named
+/// on the command line. A missing final component makes `canonicalize` return
+/// `NotFound`, and `create_dir_all` would follow a symlink parent.
+fn resolve_operator_path(path: &Path) -> eyre::Result<PathBuf> {
+    let resolved = resolve_with_ancestor(path)?;
+    let named_parent = lexical_parent(path)?;
+    let resolved_parent = match resolved.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("/"),
+    };
+    if named_parent != resolved_parent {
+        eyre::bail!(
+            "refusing {}: it resolves under {}, not {}",
+            path.display(),
+            resolved_parent.display(),
+            named_parent.display()
+        );
+    }
+    Ok(resolved)
+}
+
+fn require_copy_dir(path: &Path, kind: &str) -> eyre::Result<()> {
+    if !name_has_copy(path) {
         eyre::bail!(
             "refusing to migrate {kind} {}: directory name must contain \"copy\"",
             path.display()
         );
     }
-    if let Ok(canonical) = path.canonicalize()
-        && !marked(&canonical)
-    {
+    let resolved = resolve_operator_path(path)?;
+    if !name_has_copy(&resolved) {
         eyre::bail!(
             "refusing to migrate {kind} {}: it resolves to {}, whose name does not contain \"copy\"",
             path.display(),
-            canonical.display()
+            resolved.display()
         );
     }
     Ok(())
 }
 
 fn prepare_fixture(dir: &Path) -> eyre::Result<()> {
+    require_copy_dir(dir, "fixture directory")?;
     let consensus = dir.join("consensus");
     let index_dir = dir.join("submodule-db.copy");
     if consensus.join("mdbx.dat").is_file() {
@@ -1844,6 +1960,89 @@ fn validate(args: &Args) -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{Engine, Mode, parse_args, percentile};
+
+    fn temp() -> irys_testing_utils::tempfile::TempDir {
+        irys_testing_utils::TempDirBuilder::new()
+            .prefix("tx-copy-guard-")
+            .build()
+    }
+
+    #[test]
+    fn require_copy_dir_refuses_a_missing_name_through_a_symlink() {
+        let tmp = temp();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("LIVE"), b"live").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = link.join("new.copy");
+        let err = super::require_copy_dir(&path, "consensus database").unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("resolves under"),
+            "missing final name through a symlink was accepted: {text}"
+        );
+        assert!(!real.join("new.copy").exists());
+        assert_eq!(std::fs::read(real.join("LIVE")).unwrap(), b"live");
+    }
+
+    #[test]
+    fn require_copy_dir_applies_dotdot_across_a_symlink() {
+        let tmp = temp();
+        let real = tmp.path().join("other").join("live");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = link.join("..").join("escaped.copy");
+        let err = super::require_copy_dir(&path, "consensus database").unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("resolves under"),
+            "dotdot through a symlink was accepted: {text}"
+        );
+        assert!(!real.parent().unwrap().join("escaped.copy").exists());
+    }
+
+    #[test]
+    fn require_copy_dir_allows_a_missing_child_of_the_named_directory() {
+        let tmp = temp();
+        let parent = tmp.path().join("bench");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("db.copy");
+        super::require_copy_dir(&path, "consensus database").unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn prepare_fixture_does_not_create_through_a_symlink() {
+        let tmp = temp();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("LIVE"), b"live").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = link.join("fixture.copy");
+        let err = super::prepare_fixture(&path).unwrap_err();
+        assert!(
+            !real.join("fixture.copy").exists(),
+            "prepare created a directory through the symlink"
+        );
+        assert!(!real.join("consensus").exists());
+        assert_eq!(std::fs::read(real.join("LIVE")).unwrap(), b"live");
+        let text = format!("{err:#}");
+        assert!(text.contains("resolves under"), "{text}");
+    }
+
+    #[test]
+    fn prepare_fixture_refuses_a_name_without_copy() {
+        let tmp = temp();
+        let path = tmp.path().join("fixture");
+        let err = super::prepare_fixture(&path).unwrap_err();
+        assert!(!path.exists());
+        assert!(!path.join("consensus").exists());
+        let text = format!("{err:#}");
+        assert!(text.contains("copy"), "{text}");
+    }
 
     fn args(parts: &[&str]) -> super::Args {
         let raw: Vec<String> = parts.iter().map(|part| (*part).to_owned()).collect();
