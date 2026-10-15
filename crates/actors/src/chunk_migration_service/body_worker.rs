@@ -122,6 +122,10 @@ pub(crate) struct PassStats {
     /// Lowest block height among the jobs this pass read. `None` when it
     /// read none. A pass that stops early has not seen later keys.
     pub oldest_pending_height: Option<u64>,
+    /// `true` when this pass published the pending-job gauges. A pass that
+    /// skipped every nonempty pending table leaves the previous sample.
+    #[cfg(test)]
+    pub recorded_gauges: bool,
 }
 
 impl std::ops::AddAssign for PassStats {
@@ -252,6 +256,9 @@ impl BodyMigrationWorker {
     pub(crate) async fn drain_pass(&self) -> PassStats {
         let modules: Vec<Arc<StorageModule>> = self.storage_modules_guard.read().clone();
         let mut tasks = Vec::new();
+        // Paused modules are not drained. If every nonempty pending table was
+        // one of them, this pass has no sample and must not publish 0.
+        let mut skipped_nonempty_pending = false;
         for sm in modules {
             let Some(ledger) = sm
                 .partition_assignment()
@@ -263,6 +270,9 @@ impl BodyMigrationWorker {
             if sm.data_writes_paused() {
                 // Network-partition recovery is rewriting this module; its rows
                 // wait untouched until writes resume.
+                if paused_module_has_pending(&sm) {
+                    skipped_nonempty_pending = true;
+                }
                 debug!(
                     storage_module.id = sm.id,
                     "body migration skipping module with paused writes"
@@ -332,16 +342,50 @@ impl BodyMigrationWorker {
         if total.rows > 0 {
             debug!(?total, "body migration pass");
         }
-        crate::metrics::record_body_migration_pass(
-            total.written as u64,
-            total.settled as u64,
-            total.retired as u64,
-            total.throttled as u64,
-            total.rows.saturating_sub(total.settled + total.retired) as u64,
-            total.oldest_pending_height.unwrap_or(0),
-        );
+        // A paused module is absent from a sample that did read other modules.
+        // Skipping every nonempty table is not a sample: leave the gauges.
+        let record_gauges = total.rows > 0 || !skipped_nonempty_pending;
+        if record_gauges {
+            crate::metrics::record_body_migration_pass(
+                total.written as u64,
+                total.settled as u64,
+                total.retired as u64,
+                total.throttled as u64,
+                total.rows.saturating_sub(total.settled + total.retired) as u64,
+                total.oldest_pending_height.unwrap_or(0),
+            );
+        }
+        #[cfg(test)]
+        {
+            total.recorded_gauges = record_gauges;
+        }
         total
     }
+}
+
+/// `true` when a paused module still has a pending body row, or that table
+/// cannot be read. An unreadable table counts as nonempty so a failed read
+/// cannot publish a zero pending gauge.
+fn paused_module_has_pending(sm: &StorageModule) -> bool {
+    for interval in sm.submodule_intervals() {
+        match sm.pending_body_migrations_page(
+            PartitionChunkOffset::from(*interval.start()),
+            None,
+            1,
+        ) {
+            Ok(rows) if rows.is_empty() => {}
+            Ok(_) => return true,
+            Err(error) => {
+                warn!(
+                    storage_module.id = sm.id,
+                    ?error,
+                    "pending body migrations unreadable while writes are paused; keeping the last gauge sample"
+                );
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Everything one blocking task needs to drain one submodule's rows.

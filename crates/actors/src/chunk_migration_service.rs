@@ -962,7 +962,7 @@ impl ChunkMigrationService {
 mod tests {
     use super::body_worker::{
         BodyMigrationWorker, MAX_BODY_MIGRATION_ATTEMPTS, PENDING_WRITE_CEILING_BATCHES,
-        PENDING_WRITE_CEILING_MIN_CHUNKS, PassStats, pending_write_ceiling_bytes,
+        PENDING_WRITE_CEILING_MIN_CHUNKS, pending_write_ceiling_bytes,
     };
     use super::*;
     use irys_database::{
@@ -1303,8 +1303,18 @@ mod tests {
             assert_eq!(f.chunk_type(offset), Some(ChunkType::Data));
         }
 
-        // Idle pass is a no-op.
-        assert_eq!(worker.drain_pass().await, PassStats::default());
+        // Idle pass reads an empty backlog and publishes that zero.
+        let idle = worker.drain_pass().await;
+        assert_eq!(
+            (
+                idle.rows,
+                idle.written,
+                idle.settled,
+                idle.retired,
+                idle.recorded_gauges
+            ),
+            (0, 0, 0, 0, true)
+        );
         Ok(())
     }
 
@@ -1881,6 +1891,167 @@ mod tests {
         f.sm.resume_data_writes();
         assert_eq!(worker.drain_pass().await.settled, 1);
         assert!(f.rows()?.is_empty());
+        Ok(())
+    }
+
+    /// Submit module on `slot`. Slot 0 overlaps the fixture tx. A later slot
+    /// does not, so indexing leaves its pending table empty.
+    fn submit_module(config: &Config, id: usize, slot: usize) -> eyre::Result<Arc<StorageModule>> {
+        Ok(Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(slot),
+                    miner_address: IrysAddress::from([0xBB; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, 20), format!("hdd{id}").into())],
+            },
+            config,
+        )?))
+    }
+
+    fn index_on(f: &Fixture, guard: &StorageModulesReadGuard) -> Result<(), MigrationError> {
+        process_ledger_transactions(
+            &f.block,
+            DataLedger::Submit,
+            std::slice::from_ref(&f.tx.header),
+            &f.block_index,
+            &f.config,
+            guard,
+            &mut Vec::new(),
+        )
+    }
+
+    fn worker_for(f: &Fixture, guard: StorageModulesReadGuard) -> BodyMigrationWorker {
+        let (senders, _receivers) = crate::services::ServiceSenders::new();
+        BodyMigrationWorker::new(
+            guard,
+            f.db.clone(),
+            f.config.clone(),
+            Arc::new(Notify::new()),
+            f.shutdown.clone(),
+            senders.data_sync.clone(),
+        )
+    }
+
+    /// No pending rows: the pass did sample the backlog, and the sample is 0.
+    #[tokio::test]
+    async fn empty_pass_records_a_zero_pending_gauge() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        let pass = f.worker().drain_pass().await;
+        assert!(pass.recorded_gauges);
+        assert_eq!(pass.rows, 0);
+        assert!(f.rows()?.is_empty());
+        Ok(())
+    }
+
+    /// A pause with nothing queued is not a skipped backlog.
+    #[tokio::test]
+    async fn paused_module_with_no_pending_rows_still_records_zero() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pause_data_writes();
+        let pass = f.worker().drain_pass().await;
+        assert!(
+            pass.recorded_gauges,
+            "a paused module with an empty pending table is not a skipped backlog"
+        );
+        assert_eq!(pass.rows, 0);
+        assert!(f.rows()?.is_empty());
+        Ok(())
+    }
+
+    /// A pass that reads jobs publishes that sample.
+    #[tokio::test]
+    async fn unpaused_pass_records_the_jobs_it_read() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+        let pass = f.worker().drain_pass().await;
+        assert!(pass.recorded_gauges);
+        assert_eq!((pass.rows, pass.written), (1, 3));
+        Ok(())
+    }
+
+    /// Rollback holds every module that still has a pending row. The pass
+    /// reads none of them, so it must not publish 0 over the last sample.
+    #[tokio::test]
+    async fn paused_nonempty_pass_does_not_replace_pending_gauges() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+        f.sm.pause_data_writes();
+        let pass = f.worker().drain_pass().await;
+        assert!(
+            !pass.recorded_gauges,
+            "every nonempty pending table was paused; gauges must stay at the last sample"
+        );
+        assert_eq!(
+            (pass.rows, pass.written, pass.settled, pass.retired),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(f.rows()?.len(), 1);
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(!f.sm.has_pending_writes());
+        Ok(())
+    }
+
+    /// An unpaused sibling with an empty table is not a sample of the paused
+    /// backlog. The gauges stay.
+    #[tokio::test]
+    async fn paused_nonempty_stays_unsampled_when_siblings_have_no_pending() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.seed_cache()?;
+        let sibling = submit_module(&f.config, 1, 1)?;
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            f.sm.clone(),
+            sibling.clone(),
+        ])));
+        index_on(&f, &guard)?;
+        assert_eq!(f.rows()?.len(), 1);
+        assert!(sibling.pending_body_migrations()?.is_empty());
+        f.sm.pause_data_writes();
+        let pass = worker_for(&f, guard).drain_pass().await;
+        assert!(
+            !pass.recorded_gauges,
+            "the only nonempty pending table was paused"
+        );
+        assert_eq!(pass.rows, 0);
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(sibling.pending_body_migrations()?.is_empty());
+        Ok(())
+    }
+
+    /// One module is paused with rows. Another is read. Record that sample.
+    /// The paused module is absent from it, and its row is untouched.
+    #[tokio::test]
+    async fn pass_records_modules_it_read_while_a_sibling_is_paused() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        let sibling = submit_module(&f.config, 1, 0)?;
+        f.sm.pack_with_zeros();
+        sibling.pack_with_zeros();
+        f.seed_cache()?;
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            f.sm.clone(),
+            sibling.clone(),
+        ])));
+        index_on(&f, &guard)?;
+        assert_eq!(f.rows()?.len(), 1);
+        assert_eq!(sibling.pending_body_migrations()?.len(), 1);
+        f.sm.pause_data_writes();
+        let pass = worker_for(&f, guard).drain_pass().await;
+        assert!(
+            pass.recorded_gauges,
+            "a pass that read an unpaused module records that sample"
+        );
+        assert_eq!((pass.rows, pass.written), (1, 3));
+        assert_eq!(f.rows()?.len(), 1);
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(!f.sm.has_pending_writes());
+        assert_eq!(sibling.pending_body_migrations()?.len(), 1);
         Ok(())
     }
 
