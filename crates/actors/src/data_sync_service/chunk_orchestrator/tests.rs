@@ -2325,24 +2325,19 @@ async fn dispatch_does_not_spin_when_ledger_offsets_are_gone() {
     let offset = PartitionChunkOffset::from(0);
     insert_pending(&mut orch, offset);
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let progressed = orch.dispatch_next();
-        let pending = matches!(
+    let progressed = orch.dispatch_next();
+    assert!(!progressed, "a missing ledger range must stop this round");
+    assert!(
+        matches!(
             orch.chunk_requests[&offset].request_state,
             ChunkRequestState::Pending
-        );
-        let requeued = orch.ready_offsets.contains(&offset);
-        let _ = tx.send((progressed, pending, requeued));
-    });
-
-    let (progressed, pending, requeued) =
-        rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| {
-            panic!("dispatch_next did not return; a missing ledger range must stop the round")
-        });
-    assert!(!progressed, "a missing ledger range must stop this round");
-    assert!(pending, "the offset stays pending");
-    assert!(requeued, "the offset is back on the ready queue");
+        ),
+        "the offset stays pending"
+    );
+    assert!(
+        orch.ready_offsets.contains(&offset),
+        "the offset is back on the ready queue"
+    );
 }
 
 /// The fetcher is created for one ledger, then the assignment is read again.
