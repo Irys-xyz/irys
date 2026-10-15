@@ -442,10 +442,17 @@ impl InnerCacheTask {
             let mut placed = BTreeSet::new();
             let mut unreadable = false;
             irys_domain::trace_index_read(irys_domain::CACHE_RECLAIM, || {
+                let proven = proven_roots.contains(&root);
                 for storage_module in &storage_modules {
                     let read = storage_module
                         .durable_tx_offsets_for_data_root(root, &cached_offsets)
                         .and_then(|d| {
+                            // Placement only decides which unproven bodies this
+                            // node does not store. A local proof already keeps
+                            // those bodies, so the second index read is wasted.
+                            if proven {
+                                return Ok((d, BTreeSet::new()));
+                            }
                             let p = storage_module
                                 .placed_tx_offsets_for_data_root(root, &cached_offsets)?;
                             Ok((d, p))
@@ -1011,13 +1018,25 @@ impl InnerCacheTask {
     /// - (c) Unpromoted + expired + under capacity + local author: regenerate
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_ingress_proofs(&self) -> eyre::Result<()> {
+        // A stable prefix of still-valid proofs must not consume the budget
+        // on every pass. Start at a random key and wrap once. The cap stays.
+        self.prune_ingress_proofs_limited(H256::random(), MAX_PROOF_CHECKS_PER_RUN)
+    }
+
+    /// Scan at most `max_checks` proofs, starting at `seek_key` and wrapping
+    /// once. Every record counts, valid or not. The wrap stops at `seek_key`
+    /// so a proof is not visited twice.
+    fn prune_ingress_proofs_limited(
+        &self,
+        seek_key: DataRoot,
+        max_checks: usize,
+    ) -> eyre::Result<()> {
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
         let tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
-        // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
-        // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
-        let mut walker = cursor.walk(None)?;
+        let mut walker = cursor.walk(Some(seek_key))?;
+        let mut wrapped = false;
         // Carries the full proof content so the delete phase can compare before deleting
         // (closes the TOCTOU window: a fresh proof stored between the scan and the delete
         // will not match the scanned content and will be preserved). The bool flags an
@@ -1042,68 +1061,78 @@ impl InnerCacheTask {
             &chunk_count
         );
 
-        while let Some((data_root, compact)) = walker.next().transpose()? {
-            if processed >= MAX_PROOF_CHECKS_PER_RUN {
-                break;
-            }
-            processed += 1;
-            let CachedIngressProof { address, proof } = compact.0.clone();
-
-            // Associated txids
-            let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
-                debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
-                to_delete.push((data_root, compact, true));
-                continue;
-            };
-
-            let check_result = ChunkIngressServiceInner::is_ingress_proof_expired_static(
-                &self.block_tree_guard,
-                &self.db,
-                &self.config,
-                &proof,
-            );
-            if !check_result.expired_or_invalid {
-                continue;
-            }
-            let mut any_unpromoted = false;
-            for txid in cached_data_root.txid_set.iter() {
-                if let Some(tx_header) = tx_header_by_txid(&tx, txid)?
-                    && tx_header.promoted_height().is_none()
-                {
-                    any_unpromoted = true;
-                    debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+        loop {
+            while let Some((data_root, compact)) = walker.next().transpose()? {
+                if wrapped && data_root >= seek_key {
                     break;
                 }
-            }
+                if processed >= max_checks {
+                    break;
+                }
+                processed += 1;
+                let CachedIngressProof { address, proof } = compact.0.clone();
 
-            let is_locally_produced = address == local_addr;
+                // Associated txids
+                let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
+                    debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
+                    to_delete.push((data_root, compact, true));
+                    continue;
+                };
 
-            if at_capacity {
-                // Unpromoted + expired + at capacity: delete
-                to_delete.push((data_root, compact, false));
-                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
-            } else if is_locally_produced && any_unpromoted {
-                match check_result.regeneration_action {
-                    RegenAction::Reanchor => {
-                        to_reanchor.push(proof);
-                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for reanchoring");
-                    }
-                    RegenAction::Regenerate => {
-                        to_regen.push(proof);
-                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
-                    }
-                    RegenAction::DoNotRegenerate => {
-                        error!(
-                            "We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.",
-                            &data_root
-                        );
+                let check_result = ChunkIngressServiceInner::is_ingress_proof_expired_static(
+                    &self.block_tree_guard,
+                    &self.db,
+                    &self.config,
+                    &proof,
+                );
+                if !check_result.expired_or_invalid {
+                    continue;
+                }
+                let mut any_unpromoted = false;
+                for txid in cached_data_root.txid_set.iter() {
+                    if let Some(tx_header) = tx_header_by_txid(&tx, txid)?
+                        && tx_header.promoted_height().is_none()
+                    {
+                        any_unpromoted = true;
+                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                        break;
                     }
                 }
-            } else {
-                // Not local + expired: delete
-                to_delete.push((data_root, compact, false));
-                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (remote or fully-promoted)");
+
+                let is_locally_produced = address == local_addr;
+
+                if at_capacity {
+                    // Unpromoted + expired + at capacity: delete
+                    to_delete.push((data_root, compact, false));
+                    debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                } else if is_locally_produced && any_unpromoted {
+                    match check_result.regeneration_action {
+                        RegenAction::Reanchor => {
+                            to_reanchor.push(proof);
+                            debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for reanchoring");
+                        }
+                        RegenAction::Regenerate => {
+                            to_regen.push(proof);
+                            debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
+                        }
+                        RegenAction::DoNotRegenerate => {
+                            error!(
+                                "We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.",
+                                &data_root
+                            );
+                        }
+                    }
+                } else {
+                    // Not local + expired: delete
+                    to_delete.push((data_root, compact, false));
+                    debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (remote or fully-promoted)");
+                }
             }
+            if wrapped || processed >= max_checks {
+                break;
+            }
+            wrapped = true;
+            walker = cursor.walk(None)?;
         }
 
         // Release the scan's read transaction (and its walker/cursor) before the
@@ -2956,6 +2985,93 @@ mod tests {
             Ok(())
         })??;
 
+        Ok(())
+    }
+
+    /// A full budget spent on the lowest keys must not be the only keys a
+    /// later pass can see. Seeking the high key with a budget of one deletes
+    /// that proof and leaves the lower one.
+    #[tokio::test]
+    async fn prune_ingress_proofs_rotates_past_the_lowest_key() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let low = H256::from([0x01; 32]);
+        let high = H256::from([0xFE; 32]);
+        let remote = IrysAddress::random();
+        let invalid_anchor = H256::random();
+
+        db.update(|wtx| -> eyre::Result<()> {
+            for data_root in [low, high] {
+                let txid = H256::random();
+                wtx.put::<CachedDataRoots>(
+                    data_root,
+                    CachedDataRoot {
+                        data_size: 64,
+                        data_size_confirmed: false,
+                        txid_set: vec![txid],
+                        block_set: vec![],
+                        expiry_height: None,
+                        cached_at: irys_types::UnixTimestamp::now()?,
+                    },
+                )?;
+                database::insert_tx_header(
+                    wtx,
+                    &DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                        tx: DataTransactionHeaderV1 {
+                            id: txid,
+                            data_root,
+                            data_size: 64,
+                            ..Default::default()
+                        },
+                        metadata: DataTransactionMetadata::new(),
+                    }),
+                )?;
+                let mut proof = IngressProof::default();
+                proof.data_root = data_root;
+                proof.anchor = invalid_anchor;
+                irys_database::store_external_ingress_proof_checked(wtx, &proof, remote)?;
+            }
+            Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+            storage_modules_guard: test_storage_modules_guard(),
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+
+        service_task.prune_ingress_proofs_limited(high, 1)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let low_left = irys_database::ingress_proofs_by_data_root(rtx, low)?.len();
+            let high_left = irys_database::ingress_proofs_by_data_root(rtx, high)?.len();
+            assert_eq!(low_left, 1, "the lower proof is outside this pass");
+            assert_eq!(high_left, 0, "the seek key's proof is the one checked");
+            Ok(())
+        })??;
         Ok(())
     }
 
