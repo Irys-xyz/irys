@@ -22,7 +22,8 @@
 # <out>/run.pid is the bench process, not this shell. The bench runs in its
 # own process group. TERM and INT stop that group. The EXIT trap removes
 # run.pid after that process is gone, so a later teardown cannot signal a
-# reused pid.
+# reused pid. <out>/sample.pid is the sampler, written before the bench
+# starts. The EXIT trap removes it after the sampler is gone.
 #
 # The bench's exit code is appended to <out>/bench.out. This script exits 0
 # after a bench failure so a ladder can continue. A guard failure exits 1.
@@ -347,7 +348,7 @@ cleanup() {
         sp=
     fi
     if [ -n "${out:-}" ]; then
-        rm -f "$out/run.pid"
+        rm -f "$out/run.pid" "$out/sample.pid"
     fi
 }
 trap cleanup EXIT
@@ -357,6 +358,9 @@ trap 'cleanup; exit 130' INT
 set -m
 "$here/sample.sh" "$device" "$out" &
 sp=$!
+# Record the sampler before the bench. A kill of this shell skips the trap
+# above, and teardown.sh uses this pid to stop sample.sh and iostat.
+printf '%s\n' "$sp" >"$out/sample.pid"
 set +e
 "$bench" \
     --dir "$loadtest" \

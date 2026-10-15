@@ -23,6 +23,13 @@
 # or non-numeric run.pid exits before any queue write. A live pid whose comm
 # is not irys-sm-bench exits the same way. Other processes are left alone.
 # A numeric pid that is already gone has finished I/O, so the queue is restored.
+#
+# sample.pid next to run.pid is optional. After the bench check succeeds, a
+# numeric pid whose command line contains sample.sh is signaled. A group
+# leader is signaled with the group so iostat stops too. The queue write
+# waits until that group is idle. A missing, empty, or non-numeric sample.pid
+# does not change the exit status. A live pid that is not sample.sh is left
+# alone.
 
 set -eu
 
@@ -63,6 +70,15 @@ proc_busy() {
         return 1
     fi
     return 0
+}
+
+# 0 when any non-zombie task still has this process group.
+group_busy() {
+    want=$1
+    ps -eo pgid=,stat= 2>/dev/null | awk -v want="$want" '
+        $1 == want && $2 !~ /^Z/ { found = 1 }
+        END { exit (found ? 0 : 1) }
+    '
 }
 
 wait_until_idle() {
@@ -119,6 +135,50 @@ if [ -d "/proc/$pid" ]; then
         fi
         wait_until_idle "$pid" "$pgid"
     fi
+fi
+
+# The bench check above has succeeded. Stop the sampler, if one was recorded,
+# before the queue write. A bad sample.pid must not block that write.
+sample_file=$(dirname "$orig")/sample.pid
+if [ -f "$sample_file" ]; then
+    sample_pid=$(head -n 1 "$sample_file" | tr -d '[:space:]')
+    case "$sample_pid" in
+        '' | *[!0-9]*)
+            ;;
+        *)
+            if [ -d "/proc/$sample_pid" ]; then
+                cmd=$(tr '\0' ' ' < "/proc/$sample_pid/cmdline" 2>/dev/null || true)
+                case "$cmd" in
+                    *sample.sh*)
+                        spgid=$(ps -o pgid= -p "$sample_pid" 2>/dev/null | tr -d '[:space:]' || true)
+                        if [ -n "$spgid" ] && [ "$spgid" = "$sample_pid" ]; then
+                            kill -TERM "-$spgid" 2>/dev/null || true
+                            i=0
+                            while group_busy "$spgid"; do
+                                i=$((i + 1))
+                                if [ "$i" -ge 30 ]; then
+                                    kill -KILL "-$spgid" 2>/dev/null || true
+                                    break
+                                fi
+                                sleep 0.1
+                            done
+                        else
+                            kill -TERM "$sample_pid" 2>/dev/null || true
+                            i=0
+                            while proc_busy "$sample_pid"; do
+                                i=$((i + 1))
+                                if [ "$i" -ge 30 ]; then
+                                    kill -KILL "$sample_pid" 2>/dev/null || true
+                                    break
+                                fi
+                                sleep 0.1
+                            done
+                        fi
+                        ;;
+                esac
+            fi
+            ;;
+    esac
 fi
 
 while IFS= read -r line || [ -n "$line" ]; do

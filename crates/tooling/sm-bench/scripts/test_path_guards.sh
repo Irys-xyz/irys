@@ -1602,6 +1602,304 @@ EOF
     rm -rf "$root"
 }
 
+# iostat on PATH that stays up until TERM and records the queue value it saw.
+# GNU sleep dies on TERM too, but it cannot record that value.
+install_iostat_holder() {
+    local root=$1 queue=$2
+    mkdir -p "$root/bin"
+    cat >"$root/bin/iostat.py" <<'PY'
+import os
+import signal
+import sys
+import time
+
+root = sys.argv[1]
+queue = sys.argv[2]
+
+
+def stop(_signum, _frame):
+    path = os.path.join(queue, "max_sectors_kb")
+    try:
+        data = open(path, encoding="utf-8").read()
+    except OSError:
+        data = ""
+    with open(os.path.join(root, "iostat.saw"), "w", encoding="utf-8") as handle:
+        handle.write(data)
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+with open(os.path.join(root, "iostat.pid"), "w", encoding="utf-8") as handle:
+    handle.write(f"{os.getpid()}\n")
+with open(os.path.join(root, "iostat.ppid"), "w", encoding="utf-8") as handle:
+    handle.write(f"{os.getppid()}\n")
+time.sleep(60)
+PY
+    cat >"$root/bin/iostat" <<EOF
+#!/bin/bash
+exec python3 "$root/bin/iostat.py" "$root" "$queue"
+EOF
+    chmod +x "$root/bin/iostat"
+}
+
+stop_pids() {
+    local pid
+    for pid in "$@"; do
+        if [ -n "$pid" ] && alive "$pid"; then
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
+test_run_records_the_sampler_and_stops_it_when_the_bench_exits() {
+    local name=run-sample-exit root err dev mnt queue
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    queue=$root/sys/block/$dev/queue
+    mkdir -p "$queue"
+    queue_files "$queue"
+    install_iostat_holder "$root" "$queue"
+    cat >"$root/bench" <<EOF
+#!/bin/bash
+i=0
+while [ ! -s "$root/iostat.pid" ]; do
+    i=\$((i + 1))
+    if [ "\$i" -ge 50 ]; then
+        exit 1
+    fi
+    sleep 0.1
+done
+if [ -s "$root/out/t/sample.pid" ]; then
+    printf 'yes\n' > "$root/sample-before-bench"
+fi
+printf '%s' irys-sm-bench > /proc/\$\$/comm
+exit 0
+EOF
+    chmod +x "$root/bench"
+    PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1 &
+    outer=$!
+    local tries=0
+    while alive "$outer"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 100 ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if alive "$outer"; then
+        bad "$name" "run.sh still running after the bench exited: $(cat "$err" 2>/dev/null)"
+        kill -9 "$outer" 2>/dev/null || true
+        wait "$outer" 2>/dev/null || true
+    elif ! wait "$outer"; then
+        bad "$name" "run.sh failed: $(cat "$err" 2>/dev/null)"
+    elif [ ! -f "$root/sample-before-bench" ]; then
+        bad "$name" "sample.pid was not written before the bench: $(cat "$err" 2>/dev/null)"
+    elif [ ! -s "$root/iostat.pid" ]; then
+        bad "$name" "iostat did not start"
+    elif alive "$(cat "$root/iostat.pid")"; then
+        bad "$name" "iostat still running after the bench exited"
+    elif [ -e "$root/out/t/run.pid" ] || [ -e "$root/out/t/sample.pid" ]; then
+        bad "$name" "pid files remain: run=$(cat "$root/out/t/run.pid" 2>/dev/null) sample=$(cat "$root/out/t/sample.pid" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    if [ -s "$root/iostat.pid" ]; then
+        stop_pids "$(cat "$root/iostat.pid")" "$(cat "$root/iostat.ppid" 2>/dev/null || true)"
+    fi
+    rm -rf "$root"
+}
+
+test_teardown_stops_the_sampler_after_run_is_killed() {
+    local name=teardown-after-kill9 root err dev mnt queue outer
+    local bench_pid sample_pid io_pid
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    queue=$root/sys/block/$dev/queue
+    mkdir -p "$queue"
+    queue_files "$queue"
+    install_iostat_holder "$root" "$queue"
+    cat >"$root/bench" <<EOF
+#!/bin/bash
+printf '%s' irys-sm-bench > /proc/\$\$/comm
+printf '%s\n' "\$\$" > "$root/bench.pid"
+sleep 60
+EOF
+    chmod +x "$root/bench"
+    PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1 &
+    outer=$!
+    if ! wait_file "$root/bench.pid" || ! wait_file "$root/out/t/run.pid" || ! wait_file "$root/iostat.pid"; then
+        bad "$name" "run did not start: $(cat "$err" 2>/dev/null)"
+        stop_pids "$outer"
+        rm -rf "$root"
+        return
+    fi
+    bench_pid=$(cat "$root/bench.pid")
+    sample_pid=$(cat "$root/iostat.ppid")
+    io_pid=$(cat "$root/iostat.pid")
+    # $! is the function subshell. sample.sh's parent is run.sh.
+    run_shell=$(ps -o ppid= -p "$sample_pid" | tr -d '[:space:]')
+    cmd=$(tr '\0' ' ' <"/proc/$run_shell/cmdline" 2>/dev/null || true)
+    case "$cmd" in
+        *run.sh*) ;;
+        *)
+            bad "$name" "sample parent $run_shell is not run.sh: $cmd"
+            stop_pids "$outer" "$bench_pid" "$sample_pid" "$io_pid"
+            rm -rf "$root"
+            return
+            ;;
+    esac
+    kill -9 "$run_shell" 2>/dev/null || true
+    wait "$outer" 2>/dev/null || true
+    if ! alive "$bench_pid" || ! alive "$sample_pid" || ! alive "$io_pid"; then
+        bad "$name" "kill -9 of run.sh reaped bench=$bench_pid sample=$sample_pid iostat=$io_pid"
+        stop_pids "$bench_pid" "$sample_pid" "$io_pid"
+        rm -rf "$root"
+        return
+    fi
+    printf '999\n' >"$queue/max_sectors_kb"
+    if ! with_fake_sys "$root/sys" "$here/teardown.sh" "$dev" "$root/out/t/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown failed: $(cat "$err")"
+    elif alive "$io_pid"; then
+        bad "$name" "iostat $io_pid still running after teardown"
+    elif alive "$sample_pid"; then
+        bad "$name" "sample.sh $sample_pid still running after teardown"
+    elif alive "$bench_pid"; then
+        bad "$name" "bench $bench_pid still running after teardown"
+    elif [ "$(cat "$root/iostat.saw" 2>/dev/null | tr -d '[:space:]')" != "999" ]; then
+        bad "$name" "iostat saw [$(cat "$root/iostat.saw" 2>/dev/null)] not the pre-restore queue"
+    elif ! grep -q '^111$' "$queue/max_sectors_kb"; then
+        bad "$name" "queue was not restored: $(cat "$queue/max_sectors_kb")"
+    else
+        ok "$name"
+    fi
+    stop_pids "$bench_pid" "$sample_pid" "$io_pid"
+    rm -rf "$root"
+}
+
+test_teardown_restores_when_sample_pid_is_missing() {
+    local name=teardown-sample-missing root err dead
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    sleep 30 &
+    dead=$!
+    kill "$dead" 2>/dev/null || true
+    wait "$dead" 2>/dev/null || true
+    printf '%s\n' "$dead" >"$root/run/run.pid"
+    if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown refused a missing sample.pid: $(cat "$err")"
+    elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue was not restored"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_teardown_restores_when_sample_pid_is_not_a_pid() {
+    local name=teardown-sample-bad root err dead
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    sleep 30 &
+    dead=$!
+    kill "$dead" 2>/dev/null || true
+    wait "$dead" 2>/dev/null || true
+    printf '%s\n' "$dead" >"$root/run/run.pid"
+    printf 'nope\n' >"$root/run/sample.pid"
+    if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown refused a non-numeric sample.pid: $(cat "$err")"
+    elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue was not restored"
+    else
+        : >"$root/run/sample.pid"
+        printf '999\n' >"$root/sys/block/notadisk/queue/max_sectors_kb"
+        if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+            bad "$name" "teardown refused an empty sample.pid: $(cat "$err")"
+        elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+            bad "$name" "queue was not restored for an empty sample.pid"
+        else
+            ok "$name"
+        fi
+    fi
+    rm -rf "$root"
+}
+
+test_teardown_does_not_signal_a_sample_pid_that_is_not_the_sampler() {
+    local name=teardown-sample-other root err dead decoy
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    sleep 30 &
+    dead=$!
+    kill "$dead" 2>/dev/null || true
+    wait "$dead" 2>/dev/null || true
+    printf '%s\n' "$dead" >"$root/run/run.pid"
+    sleep 60 &
+    decoy=$!
+    printf '%s\n' "$decoy" >"$root/run/sample.pid"
+    if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown failed: $(cat "$err")"
+    elif ! alive "$decoy"; then
+        bad "$name" "pid $decoy was signaled though it is not sample.sh"
+    elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+        bad "$name" "queue was not restored"
+    else
+        ok "$name"
+    fi
+    stop_pids "$decoy"
+    rm -rf "$root"
+}
+
+test_teardown_does_not_stop_the_sampler_when_the_bench_pid_is_wrong() {
+    local name=teardown-sample-after-bench-check root err queue sample_pid io_pid sleeper
+    root=$(tmpdir)
+    err=$root/err
+    queue_restore_fixture "$root"
+    queue=$root/sys/block/notadisk/queue
+    install_iostat_holder "$root" "$queue"
+    sleep 60 &
+    sleeper=$!
+    printf '%s\n' "$sleeper" >"$root/run/run.pid"
+    PATH="$root/bin:$PATH" "$here/sample.sh" notadisk "$root/run" >"$root/sample.err" 2>&1 &
+    sample_pid=$!
+    if ! wait_file "$root/iostat.pid"; then
+        bad "$name" "sampler did not start: $(cat "$root/sample.err" 2>/dev/null)"
+        stop_pids "$sleeper" "$sample_pid"
+        rm -rf "$root"
+        return
+    fi
+    io_pid=$(cat "$root/iostat.pid")
+    printf '%s\n' "$sample_pid" >"$root/run/sample.pid"
+    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown exited 0 for a pid whose comm is not the bench"
+    elif ! alive "$sample_pid" || ! alive "$io_pid"; then
+        bad "$name" "sampler was signaled before the bench check"
+    elif ! grep -q '^999$' "$queue/max_sectors_kb"; then
+        bad "$name" "queue changed"
+    else
+        ok "$name"
+    fi
+    stop_pids "$sleeper" "$sample_pid" "$io_pid"
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
