@@ -16,6 +16,9 @@
 # The file must already exist. This script does not allocate it.
 # The path must contain a `loadtest` component, and so must `readlink -f`
 # of the file. A symlink out of `loadtest` is refused before any write.
+# --pid-file must pass that check too. It is created with O_EXCL, and an
+# existing symlink is not removed. TERM and INT stop the dd process group.
+# A --log symlink is refused unless the target stays under loadtest.
 
 set -euo pipefail
 
@@ -113,15 +116,45 @@ require_loadtest() {
 
 require_loadtest "file" "$file"
 
+pid_created=0
+dd_pid=
+# A TERM trap does not run during a foreground dd. Background dd and wait,
+# so TERM stops that process group instead of leaving it running.
 cleanup() {
-    if [ -n "$pid_file" ]; then
+    trap - EXIT TERM INT
+    if [ -n "${dd_pid:-}" ]; then
+        kill -TERM -- "-$dd_pid" 2>/dev/null || kill -TERM "$dd_pid" 2>/dev/null || true
+        wait "$dd_pid" 2>/dev/null || true
+        dd_pid=
+    fi
+    if [ "$pid_created" = 1 ] && [ ! -L "$pid_file" ]; then
         rm -f "$pid_file"
     fi
 }
 trap cleanup EXIT
+trap 'cleanup; exit 143' TERM
+trap 'cleanup; exit 130' INT
+
+if [ -L "$log" ]; then
+    require_loadtest "log" "$log"
+fi
 
 if [ -n "$pid_file" ]; then
-    echo $$ >"$pid_file"
+    require_loadtest "pid-file" "$pid_file"
+    pid_parent=$(dirname -- "$pid_file")
+    if [ -e "$pid_parent" ] || [ -L "$pid_parent" ]; then
+        pid_parent_canon=$(readlink -f "$pid_parent") || exit 1
+        if ! has_loadtest "$pid_parent_canon"; then
+            echo "pid-file parent resolves to $pid_parent_canon, which has no loadtest path component; refusing" >&2
+            exit 1
+        fi
+    fi
+    # System dd, O_EXCL: an existing path (including a symlink) is not followed.
+    if ! printf '%s\n' "$$" | command -p dd of="$pid_file" conv=excl status=none; then
+        echo "refusing to create pid file: $pid_file" >&2
+        exit 1
+    fi
+    pid_created=1
 fi
 
 mono() {
@@ -145,8 +178,17 @@ while [ "$i" -lt "$n" ]; do
         len=$((size - off))
     fi
     t0=$(mono)
-    if ! dd if=/dev/zero of="$file" bs="$block" iflag=count_bytes oflag=direct,seek_bytes conv=notrunc \
-        seek="$off" count="$len" status=none; then
+    set -m
+    set +e
+    dd if=/dev/zero of="$file" bs="$block" iflag=count_bytes oflag=direct,seek_bytes conv=notrunc \
+        seek="$off" count="$len" status=none &
+    dd_pid=$!
+    set +m
+    wait "$dd_pid"
+    dd_rc=$?
+    set -e
+    dd_pid=
+    if [ "$dd_rc" -ne 0 ]; then
         echo "# dd failed at $i $(date -Is)" >>"$log"
         exit 1
     fi

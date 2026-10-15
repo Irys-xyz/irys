@@ -53,6 +53,104 @@ test_fill_refuses_symlink_that_leaves_loadtest() {
     rm -rf "$root"
 }
 
+test_fill_refuses_a_symlink_pid_and_log() {
+    local name=fill-pid-symlink root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/loadtest" "$root/outside"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    printf 'SECRET-BYTES' >"$root/outside/secret"
+    printf 'LOG-ORIGINAL' >"$root/outside/log"
+    ln -s "$root/outside/secret" "$root/loadtest/pid"
+    ln -s "$root/outside/log" "$root/loadtest/fill.log"
+    if "$here/fill.sh" --file "$root/loadtest/data" --log "$root/loadtest/fill.log" \
+        --pid-file "$root/loadtest/pid" --segment-bytes 16 >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif ! cmp -s <(printf 'SECRET-BYTES') "$root/outside/secret"; then
+        bad "$name" "pid symlink target changed: $(od -An -tx1 "$root/outside/secret")"
+    elif ! cmp -s <(printf 'LOG-ORIGINAL') "$root/outside/log"; then
+        bad "$name" "log symlink target changed"
+    elif [ ! -L "$root/loadtest/pid" ] || [ ! -L "$root/loadtest/fill.log" ]; then
+        bad "$name" "symlink was removed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_fill_refuses_a_pid_file_through_a_symlink_parent() {
+    local name=fill-pid-parent root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/loadtest" "$root/outside"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    printf 'SECRET-BYTES' >"$root/outside/secret"
+    ln -s "$root/outside" "$root/loadtest/out"
+    if "$here/fill.sh" --file "$root/loadtest/data" --log "$root/loadtest/fill.log" \
+        --pid-file "$root/loadtest/out/pid" --stop-file "$root/STOP" --segment-bytes 16 \
+        >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr did not refuse: $(cat "$err")"
+    elif [ -e "$root/outside/pid" ]; then
+        bad "$name" "pid file was created outside loadtest"
+    elif ! cmp -s <(printf 'SECRET-BYTES') "$root/outside/secret"; then
+        bad "$name" "outside bytes changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_fill_term_stops_dd() {
+    local name=fill-term-dd root err fill_pid dd_pid tries
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/loadtest" "$root/bin"
+    printf 'LIVE-NODE-BYTES' >"$root/loadtest/data"
+    cat >"$root/bin/dd" <<EOF
+#!/bin/bash
+printf '%s\n' "\$\$" > "$root/dd.pid"
+sleep 60
+EOF
+    chmod +x "$root/bin/dd"
+    PATH="$root/bin:$PATH" "$here/fill.sh" --file "$root/loadtest/data" \
+        --log "$root/loadtest/fill.log" --pid-file "$root/loadtest/fill.pid" \
+        --segment-bytes 16 >"$err" 2>&1 &
+    fill_pid=$!
+    if ! wait_file "$root/dd.pid" || ! wait_file "$root/loadtest/fill.pid"; then
+        bad "$name" "fill did not start: $(cat "$err" 2>/dev/null)"
+    else
+        dd_pid=$(cat "$root/dd.pid")
+        kill -TERM "$(cat "$root/loadtest/fill.pid")" 2>/dev/null || true
+        tries=0
+        while alive "$dd_pid" || alive "$fill_pid"; do
+            tries=$((tries + 1))
+            if [ "$tries" -ge 20 ]; then
+                break
+            fi
+            sleep 0.1
+        done
+        if alive "$dd_pid"; then
+            bad "$name" "dd $dd_pid still running after TERM"
+        elif alive "$fill_pid"; then
+            bad "$name" "fill.sh still running after TERM"
+        elif ! cmp -s <(printf 'LIVE-NODE-BYTES') "$root/loadtest/data"; then
+            bad "$name" "data file changed"
+        else
+            ok "$name"
+        fi
+    fi
+    kill "$fill_pid" 2>/dev/null || true
+    if [ -s "$root/dd.pid" ]; then
+        kill "$(cat "$root/dd.pid")" 2>/dev/null || true
+    fi
+    wait "$fill_pid" 2>/dev/null || true
+    rm -rf "$root"
+}
+
 test_fill_allows_a_loadtest_file_and_stops_before_write() {
     local name=fill-allow root file
     root=$(tmpdir)
