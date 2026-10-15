@@ -2703,14 +2703,24 @@ impl StorageModule {
             }
             let batch = &runs[next..next + guards.len()];
             let reserved = guards.len();
+            // A worker panic must return here. `commit_pending_runs` still
+            // holds `sync_in_progress`. Unwinding that guard poisons it, and
+            // later flushes and `reset` cannot take the lock.
             let results = std::thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(reserved);
                 for (run, guard) in batch.iter().zip(guards) {
-                    handles.push(scope.spawn(move || self.pwrite_run_inflight(run, guard)));
+                    handles.push(scope.spawn(move || {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.pwrite_run_inflight(run, guard)
+                        }))
+                    }));
                 }
                 handles
                     .into_iter()
-                    .map(|handle| handle.join().expect("chunk write"))
+                    .map(|handle| match handle.join() {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_)) | Err(_) => Err(eyre::eyre!("chunk write panicked")),
+                    })
                     .collect::<Vec<_>>()
             });
             next += reserved;
@@ -2726,6 +2736,10 @@ impl StorageModule {
     /// exclusive lock or wait for a recall. The count drops before the
     /// interval update, which does not touch the chunk file.
     fn pwrite_run_inflight(&self, run: &WriteRun, guard: OpGuard<'_>) -> eyre::Result<()> {
+        #[cfg(test)]
+        if self.pwrite_panic_once.swap(false, Ordering::SeqCst) {
+            panic!("injected chunk write panic");
+        }
         let (file_arc, file_offset, submodule_offset) = self.locate_io(run.start, true)?;
         let start_time = Instant::now();
         let write_result = {

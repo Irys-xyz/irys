@@ -827,6 +827,9 @@ pub struct StorageModule {
     /// Crash tests drop the module without the final fsync or interval rewrite.
     #[cfg(test)]
     abandon_on_drop: AtomicBool,
+    /// The next lane `pwrite` panics once, before the kernel write.
+    #[cfg(test)]
+    pwrite_panic_once: AtomicBool,
     /// Mining-recall preads by mode. The meter exports the same counts.
     #[cfg(test)]
     recall_io: RecallIoAtoms,
@@ -2057,6 +2060,8 @@ impl StorageModule {
             crc_scan_done: AtomicBool::new(false),
             #[cfg(test)]
             abandon_on_drop: AtomicBool::new(false),
+            #[cfg(test)]
+            pwrite_panic_once: AtomicBool::new(false),
         })
     }
 
@@ -2573,6 +2578,12 @@ impl StorageModule {
         self.reset_fail_next.store(true, Ordering::SeqCst);
     }
 
+    /// The next lane `pwrite` panics once, before the kernel write.
+    #[cfg(test)]
+    fn panic_next_pwrite_for_test(&self) {
+        self.pwrite_panic_once.store(true, Ordering::SeqCst);
+    }
+
     /// `true` once. The packed chunk is not queued, and no index row is written.
     #[cfg(any(test, feature = "test-utils"))]
     fn take_index_commit_failure(&self) -> bool {
@@ -2981,6 +2992,18 @@ impl StorageModule {
         Ok(out)
     }
 
+    /// `sync_in_progress` carries `()`. A panic while it is held does not
+    /// leave that state inconsistent, so a poisoned guard is recovered.
+    /// `into_inner` alone leaves the flag set, and a later `try_lock` would
+    /// still report poison. The caller still has to finish or retry the
+    /// work that panicked.
+    fn lock_sync(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.sync_in_progress.clear_poison();
+        self.sync_in_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Erase the index, then mark every offset `Uninitialized`.
     ///
     /// Holds `sync_in_progress` for the whole call, and takes it before
@@ -3006,10 +3029,7 @@ impl StorageModule {
     /// After `reset` alone, the previous assignment is still visible and a
     /// registration can commit rows for it into the cleared index.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
-        let _sync_guard = self
-            .sync_in_progress
-            .lock()
-            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        let _sync_guard = self.lock_sync();
         #[cfg(any(test, feature = "test-utils"))]
         if self.reset_fail_next.swap(false, Ordering::SeqCst) {
             self.reset_incomplete.store(true, Ordering::SeqCst);
@@ -3342,10 +3362,7 @@ impl StorageModule {
         if self.durable_point_remaining() != Some(Duration::ZERO) {
             return Ok(());
         }
-        let _sync_guard = self
-            .sync_in_progress
-            .lock()
-            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        let _sync_guard = self.lock_sync();
         if self.durable_point_remaining() != Some(Duration::ZERO) {
             return Ok(());
         }
@@ -3625,10 +3642,7 @@ impl StorageModule {
         // Multiple services may request a flush concurrently. Serializing the
         // operation avoids duplicate writes and lets `pending_writes` remain
         // the single durability fence until this commit finishes.
-        let _sync_guard = self
-            .sync_in_progress
-            .lock()
-            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        let _sync_guard = self.lock_sync();
 
         if max_runs.is_none() && self.disk.recall_flush_is_owed() {
             return Ok(());
@@ -5301,10 +5315,7 @@ impl StorageModule {
         kind: ChunkType,
         caller: &'static str,
     ) -> eyre::Result<CrcConfirm> {
-        let _sync_guard = self
-            .sync_in_progress
-            .lock()
-            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        let _sync_guard = self.lock_sync();
         if self.crc_bytes_are_unsettled(offset) {
             return Ok(CrcConfirm::Unsettled);
         }
@@ -5361,10 +5372,7 @@ impl StorageModule {
             Option<u32>,
         )>,
     > {
-        let _sync_guard = self
-            .sync_in_progress
-            .lock()
-            .map_err(|error| eyre::eyre!("storage-module sync lock poisoned: {error}"))?;
+        let _sync_guard = self.lock_sync();
         if self.crc_bytes_are_unsettled(offset) {
             return Ok(None);
         }
@@ -12172,6 +12180,92 @@ mod tests {
                 let _ = handle.join();
             }
         }
+    }
+
+    /// The test panic hook aborts the process. An injected panic must not.
+    fn quiet_panics<R>(body: impl FnOnce() -> R) -> R {
+        struct RestoreHook(
+            Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
+        );
+        impl Drop for RestoreHook {
+            fn drop(&mut self) {
+                if let Some(hook) = self.0.take() {
+                    std::panic::set_hook(hook);
+                }
+            }
+        }
+        let _restore = RestoreHook(Some(std::panic::take_hook()));
+        std::panic::set_hook(Box::new(|_| {}));
+        body()
+    }
+
+    /// A panic while `sync_in_progress` is held must not stop `reset` or a
+    /// later commit. The mutex payload is `()`.
+    #[test]
+    fn poisoned_sync_lock_still_resets_and_commits_a_write() -> eyre::Result<()> {
+        let (_tmp, _config, module) =
+            open_presence_module("sync_poison_recover", SubmoduleIndexEngine::Rocksdb)?;
+        let poisoned = quiet_panics(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = module.sync_in_progress.lock().unwrap();
+                panic!("injected sync lock poison");
+            }))
+            .is_err()
+        });
+        assert!(poisoned, "the sync lock was not poisoned");
+        module.reset()?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x11_u8; 32], ChunkType::Entropy));
+        module.sync_pending_chunks()?;
+        assert!(
+            module.offset_meta_for_test(offset)?.is_some(),
+            "a commit after a poisoned sync lock did not store the row"
+        );
+        assert!(
+            module.sync_in_progress.try_lock().is_ok(),
+            "the sync lock stayed poisoned"
+        );
+        Ok(())
+    }
+
+    /// A pwrite worker panic is an error from the flush. The lane thread
+    /// stays up, and the sync lock stays usable for the retry.
+    #[test]
+    fn lane_pwrite_panic_returns_and_keeps_the_sync_lock() -> eyre::Result<()> {
+        let (_tmp, _config, module) =
+            open_presence_module("lane_pwrite_panic", SubmoduleIndexEngine::Rocksdb)?;
+        let module = std::sync::Arc::new(module);
+        let lane = LaneGuard::start(std::sync::Arc::clone(&module))?;
+        let offset = PartitionChunkOffset::from(1);
+        let guard = module.sync_in_progress.lock().unwrap();
+        module.panic_next_pwrite_for_test();
+        assert!(module.write_chunk(offset, vec![0x44_u8; 32], ChunkType::Entropy));
+        let module_ref = std::sync::Arc::clone(&module);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _flush = std::thread::spawn(move || {
+            let result = module_ref.force_sync_pending_chunks();
+            let _ = tx.send(result);
+        });
+        let first = quiet_panics(|| {
+            drop(guard);
+            rx.recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("lane flush did not return after a worker panic"))
+        });
+        assert!(
+            module.disk_lane_running(),
+            "a pwrite panic killed the lane thread: {first:?}"
+        );
+        assert!(
+            module.sync_in_progress.try_lock().is_ok(),
+            "a pwrite panic poisoned the sync lock: {first:?}"
+        );
+        module.force_sync_pending_chunks()?;
+        assert!(
+            module.offset_meta_for_test(offset)?.is_some(),
+            "the retry after a pwrite panic did not store the row"
+        );
+        drop(lane);
+        Ok(())
     }
 
     #[tokio::test]
