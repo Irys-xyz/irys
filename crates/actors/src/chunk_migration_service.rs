@@ -894,7 +894,7 @@ impl ChunkMigrationService {
         );
 
         let handle = runtime_handle.spawn(async move {
-            let data_sync_service = Self {
+            let chunk_migration_service = Self {
                 shutdown: shutdown_rx,
                 msg_rx: rx,
                 inner: ChunkMigrationServiceInner::new(
@@ -906,7 +906,7 @@ impl ChunkMigrationService {
                     body_wakeup,
                 ),
             };
-            data_sync_service
+            chunk_migration_service
                 .start()
                 .await
                 .expect("Chunk migration service encountered an irrecoverable error")
