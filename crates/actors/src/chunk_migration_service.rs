@@ -973,9 +973,11 @@ mod tests {
     use irys_storage::ie;
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        BlockIndexItem, ConsensusConfig, DataTransaction, H256List, IrysAddress, LedgerChunkOffset,
-        LedgerChunkRange, LedgerIndexItem, NodeConfig, PartitionChunkOffset, SubmoduleIndexEngine,
-        irys::IrysSigner, partition::PartitionAssignment, partition_chunk_offset_ie,
+        BlockIndexItem, ConsensusConfig, DataTransaction, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
+        LedgerChunkOffset, LedgerChunkRange, LedgerIndexItem, NodeConfig, PartitionChunkOffset,
+        SubmoduleIndexEngine, irys::IrysSigner, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use std::{
         sync::{
@@ -1624,6 +1626,209 @@ mod tests {
         f.sm.force_sync_pending_chunks()?;
         let pass = worker.drain_pass().await;
         assert_eq!((pass.written, pass.unwritable), (3, 0));
+        Ok(())
+    }
+
+    /// One uninitialized interval over a large span must be classified in one
+    /// interval read. A per-offset `get_chunk_type` walk is what a crashed
+    /// node repeats every tick until packing finishes.
+    #[tokio::test]
+    async fn worker_classifies_large_uninitialized_span_without_per_chunk_scan() -> eyre::Result<()>
+    {
+        const SPAN: u64 = 1_000_000;
+        let chunk_size = 8_u64;
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: SPAN,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        node_config.storage.max_pending_write_bytes = Some(u64::MAX);
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, SPAN), "hdd0".into())],
+            },
+            &config,
+        )?);
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: SPAN * chunk_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let last = u32::try_from(SPAN - 1)?;
+        sm.index_transaction_data(
+            &data_tx,
+            &vec![1, 2, 3, 4],
+            LedgerChunkRange(irys_types::ledger_chunk_offset_ii!(0_u32, last)),
+            1,
+        )?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
+        let db = DatabaseProvider(Arc::new(open_or_create_db(
+            tmp.path().join("irys_db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing()?,
+        )?));
+        let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
+        let (senders, _receivers) = ServiceSenders::new();
+        let worker = BodyMigrationWorker::new(
+            guard,
+            db,
+            config,
+            Arc::new(Notify::new()),
+            shutdown,
+            senders.data_sync.clone(),
+        );
+
+        let naive_started = std::time::Instant::now();
+        let mut naive_unwritable = 0_usize;
+        for offset in 0..SPAN {
+            let offset = PartitionChunkOffset::from(offset);
+            if !matches!(sm.get_chunk_type(&offset), Some(ChunkType::Entropy)) {
+                naive_unwritable += 1;
+            }
+        }
+        let naive = naive_started.elapsed();
+        assert_eq!(naive_unwritable, SPAN as usize);
+
+        let drain_started = std::time::Instant::now();
+        let pass = worker.drain_pass().await;
+        let drain = drain_started.elapsed();
+        eprintln!(
+            "large uninitialized span: naive_get_chunk_type={naive:?} drain_pass={drain:?} unwritable={} written={}",
+            pass.unwritable, pass.written
+        );
+        assert_eq!(pass.written, 0);
+        assert_eq!(pass.unwritable, SPAN as usize);
+        assert_eq!(sm.pending_body_migrations()?[0].1.attempts, 0);
+        if naive > Duration::from_millis(100) {
+            assert!(
+                drain * 5 < naive,
+                "drain_pass {drain:?} must be under 1/5 of the per-offset scan {naive:?}"
+            );
+        }
+        assert!(
+            drain < Duration::from_secs(2),
+            "drain_pass took {drain:?}; naive scan took {naive:?}"
+        );
+        Ok(())
+    }
+
+    /// A crash leaves the span as many short runs, not one. Jumping each run
+    /// by scanning the run list from the start is quadratic in the fragment
+    /// count and still misses the tick. The cursor must advance through the
+    /// runs once.
+    #[tokio::test]
+    async fn worker_jumps_fragmented_uninitialized_span_in_one_pass() -> eyre::Result<()> {
+        const SPAN: u64 = 40_000;
+        let chunk_size = 8_u64;
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: SPAN,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        node_config.storage.max_pending_write_bytes = Some(u64::MAX);
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, SPAN), "hdd0".into())],
+            },
+            &config,
+        )?);
+        {
+            let mut intervals = sm.intervals().write().unwrap();
+            for offset in (0..SPAN).step_by(2) {
+                StorageModule::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    PartitionChunkOffset::from(offset),
+                    ChunkType::Interrupted,
+                );
+            }
+        }
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: SPAN * chunk_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let last = u32::try_from(SPAN - 1)?;
+        sm.index_transaction_data(
+            &data_tx,
+            &vec![1, 2, 3, 4],
+            LedgerChunkRange(irys_types::ledger_chunk_offset_ii!(0_u32, last)),
+            1,
+        )?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
+        let db = DatabaseProvider(Arc::new(open_or_create_db(
+            tmp.path().join("irys_db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing()?,
+        )?));
+        let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
+        let (senders, _receivers) = ServiceSenders::new();
+        let worker = BodyMigrationWorker::new(
+            guard,
+            db,
+            config,
+            Arc::new(Notify::new()),
+            shutdown,
+            senders.data_sync.clone(),
+        );
+
+        let drain_started = std::time::Instant::now();
+        let pass = worker.drain_pass().await;
+        let drain = drain_started.elapsed();
+        eprintln!(
+            "fragmented uninitialized span: drain_pass={drain:?} unwritable={} written={}",
+            pass.unwritable, pass.written
+        );
+        assert_eq!(pass.written, 0);
+        assert_eq!(pass.unwritable, SPAN as usize);
+        assert_eq!(sm.pending_body_migrations()?[0].1.attempts, 0);
+        assert!(
+            drain < Duration::from_secs(1),
+            "drain_pass took {drain:?} for {SPAN} alternating runs"
+        );
         Ok(())
     }
 

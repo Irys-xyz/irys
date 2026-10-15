@@ -15,6 +15,7 @@ use irys_types::{
     UnpackedChunk, app_state::DatabaseProvider,
 };
 use nodit::Interval;
+use nodit::interval::ii;
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashSet,
@@ -553,19 +554,116 @@ impl SubmoduleDrain {
         if last < first {
             return Vec::new();
         }
+        let Ok(runs) = self.span_runs(first, last) else {
+            return Vec::new();
+        };
+        // A queued write can hide Entropy behind a pending Data label.
+        // An idle module's Entropy run is a hole at every offset.
+        let pending_busy = self.sm.pending_write_bytes() > 0 || self.sm.has_pending_writes();
         let mut holes = Vec::new();
-        let mut cursor = first;
-        while cursor <= last {
-            let Ok(offset) = u32::try_from(cursor) else {
-                break;
-            };
-            let offset = PartitionChunkOffset::from(offset);
-            if matches!(self.sm.get_chunk_type(&offset), Some(ChunkType::Entropy)) {
-                holes.push(offset);
+        for (run_start, run_end, kind) in runs {
+            if kind != ChunkType::Entropy {
+                continue;
             }
-            cursor += 1;
+            let mut cursor = run_start;
+            while cursor <= run_end {
+                let Ok(offset) = Self::partition_offset(cursor) else {
+                    break;
+                };
+                if !pending_busy
+                    || matches!(self.sm.get_chunk_type(&offset), Some(ChunkType::Entropy))
+                {
+                    holes.push(offset);
+                }
+                cursor += 1;
+            }
         }
         holes
+    }
+
+    /// Live interval runs that overlap `[first, last]`, clipped to that span.
+    /// One map read. Callers use it so a uniform run is not a lock per chunk.
+    fn span_runs(
+        &self,
+        first: i64,
+        last: i64,
+    ) -> Result<Vec<(i64, i64, ChunkType)>, MigrationError> {
+        let start = Self::partition_offset(first)?;
+        let end = Self::partition_offset(last)?;
+        let intervals = self.sm.intervals().read().unwrap();
+        let mut runs = Vec::new();
+        for (interval, kind) in intervals.overlapping(ii(start, end)) {
+            let run_start = i64::from(*interval.start()).max(first);
+            let run_end = i64::from(*interval.end()).min(last);
+            if run_start <= run_end {
+                runs.push((run_start, run_end, *kind));
+            }
+        }
+        Ok(runs)
+    }
+
+    fn partition_offset(raw: i64) -> Result<PartitionChunkOffset, MigrationError> {
+        u32::try_from(raw)
+            .map(PartitionChunkOffset::from)
+            .map_err(|_| MigrationError::Other(format!("partition offset {raw} exceeds u32")))
+    }
+
+    /// A run whose every offset has the same answer, or `None` when the
+    /// per-offset loop must run.
+    ///
+    /// Uninitialized and Interrupted cannot take a body. A Data run with
+    /// nothing queued is already durable: `pending_write_bytes() == 0` is
+    /// not enough on its own, because an empty-byte map entry still makes
+    /// `is_data_chunk_durable_at` false. Entropy, and Data while a write is
+    /// queued, stay on the per-offset path.
+    ///
+    /// `runs` comes from `overlapping`, which yields ascending intervals.
+    /// `run_idx` only moves forward. Searching from the start of `runs` on
+    /// every jump is quadratic in the fragment count, and an uninitialized
+    /// span jumps once per fragment without spending the write budget.
+    fn classify_run(
+        &self,
+        cursor: i64,
+        last: i64,
+        runs: &[(i64, i64, ChunkType)],
+        run_idx: &mut usize,
+    ) -> Result<Option<RunJump>, MigrationError> {
+        while *run_idx < runs.len() && runs[*run_idx].1 < cursor {
+            *run_idx += 1;
+        }
+        let Some(&(run_start, run_end, kind)) = runs.get(*run_idx) else {
+            return Ok(Some(self.unwritable_jump(cursor, last)?));
+        };
+        if cursor < run_start {
+            return Ok(Some(self.unwritable_jump(cursor, run_start - 1)?));
+        }
+        match kind {
+            ChunkType::Uninitialized | ChunkType::Interrupted => {
+                Ok(Some(self.unwritable_jump(cursor, run_end)?))
+            }
+            ChunkType::Data
+                if self.sm.pending_write_bytes() == 0 && !self.sm.has_pending_writes() =>
+            {
+                let count = usize::try_from(run_end - cursor + 1).unwrap_or(usize::MAX);
+                Ok(Some(RunJump {
+                    next: run_end + 1,
+                    durable: count,
+                    unwritable: 0,
+                    incomplete_at: None,
+                }))
+            }
+            ChunkType::Entropy | ChunkType::Data => Ok(None),
+        }
+    }
+
+    fn unwritable_jump(&self, from: i64, to: i64) -> Result<RunJump, MigrationError> {
+        let count = usize::try_from(to - from + 1).unwrap_or(usize::MAX);
+        Ok(RunJump {
+            next: to + 1,
+            durable: 0,
+            unwritable: count,
+            incomplete_at: Some(Self::partition_offset(from)?),
+        })
     }
 
     fn hand_retired_holes_to_data_sync(
@@ -657,8 +755,23 @@ impl SubmoduleDrain {
             self.config.node_config.storage.entropy_sweep_max_bytes,
         );
         let mut run: Vec<LoadedBody> = Vec::new();
+        let runs = self.span_runs(first, last)?;
+        let mut run_idx = 0_usize;
         let mut cursor = first;
         while cursor <= last {
+            if let Some(jump) = self.classify_run(cursor, last, &runs, &mut run_idx)? {
+                if self.flush_run(&mut run, &mut progress)? {
+                    cut_short = true;
+                    break;
+                }
+                durable += jump.durable;
+                unwritable += jump.unwritable;
+                if first_incomplete.is_none() {
+                    first_incomplete = jump.incomplete_at;
+                }
+                cursor = jump.next;
+                continue;
+            }
             let partition_offset = cursor;
             let offset =
                 PartitionChunkOffset::from(u32::try_from(partition_offset).map_err(|_| {
@@ -931,6 +1044,13 @@ impl SubmoduleDrain {
         }
         Ok(false)
     }
+}
+
+struct RunJump {
+    next: i64,
+    durable: usize,
+    unwritable: usize,
+    incomplete_at: Option<PartitionChunkOffset>,
 }
 
 struct LoadedBody {
