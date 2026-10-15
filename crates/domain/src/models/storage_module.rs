@@ -2907,10 +2907,36 @@ impl StorageModule {
         data_root: DataRoot,
         candidates: &BTreeSet<TxChunkOffset>,
     ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
+        // One short lock acquisition per offset rather than holding
+        // pending/intervals across the whole loop: this runs on the
+        // background prune path and must not stall chunk writes.
+        self.tx_offsets_placed_where(data_root, candidates, |offset| {
+            self.is_data_chunk_persisted_at(offset)
+        })
+    }
+
+    /// Candidate offsets of `data_root` that this module is assigned to
+    /// store: a local placement covers them, durable or not.
+    pub fn placed_tx_offsets_for_data_root(
+        &self,
+        data_root: DataRoot,
+        candidates: &BTreeSet<TxChunkOffset>,
+    ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
+        self.tx_offsets_placed_where(data_root, candidates, |_| true)
+    }
+
+    /// Candidates with a local placement whose partition offset satisfies `keep`.
+    /// Resolves the submodule index once per root.
+    fn tx_offsets_placed_where(
+        &self,
+        data_root: DataRoot,
+        candidates: &BTreeSet<TxChunkOffset>,
+        keep: impl Fn(PartitionChunkOffset) -> bool,
+    ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
         let infos = self.collect_data_root_infos(data_root)?;
-        let mut durable = BTreeSet::new();
+        let mut out = BTreeSet::new();
         if infos.0.is_empty() {
-            return Ok(durable);
+            return Ok(out);
         }
 
         let chunk_size = self.config.consensus.chunk_size;
@@ -2930,16 +2956,13 @@ impl StorageModule {
                 }
                 let relative_offset = u32::try_from(relative_offset)
                     .map_err(|_| eyre::eyre!("partition-relative chunk offset exceeds u32"))?;
-                // One short lock acquisition per offset rather than holding
-                // pending/intervals across the whole loop: this runs on the
-                // background prune path and must not stall chunk writes.
-                if self.is_data_chunk_persisted_at(PartitionChunkOffset::from(relative_offset)) {
-                    durable.insert(*tx_offset);
+                if keep(PartitionChunkOffset::from(relative_offset)) {
+                    out.insert(*tx_offset);
                     break;
                 }
             }
         }
-        Ok(durable)
+        Ok(out)
     }
 
     /// Erase the index, then mark every offset `Uninitialized`.

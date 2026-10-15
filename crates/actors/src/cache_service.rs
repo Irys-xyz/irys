@@ -6,7 +6,8 @@ use crate::chunk_ingress_service::ingress_proofs::{
 use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_ingress_proof_if_unchanged,
-    delete_reclaimable_cached_chunks_older_than, get_data_tx_metadata, tx_header_by_txid,
+    delete_reclaimable_cached_chunks_older_than, delete_unprotected_cached_chunks_older_than,
+    get_data_tx_metadata, tx_header_by_txid,
 };
 use irys_database::{
     db::IrysDatabaseExt as _,
@@ -257,7 +258,7 @@ impl InnerCacheTask {
             debug!("Cache above target capacity, proceeding with pruning");
             if chunk_cache_size > max_cache_size_bytes {
                 warn!(
-                    "Cache above configured soft maximum; unmigrated bodies remain protected: size: {} max: {}",
+                    "Cache above configured soft maximum; bodies this node stores or proves stay until durable: size: {} max: {}",
                     &chunk_cache_size, &max_cache_size_bytes
                 )
             }
@@ -338,8 +339,13 @@ impl InnerCacheTask {
         })
     }
 
-    /// Capacity-prunes cached bodies that are durably stored in a local
-    /// storage module.
+    /// Capacity-prunes cached bodies older than the migration age.
+    ///
+    /// A body is protected when this node is assigned to store it (a local
+    /// storage module has a placement for it) or has produced an ingress proof
+    /// for its root. A protected body is reclaimed only once it is durably
+    /// stored locally. Any other body is reclaimed on age alone: this node is
+    /// not its custodian.
     ///
     /// Durability is read from the storage modules' persisted interval state
     /// (`intervals.json`, the state restart recovery reloads), not only the
@@ -415,21 +421,45 @@ impl InnerCacheTask {
             drop(tx);
         }
 
-        // Resolve durability outside the write txn: each root costs one
-        // submodule index read per storage module, and roots with nothing
-        // durable are dropped before the gated write.
+        let proven_roots: BTreeSet<DataRoot> = self.db.view_eyre(|tx| {
+            let mut proven = BTreeSet::new();
+            for root in candidates.keys() {
+                if Self::has_local_ingress_proof(tx, *root, local_address)? {
+                    proven.insert(*root);
+                }
+            }
+            Ok(proven)
+        })?;
+
+        // Resolve placement and durability outside the write txn: each root
+        // costs one submodule index read per storage module.
         let storage_modules = self.storage_modules_guard.read().clone();
         let mut durable_by_root: Vec<(DataRoot, BTreeSet<TxChunkOffset>)> =
             Vec::with_capacity(candidates.len());
+        let mut unprotected_by_root: Vec<(DataRoot, BTreeSet<TxChunkOffset>)> = Vec::new();
         for (root, cached_offsets) in candidates {
             let mut durable = BTreeSet::new();
+            let mut placed = BTreeSet::new();
+            let mut unreadable = false;
             irys_domain::trace_index_read(irys_domain::CACHE_RECLAIM, || {
                 for storage_module in &storage_modules {
-                    match storage_module.durable_tx_offsets_for_data_root(root, &cached_offsets) {
-                        Ok(offsets) => durable.extend(offsets),
+                    let read = storage_module
+                        .durable_tx_offsets_for_data_root(root, &cached_offsets)
+                        .and_then(|d| {
+                            let p = storage_module
+                                .placed_tx_offsets_for_data_root(root, &cached_offsets)?;
+                            Ok((d, p))
+                        });
+                    match read {
+                        Ok((d, p)) => {
+                            durable.extend(d);
+                            placed.extend(p);
+                        }
                         Err(error) => {
-                            // Unreadable placement metadata is not evidence of
-                            // durability; leave the bodies for a later pass.
+                            // Unreadable placement metadata is evidence of
+                            // neither durability nor non-assignment; leave the
+                            // bodies for a later pass.
+                            unreadable = true;
                             warn!(
                                 chunk.data_root = ?root,
                                 storage_module = %storage_module.id,
@@ -440,6 +470,13 @@ impl InnerCacheTask {
                     }
                 }
             });
+            if !unreadable && !proven_roots.contains(&root) {
+                let unprotected: BTreeSet<TxChunkOffset> =
+                    cached_offsets.difference(&placed).copied().collect();
+                if !unprotected.is_empty() {
+                    unprotected_by_root.push((root, unprotected));
+                }
+            }
             if !durable.is_empty() {
                 durable_by_root.push((root, durable));
             }
@@ -486,11 +523,63 @@ impl InnerCacheTask {
             pruned_chunks = pruned_chunks.saturating_add(batch_pruned);
         }
 
+        for batch in unprotected_by_root.chunks(256) {
+            let still = Self::recheck_unplaced_chunk_offsets(&storage_modules, batch);
+            if still.is_empty() {
+                continue;
+            }
+            let batch_pruned = self
+                .db
+                .update_eyre_at("cache_service.prune_unprotected_chunks_batch", |write_tx| {
+                    let mut batch_pruned = 0_u64;
+                    for (root, offsets) in &still {
+                        // A proof generated since the scan protects the root.
+                        if Self::has_local_ingress_proof(write_tx, *root, local_address)? {
+                            continue;
+                        }
+                        let pruned = delete_unprotected_cached_chunks_older_than(
+                            write_tx,
+                            *root,
+                            offsets,
+                            delete_chunks_older_than,
+                        )?;
+                        if pruned > 0 {
+                            batch_pruned = batch_pruned.saturating_add(pruned);
+                            debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned cached chunk bodies this node does not store");
+                        }
+                    }
+                    Ok(batch_pruned)
+                })?;
+            pruned_chunks = pruned_chunks.saturating_add(batch_pruned);
+        }
+
         info!(
             chunk.pruned_chunks = pruned_chunks,
             "Completed chunk pruning pass"
         );
         Ok(())
+    }
+
+    /// Offsets from `batch` that still have no local placement. A placement
+    /// made since the scan, or an unreadable module, keeps the body.
+    fn recheck_unplaced_chunk_offsets(
+        storage_modules: &[Arc<irys_domain::StorageModule>],
+        batch: &[(DataRoot, BTreeSet<TxChunkOffset>)],
+    ) -> Vec<(DataRoot, BTreeSet<TxChunkOffset>)> {
+        let mut still = Vec::with_capacity(batch.len());
+        'roots: for (root, offsets) in batch {
+            let mut remaining = offsets.clone();
+            for storage_module in storage_modules {
+                match storage_module.placed_tx_offsets_for_data_root(*root, offsets) {
+                    Ok(placed) => remaining.retain(|offset| !placed.contains(offset)),
+                    Err(_) => continue 'roots,
+                }
+            }
+            if !remaining.is_empty() {
+                still.push((*root, remaining));
+            }
+        }
+        still
     }
 
     /// Offsets from `batch` that are still persisted. A storage-module error
@@ -1765,9 +1854,9 @@ mod tests {
         Ok(())
     }
 
-    // A missing proof is not evidence that an individual body was durably migrated.
-    #[tokio::test]
-    async fn does_not_capacity_prune_unmigrated_chunks_without_a_proof() -> eyre::Result<()> {
+    /// Runs one capacity prune over an old cached body and reports whether it
+    /// is still cached.
+    fn old_body_survives_capacity_prune(local_proof: bool, assigned: bool) -> eyre::Result<bool> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -1817,6 +1906,29 @@ mod tests {
         let block_index = BlockIndex::new_for_testing(db.clone());
         let block_index_guard =
             irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        if local_proof {
+            db.update(|wtx| {
+                let mut ingress_proof = IngressProof::default();
+                ingress_proof.data_root = tx_header.data_root;
+                irys_database::store_external_ingress_proof_checked(
+                    wtx,
+                    &ingress_proof,
+                    config.irys_signer().address(),
+                )?;
+                eyre::Ok(())
+            })??;
+        }
+        let storage_modules_guard = if assigned {
+            // A placement for the chunk, nothing durable yet.
+            storage_modules_guard_with_durable(
+                _temp_dir.path().join("sm"),
+                tx_header.data_root,
+                tx_header.data_size,
+                &[],
+            )?
+        } else {
+            test_storage_modules_guard()
+        };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
@@ -1826,25 +1938,38 @@ mod tests {
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
-            storage_modules_guard: test_storage_modules_guard(),
+            storage_modules_guard,
             #[cfg(test)]
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
-        // Execute capacity pruning. No durable storage offset exists, so the body stays.
         service_task.prune_durably_migrated_chunk_bodies()?;
-
-        // Verify the unmigrated body remains recoverable.
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
-            let index_entry = walk.next().transpose()?;
-            eyre::ensure!(
-                index_entry.is_some(),
-                "unmigrated chunk was pruned merely because its root lacks a proof"
-            );
-            Ok(())
-        })??;
+            Ok(walk
+                .next()
+                .transpose()?
+                .is_some_and(|(root, _)| root == tx_header.data_root))
+        })?
+    }
+
+    // Only bodies this node stores or proves wait for local durability.
+    #[tokio::test]
+    async fn capacity_prune_protects_only_stored_or_proven_bodies() -> eyre::Result<()> {
+        assert!(
+            !old_body_survives_capacity_prune(false, false)?,
+            "a body this node neither stores nor proves is reclaimed on age"
+        );
+        assert!(
+            old_body_survives_capacity_prune(true, false)?,
+            "a body under a local ingress proof stays until durable"
+        );
+        assert!(
+            old_body_survives_capacity_prune(false, true)?,
+            "a body this node is assigned to store stays until durable"
+        );
+        assert!(old_body_survives_capacity_prune(true, true)?);
         Ok(())
     }
 
