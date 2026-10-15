@@ -467,6 +467,9 @@ enum SyncPausePoint {
     /// `reset` has cleared `pending` once. The interval map is still the
     /// pre-reset labels.
     AfterResetPendingClear,
+    /// A confirmed checksum mismatch is about to cut the live label.
+    /// The cut has not run.
+    AfterCrcConfirm,
 }
 
 /// One armed pause. The durable point waits until the test releases it.
@@ -5266,21 +5269,17 @@ impl StorageModule {
 
     /// One suspect offset, judged again under `sync_in_progress`.
     ///
-    /// `Confirmed` has already called `note_crc_mismatch`. `NotConfirmed`
-    /// carries the fresh bytes that match the stable row. `Unsettled` is
-    /// still in `pending` or `written_ahead`: the caller omits it and does
-    /// not repair it.
+    /// `Confirmed` has already called `note_crc_mismatch` while that lock
+    /// was still held. `NotConfirmed` carries the fresh bytes that match
+    /// the stable row. `Unsettled` is still in `pending` or `written_ahead`:
+    /// the caller omits it and does not repair it.
     fn note_if_crc_mismatch(
         &self,
         offset: PartitionChunkOffset,
         kind: ChunkType,
         caller: &'static str,
     ) -> eyre::Result<CrcConfirm> {
-        let verdict = self.confirm_crc_mismatch(offset)?;
-        if matches!(verdict, CrcConfirm::Confirmed) {
-            self.note_crc_mismatch(offset, kind, caller);
-        }
-        Ok(verdict)
+        self.confirm_crc_mismatch(offset, kind, caller)
     }
 
     /// Re-read one offset and its checksum under `sync_in_progress`.
@@ -5293,9 +5292,15 @@ impl StorageModule {
     /// stable checksum row for as long as this lock is held.
     ///
     /// Lock order matches `finish_durable_point`: `sync_in_progress`, then
-    /// `pending_writes`, then the `chunks.dat` lock. Release this lock before
-    /// `note_crc_mismatch`, which takes `intervals`.
-    fn confirm_crc_mismatch(&self, offset: PartitionChunkOffset) -> eyre::Result<CrcConfirm> {
+    /// `pending_writes`, then the `chunks.dat` lock, then `intervals` inside
+    /// `note_crc_mismatch`. The note runs before this lock drops. A rewrite
+    /// cannot commit between the verdict and the live cut.
+    fn confirm_crc_mismatch(
+        &self,
+        offset: PartitionChunkOffset,
+        kind: ChunkType,
+        caller: &'static str,
+    ) -> eyre::Result<CrcConfirm> {
         let _sync_guard = self
             .sync_in_progress
             .lock()
@@ -5324,7 +5329,10 @@ impl StorageModule {
         }
         let complete = submodule.crc_complete.load(Ordering::SeqCst);
         match chunk_crc::classify(crc, &bytes, complete) {
-            chunk_crc::CrcVerdict::Mismatch => Ok(CrcConfirm::Confirmed),
+            chunk_crc::CrcVerdict::Mismatch => {
+                self.note_crc_mismatch(offset, kind, caller);
+                Ok(CrcConfirm::Confirmed)
+            }
             _ => Ok(CrcConfirm::NotConfirmed(bytes)),
         }
     }
@@ -5573,6 +5581,8 @@ impl StorageModule {
         kind: ChunkType,
         caller: &'static str,
     ) {
+        #[cfg(test)]
+        self.wait_if_sync_paused(SyncPausePoint::AfterCrcConfirm);
         chunk_crc::note_mismatch(caller, kind);
         chunk_crc::warn_mismatch(self.id, offset.0);
         let previous = self.intervals.read().unwrap().get_at_point(offset).copied();

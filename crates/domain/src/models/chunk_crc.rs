@@ -842,6 +842,83 @@ mod tests {
         Ok(())
     }
 
+    /// The live cut for a confirmed mismatch runs while `sync_in_progress` is
+    /// held, so a rewrite cannot commit between the verdict and the cut.
+    /// After the note finishes, that rewrite still commits.
+    #[test]
+    fn mismatch_note_holds_the_sync_lock_and_a_later_write_still_commits() -> eyre::Result<()> {
+        let (tmp, module) = durable_data_chunk_module("crc_note_holds_sync")?;
+        flip_dat(&sub_path(&tmp, "chunks.dat"), 0);
+        let offset = PartitionChunkOffset::from(0);
+        module.pause_next_sync_at(SyncPausePoint::AfterCrcConfirm);
+        let module_ref = &module;
+        let (held, writer_finished_while_paused) =
+            std::thread::scope(|scope| -> eyre::Result<(bool, bool)> {
+                struct Release<'a>(&'a StorageModule);
+                impl Drop for Release<'_> {
+                    fn drop(&mut self) {
+                        self.0.release_sync_pause();
+                    }
+                }
+                let _release = Release(module_ref);
+                let (read_tx, read_rx) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    let served = module_ref.generate_full_chunks(offset, offset);
+                    let _ = read_tx.send(served);
+                });
+                assert!(
+                    module_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                    "mismatch note did not pause"
+                );
+                let held = module_ref.sync_in_progress.try_lock().is_err();
+                let (write_tx, write_rx) = std::sync::mpsc::channel();
+                scope.spawn(move || {
+                    assert!(module_ref.write_chunk(
+                        offset,
+                        vec![0xEE_u8; CHUNK],
+                        ChunkType::Entropy
+                    ));
+                    let result = module_ref.force_sync_pending_chunks();
+                    let _ = write_tx.send(result);
+                });
+                let early_write = write_rx.recv_timeout(Duration::from_millis(400));
+                let writer_finished_while_paused = early_write.is_ok();
+                module_ref.release_sync_pause();
+                let served = read_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("reader finished")?;
+                assert!(
+                    served.is_empty(),
+                    "mismatched bytes were served: {served:?}"
+                );
+                let write_result = match early_write {
+                    Ok(result) => result,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => write_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("writer finished"),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        eyre::bail!("writer dropped the result");
+                    }
+                };
+                write_result?;
+                Ok((held, writer_finished_while_paused))
+            })?;
+        assert!(
+            held,
+            "the mismatch note must run while the sync lock is held"
+        );
+        assert!(
+            !writer_finished_while_paused,
+            "a rewrite committed between the verdict and the live cut"
+        );
+        assert_eq!(
+            module.get_chunk_type(&offset),
+            Some(ChunkType::Entropy),
+            "a write that starts after the note still commits"
+        );
+        Ok(())
+    }
+
     /// Entropy packed for hash A must not land after the module is hash B or unassigned.
     #[test]
     fn entropy_packed_for_another_partition_is_refused() -> eyre::Result<()> {
