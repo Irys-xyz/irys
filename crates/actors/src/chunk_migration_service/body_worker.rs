@@ -114,6 +114,11 @@ pub(crate) struct PassStats {
     /// Offsets skipped because they hold no entropy yet (module still packing,
     /// or a range recovery just re-marked). They wait; they are not failures.
     pub unwritable: usize,
+    /// `get_chunk_type` calls this pass made. A uniform uninitialized span is
+    /// one interval jump and stays at zero. The per-offset arm is one call
+    /// per chunk.
+    #[cfg(test)]
+    pub chunk_type_reads: usize,
     /// Lowest block height among the jobs this pass read. `None` when it
     /// read none. A pass that stops early has not seen later keys.
     pub oldest_pending_height: Option<u64>,
@@ -127,6 +132,10 @@ impl std::ops::AddAssign for PassStats {
         self.retired += other.retired;
         self.throttled += other.throttled;
         self.unwritable += other.unwritable;
+        #[cfg(test)]
+        {
+            self.chunk_type_reads += other.chunk_type_reads;
+        }
         self.oldest_pending_height = match (self.oldest_pending_height, other.oldest_pending_height)
         {
             (Some(left), Some(right)) => Some(left.min(right)),
@@ -306,6 +315,8 @@ impl BodyMigrationWorker {
                     ceiling,
                     throttled_jobs: 0,
                     data_sync: self.data_sync.clone(),
+                    #[cfg(test)]
+                    chunk_type_reads: std::sync::atomic::AtomicUsize::new(0),
                 };
                 tasks.push(tokio::task::spawn_blocking(move || drain.run()));
             }
@@ -350,6 +361,9 @@ struct SubmoduleDrain {
     /// Jobs this task cut short at the ceiling (for `PassStats::throttled`).
     throttled_jobs: usize,
     data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
+    /// `get_chunk_type` calls this task made. Test builds only.
+    #[cfg(test)]
+    chunk_type_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl SubmoduleDrain {
@@ -457,7 +471,25 @@ impl SubmoduleDrain {
             cursor = Some(PartitionChunkOffset::from(next));
         }
         stats.throttled = self.throttled_jobs;
+        #[cfg(test)]
+        {
+            stats.chunk_type_reads = self
+                .chunk_type_reads
+                .load(std::sync::atomic::Ordering::Relaxed);
+        }
         stats
+    }
+
+    /// Chunk type at `offset`, counted in test builds. The jump path must not
+    /// call this once per chunk of a uniform run.
+    fn chunk_type(&self, offset: &PartitionChunkOffset) -> Option<ChunkType> {
+        #[cfg(test)]
+        {
+            let _ = self
+                .chunk_type_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.sm.get_chunk_type(offset)
     }
 
     /// Move the row to the first offset that is not durable, in one batch.
@@ -570,9 +602,7 @@ impl SubmoduleDrain {
                 let Ok(offset) = Self::partition_offset(cursor) else {
                     break;
                 };
-                if !pending_busy
-                    || matches!(self.sm.get_chunk_type(&offset), Some(ChunkType::Entropy))
-                {
+                if !pending_busy || matches!(self.chunk_type(&offset), Some(ChunkType::Entropy)) {
                     holes.push(offset);
                 }
                 cursor += 1;
@@ -804,7 +834,7 @@ impl SubmoduleDrain {
             // body: `write_data_chunk` silently writes nothing anywhere else
             // (Uninitialized while packing, Interrupted mid-flush). Skip without
             // touching the cache and let the tick retry once packing lands.
-            if !matches!(self.sm.get_chunk_type(&offset), Some(ChunkType::Entropy)) {
+            if !matches!(self.chunk_type(&offset), Some(ChunkType::Entropy)) {
                 if self.flush_run(&mut run, &mut progress)? {
                     cut_short = true;
                     break;
@@ -860,10 +890,7 @@ impl SubmoduleDrain {
                     })?);
                 if self.sm.is_data_chunk_durable_at(look_offset)
                     || self.sm.is_data_write_pending_at(look_offset)
-                    || !matches!(
-                        self.sm.get_chunk_type(&look_offset),
-                        Some(ChunkType::Entropy)
-                    )
+                    || !matches!(self.chunk_type(&look_offset), Some(ChunkType::Entropy))
                 {
                     break;
                 }

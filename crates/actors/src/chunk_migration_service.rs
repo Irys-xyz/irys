@@ -1700,36 +1700,19 @@ mod tests {
             senders.data_sync.clone(),
         );
 
-        let naive_started = std::time::Instant::now();
-        let mut naive_unwritable = 0_usize;
-        for offset in 0..SPAN {
-            let offset = PartitionChunkOffset::from(offset);
-            if !matches!(sm.get_chunk_type(&offset), Some(ChunkType::Entropy)) {
-                naive_unwritable += 1;
-            }
-        }
-        let naive = naive_started.elapsed();
-        assert_eq!(naive_unwritable, SPAN as usize);
-
         let drain_started = std::time::Instant::now();
         let pass = worker.drain_pass().await;
         let drain = drain_started.elapsed();
         eprintln!(
-            "large uninitialized span: naive_get_chunk_type={naive:?} drain_pass={drain:?} unwritable={} written={}",
-            pass.unwritable, pass.written
+            "large uninitialized span: drain_pass={drain:?} unwritable={} written={} chunk_type_reads={}",
+            pass.unwritable, pass.written, pass.chunk_type_reads
         );
         assert_eq!(pass.written, 0);
         assert_eq!(pass.unwritable, SPAN as usize);
         assert_eq!(sm.pending_body_migrations()?[0].1.attempts, 0);
-        if naive > Duration::from_millis(100) {
-            assert!(
-                drain * 5 < naive,
-                "drain_pass {drain:?} must be under 1/5 of the per-offset scan {naive:?}"
-            );
-        }
-        assert!(
-            drain < Duration::from_secs(2),
-            "drain_pass took {drain:?}; naive scan took {naive:?}"
+        assert_eq!(
+            pass.chunk_type_reads, 0,
+            "an uninitialized span is one interval jump; a per-offset scan calls get_chunk_type once per chunk"
         );
         Ok(())
     }
