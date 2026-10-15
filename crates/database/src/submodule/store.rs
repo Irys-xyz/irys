@@ -13,6 +13,7 @@
 //! unsynced until the next synced write, the WAL backstop, or shutdown. A failed RocksDB WAL sync rejects later `update`
 //! and `update_covered` calls.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -29,8 +30,7 @@ use super::db::{
     clear_tx_intervals_in_ranges, del_pending_body_migrations_in_ranges, delete_presence_in_ranges,
     delete_reset_marker, ensure_span_offsets_fit_i32, has_pending_in_ranges,
     info_overlaps_coalesced_spans, list_data_root_infos, presence_in_ranges, put_reset_marker,
-    read_reset_marker, trim_data_root_placements, tx_interval_at, tx_intervals_in_range,
-    tx_intervals_overlap_ranges,
+    read_reset_marker, tx_interval_at, tx_intervals_in_range, tx_intervals_overlap_ranges,
 };
 use super::interval::{IntervalRow, coalesce_inclusive_spans};
 #[cfg(feature = "rocksdb")]
@@ -500,15 +500,17 @@ pub trait SubmoduleStore: Send + Sync {
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile>;
 
-    /// Drop tx intervals, data-root placements, and pending jobs that overlap
-    /// `spans`.
+    /// Drop tx intervals and pending jobs that overlap `spans`.
     ///
-    /// Callers pass `Uninitialized` spans only. An `Entropy` span keeps its
-    /// tx index: those rows name bytes that are not stored yet. An empty
-    /// list, or spans with no such rows, does not commit. A tx-path blob and
-    /// its leaf binding stay while any interval in this submodule names that
-    /// hash. The last such interval deletes both rows. A tx interval that
-    /// starts before the span is split, not deleted as a key range.
+    /// A data-root info is removed only when no remaining interval for that
+    /// data root still overlaps the info extent. A split keeps the info and
+    /// its `data_size`. Callers pass `Uninitialized` spans only. An `Entropy`
+    /// span keeps its tx index: those rows name bytes that are not stored yet.
+    /// An empty list, or spans with no such rows, does not commit. A tx-path
+    /// blob and its leaf binding stay while any interval in this submodule
+    /// names that hash. The last such interval deletes both rows. A tx
+    /// interval that starts before the span is split, not deleted as a key
+    /// range.
     fn drop_uninitialized_coverage(
         &self,
         spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -1349,12 +1351,110 @@ fn drop_coverage_rows(
     if intervals_own_rows {
         return Ok(());
     }
-    for (root, infos) in tx.data_root_entries()? {
-        if let Some(remaining) = trim_data_root_placements(infos, &spans, chunk_size)? {
+    let entries = tx.data_root_entries()?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    if chunk_size != 0 && entries.iter().any(|(_, infos)| !infos.0.is_empty()) {
+        ensure_span_offsets_fit_i32(&spans)?;
+    }
+    // The interval row does not own the info. A split leaves a remnant, and
+    // that remnant still has to resolve `data_size`. Drop the info only when
+    // no remaining interval for its data root overlaps the info extent.
+    let live = live_intervals_by_data_root(tx)?;
+    for (root, infos) in entries {
+        let intervals = live.get(&root).map(Vec::as_slice).unwrap_or(&[]);
+        if let Some(remaining) = trim_infos_to_live_intervals(infos, &spans, chunk_size, intervals)?
+        {
             tx.set_data_root_infos_for_data_root(root, remaining)?;
         }
     }
     Ok(())
+}
+
+/// Remaining intervals grouped by the data root their leaf binding names.
+///
+/// Starts that do not fit in `i32` cannot overlap an info extent. Interval
+/// rows do not overlap, so a later overlap check can use the floor row.
+fn live_intervals_by_data_root(
+    tx: &dyn SubmoduleRead,
+) -> eyre::Result<HashMap<DataRoot, Vec<(i32, i32)>>> {
+    let rows = tx.tx_intervals_in_range(PartitionChunkOffset(0), PartitionChunkOffset(u32::MAX))?;
+    let mut by_hash: HashMap<H256, Option<DataRoot>> = HashMap::new();
+    let mut by_root: HashMap<DataRoot, Vec<(i32, i32)>> = HashMap::new();
+    for row in rows {
+        let root = match by_hash.get(&row.tx_path_hash) {
+            Some(root) => *root,
+            None => {
+                let root = tx
+                    .get_tx_leaf_binding(row.tx_path_hash)?
+                    .map(|binding| binding.data_root);
+                by_hash.insert(row.tx_path_hash, root);
+                root
+            }
+        };
+        let Some(root) = root else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (i32::try_from(row.start.0), i32::try_from(row.end.0)) else {
+            continue;
+        };
+        by_root.entry(root).or_default().push((start, end));
+    }
+    for intervals in by_root.values_mut() {
+        intervals.sort_unstable();
+    }
+    Ok(by_root)
+}
+
+/// Infos that still have a live interval. `None` when every info stayed.
+///
+/// An info that misses `spans` stays. An info that overlaps `spans` stays
+/// when a live interval overlaps the info extent. `chunk_size == 0` overlaps
+/// every info, so those infos are removed. `spans` is coalesced. `live` is
+/// sorted by start and its rows do not overlap.
+fn trim_infos_to_live_intervals(
+    infos: DataRootInfos,
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    chunk_size: u64,
+    live: &[(i32, i32)],
+) -> eyre::Result<Option<DataRootInfos>> {
+    let mut changed = false;
+    let mut remaining = Vec::new();
+    for info in infos.0 {
+        if !info_overlaps_coalesced_spans(&info, spans, chunk_size)? {
+            remaining.push(info);
+            continue;
+        }
+        if chunk_size != 0 && info_extent_hits_live_interval(&info, chunk_size, live)? {
+            remaining.push(info);
+            continue;
+        }
+        changed = true;
+    }
+    Ok(changed.then_some(DataRootInfos(remaining)))
+}
+
+fn info_extent_hits_live_interval(
+    info: &DataRootInfo,
+    chunk_size: u64,
+    live: &[(i32, i32)],
+) -> eyre::Result<bool> {
+    if live.is_empty() {
+        return Ok(false);
+    }
+    let extent_start = info.start_offset.0;
+    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
+        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
+    let extent_end = extent_start
+        .checked_add(extent_chunks)
+        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
+        .saturating_sub(1);
+    let idx = live.partition_point(|(start, _)| *start <= extent_end);
+    let Some(index) = idx.checked_sub(1) else {
+        return Ok(false);
+    };
+    Ok(live[index].1 >= extent_start)
 }
 
 pub(super) fn drop_uninitialized_coverage_on(
@@ -2761,6 +2861,71 @@ mod tests {
                 .expect("info extent does not overlap the tail");
             assert_eq!(infos.0.len(), 1);
             assert_eq!(infos.0[0].data_size, 32);
+            Ok(())
+        })
+    }
+
+    /// An uninitialized tail splits the interval. The data-root info stays,
+    /// with its original `data_size`, so the remnant still resolves. The
+    /// pending key is outside the tail. Removing the remnant drops the info.
+    #[test]
+    fn uninitialized_tail_keeps_the_data_root_info() -> eyre::Result<()> {
+        each_engine("submodule_partial_uninit", |store| {
+            let root = H256::repeat_byte(3);
+            let prefix = H256::repeat_byte(4);
+            store.update(|tx| {
+                install_placement(tx, 0, 9, root, prefix, 0, 10 * 32)?;
+                tx.add_pending_body_migration(PartitionChunkOffset::from(0), &pending_job(root))?;
+                Ok(())
+            })?;
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(8), PartitionChunkOffset::from(9))],
+                32,
+            )?;
+            let at_zero = store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+                .expect("remnant placement");
+            assert_eq!(at_zero.end, PartitionChunkOffset::from(7));
+            assert_eq!(at_zero.data_size, 10 * 32);
+            assert_eq!(at_zero.data_root, root);
+            assert_eq!(at_zero.tx_start_offset, RelativeChunkOffset(0));
+            assert!(
+                store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(8)))?
+                    .is_none()
+            );
+            assert_eq!(
+                store.view(|tx| tx.get_data_root_infos_for_data_root(root))?,
+                Some(DataRootInfos(vec![DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 10 * 32,
+                }]))
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(0)))?
+                    .is_some()
+            );
+
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(0), PartitionChunkOffset::from(7))],
+                32,
+            )?;
+            assert!(
+                store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+                    .is_none()
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_data_root_infos_for_data_root(root))?
+                    .is_none()
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(0)))?
+                    .is_none()
+            );
             Ok(())
         })
     }

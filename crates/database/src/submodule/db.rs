@@ -740,28 +740,6 @@ pub(super) fn ensure_span_offsets_fit_i32(
     Ok(())
 }
 
-/// Placements that miss every span. `None` when nothing overlapped.
-pub(super) fn trim_data_root_placements(
-    infos: DataRootInfos,
-    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    chunk_size: u64,
-) -> eyre::Result<Option<DataRootInfos>> {
-    let spans = coalesce_inclusive_spans(spans);
-    if chunk_size != 0 && !infos.0.is_empty() {
-        ensure_span_offsets_fit_i32(&spans)?;
-    }
-    let mut changed = false;
-    let mut remaining = Vec::new();
-    for info in infos.0 {
-        if info_overlaps_coalesced_spans(&info, &spans, chunk_size)? {
-            changed = true;
-        } else {
-            remaining.push(info);
-        }
-    }
-    Ok(changed.then_some(DataRootInfos(remaining)))
-}
-
 /// Durable row written before a reset clears the index.
 pub fn put_reset_marker<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.put::<Metadata>(MetadataKey::SubmoduleResetInProgress, vec![1_u8])?;
