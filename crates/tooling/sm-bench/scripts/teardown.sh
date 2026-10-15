@@ -3,7 +3,8 @@
 #
 # usage: teardown.sh <dev> <sysfs-orig-file>
 #
-# <dev> is a /sys/block name such as sdc. The name must be alphanumeric.
+# <dev> is a /sys/block name such as sdc or dm-0. A hyphen is allowed.
+# Empty, slash, and "." / ".." are refused.
 # <sysfs-orig-file> is `key=value` lines. The keys are:
 #   max_sectors_kb
 #   read_ahead_kb
@@ -32,8 +33,8 @@ dev=$1
 orig=$2
 
 case "$dev" in
-    *[!A-Za-z0-9]*)
-        echo "device name must be alphanumeric: $dev" >&2
+    "" | . | .. | *[!A-Za-z0-9-]*)
+        echo "device name must be alphanumeric or '-': $dev" >&2
         exit 1
         ;;
 esac

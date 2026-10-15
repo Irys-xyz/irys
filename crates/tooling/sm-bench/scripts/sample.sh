@@ -3,7 +3,8 @@
 #
 # usage: sample.sh <dev> <out-dir>
 #
-# <dev> is a /sys/block name such as sdc. The name must be alphanumeric.
+# <dev> is a /sys/block name such as sdc or dm-0. A hyphen is allowed.
+# Empty, slash, and "." / ".." are refused.
 # The script writes <out-dir>/iostat.log and <out-dir>/meminfo-delta.log.
 # It stops when iostat exits. INT and TERM kill iostat.
 #
@@ -20,8 +21,8 @@ dev=$1
 out=$2
 
 case "$dev" in
-    *[!A-Za-z0-9]*)
-        echo "device name must be alphanumeric: $dev" >&2
+    "" | . | .. | *[!A-Za-z0-9-]*)
+        echo "device name must be alphanumeric or '-': $dev" >&2
         exit 1
         ;;
 esac

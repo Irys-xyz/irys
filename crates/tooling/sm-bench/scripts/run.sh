@@ -104,9 +104,11 @@ if [ -z "$name" ] || [ -z "$device" ] || [ -z "$mount" ] || [ -z "$loadtest" ] |
     exit 1
 fi
 
+# A mapper name such as dm-0 contains a hyphen. Empty, slash, and "." / ".."
+# stay refused. The queue path below is quoted.
 case "$device" in
-    *[!A-Za-z0-9]*)
-        echo "device name must be alphanumeric: $device" >&2
+    "" | . | .. | *[!A-Za-z0-9-]*)
+        echo "device name must be alphanumeric or '-': $device" >&2
         exit 1
         ;;
 esac

@@ -873,6 +873,151 @@ EOF
     rm -rf "$root"
 }
 
+test_device_name_allows_a_hyphen_and_rejects_dot_and_slash() {
+    local name=device-hyphen root err module sys queue
+    root=$(tmpdir)
+    err=$root/err
+    module=$root/loadtest
+    sys=$root/sys
+    queue=$sys/block/dm-0/queue
+    mkdir -p "$module" "$queue" "$sys/block/data-root/queue" "$root/out"
+    queue_files "$queue"
+    queue_files "$sys/block/data-root/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+
+    if with_fake_sys "$sys" "$here/run.sh" \
+        --name t --device dm-0 --mount /tmp \
+        --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0 for dm-0: $(cat "$err")"
+    elif grep -q "alphanumeric" "$err"; then
+        bad "$name" "run.sh rejected dm-0: $(cat "$err")"
+    elif ! grep -q "not dm-0" "$err"; then
+        bad "$name" "run.sh did not reach the mount check for dm-0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran for dm-0"
+    else
+        ok "$name-run"
+    fi
+
+    if with_fake_sys "$sys" "$here/run.sh" \
+        --name t --device data-root --mount /tmp \
+        --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0 for data-root: $(cat "$err")"
+    elif grep -q "alphanumeric" "$err"; then
+        bad "$name" "run.sh rejected data-root: $(cat "$err")"
+    elif ! grep -q "not data-root" "$err"; then
+        bad "$name" "run.sh did not reach the mount check for data-root: $(cat "$err")"
+    else
+        ok "$name-run-mapper"
+    fi
+
+    if with_fake_sys "$sys" "$here/run.sh" \
+        --name t --device .. --mount /tmp \
+        --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh accepted .."
+    elif ! grep -q "alphanumeric" "$err"; then
+        bad "$name" "run.sh did not reject ..: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran for .."
+    else
+        ok "$name-run-dotdot"
+    fi
+
+    if with_fake_sys "$sys" "$here/ladder.sh" \
+        --device dm-0 --mount /tmp --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0 for dm-0: $(cat "$err")"
+    elif grep -q "alphanumeric" "$err"; then
+        bad "$name" "ladder.sh rejected dm-0: $(cat "$err")"
+    elif ! grep -q "not dm-0" "$err"; then
+        bad "$name" "ladder.sh did not reach the mount check: $(cat "$err")"
+    else
+        ok "$name-ladder"
+    fi
+
+    printf '999\n' >"$queue/max_sectors_kb"
+    cat >"$root/out/sysfs.txt" <<'EOF'
+max_sectors_kb=111
+read_ahead_kb=128
+nr_requests=64
+scheduler=[mq-deadline]
+EOF
+    if ! with_fake_sys "$sys" "$here/teardown.sh" dm-0 "$root/out/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown.sh rejected dm-0: $(cat "$err")"
+    elif grep -q "alphanumeric" "$err"; then
+        bad "$name" "teardown.sh said dm-0 is not a device name: $(cat "$err")"
+    elif ! grep -q '^111$' "$queue/max_sectors_kb"; then
+        bad "$name" "teardown.sh did not restore dm-0: $(cat "$queue/max_sectors_kb" 2>/dev/null)"
+    else
+        ok "$name-teardown"
+    fi
+
+    printf '999\n' >"$queue/max_sectors_kb"
+    if with_fake_sys "$sys" "$here/teardown.sh" . "$root/out/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown.sh accepted ."
+    elif ! grep -q "alphanumeric" "$err"; then
+        bad "$name" "teardown.sh did not reject .: $(cat "$err")"
+    elif ! grep -q '^999$' "$queue/max_sectors_kb"; then
+        bad "$name" "teardown.sh wrote the queue for ."
+    else
+        ok "$name-teardown-dot"
+    fi
+
+    if with_fake_sys "$sys" "$here/teardown.sh" "" "$root/out/sysfs.txt" >"$err" 2>&1; then
+        bad "$name" "teardown.sh accepted an empty name"
+    elif ! grep -q "alphanumeric" "$err"; then
+        bad "$name" "teardown.sh did not reject an empty name: $(cat "$err")"
+    else
+        ok "$name-teardown-empty"
+    fi
+
+    if "$here/sample.sh" dm-0 "$root/out" >"$err" 2>&1; then
+        bad "$name" "sample.sh exited 0"
+    elif grep -q "alphanumeric" "$err"; then
+        bad "$name" "sample.sh rejected dm-0: $(cat "$err")"
+    elif ! grep -q "iostat" "$err"; then
+        bad "$name" "sample.sh did not reach iostat: $(cat "$err")"
+    else
+        ok "$name-sample"
+    fi
+
+    if "$here/sample.sh" "sda/sdb" "$root/out" >"$err" 2>&1; then
+        bad "$name" "sample.sh accepted a slash"
+    elif ! grep -q "alphanumeric" "$err"; then
+        bad "$name" "sample.sh did not reject a slash: $(cat "$err")"
+    else
+        ok "$name-sample-slash"
+    fi
+
+    if "$here/blk-run.sh" dm-0 "$module" "$root/trace" >"$err" 2>&1; then
+        bad "$name" "blk-run.sh exited 0 for dm-0: $(cat "$err")"
+    elif grep -q "alphanumeric" "$err"; then
+        bad "$name" "blk-run.sh rejected dm-0: $(cat "$err")"
+    elif ! grep -q "not dm-0" "$err"; then
+        bad "$name" "blk-run.sh did not reach the mount check: $(cat "$err")"
+    else
+        ok "$name-blk-run"
+    fi
+
+    if "$here/blk-run.sh" .. "$module" "$root/trace" >"$err" 2>&1; then
+        bad "$name" "blk-run.sh accepted .."
+    elif ! grep -q "alphanumeric" "$err"; then
+        bad "$name" "blk-run.sh did not reject ..: $(cat "$err")"
+    else
+        ok "$name-blk-run-dotdot"
+    fi
+
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then

@@ -31,9 +31,11 @@ loadtest=$2
 out=$3
 dev=${dev#/dev/}
 
+# A mapper name such as dm-0 contains a hyphen. Empty, slash, and "." / ".."
+# stay refused.
 case "$dev" in
-    *[!A-Za-z0-9]*)
-        echo "device name must be alphanumeric: $dev" >&2
+    "" | . | .. | *[!A-Za-z0-9-]*)
+        echo "device name must be alphanumeric or '-': $dev" >&2
         exit 1
         ;;
 esac
