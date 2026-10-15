@@ -5146,8 +5146,7 @@ mod tests {
         Ok(())
     }
 
-    /// One-chunk v1 placements, one tx each, in a single block. This is the
-    /// shape that used to commit twice per placement.
+    /// One-chunk v1 placements, one tx each, in a single block.
     fn write_v1_one_chunk_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
         write_v1_one_chunk_partition_with(root, n, 4)
     }
