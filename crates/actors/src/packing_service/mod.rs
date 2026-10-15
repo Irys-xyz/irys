@@ -51,19 +51,34 @@ pub(crate) fn sync_with_warning(storage_module: &irys_domain::StorageModule, con
 /// Interval between pending-room checks while packing waits on the disk.
 const PENDING_ROOM_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long packing waits for a module's pending writes to drain.
+const PENDING_ROOM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Wake the disk lane, then wait until the module has room for more pending
 /// chunks. Packing computes entropy faster than a disk writes it, and with the
 /// lane running a sync only wakes the lane, so without this wait the pending
 /// queue grows without bound.
+///
+/// Fails after [`PENDING_ROOM_TIMEOUT`]: a module whose writes keep failing
+/// never drains, and the caller must requeue the range instead of holding a
+/// packing controller forever.
 pub(crate) async fn wait_for_pending_room(
     storage_module: &irys_domain::StorageModule,
     context: &str,
-) {
+) -> Result<(), String> {
     sync_with_warning(storage_module, context);
+    let deadline = std::time::Instant::now() + PENDING_ROOM_TIMEOUT;
     while !storage_module.has_pending_room() {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "SM {} pending writes did not drain within {:?} during {context}",
+                storage_module.id, PENDING_ROOM_TIMEOUT
+            ));
+        }
         tokio::time::sleep(PENDING_ROOM_POLL).await;
         sync_with_warning(storage_module, context);
     }
+    Ok(())
 }
 
 /// Log packing progress at regular intervals

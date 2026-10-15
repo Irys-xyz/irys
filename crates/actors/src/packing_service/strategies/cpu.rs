@@ -110,11 +110,15 @@ impl super::PackingStrategy for CpuPackingStrategy {
         for i in range_start..=range_end {
             // Wait for the disk before queueing more entropy.
             if i % short_writes_before_sync == 0 {
-                crate::packing_service::wait_for_pending_room(
+                if let Err(err) = crate::packing_service::wait_for_pending_room(
                     storage_module,
                     "CPU packing (periodic)",
                 )
-                .await;
+                .await
+                {
+                    failed = Some(err);
+                    break;
+                }
                 yield_now().await;
             }
 

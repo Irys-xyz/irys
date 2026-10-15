@@ -140,7 +140,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
                             &storage_module_clone,
                             "CUDA packing (periodic)",
                         )
-                        .await;
+                        .await?;
                     }
                 }
                 drop(permit);

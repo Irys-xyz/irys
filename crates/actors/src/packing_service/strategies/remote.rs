@@ -108,7 +108,7 @@ impl RemotePackingStrategy {
                     storage_module,
                     "remote packing (streaming)",
                 )
-                .await;
+                .await?;
             }
             let chunk = chunk_result.map_err(|e| format!("Error getting chunk: {:?}", e))?;
             buffer.extend_from_slice(&chunk);
