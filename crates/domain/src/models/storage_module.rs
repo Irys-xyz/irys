@@ -1697,6 +1697,29 @@ impl StorageModule {
         Self::open(storage_module_info, config, Some(split), Some(index))
     }
 
+    /// Both the span built at open and the loaded file must cover the partition.
+    /// The only legal gap is the tail from `num_chunks` through `u32::MAX`.
+    fn ensure_partition_coverage(
+        intervals: &StorageIntervals,
+        num_chunks: u64,
+    ) -> eyre::Result<()> {
+        let gaps = intervals
+            .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
+            .collect::<Vec<_>>();
+        let expected = vec![partition_chunk_offset_ii!(
+            u32::try_from(num_chunks).expect("Value exceeds u32::MAX"),
+            u32::MAX
+        )];
+        if gaps != expected {
+            return Err(eyre!(
+                "Invalid storage module config, expected range {:?}, got range {:?}",
+                &expected,
+                &gaps
+            ));
+        }
+        Ok(())
+    }
+
     fn open(
         storage_module_info: &StorageModuleInfo,
         config: &Config,
@@ -1893,22 +1916,10 @@ impl StorageModule {
                 .map_err(|e| eyre::eyre!("Failed to insert submodule interval: {:?}", e))?;
         }
 
-        // TODO: if there are any gaps, or the range doesn't cover a full module range panic
-        let gaps = global_intervals
-            .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
-            .collect::<Vec<_>>();
-        let expected = vec![partition_chunk_offset_ii!(
-            TryInto::<u32>::try_into(config.consensus.num_chunks_in_partition)
-                .expect("Value exceeds u32::MAX"),
-            u32::MAX
-        )];
-        if gaps != expected {
-            return Err(eyre!(
-                "Invalid storage module config, expected range {:?}, got range {:?}",
-                &expected,
-                &gaps
-            ));
-        }
+        Self::ensure_partition_coverage(
+            &global_intervals,
+            config.consensus.num_chunks_in_partition,
+        )?;
 
         // A crash during reset leaves the marker set. Finish the clear and
         // rewrite that submodule's intervals before the file is loaded.
@@ -1935,23 +1946,10 @@ impl StorageModule {
             ChunkType,
         > = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id)?;
 
-        // validate that the loaded intervals span the correct range
-        let gaps = loaded_intervals
-            .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
-            .collect::<Vec<_>>();
-        let expected = vec![partition_chunk_offset_ii!(
-            TryInto::<u32>::try_into(config.consensus.num_chunks_in_partition)
-                .expect("Value exceeds u32::MAX"),
-            u32::MAX
-        )];
-
-        if gaps != expected {
-            return Err(eyre!(
-                "Invalid storage module config, expected range {:?}, got range {:?}",
-                &expected,
-                &gaps
-            ));
-        }
+        Self::ensure_partition_coverage(
+            &loaded_intervals,
+            config.consensus.num_chunks_in_partition,
+        )?;
 
         // A bench split writes synthetic presence under Entropy after this
         // open returns. Reconciling here would delete a resumed prepopulate.
