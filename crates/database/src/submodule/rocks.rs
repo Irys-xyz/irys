@@ -3218,13 +3218,13 @@ fn user_column_families(
         rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
         column_options(cache, Cf::Metadata, tuning),
     ));
-    // A family written by a newer binary. Default options, and no reader
-    // or writer in this process uses the handle.
+    // A family written by a newer binary. No reader or writer in this
+    // process uses the handle. Auto compaction stays off so this open does
+    // not rewrite that family's SSTs with default table options.
     for name in extra_families {
-        families.push(rocksdb::ColumnFamilyDescriptor::new(
-            name,
-            Options::default(),
-        ));
+        let mut opts = Options::default();
+        opts.set_disable_auto_compactions(true);
+        families.push(rocksdb::ColumnFamilyDescriptor::new(name, opts));
     }
     families
 }
@@ -3480,7 +3480,7 @@ fn log_unknown_families(path: &Path, unknown: &[String]) {
     tracing::info!(
         path = %path.display(),
         families = %unknown.join(","),
-        "opening column families this binary does not use; default options, and they are not read or written"
+        "opening column families this binary does not use; auto compaction is off, and they are not read or written"
     );
 }
 
@@ -6536,6 +6536,45 @@ mod tests {
         );
         let names = DB::list_cf(&Options::default(), &path)?;
         assert!(names.iter().any(|name| name == family), "{names:?}");
+        Ok(())
+    }
+
+    /// A writable open lists every family. An unknown family must not compact:
+    /// default options would rewrite its SSTs. Known families keep compaction.
+    #[test]
+    fn unknown_family_opens_with_auto_compaction_disabled() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_unknown_cf_compact")
+            .build();
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+
+        let family = "FutureIndex";
+        {
+            let mut db = reopen_for_edit(&path)?;
+            db.create_cf(family, &Options::default())?;
+            let extra = db
+                .cf_handle(family)
+                .ok_or_else(|| eyre::eyre!("missing {family}"))?;
+            db.put_cf(&extra, b"k", b"leave-me")?;
+        }
+
+        drop(RocksSubmoduleStore::open(&path)?);
+        let opts = persisted_options(&path)?;
+        assert_eq!(
+            cf_option(&opts, family, "disable_auto_compactions").as_deref(),
+            Some("true"),
+            "{opts}"
+        );
+        assert_ne!(
+            cf_option(&opts, "Metadata", "disable_auto_compactions").as_deref(),
+            Some("true"),
+            "known families stay on their own compaction setting"
+        );
+        assert_eq!(
+            read_only_value(&path, family, b"k")?,
+            Some(b"leave-me".to_vec())
+        );
         Ok(())
     }
 
