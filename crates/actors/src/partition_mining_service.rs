@@ -385,13 +385,9 @@ impl PartitionMiningServiceInner {
         partition_hash: &irys_types::H256,
     ) -> eyre::Result<u64> {
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
-        // Fast path ONLY for the exact next consecutive step. Anything else — `step` AHEAD of the
-        // iterator (a gap) OR BEHIND it (a VDF re-anchor rewound the steps below the iterator's
-        // stateful rotation position, e.g. partition-recovery) — must rebuild the rotation rather
-        // than advance it. The previous `>=` fast-pathed every `step <= last_step_num + 1`, which
-        // silently computed a WRONG recall range after a re-anchor rewind (the rotation state was
-        // for a higher, now-discarded step), making the node mine blocks whose recall range no
-        // longer matches its (re-anchored) VDF steps.
+        // Fast path only for the exact next step. A gap, or a step behind the
+        // iterator, rebuilds the rotation. Advancing a rewound iterator mines a
+        // recall range the VDF steps no longer match.
         if next_ranges_step == step {
             debug!("Step {} is the next consecutive step", step);
         } else {
@@ -540,7 +536,6 @@ impl PartitionMiningServiceInner {
                 solution_hash,
             };
 
-            // Once solution is sent stop mining and let all other partitions know
             return Ok(Some(solution));
         }
 
