@@ -57,9 +57,11 @@ index_wal_backstop_ms = 1000
 # batches, floored at 256 chunks per submodule).
 # max_pending_write_bytes = 67108864
 # Mining recall reads chunks.dat with O_DIRECT so one-shot recall ranges do not
-# fill the page cache. On by default. A filesystem that
-# rejects O_DIRECT (tmpfs returns EINVAL) logs one warning and keeps the buffered
-# descriptor. Serving, the entropy sweep, and packing validation stay buffered.
+# fill the page cache. On by default. An open that returns EINVAL or
+# EOPNOTSUPP (tmpfs returns EINVAL) logs one warning and keeps the buffered
+# descriptor. Any other errno aborts module open. Set recall_direct_io = false
+# to skip the direct descriptor. Serving, the entropy sweep, and packing
+# validation stay buffered.
 # A direct read of a range that still has dirty buffered pages returns the new
 # bytes: Linux writes that range back first (XFS and ext4 iomap).
 # recall_direct_io = true

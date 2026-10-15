@@ -711,11 +711,11 @@ pub struct StorageSyncConfig {
     /// use-once pages per partition per step into the page cache and evict
     /// everything else (measured on devnet HDDs: page cache full within
     /// minutes; serving p50 5–8 ms buffered vs 0.8 ms direct, recall p50
-    /// ~12% lower direct). `testing()` keeps it off. A filesystem that
-    /// rejects the open (tmpfs returns `EINVAL` on kernels without the
-    /// support) logs one warning and keeps the buffered descriptor. Serving,
-    /// the entropy sweep, and packing validation stay on the buffered
-    /// descriptor either way.
+    /// ~12% lower direct). `testing()` keeps it off. An open that fails with
+    /// `EINVAL` or `EOPNOTSUPP` (tmpfs returns `EINVAL`) logs one warning and
+    /// keeps the buffered descriptor. Any other errno fails module open. Set
+    /// this flag false to skip the direct descriptor. Serving, the entropy
+    /// sweep, and packing validation stay on the buffered descriptor either way.
     ///
     /// A direct read of a range that still has dirty buffered pages returns
     /// the new bytes. Linux writes that range back before the direct read
