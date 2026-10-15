@@ -769,7 +769,7 @@ impl Cf {
     /// [`Self::Content`] always has a prefix bloom. Data-root reads are
     /// prefix seeks. A whole-key bloom cannot answer them. See
     /// [`RocksTuning::bloom_all_families`].
-    fn uses_bloom(self, tuning: &RocksTuning, _layout: IndexLayout) -> bool {
+    fn uses_bloom(self, tuning: &RocksTuning) -> bool {
         matches!(self, Self::Content)
             || tuning.bloom_all_families
             || (tuning.data_path_bloom && matches!(self, Self::OffsetMeta))
@@ -1264,7 +1264,6 @@ impl RocksSubmoduleStore {
             collect_stats,
             preload_tables,
             resources.as_deref(),
-            layout,
             create_missing,
             &unknown,
         )?;
@@ -3116,7 +3115,6 @@ fn open_db(
     collect_stats: bool,
     preload_tables: bool,
     resources: Option<&RocksResources>,
-    layout: IndexLayout,
     create_missing: bool,
     extra_families: &[String],
 ) -> eyre::Result<(DB, Option<Arc<Options>>)> {
@@ -3170,7 +3168,7 @@ fn open_db(
         apply_shared_limits(&mut db_opts, resources)?;
     }
 
-    let families = user_column_families(&cache, tuning, layout, extra_families);
+    let families = user_column_families(&cache, tuning, extra_families);
     let db = DB::open_cf_descriptors(&db_opts, path, families)
         .wrap_err("open rocksdb submodule index")?;
     let stats = collect_stats.then(|| Arc::new(db_opts));
@@ -3204,15 +3202,11 @@ fn open_cache(tuning: &RocksTuning, resources: Option<&RocksResources>) -> rocks
 fn user_column_families(
     cache: &rocksdb::Cache,
     tuning: &RocksTuning,
-    layout: IndexLayout,
     extra_families: &[String],
 ) -> Vec<rocksdb::ColumnFamilyDescriptor> {
     let mut families: Vec<_> = families()
         .map(|cf| {
-            rocksdb::ColumnFamilyDescriptor::new(
-                cf.name(),
-                column_options(cache, cf, tuning, layout),
-            )
+            rocksdb::ColumnFamilyDescriptor::new(cf.name(), column_options(cache, cf, tuning))
         })
         .collect();
     // The binding opens "default" with a private 32 MiB cache when this list
@@ -3220,7 +3214,7 @@ fn user_column_families(
     // open's cache and write buffer instead. The family stays empty.
     families.push(rocksdb::ColumnFamilyDescriptor::new(
         rocksdb::DEFAULT_COLUMN_FAMILY_NAME,
-        column_options(cache, Cf::Metadata, tuning, layout),
+        column_options(cache, Cf::Metadata, tuning),
     ));
     // A family written by a newer binary. Default options, and no reader
     // or writer in this process uses the handle.
@@ -3254,12 +3248,7 @@ fn block_cache(tuning: &RocksTuning) -> rocksdb::Cache {
     rocksdb::Cache::new_lru_cache_opts(&opts)
 }
 
-fn column_options(
-    cache: &rocksdb::Cache,
-    cf: Cf,
-    tuning: &RocksTuning,
-    layout: IndexLayout,
-) -> Options {
+fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
     let mut table = BlockBasedOptions::default();
     table.set_block_size(tuning.block_bytes);
     // Full filter, 10 bits per key. `false` is not a block-based filter.
@@ -3273,7 +3262,7 @@ fn column_options(
     // Partitioned filters are the production shape. See
     // `RocksTuning::partition_filters`. `all-blooms` restores the filter
     // on the other families.
-    let bloom = cf.uses_bloom(tuning, layout);
+    let bloom = cf.uses_bloom(tuning);
     if bloom {
         table.set_bloom_filter(10.0, false);
     }
