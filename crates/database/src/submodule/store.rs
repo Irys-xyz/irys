@@ -1361,7 +1361,7 @@ fn drop_coverage_rows(
     // The interval row does not own the info. A split leaves a remnant, and
     // that remnant still has to resolve `data_size`. Drop the info only when
     // no remaining interval for its data root overlaps the info extent.
-    let live = live_intervals_by_data_root(tx)?;
+    let live = live_intervals_by_data_root(tx, &entries, &spans, chunk_size)?;
     for (root, infos) in entries {
         let intervals = live.get(&root).map(Vec::as_slice).unwrap_or(&[]);
         if let Some(remaining) = trim_infos_to_live_intervals(infos, &spans, chunk_size, intervals)?
@@ -1372,39 +1372,122 @@ fn drop_coverage_rows(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static INTERVAL_ROWS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_interval_rows_read() {
+    INTERVAL_ROWS_READ.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn interval_rows_read() -> usize {
+    INTERVAL_ROWS_READ.with(|cell| cell.get())
+}
+
 /// Remaining intervals grouped by the data root their leaf binding names.
 ///
+/// Only extents that overlap `spans` are read. `chunk_size == 0` drops every
+/// info without this list. A negative extent start is read from offset 0.
 /// Starts that do not fit in `i32` cannot overlap an info extent. Interval
 /// rows do not overlap, so a later overlap check can use the floor row.
 fn live_intervals_by_data_root(
     tx: &dyn SubmoduleRead,
+    entries: &[(DataRoot, DataRootInfos)],
+    spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
+    chunk_size: u64,
 ) -> eyre::Result<HashMap<DataRoot, Vec<(i32, i32)>>> {
-    let rows = tx.tx_intervals_in_range(PartitionChunkOffset(0), PartitionChunkOffset(u32::MAX))?;
+    if chunk_size == 0 {
+        return Ok(HashMap::new());
+    }
+    let mut ranges = Vec::new();
+    for (_, infos) in entries {
+        for info in &infos.0 {
+            if !info_overlaps_coalesced_spans(info, spans, chunk_size)? {
+                continue;
+            }
+            if let Some(range) = info_extent_query_range(info, chunk_size)? {
+                ranges.push(range);
+            }
+        }
+    }
     let mut by_hash: HashMap<H256, Option<DataRoot>> = HashMap::new();
     let mut by_root: HashMap<DataRoot, Vec<(i32, i32)>> = HashMap::new();
-    for row in rows {
-        let root = match by_hash.get(&row.tx_path_hash) {
-            Some(root) => *root,
-            None => {
-                let root = tx
-                    .get_tx_leaf_binding(row.tx_path_hash)?
-                    .map(|binding| binding.data_root);
-                by_hash.insert(row.tx_path_hash, root);
-                root
-            }
-        };
-        let Some(root) = root else {
-            continue;
-        };
-        let (Ok(start), Ok(end)) = (i32::try_from(row.start.0), i32::try_from(row.end.0)) else {
-            continue;
-        };
-        by_root.entry(root).or_default().push((start, end));
+    for (range_start, range_end) in merge_inclusive_ranges(ranges) {
+        let rows = tx.tx_intervals_in_range(
+            PartitionChunkOffset(range_start),
+            PartitionChunkOffset(range_end),
+        )?;
+        #[cfg(test)]
+        INTERVAL_ROWS_READ.with(|cell| cell.set(cell.get().saturating_add(rows.len())));
+        for row in rows {
+            let root = match by_hash.get(&row.tx_path_hash) {
+                Some(root) => *root,
+                None => {
+                    let root = tx
+                        .get_tx_leaf_binding(row.tx_path_hash)?
+                        .map(|binding| binding.data_root);
+                    by_hash.insert(row.tx_path_hash, root);
+                    root
+                }
+            };
+            let Some(root) = root else {
+                continue;
+            };
+            let (Ok(start), Ok(end)) = (i32::try_from(row.start.0), i32::try_from(row.end.0))
+            else {
+                continue;
+            };
+            by_root.entry(root).or_default().push((start, end));
+        }
     }
     for intervals in by_root.values_mut() {
         intervals.sort_unstable();
+        intervals.dedup_by(|left, right| left.0 == right.0);
     }
     Ok(by_root)
+}
+
+/// Inclusive partition range of `info`. `None` when the extent ends before
+/// offset 0. A negative start is clamped to 0.
+fn info_extent_query_range(
+    info: &DataRootInfo,
+    chunk_size: u64,
+) -> eyre::Result<Option<(u32, u32)>> {
+    let extent_start = info.start_offset.0;
+    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
+        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
+    let extent_end = extent_start
+        .checked_add(extent_chunks)
+        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
+        .saturating_sub(1);
+    if extent_end < 0 {
+        return Ok(None);
+    }
+    let start = u32::try_from(extent_start.max(0)).unwrap_or(0);
+    let end = u32::try_from(extent_end).unwrap_or(u32::MAX);
+    Ok(Some((start, end)))
+}
+
+fn merge_inclusive_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    if ranges.is_empty() {
+        return ranges;
+    }
+    ranges.sort_unstable();
+    let mut merged = Vec::with_capacity(ranges.len());
+    let mut current = ranges[0];
+    for range in ranges.into_iter().skip(1) {
+        if range.0 <= current.1.saturating_add(1) {
+            current.1 = current.1.max(range.1);
+        } else {
+            merged.push(current);
+            current = range;
+        }
+    }
+    merged.push(current);
+    merged
 }
 
 /// Infos that still have a live interval. `None` when every info stayed.
@@ -2928,6 +3011,122 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    /// The tail split still keeps the info. Interval rows outside that info
+    /// extent are not part of the check. A far interval of the same root does
+    /// not keep the local info after the local extent is gone. A negative
+    /// info start is read from partition offset 0.
+    #[test]
+    fn uninitialized_overlap_reads_the_overlapping_info_extent() -> eyre::Result<()> {
+        each_engine("submodule_bounded_intervals", |store| {
+            let root = H256::repeat_byte(3);
+            let owns = store.update(|tx| Ok(tx.intervals_own_data_root_rows()))?;
+            store.update(|tx| {
+                install_placement(tx, 0, 9, root, H256::repeat_byte(4), 0, 10 * 32)?;
+                install_placement(tx, 5_000, 5_000, root, H256::repeat_byte(5), 5_000, 32)?;
+                for i in 0..200_u32 {
+                    let at = 1_000 + i * 2;
+                    let byte = far_root_byte(i);
+                    install_placement(
+                        tx,
+                        at,
+                        at,
+                        H256::repeat_byte(byte),
+                        H256::repeat_byte(byte.wrapping_add(17)),
+                        i32::try_from(at)?,
+                        32,
+                    )?;
+                }
+                Ok(())
+            })?;
+
+            reset_interval_rows_read();
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(8), PartitionChunkOffset::from(9))],
+                32,
+            )?;
+            assert_interval_rows(owns, interval_rows_read());
+            let infos = store
+                .view(|tx| tx.get_data_root_infos_for_data_root(root))?
+                .expect("remnant keeps the local info");
+            assert!(
+                infos.0.iter().any(|info| {
+                    info.start_offset == RelativeChunkOffset(0) && info.data_size == 10 * 32
+                }),
+                "{infos:?}"
+            );
+            assert!(
+                store
+                    .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
+                    .is_some()
+            );
+
+            reset_interval_rows_read();
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(0), PartitionChunkOffset::from(7))],
+                32,
+            )?;
+            assert_interval_rows(owns, interval_rows_read());
+            let infos = store
+                .view(|tx| tx.get_data_root_infos_for_data_root(root))?
+                .expect("the far placement of this root still has an info");
+            assert!(
+                infos
+                    .0
+                    .iter()
+                    .all(|info| info.start_offset != RelativeChunkOffset(0)),
+                "local info stays: {infos:?}"
+            );
+            assert!(
+                infos
+                    .0
+                    .iter()
+                    .any(|info| info.start_offset == RelativeChunkOffset(5_000)),
+                "{infos:?}"
+            );
+
+            let neg_root = H256::repeat_byte(9);
+            store.update(|tx| {
+                install_placement(tx, 0, 1, neg_root, H256::repeat_byte(8), -4, 6 * 32)?;
+                Ok(())
+            })?;
+            reset_interval_rows_read();
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(1), PartitionChunkOffset::from(1))],
+                32,
+            )?;
+            assert_interval_rows(owns, interval_rows_read());
+            let neg = store
+                .view(|tx| tx.get_data_root_infos_for_data_root(neg_root))?
+                .expect("extent starts before offset 0 and still covers the remnant");
+            assert_eq!(neg.0[0].start_offset, RelativeChunkOffset(-4));
+            assert_eq!(neg.0[0].data_size, 6 * 32);
+            Ok(())
+        })
+    }
+
+    fn far_root_byte(i: u32) -> u8 {
+        // Zero is not a data root on RocksDB v1. 3 and 9 are the roots this test names.
+        let mut byte = u8::try_from(i).expect("i fits").saturating_add(1);
+        if byte >= 3 {
+            byte += 1;
+        }
+        if byte >= 9 {
+            byte += 1;
+        }
+        byte
+    }
+
+    fn assert_interval_rows(intervals_own_rows: bool, rows: usize) {
+        if intervals_own_rows {
+            assert_eq!(rows, 0, "the interval row owns the info, so no scan runs");
+            return;
+        }
+        assert!(
+            rows <= 2,
+            "read {rows} interval rows; only the overlapping info extent is needed"
+        );
     }
 
     /// Fragmented spans delete only the rows they cover. A later put in the
