@@ -308,6 +308,34 @@ test_run_refuses_a_missing_path_that_escapes_loadtest() {
     rm -rf "$root"
 }
 
+test_run_refuses_a_device_that_is_not_the_mount_disk() {
+    local name=run-mount-disk root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest" "$root/sys/block/loop0/queue"
+    queue_files "$root/sys/block/loop0/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device loop0 --mount /tmp \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0: $(cat "$err")"
+    elif ! grep -q "not loop0" "$err"; then
+        bad "$name" "stderr did not refuse the disk: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif [ -e "$root/out/t/sysfs.txt" ]; then
+        bad "$name" "sysfs snapshot was written for the other disk"
+    elif ! grep -q '^111$' "$root/sys/block/loop0/queue/max_sectors_kb"; then
+        bad "$name" "queue value changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_run_allows_a_missing_path_under_loadtest() {
     local name=run-allow-missing root err
     root=$(tmpdir)

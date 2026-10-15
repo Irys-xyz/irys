@@ -16,6 +16,7 @@
 #   the mount has less than MIN_FREE_GIB free (default 500)
 #   loadtest, the recall file, or the write file has no `loadtest` path component
 #   on the given path, or on the deepest existing ancestor plus the missing tail
+#   --device is not the disk that holds the loadtest directory
 # The queue settings are written to <out>/sysfs.txt before the bench starts.
 # <out>/run.pid is the bench process, not this shell. The bench runs in its
 # own process group. TERM and INT stop that group.
@@ -187,6 +188,42 @@ require_loadtest() {
     fi
 }
 
+# Same mount-to-disk check as ladder.sh. Sampling and the sysfs snapshot must
+# use the disk that holds the loadtest directory.
+require_mount_device() {
+    local canon=$1
+    local dev=$2
+    local mnt_src mnt
+    if command -v findmnt >/dev/null 2>&1; then
+        mnt_src=$(findmnt -n -o SOURCE -T "$canon" || true)
+        mnt=$(findmnt -n -o TARGET -T "$canon" || true)
+    else
+        mnt_src=$(df -P "$canon" | awk 'NR==2 { print $1 }')
+        mnt=$(df -P "$canon" | awk 'NR==2 { print $6 }')
+    fi
+    if [ -z "${mnt_src:-}" ] || [ -z "${mnt:-}" ]; then
+        echo "no mount for $canon" >&2
+        exit 1
+    fi
+    # findmnt appends a subvolume in brackets. The lab disk does not.
+    mnt_src=${mnt_src%%[*}
+    mnt_src=$(readlink -f "$mnt_src") || {
+        echo "cannot resolve mount source for $canon" >&2
+        exit 1
+    }
+    local mnt_name parent
+    mnt_name=${mnt_src##*/}
+    if [ -e "/sys/class/block/$mnt_name/partition" ]; then
+        parent=$(basename "$(readlink -f "/sys/class/block/$mnt_name/..")")
+    else
+        parent=$mnt_name
+    fi
+    if [ "$parent" != "$dev" ]; then
+        echo "refusing: $canon is on $mnt_name, not $dev" >&2
+        exit 1
+    fi
+}
+
 require_loadtest "loadtest" "$loadtest"
 require_loadtest "recall-file" "$recall_file"
 require_loadtest "write-file" "$write_file"
@@ -237,6 +274,13 @@ if [ ! -d "$queue" ]; then
     echo "no queue directory: $queue" >&2
     exit 1
 fi
+
+resolved_loadtest=$(resolve_path "$loadtest") || exit 1
+mount_at=$resolved_loadtest
+while [ ! -e "$mount_at" ] && [ ! -L "$mount_at" ]; do
+    mount_at=$(dirname -- "$mount_at")
+done
+require_mount_device "$mount_at" "$device"
 
 out=$out_root/$name
 mkdir -p "$out"
