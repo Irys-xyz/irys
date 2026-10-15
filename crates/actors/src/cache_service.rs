@@ -17,14 +17,15 @@ use irys_database::{
     },
 };
 use irys_domain::{
-    BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot,
+    BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, ChainState, EpochSnapshot,
     StorageModulesReadGuard,
 };
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof,
-    LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, TxChunkOffset, UnixTimestamp,
+    Config, DataLedger, DataRoot, DataTransactionHeader, DatabaseProvider, GIGABYTE, H256,
+    IngressProof, IrysBlockHeader, LedgerChunkOffset, PartitionChunkOffset, SendTraced as _,
+    TokioServiceHandle, Traced, TxChunkOffset, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -50,6 +51,13 @@ struct CdrEvictionState {
     inclusion_max_height: Option<u64>,
     horizon: Option<u64>,
     evictable: bool,
+}
+
+/// One transaction's chunk span on a ledger, in ledger offsets.
+struct TxLedgerSpan {
+    ledger: DataLedger,
+    start: u64,
+    chunk_count: u64,
 }
 
 /// Maximum evictions per invocation to prevent blocking the service.
@@ -363,20 +371,20 @@ impl InnerCacheTask {
 
     /// Capacity-prunes cached bodies older than the migration age.
     ///
-    /// A body is protected when this node is assigned to store it (a local
-    /// storage module has a placement for it) or has produced an ingress proof
-    /// for its root. A protected body is reclaimed only once it is durably
-    /// stored locally. Any other body is reclaimed on age, but only once every
-    /// tx of its root is migrated: before that no node has a placement yet, so
-    /// "unassigned" cannot be told apart from "assigned, not migrated".
+    /// A body stays when this node holds a local ingress proof, a placement
+    /// row, or a module assignment whose interval is not persisted `Data`.
+    /// Open drops the placement row when the file is not `Data`. The assignment
+    /// remains, and the cached body is what a replica reads back until the
+    /// file says `Data`.
     ///
-    /// Durability is read from the storage modules' persisted interval state
-    /// (`intervals.json`, the state restart recovery reloads), not only the
-    /// live map, so the pruner can never drop a body the node would forget
-    /// after a crash. The database delete
-    /// additionally requires the current signer's compact ingress hash. A body
-    /// missing either independent prerequisite is never reclaimed, whatever
-    /// its root's ingress-proof state.
+    /// A placed or proven body is deleted only by
+    /// `delete_reclaimable_cached_chunks_older_than`: the offset must be
+    /// persisted `Data`, and the current signer's compact ingress hash must
+    /// be present. A body with neither a proof, a placement, nor an
+    /// unpersisted assignment is deleted on age once every tx of its root is
+    /// migrated. That path does not require the ingress hash. Before migration
+    /// no node has a placement yet, so "unassigned" cannot be told apart from
+    /// "assigned, not migrated".
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_durably_migrated_chunk_bodies(&self, migration_height: u64) -> eyre::Result<()> {
         let local_address = self.config.irys_signer().address();
@@ -505,8 +513,17 @@ impl InnerCacheTask {
                 }
             });
             if !unreadable && !proven_roots.contains(&root) && migrated_roots.contains(&root) {
-                let unprotected: BTreeSet<TxChunkOffset> =
+                let mut unprotected: BTreeSet<TxChunkOffset> =
                     cached_offsets.difference(&placed).copied().collect();
+                if !unprotected.is_empty() {
+                    let keep = self.assigned_unpersisted_offsets(
+                        root,
+                        &unprotected,
+                        &storage_modules,
+                        migration_height,
+                    )?;
+                    unprotected.retain(|offset| !keep.contains(offset));
+                }
                 if !unprotected.is_empty() {
                     unprotected_by_root.push((root, unprotected));
                 }
@@ -559,14 +576,28 @@ impl InnerCacheTask {
 
         for batch in unprotected_by_root.chunks(256) {
             let still = Self::recheck_unplaced_chunk_offsets(&storage_modules, batch);
-            if still.is_empty() {
+            let mut deletable = Vec::with_capacity(still.len());
+            for (root, offsets) in still {
+                let keep = self.assigned_unpersisted_offsets(
+                    root,
+                    &offsets,
+                    &storage_modules,
+                    migration_height,
+                )?;
+                let remaining: BTreeSet<TxChunkOffset> =
+                    offsets.difference(&keep).copied().collect();
+                if !remaining.is_empty() {
+                    deletable.push((root, remaining));
+                }
+            }
+            if deletable.is_empty() {
                 continue;
             }
             let batch_pruned = self
                 .db
                 .update_eyre_at("cache_service.prune_unprotected_chunks_batch", |write_tx| {
                     let mut batch_pruned = 0_u64;
-                    for (root, offsets) in &still {
+                    for (root, offsets) in &deletable {
                         // A proof generated since the scan protects the root.
                         if Self::has_local_ingress_proof(write_tx, *root, local_address)? {
                             continue;
@@ -644,6 +675,240 @@ impl InnerCacheTask {
             }
         }
         confirmed
+    }
+
+    /// Offsets in `candidates` that a local module is still assigned to store
+    /// and whose interval is not persisted `Data`.
+    ///
+    /// Open drops the placement row when the file is not `Data`. The partition
+    /// assignment and the canonical ledger range stay. Keep the cached body
+    /// until the file says `Data`. A missing block or tx header skips that
+    /// span. A database error fails the prune.
+    fn assigned_unpersisted_offsets(
+        &self,
+        data_root: DataRoot,
+        candidates: &BTreeSet<TxChunkOffset>,
+        storage_modules: &[Arc<irys_domain::StorageModule>],
+        migration_height: u64,
+    ) -> eyre::Result<BTreeSet<TxChunkOffset>> {
+        let mut keep = BTreeSet::new();
+        if candidates.is_empty()
+            || storage_modules.iter().all(|sm| {
+                sm.partition_assignment()
+                    .is_none_or(|a| a.ledger_id.is_none() || a.slot_index.is_none())
+            })
+        {
+            return Ok(keep);
+        }
+        let spans = self.ledger_spans_for_root(data_root, migration_height)?;
+        if spans.is_empty() {
+            return Ok(keep);
+        }
+        for tx_offset in candidates {
+            let raw = u64::from(**tx_offset);
+            let mut keep_offset = false;
+            'spans: for span in &spans {
+                if raw >= span.chunk_count {
+                    continue;
+                }
+                let Some(ledger_offset) = span.start.checked_add(raw) else {
+                    continue;
+                };
+                for sm in storage_modules {
+                    let Some(assignment) = sm.partition_assignment() else {
+                        continue;
+                    };
+                    let (Some(ledger_id), Some(slot_index)) =
+                        (assignment.ledger_id, assignment.slot_index)
+                    else {
+                        continue;
+                    };
+                    if ledger_id != u32::from(span.ledger) {
+                        continue;
+                    }
+                    if !sm.contains_offset(LedgerChunkOffset::from(ledger_offset)) {
+                        continue;
+                    }
+                    let Some(start) = (slot_index as u64)
+                        .checked_mul(sm.config.consensus.num_chunks_in_partition)
+                    else {
+                        continue;
+                    };
+                    let Some(partition_raw) = ledger_offset.checked_sub(start) else {
+                        continue;
+                    };
+                    let Ok(partition_raw) = u32::try_from(partition_raw) else {
+                        continue;
+                    };
+                    if !sm.is_data_chunk_persisted_at(PartitionChunkOffset::from(partition_raw)) {
+                        keep_offset = true;
+                        break 'spans;
+                    }
+                }
+            }
+            if keep_offset {
+                keep.insert(*tx_offset);
+            }
+        }
+        Ok(keep)
+    }
+
+    /// Ledger spans this root's txs occupy at or below `migration_height`.
+    ///
+    /// A Publish-targeted tx is included on Submit, so `included_height` is
+    /// that Submit block. Promotion adds a separate Publish span.
+    /// Term-ledger txs are placed on their own ledger at `included_height`.
+    fn ledger_spans_for_root(
+        &self,
+        data_root: DataRoot,
+        migration_height: u64,
+    ) -> eyre::Result<Vec<TxLedgerSpan>> {
+        let headers = self.db.view_eyre(|tx| {
+            let Some(cached) = tx.get::<CachedDataRoots>(data_root)? else {
+                return Ok(Vec::new());
+            };
+            let mut headers = Vec::with_capacity(cached.txid_set.len());
+            for tx_id in &cached.txid_set {
+                if let Some(header) = tx_header_by_txid(tx, tx_id)? {
+                    headers.push(header);
+                }
+            }
+            Ok(headers)
+        })?;
+        let mut spans = Vec::new();
+        for header in &headers {
+            for (ledger, height) in Self::inclusion_placements(header, migration_height) {
+                if let Some(span) = self.tx_span_in_block(header.id, ledger, height)? {
+                    spans.push(span);
+                }
+            }
+        }
+        Ok(spans)
+    }
+
+    /// `(ledger, height)` pairs whose chunk range this tx occupies.
+    fn inclusion_placements(
+        header: &DataTransactionHeader,
+        migration_height: u64,
+    ) -> Vec<(DataLedger, u64)> {
+        let mut placements = Vec::new();
+        if let Some(height) = header.metadata().included_height
+            && height <= migration_height
+        {
+            match DataLedger::try_from(header.ledger_id) {
+                // Publish-targeted data is staged on Submit. `included_height`
+                // is that Submit block, not a Publish block.
+                Ok(DataLedger::Submit | DataLedger::Publish) => {
+                    placements.push((DataLedger::Submit, height));
+                }
+                Ok(ledger @ (DataLedger::OneYear | DataLedger::ThirtyDay)) => {
+                    placements.push((ledger, height));
+                }
+                Err(_) => {}
+            }
+        }
+        if let Some(height) = header.promoted_height()
+            && height <= migration_height
+        {
+            placements.push((DataLedger::Publish, height));
+        }
+        placements
+    }
+
+    /// The tx's span inside `ledger` on the canonical block at `height`.
+    ///
+    /// `None` when the block, a prior tx header, or the tx itself is missing.
+    /// Guessing a start of 0 would assign the chunk to slot 0.
+    fn tx_span_in_block(
+        &self,
+        tx_id: H256,
+        ledger: DataLedger,
+        height: u64,
+    ) -> eyre::Result<Option<TxLedgerSpan>> {
+        let Some(block) = self.onchain_header_at_height(height)? else {
+            return Ok(None);
+        };
+        let Some(start) = self.ledger_chunk_start(&block, ledger)? else {
+            return Ok(None);
+        };
+        let Some(tx_ids) = block
+            .data_ledgers
+            .iter()
+            .find(|entry| entry.ledger_id == u32::from(ledger))
+            .map(|entry| entry.tx_ids.0.clone())
+        else {
+            return Ok(None);
+        };
+        let chunk_size = self.config.consensus.chunk_size;
+        self.db.view_eyre(|tx| {
+            let mut cursor = start;
+            for id in &tx_ids {
+                let Some(header) = tx_header_by_txid(tx, id)? else {
+                    return Ok(None);
+                };
+                let count = header.data_size.div_ceil(chunk_size);
+                if *id == tx_id {
+                    if count == 0 {
+                        return Ok(None);
+                    }
+                    return Ok(Some(TxLedgerSpan {
+                        ledger,
+                        start: cursor,
+                        chunk_count: count,
+                    }));
+                }
+                let Some(next) = cursor.checked_add(count) else {
+                    return Ok(None);
+                };
+                cursor = next;
+            }
+            Ok(None)
+        })
+    }
+
+    /// Ledger offset where `block` starts appending to `ledger`.
+    ///
+    /// Height 0 starts at 0. A missing previous header is `None` (do not
+    /// guess 0). A previous block that has no such ledger started it here.
+    fn ledger_chunk_start(
+        &self,
+        block: &IrysBlockHeader,
+        ledger: DataLedger,
+    ) -> eyre::Result<Option<u64>> {
+        if block.height == 0 {
+            return Ok(Some(0));
+        }
+        let Some(prev) = self.onchain_header_at_height(block.height - 1)? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            prev.data_ledgers
+                .iter()
+                .find(|entry| entry.ledger_id == u32::from(ledger))
+                .map(|entry| entry.total_chunks)
+                .unwrap_or(0),
+        ))
+    }
+
+    /// Canonical header at `height`: the in-memory on-chain tree, else the
+    /// migrated-block tables. The tree guard is dropped before the database read.
+    fn onchain_header_at_height(&self, height: u64) -> eyre::Result<Option<IrysBlockHeader>> {
+        let from_tree = {
+            let tree = self.block_tree_guard.read();
+            let (chain, _) = tree.get_canonical_chain();
+            chain
+                .iter()
+                .find(|entry| entry.height() == height)
+                .and_then(|entry| {
+                    let (header, state) = tree.get_block_and_status(&entry.block_hash())?;
+                    (*state == ChainState::Onchain).then(|| header.clone())
+                })
+        };
+        if let Some(header) = from_tree {
+            return Ok(Some(header));
+        }
+        self.db
+            .view_eyre(|tx| irys_database::canonical_header_at_height(tx, height))
     }
 
     #[cfg(test)]
@@ -2039,6 +2304,220 @@ mod tests {
         );
         assert!(old_body_survives_capacity_prune(true, true, true)?);
         Ok(())
+    }
+
+    /// After open drops a placement, capacity prune must keep the replica's
+    /// cached body while the assigned interval is not persisted `Data`.
+    ///
+    /// The ledger offset is slot 0. A module on another slot is not the
+    /// custodian. Persisted `Data` ends the crash window, so that copy can go.
+    #[tokio::test]
+    async fn capacity_prune_keeps_replica_cache_after_placement_drop() -> eyre::Result<()> {
+        assert!(
+            replica_body_survives_capacity_prune(0, false)?,
+            "assigned slot with an unpersisted interval must keep the cache after the placement row is gone"
+        );
+        assert!(
+            !replica_body_survives_capacity_prune(1, false)?,
+            "a module assigned a different slot does not keep this chunk"
+        );
+        assert!(
+            !replica_body_survives_capacity_prune(0, true)?,
+            "persisted Data ends the crash window; the cache copy can go"
+        );
+        Ok(())
+    }
+
+    /// One old migrated body, no local proof, no placement row.
+    ///
+    /// `persist_data` writes partition offset 0 as `Data`, then deletes the
+    /// data-root row so the index looks like the open-time drop while the
+    /// file still says `Data`.
+    fn replica_body_survives_capacity_prune(
+        slot_index: usize,
+        persist_data: bool,
+    ) -> eyre::Result<bool> {
+        use irys_database::insert_tx_header;
+        use irys_database::tables::{IrysBlockHeaders, MigratedBlockHashes};
+        use irys_types::{H256List, IrysBlockHeader, PartitionChunkOffset, U256};
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let chunk_size = config.consensus.chunk_size;
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: chunk_size,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let data_root = tx_header.data_root;
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            insert_tx_header(wtx, &tx_header)?;
+            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+            eyre::Ok(())
+        })??;
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: chunk_size,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![2_u8; 8]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_chunk(wtx, &chunk)?;
+            let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+            let mut walk = cur.walk_dup(Some(data_root), None)?;
+            while let Some((_k, entry)) = walk.next().transpose()? {
+                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+                let mut updated = entry.clone();
+                updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                wtx.put::<CachedChunksIndex>(data_root, updated)?;
+            }
+            eyre::Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.data_ledgers[DataLedger::Submit].total_chunks = 0;
+        genesis.test_sign();
+        let mut included = IrysBlockHeader::new_mock_header();
+        included.height = 1;
+        included.previous_block_hash = genesis.block_hash;
+        included.cumulative_diff = U256::from(2_u64);
+        let submit = &mut included.data_ledgers[DataLedger::Submit];
+        submit.total_chunks = 1;
+        submit.tx_ids = H256List(vec![tx_header.id]);
+        included.test_sign();
+        db.update(|wtx| {
+            wtx.put::<IrysBlockHeaders>(genesis.block_hash, genesis.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(0, genesis.block_hash)?;
+            wtx.put::<IrysBlockHeaders>(included.block_hash, included.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(1, included.block_hash)?;
+            eyre::Ok(())
+        })??;
+
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let storage_modules_guard = if persist_data {
+            let guard = storage_modules_guard_with_durable(
+                sm_dir.path().to_path_buf(),
+                data_root,
+                chunk_size,
+                &[0],
+            )?;
+            let sm = guard.read()[0].clone();
+            sm.clear_data_root_infos_in_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(0),
+                &[data_root],
+            )?;
+            eyre::ensure!(
+                sm.is_data_chunk_persisted_at(PartitionChunkOffset::from(0)),
+                "fixture did not persist Data"
+            );
+            guard
+        } else {
+            assigned_module_without_placement(sm_dir.path().to_path_buf(), slot_index)?
+        };
+        {
+            let sm = storage_modules_guard.read()[0].clone();
+            let placed = sm.placed_tx_offsets_for_data_root(
+                data_root,
+                &BTreeSet::from([TxChunkOffset::from(0)]),
+            )?;
+            eyre::ensure!(placed.is_empty(), "fixture still has a placement row");
+            if !persist_data {
+                eyre::ensure!(
+                    !sm.is_data_chunk_persisted_at(PartitionChunkOffset::from(0)),
+                    "unpersisted fixture is already Data"
+                );
+            }
+        }
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+            storage_modules_guard,
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        service_task.prune_durably_migrated_chunk_bodies(10)?;
+        db.view(|rtx| -> eyre::Result<bool> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(data_root))?;
+            Ok(walk
+                .next()
+                .transpose()?
+                .is_some_and(|(root, _)| root == data_root))
+        })?
+    }
+
+    /// Ledger-assigned module with an empty index. Intervals stay `Uninitialized`.
+    fn assigned_module_without_placement(
+        base_directory: std::path::PathBuf,
+        slot_index: usize,
+    ) -> eyre::Result<StorageModulesReadGuard> {
+        use irys_domain::{StorageModule, StorageModuleInfo};
+        use irys_types::{
+            ConsensusConfig, PartitionChunkOffset, partition::PartitionAssignment,
+            partition_chunk_offset_ie,
+        };
+
+        let num_chunks = 10_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: num_chunks,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory,
+            ..NodeConfig::testing()
+        };
+        let sm_config = Config::new_with_random_peer_id(node_config);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                ledger_id: Some(DataLedger::Submit.into()),
+                slot_index: Some(slot_index),
+                miner_address: IrysAddress::random(),
+                partition_hash: H256::random(),
+            }),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, num_chunks as u32),
+                "chunks".into(),
+            )],
+        };
+        let sm = Arc::new(StorageModule::new(&info, &sm_config)?);
+        Ok(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            sm,
+        ]))))
     }
 
     /// A body that was durable in the snapshot stays in the cache when that
