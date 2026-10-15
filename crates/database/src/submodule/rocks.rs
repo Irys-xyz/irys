@@ -1099,6 +1099,9 @@ impl RocksSubmoduleStore {
                 path.display()
             );
         }
+        // Read-only open does not create a database. Refuse before RocksDB
+        // reports a missing CURRENT, so the error names the restore.
+        refuse_schema_without_current(&path)?;
         let lock_file = hold_rocks_lock(&path)?;
         let layout = resolve_layout(&path, None)?;
         let unknown = existing_unknown_families(&path)?;
@@ -3355,10 +3358,13 @@ thread_local! {
 ///
 /// `CONVERTING` is an unfinished conversion. `CURRENT` without that file is
 /// a first open that crashed before the marker. A directory that already has
-/// SCHEMA is complete: `CONVERTING` beside it is the crash after the marker
-/// and before the sentinel is removed, and open continues.
+/// SCHEMA is complete only when `CURRENT` is a file. `CONVERTING` beside both
+/// is the crash after the marker and before the sentinel is removed, and open
+/// continues. SCHEMA without CURRENT is an unrestored manifest pointer, not
+/// a new database.
 fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
     if path.join(SCHEMA_FILE).exists() {
+        refuse_schema_without_current(path)?;
         return Ok(());
     }
     if !directory_has_entries(path)? {
@@ -3376,6 +3382,19 @@ fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
         "submodule index {} has no SCHEMA marker, so the directory is incomplete. Delete this directory and rerun `submodule-index-convert` with --replace-incomplete. Do not start the node on it.",
         path.display()
     );
+}
+
+/// SCHEMA is written after CURRENT. A directory that has the marker and no
+/// CURRENT file is not empty, and `create_if_missing` would replace the
+/// manifest with an empty database.
+fn refuse_schema_without_current(path: &Path) -> eyre::Result<()> {
+    if path.join(SCHEMA_FILE).is_file() && !path.join("CURRENT").is_file() {
+        eyre::bail!(
+            "submodule index {} has a SCHEMA marker and no CURRENT file. The directory is not a new database. Restore CURRENT. This open does not create an empty index.",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn directory_has_entries(path: &Path) -> eyre::Result<bool> {
@@ -6751,6 +6770,65 @@ mod tests {
         assert_eq!(
             fs::read_to_string(path.join(SCHEMA_FILE))?,
             SUBMODULE_SCHEMA_ROCKS_V1
+        );
+        Ok(())
+    }
+
+    /// `SCHEMA` with no `CURRENT` is a finished directory that lost its manifest
+    /// pointer. Open must not create an empty index over the SST files.
+    /// Restoring `CURRENT` returns the flushed row. An empty directory, which
+    /// has neither file, still creates.
+    #[test]
+    fn schema_without_current_refuses_and_keeps_the_flushed_row() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_schema_no_current")
+            .build();
+        let path = dir.path().join("index");
+        let offset = PartitionChunkOffset::from(4);
+        {
+            let store = RocksSubmoduleStore::open(&path)?;
+            place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[4], None)?;
+            store.flush_memtables()?;
+            assert!(
+                store
+                    .view(|tx| tx.get_data_path_by_offset(offset))?
+                    .is_some()
+            );
+        }
+        let current = fs::read(path.join("CURRENT"))?;
+        let manifest_name = String::from_utf8(current.clone())
+            .unwrap()
+            .trim()
+            .to_owned();
+        let manifest = fs::read(path.join(&manifest_name))?;
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".log") {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        fs::remove_file(path.join("CURRENT"))?;
+        let err = RocksSubmoduleStore::open(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("not a new database"), "{text}");
+        assert!(text.contains("CURRENT"), "{text}");
+        assert!(text.contains("Restore"), "{text}");
+        assert!(!path.join("CURRENT").is_file());
+        assert_eq!(fs::read(path.join(&manifest_name))?, manifest);
+        let err = RocksSubmoduleStore::open_read_only(&path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("not a new database"), "{text}");
+        assert_eq!(fs::read(path.join(&manifest_name))?, manifest);
+
+        fs::write(path.join("CURRENT"), &current)?;
+        let store = RocksSubmoduleStore::open(&path)?;
+        assert!(
+            store
+                .view(|tx| tx.get_data_path_by_offset(offset))?
+                .is_some(),
+            "restoring CURRENT must return the flushed row"
         );
         Ok(())
     }
