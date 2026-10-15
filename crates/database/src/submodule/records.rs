@@ -4,6 +4,8 @@
 //! one placement: the data-root point key is removed in the same batch as
 //! its interval.
 
+use std::collections::BTreeMap;
+
 use irys_types::{H256, PartitionChunkOffset, RelativeChunkOffset};
 
 use super::tables::{OffsetMeta, PendingBodyMigration};
@@ -353,26 +355,18 @@ fn merge_adjacent(mut rows: Vec<PlacementSpan>) -> Vec<PlacementSpan> {
 }
 
 fn diff(existing: &[PlacementSpan], merged: &[PlacementSpan]) -> (Vec<u32>, Vec<PlacementSpan>) {
-    let mut delete = Vec::new();
+    // Keyed by start. `position` + `Vec::remove` copies the tail on every hit,
+    // so one edit of a fragmented window is quadratic.
+    let mut old: BTreeMap<u32, &PlacementSpan> =
+        existing.iter().map(|row| (row.start, row)).collect();
     let mut put = Vec::new();
-    let mut old: Vec<&PlacementSpan> = existing.iter().collect();
     for row in merged {
-        if let Some(pos) = old
-            .iter()
-            .position(|candidate| candidate.start == row.start)
-        {
-            let previous = old.remove(pos);
-            if previous.value != row.value {
-                put.push(*row);
-            }
-        } else {
-            put.push(*row);
+        match old.remove(&row.start) {
+            Some(previous) if previous.value == row.value => {}
+            Some(_) | None => put.push(*row),
         }
     }
-    for row in old {
-        delete.push(row.start);
-    }
-    delete.sort_unstable();
+    let delete: Vec<u32> = old.into_keys().collect();
     put.sort_by_key(|row| row.start);
     (delete, put)
 }
@@ -474,6 +468,26 @@ mod tests {
         let (_delete, put) = plan_placement(&[left], 5, 9, Some(placed(0, 2, 10)));
         assert_eq!(put.len(), 1);
         assert_eq!(put[0].start, 5);
+    }
+
+    #[test]
+    fn plan_placement_stays_linear_in_fragment_count() {
+        let n = 20_000_u32;
+        let existing: Vec<_> = (0..n)
+            .map(|i| PlacementSpan {
+                start: i * 2,
+                value: placed(i * 2, (i % 200) as u8, 32),
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let (delete, put) = plan_placement(&existing, 0, n * 2, None);
+        let elapsed = started.elapsed();
+        assert_eq!(delete.len(), n as usize);
+        assert!(put.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "placement diff of {n} fragments took {elapsed:?}"
+        );
     }
 
     #[test]
