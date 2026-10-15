@@ -285,7 +285,7 @@ impl ChunkProvider {
                                 partition.offset = cursor,
                                 "chunk offset has no body on disk"
                             );
-                            note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                            note_chunk_read(SERVE_SPAN, "storage_module", "miss");
                             None
                         }
                         Err(error) => {
@@ -1424,6 +1424,50 @@ mod tests {
                 )
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// An indexed offset with no body is a hole. The span omits it and
+    /// counts a miss. A failed read stays an error.
+    #[test]
+    fn span_hole_is_a_miss() {
+        let tmp = TempDirBuilder::new().prefix("span-hole-miss").build();
+        let config = testing_config(tmp.path().to_path_buf(), 4);
+        let sm = assigned(&config, 0, 0, "hdd0", 4);
+        let (tx, _data) = one_chunk(&config, 3);
+        index_one(&sm, &tx, 0);
+        let offset = PartitionChunkOffset(0);
+        remember_data_path(&sm, offset, &tx.proofs[0].proof);
+        let err = sm
+            .generate_full_chunks(offset, offset)
+            .expect_err("indexed chunk with no bytes");
+        assert!(
+            err.to_string()
+                .contains("Could not find chunk bytes on disk"),
+            "{err}"
+        );
+
+        let db = create_test_db(&tmp.path().join("db"));
+        let provider = make_provider(config, vec![Arc::new(sm)], db);
+        let _ = take_chunk_read_notes();
+        let span = provider
+            .get_unpacked_chunks_by_ledger_span(
+                DataLedger::Publish,
+                LedgerChunkOffset::from(0),
+                LedgerChunkOffset::from(0),
+            )
+            .expect("a hole is absent, not a failed span");
+        assert!(span.is_empty(), "{span:?}");
+        let notes = take_chunk_read_notes();
+        assert!(
+            notes.contains(&("serve_span", "storage_module", "miss")),
+            "a span hole was not a miss: {notes:?}"
+        );
+        assert!(
+            !notes
+                .iter()
+                .any(|note| *note == ("serve_span", "storage_module", "error")),
+            "a span hole was counted as a read error: {notes:?}"
         );
     }
 
