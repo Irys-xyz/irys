@@ -486,6 +486,10 @@ enum SyncFailurePoint {
 /// copied the interval map and has not taken the file lock.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the prefix is the pause moment, after a named step"
+)]
 enum SyncPausePoint {
     /// Proofs are copied out of `pending`. The index write has not started.
     AfterPresenceCopy,
