@@ -407,7 +407,8 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// | Transition | When it is stored | Class |
 /// | --- | --- | --- |
 /// | `Entropy` / `Uninitialized` / `Data` → `Interrupted` for offsets about to be written | Before the `pwrite`, atomic replace. A span already marked is not rewritten | Write-ahead |
-/// | Ahead `Entropy` / `Uninitialized` → `Interrupted` on disk only | Same rewrite, up to 512 MiB forward inside the submodule | Write-ahead coalesce |
+/// | Ahead `Entropy` / `Uninitialized` → `Interrupted` on disk only | Same rewrite, up to 512 MiB forward inside the submodule. The walk stops at live `Data` and at a CRC file hold | Write-ahead coalesce |
+/// | CRC mismatch → live `Uninitialized`, file keeps the previous `Data` or `Entropy` | The hold stores that label. A completion flush and a lower-offset write-ahead both restore it over a projected `Uninitialized` or `Interrupted`. The hold drops after that offset's `pwrite` succeeds | Completion |
 /// | `Interrupted` → `Data` or `Entropy` | After `fdatasync` and the presence commit. At most every `intervals_persist_secs`, sooner on the next write-ahead rewrite, on `force_sync`, or on clean shutdown | Completion |
 /// | Failed `pwrite` → live `Uninitialized`, file stays `Interrupted` | No extra rewrite. Load maps both to `Uninitialized` | Completion lag is safe |
 /// | Any → `Uninitialized` on reset | After the index clear. A metadata marker covers a crash before the file rewrite | Write-ahead |
@@ -805,10 +806,12 @@ pub struct StorageModule {
     /// Settled offsets whose bytes failed the crc check. The storage-module
     /// service drains this into the existing packing queue.
     crc_repairs: Mutex<BTreeSet<PartitionChunkOffset>>,
-    /// CRC offsets whose live label is `Uninitialized` but whose file label
-    /// must stay until a packed write replaces the offset. A rewrite that
-    /// copies the live label makes the next open drop the placement.
-    crc_file_holds: Mutex<BTreeSet<PartitionChunkOffset>>,
+    /// CRC offsets whose live label is `Uninitialized` but whose file must
+    /// keep the label stored here until a packed write of that offset
+    /// succeeds. The label is the live `Data` or `Entropy` from before the
+    /// cut. A projection that says `Uninitialized` or `Interrupted` is
+    /// overwritten with it. The write-ahead walk stops at the offset.
+    crc_file_holds: Mutex<BTreeMap<PartitionChunkOffset, ChunkType>>,
     /// Recall mismatches not yet checked under `sync_in_progress`. The
     /// mining thread must not take that lock: it still holds the recall,
     /// and a durable point waits on the recall while holding the lock.
@@ -2046,7 +2049,7 @@ impl StorageModule {
             #[cfg(test)]
             recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
-            crc_file_holds: Mutex::new(BTreeSet::new()),
+            crc_file_holds: Mutex::new(BTreeMap::new()),
             crc_suspects: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
             #[cfg(test)]
@@ -3999,7 +4002,7 @@ impl StorageModule {
         let chunk = self.config.consensus.chunk_size.max(1);
         let budget = INTERVAL_WRITE_AHEAD_BYTES / chunk;
         // Clone before `interval_disk`. The two mutexes are not nested.
-        let holds = self.crc_file_hold_offsets();
+        let holds = self.crc_file_hold_snapshot();
         let mut disk = self.lock_interval_disk();
         if !self.interval_snapshot_current(snapshot_epoch) {
             return Ok(());
@@ -4014,10 +4017,10 @@ impl StorageModule {
         let mut mask = disk.mask.clone();
         for run in runs {
             let submodule = *self.get_submodule_for_offset(run.start)?.0;
-            Self::extend_write_ahead(&mut mask, &memory, run, submodule, budget);
+            Self::extend_write_ahead(&mut mask, &memory, run, submodule, budget, &holds);
         }
         let mut projection = Self::project_interval_file(&memory, &mask)?;
-        Self::overlay_held_file_labels(&mut projection, &disk.written, &holds);
+        Self::overlay_held_file_labels(&mut projection, &holds);
         let needs_write = self.projection_differs(&disk.written, &projection, touched);
         if !needs_write {
             // The file already has these Interrupted labels. Remember them so
@@ -4101,7 +4104,7 @@ impl StorageModule {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         // Clone before `interval_disk`. The two mutexes are not nested.
-        let holds = self.crc_file_hold_offsets();
+        let holds = self.crc_file_hold_snapshot();
         let disk = self.lock_interval_disk();
         if !self.interval_snapshot_current(snapshot_epoch) {
             return Ok(());
@@ -4112,7 +4115,7 @@ impl StorageModule {
             return Ok(());
         }
         let mut projection = Self::project_interval_file(&memory, &disk.mask)?;
-        Self::overlay_held_file_labels(&mut projection, &disk.written, &holds);
+        Self::overlay_held_file_labels(&mut projection, &holds);
         drop(disk);
         self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)
     }
@@ -4223,10 +4226,10 @@ impl StorageModule {
         self.write_interval_image(&memory, only, snapshot_epoch, false)
     }
 
-    /// Offsets whose file label a CRC mismatch is still holding.
+    /// Labels a CRC mismatch is still holding on the file.
     ///
     /// The guard is dropped before the caller takes `interval_disk`.
-    fn crc_file_hold_offsets(&self) -> BTreeSet<PartitionChunkOffset> {
+    fn crc_file_hold_snapshot(&self) -> BTreeMap<PartitionChunkOffset, ChunkType> {
         self.crc_file_holds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4246,37 +4249,32 @@ impl StorageModule {
         }
     }
 
-    /// Put the previous `Data` or `Entropy` file label back over a live
-    /// `Uninitialized` point that a CRC mismatch is holding. `Interrupted`
-    /// and `Uninitialized` in the file are left as they are.
+    /// Put the stored `Data` or `Entropy` label back over a projected
+    /// `Uninitialized` or `Interrupted` point that a CRC mismatch is holding.
+    /// The stored label is the one from before the live map was cut. The
+    /// file image can already say `Interrupted`, so copying `disk.written`
+    /// would publish that and the next open would drop the placement.
     fn restore_crc_file_labels(&self, image: &mut StorageIntervals) {
-        let holds = self.crc_file_hold_offsets();
-        if holds.is_empty() {
-            return;
-        }
-        let disk = self.lock_interval_disk();
-        Self::overlay_held_file_labels(image, &disk.written, &holds);
+        let holds = self.crc_file_hold_snapshot();
+        Self::overlay_held_file_labels(image, &holds);
     }
 
     fn overlay_held_file_labels(
         image: &mut StorageIntervals,
-        written: &StorageIntervals,
-        holds: &BTreeSet<PartitionChunkOffset>,
+        holds: &BTreeMap<PartitionChunkOffset, ChunkType>,
     ) {
         if holds.is_empty() {
             return;
         }
-        for offset in holds {
-            if image.get_at_point(*offset).copied() != Some(ChunkType::Uninitialized) {
-                continue;
-            }
-            let Some(label) = written.get_at_point(*offset).copied() else {
-                continue;
-            };
+        for (offset, label) in holds {
             if !matches!(label, ChunkType::Data | ChunkType::Entropy) {
                 continue;
             }
-            Self::cut_then_insert_interval_if_touching(image, *offset, label);
+            match image.get_at_point(*offset).copied() {
+                Some(ChunkType::Uninitialized) | Some(ChunkType::Interrupted) => {}
+                _ => continue,
+            }
+            Self::cut_then_insert_interval_if_touching(image, *offset, *label);
         }
     }
 
@@ -4417,16 +4415,18 @@ impl StorageModule {
         Ok(projected)
     }
 
-    /// Insert `run`, then walk forward. Stop at `Data`, at the submodule
-    /// boundary, when the budget is spent, or when the next point is already
-    /// masked. Do not jump the mask: that would add another 512 MiB on every
-    /// later commit and rewrite every gap.
+    /// Insert `run`, then walk forward. Stop at `Data`, at a CRC file hold,
+    /// at the submodule boundary, when the budget is spent, or when the next
+    /// point is already masked. Do not jump the mask: that would add another
+    /// 512 MiB on every later commit and rewrite every gap. The run itself
+    /// is still inserted: those bytes are about to change.
     fn extend_write_ahead(
         mask: &mut IntervalMask,
         memory: &StorageIntervals,
         run: &WriteRun,
         submodule: Interval<PartitionChunkOffset>,
         budget_chunks: u64,
+        holds: &BTreeMap<PartitionChunkOffset, ChunkType>,
     ) {
         let (start, end) = Self::run_bounds(run);
         mask.insert_merge_touching_or_overlapping(ii(start, end));
@@ -4435,7 +4435,7 @@ impl StorageModule {
         };
         let mut remaining = budget_chunks;
         while remaining > 0 && cursor <= submodule.end() {
-            if mask.contains_point(cursor) {
+            if mask.contains_point(cursor) || holds.contains_key(&cursor) {
                 break;
             }
             let Ok((interval, chunk_type)) = memory.get_key_value_at_point(cursor) else {
@@ -4443,6 +4443,8 @@ impl StorageModule {
             };
             // Data not in this run stays labelled Data. Marking it Interrupted
             // would make a crash reload durable bytes as Uninitialized.
+            // A CRC hold is the same stop. Its live label is `Uninitialized`,
+            // and painting it `Interrupted` would drop the placement on open.
             if *chunk_type == ChunkType::Data {
                 break;
             }
@@ -4455,6 +4457,15 @@ impl StorageModule {
                     break;
                 };
                 span_end = before;
+            }
+            if let Some((&held, _)) = holds.range(cursor..=span_end).next() {
+                if held <= cursor {
+                    break;
+                }
+                let Some(before) = held.down() else {
+                    break;
+                };
+                span_end = span_end.min(before);
             }
             if span_end < cursor {
                 break;
@@ -5537,9 +5548,11 @@ impl StorageModule {
     /// Mark one offset untrustworthy and hand it to the packing queue.
     ///
     /// The live map becomes `Uninitialized`, so a later read does not serve
-    /// the bytes. Projections keep the previous file label until a packed
-    /// write replaces that offset. A crash reloads that label and the next
-    /// read queues the repair again. The index stays so data sync can refill
+    /// the bytes. The file keeps the previous `Data` or `Entropy` label,
+    /// stored here before the cut, until a packed write of this offset
+    /// succeeds. A projection that says `Uninitialized` or `Interrupted`
+    /// is overwritten with that label. A crash reloads it and the next read
+    /// queues the repair again. The index stays so data sync can refill
     /// after packing.
     fn note_crc_mismatch(
         &self,
@@ -5549,6 +5562,7 @@ impl StorageModule {
     ) {
         chunk_crc::note_mismatch(caller, kind);
         chunk_crc::warn_mismatch(self.id, offset.0);
+        let previous = self.intervals.read().unwrap().get_at_point(offset).copied();
         {
             let mut intervals = self.intervals.write().unwrap();
             Self::cut_then_insert_interval_if_touching(
@@ -5561,10 +5575,12 @@ impl StorageModule {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(offset);
-        self.crc_file_holds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(offset);
+        if let Some(label @ (ChunkType::Data | ChunkType::Entropy)) = previous {
+            self.crc_file_holds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(offset, label);
+        }
         self.entropy_cache.lock().unwrap().invalidate(offset);
     }
 
@@ -16256,6 +16272,281 @@ mod tests {
         assert!(
             reopened.is_data_root_index_ready_at(offset),
             "open dropped the placement under a published CRC Uninitialized label"
+        );
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    fn crc_hold_module(
+        prefix: &str,
+        persist_secs: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                entropy_sweep_max_bytes: chunk_size * 4,
+                entropy_read_grace_ms: 0,
+                entropy_read_batch_bytes: chunk_size * 4,
+                min_durable_interval_ms: 0,
+                intervals_persist_secs: persist_secs,
+                ..StorageSyncConfig::default()
+            },
+            database: index_database(SubmoduleIndexEngine::Rocksdb),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(&crc_hold_info(tmp_dir.path()), &config)?;
+        Ok((tmp_dir, config, storage))
+    }
+
+    fn crc_hold_info(dir: &std::path::Path) -> StorageModuleInfo {
+        StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                ledger_id: Some(DataLedger::Submit.into()),
+                slot_index: Some(0),
+                miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                partition_hash: H256::repeat_byte(0x11),
+            }),
+            submodules: vec![(partition_chunk_offset_ii!(0, 3), dir.join("hdd0"))],
+        }
+    }
+
+    /// The completion period is monotonic. Move the last rewrite back so the
+    /// next non-force flush is due, without sleeping for the period.
+    fn make_interval_completion_due(storage: &StorageModule) {
+        let period = storage
+            .config
+            .node_config
+            .storage
+            .intervals_persist_secs
+            .saturating_add(1);
+        let due = Instant::now()
+            .checked_sub(Duration::from_secs(period))
+            .expect("the monotonic clock can represent the persist period");
+        let mut disk = storage.lock_interval_disk();
+        for stamp in disk.last_completion.values_mut() {
+            *stamp = due;
+        }
+    }
+
+    fn file_label(storage: &StorageModule, offset: u32) -> eyre::Result<Option<ChunkType>> {
+        Ok(file_intervals(storage)?
+            .get_at_point(PartitionChunkOffset::from(offset))
+            .copied())
+    }
+
+    fn live_label(storage: &StorageModule, offset: u32) -> Option<ChunkType> {
+        storage
+            .intervals
+            .read()
+            .unwrap()
+            .get_at_point(PartitionChunkOffset::from(offset))
+            .copied()
+    }
+
+    /// Period 30. The file still says `Interrupted` when the mismatch is
+    /// noted. The due completion flush must keep `Data`. A clean publish and
+    /// a reopen must keep the placement.
+    #[test]
+    fn crc_hold_survives_the_completion_lag_flush() -> eyre::Result<()> {
+        let (tmp, config, storage) = crc_hold_module("crc_hold_lag", 30)?;
+        storage.pack_with_zeros();
+        let unpacked = index_four_chunks(&storage)?;
+        storage.write_data_chunk(&unpacked[0])?;
+        storage.sync_pending_chunks()?;
+        let offset = PartitionChunkOffset::from(0);
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Interrupted),
+            "lag_file"
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Data), "lag_live");
+
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Uninitialized));
+        assert!(storage.is_data_root_index_ready_at(offset), "index_before");
+
+        make_interval_completion_due(&storage);
+        storage.flush_interval_completions_locked(false)?;
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Data), "due_flush");
+
+        storage.write_intervals_to_submodules()?;
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Data), "shutdown");
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(&crc_hold_info(tmp.path()), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Data),
+            "reopened"
+        );
+        assert!(reopened.is_data_root_index_ready_at(offset), "index_after");
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Period 30. The file has already been completed to `Data`. A write at a
+    /// lower offset, with no live `Data` between them, must not paint the
+    /// hold `Interrupted`. The gap in front of the hold is still marked ahead.
+    #[test]
+    fn write_ahead_keeps_a_crc_hold_at_a_higher_offset() -> eyre::Result<()> {
+        let (tmp, config, storage) = crc_hold_module("crc_hold_ahead", 30)?;
+        storage.pack_with_zeros();
+        let unpacked = index_four_chunks(&storage)?;
+        let held = PartitionChunkOffset::from(2);
+        storage.write_data_chunk(&unpacked[2])?;
+        storage.sync_pending_chunks()?;
+        make_interval_completion_due(&storage);
+        storage.flush_interval_completions_locked(false)?;
+        assert_eq!(
+            file_label(&storage, 2)?,
+            Some(ChunkType::Data),
+            "completed file"
+        );
+
+        storage.note_crc_mismatch(held, ChunkType::Data, "test");
+        assert_eq!(
+            file_label(&storage, 2)?,
+            Some(ChunkType::Data),
+            "after_mismatch"
+        );
+        assert!(storage.is_data_root_index_ready_at(held), "index_before");
+
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0xEE; 32],
+            ChunkType::Entropy,
+        ));
+        storage.sync_pending_chunks()?;
+        assert_eq!(
+            file_label(&storage, 1)?,
+            Some(ChunkType::Interrupted),
+            "the gap in front of the hold is still write-ahead"
+        );
+        assert_eq!(file_label(&storage, 2)?, Some(ChunkType::Data), "neighbor");
+
+        make_interval_completion_due(&storage);
+        storage.flush_interval_completions_locked(false)?;
+        assert_eq!(file_label(&storage, 2)?, Some(ChunkType::Data), "due_flush");
+
+        storage.write_intervals_to_submodules()?;
+        assert_eq!(file_label(&storage, 2)?, Some(ChunkType::Data), "shutdown");
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(&crc_hold_info(tmp.path()), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&held),
+            Some(ChunkType::Data),
+            "reopened"
+        );
+        assert!(reopened.is_data_root_index_ready_at(held), "index_after");
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// The same lag, for an entropy label. The walk does not stop on live
+    /// `Entropy`, so the hold is the only thing that keeps the file label.
+    #[test]
+    fn crc_hold_keeps_an_entropy_label_across_the_completion_flush() -> eyre::Result<()> {
+        let (tmp, config, storage) = crc_hold_module("crc_hold_entropy", 30)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0xAB; 32],
+            ChunkType::Entropy,
+        ));
+        storage.sync_pending_chunks()?;
+        let offset = PartitionChunkOffset::from(1);
+        assert_eq!(live_label(&storage, 1), Some(ChunkType::Entropy));
+        assert_eq!(
+            file_label(&storage, 1)?,
+            Some(ChunkType::Interrupted),
+            "lag_file"
+        );
+
+        storage.note_crc_mismatch(offset, ChunkType::Entropy, "test");
+        make_interval_completion_due(&storage);
+        storage.flush_interval_completions_locked(false)?;
+        assert_eq!(
+            file_label(&storage, 1)?,
+            Some(ChunkType::Entropy),
+            "due_flush"
+        );
+        storage.write_intervals_to_submodules()?;
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(&crc_hold_info(tmp.path()), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Entropy),
+            "reopened"
+        );
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A packed write of the held offset still replaces the label. The hold
+    /// drops only after that pwrite, and the next completion publishes the
+    /// new type. Reset still publishes `Uninitialized` over the same offset.
+    #[test]
+    fn crc_hold_clears_after_the_packed_write_and_reset_still_publishes() -> eyre::Result<()> {
+        let (tmp, config, storage) = crc_hold_module("crc_hold_repack", 30)?;
+        storage.pack_with_zeros();
+        let unpacked = index_four_chunks(&storage)?;
+        storage.write_data_chunk(&unpacked[0])?;
+        storage.sync_pending_chunks()?;
+        make_interval_completion_due(&storage);
+        storage.flush_interval_completions_locked(false)?;
+        let offset = PartitionChunkOffset::from(0);
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Data));
+
+        assert!(storage.write_chunk(offset, vec![0xEE; 32], ChunkType::Entropy,));
+        storage.force_sync_pending_chunks()?;
+        assert!(
+            storage.crc_file_holds.lock().unwrap().is_empty(),
+            "a successful pwrite clears the hold"
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Entropy));
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Entropy),
+            "completion publishes the packed label"
+        );
+
+        storage.reset()?;
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Uninitialized),
+            "reset still publishes Uninitialized"
+        );
+        assert!(storage.crc_file_holds.lock().unwrap().is_empty());
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+        let reopened = StorageModule::new(&crc_hold_info(tmp.path()), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized)
         );
         drop(reopened);
         drop(tmp);
