@@ -116,12 +116,11 @@ fn placement_for<R: SubmoduleRead + ?Sized>(
         .next())
 }
 
-/// One placement per data-root info that falls inside `interval`.
+/// One placement per data-root info whose start falls inside `interval`.
 ///
-/// Schema v2 merges adjacent rows that share a tx-path hash. Two txs with
-/// the same bytes then occupy one interval. The info start inside that
-/// interval is the next tx. A negative start does not split: the tx began
-/// before this partition, and the first segment keeps that info.
+/// Adjacent rows merge only when they share a tx-path hash. A start inside
+/// that span is the next placement. A negative start does not split: the tx
+/// began before this partition, and the first segment keeps that info.
 fn placements_for_interval<R: SubmoduleRead + ?Sized>(
     reader: &R,
     interval: &IntervalRow,

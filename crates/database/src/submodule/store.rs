@@ -1344,8 +1344,8 @@ fn drop_coverage_rows(
         return Ok(());
     }
     let intervals_own_rows = tx.intervals_own_data_root_rows();
-    // One interval pass and one pending pass. A loop here used to open a
-    // cursor per fragment and, on RocksDB, emit one range tombstone per span.
+    // One interval pass and one pending pass. A cursor per fragment, and on
+    // RocksDB one range tombstone per span, rebuilds that tombstone map.
     tx.clear_tx_coverage_in_ranges(&spans)?;
     tx.del_pending_body_migrations_in_ranges(&spans)?;
     if intervals_own_rows {

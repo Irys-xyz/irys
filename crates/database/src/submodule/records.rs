@@ -355,8 +355,6 @@ fn merge_adjacent(mut rows: Vec<PlacementSpan>) -> Vec<PlacementSpan> {
 }
 
 fn diff(existing: &[PlacementSpan], merged: &[PlacementSpan]) -> (Vec<u32>, Vec<PlacementSpan>) {
-    // Keyed by start. `position` + `Vec::remove` copies the tail on every hit,
-    // so one edit of a fragmented window is quadratic.
     let mut old: BTreeMap<u32, &PlacementSpan> =
         existing.iter().map(|row| (row.start, row)).collect();
     let mut put = Vec::new();

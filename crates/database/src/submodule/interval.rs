@@ -146,8 +146,6 @@ fn merge_adjacent(mut rows: Vec<IntervalRow>) -> Vec<IntervalRow> {
 }
 
 fn diff(existing: &[IntervalRow], merged: &[IntervalRow]) -> IntervalEdit {
-    // Keyed by start. `position` + `Vec::remove` copies the tail on every hit,
-    // so one edit of a fragmented submodule is quadratic in the window.
     let mut old: BTreeMap<PartitionChunkOffset, IntervalRow> =
         existing.iter().map(|row| (row.start, *row)).collect();
     let mut put = Vec::new();
