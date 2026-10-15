@@ -1,8 +1,18 @@
 use crate::{ChunkDataPath, H256, H256List, IrysAddress, TxPath, partition::PartitionHash};
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+/// Most tx-path derives that may run at once.
+///
+/// Each derive is its own OS thread plus a consensus read of every tx header
+/// in the block. A slow read must not start another thread for every later
+/// winning chunk.
+const MAX_TX_PATH_DERIVES: usize = 8;
+
+static TX_PATH_DERIVES_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Seed(pub H256);
@@ -147,30 +157,49 @@ impl TxPathError {
 
 impl TxPathJob {
     /// Run `work` on its own thread. The result stays in the job.
+    ///
+    /// Does not take a derive slot. Tests use this. Mining uses [`Self::try_spawn`].
     pub fn spawn<F>(work: F) -> Self
     where
         F: FnOnce() -> eyre::Result<TxPath> + Send + 'static,
     {
-        let slot = Arc::new(TxPathSlot {
-            state: Mutex::new(TxPathState::Pending),
-            ready: Condvar::new(),
-        });
+        let slot = new_slot();
+        start_worker(Arc::clone(&slot), work);
+        Self { slot }
+    }
+
+    /// [`Self::spawn`] when fewer than [`MAX_TX_PATH_DERIVES`] jobs are running.
+    ///
+    /// `None` means this winner must not start another thread. The caller
+    /// skips the chunk. The in-flight jobs keep their slots until they finish.
+    pub fn try_spawn<F>(work: F) -> Option<Self>
+    where
+        F: FnOnce() -> eyre::Result<TxPath> + Send + 'static,
+    {
+        Self::try_spawn_limited(work, &TX_PATH_DERIVES_IN_FLIGHT, MAX_TX_PATH_DERIVES)
+    }
+
+    fn try_spawn_limited<F>(work: F, counter: &'static AtomicUsize, limit: usize) -> Option<Self>
+    where
+        F: FnOnce() -> eyre::Result<TxPath> + Send + 'static,
+    {
+        let permit = try_permit(counter, limit)?;
+        let slot = new_slot();
         let worker = Arc::clone(&slot);
         let started = std::thread::Builder::new()
             .name("tx-path-derive".to_owned())
             .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
-                let done = match result {
-                    Ok(Ok(path)) => Ok(path),
-                    Ok(Err(error)) => Err(error.to_string()),
-                    Err(_) => Err("tx path derive panicked".to_owned()),
-                };
-                finish_job(&worker, done);
+                let result = run_derive(work);
+                // Free the slot before waiters observe the result. A waiter
+                // that starts the next derive must not see this job as still
+                // in flight.
+                drop(permit);
+                finish_job(&worker, result);
             });
         if let Err(error) = started {
             finish_job(&slot, Err(error.to_string()));
         }
-        Self { slot }
+        Some(Self { slot })
     }
 
     /// The finished path, or `None` while the job is still running.
@@ -215,6 +244,69 @@ impl TxPathJob {
                     }
                 }
             }
+        }
+    }
+}
+
+fn new_slot() -> Arc<TxPathSlot> {
+    Arc::new(TxPathSlot {
+        state: Mutex::new(TxPathState::Pending),
+        ready: Condvar::new(),
+    })
+}
+
+fn start_worker<F>(slot: Arc<TxPathSlot>, work: F)
+where
+    F: FnOnce() -> eyre::Result<TxPath> + Send + 'static,
+{
+    let worker = Arc::clone(&slot);
+    let started = std::thread::Builder::new()
+        .name("tx-path-derive".to_owned())
+        .spawn(move || {
+            finish_job(&worker, run_derive(work));
+        });
+    if let Err(error) = started {
+        finish_job(&slot, Err(error.to_string()));
+    }
+}
+
+fn run_derive<F>(work: F) -> Result<TxPath, String>
+where
+    F: FnOnce() -> eyre::Result<TxPath>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(path)) => Ok(path),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("tx path derive panicked".to_owned()),
+    }
+}
+
+struct DerivePermit {
+    counter: &'static AtomicUsize,
+}
+
+impl Drop for DerivePermit {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn try_permit(counter: &'static AtomicUsize, limit: usize) -> Option<DerivePermit> {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current >= limit {
+            return None;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                return Some(DerivePermit { counter });
+            }
+            Err(observed) => current = observed,
         }
     }
 }
@@ -318,6 +410,48 @@ mod tests {
             "failed"
         );
         assert_eq!(TxPathError::TimedOut.metric_reason(), "timeout");
+    }
+
+    #[test]
+    fn try_spawn_refuses_work_past_the_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let mut jobs = Vec::new();
+        for _ in 0..2 {
+            let release = Arc::clone(&gate);
+            let job = TxPathJob::try_spawn_limited(
+                move || {
+                    let (lock, ready) = &*release;
+                    let mut open = lock.lock().expect("gate");
+                    while !*open {
+                        open = ready.wait(open).expect("gate wait");
+                    }
+                    Ok(vec![1])
+                },
+                &IN_FLIGHT,
+                2,
+            )
+            .expect("a free derive slot");
+            jobs.push(job);
+        }
+        assert!(
+            TxPathJob::try_spawn_limited(|| Ok(vec![2]), &IN_FLIGHT, 2).is_none(),
+            "the third derive must not start a thread"
+        );
+        assert_eq!(IN_FLIGHT.load(Ordering::Relaxed), 2);
+        {
+            let (lock, ready) = &*gate;
+            *lock.lock().expect("gate") = true;
+            ready.notify_all();
+        }
+        for job in jobs {
+            assert_eq!(job.wait(Duration::from_secs(2)).expect("released"), vec![1]);
+        }
+        let next = TxPathJob::try_spawn_limited(|| Ok(vec![3]), &IN_FLIGHT, 2)
+            .expect("a slot frees when a job finishes");
+        assert_eq!(next.wait(Duration::from_secs(2)).expect("next"), vec![3]);
+        assert_eq!(IN_FLIGHT.load(Ordering::Relaxed), 0);
     }
 
     #[test]

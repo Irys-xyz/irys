@@ -558,23 +558,15 @@ impl PartitionMiningServiceInner {
         let tx_path = if let Some(stored) = stored_tx_path {
             TxPathSource::Stored(Some(stored))
         } else {
-            match self.spawn_tx_path_derive(offset, &data_path) {
-                Some(job) => TxPathSource::Derive(job),
-                None => {
-                    warn!(
-                        storage_module.id = self.storage_module.id,
-                        chunk_offset = offset.0,
-                        "winning data chunk has no stored tx path and tx path derive is unavailable"
-                    );
-                    return None;
-                }
-            }
+            let job = self.spawn_tx_path_derive(offset, &data_path)?;
+            TxPathSource::Derive(job)
         };
         Some((tx_path, data_path))
     }
 
     /// Start a derive for `offset`. `None` when this miner has no consensus
-    /// database, the partition has no ledger slot, or the submodule is missing.
+    /// database, the partition has no ledger slot, the submodule is missing,
+    /// or [`TxPathJob::try_spawn`] already has its threads running.
     ///
     /// The job checks the derived root against `data_path` and, on RocksDB v1,
     /// against the stored placement. A mismatch fails the job.
@@ -583,13 +575,34 @@ impl PartitionMiningServiceInner {
         offset: PartitionChunkOffset,
         data_path: &[u8],
     ) -> Option<TxPathJob> {
-        let (ledger, ledger_offset) = self.assigned_ledger_offset(offset)?;
-        let db = self.tx_path_db.clone()?;
+        let Some((ledger, ledger_offset)) = self.assigned_ledger_offset(offset) else {
+            warn!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "winning data chunk has no stored tx path and the partition has no ledger slot"
+            );
+            return None;
+        };
+        let Some(db) = self.tx_path_db.clone() else {
+            warn!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "winning data chunk has no stored tx path and tx path derive has no consensus database"
+            );
+            return None;
+        };
         let pool = self.tx_path_pool.clone();
         let chunk_size = self.config.consensus.chunk_size;
         let data_path = data_path.to_vec();
-        let placement = self.placement_for_derive(offset)?;
-        Some(TxPathJob::spawn(move || {
+        let Some(placement) = self.placement_for_derive(offset) else {
+            warn!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "winning data chunk has no stored tx path and the submodule is missing"
+            );
+            return None;
+        };
+        let Some(job) = TxPathJob::try_spawn(move || {
             let derived = irys_database::tx_path_derive::derive_tx_path_at_offset_with(
                 db.0.as_ref(),
                 ledger,
@@ -610,7 +623,15 @@ impl PartitionMiningServiceInner {
                 placement,
             )?;
             Ok(derived.proof.proof)
-        }))
+        }) else {
+            debug!(
+                storage_module.id = self.storage_module.id,
+                chunk_offset = offset.0,
+                "tx path derive is busy; this chunk is not submitted"
+            );
+            return None;
+        };
+        Some(job)
     }
 
     /// MDBX skips the placement check. RocksDB v1 requires the stored row.
@@ -1793,5 +1814,79 @@ mod tests {
         slot.tx_ids = H256List(txs.iter().map(|header| header.id).collect());
         slot.tx_root = root;
         slot.total_chunks = total;
+    }
+
+    /// `first_data_offset` calls `get_intervals` once at startup. That walk
+    /// visits every fragment. Non-adjacent intervals do not merge, so a crash
+    /// can leave one interval per chunk. A quadratic scan of 100k fragments
+    /// does not finish inside this bound.
+    #[test]
+    fn get_intervals_over_100k_fragments_stays_within_ten_seconds() {
+        const CHUNKS: u32 = 100_000;
+        let setup_started = std::time::Instant::now();
+        let tmp_dir = TempDirBuilder::new().prefix("fragmented_intervals").build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: u64::from(CHUNKS),
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: H256::repeat_byte(0x44),
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, CHUNKS),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage = StorageModule::new(&info, &config).expect("storage module");
+        {
+            let mut intervals = storage.intervals().write().expect("intervals");
+            for offset in 0..CHUNKS {
+                let kind = if offset % 2 == 0 {
+                    ChunkType::Uninitialized
+                } else {
+                    ChunkType::Entropy
+                };
+                StorageModule::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    PartitionChunkOffset::from(offset),
+                    kind,
+                );
+            }
+        }
+        let setup = setup_started.elapsed();
+        let entropy_started = std::time::Instant::now();
+        let entropy = storage.get_intervals(ChunkType::Entropy);
+        let entropy_elapsed = entropy_started.elapsed();
+        let uninit_started = std::time::Instant::now();
+        let uninit = storage.get_intervals(ChunkType::Uninitialized);
+        let uninit_elapsed = uninit_started.elapsed();
+        let data_started = std::time::Instant::now();
+        let data = storage.get_intervals(ChunkType::Data);
+        let data_elapsed = data_started.elapsed();
+        eprintln!(
+            "fragmented intervals: chunks={CHUNKS} setup={setup:?} entropy={} in {entropy_elapsed:?} uninit={} in {uninit_elapsed:?} data={} in {data_elapsed:?}",
+            entropy.len(),
+            uninit.len(),
+            data.len(),
+        );
+        assert_eq!(entropy.len(), usize::try_from(CHUNKS / 2).expect("half"));
+        assert_eq!(uninit.len(), usize::try_from(CHUNKS / 2).expect("half"));
+        assert!(data.is_empty());
+        let budget = std::time::Duration::from_secs(10);
+        assert!(
+            entropy_elapsed < budget && uninit_elapsed < budget && data_elapsed < budget,
+            "get_intervals over {CHUNKS} fragments exceeded {budget:?}: entropy={entropy_elapsed:?} uninit={uninit_elapsed:?} data={data_elapsed:?}"
+        );
     }
 }
