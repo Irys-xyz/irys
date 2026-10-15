@@ -354,11 +354,33 @@ fn merge_adjacent(mut rows: Vec<PlacementSpan>) -> Vec<PlacementSpan> {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    static DIFF_MERGED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_diff_merged_rows() {
+    DIFF_MERGED_ROWS.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn diff_merged_rows() -> usize {
+    DIFF_MERGED_ROWS.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+fn note_diff_merged_row() {
+    DIFF_MERGED_ROWS.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
 fn diff(existing: &[PlacementSpan], merged: &[PlacementSpan]) -> (Vec<u32>, Vec<PlacementSpan>) {
     let mut old: BTreeMap<u32, &PlacementSpan> =
         existing.iter().map(|row| (row.start, row)).collect();
     let mut put = Vec::new();
     for row in merged {
+        #[cfg(test)]
+        note_diff_merged_row();
         match old.remove(&row.start) {
             Some(previous) if previous.value == row.value => {}
             Some(_) | None => put.push(*row),
@@ -477,11 +499,23 @@ mod tests {
                 value: placed(i * 2, (i % 200) as u8, 32),
             })
             .collect();
-        let started = std::time::Instant::now();
+        // A full wipe deletes every row, so this call does not walk the merge.
         let (delete, put) = plan_placement(&existing, 0, n * 2, None);
-        let elapsed = started.elapsed();
         assert_eq!(delete.len(), n as usize);
         assert!(put.is_empty());
+
+        // The span sits past every point row. The merge keeps one row per
+        // fragment, and each row matches the start already stored.
+        // One step per merged row. A scan of every stored row for each
+        // merged row counts n * n steps.
+        let outside = n * 2 + 10;
+        reset_diff_merged_rows();
+        let started = std::time::Instant::now();
+        let (delete, put) = plan_placement(&existing, outside, outside, None);
+        let elapsed = started.elapsed();
+        assert!(delete.is_empty());
+        assert!(put.is_empty());
+        assert_eq!(diff_merged_rows(), n as usize);
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "placement diff of {n} fragments took {elapsed:?}"

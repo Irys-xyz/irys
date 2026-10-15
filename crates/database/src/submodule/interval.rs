@@ -145,11 +145,33 @@ fn merge_adjacent(mut rows: Vec<IntervalRow>) -> Vec<IntervalRow> {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    static DIFF_MERGED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_diff_merged_rows() {
+    DIFF_MERGED_ROWS.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn diff_merged_rows() -> usize {
+    DIFF_MERGED_ROWS.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+fn note_diff_merged_row() {
+    DIFF_MERGED_ROWS.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
 fn diff(existing: &[IntervalRow], merged: &[IntervalRow]) -> IntervalEdit {
     let mut old: BTreeMap<PartitionChunkOffset, IntervalRow> =
         existing.iter().map(|row| (row.start, *row)).collect();
     let mut put = Vec::new();
     for row in merged {
+        #[cfg(test)]
+        note_diff_merged_row();
         match old.remove(&row.start) {
             Some(previous)
                 if previous.end == row.end && previous.tx_path_hash == row.tx_path_hash => {}
@@ -506,11 +528,23 @@ mod tests {
         let n = 20_000_u32;
         let existing: Vec<_> = (0..n).map(|i| row(i * 2, i * 2, (i % 200) as u8)).collect();
         let spans: Vec<_> = (0..n).map(|i| (at(i * 2), at(i * 2))).collect();
-        let started = Instant::now();
+        // A full wipe deletes every row, so this call does not walk the merge.
         let edit = clear_coverage(&existing, &spans);
-        let elapsed = started.elapsed();
         assert_eq!(edit.delete.len(), n as usize);
         assert!(edit.put.is_empty());
+
+        // The span sits past every point row. The merge keeps one row per
+        // fragment, and each row matches the start already stored.
+        // One step per merged row. A scan of every stored row for each
+        // merged row counts n * n steps.
+        let outside = n * 2 + 10;
+        reset_diff_merged_rows();
+        let started = Instant::now();
+        let edit = clear_coverage(&existing, &[(at(outside), at(outside))]);
+        let elapsed = started.elapsed();
+        assert!(edit.delete.is_empty());
+        assert!(edit.put.is_empty());
+        assert_eq!(diff_merged_rows(), n as usize);
         assert!(
             elapsed < Duration::from_secs(2),
             "clear of {n} fragments took {elapsed:?}"
