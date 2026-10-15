@@ -833,6 +833,10 @@ pub struct StorageModule {
     /// Settled offsets whose bytes failed the crc check. The storage-module
     /// service drains this into the existing packing queue.
     crc_repairs: Mutex<BTreeSet<PartitionChunkOffset>>,
+    /// CRC offsets whose live label is `Uninitialized` but whose file label
+    /// must stay until a packed write replaces the offset. A rewrite that
+    /// copies the live label makes the next open drop the placement.
+    crc_file_holds: Mutex<BTreeSet<PartitionChunkOffset>>,
     /// Recall mismatches not yet checked under `sync_in_progress`. The
     /// mining thread must not take that lock: it still holds the recall,
     /// and a durable point waits on the recall while holding the lock.
@@ -2081,6 +2085,7 @@ impl StorageModule {
             #[cfg(test)]
             recall_io: RecallIoAtoms::new(),
             crc_repairs: Mutex::new(BTreeSet::new()),
+            crc_file_holds: Mutex::new(BTreeSet::new()),
             crc_suspects: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
             #[cfg(test)]
@@ -3060,6 +3065,12 @@ impl StorageModule {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        // The file publish below is the new label. Do not restore the one
+        // these holds were keeping.
+        self.crc_file_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.fail_queued_sweeps();
         // A body write can occupy after the clear above and before the
         // interval map flips. The test freezes that window here.
@@ -4012,6 +4023,8 @@ impl StorageModule {
             .clone();
         let chunk = self.config.consensus.chunk_size.max(1);
         let budget = INTERVAL_WRITE_AHEAD_BYTES / chunk;
+        // Clone before `interval_disk`. The two mutexes are not nested.
+        let holds = self.crc_file_hold_offsets();
         let mut disk = self.lock_interval_disk();
         if !self.interval_snapshot_current(snapshot_epoch) {
             return Ok(());
@@ -4028,7 +4041,8 @@ impl StorageModule {
             let submodule = *self.get_submodule_for_offset(run.start)?.0;
             Self::extend_write_ahead(&mut mask, &memory, run, submodule, budget);
         }
-        let projection = Self::project_interval_file(&memory, &mask)?;
+        let mut projection = Self::project_interval_file(&memory, &mask)?;
+        Self::overlay_held_file_labels(&mut projection, &disk.written, &holds);
         let needs_write = self.projection_differs(&disk.written, &projection, touched);
         if !needs_write {
             // The file already has these Interrupted labels. Remember them so
@@ -4111,6 +4125,8 @@ impl StorageModule {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        // Clone before `interval_disk`. The two mutexes are not nested.
+        let holds = self.crc_file_hold_offsets();
         let disk = self.lock_interval_disk();
         if !self.interval_snapshot_current(snapshot_epoch) {
             return Ok(());
@@ -4120,7 +4136,8 @@ impl StorageModule {
         if touched.is_empty() {
             return Ok(());
         }
-        let projection = Self::project_interval_file(&memory, &disk.mask)?;
+        let mut projection = Self::project_interval_file(&memory, &disk.mask)?;
+        Self::overlay_held_file_labels(&mut projection, &disk.written, &holds);
         drop(disk);
         self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)
     }
@@ -4175,6 +4192,11 @@ impl StorageModule {
             .clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
+        // `reset` passes `force_replace` and has cleared the holds. Restoring
+        // here would put the previous label over the `Uninitialized` publish.
+        if !force_replace {
+            self.restore_crc_file_labels(&mut memory);
+        }
         // The map copy is done. The file lock is later, inside
         // `write_interval_image`. A test can `reset` in this gap. The pause
         // disarms before it waits, so this call from `reset` does not stop.
@@ -4222,7 +4244,65 @@ impl StorageModule {
             }
         }
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
+        self.restore_crc_file_labels(&mut memory);
         self.write_interval_image(&memory, only, snapshot_epoch, false)
+    }
+
+    /// Offsets whose file label a CRC mismatch is still holding.
+    ///
+    /// The guard is dropped before the caller takes `interval_disk`.
+    fn crc_file_hold_offsets(&self) -> BTreeSet<PartitionChunkOffset> {
+        self.crc_file_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn clear_crc_file_holds(&self, offsets: &[PartitionChunkOffset]) {
+        if offsets.is_empty() {
+            return;
+        }
+        let mut holds = self
+            .crc_file_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for offset in offsets {
+            holds.remove(offset);
+        }
+    }
+
+    /// Put the previous `Data` or `Entropy` file label back over a live
+    /// `Uninitialized` point that a CRC mismatch is holding. `Interrupted`
+    /// and `Uninitialized` in the file are left as they are.
+    fn restore_crc_file_labels(&self, image: &mut StorageIntervals) {
+        let holds = self.crc_file_hold_offsets();
+        if holds.is_empty() {
+            return;
+        }
+        let disk = self.lock_interval_disk();
+        Self::overlay_held_file_labels(image, &disk.written, &holds);
+    }
+
+    fn overlay_held_file_labels(
+        image: &mut StorageIntervals,
+        written: &StorageIntervals,
+        holds: &BTreeSet<PartitionChunkOffset>,
+    ) {
+        if holds.is_empty() {
+            return;
+        }
+        for offset in holds {
+            if image.get_at_point(*offset).copied() != Some(ChunkType::Uninitialized) {
+                continue;
+            }
+            let Some(label) = written.get_at_point(*offset).copied() else {
+                continue;
+            };
+            if !matches!(label, ChunkType::Data | ChunkType::Entropy) {
+                continue;
+            }
+            Self::cut_then_insert_interval_if_touching(image, *offset, label);
+        }
     }
 
     /// `pending.chunks` and `pending.written_ahead`. Caller released
@@ -5482,11 +5562,10 @@ impl StorageModule {
     /// Mark one offset untrustworthy and hand it to the packing queue.
     ///
     /// The live map becomes `Uninitialized`, so a later read does not serve
-    /// the bytes. The interval file is not rewritten here: an authoritative
-    /// rewrite would drop the write-ahead mask. Packing's own write stores
-    /// the new label. A crash before that reloads the old label and the next
-    /// read queues the offset again. The offset index is left in place so
-    /// data sync can refill the body after entropy is packed.
+    /// the bytes. Projections keep the previous file label until a packed
+    /// write replaces that offset. A crash reloads that label and the next
+    /// read queues the repair again. The index stays so data sync can refill
+    /// after packing.
     fn note_crc_mismatch(
         &self,
         offset: PartitionChunkOffset,
@@ -5504,6 +5583,10 @@ impl StorageModule {
             );
         }
         self.crc_repairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(offset);
+        self.crc_file_holds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(offset);
@@ -7792,6 +7875,11 @@ impl StorageModule {
                 return Err(e);
             }
         }
+
+        // The bytes landed. The next interval rewrite stores this run's
+        // label. A failed write leaves the hold, so the file keeps the
+        // previous label.
+        self.clear_crc_file_holds(&run.offsets);
 
         let completion_time = Instant::now();
         self.stamp_pwrite(run, completion_time);
@@ -15967,7 +16055,11 @@ mod tests {
         assert!(row.proof.is_some() && row.crc.is_none());
 
         let stable = storage.generate_full_chunks(offset, offset)?;
-        assert_eq!(stable.len(), 1, "a stable proof-only row must still be served");
+        assert_eq!(
+            stable.len(),
+            1,
+            "a stable proof-only row must still be served"
+        );
         assert_ne!(stable[&offset].bytes.0, vec![0xEE_u8; 32]);
 
         storage.pause_next_sync_at(SyncPausePoint::AfterPresenceCopy);
@@ -16114,6 +16206,84 @@ mod tests {
             Ok(())
         });
         outcome?;
+        Ok(())
+    }
+
+    /// A settled CRC mismatch marks the live map `Uninitialized` and leaves
+    /// the file and the index alone. The next interval rewrite must keep
+    /// that file label. Publishing `Uninitialized` makes the next open drop
+    /// the placement.
+    #[test]
+    fn crc_mismatch_rewrite_keeps_the_data_label_and_the_placement() -> eyre::Result<()> {
+        let (tmp, storage) = readahead_module("crc_file_hold", 0, 0)?;
+        storage.pack_with_zeros();
+        let unpacked = index_four_chunks(&storage)?;
+        storage.write_data_chunk(&unpacked[0])?;
+        storage.sync_pending_chunks()?;
+        let offset = PartitionChunkOffset::from(0);
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(offset).copied(),
+            Some(ChunkType::Data)
+        );
+        assert!(storage.is_data_root_index_ready_at(offset));
+
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+        assert_eq!(
+            storage
+                .intervals
+                .read()
+                .unwrap()
+                .get_at_point(offset)
+                .copied(),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(offset).copied(),
+            Some(ChunkType::Data),
+            "the mismatch itself must not rewrite the file"
+        );
+        assert!(storage.is_data_root_index_ready_at(offset));
+
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0xEE; 32],
+            ChunkType::Entropy,
+        ));
+        storage.sync_pending_chunks()?;
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(offset).copied(),
+            Some(ChunkType::Data),
+            "a later interval rewrite published Uninitialized for a CRC mismatch"
+        );
+
+        let config = storage.config.clone();
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::repeat_byte(0x11),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 3), tmp.path().join("hdd0"))],
+            },
+            &config,
+        )?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Data),
+            "open loaded Uninitialized for a CRC mismatch"
+        );
+        assert!(
+            reopened.is_data_root_index_ready_at(offset),
+            "open dropped the placement under a published CRC Uninitialized label"
+        );
+        drop(reopened);
+        drop(tmp);
         Ok(())
     }
 }
