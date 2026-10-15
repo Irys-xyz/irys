@@ -2712,6 +2712,11 @@ fn copy_mdbx_v1_into_rocks(
                         orphans = orphans.saturating_add(1);
                     }
                 } else if let Some(hash) = hashes.data_path_hash {
+                    // The range copy reads this run once `rescan` is set.
+                    // Another read here is discarded.
+                    if rescan {
+                        continue;
+                    }
                     let path = read_v1_data_path(env, *offset, hash)?;
                     attach_v1_path(
                         limits,
@@ -2982,11 +2987,34 @@ fn read_v1_hash_batch(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static V1_DATA_PATH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn reset_v1_data_path_reads() {
+    #[cfg(test)]
+    V1_DATA_PATH_READS.with(|cell| cell.set(0));
+}
+
+fn v1_data_path_reads() -> usize {
+    #[cfg(test)]
+    {
+        V1_DATA_PATH_READS.with(|cell| cell.get())
+    }
+    #[cfg(not(test))]
+    {
+        0
+    }
+}
+
 fn read_v1_data_path(
     env: &DatabaseEnv,
     offset: PartitionChunkOffset,
     hash: H256,
 ) -> eyre::Result<ChunkDataPath> {
+    #[cfg(test)]
+    V1_DATA_PATH_READS.with(|cell| cell.set(cell.get().saturating_add(1)));
     env.view_eyre(|tx| match tx.get::<ChunkDataPathByPathHash>(hash) {
         Ok(Some(path)) => Ok(path),
         Ok(None) => eyre::bail!(
@@ -3857,8 +3885,8 @@ mod tests {
         SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
     };
     use super::{
-        ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, verify_mdbx_and_rocks,
-        verify_rocks_records,
+        ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, reset_v1_data_path_reads,
+        v1_data_path_reads, verify_mdbx_and_rocks, verify_rocks_records,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -5134,6 +5162,134 @@ mod tests {
         let text = format!("{err:#}");
         assert!(text.contains("derives a different data root"), "{text}");
         assert!(!rocks.join("SCHEMA").exists());
+        Ok(())
+    }
+
+    /// One v1 tx covers every chunk. Adjacent offsets share its tx-path hash,
+    /// so the copy keeps one run. Each data path is 16 distinct bytes.
+    fn write_v1_one_tx_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
+        use crate::submodule::tables::v1_fixture::master;
+        use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
+        use reth_db::Database as _;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let consensus = root.join("consensus");
+        fs::create_dir_all(&consensus)?;
+        let txs = [tx_at(1, n.saturating_mul(32))];
+        let blocks = [block_with(0, &[], 0), block_with(1, &txs, n)];
+        let db = open_or_create_db(&consensus, IrysTables::ALL, testing_args()?)?;
+        db.update_eyre(|tx| {
+            insert_tx_header(tx, &txs[0])?;
+            for block in &blocks {
+                insert_block_header(tx, block)?;
+                insert_block_index_items_for_block(tx, block)?;
+            }
+            crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+            Ok(())
+        })?;
+        drop(db);
+
+        let opened = open_consensus(&consensus)?;
+        let mut cache = TxPathBlockCache::new();
+        let mdbx = root.join("db");
+        let index = open_or_create_db(&mdbx, master::MasterV1Tables::ALL, testing_args()?)?;
+        {
+            let tx = index.tx_mut()?;
+            let mut data_root = None;
+            for offset in 0..n {
+                let derived = derive_tx_path_at_offset_cached(
+                    &opened,
+                    &mut cache,
+                    DataLedger::Publish,
+                    offset,
+                    32,
+                )?;
+                let proof = derived.proof.proof;
+                let path_hash = tx_path_hash(&proof);
+                let data = v1_path_bytes(offset);
+                let data_hash = H256::from(hash_sha256(&data));
+                let key = PartitionChunkOffset(offset as u32);
+                tx.put::<master::ChunkPathHashesByOffset>(
+                    key,
+                    ChunkPathHashes {
+                        data_path_hash: Some(data_hash),
+                        tx_path_hash: Some(path_hash),
+                    },
+                )?;
+                tx.put::<master::ChunkDataPathByPathHash>(data_hash, data)?;
+                tx.put::<master::TxPathByTxPathHash>(path_hash, proof)?;
+                data_root = Some(derived.data_root);
+            }
+            let root = data_root.ok_or_else(|| eyre::eyre!("no v1 chunks"))?;
+            tx.put::<master::DataRootInfosByDataRoot>(
+                root,
+                DataRootInfos(vec![DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: n.saturating_mul(32),
+                }]),
+            )?;
+            tx.commit()?;
+        }
+        drop(index);
+        drop(opened);
+        Ok(consensus)
+    }
+
+    fn v1_path_bytes(offset: u64) -> Vec<u8> {
+        let mut data = vec![0_u8; 16];
+        data[0] = u8::try_from(offset).unwrap_or(u8::MAX);
+        data[15] = 0x5a;
+        data
+    }
+
+    /// A path batch smaller than one data path still copies the run. Offsets
+    /// after the cap is crossed are not read until the range copy. A batch
+    /// that can hold the paths reads each one once.
+    #[test]
+    fn v1_oversized_path_batch_does_not_reread_the_rest_of_the_run() -> eyre::Result<()> {
+        const N: u64 = 5;
+        let root = temp("convert-v1-path-cap");
+        let consensus = write_v1_one_tx_partition(root.path(), N)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        options.batch_rows = 8;
+        options.batch_value_bytes = 8;
+        options.dry_run = true;
+
+        reset_v1_data_path_reads();
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.intervals, 1, "{stats}");
+        assert_eq!(stats.data_paths, N, "{stats}");
+        assert_eq!(stats.path_hashes, N, "{stats}");
+        assert_eq!(stats.skipped_frontier, 0, "{stats}");
+        // First path is kept. The next path crosses the cap and is dropped.
+        // The other three wait for the range copy, which reads all five.
+        assert_eq!(v1_data_path_reads(), 7);
+
+        options.batch_value_bytes = 8 * 1024 * 1024;
+        options.dry_run = false;
+        reset_v1_data_path_reads();
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(
+            v1_data_path_reads(),
+            usize::try_from(N).unwrap_or(usize::MAX)
+        );
+        assert_eq!(stats.intervals, 1, "{stats}");
+        assert_eq!(stats.data_paths, N, "{stats}");
+        assert_eq!(stats.skipped_frontier, 0, "{stats}");
+        let opened = RocksSubmoduleStore::open(&rocks)?;
+        opened.view(|tx| {
+            assert_eq!(
+                tx.get_data_path_by_offset(PartitionChunkOffset(4))?,
+                Some(v1_path_bytes(4))
+            );
+            assert!(tx.placement_at(PartitionChunkOffset(0))?.is_some());
+            assert!(tx.placement_at(PartitionChunkOffset(4))?.is_some());
+            Ok(())
+        })?;
         Ok(())
     }
 
