@@ -170,6 +170,9 @@ fn write_error_label(error: &WriteDataChunkError) -> &'static str {
     }
 }
 
+/// Minimum gap between entropy-interval scans for an orchestrator without peers.
+const ENTROPY_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Orchestrates efficient chunk downloading for a StorageModule's assigned data partition.
 ///
 /// Key responsibilities:
@@ -191,7 +194,8 @@ pub struct ChunkOrchestrator {
     /// Entropy intervals seen on the previous discovery pass, `(start, end)`.
     /// A new interval while [`Self::current_peers`] is empty means this module
     /// had no peer managers when assignments were last synchronized.
-    seen_entropy_intervals: Vec<(u32, u32)>,
+    seen_entropy_intervals: HashSet<(u32, u32)>,
+    last_entropy_peer_check: Option<Instant>,
     pub current_peers: Vec<IrysAddress>,
     block_tree: BlockTreeReadGuard,
     pub storage_module: Arc<StorageModule>,
@@ -255,7 +259,8 @@ impl ChunkOrchestrator {
             } else {
                 0
             },
-            seen_entropy_intervals: Vec::new(),
+            seen_entropy_intervals: HashSet::new(),
+            last_entropy_peer_check: None,
             recent_chunk_times: CircularBuffer::new(8000),
             current_peers: Default::default(),
             block_tree,
@@ -289,7 +294,22 @@ impl ChunkOrchestrator {
     /// pass and the orchestrator still has no peers. The caller syncs partition
     /// assignments for that module. The epoch refresh stays in place.
     pub(crate) fn note_new_entropy_without_peers(&mut self) -> bool {
-        let next: Vec<(u32, u32)> = self
+        // Runs every tick. A fragmented module holds hundreds of thousands of
+        // entropy intervals, so scan only when the answer can matter (no
+        // peers) and at most once per ENTROPY_PEER_CHECK_INTERVAL.
+        if !self.current_peers.is_empty() {
+            self.seen_entropy_intervals.clear();
+            return false;
+        }
+        let now = Instant::now();
+        if self
+            .last_entropy_peer_check
+            .is_some_and(|last| now.duration_since(last) < ENTROPY_PEER_CHECK_INTERVAL)
+        {
+            return false;
+        }
+        self.last_entropy_peer_check = Some(now);
+        let next: HashSet<(u32, u32)> = self
             .storage_module
             .get_intervals(ChunkType::Entropy)
             .iter()
@@ -298,9 +318,13 @@ impl ChunkOrchestrator {
         let has_new = next
             .iter()
             .any(|interval| !self.seen_entropy_intervals.contains(interval));
-        let needs_sync = has_new && !next.is_empty() && self.current_peers.is_empty();
         self.seen_entropy_intervals = next;
-        needs_sync
+        has_new
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entropy_peer_checked(&self) -> bool {
+        self.last_entropy_peer_check.is_some()
     }
 
     /// Refresh local scheduler state. Dispatch is driven separately by

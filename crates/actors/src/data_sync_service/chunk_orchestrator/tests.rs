@@ -1982,3 +1982,41 @@ fn count_state(orch: &ChunkOrchestrator, state: &ChunkRequestState) -> usize {
         .filter(|request| &request.request_state == state)
         .count()
 }
+
+/// A module with peers never scans its entropy intervals: on a fragmented
+/// module that scan dominated every 250 ms tick.
+#[test_log::test(tokio::test)]
+async fn entropy_peer_check_skips_the_scan_when_peers_exist() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+    add_assigned_peer(&mut orch, &config, 7, 19107);
+
+    assert!(!orch.note_new_entropy_without_peers());
+    assert!(
+        !orch.entropy_peer_checked(),
+        "an orchestrator with peers must not scan entropy intervals"
+    );
+}
+
+/// Without peers, the first check sees the packed interval as new and a
+/// repeat inside the interval does not scan again.
+#[test_log::test(tokio::test)]
+async fn entropy_peer_check_without_peers_is_throttled() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+
+    assert!(
+        orch.note_new_entropy_without_peers(),
+        "packed entropy is new"
+    );
+    assert!(
+        !orch.note_new_entropy_without_peers(),
+        "a second check inside the throttle window does not resync"
+    );
+}
