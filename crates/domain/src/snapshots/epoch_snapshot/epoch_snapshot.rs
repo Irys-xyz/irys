@@ -144,9 +144,9 @@ impl EpochSnapshot {
             }
         }
 
-        // While we don't return these module infos, we call this method for validating of the storage modules.
-        // `new` has no `Result`. A corrupt packing file still aborts here.
-        // Startup uses `replay_epoch_data` and the chain caller, which return the error.
+        // `new` returns `Self`. A corrupt packing file aborts here.
+        // `BlockTree::restore_from_db` calls `new` before `replay_epoch_data`
+        // and expects that replay, so process start does not return this error.
         let _storage_module_info = new_self
             .map_storage_modules_to_partition_assignments()
             .expect("packing params to load");
