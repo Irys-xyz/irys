@@ -13,7 +13,8 @@
 # Guards, all of them refuse the run:
 #   pm2 is installed and the app "Irys Node" is online, or its jlist cannot be read
 #   a missing pm2 binary is allowed
-#   the mount has less than MIN_FREE_GIB free (default 500), counted in bytes
+#   the loadtest disk has less than MIN_FREE_GIB free (default 500), counted in bytes
+#   --mount is not the mount that holds the loadtest directory
 #   loadtest, the recall file, or the write file has no `loadtest` path component
 #   on the given path, or on the deepest existing ancestor plus the missing tail
 #   --device is not the disk that holds the loadtest directory
@@ -228,6 +229,21 @@ require_mount_device() {
     fi
 }
 
+mount_target() {
+    local path=$1
+    local target
+    if command -v findmnt >/dev/null 2>&1; then
+        target=$(findmnt -n -o TARGET -T "$path" || true)
+    else
+        target=$(df -P "$path" | awk 'NR==2 { print $6 }')
+    fi
+    if [ -z "${target:-}" ]; then
+        echo "no mount for $path" >&2
+        exit 1
+    fi
+    readlink -f "$target"
+}
+
 require_loadtest "loadtest" "$loadtest"
 require_loadtest "recall-file" "$recall_file"
 require_loadtest "write-file" "$write_file"
@@ -266,15 +282,6 @@ sys.exit(0 if online else 1)
     fi
 fi
 
-# df -B1G rounds to the nearest GiB, so a volume just under the floor can pass.
-avail_bytes=$(df -B1 --output=avail "$mount" | tail -n 1)
-avail_bytes=${avail_bytes//[[:space:]]/}
-min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
-if [ "$avail_bytes" -lt "$min_free_bytes" ]; then
-    echo "$mount has ${avail_bytes} bytes free, below ${min_free_gib} GiB; refusing" >&2
-    exit 1
-fi
-
 queue=/sys/block/$device/queue
 if [ ! -d "$queue" ]; then
     echo "no queue directory: $queue" >&2
@@ -287,6 +294,23 @@ while [ ! -e "$mount_at" ] && [ ! -L "$mount_at" ]; do
     mount_at=$(dirname -- "$mount_at")
 done
 require_mount_device "$mount_at" "$device"
+
+loadtest_mount=$(mount_target "$mount_at")
+given_mount=$(mount_target "$mount")
+if [ "$loadtest_mount" != "$given_mount" ]; then
+    echo "refusing: --mount $mount is $given_mount, not the loadtest mount $loadtest_mount" >&2
+    exit 1
+fi
+
+# df -B1G rounds to the nearest GiB, so a volume just under the floor can pass.
+# Measure the loadtest path. --mount is only the operator's name for that mount.
+avail_bytes=$(df -B1 --output=avail "$mount_at" | tail -n 1)
+avail_bytes=${avail_bytes//[[:space:]]/}
+min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
+if [ "$avail_bytes" -lt "$min_free_bytes" ]; then
+    echo "$mount_at has ${avail_bytes} bytes free, below ${min_free_gib} GiB; refusing" >&2
+    exit 1
+fi
 
 out=$out_root/$name
 mkdir -p "$out"

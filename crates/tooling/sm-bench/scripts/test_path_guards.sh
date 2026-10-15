@@ -1230,6 +1230,96 @@ EOF
     chmod +x "$root/bin/df"
 }
 
+test_run_refuses_when_mount_is_not_the_loadtest_mount() {
+    local name=run-mount-mismatch root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    if [ "$mnt" = "$(mount_of /workspaces)" ]; then
+        bad "$name" "loadtest mount $mnt is /workspaces; this case needs two mounts"
+        rm -rf "$root"
+        return
+    fi
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount /workspaces \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh started when --mount was not the loadtest mount"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran on the wrong mount check"
+    elif ! grep -q "not the loadtest mount" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_measures_free_space_on_the_loadtest_path() {
+    local name=run-df-loadtest root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest" "$root/bin"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    cat >"$root/bin/df" <<EOF
+#!/bin/bash
+printf '%s\\n' "\$*" >> "$root/df.args"
+exec /usr/bin/df "\$@"
+EOF
+    chmod +x "$root/bin/df"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if ! PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused a matching mount: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif ! grep -F "$root/safe/loadtest" "$root/df.args" >/dev/null; then
+        bad "$name" "df was not run on the loadtest path: $(cat "$root/df.args" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_allows_the_floor_on_the_loadtest_mount() {
+    local name=run-floor-same-mount root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 1 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused the loadtest mount: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_run_refuses_a_floor_that_df_would_round_up() {
     local name=run-floor-bytes root err dev mnt
     root=$(tmpdir)
