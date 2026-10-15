@@ -3177,6 +3177,67 @@ impl StorageModule {
         Ok(interval)
     }
 
+    /// Reset to capacity when `expired_hash` is still assigned and every
+    /// submodule file was stored before `notice_height`.
+    ///
+    /// The assignment write lock covers the read and the reset. A file stored
+    /// at or after the notice stays: that write is this epoch's ledger slot,
+    /// or the capacity assignment another writer already stored. A different
+    /// hash stays too. `Ok(None)` means the module was not reset. A read
+    /// error is `Err` and does not reset. The capacity assignment is stored
+    /// before the lock is released. `reset` returning `Ok` is not enough:
+    /// `Err` after that means the capacity assignment was not stored.
+    pub fn reset_expired_to_capacity(
+        &self,
+        expired_hash: PartitionHash,
+        notice_height: u64,
+    ) -> eyre::Result<Option<Interval<PartitionChunkOffset>>> {
+        let mut assignment = self.partition_assignment.write().unwrap();
+        let Some(current) = *assignment else {
+            return Ok(None);
+        };
+        if current.partition_hash != expired_hash {
+            return Ok(None);
+        }
+        // Read every file before `reset`. One unreadable file must not clear
+        // the index. The lock keeps a storage-task install from landing
+        // between this read and the capacity store.
+        let stored = self.read_submodule_packing_params()?;
+        let still_expired = stored.iter().all(|params| {
+            params.partition_hash == Some(expired_hash)
+                && params
+                    .last_updated_height
+                    .is_none_or(|height| height < notice_height)
+        });
+        if !still_expired {
+            return Ok(None);
+        }
+        let capacity = PartitionAssignment {
+            partition_hash: expired_hash,
+            miner_address: current.miner_address,
+            ledger_id: None,
+            slot_index: None,
+        };
+        let interval = self.reset()?;
+        self.store_assignment(&mut assignment, Some(capacity), notice_height)?;
+        Ok(Some(interval))
+    }
+
+    /// Packing params for every submodule. The caller holds the assignment
+    /// write lock. An empty module or one bad file fails the read.
+    fn read_submodule_packing_params(&self) -> eyre::Result<Vec<PackingParams>> {
+        let mut stored = Vec::new();
+        for (_, submodule) in self.submodules.iter() {
+            stored.push(PackingParams::from_toml(
+                submodule.path.join(PACKING_PARAMS_FILE_NAME),
+            )?);
+        }
+        if stored.is_empty() {
+            eyre::bail!("storage module has no submodule");
+        }
+        Ok(stored)
+    }
+
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
     pub fn contains_offset(&self, chunk_offset: LedgerChunkOffset) -> bool {
         self.partition_assignment
