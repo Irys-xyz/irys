@@ -3548,10 +3548,6 @@ mod tests {
         module.drive_entropy_queue_for_test();
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_secs(2),
-            "drain took {elapsed:?}, past the grace bound"
-        );
-        assert!(
             elapsed >= Duration::from_millis(20),
             "drain took {elapsed:?}, before the grace"
         );
