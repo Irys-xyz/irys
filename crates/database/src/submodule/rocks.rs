@@ -3361,10 +3361,11 @@ thread_local! {
 ///
 /// `CONVERTING` is an unfinished conversion. `CURRENT` without that file is
 /// a first open that crashed before the marker. A directory that already has
-/// SCHEMA is complete only when `CURRENT` is a file. `CONVERTING` beside both
-/// is the crash after the marker and before the sentinel is removed, and open
-/// continues. SCHEMA without CURRENT is an unrestored manifest pointer, not
-/// a new database.
+/// the RocksDB v1 marker is complete only when `CURRENT` is a file.
+/// `CONVERTING` beside both is the crash after the marker and before the
+/// sentinel is removed, and open continues. That marker without CURRENT is
+/// an unrestored manifest pointer, not a new database. Any other marker is
+/// an unrecognised layout.
 fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
     if path.join(SCHEMA_FILE).exists() {
         refuse_schema_without_current(path)?;
@@ -3387,17 +3388,23 @@ fn refuse_incomplete_directory(path: &Path) -> eyre::Result<()> {
     );
 }
 
-/// SCHEMA is written after CURRENT. A directory that has the marker and no
-/// CURRENT file is not empty, and `create_if_missing` would replace the
-/// manifest with an empty database.
+/// SCHEMA is written after CURRENT. A directory that has the RocksDB v1
+/// marker and no CURRENT file is not empty, and `create_if_missing` would
+/// replace the manifest with an empty database. A different marker is left
+/// for the layout check.
 fn refuse_schema_without_current(path: &Path) -> eyre::Result<()> {
-    if path.join(SCHEMA_FILE).is_file() && !path.join("CURRENT").is_file() {
-        eyre::bail!(
-            "submodule index {} has a SCHEMA marker and no CURRENT file. The directory is not a new database. Restore CURRENT. This open does not create an empty index.",
-            path.display()
-        );
+    let marker = path.join(SCHEMA_FILE);
+    if !marker.is_file() || path.join("CURRENT").is_file() {
+        return Ok(());
     }
-    Ok(())
+    let text = fs::read_to_string(&marker).wrap_err("read schema marker")?;
+    if text != SUBMODULE_SCHEMA_ROCKS_V1 {
+        return Ok(());
+    }
+    eyre::bail!(
+        "submodule index {} has a SCHEMA marker and no CURRENT file. The directory is not a new database. Restore CURRENT. This open does not create an empty index.",
+        path.display()
+    )
 }
 
 fn directory_has_entries(path: &Path) -> eyre::Result<bool> {

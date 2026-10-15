@@ -259,9 +259,11 @@ writes `SCHEMA` has no `CONVERTING` file. Delete that `rocks/` directory
 and start the node again. `--replace-incomplete` only deletes a
 directory that contains `CONVERTING`.
 
-A directory that has `rocks/SCHEMA` and no `rocks/CURRENT` is not a new
-database. `CURRENT` names the manifest. Open refuses that directory and
-does not create an empty index. Restore `CURRENT`, then start the node.
+A directory whose `rocks/SCHEMA` is the RocksDB v1 marker and that has no
+`rocks/CURRENT` is not a new database. `CURRENT` names the manifest. Open
+refuses that directory and does not create an empty index. Restore
+`CURRENT`, then start the node. Any other marker is an unrecognised layout.
+Open does not rewrite it.
 
 `rocks-to-mdbx` reads RocksDB v1 only. It drops checksum-only rows and
 copies the proof bytes from the offset record. It does not copy the
