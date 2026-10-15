@@ -6114,9 +6114,8 @@ impl SubmoduleWrite for Batch<'_> {
         self.assign_tx_interval(start, end, None)?;
 
         // `delete_offset_range` hides these keys from a later read.
-        // Pending jobs for the cleared placement go in this same batch.
+        // Pending stays. The caller purges it in its own commit.
         self.delete_content_rows_for_paths(start, end)?;
-        self.delete_offset_range(Cf::Pending, start, end)?;
 
         self.delete_offset_range(Cf::OffsetMeta, start, end)?;
         Ok(())
@@ -7583,8 +7582,13 @@ mod tests {
         assert!(
             store
                 .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(0)))?
-                .is_none()
+                .is_some(),
+            "path clear leaves the pending key for the caller"
         );
+        store.update(|tx| {
+            assert!(tx.del_pending_body_migration(PartitionChunkOffset::from(0))?);
+            Ok(())
+        })?;
         assert_no_orphans(&store)?;
         Ok(())
     }

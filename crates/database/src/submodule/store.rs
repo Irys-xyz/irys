@@ -3226,6 +3226,74 @@ mod tests {
         })
     }
 
+    /// Path clear drops coverage and data paths. The pending key stays until
+    /// the caller purges it in a later commit. A pending key outside the
+    /// range stays through both commits.
+    #[test]
+    fn clear_paths_keeps_pending_until_the_caller_purges() -> eyre::Result<()> {
+        each_engine("submodule_clear_paths_pending", |store| {
+            let root = H256::repeat_byte(4);
+            store.update(|tx| {
+                install_placement(tx, 0, 10, root, H256::repeat_byte(2), 0, 11 * 32)?;
+                tx.write_data_path_updates(vec![(
+                    PartitionChunkOffset::from(5),
+                    H256::repeat_byte(5),
+                    vec![5],
+                )])?;
+                tx.add_pending_body_migration(PartitionChunkOffset::from(5), &pending_job(root))?;
+                tx.add_pending_body_migration(PartitionChunkOffset::from(20), &pending_job(root))?;
+                Ok(())
+            })?;
+            store.update(|tx| {
+                tx.clear_paths_in_inclusive_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(10),
+                )?;
+                assert!(
+                    tx.get_pending_body_migration(PartitionChunkOffset::from(5))?
+                        .is_some(),
+                    "pending stays in the path-clear batch"
+                );
+                assert!(
+                    tx.get_data_path_by_offset(PartitionChunkOffset::from(5))?
+                        .is_none()
+                );
+                assert!(tx.tx_interval_at(PartitionChunkOffset::from(5))?.is_none());
+                Ok(())
+            })?;
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(5)))?
+                    .is_some(),
+                "pending is still committed after the path clear"
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(20)))?
+                    .is_some()
+            );
+            store.update(|tx| {
+                let removed = tx.del_pending_body_migrations_in_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(10),
+                )?;
+                assert_eq!(removed, 1);
+                Ok(())
+            })?;
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(5)))?
+                    .is_none()
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_pending_body_migration(PartitionChunkOffset::from(20)))?
+                    .is_some()
+            );
+            Ok(())
+        })
+    }
+
     /// Inclusive range delete drops both ends and keeps the neighbors.
     /// `u32::MAX` is inside `[MAX, MAX]` and outside `[1, 5]`.
     #[test]
@@ -3248,7 +3316,6 @@ mod tests {
             })?;
 
             store.update(|tx| {
-                let intervals_own_rows = tx.intervals_own_data_root_rows();
                 tx.clear_paths_in_inclusive_range(
                     PartitionChunkOffset::from(1),
                     PartitionChunkOffset::from(5),
@@ -3257,8 +3324,7 @@ mod tests {
                     PartitionChunkOffset::from(1),
                     PartitionChunkOffset::from(5),
                 )?;
-                // RocksDB v1 deletes pending in the same batch as the interval clear.
-                assert_eq!(removed, if intervals_own_rows { 0 } else { 2 });
+                assert_eq!(removed, 2);
                 assert!(
                     tx.get_data_path_by_offset(PartitionChunkOffset::from(1))?
                         .is_none()
