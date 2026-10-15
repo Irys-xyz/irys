@@ -1257,7 +1257,12 @@ impl DataSyncServiceInner {
         let by_miner = {
             let epoch = self.block_tree.read().canonical_epoch_snapshot();
             let mut by_miner: HashMap<IrysAddress, Vec<_>> = HashMap::new();
-            for assignment in epoch.partition_assignments.data_partitions.values().copied() {
+            for assignment in epoch
+                .partition_assignments
+                .data_partitions
+                .values()
+                .copied()
+            {
                 by_miner
                     .entry(assignment.miner_address)
                     .or_default()
@@ -1728,11 +1733,20 @@ impl DataSyncService {
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 
-        let mut interval = tokio::time::interval(Duration::from_millis(250));
-        interval.tick().await; // Skip first immediate tick
-
         // Subscribe to peer lifecycle events for event-driven synchronization
         let mut peer_events_rx = self.inner.peer_list.subscribe_to_peer_events();
+        self.run_until_stopped(&mut peer_events_rx).await
+    }
+
+    /// Runs until shutdown, a closed message channel, a tick error, or a
+    /// closed peer-event channel. The receiver is a parameter so a test can
+    /// close it. `PeerList` keeps the production sender alive.
+    async fn run_until_stopped(
+        &mut self,
+        peer_events_rx: &mut tokio::sync::broadcast::Receiver<irys_domain::PeerEvent>,
+    ) -> eyre::Result<()> {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        interval.tick().await; // Skip first immediate tick
 
         loop {
             tokio::select! {
@@ -1813,34 +1827,87 @@ impl DataSyncService {
 
 #[cfg(test)]
 mod peer_event_channel_tests {
-    use super::{PeerEventChannelFault, peer_event_channel_fault};
+    use super::{
+        DataSyncService, DataSyncServiceInner, PeerEventChannelFault, peer_event_channel_fault,
+    };
+    use crate::chunk_fetcher::MockChunkFetcher;
+    use crate::services::ServiceSenders;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::{BlockTree, PeerList};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{Config, NodeConfig, app_state::DatabaseProvider};
+    use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn closed_peer_event_channel_stops_instead_of_spinning() {
-        let (sender, mut receiver) = tokio::sync::broadcast::channel::<()>(1);
-        drop(sender);
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let env = open_or_create_db(
+            tmp.path().join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("db");
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let genesis = irys_testing_utils::new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            Arc::new(RwLock::new(Vec::new())),
+            PeerList::test_mock().expect("peer list"),
+            DatabaseProvider(Arc::new(env)),
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize))),
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+        let (msg_tx, msg_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+        let (peer_tx, mut peer_rx) = tokio::sync::broadcast::channel(1);
+        drop(peer_tx);
+        let mut service = DataSyncService {
+            shutdown: shutdown_rx,
+            msg_rx,
+            inner,
+        };
+
+        // The message sender and the shutdown signal stay alive. A dropped
+        // message sender or a fired shutdown would leave the loop on another arm.
+        // The service runs on its own thread: a closed broadcast receiver stays
+        // ready, so `continue` never returns to this thread's timer.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let started = Instant::now();
-        let mut continued = 0_u32;
-        loop {
-            match receiver.recv().await {
-                Ok(()) => {}
-                Err(error) => match peer_event_channel_fault(error) {
-                    PeerEventChannelFault::Lagged => {}
-                    PeerEventChannelFault::Closed => break,
-                },
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("runtime");
+            let result = runtime.block_on(service.run_until_stopped(&mut peer_rx));
+            let _ = done_tx.send(result);
+        });
+        let report = done_rx.recv_timeout(Duration::from_millis(500));
+        let elapsed = started.elapsed();
+        drop(msg_tx);
+        drop(shutdown_tx);
+        match report {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => panic!("closed peer-event channel stopped with an error: {err:#}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // The service thread is still inside the ready Closed receive.
+                // Leave the process so the test binary does not wait on that thread.
+                eprintln!("closed peer-event channel did not stop the service");
+                std::process::exit(101);
             }
-            continued += 1;
-            if continued > 10 {
-                panic!("closed peer-event channel kept the loop running");
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("service thread ended without a result");
             }
         }
-        assert_eq!(continued, 0, "Closed must stop before another iteration");
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "elapsed {:?}",
-            started.elapsed()
-        );
+        assert!(elapsed < Duration::from_millis(500), "elapsed {elapsed:?}");
     }
 
     #[test]
