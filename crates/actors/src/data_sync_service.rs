@@ -1367,12 +1367,15 @@ impl DataSyncServiceInner {
                 .collect()
         };
 
-        // Drop orchestrators for modules that no longer hold a data ledger assignment
-        self.chunk_orchestrators.retain(|sm_id, _| {
+        // Drop an orchestrator whose ledger is gone or has changed. The loop
+        // below builds a new one with a fetcher for the live ledger. A
+        // same-ledger slot change stays: the slot and the ledger range are
+        // read from the module on each request.
+        self.chunk_orchestrators.retain(|sm_id, orchestrator| {
             storage_module_by_id(&storage_modules, *sm_id)
                 .and_then(|sm| sm.partition_assignment())
                 .and_then(|pa| pa.ledger_id)
-                .is_some()
+                == Some(orchestrator.ledger_id())
         });
 
         for sm in storage_modules {
@@ -2798,9 +2801,9 @@ mod entropy_peer_sync_tests {
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
-        NodeConfig, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
-        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, NodeConfig,
+        PartitionChunkOffset, app_state::DatabaseProvider, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -3045,4 +3048,223 @@ mod residual_scan_tests {
             "high entropy span of 100_000_000 offsets took {elapsed:?}"
         );
     }
+}
+
+#[cfg(test)]
+mod assignment_follow_tests {
+    use super::{DataSyncServiceInner, DataSyncServiceMessage};
+    use crate::chunk_fetcher::{ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher};
+    use crate::data_sync_service::chunk_orchestrator::{ChunkRequest, ChunkRequestState};
+    use crate::services::ServiceSenders;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
+        NodeConfig, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
+        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+    use std::sync::{Arc, Mutex, RwLock};
+    use std::time::Instant;
+
+    fn test_config(base: &std::path::Path) -> Config {
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base.to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    fn signed_genesis() -> IrysBlockHeader {
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.test_sign();
+        genesis
+    }
+
+    fn open_db(base: &std::path::Path) -> DatabaseProvider {
+        let env = open_or_create_db(
+            base.join("db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        )
+        .expect("db");
+        DatabaseProvider(Arc::new(env))
+    }
+
+    fn module(
+        config: &Config,
+        path: std::path::PathBuf,
+        ledger_id: u32,
+        slot_index: usize,
+    ) -> Arc<StorageModule> {
+        let pa = PartitionAssignment {
+            ledger_id: Some(ledger_id),
+            slot_index: Some(slot_index),
+            miner_address: IrysAddress::from([0x11; 20]),
+            partition_hash: H256::repeat_byte(0x44),
+        };
+        Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 3,
+                    partition_assignment: Some(pa),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), path)],
+                },
+                config,
+            )
+            .expect("storage module"),
+        )
+    }
+
+    fn set_live_assignment(sm: &StorageModule, ledger_id: Option<u32>, slot_index: Option<usize>) {
+        let mut guard = sm.partition_assignment.write().unwrap();
+        let mut assignment = guard.expect("assignment");
+        assignment.ledger_id = ledger_id;
+        assignment.slot_index = slot_index;
+        *guard = Some(assignment);
+    }
+
+    struct Built {
+        inner: DataSyncServiceInner,
+        sm: Arc<StorageModule>,
+        /// `(ledger, fetcher allocation)` in factory-call order.
+        built: Arc<Mutex<Vec<(u32, usize)>>>,
+    }
+
+    fn build(base: &std::path::Path, ledger_id: u32, slot_index: usize) -> Built {
+        let config = test_config(base);
+        let sm = module(&config, base.join("chunks"), ledger_id, slot_index);
+        let built = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&built);
+        let factory: ChunkFetcherFactory = Box::new(move |ledger| {
+            let fetcher: Arc<dyn ChunkFetcher> = Arc::new(MockChunkFetcher::new(ledger as usize));
+            let addr = Arc::as_ptr(&fetcher) as *const () as usize;
+            seen.lock().unwrap().push((ledger, addr));
+            fetcher
+        });
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let genesis = signed_genesis();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            Arc::new(RwLock::new(vec![Arc::clone(&sm)])),
+            peer_list,
+            open_db(base),
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+        Built { inner, sm, built }
+    }
+
+    fn fetcher_addr(inner: &DataSyncServiceInner, sm_id: usize) -> usize {
+        inner.chunk_orchestrators[&sm_id].test_fetcher_addr()
+    }
+
+    /// Same-ledger slot moves keep the orchestrator. A ledger change drops it
+    /// and builds one whose fetcher uses the new ledger. Capacity drops it.
+    #[tokio::test]
+    async fn ledger_change_rebuilds_the_orchestrator_and_same_ledger_keeps_it() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let submit = u32::from(DataLedger::Submit);
+        let publish = u32::from(DataLedger::Publish);
+        let mut built = build(tmp.path(), submit, 0);
+        let sm_id = built.sm.id;
+        assert_eq!(built.inner.chunk_orchestrators[&sm_id].ledger_id(), submit);
+        let original = fetcher_addr(&built.inner, sm_id);
+        assert_eq!(
+            built.built.lock().unwrap().as_slice(),
+            &[(submit, original)]
+        );
+
+        let offset = PartitionChunkOffset::from(2);
+        built
+            .inner
+            .chunk_orchestrators
+            .get_mut(&sm_id)
+            .unwrap()
+            .chunk_requests
+            .insert(
+                offset,
+                ChunkRequest {
+                    excluded: Default::default(),
+                    request_state: ChunkRequestState::Pending,
+                    attempt_count: 4,
+                    retry_round: 1,
+                    ready_since: Instant::now(),
+                    local_cache_miss: false,
+                },
+            );
+
+        set_live_assignment(&built.sm, Some(submit), Some(1));
+        built
+            .inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
+            .expect("same-ledger sync");
+        assert_eq!(
+            built.inner.chunk_orchestrators[&sm_id].ledger_id(),
+            submit,
+            "a same-ledger slot change keeps the orchestrator"
+        );
+        assert!(
+            built.inner.chunk_orchestrators[&sm_id]
+                .chunk_requests
+                .contains_key(&offset),
+            "in-flight requests survive a same-ledger slot change"
+        );
+        assert_eq!(
+            fetcher_addr(&built.inner, sm_id),
+            original,
+            "a same-ledger slot change does not build a new fetcher"
+        );
+
+        set_live_assignment(&built.sm, Some(publish), Some(1));
+        built
+            .inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
+            .expect("ledger change sync");
+        assert_eq!(
+            built.inner.chunk_orchestrators[&sm_id].ledger_id(),
+            publish,
+            "a ledger change rebuilds the orchestrator"
+        );
+        assert!(
+            !built.inner.chunk_orchestrators[&sm_id]
+                .chunk_requests
+                .contains_key(&offset),
+            "the previous ledger's requests are not reused"
+        );
+        let made = built.built.lock().unwrap().clone();
+        assert_eq!(made.len(), 2, "the new ledger builds one fetcher: {made:?}");
+        assert_eq!(made[1].0, publish);
+        assert_eq!(fetcher_addr(&built.inner, sm_id), made[1].1);
+
+        set_live_assignment(&built.sm, None, None);
+        built
+            .inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
+            .expect("capacity sync");
+        assert!(
+            !built.inner.chunk_orchestrators.contains_key(&sm_id),
+            "a ledger-to-capacity assignment drops the orchestrator"
+        );
+    }
+
 }

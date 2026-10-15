@@ -376,6 +376,12 @@ impl ChunkOrchestrator {
         self.ledger_id
     }
 
+    /// Allocation of the fetcher this orchestrator dispatches with.
+    #[cfg(test)]
+    pub(crate) fn test_fetcher_addr(&self) -> usize {
+        Arc::as_ptr(&self.chunk_fetcher) as *const () as usize
+    }
+
     /// True when this pass saw an Entropy interval that was not present last
     /// pass and the orchestrator still has no peers. The caller syncs partition
     /// assignments for that module. The epoch refresh stays in place.
