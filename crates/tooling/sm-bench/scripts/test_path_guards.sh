@@ -1,6 +1,8 @@
 #!/bin/bash
 # Regression checks for the sm-bench shell guards.
-# Throwaway directories under /tmp only. Does not write real devices or sysfs.
+# Throwaway directories under /tmp, plus one on the worktree disk so a
+# success case is not tied to source name "none". Does not write real
+# devices or sysfs.
 set -u
 set -o pipefail
 
@@ -14,6 +16,40 @@ bad() {
 }
 
 tmpdir() { mktemp -d /tmp/sm-bench-guards.XXXXXX; }
+
+# Source basename require_mount_device compares when the fake /sys has no
+# partition node. Call it on a path that exists.
+mount_dev_for() {
+    local path=$1
+    local mnt_src
+    if command -v findmnt >/dev/null 2>&1; then
+        mnt_src=$(findmnt -n -o SOURCE -T "$path" || true)
+    else
+        mnt_src=$(df -P "$path" | awk 'NR==2 { print $1 }')
+    fi
+    mnt_src=${mnt_src%%[*}
+    mnt_src=$(readlink -f "$mnt_src") || return 1
+    printf '%s\n' "${mnt_src##*/}"
+}
+
+mount_of() {
+    local path=$1
+    local target
+    if command -v findmnt >/dev/null 2>&1; then
+        target=$(findmnt -n -o TARGET -T "$path" || true)
+    else
+        target=$(df -P "$path" | awk 'NR==2 { print $6 }')
+    fi
+    printf '%s\n' "$target"
+}
+
+# A temp directory on the worktree disk, which is not the /tmp tmpfs.
+other_tmpdir() {
+    local base
+    base=$(cd "$here/../../../.." && pwd)/.tmp
+    mkdir -p "$base"
+    mktemp -d "$base/sm-bench-guards.XXXXXX"
+}
 
 test_fill_refuses_file_outside_loadtest() {
     local name=fill-outside root file log err
@@ -529,16 +565,47 @@ test_run_refuses_a_device_that_is_not_the_mount_disk() {
     rm -rf "$root"
 }
 
-test_run_allows_a_missing_path_under_loadtest() {
-    local name=run-allow-missing root err
-    root=$(tmpdir)
+test_run_allows_a_missing_path_when_the_disk_is_not_named_none() {
+    local name=run-allow-other-disk root err dev
+    root=$(other_tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest" "$root/sys/block/none/queue"
-    queue_files "$root/sys/block/none/queue"
+    dev=$(mount_dev_for "$root")
+    if [ "$dev" = "none" ]; then
+        bad "$name" "$root is source none; this case does not exercise another disk"
+        rm -rf "$root"
+        return
+    fi
+    mkdir -p "$root/safe/loadtest" "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
     printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
     chmod +x "$root/bench"
     if ! with_fake_sys "$root/sys" "$here/run.sh" \
-        --name t --device none --mount /tmp \
+        --name t --device "$dev" --mount "$(mount_of "$root")" \
+        --loadtest "$root/safe/loadtest/newdir" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused a path under loadtest on $dev: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_allows_a_missing_path_under_loadtest() {
+    local name=run-allow-missing root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
         --loadtest "$root/safe/loadtest/newdir" \
         --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
         >"$err" 2>&1; then
@@ -557,15 +624,17 @@ cmdline_has() {
 }
 
 test_ladder_term_stops_the_run_and_restores_the_queue() {
-    local name=ladder-term root module sys err outer
+    local name=ladder-term root module sys err outer dev mnt
     local bench_pid run_parent ladder_pid tries
     root=$(tmpdir)
     module=$root/loadtest
     sys=$root/sys
     err=$root/err
     seed_module "$module"
-    mkdir -p "$sys/block/none/queue"
-    queue_files "$sys/block/none/queue"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
     cat >"$root/bench" <<EOF
 #!/bin/bash
 printf '%s\n' "\$\$" > "$root/bench.pid"
@@ -573,7 +642,7 @@ exec sleep 60
 EOF
     chmod +x "$root/bench"
     MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
-        --device none --mount /tmp --loadtest "$module" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
         --out-root "$root/out" --bench "$root/bench" \
         --max-sectors-kb 64 --run only-run \
         >"$err" 2>&1 &
@@ -600,8 +669,8 @@ EOF
                 bad "$name" "bench $bench_pid still running after TERM"
             elif alive "$ladder_pid"; then
                 bad "$name" "ladder $ladder_pid still running after TERM"
-            elif ! grep -q '^111$' "$sys/block/none/queue/max_sectors_kb"; then
-                bad "$name" "queue was not restored: $(cat "$sys/block/none/queue/max_sectors_kb" 2>/dev/null)"
+            elif ! grep -q '^111$' "$sys/block/$dev/queue/max_sectors_kb"; then
+                bad "$name" "queue was not restored: $(cat "$sys/block/$dev/queue/max_sectors_kb" 2>/dev/null)"
             else
                 ok "$name"
             fi
@@ -616,15 +685,17 @@ EOF
 }
 
 test_ladder_term_stops_the_tracer() {
-    local name=ladder-trace-term root module sys err outer
+    local name=ladder-trace-term root module sys err outer dev mnt
     local tracer_pid ladder_pid tries
     root=$(tmpdir)
     module=$root/loadtest
     sys=$root/sys
     err=$root/err
     seed_module "$module"
-    mkdir -p "$sys/block/none/queue"
-    queue_files "$sys/block/none/queue"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
     printf '#!/bin/sh\nexit 0\n' >"$root/bench"
     chmod +x "$root/bench"
     cat >"$root/blk-run.sh" <<EOF
@@ -634,7 +705,7 @@ exec sleep 60
 EOF
     chmod +x "$root/blk-run.sh"
     MIN_FREE_GIB=0 with_binds "$sys" "$root/blk-run.sh" "$here/blk-run.sh" "$here/ladder.sh" \
-        --device none --mount /tmp --loadtest "$module" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
         --out-root "$root/out" --bench "$root/bench" \
         --max-sectors-kb 64 --trace --run only-run \
         >"$err" 2>&1 &
@@ -660,8 +731,8 @@ EOF
                 bad "$name" "tracer $tracer_pid still running after TERM"
             elif alive "$ladder_pid"; then
                 bad "$name" "ladder $ladder_pid still running after TERM"
-            elif ! grep -q '^111$' "$sys/block/none/queue/max_sectors_kb"; then
-                bad "$name" "queue was not restored: $(cat "$sys/block/none/queue/max_sectors_kb" 2>/dev/null)"
+            elif ! grep -q '^111$' "$sys/block/$dev/queue/max_sectors_kb"; then
+                bad "$name" "queue was not restored: $(cat "$sys/block/$dev/queue/max_sectors_kb" 2>/dev/null)"
             else
                 ok "$name"
             fi
@@ -715,12 +786,15 @@ wait_file() {
 alive() { kill -0 "$1" 2>/dev/null; }
 
 test_run_records_the_bench_and_term_stops_it() {
-    local name=run-term root err outer
+    local name=run-term root err outer dev mnt
     local bench_pid run_pid
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest" "$root/sys/block/none/queue"
-    queue_files "$root/sys/block/none/queue"
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
     cat >"$root/bench" <<EOF
 #!/bin/bash
 printf '%s\n' "\$\$" > "$root/bench.pid"
@@ -729,7 +803,7 @@ exec sleep 60
 EOF
     chmod +x "$root/bench"
     with_fake_sys "$root/sys" "$here/run.sh" \
-        --name t --device none --mount /tmp \
+        --name t --device "$dev" --mount "$mnt" \
         --loadtest "$root/safe/loadtest" \
         --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
         >"$err" 2>&1 &
