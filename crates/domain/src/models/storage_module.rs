@@ -5670,8 +5670,9 @@ impl StorageModule {
     ///
     /// A converted module is settled and has proofs with no checksum. The scan
     /// records that and leaves the flag unset, so a missing checksum stays
-    /// unknown. Reset and repack clear the flag and allow another scan. A scan
-    /// error does not fail the durable point and does not stick the flag.
+    /// unknown. Reset, a finished crashed reset, and partition recovery clear
+    /// the flag and allow another scan. A scan error does not fail the durable
+    /// point and does not stick the flag.
     fn maybe_mark_crc_complete(&self) {
         if self.crc_scan_done.load(Ordering::SeqCst) {
             return;
