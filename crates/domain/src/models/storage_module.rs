@@ -1750,6 +1750,10 @@ impl StorageModule {
         // Bind after a pending reset clears the old partition hash. Binding
         // first refuses a new partition, or the reset clear drops the new one.
         let mut pack_binds = Vec::new();
+        // Hash changes are written only after `bind_packing_identity` accepts.
+        // A refused bind must leave the previous identity on disk.
+        let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
+            Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
         let index_gap = Arc::new(index_drain::IndexGap::new());
@@ -1836,12 +1840,20 @@ impl StorageModule {
                         None => (None, None, None),
                     };
 
-                // Sync disk params to the desired state if anything drifted
-                if params.partition_hash != want_hash
-                    || params.ledger != want_ledger
-                    || params.slot != want_slot
-                {
-                    params.partition_hash = want_hash;
+                // A different partition must not keep the old labels or the
+                // old Rocks partition key. Clear first, then bind, then publish
+                // the new identity. Ledger or slot drift with the same hash is
+                // the in-process assign path and does not wipe the bytes.
+                if params.partition_hash != want_hash {
+                    submodule_db.set_chunk_crc_complete(false)?;
+                    submodule_db.set_reset_in_progress()?;
+                    rebind_after_bind.push((
+                        params_path.clone(),
+                        want_hash,
+                        want_ledger,
+                        want_slot,
+                    ));
+                } else if params.ledger != want_ledger || params.slot != want_slot {
                     params.ledger = want_ledger;
                     params.slot = want_slot;
                     params.last_updated_height = Some(0);
@@ -1856,7 +1868,12 @@ impl StorageModule {
             if let Err(err) = packing_params_valid_for_module(&recorded, &expected) {
                 return Err(eyre!("{err} at {}", params_path.display()));
             }
-            let bound_partition = params.partition_hash;
+            // The file still names the old hash until bind accepts.
+            let bound_partition = rebind_after_bind
+                .iter()
+                .find(|(path, ..)| path == &params_path)
+                .map(|(_, hash, ..)| *hash)
+                .unwrap_or(params.partition_hash);
 
             let intervals_file_path = sub_base_path.join("intervals.json");
 
@@ -1930,6 +1947,15 @@ impl StorageModule {
         Self::finish_pending_resets(&submodule_map)?;
         for (index, partition, packing) in pack_binds {
             index.bind_packing_identity(partition, &packing)?;
+        }
+        // Bind accepted. The file may now name the new partition.
+        for (path, hash, ledger, slot) in rebind_after_bind {
+            let mut params = PackingParams::from_toml(&path)?;
+            params.partition_hash = hash;
+            params.ledger = ledger;
+            params.slot = slot;
+            params.last_updated_height = Some(0);
+            params.write_to_disk(&path)?;
         }
 
         // Attempt to load a global set of intervals from the submodules
@@ -15687,6 +15713,100 @@ mod tests {
             "covered persist {cost:?} clone {clone_cost:?} limit {limit:?}"
         );
         eprintln!("covered persist {cost:?} clone {clone_cost:?} limit {limit:?}");
+        Ok(())
+    }
+
+    /// Unassign while the process is down, then bind a new partition.
+    /// The old labels must not survive either open. Both index engines.
+    #[test]
+    fn unassign_then_rebind_drops_old_labels() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let prefix = format!("unassign_rebind_{engine:?}");
+            let tmp = TempDirBuilder::new().prefix(&prefix).build();
+            let node_config = NodeConfig {
+                consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                    chunk_size: 32,
+                    num_chunks_in_partition: 8,
+                    ..ConsensusConfig::testing()
+                }),
+                storage: StorageSyncConfig {
+                    num_writes_before_sync: 1,
+                    intervals_persist_secs: 0,
+                    min_durable_interval_ms: 0,
+                    ..StorageSyncConfig::default()
+                },
+                base_directory: tmp.path().to_path_buf(),
+                database: index_database(engine),
+                ..NodeConfig::testing()
+            };
+            let config = Config::new_with_random_peer_id(node_config);
+            let hash_a = H256::repeat_byte(0xA1);
+            let hash_b = H256::repeat_byte(0xB2);
+            let assignment = |hash| PartitionAssignment {
+                partition_hash: hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            };
+            let info = |assignment| StorageModuleInfo {
+                id: 0,
+                partition_assignment: assignment,
+                submodules: vec![(partition_chunk_offset_ii!(0, 7), "sub".into())],
+            };
+            let params_path = tmp
+                .path()
+                .join("sub")
+                .join(PACKING_PARAMS_FILE_NAME);
+
+            let first = StorageModule::new(&info(Some(assignment(hash_a))), &config)?;
+            assert_eq!(
+                PackingParams::from_toml(&params_path)?.partition_hash,
+                Some(hash_a)
+            );
+            assert!(first.write_chunk(
+                PartitionChunkOffset::from(0),
+                vec![0x11; 32],
+                ChunkType::Entropy
+            ));
+            first.force_sync_pending_chunks()?;
+            assert!(
+                !first.get_intervals(ChunkType::Entropy).is_empty(),
+                "{engine:?}: entropy was not stored"
+            );
+            drop(first);
+
+            let unassigned = StorageModule::new(&info(None), &config)?;
+            let params = PackingParams::from_toml(&params_path)?;
+            assert_eq!(params.partition_hash, None, "{engine:?}: hash was not cleared");
+            assert!(
+                unassigned.get_intervals(ChunkType::Entropy).is_empty(),
+                "{engine:?}: unassign kept entropy labels {:?}",
+                unassigned.get_intervals(ChunkType::Entropy)
+            );
+            assert_eq!(
+                unassigned.get_intervals(ChunkType::Uninitialized),
+                vec![partition_chunk_offset_ii!(0, 7)],
+                "{engine:?}"
+            );
+            drop(unassigned);
+
+            let rebound = StorageModule::new(&info(Some(assignment(hash_b))), &config)?;
+            assert_eq!(
+                PackingParams::from_toml(&params_path)?.partition_hash,
+                Some(hash_b),
+                "{engine:?}"
+            );
+            assert!(
+                rebound.get_intervals(ChunkType::Entropy).is_empty(),
+                "{engine:?}: rebind kept entropy labels {:?}",
+                rebound.get_intervals(ChunkType::Entropy)
+            );
+            assert_eq!(
+                rebound.get_intervals(ChunkType::Uninitialized),
+                vec![partition_chunk_offset_ii!(0, 7)],
+                "{engine:?}"
+            );
+        }
         Ok(())
     }
 }
