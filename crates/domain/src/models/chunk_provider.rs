@@ -205,6 +205,9 @@ impl ChunkProvider {
     ///
     /// Each storage module that overlaps the span is read once. Offsets the
     /// node does not hold are absent. The result is ordered by ledger offset.
+    /// A storage read error is omitted when another offset is present or
+    /// absent. The error is returned when every offset in the span failed
+    /// to read.
     pub fn get_unpacked_chunks_by_ledger_span(
         &self,
         ledger: DataLedger,
@@ -220,10 +223,13 @@ impl ChunkProvider {
         from: LedgerChunkOffset,
         to: LedgerChunkOffset,
     ) -> eyre::Result<Vec<(LedgerChunkOffset, UnpackedChunk)>> {
+        let requested_len = (*to).saturating_sub(*from).saturating_add(1);
         let requested = LedgerChunkRange(ii(from, to));
         let modules =
             get_overlapped_storage_modules(&self.storage_modules_guard, ledger, &requested);
         let mut out = Vec::new();
+        let mut read_failures = 0_u64;
+        let mut last_read_error: Option<eyre::Report> = None;
         for module in modules {
             let module_range = match module.get_storage_module_ledger_offsets() {
                 Ok(range) => range,
@@ -270,18 +276,32 @@ impl ChunkProvider {
             loop {
                 let partition_offset = PartitionChunkOffset(cursor);
                 let ledger_offset = LedgerChunkOffset::from(ledger_start + u64::from(cursor));
+                // `Could not find chunk bytes on disk` is a hole: the index
+                // names a body this file does not hold. Any other error is a
+                // failed read.
+                let mut read_failed: Option<eyre::Report> = None;
                 let packed = if let Some(map) = batch.as_mut() {
                     map.remove(&partition_offset)
                 } else {
                     match module.generate_full_chunk(partition_offset) {
                         Ok(chunk) => chunk,
+                        Err(error) if missing_on_disk(&error) => {
+                            debug!(
+                                error = %error,
+                                partition.offset = cursor,
+                                "chunk offset has no body on disk"
+                            );
+                            note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                            None
+                        }
                         Err(error) => {
                             debug!(
                                 error = %error,
                                 partition.offset = cursor,
-                                "skipping chunk offset after a storage module read error"
+                                "chunk offset read failed"
                             );
                             note_chunk_read(SERVE_SPAN, "storage_module", "error");
+                            read_failed = Some(error);
                             None
                         }
                     }
@@ -289,8 +309,22 @@ impl ChunkProvider {
                 if let Some(packed) = packed {
                     note_chunk_read(SERVE_SPAN, "storage_module", "hit");
                     out.push((ledger_offset, unpack_packed(&self.config, &packed)));
+                } else if let Some(error) = read_failed {
+                    match self.cached_unpacked_at(SERVE_SPAN, &module, partition_offset) {
+                        Ok(Some(cached)) => out.push((ledger_offset, cached)),
+                        Ok(None) => {
+                            read_failures += 1;
+                            last_read_error = Some(error);
+                        }
+                        Err(cache_error) => {
+                            warn_omitted_cache_read(ledger_offset, cursor, &cache_error);
+                            read_failures += 1;
+                            last_read_error = Some(error);
+                        }
+                    }
                 } else {
-                    // The batch path omitted a hole. The error path already counted it.
+                    // The batch path omitted a hole. The missing-body path
+                    // already counted its read.
                     if batch.is_some() {
                         note_chunk_read(SERVE_SPAN, "storage_module", "miss");
                     }
@@ -311,6 +345,9 @@ impl ChunkProvider {
             }
         }
         out.sort_by_key(|(offset, _)| *offset);
+        if requested_len > 0 && read_failures == requested_len {
+            return Err(last_read_error.unwrap_or_else(|| eyre::eyre!("chunk span read failed")));
+        }
         Ok(out)
     }
 
@@ -378,6 +415,8 @@ impl ChunkProvider {
     /// placement (`data_size` on the storage-module index, or on `CachedDataRoots`).
     /// A chunk read from that offset is returned only when its `data_root`,
     /// `data_size`, and `tx_offset` are the requested placement.
+    /// A storage read error is returned when the cache does not hold the chunk.
+    /// A placement with no body is a hole and stays `Ok(None)`.
     pub fn get_chunk_by_data_root(
         &self,
         ledger: DataLedger,
@@ -413,6 +452,9 @@ impl ChunkProvider {
                     == Some(ledger as u32)
             })
             .collect::<Vec<_>>();
+        // A real read error is not a hole. A later hit still wins. A cache
+        // miss returns the last error.
+        let mut disk_error: Option<eyre::Report> = None;
 
         for sm in sms {
             // One read of this root's placements. `generate_full_chunk` stamps
@@ -430,27 +472,39 @@ impl ChunkProvider {
                 ) else {
                     continue;
                 };
-                // try other offsets and sm's if we get an Error or a None
-                let Ok(Some(packed)) = sm.generate_full_chunk(partition_offset) else {
-                    continue;
-                };
-                if packed.data_root != data_root
-                    || packed.tx_offset != data_tx_offset
-                    || packed.data_size != info.data_size
-                {
-                    debug!(
-                        requested_data_root = %data_root,
-                        requested_tx_offset = %data_tx_offset,
-                        chunk_data_root = %packed.data_root,
-                        chunk_tx_offset = %packed.tx_offset,
-                        chunk_data_size = packed.data_size,
-                        placement_data_size = info.data_size,
-                        %partition_offset,
-                        "data_root chunk does not match the requested placement"
-                    );
-                    continue;
+                match sm.generate_full_chunk(partition_offset) {
+                    Ok(Some(packed)) => {
+                        if packed.data_root != data_root
+                            || packed.tx_offset != data_tx_offset
+                            || packed.data_size != info.data_size
+                        {
+                            debug!(
+                                requested_data_root = %data_root,
+                                requested_tx_offset = %data_tx_offset,
+                                chunk_data_root = %packed.data_root,
+                                chunk_tx_offset = %packed.tx_offset,
+                                chunk_data_size = packed.data_size,
+                                placement_data_size = info.data_size,
+                                %partition_offset,
+                                "data_root chunk does not match the requested placement"
+                            );
+                            continue;
+                        }
+                        return Ok(Some(ChunkFormat::Packed(packed)));
+                    }
+                    // No body at this placement. A later placement or the cache
+                    // may still hold it.
+                    Ok(None) => continue,
+                    Err(error) if missing_on_disk(&error) => continue,
+                    Err(error) => {
+                        debug!(
+                            error = %error,
+                            %partition_offset,
+                            "data_root chunk read failed"
+                        );
+                        disk_error = Some(error);
+                    }
                 }
-                return Ok(Some(ChunkFormat::Packed(packed)));
             }
         }
         drop(binding);
@@ -458,7 +512,15 @@ impl ChunkProvider {
         // Fall back to the node chunk cache. Non-assignees often never have an SM
         // for this ledger/slot, but may still hold the body after POST /chunk
         // (long enough to generate an ingress proof and to serve residual holes).
-        self.get_chunk_from_cache(data_root, data_tx_offset)
+        // A storage read error is not a hole: return it when the cache misses.
+        match self.get_chunk_from_cache(data_root, data_tx_offset) {
+            Ok(Some(chunk)) => Ok(Some(chunk)),
+            Ok(None) => match disk_error {
+                Some(error) => Err(error),
+                None => Ok(None),
+            },
+            Err(error) => Err(error),
+        }
     }
 
     /// Reads an unpacked chunk body from `CachedChunks` / `CachedDataRoots`.
@@ -1589,6 +1651,121 @@ mod tests {
                 .is_none()
         );
 
+        Ok(())
+    }
+
+    /// A storage read error is not a hole. A hole stays absent. A span fails
+    /// only when every offset in the request failed to read.
+    #[test]
+    fn storage_read_error_is_not_a_missing_chunk() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("chunk-read-error")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path().to_path_buf(), 4);
+        let broken = assigned(&config, 0, 0, "hdd0", 4);
+        let (tx, data) = one_chunk(&config, 7);
+        pack_entropy(&broken, &config, 0);
+        index_one(&broken, &tx, 0);
+        write_one(&broken, &tx, &data);
+        broken.sync_pending_chunks()?;
+
+        let (hole_tx, _) = one_chunk(&config, 3);
+        index_one(&broken, &hole_tx, 1);
+
+        let good = assigned(&config, 1, 1, "hdd1", 4);
+        let (good_tx, good_data) = one_chunk(&config, 9);
+        pack_entropy(&good, &config, 0);
+        index_one(&good, &good_tx, 4);
+        write_one(&good, &good_tx, &good_data);
+        good.sync_pending_chunks()?;
+
+        let db = create_test_db(&tmp.path().join("db"));
+        let provider = make_provider(config.clone(), vec![Arc::new(broken), Arc::new(good)], db);
+
+        assert!(
+            provider
+                .get_chunk_by_data_root(
+                    DataLedger::Publish,
+                    tx.header.data_root,
+                    TxChunkOffset::from(0),
+                )?
+                .is_some(),
+            "the durable chunk is readable before the file is truncated"
+        );
+        assert!(
+            provider
+                .get_chunk_by_data_root(
+                    DataLedger::Publish,
+                    hole_tx.header.data_root,
+                    TxChunkOffset::from(0),
+                )?
+                .is_none(),
+            "an indexed chunk with no body is a hole"
+        );
+
+        let chunks_path = config
+            .node_config
+            .base_directory
+            .join("hdd0")
+            .join("chunks.dat");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&chunks_path)?
+            .set_len(0)?;
+
+        let err = provider
+            .get_chunk_by_data_root(
+                DataLedger::Publish,
+                tx.header.data_root,
+                TxChunkOffset::from(0),
+            )
+            .expect_err("a disk read error is not a missing chunk");
+        assert!(
+            !err.to_string()
+                .contains("Could not find chunk bytes on disk"),
+            "{err}"
+        );
+
+        let span_err = provider
+            .get_unpacked_chunks_by_ledger_span(
+                DataLedger::Publish,
+                LedgerChunkOffset::from(0),
+                LedgerChunkOffset::from(0),
+            )
+            .expect_err("a span whose only offset failed to read");
+        assert!(
+            !span_err
+                .to_string()
+                .contains("Could not find chunk bytes on disk"),
+            "{span_err}"
+        );
+
+        let mixed = provider.get_unpacked_chunks_by_ledger_span(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(0),
+            LedgerChunkOffset::from(4),
+        )?;
+        assert_eq!(mixed.len(), 1, "{mixed:?}");
+        assert_eq!(*mixed[0].0, 4);
+        assert_eq!(mixed[0].1.bytes.0, good_data);
+
+        cache_one(&provider.db, &tx, &data);
+        let cached = provider
+            .get_chunk_by_data_root(
+                DataLedger::Publish,
+                tx.header.data_root,
+                TxChunkOffset::from(0),
+            )?
+            .expect("a cache hit is served when the disk read fails");
+        assert_eq!(
+            cached
+                .as_unpacked()
+                .expect("cache returns unpacked")
+                .bytes
+                .0,
+            data
+        );
         Ok(())
     }
 
