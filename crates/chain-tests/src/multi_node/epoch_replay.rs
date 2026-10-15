@@ -146,7 +146,8 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
             .block_tree_guard
             .read()
             .canonical_epoch_snapshot()
-            .map_storage_modules_to_partition_assignments();
+            .map_storage_modules_to_partition_assignments()
+            .expect("packing params");
 
         assert!(peer_sm_infos_before[0].partition_assignment.is_some());
         assert_eq!(
@@ -267,7 +268,8 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         .block_tree_guard
         .read()
         .canonical_epoch_snapshot()
-        .map_storage_modules_to_partition_assignments();
+        .map_storage_modules_to_partition_assignments()
+        .expect("packing params");
 
     let peer_assignment_before = peer_sm_infos_before[0].partition_assignment.unwrap();
     let peer_assignment_after = sm_infos_after

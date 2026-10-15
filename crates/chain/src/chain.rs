@@ -1903,7 +1903,7 @@ impl IrysNode {
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
 
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());

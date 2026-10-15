@@ -1755,7 +1755,7 @@ impl BlockTreeServiceInner {
         }
 
         // Let the node know about any newly assigned partition hashes to local storage modules
-        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
+        let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments()?;
         self.service_senders.storage_modules.send_traced(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
