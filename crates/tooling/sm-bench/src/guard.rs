@@ -450,9 +450,7 @@ mod tests {
 
     #[test]
     fn require_loadtest_ancestor_refuses_a_missing_dir_through_a_symlink() {
-        let tmp = TempDirBuilder::new()
-            .prefix("sm-bench-link-dir-")
-            .build();
+        let tmp = TempDirBuilder::new().prefix("sm-bench-link-dir-").build();
         let live = tmp.path().join("live");
         fs::create_dir_all(&live).unwrap();
         let link = tmp.path().join("link");
