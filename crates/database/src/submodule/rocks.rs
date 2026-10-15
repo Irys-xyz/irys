@@ -1754,7 +1754,6 @@ impl RocksSubmoduleStore {
             bindings: HashMap::new(),
             unfilled: Vec::new(),
             origin: None,
-            used_placeholder: false,
         };
         let result = f(&mut batch)?;
         // Conversion skips the WAL. Durability is the later memtable flush.
@@ -4091,11 +4090,6 @@ struct Batch<'a> {
     /// Interval starts in this batch that still need a data-root info.
     unfilled: Vec<(u32, H256)>,
     origin: Option<records::PlacementOrigin>,
-    /// A placeholder data root was written. Retarget walks the overlay only then.
-    ///
-    /// Intervals are written after their leaf binding, so this stays false and
-    /// the walk does not run.
-    used_placeholder: bool,
 }
 
 impl<'a> Batch<'a> {
@@ -4266,44 +4260,6 @@ impl<'a> Batch<'a> {
             &records::data_root_key(&H256(row.value.data_root), row.start),
             records::encode_data_root(&value).to_vec(),
         );
-    }
-
-    fn retarget_data_root(&mut self, from: H256, to: H256) -> eyre::Result<()> {
-        if from == to || !self.used_placeholder {
-            return Ok(());
-        }
-        let keys: Vec<Vec<u8>> = self.overlay.maps[Cf::Interval.index()]
-            .keys()
-            .filter(|key| key.len() == 4)
-            .cloned()
-            .collect();
-        for key in keys {
-            let Some(Some(bytes)) = self.overlay.maps[Cf::Interval.index()].get(&key).cloned()
-            else {
-                continue;
-            };
-            let mut value = records::decode_placement(&bytes)?;
-            if value.data_root != from.0 {
-                continue;
-            }
-            let start = PartitionChunkOffset::decode(&key)?.0;
-            self.delete_data_root_point(&from, start);
-            value.data_root = to.0;
-            self.put_bytes(
-                Cf::Interval,
-                &key,
-                records::encode_placement(&value).to_vec(),
-            );
-            if !records::awaits_info(&value) {
-                self.put_data_root_point(&records::PlacementSpan { start, value });
-            }
-        }
-        for (_, root) in &mut self.unfilled {
-            if *root == from {
-                *root = to;
-            }
-        }
-        Ok(())
     }
 
     fn reject_empty_info(info: &DataRootInfo) -> eyre::Result<()> {
@@ -5981,8 +5937,10 @@ impl SubmoduleWrite for Batch<'_> {
         path_hash: TxPathHash,
         binding: &TxLeafBinding,
     ) -> eyre::Result<()> {
+        // The interval row is written later in this batch and reads the root
+        // from this map. No interval exists yet, so nothing is rewritten.
         self.bindings.insert(path_hash, binding.clone());
-        self.retarget_data_root(path_hash, binding.data_root)
+        Ok(())
     }
 
     fn add_data_path_hash_to_offset_index(
