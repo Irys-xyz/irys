@@ -643,7 +643,8 @@ impl PartitionMiningServiceInner {
                 );
                 return None;
             }
-            Some(placement) => placement,
+            Some(DerivePlacement::Skip) => None,
+            Some(DerivePlacement::Check(check)) => Some(check),
         };
         let Some(job) = TxPathJob::try_spawn(move || {
             let derived = irys_database::tx_path_derive::derive_tx_path_at_offset_with(
@@ -653,11 +654,6 @@ impl PartitionMiningServiceInner {
                 chunk_size,
                 pool.as_deref(),
             )?;
-            let placement = match placement {
-                DerivePlacement::Skip => None,
-                DerivePlacement::Check(check) => Some(check),
-                DerivePlacement::Missing(reason) => eyre::bail!("{reason}"),
-            };
             irys_database::tx_path_derive::cross_check_derived(
                 &derived,
                 ledger_offset,
