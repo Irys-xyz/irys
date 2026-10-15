@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
@@ -49,8 +50,11 @@ impl RemotePackingStrategy {
         storage_module_id: usize,
         partition_hash: PartitionHash,
         mining_address: IrysAddress,
+        stream_budget: Duration,
     ) -> Result<u32, String> {
         let chunk_size = self.config.consensus.chunk_size as usize;
+        // `read_timeout` resets after every read. This deadline does not.
+        let stream_deadline = tokio::time::Instant::now() + stream_budget;
         let mut buffer = BytesMut::with_capacity(
             (self.config.consensus.chunk_size * REMOTE_STREAM_BUFFER_MULTIPLIER)
                 .try_into()
@@ -100,21 +104,21 @@ impl RemotePackingStrategy {
             Ok(())
         };
 
-        // Process streaming chunks
-        while let Some(chunk_result) = stream.next().await {
-            // Wait for the disk before taking more entropy off the stream.
-            if !storage_module.has_pending_room() {
-                crate::packing_service::wait_for_pending_room(
-                    storage_module,
-                    "remote packing (streaming)",
-                )
-                .await?;
-            }
+        // Process streaming chunks. One item can hold many chunks, so the
+        // ceiling is checked again before each write.
+        loop {
+            let Some(chunk_result) =
+                within_stream_deadline(stream_deadline, stream_budget, stream.next()).await?
+            else {
+                break;
+            };
+            // Wait for the disk before taking this item's bytes into the module.
+            wait_for_stream_room(storage_module, stream_deadline, stream_budget).await?;
             let chunk = chunk_result.map_err(|e| format!("Error getting chunk: {:?}", e))?;
             buffer.extend_from_slice(&chunk);
 
-            // Process complete chunks from buffer
             while buffer.len() >= chunk_size {
+                wait_for_stream_room(storage_module, stream_deadline, stream_budget).await?;
                 let chunk_to_process = buffer.split_to(chunk_size).freeze();
                 process_chunk(chunk_to_process)?;
             }
@@ -148,12 +152,17 @@ impl RemotePackingStrategy {
         let current_chunk_range =
             PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
 
-        let RemotePackingConfig { url, timeout } = remote;
-        let v1_url = format!("{}/v1", url);
+        // No timeout means no connect timeout and no read timeout. The
+        // stream can then hold this controller until the process stops.
+        let Some(timeout) = remote.timeout else {
+            return Err(format!("remote packing host {} has no timeout", remote.url));
+        };
+        let url = &remote.url;
+        let v1_url = format!("{url}/v1");
 
         let client = self
             .client_pool
-            .get_or_create_client(&v1_url, timeout.as_ref());
+            .get_or_create_client(&v1_url, Some(&timeout));
 
         // Check connectivity
         debug!("Attempting to connect to remote packing host {}", &v1_url);
@@ -193,6 +202,12 @@ impl RemotePackingStrategy {
 
         let stream = response.bytes_stream();
 
+        // One configured gap per chunk. A dribble that resets `read_timeout`
+        // still has to finish the body inside this budget.
+        let chunks_in_range = u64::from(range_end.saturating_sub(range_start)).saturating_add(1);
+        let stream_budget =
+            timeout.saturating_mul(u32::try_from(chunks_in_range).unwrap_or(u32::MAX));
+
         // Process response stream
         self.process_chunk_stream(
             stream,
@@ -203,9 +218,38 @@ impl RemotePackingStrategy {
             storage_module_id,
             partition_hash,
             mining_address,
+            stream_budget,
         )
         .await
     }
+}
+
+/// Stop a remote body that outlives its budget. The clock is monotonic.
+async fn within_stream_deadline<T>(
+    deadline: tokio::time::Instant,
+    budget: Duration,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    tokio::time::timeout_at(deadline, future)
+        .await
+        .map_err(|_| format!("remote packing stream exceeded monotonic deadline {budget:?}"))
+}
+
+/// Wait until the module can take another chunk, but not past the stream budget.
+async fn wait_for_stream_room(
+    storage_module: &StorageModule,
+    deadline: tokio::time::Instant,
+    budget: Duration,
+) -> Result<(), String> {
+    if storage_module.has_pending_room() {
+        return Ok(());
+    }
+    within_stream_deadline(
+        deadline,
+        budget,
+        crate::packing_service::wait_for_pending_room(storage_module, "remote packing (streaming)"),
+    )
+    .await?
 }
 
 #[async_trait]
@@ -286,6 +330,7 @@ mod short_stream_tests {
         ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange, ii,
         partition::PartitionHash, partition_chunk_offset_ii,
     };
+    use reth::revm::primitives::bytes::Bytes;
     use tokio::sync::Notify;
 
     use super::super::PackingStrategy as _;
@@ -559,5 +604,326 @@ mod short_stream_tests {
             module.get_chunk_type(&PartitionChunkOffset(0)),
             Some(ChunkType::Entropy)
         );
+    }
+
+    fn module_with_pending_ceiling(
+        prefix: &str,
+        ceiling_bytes: u64,
+    ) -> (
+        irys_testing_utils::tempfile::TempDir,
+        Arc<irys_types::Config>,
+        Arc<StorageModule>,
+        PartitionHash,
+    ) {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 32,
+            ..consensus
+        });
+        node_config.storage.max_pending_write_bytes = Some(ceiling_bytes);
+        let config = Arc::new(irys_types::Config::new_with_random_peer_id(node_config));
+        let partition_hash = PartitionHash::repeat_byte(0x3C);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), "hdd0".into())],
+        };
+        let module = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        (tmp_dir, config, module, partition_hash)
+    }
+
+    /// Accepts the TCP connection and never answers. A client with no read
+    /// timeout waits here.
+    fn spawn_stall_host() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stall host");
+        listener
+            .set_nonblocking(true)
+            .expect("stall host accepts without blocking the test thread");
+        let addr = listener.local_addr().expect("stall host addr");
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0_u8; 1024];
+                        let _ = stream.read(&mut buf);
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        addr
+    }
+
+    /// Answers `/info`, then writes the pack body one byte at a time.
+    fn spawn_dribble_host(gap: Duration) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind dribble host");
+        listener
+            .set_nonblocking(true)
+            .expect("dribble host accepts without blocking the test thread");
+        let addr = listener.local_addr().expect("dribble host addr");
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_nodelay(true);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                        handle_dribble(stream, gap);
+                    }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        addr
+    }
+
+    fn handle_dribble(mut stream: TcpStream, gap: Duration) {
+        let mut buf = Vec::new();
+        let mut tmp = [0_u8; 1024];
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if request_complete(&buf) {
+                        break;
+                    }
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(_) => return,
+            }
+        }
+        let text = String::from_utf8_lossy(&buf);
+        if !text.contains("POST /v1/pack") {
+            let header = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(header.as_bytes());
+            return;
+        }
+        let header = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        if stream.write_all(header.as_bytes()).is_err() {
+            return;
+        }
+        // 32 bytes is one test chunk. The gap stays under the read timeout.
+        for _ in 0..32 {
+            std::thread::sleep(gap);
+            if stream.write_all(b"1\r\n").is_err()
+                || stream.write_all(&[0xAB]).is_err()
+                || stream.write_all(b"\r\n").is_err()
+                || stream.flush().is_err()
+            {
+                return;
+            }
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+    }
+
+    async fn pack_with_timeout(
+        addr: SocketAddr,
+        config: Arc<irys_types::Config>,
+        module: &Arc<StorageModule>,
+        partition_hash: PartitionHash,
+        timeout: Option<Duration>,
+    ) -> Result<(), String> {
+        let packing_config = crate::packing_service::config::PackingConfig {
+            poll_duration: Duration::from_secs(1),
+            concurrency: 1,
+            #[cfg(feature = "nvidia")]
+            max_chunks: 1,
+            chain_id: config.consensus.chain_id,
+            remotes: vec![irys_types::RemotePackingConfig {
+                url: format!("http://{addr}"),
+                timeout,
+            }],
+        };
+        let strategy =
+            RemotePackingStrategy::new(config.clone(), packing_config, Arc::new(Notify::new()));
+        strategy
+            .pack(
+                module,
+                PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+                config.node_config.miner_address(),
+                partition_hash,
+                module.id,
+                100,
+            )
+            .await
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn one_remote_stream_item_stays_within_the_pending_ceiling() {
+        let (_tmp, config, module, hash) =
+            module_with_pending_ceiling("remote_pending_ceiling", 32);
+        assert_eq!(
+            module.pending_memory_ceiling_bytes(),
+            32,
+            "the fixture ceiling must be one chunk"
+        );
+        let packing_config = crate::packing_service::config::PackingConfig {
+            poll_duration: Duration::from_secs(1),
+            concurrency: 1,
+            #[cfg(feature = "nvidia")]
+            max_chunks: 1,
+            chain_id: config.consensus.chain_id,
+            remotes: Vec::new(),
+        };
+        let strategy =
+            RemotePackingStrategy::new(config.clone(), packing_config, Arc::new(Notify::new()));
+        // Offsets 1, 2, 3 are not multiples of 1000, so the per-chunk sync
+        // does not drain the queue. One `Bytes` holds all three chunks.
+        let stream = futures::stream::iter(std::iter::once(Ok::<_, reqwest::Error>(Bytes::from(
+            vec![0xAB; 96],
+        ))));
+        let result = strategy
+            .process_chunk_stream(
+                stream,
+                &module,
+                &PartitionChunkRange(partition_chunk_offset_ii!(1, 3)),
+                1,
+                1000,
+                module.id,
+                hash,
+                config.node_config.miner_address(),
+                Duration::from_secs(30),
+            )
+            .await;
+        assert_eq!(result, Ok(4), "three chunks must be accepted: {result:?}");
+        let pending = module.pending_write_bytes();
+        let ceiling = module.pending_memory_ceiling_bytes();
+        assert!(
+            pending <= ceiling,
+            "one stream item passed the pending ceiling: pending {pending} ceiling {ceiling}"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn remote_without_timeout_returns_without_waiting() {
+        let (_tmp, config, module, hash) = test_module("remote_no_timeout");
+        let addr = spawn_stall_host();
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            pack_with_timeout(addr, config, &module, hash, None),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "a remote with no timeout must fail itself, got {result:?}"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn remote_byte_dribble_hits_the_monotonic_deadline() {
+        let (_tmp, config, module, hash) = test_module("remote_dribble_deadline");
+        let packing_config = crate::packing_service::config::PackingConfig {
+            poll_duration: Duration::from_secs(1),
+            concurrency: 1,
+            #[cfg(feature = "nvidia")]
+            max_chunks: 1,
+            chain_id: config.consensus.chain_id,
+            remotes: Vec::new(),
+        };
+        let strategy =
+            RemotePackingStrategy::new(config.clone(), packing_config, Arc::new(Notify::new()));
+        let stream = slow_byte_stream(32, Duration::from_millis(20));
+        let result = tokio::time::timeout(
+            Duration::from_millis(400),
+            strategy.process_chunk_stream(
+                stream,
+                &module,
+                &PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+                0,
+                100,
+                module.id,
+                hash,
+                config.node_config.miner_address(),
+                Duration::from_millis(100),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(ref error)) if error.contains("monotonic deadline")),
+            "the stream must fail on its own deadline, got {result:?}"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Uninitialized),
+            "a deadline must not store a partial dribble as a chunk"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn configured_remote_dribble_hits_the_stream_deadline() {
+        let (_tmp, config, module, hash) = test_module("remote_http_dribble");
+        let addr = spawn_dribble_host(Duration::from_millis(20));
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(800),
+            pack_with_timeout(
+                addr,
+                config,
+                &module,
+                hash,
+                Some(Duration::from_millis(100)),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "a dribble must hit the stream deadline, got {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(700),
+            "the deadline must fire before the dribble finishes, elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    fn slow_byte_stream(
+        count: usize,
+        gap: Duration,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>> {
+        Box::pin(futures::stream::unfold(0_usize, move |sent| async move {
+            if sent >= count {
+                return None;
+            }
+            tokio::time::sleep(gap).await;
+            Some((
+                Ok::<Bytes, reqwest::Error>(Bytes::copy_from_slice(&[0xAB])),
+                sent + 1,
+            ))
+        }))
     }
 }
