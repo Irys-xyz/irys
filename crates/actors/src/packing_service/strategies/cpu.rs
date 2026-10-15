@@ -416,9 +416,12 @@ mod tests {
         eprintln!(
             "retained spawn_blocking rss: before={before}KiB during={during}KiB after={after}KiB tasks={TASKS} per_task≈{per_task}B"
         );
+        // A `Vec` of join handles is tens of bytes per task. Retained
+        // `spawn_blocking` stacks leave a few hundred bytes each. A floor
+        // under that residue fails when the runtime frees the stacks.
         assert!(
-            growth_kb > 0,
-            "retaining {TASKS} completed tasks did not grow VmRSS ({before} -> {during})"
+            per_task >= 256,
+            "retaining {TASKS} completed tasks grew {per_task} B each ({before} -> {during} KiB); expected at least 256 B of stack residue per task"
         );
     }
 
