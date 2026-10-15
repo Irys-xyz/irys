@@ -1121,11 +1121,9 @@ impl DataSyncServiceInner {
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr, failure_kind)?;
 
-            if failure_kind != ChunkFetchFailureKind::NotFound {
-                let pa = orchestrator
-                    .storage_module
-                    .partition_assignment()
-                    .expect("A partition assignment present");
+            if failure_kind != ChunkFetchFailureKind::NotFound
+                && let Some(pa) = orchestrator.storage_module.partition_assignment()
+            {
                 debug!(
                     "chunk failed: ledger:{:?}, slot_index:{:?} chunk_offset:{} peer:{} kind:{:?}",
                     pa.ledger_id, pa.slot_index, chunk_offset, peer_addr, failure_kind
@@ -1491,8 +1489,11 @@ impl DataSyncServiceInner {
             return Vec::new();
         }
 
-        // Extract partition assignment
-        let pa = storage_module.partition_assignment().unwrap();
+        // An epoch update can clear the assignment before SyncPartitions drops
+        // this orchestrator.
+        let Some(pa) = storage_module.partition_assignment() else {
+            return Vec::new();
+        };
 
         // Check to see that the partition hash hasn't been re-assigned to capacity and no longer
         // has any data to sync
@@ -2768,7 +2769,9 @@ mod entropy_peer_sync_tests {
                 &StorageModuleInfo {
                     id: 2,
                     partition_assignment: Some(pa),
-                    submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+                    // Absolute, so clear_assignment rewrites the same packing_params.toml
+                    // that open read (a relative path resolves against the cwd).
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), tmp.path().join("chunks"))],
                 },
                 &config,
             )
@@ -2873,6 +2876,16 @@ mod entropy_peer_sync_tests {
                 .current_peers
                 .contains(&assignee),
             "discovery must publish the new manager to the orchestrator"
+        );
+
+        // An epoch update can clear the assignment before SyncPartitions drops
+        // the orchestrator. Peer lookups and the frontier must not panic then.
+        sm.clear_assignment(1).expect("clear assignment");
+        assert!(inner.get_best_available_peers(&sm, 4).is_empty());
+        assert!(
+            inner.chunk_orchestrators[&sm.id]
+                .get_max_chunk_offset()
+                .is_none()
         );
     }
 }

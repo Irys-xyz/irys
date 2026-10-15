@@ -1476,10 +1476,12 @@ impl ChunkOrchestrator {
     #[tracing::instrument(skip_all)]
     pub fn get_max_chunk_offset(&self) -> Option<(PartitionChunkOffset, LedgerChunkOffset)> {
         // Find the maximum LedgerRelativeOffset of this storage module
+        // The assignment can be cleared before SyncPartitions drops this
+        // orchestrator: nothing to sync then.
         let ledger_range = self
             .storage_module
             .get_storage_module_ledger_offsets()
-            .expect("storage module should be assigned to a ledger");
+            .ok()?;
 
         // Fetch the most recently migrated block
         // We only want to download migrated chunks from other peers
