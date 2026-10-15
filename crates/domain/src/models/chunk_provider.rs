@@ -192,13 +192,7 @@ impl ChunkProvider {
         let Some(packed) = self.get_chunk_by_ledger_offset(ledger, ledger_offset)? else {
             return Ok(None);
         };
-        let consensus = &self.config.consensus;
-        Ok(Some(irys_packing::unpack(
-            &packed,
-            consensus.entropy_packing_iterations,
-            consensus.chunk_size as usize,
-            consensus.chain_id,
-        )))
+        Ok(Some(unpack_packed(&self.config, &packed)))
     }
 
     /// Unpacked chunks for the inclusive ledger span `[from, to]`.
