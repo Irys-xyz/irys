@@ -447,22 +447,16 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 ///
 /// `intervals_persist_secs = 0` does both file rewrites on every sync and
 /// does not mark ahead. Offsets still queued or parked are stored as
-/// `Interrupted` in that image. A completion of a point that already
-/// fsynced those offsets stores the live label.
+/// `Interrupted`. A completion of offsets this point already fsynced stores
+/// the live label.
 ///
-/// A completion is never stored before its chunk `fdatasync` and presence
-/// commit. A write-ahead mark is never dropped or delayed. Clean shutdown
-/// force-syncs first, so nothing is pending, then writes the live map and
-/// drops the ahead mask. A crash leaves that mark on disk. Load turns it
-/// into `Uninitialized`, including entropy that this process only marked
-/// ahead and did not rewrite. An image built from the live map keeps
-/// `Interrupted` for offsets still in `pending.chunks` or
-/// `pending.written_ahead`, and keeps those offsets in the mask.
+/// Clean shutdown force-syncs first, then writes the live map and drops the
+/// mask. A crash leaves the mask on disk. Load turns it into `Uninitialized`,
+/// including entropy this process only marked ahead.
 ///
-/// The packed-byte checksum is not a file. It is committed in the same index
-/// batch as the presence row, after the chunk `fdatasync` and before the
-/// completion label. The `Interrupted` mark still covers the bytes: a crash
-/// reloads that span as `Uninitialized` and drops the row.
+/// The packed-byte checksum is committed with the presence row, after the
+/// chunk `fdatasync` and before the completion label. The `Interrupted` mark
+/// still covers those bytes, so that crash drops the row.
 #[derive(Debug)]
 struct IntervalDisk {
     written: StorageIntervals,
@@ -4564,7 +4558,7 @@ impl StorageModule {
                 continue;
             }
             // The reset marker won the crash. The flag clear may not have.
-            // `clear` does not touch the Metadata family.
+            // `clear` drops the partition binding and leaves the marker.
             submodule.db.set_chunk_crc_complete(false)?;
             submodule.crc_complete.store(false, Ordering::SeqCst);
             submodule.db.update(|tx| tx.clear())?;
@@ -6068,14 +6062,12 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Indexes transaction data by mapping chunks to transaction paths across storage submodules.
-    /// Stores three mappings: tx path hashes -> tx_path, chunk offsets -> tx paths, and data roots -> start offset.
-    /// Updates all overlapping submodules within the given chunk range.
+    /// Index one tx into every overlapping submodule.
     ///
-    /// Also records, in the same per-submodule transaction, a
-    /// `PendingBodyMigrationsByOffset` row saying this tx's chunk bodies are still
-    /// owed to that submodule (see [`Self::settle_pending_body_migration`]).
-    /// `block_height` is the canonical block whose migration is indexing the tx.
+    /// The same transaction records a `PendingBodyMigrationsByOffset` row, so
+    /// the body is owed once the index is visible (see
+    /// [`Self::settle_pending_body_migration`]). `block_height` is the
+    /// canonical block whose migration is indexing the tx.
     ///
     /// # Errors
     /// Returns error if chunk range doesn't overlap with storage module range.
@@ -6837,17 +6829,7 @@ impl StorageModule {
         self.generate_full_chunk(partition_offset)
     }
 
-    /// Constructs a Chunk struct for the given ledger offset
-    ///
-    /// This function:
-    /// 1. Retrieves and validates tx and data paths
-    /// 2. Extracts data_root and size from merkle proofs
-    /// 3. Calculates chunk position within its parent transaction
-    /// 4. Returns None if any step fails or chunk not found
-    ///
-    /// Note: Handles cases where data spans partition boundaries by supporting
-    /// negative offsets in the calculation of chunk position
-    /// this is why the input offset is a LedgerOffset and not a PartitionOffset
+    /// One packed chunk at a partition offset.
     pub fn generate_full_chunk(
         &self,
         partition_offset: PartitionChunkOffset,
@@ -7822,44 +7804,19 @@ impl StorageModule {
             completion_time
         );
 
-        // Calculate the actual time span covered by our records.
-        //
-        // Why this exists:
-        // - The storage module batches writes of fixed-size chunks (consensus chunk_size).
-        // - We want a lightweight, real-time estimate of sustained write throughput (bytes/sec)
-        //   to make backpressure decisions in the data sync layer (e.g., throttling request rate).
-        // - We derive throughput from the recorded timing of recent chunk writes to avoid heavy I/O stats.
-        //
-        // Behavior:
-        // - Computes total bytes written over the time window spanned by the first and last sample.
-        // - Samples completed more than 10s ago are outside that window.
-        // - If there are no samples in the window, returns 0 (no signal).
-        // - If the window is extremely small, we treat it conservatively (see below) to avoid spikes.
+        // Integer math only. A sub-millisecond span has no duration to divide.
         let time_span = completion_time.duration_since(start_time);
-
-        // Total bytes processed in this time span: chunk_size × number_of_chunks_in_window
         let total_bytes = chunk_size * count;
-
-        // Throughput calculation (integer-only to avoid non-deterministic floating point):
-        // - For spans >= 1s: return rounded division total_bytes / secs.
-        // - For spans < 1s: scale using milliseconds with rounding, i.e.
-        //     bytes_per_sec = round((total_bytes * 1000) / millis).
-        // This keeps the signal smooth and deterministic while remaining inexpensive.
         let secs = time_span.as_secs();
         if secs >= 1 {
-            // Rounded integer division for stable signal over longer spans
             return (total_bytes + secs / 2) / secs;
         }
 
         let millis = time_span.as_millis();
         if millis == 0 {
-            // Extremely small span (sub-millisecond): avoid division-by-zero and
-            // treat this as an instantaneous estimate bounded by total_bytes/sec.
             return total_bytes;
         }
 
-        // Scale to per-second using millisecond precision with rounding.
-        // Use u128 intermediates for headroom, then convert back to u64.
         let scaled = (total_bytes as u128) * 1000_u128;
         let per_sec = (scaled + millis / 2) / millis;
         per_sec as u64
