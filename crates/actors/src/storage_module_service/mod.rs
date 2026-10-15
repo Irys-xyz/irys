@@ -343,20 +343,17 @@ impl StorageModuleServiceInner {
                 {
                     let ledger_before = existing_pa.ledger_id;
 
-                    // Expiry resets and returns the partition to capacity
-                    // under one write lock. A failed reset leaves the ledger
-                    // assignment in place, so the next update still sees the
-                    // ledger→capacity transition. A module that already moved
-                    // is not reset again.
-                    if ledger_before.is_some() && info_pa.ledger_id.is_none() {
+                    // A ledger slot is changing. Clear the old index and store
+                    // the final assignment under one write lock. That covers
+                    // ledger→capacity and a same-epoch ledger→ledger
+                    // reassignment. A failed reset leaves the previous
+                    // assignment, so the next update still sees the change.
+                    // Capacity→ledger does not reset: index repair runs below.
+                    if ledger_before.is_some() {
                         let range =
                             self.reset_and_install(existing, Some(info_pa), update_height)?;
                         self.enqueue_packing(existing, range);
                     } else {
-                        // Capacity→LedgerSlot and long-lived ledger assigns.
-                        // Index repair runs below for ledger-assigned modules.
-                        // Direct ledger A→B reassignment uses the mining-bus
-                        // reset path, not this presence scan.
                         existing.assign_partition(info_pa, update_height)?;
                     }
                 }
@@ -878,6 +875,66 @@ mod assignment_reset_tests {
             None
         );
         assert!(!harness.module.reset_incomplete());
+        assert!(harness.receivers.packing.try_recv().is_ok());
+    }
+
+    /// A hash that expired and was backfilled onto another ledger slot in the
+    /// same epoch arrives here as a ledger-to-ledger change. The old index
+    /// belongs to the previous slot. The reset stores the new slot.
+    #[tokio::test]
+    async fn ledger_reassignment_clears_the_old_index() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(Some(DataLedger::Submit.into()));
+        let hash = harness.module.partition_hash().expect("assigned");
+        let miner = harness
+            .module
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(
+            harness
+                .module
+                .write_chunk(offset, vec![0x11_u8; 32], ChunkType::Data)
+        );
+        harness
+            .module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+        assert_eq!(
+            harness.module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+
+        let update = Arc::new(vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: Some(DataLedger::Publish.into()),
+                slot_index: Some(1),
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), harness.path.clone())],
+        }]);
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: update,
+                update_height: 8,
+            })
+            .await
+            .expect("reassignment");
+
+        let assignment = harness.module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.partition_hash, hash);
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(assignment.slot_index, Some(1));
+        assert_eq!(
+            harness.module.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "the previous slot's bytes are not the new slot's index"
+        );
         assert!(harness.receivers.packing.try_recv().is_ok());
     }
 

@@ -230,6 +230,18 @@ impl PartitionMiningServiceInner {
         if !expired.0.contains(&partition_hash) {
             return;
         }
+        // The assignment update is the last writer for a ledger slot. This
+        // notice also names a hash that the same epoch backfilled onto a new
+        // slot. The storage task can install that slot before this task reads
+        // the notice. Resetting then would store capacity over it.
+        if self.assigned_ledger_slot() {
+            self.expiry_reset_pending = false;
+            debug!(
+                storage_module.partition_hash = ?partition_hash,
+                "Partition expiry notice left the ledger assignment in place"
+            );
+            return;
+        }
         self.expiry_update_height = update_height;
         // This call is the attempt. Do not also run the retry here: a
         // successful retry and this handler would pack twice.
@@ -263,6 +275,12 @@ impl PartitionMiningServiceInner {
             self.expiry_reset_pending = false;
             return;
         }
+        // A ledger installed while the reset was pending owns the module.
+        // Retrying the capacity reset would remove that slot.
+        if self.assigned_ledger_slot() {
+            self.expiry_reset_pending = false;
+            return;
+        }
         let Some(partition_hash) = self.storage_module.partition_hash() else {
             self.expiry_reset_pending = false;
             return;
@@ -286,9 +304,19 @@ impl PartitionMiningServiceInner {
         }
     }
 
+    /// The module is on a ledger slot. The assignment update clears that
+    /// index and stores the final slot. This service must not replace it
+    /// with capacity.
+    fn assigned_ledger_slot(&self) -> bool {
+        self.storage_module
+            .partition_assignment()
+            .is_some_and(|assignment| assignment.ledger_id.is_some())
+    }
+
     /// Reset and store capacity (same partition and miner, no ledger slot)
     /// before the assignment write lock is released. A failed reset leaves
-    /// the previous assignment in place.
+    /// the previous assignment in place. Do not call this when
+    /// [`Self::assigned_ledger_slot`] is set.
     fn expire_to_capacity(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let Some(current) = self.storage_module.partition_assignment() else {
             eyre::bail!("partition assignment missing during expiry reset");
@@ -1083,6 +1111,92 @@ mod tests {
         assert!(!storage_module.reset_incomplete());
         assert!(receivers.packing.try_recv().is_ok());
         inner.finish_expiry_reset();
+        assert!(receivers.packing.try_recv().is_err());
+    }
+
+    /// The storage task can install the epoch's new ledger before this task
+    /// reads the expiry notice. The notice must not replace that ledger with
+    /// capacity, and it must not clear the index the assignment update owns.
+    #[test]
+    fn expiry_notice_keeps_a_ledger_installed_before_it() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x77);
+        let miner = config.node_config.miner_address();
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: miner,
+                ledger_id: Some(DataLedger::Submit.into()),
+                slot_index: Some(0),
+            }),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage_module.write_chunk(offset, vec![0x11_u8; 32], ChunkType::Data));
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+        storage_module
+            .assign_partition(
+                PartitionAssignment {
+                    partition_hash,
+                    miner_address: miner,
+                    ledger_id: Some(DataLedger::Publish.into()),
+                    slot_index: Some(1),
+                },
+                20,
+            )
+            .expect("install the reassignment");
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.partition_hash, partition_hash);
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(assignment.slot_index, Some(1));
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data),
+            "the expiry notice must not clear the index of the new ledger"
+        );
+        assert!(!inner.expiry_reset_pending);
         assert!(receivers.packing.try_recv().is_err());
     }
 
