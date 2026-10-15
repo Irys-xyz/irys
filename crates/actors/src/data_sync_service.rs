@@ -1208,6 +1208,11 @@ impl DataSyncServiceInner {
             // If it does, ensure there's a bandwidth manager for any peer storing the data for this storage module
             self.ensure_bandwidth_managers_for_peers(ledger_id, slot_index);
         }
+
+        // Managers outlive a single slot. Replace each list with the epoch's
+        // current data partitions for that miner, so a slot the peer left
+        // does not stay preferred.
+        self.replace_peer_assignments_from_epoch();
     }
 
     /// Updates the active_peers list and ensures there are PeerBandwidthManagers for
@@ -1231,26 +1236,41 @@ impl DataSyncServiceInner {
                 continue;
             };
 
-            // Get existing entry for a peer bandwidth manager or add a new one for the peer
+            // Create the manager when this peer is new. Its partition list is
+            // replaced from the epoch snapshot after every local slot is visited.
             let mut active_peers = self.active_peer_bandwidth_managers.write().unwrap();
-            let entry = active_peers
+            active_peers
                 .entry(pa.miner_address)
                 .or_insert(PeerBandwidthManager::new(
                     &pa.miner_address,
                     &peer,
                     &self.config,
                 ));
+        }
+    }
 
-            // Finally let the peer bandwidth manager for this peer store a reference to this partition assignment
-            // so we can filter the active_peer_bandwidth_managers list for peers assigned to this ledger/slot in the future
-            if !entry.partition_assignments.contains(&pa) {
-                debug!(
-                    "Adding partition assignment: {:#?} to Peer: {}",
-                    pa, entry.miner_address
-                );
-                entry.partition_assignments.push(pa);
+    /// Set every live manager's partition list from the canonical epoch.
+    ///
+    /// The epoch read is dropped before the peer map is locked. The same
+    /// order is used when a manager is created.
+    fn replace_peer_assignments_from_epoch(&mut self) {
+        let by_miner = {
+            let epoch = self.block_tree.read().canonical_epoch_snapshot();
+            let mut by_miner: HashMap<IrysAddress, Vec<_>> = HashMap::new();
+            for assignment in epoch.partition_assignments.data_partitions.values().copied() {
+                by_miner
+                    .entry(assignment.miner_address)
+                    .or_default()
+                    .push(assignment);
             }
-            // active_peers dropped here
+            by_miner
+        };
+        let mut active = self.active_peer_bandwidth_managers.write().unwrap();
+        for manager in active.values_mut() {
+            manager.partition_assignments = by_miner
+                .get(&manager.miner_address)
+                .cloned()
+                .unwrap_or_default();
         }
     }
 
@@ -2801,9 +2821,9 @@ mod entropy_peer_sync_tests {
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, NodeConfig,
-        PartitionChunkOffset, app_state::DatabaseProvider, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
+        NodeConfig, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
+        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -3267,4 +3287,125 @@ mod assignment_follow_tests {
         );
     }
 
+    fn peer_item(address: IrysAddress, port: u16) -> PeerListItem {
+        let api =
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+        PeerListItem {
+            peer_id: IrysPeerId::from(address),
+            mining_address: address,
+            address: PeerAddress {
+                gossip: api,
+                api,
+                ..Default::default()
+            },
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            is_online: true,
+            protocol_version: ProtocolVersion::default(),
+            ..Default::default()
+        }
+    }
+
+    fn install_epoch(guard: &irys_domain::BlockTreeReadGuard, assignments: &[PartitionAssignment]) {
+        let tip = guard.read().tip;
+        let mut tree = guard.write();
+        let entry = tree.blocks.get_mut(&tip).expect("genesis entry");
+        let mut snapshot = irys_domain::EpochSnapshot::default();
+        for assignment in assignments {
+            snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(assignment.partition_hash, *assignment);
+        }
+        entry.epoch_snapshot = Arc::new(snapshot);
+    }
+
+    /// A peer that stays connected across epochs keeps only the slots the
+    /// current epoch snapshot still has for that miner.
+    #[tokio::test]
+    async fn peer_assignments_follow_the_current_epoch() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let config = test_config(tmp.path());
+        let assignee = IrysAddress::from([0xA5; 20]);
+        let ledger = u32::from(DataLedger::Submit);
+        let slot0 = PartitionAssignment {
+            ledger_id: Some(ledger),
+            slot_index: Some(0),
+            miner_address: assignee,
+            partition_hash: H256::repeat_byte(0x21),
+        };
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 4,
+                    partition_assignment: Some(slot0),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), tmp.path().join("chunks"))],
+                },
+                &config,
+            )
+            .expect("storage module"),
+        );
+        sm.pack_with_zeros();
+
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let peer_list = PeerList::from_peers(
+            vec![peer_item(assignee, 19191)],
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+        let genesis = signed_genesis();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        install_epoch(&block_tree_guard, &[slot0]);
+
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard.clone(),
+            Arc::new(RwLock::new(vec![sm])),
+            peer_list,
+            open_db(tmp.path()),
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize))),
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+
+        {
+            let managers = inner.active_peer_bandwidth_managers.read().unwrap();
+            let manager = managers
+                .get(&assignee)
+                .expect("the current assignee has a bandwidth manager");
+            assert!(manager.is_assigned_to(ledger, Some(0)));
+            assert!(!manager.is_assigned_to(ledger, Some(1)));
+        }
+
+        let slot1 = PartitionAssignment {
+            ledger_id: Some(ledger),
+            slot_index: Some(1),
+            miner_address: assignee,
+            partition_hash: H256::repeat_byte(0x22),
+        };
+        install_epoch(&block_tree_guard, &[slot1]);
+        inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
+            .expect("epoch sync");
+
+        let managers = inner.active_peer_bandwidth_managers.read().unwrap();
+        let manager = managers
+            .get(&assignee)
+            .expect("a connected peer keeps its bandwidth manager");
+        assert!(
+            !manager.is_assigned_to(ledger, Some(0)),
+            "the slot the peer left must not stay preferred: {:?}",
+            manager.partition_assignments
+        );
+        assert!(
+            manager.is_assigned_to(ledger, Some(1)),
+            "the slot the epoch still assigns is recorded: {:?}",
+            manager.partition_assignments
+        );
+        assert_eq!(manager.partition_assignments.len(), 1);
+    }
 }
