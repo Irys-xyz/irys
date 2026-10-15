@@ -518,7 +518,7 @@ fn incomplete_mdbx_conversion(path: &Path) -> eyre::Report {
 }
 
 /// `true` when `CONVERTING` is the convert-incomplete sentinel.
-fn converting_sentinel_present(path: &Path) -> eyre::Result<bool> {
+pub(super) fn converting_sentinel_present(path: &Path) -> eyre::Result<bool> {
     let file_path = path.join("CONVERTING");
     if !file_path.is_file() {
         return Ok(false);

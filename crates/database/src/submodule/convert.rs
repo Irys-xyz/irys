@@ -3727,7 +3727,7 @@ fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> e
 }
 
 fn replace_marked_incomplete(path: &Path, replace: bool) -> eyre::Result<()> {
-    if !converting_sentinel_present(path)? {
+    if !migrate::converting_sentinel_present(path)? {
         eyre::bail!(
             "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
             path.display()
@@ -3757,15 +3757,6 @@ fn refuse_forbidden(path: &Path) -> eyre::Result<()> {
         }
     }
     Ok(())
-}
-
-fn converting_sentinel_present(path: &Path) -> eyre::Result<bool> {
-    let file_path = path.join(CONVERTING_FILE);
-    if !file_path.is_file() {
-        return Ok(false);
-    }
-    // Any file counts: a crash between create and write leaves it short.
-    Ok(true)
 }
 
 fn write_converting_sentinel(path: &Path) -> eyre::Result<()> {
