@@ -11,6 +11,9 @@ path = "src/main.rs"
 nvidia = ["irys-actors/nvidia"]
 test-utils = []
 telemetry = ["irys-utils/telemetry", "irys-testing-utils/telemetry"]
+# jemalloc heap profiling. Off by default: sampling costs a little CPU even
+# when no profile is requested. See scripts/profiling/README.md.
+jemalloc-prof = ["reth-cli-util/jemalloc-prof"]
 
 [dependencies]
 # Irys
