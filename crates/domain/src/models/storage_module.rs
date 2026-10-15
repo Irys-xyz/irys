@@ -2505,6 +2505,13 @@ impl StorageModule {
             .saturating_add(pending.queued_unpacked_bytes)
     }
 
+    /// True while queued chunk bytes are under [`Self::pending_memory_ceiling_bytes`].
+    /// Producers that can outrun the disk (packing) wait for this: the disk
+    /// lane drains asynchronously, so `sync_pending_chunks` does not block.
+    pub fn has_pending_room(&self) -> bool {
+        self.pending_write_bytes() < self.pending_memory_ceiling_bytes()
+    }
+
     /// Number of submodules (independent disks) backing this module.
     pub fn submodule_count(&self) -> usize {
         self.submodules.len()
@@ -3225,7 +3232,7 @@ impl StorageModule {
 
     /// Same ceiling the body-migration worker uses. A configured value is
     /// floored at one flush batch so a small cap cannot stall that worker.
-    fn pending_memory_ceiling_bytes(&self) -> u64 {
+    pub fn pending_memory_ceiling_bytes(&self) -> u64 {
         let storage = &self.config.node_config.storage;
         let submodules = self.submodule_count() as u64;
         let chunk = self.config.consensus.chunk_size;

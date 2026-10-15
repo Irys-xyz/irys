@@ -56,9 +56,13 @@ impl super::PackingStrategy for CpuPackingStrategy {
         let mut handles = Vec::new();
 
         for i in range_start..=range_end {
-            // Periodic sync to avoid memory buildup
+            // Wait for the disk before queueing more entropy.
             if i % short_writes_before_sync == 0 {
-                crate::packing_service::sync_with_warning(storage_module, "CPU packing (periodic)");
+                crate::packing_service::wait_for_pending_room(
+                    storage_module,
+                    "CPU packing (periodic)",
+                )
+                .await;
                 yield_now().await;
             }
 

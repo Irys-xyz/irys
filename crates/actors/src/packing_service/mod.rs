@@ -48,6 +48,24 @@ pub(crate) fn sync_with_warning(storage_module: &irys_domain::StorageModule, con
     }
 }
 
+/// Interval between pending-room checks while packing waits on the disk.
+const PENDING_ROOM_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Wake the disk lane, then wait until the module has room for more pending
+/// chunks. Packing computes entropy faster than a disk writes it, and with the
+/// lane running a sync only wakes the lane, so without this wait the pending
+/// queue grows without bound.
+pub(crate) async fn wait_for_pending_room(
+    storage_module: &irys_domain::StorageModule,
+    context: &str,
+) {
+    sync_with_warning(storage_module, context);
+    while !storage_module.has_pending_room() {
+        tokio::time::sleep(PENDING_ROOM_POLL).await;
+        sync_with_warning(storage_module, context);
+    }
+}
+
 /// Log packing progress at regular intervals
 #[inline]
 #[tracing::instrument(level = "trace", skip_all, fields(packing.strategy = strategy, chunk.current_offset = current_offset, storage_module.id = storage_module_id, partition.hash = %partition_hash))]

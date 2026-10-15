@@ -133,13 +133,14 @@ impl super::PackingStrategy for CudaPackingStrategy {
                         ));
                     }
 
-                    // Periodic sync
+                    // Wait for the disk before queueing more entropy.
                     if i % short_writes_before_sync == 0 {
                         yield_now().await;
-                        crate::packing_service::sync_with_warning(
+                        crate::packing_service::wait_for_pending_room(
                             &storage_module_clone,
                             "CUDA packing (periodic)",
-                        );
+                        )
+                        .await;
                     }
                 }
                 drop(permit);

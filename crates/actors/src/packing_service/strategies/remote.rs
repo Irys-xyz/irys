@@ -102,6 +102,14 @@ impl RemotePackingStrategy {
 
         // Process streaming chunks
         while let Some(chunk_result) = stream.next().await {
+            // Wait for the disk before taking more entropy off the stream.
+            if !storage_module.has_pending_room() {
+                crate::packing_service::wait_for_pending_room(
+                    storage_module,
+                    "remote packing (streaming)",
+                )
+                .await;
+            }
             let chunk = chunk_result.map_err(|e| format!("Error getting chunk: {:?}", e))?;
             buffer.extend_from_slice(&chunk);
 
