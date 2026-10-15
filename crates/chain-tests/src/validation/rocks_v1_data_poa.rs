@@ -301,26 +301,30 @@ async fn heavy_test_rocks_v1_submit_and_publish_data_poa() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A chunk-aligned OneYear tx is mined as a data chunk on the term ledger.
-#[test_log::test(tokio::test)]
-async fn heavy_test_rocks_v1_term_ledger_data_poa() -> eyre::Result<()> {
-    initialize_tracing();
+/// OneYear and ThirtyDay use the same cascade setup and the same slot-0 PoA
+/// wait. The fill byte only distinguishes the payload.
+async fn mine_cascaded_ledger_data_poa(
+    ledger: DataLedger,
+    fill: u8,
+    label: &str,
+) -> eyre::Result<()> {
     let mut config = rocks_config(4, 2);
     cascade_since_unix_epoch(&mut config);
     // Publish, Submit, OneYear, ThirtyDay, and one capacity partition.
     let (node, signer) = start_rocks_node(config, 5).await?;
     mine_past_epoch(&node).await?;
-
-    let _tx = post_ledger_tx(&node, &signer, DataLedger::OneYear, aligned_bytes(4, 0x33)).await?;
-
-    wait_for_data_on_slot(&node, DataLedger::OneYear, 0).await?;
-    mine_until(&node, "one-year data poa", |block| {
-        is_data_poa(&block.poa, DataLedger::OneYear)
-    })
-    .await?;
-
+    let _tx = post_ledger_tx(&node, &signer, ledger, aligned_bytes(4, fill)).await?;
+    wait_for_data_on_slot(&node, ledger, 0).await?;
+    mine_until(&node, label, |block| is_data_poa(&block.poa, ledger)).await?;
     node.stop().await;
     Ok(())
+}
+
+/// A chunk-aligned OneYear tx is mined as a data chunk on the term ledger.
+#[test_log::test(tokio::test)]
+async fn heavy_test_rocks_v1_term_ledger_data_poa() -> eyre::Result<()> {
+    initialize_tracing();
+    mine_cascaded_ledger_data_poa(DataLedger::OneYear, 0x33, "one-year data poa").await
 }
 
 /// Two chunk-aligned publish txs overflow one partition. The epoch gives the
@@ -368,27 +372,7 @@ async fn heavy_test_rocks_v1_nonzero_slot_data_poa() -> eyre::Result<()> {
 #[test_log::test(tokio::test)]
 async fn heavy_test_rocks_v1_thirty_day_data_poa() -> eyre::Result<()> {
     initialize_tracing();
-    let mut config = rocks_config(4, 2);
-    cascade_since_unix_epoch(&mut config);
-    let (node, signer) = start_rocks_node(config, 5).await?;
-    mine_past_epoch(&node).await?;
-
-    let _tx = post_ledger_tx(
-        &node,
-        &signer,
-        DataLedger::ThirtyDay,
-        aligned_bytes(4, 0x34),
-    )
-    .await?;
-
-    wait_for_data_on_slot(&node, DataLedger::ThirtyDay, 0).await?;
-    mine_until(&node, "thirty-day data poa", |block| {
-        is_data_poa(&block.poa, DataLedger::ThirtyDay)
-    })
-    .await?;
-
-    node.stop().await;
-    Ok(())
+    mine_cascaded_ledger_data_poa(DataLedger::ThirtyDay, 0x34, "thirty-day data poa").await
 }
 
 /// Two chunk-aligned publish txs overflow one partition. They live on the
