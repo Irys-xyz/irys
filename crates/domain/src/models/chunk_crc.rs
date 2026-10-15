@@ -147,8 +147,11 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write as _;
     use std::os::unix::fs::FileExt as _;
+    use std::time::{Duration, Instant};
 
-    use super::super::{ChunkType, StorageModule, StorageModuleInfo, SyncFailurePoint};
+    use super::super::{
+        ChunkType, StorageModule, StorageModuleInfo, SyncFailurePoint, SyncPausePoint,
+    };
     use super::{checksum, classify, test_mismatch_count, test_unknown_count};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -1092,6 +1095,126 @@ mod tests {
             !module.chunk_crc_complete_for_test(),
             "one settled offset with no checksum keeps crc_complete false"
         );
+        Ok(())
+    }
+
+    /// Entropy, then one indexed data chunk, then the checksum cleared.
+    /// Other offsets stay uninitialized, so a later rewrite cannot latch
+    /// `crc_complete` and turn this read into a mismatch.
+    fn assigned_proof_only(
+        prefix: &str,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
+        let (tmp, config, module) = open_assigned(prefix)?;
+        write_synced(&module, 0, 0x21, ChunkType::Entropy);
+        let chunk = index_one_chunk(&module, &config, vec![0x5A_u8; CHUNK])?;
+        module
+            .write_data_chunk(&chunk)
+            .expect("pack the data chunk");
+        module.sync_pending_chunks()?;
+        module.set_offset_crc_for_test(PartitionChunkOffset::from(0), None)?;
+        module.clear_chunk_crc_complete()?;
+        let row = module
+            .offset_meta_for_test(PartitionChunkOffset::from(0))?
+            .expect("proof row");
+        assert!(row.proof.is_some() && row.crc.is_none());
+        assert!(!module.chunk_crc_complete_for_test());
+        Ok((tmp, module))
+    }
+
+    /// The reader loads the proof-only row while the rewrite holds the sync
+    /// lock, after the bytes are durable and before the presence row changes.
+    /// Returns how many chunks were served and the reader thread's unknown delta.
+    fn serve_during_paused_rewrite(
+        module: &StorageModule,
+        byte: u8,
+        kind: ChunkType,
+    ) -> eyre::Result<(usize, u64)> {
+        let offset = PartitionChunkOffset::from(0);
+        module.pause_next_sync_at(SyncPausePoint::AfterPresenceCopy);
+        std::thread::scope(|scope| -> eyre::Result<(usize, u64)> {
+            struct Release<'a>(&'a StorageModule);
+            impl Drop for Release<'_> {
+                fn drop(&mut self) {
+                    self.0.release_sync_pause();
+                }
+            }
+            let _release = Release(module);
+            let writer = scope.spawn(|| {
+                assert!(module.write_chunk(offset, vec![byte; CHUNK], kind));
+                module.force_sync_pending_chunks()
+            });
+            assert!(
+                module.wait_for_sync_pause(Duration::from_secs(5)),
+                "rewrite did not pause after the bytes were durable"
+            );
+            let before_views = module.index_view_count();
+            let (tx, rx) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let start = test_unknown_count();
+                let served = module.generate_full_chunks(offset, offset);
+                let delta = test_unknown_count().saturating_sub(start);
+                let _ = tx.send((served, delta));
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while module.index_view_count() == before_views {
+                if Instant::now() >= deadline {
+                    eyre::bail!("reader did not load the proof-only row");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            module.release_sync_pause();
+            let (served, delta) = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("reader finished");
+            writer.join().expect("writer")?;
+            Ok((served?.len(), delta))
+        })
+    }
+
+    #[test]
+    fn unknown_count_follows_a_stable_proof_only_row() -> eyre::Result<()> {
+        let (_tmp, module) = assigned_proof_only("crc_unknown_stable")?;
+        let offset = PartitionChunkOffset::from(0);
+        let before = test_unknown_count();
+        let served = module.generate_full_chunks(offset, offset)?;
+        assert_eq!(served.len(), 1, "a stable proof-only row is served");
+        assert_eq!(
+            test_unknown_count().saturating_sub(before),
+            1,
+            "a served row with no checksum counts as unknown"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_count_skips_a_reload_that_omits_the_offset() -> eyre::Result<()> {
+        let (_tmp, module) = assigned_proof_only("crc_unknown_omit")?;
+        let (len, delta) = serve_during_paused_rewrite(&module, 0xEE, ChunkType::Entropy)?;
+        assert_eq!(len, 0, "a checksum-only entropy row is not served");
+        assert_eq!(
+            delta, 0,
+            "an omitted re-read is not a chunk served without a checksum"
+        );
+        let finished = module
+            .offset_meta_for_test(PartitionChunkOffset::from(0))?
+            .expect("entropy row");
+        assert!(finished.crc.is_some() && finished.proof.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_count_skips_a_reload_that_now_has_a_checksum() -> eyre::Result<()> {
+        let (_tmp, module) = assigned_proof_only("crc_unknown_fresh_crc")?;
+        let (len, delta) = serve_during_paused_rewrite(&module, 0xAB, ChunkType::Data)?;
+        assert_eq!(len, 1, "a re-read whose row has a checksum is served");
+        assert_eq!(
+            delta, 0,
+            "a re-read whose row now has a checksum is not unknown"
+        );
+        let finished = module
+            .offset_meta_for_test(PartitionChunkOffset::from(0))?
+            .expect("data row");
+        assert!(finished.crc.is_some() && finished.proof.is_some());
         Ok(())
     }
 

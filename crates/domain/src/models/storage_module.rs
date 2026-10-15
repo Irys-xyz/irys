@@ -5333,15 +5333,26 @@ impl StorageModule {
     ///
     /// The caller loaded that proof before `yield_to_writes`. Serve the pair
     /// read while this lock is held. No proof means the row is checksum-only,
-    /// so omit it. A mismatch is omitted too. A missing checksum stays unknown
-    /// and is not queued as a repair.
+    /// so omit it. A mismatch is omitted too. The checksum in a served pair
+    /// is the one committed with those bytes. The caller counts unknown only
+    /// when that checksum is still absent. A missing checksum is not queued
+    /// as a repair.
     ///
     /// Lock order matches `finish_durable_point`: this lock, then
     /// `pending_writes`, then `chunks.dat`.
     fn reload_unchecksummed_chunk(
         &self,
         offset: PartitionChunkOffset,
-    ) -> eyre::Result<Option<(ChunkBytes, DataRoot, u64, Base64, TxChunkOffset)>> {
+    ) -> eyre::Result<
+        Option<(
+            ChunkBytes,
+            DataRoot,
+            u64,
+            Base64,
+            TxChunkOffset,
+            Option<u32>,
+        )>,
+    > {
         let _sync_guard = self
             .sync_in_progress
             .lock()
@@ -5366,7 +5377,9 @@ impl StorageModule {
         ) {
             return Ok(None);
         }
-        Ok(Some((bytes, data_root, data_size, data_path, tx_offset)))
+        Ok(Some((
+            bytes, data_root, data_size, data_path, tx_offset, crc,
+        )))
     }
 
     /// One `pread` of the buffered `chunks.dat` descriptor.
@@ -7101,12 +7114,17 @@ impl StorageModule {
                         }
                     }
                     chunk_crc::CrcVerdict::Unknown => {
-                        chunk_crc::note_unknown(caller);
                         // The proof above was loaded before `yield_to_writes`.
                         // A commit can replace the bytes while this read waits.
                         // Serve only the pair read while the sync lock is held.
+                        // Count unknown only when that pair still has no checksum.
+                        // An omitted offset, and a row that now has one, are not
+                        // chunks served without a stored checksum.
                         match self.reload_unchecksummed_chunk(offset)? {
-                            Some((fresh, root, size, path, tx)) => {
+                            Some((fresh, root, size, path, tx, fresh_crc)) => {
+                                if fresh_crc.is_none() {
+                                    chunk_crc::note_unknown(caller);
+                                }
                                 (data_root, data_size, data_path, tx_offset) =
                                     (root, size, path, tx);
                                 bytes = fresh;
