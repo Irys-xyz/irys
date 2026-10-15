@@ -3946,6 +3946,18 @@ impl StorageModule {
         // Read the epoch before the map. A later reset fails this snapshot
         // instead of letting it put the old mask back.
         let snapshot_epoch = self.load_interval_image_epoch();
+        // The file already says Interrupted for a covered batch. Return before
+        // cloning the interval map: that clone is the whole fragment list, and
+        // this runs on the durable-point path. The lock is not held across the
+        // clone below.
+        {
+            let disk = self.lock_interval_disk();
+            if !self.interval_snapshot_current(snapshot_epoch)
+                || Self::runs_covered(&disk.mask, runs)
+            {
+                return Ok(());
+            }
+        }
         let memory = self
             .intervals
             .read()
@@ -4349,16 +4361,30 @@ impl StorageModule {
         (start, end)
     }
 
-    /// The submodule's slice of `image`. Empty input becomes one
+    /// The submodule's slice of `image`. Empty overlap becomes one
     /// `Uninitialized` range so the file always spans the submodule.
-    /// `None` when the cut intervals overlap, matching the old skip.
+    /// `None` when clipped intervals overlap, matching the old skip.
+    ///
+    /// A map that already lies inside `range` is cloned. One submodule per
+    /// partition hits that path. Clipping by copying the map and rebuilding
+    /// a tree is O(n log n) in the fragment count.
     fn interval_slice(
         image: &StorageIntervals,
         range: Interval<PartitionChunkOffset>,
     ) -> Option<StorageIntervals> {
-        let mut working = image.clone();
-        let cut: Vec<_> = working.cut(range).collect();
-        let mut slice = NoditMap::from_iter_strict(cut.into_iter()).ok()?;
+        if let (Some((first, _)), Some((last, _))) = (image.iter().next(), image.iter().next_back())
+            && first.start() >= range.start()
+            && last.end() <= range.end()
+        {
+            return Some(image.clone());
+        }
+
+        let mut slice = StorageIntervals::new();
+        for (interval, chunk_type) in image.overlapping(range) {
+            let start = interval.start().max(range.start());
+            let end = interval.end().min(range.end());
+            slice.insert_strict(ii(start, end), *chunk_type).ok()?;
+        }
         if slice.is_empty() {
             slice
                 .insert_merge_touching_if_values_equal(range, ChunkType::Uninitialized)
@@ -4429,13 +4455,10 @@ impl StorageModule {
 
             for (interval, chunk_type) in submodule_intervals {
                 let set_chunk_type = match chunk_type {
+                    // One summary below. A line per span stalls open when a
+                    // crash left hundreds of thousands of Interrupted points.
                     ChunkType::Interrupted => {
                         interrupted_count += 1;
-                        warn!(
-                            "Chunk @ interval ({}, {}) was interrupted, resetting to Uninitialized",
-                            interval.start(),
-                            interval.end()
-                        );
                         ChunkType::Uninitialized
                     }
                     ChunkType::Entropy | ChunkType::Data | ChunkType::Uninitialized => chunk_type,
@@ -4523,7 +4546,7 @@ impl StorageModule {
             submodule = %submodule.path.display(),
             path_hash_rows = stats.path_hash_rows,
             data_path_rows = stats.data_path_rows,
-            ranges = ?spans,
+            span_count = spans.len(),
             "removed presence rows under intervals that are not Data"
         );
         index_read_metrics::note_presence_reconciled(
@@ -5617,24 +5640,22 @@ impl StorageModule {
         Ok(buf)
     }
 
-    /// Gets all chunk intervals in a given storage state, merging adjacent ranges
+    /// Intervals of `chunk_type`, ascending, with pending writes applied.
     ///
-    /// Collects all intervals matching the requested state and combines them when:
-    /// - Intervals are touching (e.g., 0-5 and 6-10)
-    /// - Intervals overlap (e.g., 0-5 and 3-8)
-    ///
-    /// Returns a NoditSet containing the merged intervals for efficient range operations
+    /// Touching matches merge. The stored map is scanned once. Each pending
+    /// offset is a binary search. Pending is a bounded batch. Rebuilding a
+    /// tree is O(n log n) in the fragment count, and the data-sync tick calls
+    /// this for every module.
     pub fn get_intervals(&self, chunk_type: ChunkType) -> Vec<Interval<PartitionChunkOffset>> {
         let intervals = self.intervals.read().unwrap();
-        let mut set = NoditSet::new();
-        for (interval, ct) in intervals.iter() {
-            if *ct == chunk_type {
-                let _ = set.insert_merge_touching_or_overlapping(*interval);
-            }
-        }
+        let mut spans = Self::intervals_matching(&intervals, chunk_type);
         drop(intervals);
+        if chunk_type == ChunkType::Interrupted {
+            return spans;
+        }
 
-        // Also loop though pending write for matching chunks
+        // Pending is applied after the interval lock is released. The other
+        // order deadlocks with paths that hold pending and then intervals.
         let pending = self
             .pending_writes
             .read()
@@ -5642,47 +5663,133 @@ impl StorageModule {
 
         match chunk_type {
             ChunkType::Entropy => {
-                // First, add any pending entropy chunks to the set
-                pending
-                    .iter()
-                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Entropy)
-                    .for_each(|(offset, _)| {
-                        let interval = partition_chunk_offset_ii!(*offset, *offset);
-                        let _ = set.insert_merge_touching_or_overlapping(interval);
-                    });
-
-                // Then, remove any entropy offsets that have pending data chunks
-                pending
-                    .iter()
-                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Data)
-                    .for_each(|(offset, _)| {
-                        let point_interval = ii(*offset, *offset);
-                        let _ = set.cut(point_interval);
-                    });
+                // Add pending entropy, then cut pending data. One offset has
+                // one pending type, so the two passes do not fight.
+                for (offset, (_, pending_type)) in pending.iter() {
+                    if *pending_type == ChunkType::Entropy {
+                        Self::insert_interval_point(&mut spans, *offset);
+                    }
+                }
+                for (offset, (_, pending_type)) in pending.iter() {
+                    if *pending_type == ChunkType::Data {
+                        Self::cut_interval_point(&mut spans, *offset);
+                    }
+                }
             }
             ChunkType::Data => {
-                pending
-                    .iter()
-                    .filter(|(_, (_, pending_chunk_type))| *pending_chunk_type == ChunkType::Data)
-                    .for_each(|(offset, _)| {
-                        let interval = partition_chunk_offset_ii!(*offset, *offset);
-                        let _ = set.insert_merge_touching_or_overlapping(interval);
-                    });
+                for (offset, (_, pending_type)) in pending.iter() {
+                    if *pending_type == ChunkType::Data {
+                        Self::insert_interval_point(&mut spans, *offset);
+                    }
+                }
             }
             ChunkType::Uninitialized => {
                 for offset in pending.keys() {
-                    let point_interval = ii(*offset, *offset);
-                    let _ = set.cut(point_interval);
+                    Self::cut_interval_point(&mut spans, *offset);
                 }
             }
-            ChunkType::Interrupted => {
-                // Do nothing
-            }
+            ChunkType::Interrupted => {}
         }
 
-        // NoditSet is a BTreeMap underneath, meaning collecting them into a vec
-        // is done in ascending key order.
-        set.into_iter().collect::<Vec<_>>()
+        spans
+    }
+
+    /// Matching intervals, ascending. Touching equals become one span.
+    fn intervals_matching(
+        intervals: &StorageIntervals,
+        chunk_type: ChunkType,
+    ) -> Vec<Interval<PartitionChunkOffset>> {
+        let mut spans: Vec<Interval<PartitionChunkOffset>> = Vec::new();
+        for (interval, stored) in intervals.iter() {
+            if *stored != chunk_type {
+                continue;
+            }
+            if let Some(last) = spans.last_mut()
+                && Self::spans_touch(last.end(), interval.start())
+            {
+                let start = last.start();
+                let end = last.end().max(interval.end());
+                *last = ii(start, end);
+            } else {
+                spans.push(*interval);
+            }
+        }
+        spans
+    }
+
+    /// Inclusive spans touch when they share a point or sit on adjacent points.
+    fn spans_touch(left_end: PartitionChunkOffset, right_start: PartitionChunkOffset) -> bool {
+        left_end.0 == u32::MAX || left_end.0.saturating_add(1) >= right_start.0
+    }
+
+    /// Insert one pending point, merging it with spans it touches.
+    fn insert_interval_point(
+        spans: &mut Vec<Interval<PartitionChunkOffset>>,
+        point: PartitionChunkOffset,
+    ) {
+        let idx = spans.partition_point(|interval| {
+            let end = interval.end().0;
+            end != u32::MAX && end.saturating_add(1) < point.0
+        });
+        if idx == spans.len() {
+            spans.push(ii(point, point));
+            return;
+        }
+        let current = spans[idx];
+        let gap_before = match point.0.checked_add(1) {
+            Some(next) => current.start().0 > next,
+            None => false,
+        };
+        if gap_before {
+            spans.insert(idx, ii(point, point));
+            return;
+        }
+        let start = current.start().min(point);
+        let mut end = current.end().max(point);
+        let absorb_next = spans
+            .get(idx + 1)
+            .is_some_and(|next| Self::spans_touch(end, next.start()));
+        if absorb_next {
+            end = end.max(spans[idx + 1].end());
+        }
+        spans[idx] = ii(start, end);
+        if absorb_next {
+            spans.remove(idx + 1);
+        }
+    }
+
+    /// Remove one point from the spans. A miss is a no-op.
+    fn cut_interval_point(
+        spans: &mut Vec<Interval<PartitionChunkOffset>>,
+        point: PartitionChunkOffset,
+    ) {
+        let idx = spans.partition_point(|interval| interval.end().0 < point.0);
+        if idx == spans.len() {
+            return;
+        }
+        let interval = spans[idx];
+        if interval.start().0 > point.0 {
+            return;
+        }
+        let start = interval.start().0;
+        let end = interval.end().0;
+        if start == end {
+            spans.remove(idx);
+            return;
+        }
+        if start == point.0 {
+            spans[idx] = ii(PartitionChunkOffset(point.0 + 1), interval.end());
+            return;
+        }
+        if end == point.0 {
+            spans[idx] = ii(interval.start(), PartitionChunkOffset(point.0 - 1));
+            return;
+        }
+        spans[idx] = ii(interval.start(), PartitionChunkOffset(point.0 - 1));
+        spans.insert(
+            idx + 1,
+            ii(PartitionChunkOffset(point.0 + 1), interval.end()),
+        );
     }
 
     /// Queues chunk data for later disk write. Chunks are batched for efficiency
@@ -15342,5 +15449,287 @@ mod tests {
         assert_eq!(again, loaded);
         let second = ensure_recorded_packing_params(&path, &consensus).unwrap();
         assert_eq!(second, loaded);
+    }
+
+    /// Alternating single-chunk Entropy / Uninitialized. Touching equals would
+    /// merge, so this is the fragmented shape left by a crash.
+    fn fragmented_intervals(count: u32) -> StorageIntervals {
+        let mut map = StorageIntervals::new();
+        for offset in 0..count {
+            let kind = if offset % 2 == 0 {
+                ChunkType::Entropy
+            } else {
+                ChunkType::Uninitialized
+            };
+            map.insert_strict(
+                ii(PartitionChunkOffset(offset), PartitionChunkOffset(offset)),
+                kind,
+            )
+            .expect("fragment");
+        }
+        map
+    }
+
+    /// NoditSet rebuild. The production query must stay equivalent to this
+    /// and must not pay for it on every call.
+    fn intervals_via_set(
+        module: &StorageModule,
+        chunk_type: ChunkType,
+    ) -> Vec<Interval<PartitionChunkOffset>> {
+        let intervals = module.intervals.read().unwrap();
+        let mut set = NoditSet::new();
+        for (interval, ct) in intervals.iter() {
+            if *ct == chunk_type {
+                let _ = set.insert_merge_touching_or_overlapping(*interval);
+            }
+        }
+        drop(intervals);
+        let pending = module.pending_writes.read().unwrap();
+        match chunk_type {
+            ChunkType::Entropy => {
+                pending
+                    .iter()
+                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Entropy)
+                    .for_each(|(offset, _)| {
+                        let _ = set.insert_merge_touching_or_overlapping(ii(*offset, *offset));
+                    });
+                pending
+                    .iter()
+                    .filter(|(_, (_, chunk_type))| *chunk_type == ChunkType::Data)
+                    .for_each(|(offset, _)| {
+                        let _ = set.cut(ii(*offset, *offset));
+                    });
+            }
+            ChunkType::Data => {
+                pending
+                    .iter()
+                    .filter(|(_, (_, pending_chunk_type))| *pending_chunk_type == ChunkType::Data)
+                    .for_each(|(offset, _)| {
+                        let _ = set.insert_merge_touching_or_overlapping(ii(*offset, *offset));
+                    });
+            }
+            ChunkType::Uninitialized => {
+                for offset in pending.keys() {
+                    let _ = set.cut(ii(*offset, *offset));
+                }
+            }
+            ChunkType::Interrupted => {}
+        }
+        set.into_iter().collect()
+    }
+
+    fn install_intervals(module: &StorageModule, spans: &[(u32, u32, ChunkType)]) {
+        let mut map = StorageIntervals::new();
+        for &(start, end, kind) in spans {
+            map.insert_merge_touching_if_values_equal(
+                ii(PartitionChunkOffset(start), PartitionChunkOffset(end)),
+                kind,
+            )
+            .expect("span");
+        }
+        *module.intervals.write().unwrap() = map;
+    }
+
+    fn queue_pending(module: &StorageModule, offset: u32, kind: ChunkType) {
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .insert(PartitionChunkOffset(offset), (vec![1_u8; 32], kind));
+    }
+
+    #[test]
+    fn get_intervals_matches_the_pending_overlay() -> eyre::Result<()> {
+        let (_tmp, _config, storage) =
+            open_presence_module("interval_overlay", SubmoduleIndexEngine::Rocksdb)?;
+        let cases: &[(&[(u32, u32, ChunkType)], &[(u32, ChunkType)])] = &[
+            (
+                &[(0, 4, ChunkType::Entropy), (5, 7, ChunkType::Uninitialized)],
+                &[],
+            ),
+            (
+                &[(0, 2, ChunkType::Entropy), (3, 7, ChunkType::Uninitialized)],
+                &[(3, ChunkType::Entropy)],
+            ),
+            (
+                &[(0, 4, ChunkType::Entropy), (5, 7, ChunkType::Uninitialized)],
+                &[(1, ChunkType::Data)],
+            ),
+            (
+                &[
+                    (0, 0, ChunkType::Entropy),
+                    (2, 2, ChunkType::Entropy),
+                    (1, 1, ChunkType::Uninitialized),
+                    (3, 7, ChunkType::Data),
+                ],
+                &[(1, ChunkType::Entropy)],
+            ),
+            (
+                &[(0, 7, ChunkType::Uninitialized)],
+                &[(2, ChunkType::Data), (4, ChunkType::Entropy)],
+            ),
+            (
+                &[(0, 3, ChunkType::Interrupted), (4, 7, ChunkType::Entropy)],
+                &[(1, ChunkType::Data)],
+            ),
+            (
+                &[(0, 0, ChunkType::Entropy), (1, 7, ChunkType::Uninitialized)],
+                &[(0, ChunkType::Data)],
+            ),
+        ];
+        for (spans, pending) in cases {
+            install_intervals(&storage, spans);
+            storage.pending_writes.write().unwrap().clear();
+            for &(offset, kind) in *pending {
+                queue_pending(&storage, offset, kind);
+            }
+            for kind in [
+                ChunkType::Entropy,
+                ChunkType::Data,
+                ChunkType::Uninitialized,
+                ChunkType::Interrupted,
+            ] {
+                assert_eq!(
+                    storage.get_intervals(kind),
+                    intervals_via_set(&storage, kind),
+                    "{kind:?} spans {spans:?} pending {pending:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn interval_slice_clips_and_fills_gaps() {
+        let mut map = StorageIntervals::new();
+        map.insert_merge_touching_if_values_equal(
+            ii(PartitionChunkOffset(0), PartitionChunkOffset(10)),
+            ChunkType::Entropy,
+        )
+        .unwrap();
+        map.insert_merge_touching_if_values_equal(
+            ii(PartitionChunkOffset(11), PartitionChunkOffset(20)),
+            ChunkType::Data,
+        )
+        .unwrap();
+        let slice = StorageModule::interval_slice(
+            &map,
+            ii(PartitionChunkOffset(5), PartitionChunkOffset(15)),
+        )
+        .unwrap();
+        let got: Vec<_> = slice.into_iter().collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    ii(PartitionChunkOffset(5), PartitionChunkOffset(10)),
+                    ChunkType::Entropy
+                ),
+                (
+                    ii(PartitionChunkOffset(11), PartitionChunkOffset(15)),
+                    ChunkType::Data
+                ),
+            ]
+        );
+
+        let empty = StorageModule::interval_slice(
+            &StorageIntervals::new(),
+            ii(PartitionChunkOffset(0), PartitionChunkOffset(3)),
+        )
+        .unwrap();
+        let got: Vec<_> = empty.into_iter().collect();
+        assert_eq!(
+            got,
+            vec![(
+                ii(PartitionChunkOffset(0), PartitionChunkOffset(3)),
+                ChunkType::Uninitialized
+            )]
+        );
+    }
+
+    #[test]
+    fn fragmented_interval_queries_stay_near_the_clone_cost() -> eyre::Result<()> {
+        let count = 100_000_u32;
+        let map = fragmented_intervals(count);
+        let started = std::time::Instant::now();
+        let _cloned = map.clone();
+        let clone_cost = started.elapsed();
+
+        let range = ii(PartitionChunkOffset(0), PartitionChunkOffset(count - 1));
+        let started = std::time::Instant::now();
+        let slice = StorageModule::interval_slice(&map, range).expect("slice");
+        let slice_cost = started.elapsed();
+        assert_eq!(slice.len(), count as usize);
+        let slice_limit = clone_cost
+            .saturating_mul(4)
+            .max(std::time::Duration::from_millis(40));
+        assert!(
+            slice_cost < slice_limit,
+            "interval_slice {slice_cost:?} clone {clone_cost:?} limit {slice_limit:?}"
+        );
+        eprintln!("interval_slice {slice_cost:?} clone {clone_cost:?} limit {slice_limit:?}");
+        let mut working = map.clone();
+        let cut: Vec<_> = working.cut(range).collect();
+        let rebuilt =
+            NoditMap::from_iter_strict(cut.into_iter()).expect("cut intervals do not overlap");
+        assert_eq!(slice, rebuilt);
+
+        let (_tmp, _config, storage) =
+            open_presence_module("fragmented_query", SubmoduleIndexEngine::Rocksdb)?;
+        *storage.intervals.write().unwrap() = map;
+        let started = std::time::Instant::now();
+        let entropy = storage.get_intervals(ChunkType::Entropy);
+        let query_cost = started.elapsed();
+        assert_eq!(entropy.len(), (count / 2) as usize);
+        let query_limit = clone_cost
+            .saturating_mul(8)
+            .max(std::time::Duration::from_millis(40));
+        assert!(
+            query_cost < query_limit,
+            "get_intervals {query_cost:?} clone {clone_cost:?} limit {query_limit:?}"
+        );
+        eprintln!("get_intervals {query_cost:?} clone {clone_cost:?} limit {query_limit:?}");
+        Ok(())
+    }
+
+    /// A covered write-ahead used to clone the interval map before it noticed
+    /// the mask already held the batch.
+    #[test]
+    fn covered_write_ahead_skips_the_interval_clone() -> eyre::Result<()> {
+        let count = 100_000_u32;
+        let map = fragmented_intervals(count);
+        let started = std::time::Instant::now();
+        let _cloned = map.clone();
+        let clone_cost = started.elapsed();
+
+        let (_tmp, _config, storage) =
+            open_presence_module_with("covered_ahead", SubmoduleIndexEngine::Rocksdb, 30)?;
+        *storage.intervals.write().unwrap() = map;
+        {
+            let mut disk = storage.lock_interval_disk();
+            disk.mask.insert_merge_touching_or_overlapping(ii(
+                PartitionChunkOffset(0),
+                PartitionChunkOffset(0),
+            ));
+        }
+        let run = WriteRun {
+            start: PartitionChunkOffset(0),
+            chunk_type: ChunkType::Entropy,
+            bytes: vec![1_u8; 32],
+            offsets: vec![PartitionChunkOffset(0)],
+        };
+        let started = std::time::Instant::now();
+        storage.persist_write_ahead(&[run], &std::collections::BTreeSet::new())?;
+        let cost = started.elapsed();
+        let limit = clone_cost
+            .checked_div(2)
+            .unwrap_or(clone_cost)
+            .max(std::time::Duration::from_millis(1));
+        assert!(
+            cost < limit,
+            "covered persist {cost:?} clone {clone_cost:?} limit {limit:?}"
+        );
+        eprintln!("covered persist {cost:?} clone {clone_cost:?} limit {limit:?}");
+        Ok(())
     }
 }
