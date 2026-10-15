@@ -266,7 +266,7 @@ impl InnerCacheTask {
             // not completed the durable write/leaf handoff may temporarily
             // keep the cache above its configured maximum. Normal terminal
             // lifecycle pruning still removes expired or abandoned roots.
-            self.prune_durably_migrated_chunk_bodies()?;
+            self.prune_durably_migrated_chunk_bodies(migration_height)?;
         } else {
             debug!("Cache under target capacity, skipping chunk pruning");
         }
@@ -294,6 +294,28 @@ impl InnerCacheTask {
             }
         }
         Ok(false)
+    }
+
+    /// True when the root has at least one tx and every one is included at or
+    /// below `migration_height`. Placements exist only after migration.
+    fn root_txs_migrated<T: reth_db::transaction::DbTx>(
+        tx: &T,
+        data_root: DataRoot,
+        migration_height: u64,
+    ) -> eyre::Result<bool> {
+        let Some(cached) = tx.get::<CachedDataRoots>(data_root)? else {
+            return Ok(false);
+        };
+        if cached.txid_set.is_empty() {
+            return Ok(false);
+        }
+        for tx_id in cached.txid_set.iter() {
+            match get_data_tx_metadata(tx, tx_id)?.and_then(|m| m.included_height) {
+                Some(height) if height <= migration_height => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 
     /// Evaluates the CDR pruning-horizon policy for `cached`, reading tx
@@ -344,8 +366,9 @@ impl InnerCacheTask {
     /// A body is protected when this node is assigned to store it (a local
     /// storage module has a placement for it) or has produced an ingress proof
     /// for its root. A protected body is reclaimed only once it is durably
-    /// stored locally. Any other body is reclaimed on age alone: this node is
-    /// not its custodian.
+    /// stored locally. Any other body is reclaimed on age, but only once every
+    /// tx of its root is migrated: before that no node has a placement yet, so
+    /// "unassigned" cannot be told apart from "assigned, not migrated".
     ///
     /// Durability is read from the storage modules' persisted interval state
     /// (`intervals.json`, the state restart recovery reloads), not only the
@@ -355,7 +378,7 @@ impl InnerCacheTask {
     /// missing either independent prerequisite is never reclaimed, whatever
     /// its root's ingress-proof state.
     #[tracing::instrument(level = "trace", skip_all)]
-    fn prune_durably_migrated_chunk_bodies(&self) -> eyre::Result<()> {
+    fn prune_durably_migrated_chunk_bodies(&self, migration_height: u64) -> eyre::Result<()> {
         let local_address = self.config.irys_signer().address();
         let min_chunk_age_in_blocks = self
             .config
@@ -421,14 +444,18 @@ impl InnerCacheTask {
             drop(tx);
         }
 
-        let proven_roots: BTreeSet<DataRoot> = self.db.view_eyre(|tx| {
+        let (proven_roots, migrated_roots) = self.db.view_eyre(|tx| {
             let mut proven = BTreeSet::new();
+            let mut migrated = BTreeSet::new();
             for root in candidates.keys() {
                 if Self::has_local_ingress_proof(tx, *root, local_address)? {
                     proven.insert(*root);
                 }
+                if Self::root_txs_migrated(tx, *root, migration_height)? {
+                    migrated.insert(*root);
+                }
             }
-            Ok(proven)
+            Ok((proven, migrated))
         })?;
 
         // Resolve placement and durability outside the write txn: each root
@@ -477,7 +504,7 @@ impl InnerCacheTask {
                     }
                 }
             });
-            if !unreadable && !proven_roots.contains(&root) {
+            if !unreadable && !proven_roots.contains(&root) && migrated_roots.contains(&root) {
                 let unprotected: BTreeSet<TxChunkOffset> =
                     cached_offsets.difference(&placed).copied().collect();
                 if !unprotected.is_empty() {
@@ -1885,7 +1912,11 @@ mod tests {
 
     /// Runs one capacity prune over an old cached body and reports whether it
     /// is still cached.
-    fn old_body_survives_capacity_prune(local_proof: bool, assigned: bool) -> eyre::Result<bool> {
+    fn old_body_survives_capacity_prune(
+        local_proof: bool,
+        assigned: bool,
+        migrated: bool,
+    ) -> eyre::Result<bool> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -1904,6 +1935,10 @@ mod tests {
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
+            if migrated {
+                irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                    .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+            }
             eyre::Ok(())
         })??;
         let chunk = UnpackedChunk {
@@ -1972,7 +2007,7 @@ mod tests {
             prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
         };
 
-        service_task.prune_durably_migrated_chunk_bodies()?;
+        service_task.prune_durably_migrated_chunk_bodies(10)?;
         db.view(|rtx| -> eyre::Result<bool> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
@@ -1987,18 +2022,22 @@ mod tests {
     #[tokio::test]
     async fn capacity_prune_protects_only_stored_or_proven_bodies() -> eyre::Result<()> {
         assert!(
-            !old_body_survives_capacity_prune(false, false)?,
-            "a body this node neither stores nor proves is reclaimed on age"
+            !old_body_survives_capacity_prune(false, false, true)?,
+            "a migrated body this node neither stores nor proves is reclaimed on age"
         );
         assert!(
-            old_body_survives_capacity_prune(true, false)?,
+            old_body_survives_capacity_prune(false, false, false)?,
+            "before migration no node has a placement, so the body must stay"
+        );
+        assert!(
+            old_body_survives_capacity_prune(true, false, true)?,
             "a body under a local ingress proof stays until durable"
         );
         assert!(
-            old_body_survives_capacity_prune(false, true)?,
+            old_body_survives_capacity_prune(false, true, true)?,
             "a body this node is assigned to store stays until durable"
         );
-        assert!(old_body_survives_capacity_prune(true, true)?);
+        assert!(old_body_survives_capacity_prune(true, true, true)?);
         Ok(())
     }
 
@@ -2094,7 +2133,8 @@ mod tests {
         }
         let _release = Release(&task);
         let worker = task.clone();
-        let handle = std::thread::spawn(move || worker.prune_durably_migrated_chunk_bodies());
+        let handle =
+            std::thread::spawn(move || worker.prune_durably_migrated_chunk_bodies(u64::MAX));
         eyre::ensure!(
             task.wait_for_prune_recheck_pause(std::time::Duration::from_secs(5)),
             "prune did not reach the durability re-check"
