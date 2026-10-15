@@ -93,10 +93,9 @@ const RATE_LIMIT_REFILL_PERIOD_US: i64 = 100_000;
 const RATE_LIMIT_FAIRNESS: i32 = 10;
 /// Leveled SST target. Compaction output preallocation uses this as a cap.
 const TARGET_FILE_BYTES: u64 = 256 * 1024 * 1024;
-/// Live WAL cap for the rotate presets. The bench index writes about
-/// 10 KiB/s of WAL, so 1 MiB switches logs about every 100 s and a 600 s
-/// step runs mostly on reused WAL files. Each switch flushes every family
-/// that holds data in the old log.
+/// Live WAL cap for the rotate presets. Small enough that a bench step
+/// switches logs and then runs on reused files. Each switch flushes every
+/// family that still holds data in the old log.
 const WAL_ROTATE_BYTES: u64 = 1024 * 1024;
 /// Live SST files on one column family that start a whole-range compact
 /// in `fdatasync-wal-rotate-compact`. Baseline keeps `0` (the hook off).
@@ -172,11 +171,6 @@ pub struct RocksTuning {
     /// is larger than one shard of the 64 MiB block cache. Once that SST
     /// leaves level 0, every lookup reads the filter, checksums it, and
     /// drops it.
-    ///
-    /// A planned 4 TB partition is about 15-17 million chunks. Data-path
-    /// keys stay one per chunk, so a full filter is still about 20 MB and
-    /// can miss a shard. Interval rows are fewer. This open is provisional
-    /// until a measurement at that size shows a full filter stays cached.
     pub partition_filters: bool,
     /// Retired WAL files to overwrite instead of allocating a new file.
     ///
