@@ -857,15 +857,6 @@ pub struct StorageModuleInfo {
     pub submodules: Vec<(Interval<PartitionChunkOffset>, SubmodulePath)>,
 }
 
-impl StorageModuleInfo {
-    /// Loads the [`StorageModuleInfo`] from a JSON file at the given path
-    pub fn from_json(path: impl AsRef<Path>) -> eyre::Result<Self> {
-        let contents = fs::read_to_string(path)?;
-        let config: Self = serde_json::from_str(&contents)?;
-        Ok(config)
-    }
-}
-
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 pub struct PackingParams {
     pub packing_address: IrysAddress,
