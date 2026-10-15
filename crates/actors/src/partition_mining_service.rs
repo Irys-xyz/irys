@@ -523,9 +523,7 @@ impl PartitionMiningServiceInner {
         #[cfg(test)]
         self.data_path_lookups
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // The index is keyed by the partition offset. The old call wrapped
-        // that offset as a ledger offset and the read treated the number as
-        // a partition offset again.
+        // The index key is the partition offset.
         let (stored_tx_path, data_path) =
             match self.storage_module.read_tx_data_paths(offset, offset) {
                 Ok(paths) => paths.get(&offset).cloned().unwrap_or((None, None)),
