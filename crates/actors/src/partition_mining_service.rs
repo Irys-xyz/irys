@@ -591,7 +591,8 @@ impl PartitionMiningServiceInner {
 
     /// Start a derive for `offset`. `None` when this miner has no consensus
     /// database, the partition has no ledger slot, the submodule is missing,
-    /// or [`TxPathJob::try_spawn`] already has its threads running.
+    /// RocksDB v1 has no placement for the offset, or [`TxPathJob::try_spawn`]
+    /// already has its threads running.
     ///
     /// The job checks the derived root against `data_path` and, on RocksDB v1,
     /// against the stored placement. A mismatch fails the job.
@@ -619,13 +620,26 @@ impl PartitionMiningServiceInner {
         let pool = self.tx_path_pool.clone();
         let chunk_size = self.config.consensus.chunk_size;
         let data_path = data_path.to_vec();
-        let Some(placement) = self.placement_for_derive(offset) else {
-            warn!(
-                storage_module.id = self.storage_module.id,
-                chunk_offset = offset.0,
-                "winning data chunk has no stored tx path and the submodule is missing"
-            );
-            return None;
+        let placement = match self.placement_for_derive(offset) {
+            None => {
+                warn!(
+                    storage_module.id = self.storage_module.id,
+                    chunk_offset = offset.0,
+                    "winning data chunk has no stored tx path and the submodule is missing"
+                );
+                return None;
+            }
+            // The job would read every header and then reject this offset.
+            // Skip it before taking a derive slot, and keep scanning.
+            Some(DerivePlacement::Missing(reason)) => {
+                warn!(
+                    storage_module.id = self.storage_module.id,
+                    chunk_offset = offset.0,
+                    "winning data chunk has no stored tx path and {reason}"
+                );
+                return None;
+            }
+            Some(placement) => placement,
         };
         let Some(job) = TxPathJob::try_spawn(move || {
             let derived = irys_database::tx_path_derive::derive_tx_path_at_offset_with(
@@ -1040,8 +1054,8 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         ConsensusConfig, ConsensusOptions, DataLedger, DataTransactionLedger, H256, H256List,
-        LedgerChunkOffset, LedgerChunkRange, NodeConfig, StorageSyncConfig, irys::IrysSigner,
-        ledger_chunk_offset_ii, partition::PartitionAssignment,
+        LedgerChunkOffset, LedgerChunkRange, NodeConfig, StorageSyncConfig, SubmoduleIndexEngine,
+        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
     };
     use irys_vdf::state::VdfState;
     use nodit::interval::ii;
@@ -1523,9 +1537,30 @@ mod tests {
         PartitionMiningServiceInner,
         Option<irys_types::DataTransactionHeader>,
     ) {
+        open_data_miner_for_index(
+            difficulty,
+            indexed,
+            tx_data,
+            SubmoduleIndexEngine::Mdbx,
+            false,
+        )
+    }
+
+    fn open_data_miner_for_index(
+        difficulty: U256,
+        indexed: bool,
+        tx_data: Option<Vec<u8>>,
+        index: SubmoduleIndexEngine,
+        with_consensus_db: bool,
+    ) -> (
+        irys_testing_utils::utils::tempfile::TempDir,
+        Arc<StorageModule>,
+        PartitionMiningServiceInner,
+        Option<irys_types::DataTransactionHeader>,
+    ) {
         let tmp_dir = TempDirBuilder::new().build();
         let chunks = DATA_CHUNKS;
-        let node_config = NodeConfig {
+        let mut node_config = NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
                 num_chunks_in_partition: chunks,
@@ -1541,6 +1576,7 @@ mod tests {
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
+        node_config.database.submodule_index = index;
         let config = Config::new_with_random_peer_id(node_config);
         let partition_hash = H256::repeat_byte(0x11);
         let info = StorageModuleInfo {
@@ -1639,14 +1675,115 @@ mod tests {
             false,
             VdfStateReadonly::new(vdf_state),
             difficulty,
-            None,
+            consensus_db(with_consensus_db, tmp_dir.path()),
             None,
         );
         (tmp_dir, storage_module, inner, indexed_header)
     }
 
+    fn consensus_db(enabled: bool, tmp: &std::path::Path) -> Option<DatabaseProvider> {
+        if !enabled {
+            return None;
+        }
+        use irys_database::IrysDatabaseArgs as _;
+        let db_dir = tmp.join("consensus");
+        std::fs::create_dir_all(&db_dir).expect("consensus dir");
+        let db = irys_database::open_or_create_db(
+            &db_dir,
+            irys_database::tables::IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("consensus db");
+        Some(DatabaseProvider(Arc::new(db)))
+    }
+
     fn mine_once(inner: &mut PartitionMiningServiceInner) -> Option<SolutionContext> {
         inner.test_mine_partition_with_seed(H256::repeat_byte(0x42), 1, &H256List::default())
+    }
+
+    /// RocksDB v1 can store a data proof on an offset that no placement covers.
+    /// That chunk must not start a derive or end the recall scan. The next
+    /// entropy chunk is still a solution.
+    #[test]
+    fn unplaced_data_chunk_does_not_stop_the_recall_scan() {
+        use irys_database::submodule::SubmoduleStore as _;
+
+        let (_tmp, storage, mut inner, _header) = open_data_miner_for_index(
+            U256::zero(),
+            true,
+            None,
+            SubmoduleIndexEngine::Rocksdb,
+            true,
+        );
+        let first = PartitionChunkOffset::from(0);
+        let second = PartitionChunkOffset::from(1);
+        let submodule = storage.get_submodule(first).expect("submodule");
+        assert!(
+            !submodule.db.stores_tx_paths(),
+            "RocksDB v1 stores no tx path, so a data win derives"
+        );
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.placement_at(first))
+                .expect("placement read")
+                .is_some(),
+            "the indexed offset starts with a placement"
+        );
+        submodule
+            .db
+            .update(|tx| tx.add_tx_path_hash_to_offset_range(first, first, None))
+            .expect("clear the first placement");
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.placement_at(first))
+                .expect("placement read")
+                .is_none()
+        );
+        assert!(
+            submodule
+                .db
+                .view(|tx| tx.placement_at(second))
+                .expect("placement read")
+                .is_some(),
+            "only the first offset loses its placement"
+        );
+        let (_, data_path) = storage
+            .read_tx_data_paths(first, first)
+            .expect("paths")
+            .remove(&first)
+            .expect("row");
+        let data_path = data_path.expect("the data proof stays after the placement is removed");
+        let recalled = storage
+            .read_chunks(partition_chunk_offset_ie!(0, 1))
+            .expect("recall");
+        let (chunk_bytes, chunk_type) = recalled.get(&first).expect("offset 0");
+        assert_eq!(*chunk_type, ChunkType::Data);
+        assert!(
+            inner.data_path_binds_chunk(first, chunk_bytes, &data_path),
+            "the unplaced chunk is a real data win"
+        );
+
+        let chunk_size = storage.config.consensus.chunk_size as usize;
+        for offset in 1..DATA_CHUNKS {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset as u32),
+                vec![0xE5_u8; chunk_size],
+                ChunkType::Entropy,
+            ));
+        }
+        storage
+            .force_sync_pending_chunks()
+            .expect("sync entropy overwrite");
+
+        let found = mine_once(&mut inner);
+        if let Some(solution) = &found {
+            let _ = solution.tx_path.resolve(std::time::Duration::from_secs(5));
+        }
+        let solution = found.expect("the entropy chunk after the unplaced data chunk wins");
+        assert_eq!(solution.chunk_offset, 1);
+        assert_eq!(solution.tx_path, TxPathSource::Stored(None));
     }
 
     #[test]
