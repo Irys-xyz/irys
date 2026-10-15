@@ -17,7 +17,7 @@
 //! match.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
     ops::Deref,
     sync::{
@@ -183,18 +183,25 @@ struct SweepSlot {
 /// The fourth is a read-ahead cache pad. Only one of them is set.
 type SelectedOffset = (PartitionChunkOffset, u64, Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Disk entropy read past a demand span. Oldest first.
+/// Disk entropy read past a demand span. Oldest live pad first.
+///
+/// `order` is a FIFO of `(offset, stamp)`. A hit or an overwrite drops the
+/// map entry and leaves the FIFO row in place. Eviction skips a row whose
+/// stamp is no longer current, so a remove does not scan the FIFO. Stale
+/// rows are dropped once they outnumber the live pads.
 #[derive(Debug, Default)]
 pub(super) struct EntropyPadCache {
-    order: std::collections::VecDeque<PartitionChunkOffset>,
+    order: std::collections::VecDeque<(PartitionChunkOffset, u64)>,
     pads: HashMap<PartitionChunkOffset, CachedPad>,
     bytes: u64,
+    next_stamp: u64,
 }
 
 #[derive(Debug)]
 struct CachedPad {
     bytes: Vec<u8>,
     generation: u64,
+    stamp: u64,
 }
 
 impl EntropyPadCache {
@@ -227,10 +234,34 @@ impl EntropyPadCache {
     fn remove(&mut self, offset: PartitionChunkOffset) -> Option<CachedPad> {
         let pad = self.pads.remove(&offset)?;
         self.bytes = self.bytes.saturating_sub(pad.bytes.len() as u64);
-        if let Some(pos) = self.order.iter().position(|item| *item == offset) {
-            self.order.remove(pos);
+        // One stale FIFO row per remove. Compact before that list can grow
+        // without bound across a long run of hits.
+        if self.order.len() > self.pads.len().saturating_mul(2).saturating_add(16) {
+            self.compact_order();
         }
         Some(pad)
+    }
+
+    fn compact_order(&mut self) {
+        let pads = &self.pads;
+        self.order
+            .retain(|(offset, stamp)| pads.get(offset).is_some_and(|pad| pad.stamp == *stamp));
+    }
+
+    /// Drop the oldest pad that is still stored. Stale FIFO rows are skipped.
+    fn evict_oldest(&mut self) -> bool {
+        while let Some((offset, stamp)) = self.order.pop_front() {
+            let Some(pad) = self.pads.get(&offset) else {
+                continue;
+            };
+            if pad.stamp != stamp {
+                continue;
+            }
+            let pad = self.pads.remove(&offset).expect("stamp matched");
+            self.bytes = self.bytes.saturating_sub(pad.bytes.len() as u64);
+            return true;
+        }
+        false
     }
 
     /// Drop the pad. `Some` only when the generation still matches.
@@ -254,19 +285,25 @@ impl EntropyPadCache {
         }
         self.remove(offset);
         while self.bytes.saturating_add(len) > cap {
-            let Some(old) = self.order.pop_front() else {
+            if !self.evict_oldest() {
                 break;
-            };
-            if let Some(pad) = self.pads.remove(&old) {
-                self.bytes = self.bytes.saturating_sub(pad.bytes.len() as u64);
             }
         }
         if self.bytes.saturating_add(len) > cap {
             return false;
         }
         self.bytes = self.bytes.saturating_add(len);
-        self.order.push_back(offset);
-        self.pads.insert(offset, CachedPad { bytes, generation });
+        let stamp = self.next_stamp;
+        self.next_stamp = self.next_stamp.wrapping_add(1);
+        self.order.push_back((offset, stamp));
+        self.pads.insert(
+            offset,
+            CachedPad {
+                bytes,
+                generation,
+                stamp,
+            },
+        );
         true
     }
 }
@@ -290,9 +327,65 @@ enum OccupyFailure {
 
 #[derive(Default)]
 struct SweepQueue {
-    slots: Vec<SweepSlot>,
+    /// One slot per offset. Offset order is the span order.
+    slots: BTreeMap<PartitionChunkOffset, SweepSlot>,
+    /// Slots that already hold entropy. Fold scans this set, not `slots`.
+    memory_offsets: BTreeSet<PartitionChunkOffset>,
+    /// Live slots at each [`WritePriority`] discriminant.
+    priority_slots: [usize; 3],
+    /// Memory slots at each priority. A disk backlog does not hide these.
+    memory_slots: [usize; 3],
     groups: HashMap<u64, SweepGroup>,
     next_group: u64,
+}
+
+fn priority_index(priority: WritePriority) -> usize {
+    match priority {
+        WritePriority::Migration => 0,
+        WritePriority::Packing => 1,
+        WritePriority::Ingress => 2,
+    }
+}
+
+impl SweepQueue {
+    fn disk_len(&self) -> usize {
+        self.slots.len().saturating_sub(self.memory_offsets.len())
+    }
+
+    fn best_priority(&self) -> Option<WritePriority> {
+        const ORDER: [WritePriority; 3] = [
+            WritePriority::Migration,
+            WritePriority::Packing,
+            WritePriority::Ingress,
+        ];
+        ORDER
+            .into_iter()
+            .find(|priority| self.priority_slots[priority_index(*priority)] > 0)
+    }
+
+    fn insert_slot(&mut self, slot: SweepSlot) {
+        let offset = slot.offset;
+        if self.slots.contains_key(&offset) {
+            self.remove_slot(offset);
+        }
+        let index = priority_index(slot.priority);
+        self.priority_slots[index] = self.priority_slots[index].saturating_add(1);
+        if memory_entropy(&slot) {
+            self.memory_slots[index] = self.memory_slots[index].saturating_add(1);
+            self.memory_offsets.insert(offset);
+        }
+        self.slots.insert(offset, slot);
+    }
+
+    fn remove_slot(&mut self, offset: PartitionChunkOffset) -> Option<SweepSlot> {
+        let slot = self.slots.remove(&offset)?;
+        let index = priority_index(slot.priority);
+        self.priority_slots[index] = self.priority_slots[index].saturating_sub(1);
+        if self.memory_offsets.remove(&offset) {
+            self.memory_slots[index] = self.memory_slots[index].saturating_sub(1);
+        }
+        Some(slot)
+    }
 }
 
 /// Wakeups for recall vs write vs entropy. `chunks.dat` is locked only after
@@ -345,6 +438,10 @@ pub(super) struct DiskGate {
     /// Sweep-queue publishes. One contiguous run is one publish.
     #[cfg(test)]
     pub(super) enqueue_notifies: AtomicU64,
+    /// Disk slots a span walk has examined. A rebuild of every span counts
+    /// the whole backlog on every take.
+    #[cfg(test)]
+    pub(super) span_walk_slots: AtomicU64,
 }
 
 /// One posted flush or interval write, and the result the waiter collects.
@@ -588,6 +685,8 @@ impl DiskGate {
             source_preads: AtomicU64::new(0),
             #[cfg(test)]
             enqueue_notifies: AtomicU64::new(0),
+            #[cfg(test)]
+            span_walk_slots: AtomicU64::new(0),
         }
     }
 
@@ -1350,7 +1449,7 @@ impl StorageModule {
             );
             let enqueued_at = Instant::now();
             for (offset, generation, pending_entropy, cached_entropy) in chunk.selected {
-                queue.slots.push(SweepSlot {
+                queue.insert_slot(SweepSlot {
                     group: group_id,
                     offset,
                     unpacked: Arc::clone(&chunk.unpacked),
@@ -1539,11 +1638,17 @@ impl StorageModule {
     }
 
     /// Fail a queued sweep slot at `offset`. The copied pad is stale.
+    /// One map lookup. A scan of the backlog on every chunk write tracked
+    /// the queue length.
     pub(super) fn fail_sweep_offset(&self, offset: PartitionChunkOffset) {
-        self.fail_slots(
-            |slot| slot.offset == offset,
-            &WriteDataChunkError::Backpressure,
-        );
+        let removed = {
+            let mut queue = self.disk.queue();
+            queue.remove_slot(offset)
+        };
+        if let Some(slot) = removed {
+            self.release_queued_offset(slot.offset, slot.generation, slot.byte_len);
+            self.mark_group_slot_done(slot.group, Some(WriteDataChunkError::Backpressure));
+        }
     }
 
     pub(super) fn cancel_sweep_range(
@@ -1551,11 +1656,11 @@ impl StorageModule {
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) {
-        let groups: Vec<u64> = {
+        let groups: HashSet<u64> = {
             let queue = self.disk.queue();
             queue
                 .slots
-                .iter()
+                .values()
                 .filter(|slot| slot.offset >= start && slot.offset <= end)
                 .map(|slot| slot.group)
                 .collect()
@@ -1615,26 +1720,29 @@ impl StorageModule {
         };
         let ready = {
             let mut queue = self.disk.queue();
-            let Some(best) = queue.slots.iter().map(|slot| slot.priority).min() else {
+            let Some(best) = queue.best_priority() else {
                 return false;
             };
-            if !queue
-                .slots
-                .iter()
-                .any(|slot| slot.priority == best && memory_entropy(slot))
-            {
+            if queue.memory_slots[priority_index(best)] == 0 {
                 return false;
             }
-            let mut ready = Vec::new();
-            let mut keep = Vec::new();
-            for slot in queue.slots.drain(..) {
-                if memory_entropy(&slot) && slot.priority == best {
+            let offsets: Vec<_> = queue
+                .memory_offsets
+                .iter()
+                .copied()
+                .filter(|offset| {
+                    queue
+                        .slots
+                        .get(offset)
+                        .is_some_and(|slot| slot.priority == best)
+                })
+                .collect();
+            let mut ready = Vec::with_capacity(offsets.len());
+            for offset in offsets {
+                if let Some(slot) = queue.remove_slot(offset) {
                     ready.push(slot);
-                } else {
-                    keep.push(slot);
                 }
             }
-            queue.slots = keep;
             ready
         };
         if ready.is_empty() {
@@ -1651,7 +1759,10 @@ impl StorageModule {
             packed_any = true;
         }
         if !deferred.is_empty() {
-            self.disk.queue().slots.extend(deferred);
+            let mut queue = self.disk.queue();
+            for slot in deferred {
+                queue.insert_slot(slot);
+            }
         }
         packed_any
     }
@@ -2069,7 +2180,10 @@ impl StorageModule {
     }
 
     fn restore_span(&self, span: Vec<SweepSlot>) {
-        self.disk.queue().slots.extend(span);
+        let mut queue = self.disk.queue();
+        for slot in span {
+            queue.insert_slot(slot);
+        }
     }
 
     fn fail_span(&self, span: Vec<SweepSlot>, error: &WriteDataChunkError) {
@@ -2085,72 +2199,49 @@ impl StorageModule {
         self.take_ready_span()
     }
 
-    /// Remove the first span `ready_disk_spans` would issue. Taking one span
-    /// does not hide the rest of the queue.
+    /// Remove the lowest-offset span that is ready to read.
+    ///
+    /// The walk stops at that span. A fragmented backlog stays queued behind
+    /// it, and this call does not rebuild those spans. The lane issues one
+    /// span at a time, so a full rebuild on every take was quadratic in the
+    /// backlog.
     fn take_ready_span(&self) -> Option<Vec<SweepSlot>> {
         let mut queue = self.disk.queue();
-        let chosen = self.ready_disk_spans(&queue.slots).into_iter().next()?;
-        let mut indexes = chosen.indexes;
-        indexes.sort_unstable();
-        indexes.dedup();
-        let mut span = Vec::with_capacity(indexes.len());
-        for index in indexes.into_iter().rev() {
-            span.push(queue.slots.remove(index));
+        let offsets = self.first_ready_span(&queue)?;
+        let mut span = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            let Some(slot) = queue.remove_slot(offset) else {
+                continue;
+            };
+            span.push(slot);
         }
-        // Removal walks queue indexes. The read treats the first slot as the
-        // low offset and the last as the high one, so the span has to leave
-        // in offset order.
-        span.sort_by_key(|slot| slot.offset);
-        Some(span)
+        (!span.is_empty()).then_some(span)
     }
 
     fn has_ready_disk_span(&self) -> bool {
         let queue = self.disk.queue();
-        !self.ready_disk_spans(&queue.slots).is_empty()
+        if queue.disk_len() == 0 {
+            return false;
+        }
+        if self.entropy_read_grace().is_zero() {
+            return true;
+        }
+        self.first_ready_span(&queue).is_some()
     }
 
-    /// One span per contiguous neighborhood. The next span starts after the
-    /// previous one ends, so two spans in one file do not share a slot.
-    fn maximal_disk_spans(&self, slots: &[SweepSlot]) -> Vec<DiskSpan> {
-        let cap = self.hold_cap_bytes();
-        let hole_bytes = self.config.node_config.storage.entropy_coalesce_hole_bytes;
-        let chunk_size = self.config.consensus.chunk_size.max(1);
-        let mut groups: HashMap<i64, Vec<SpanAnchor>> = HashMap::new();
-        for (index, slot) in slots.iter().enumerate() {
-            if memory_entropy(slot) {
-                continue;
+    /// Offsets of the lowest-offset ready disk span. `None` when every disk
+    /// span is still inside the read grace.
+    fn first_ready_span(&self, queue: &SweepQueue) -> Option<Vec<PartitionChunkOffset>> {
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let mut found = None;
+        self.for_each_disk_span(&queue.slots, |span| {
+            if self.span_slots_ready(span, chunk) {
+                found = Some(span.iter().map(|slot| slot.offset).collect());
+                return true;
             }
-            let lone = i64::try_from(index)
-                .map(|value| value.saturating_add(1))
-                .unwrap_or(i64::MAX);
-            let key = self
-                .submodules
-                .get_key_value_at_point(slot.offset)
-                .ok()
-                .map(|(interval, _)| i64::from(interval.start().0))
-                .unwrap_or(-lone);
-            groups.entry(key).or_default().push(SpanAnchor {
-                index,
-                offset: slot.offset.0,
-            });
-        }
-        let mut spans = Vec::new();
-        for mut anchors in groups.into_values() {
-            anchors.sort_by_key(|anchor| anchor.offset);
-            spans.extend(partition_file_spans(&anchors, chunk_size, hole_bytes, cap));
-        }
-        spans
-    }
-
-    /// Spans this pass may read, in offset order. A short span stays out until
-    /// its oldest chunk has waited out the read grace, unless the span already
-    /// meets the batch target or it is a packing span. Recall, a packed-write
-    /// hold, and the in-flight budget still gate the read.
-    fn ready_disk_spans(&self, slots: &[SweepSlot]) -> Vec<DiskSpan> {
-        let mut ready = self.maximal_disk_spans(slots);
-        ready.retain(|span| self.span_ready(span, slots));
-        ready.sort_by(|left, right| left.start.cmp(&right.start));
-        ready
+            false
+        });
+        found
     }
 
     /// Milliseconds configured for a short entropy span. `0` does not wait.
@@ -2170,32 +2261,85 @@ impl StorageModule {
 
     /// A span may be issued. Grace `0`, a packing slot, a span at the batch
     /// target, or an oldest slot that has already waited.
-    fn span_ready(&self, span: &DiskSpan, slots: &[SweepSlot]) -> bool {
+    fn span_slots_ready(&self, span: &[QueuedOffset], chunk: u64) -> bool {
         let grace = self.entropy_read_grace();
         if grace.is_zero() {
             return true;
         }
         if span
-            .indexes
             .iter()
-            .any(|&index| slots[index].priority == WritePriority::Packing)
+            .any(|slot| slot.priority == WritePriority::Packing)
         {
             return true;
         }
-        let chunk = self.config.consensus.chunk_size.max(1);
         let target = self.entropy_batch_target();
-        if target == 0 || span_disk_bytes(span, slots, chunk) >= target {
+        if target == 0 || span_queued_bytes(span, chunk) >= target {
             return true;
         }
-        let Some(oldest) = span
-            .indexes
-            .iter()
-            .map(|&index| slots[index].enqueued_at)
-            .min()
-        else {
+        let Some(oldest) = span.iter().map(|slot| slot.enqueued_at).min() else {
             return false;
         };
         oldest.elapsed() >= grace
+    }
+
+    /// Submodule that owns `offset`, or a key unique to this offset when no
+    /// submodule does. Unassigned offsets do not coalesce with each other.
+    fn disk_span_group(&self, offset: PartitionChunkOffset) -> SpanGroup {
+        match self.submodules.get_key_value_at_point(offset) {
+            Ok((interval, _)) => SpanGroup::Submodule(interval.start().0),
+            Err(_) => SpanGroup::Lone(offset.0),
+        }
+    }
+
+    /// Disk spans in offset order. The walk stops when `visit` returns true.
+    ///
+    /// Memory slots are skipped and do not split a disk span. The gap across
+    /// them still counts. Slots are already in offset order, and submodule
+    /// intervals do not overlap, so closing a span when the group changes or
+    /// the coalesce cap is hit matches grouping then sorting by start.
+    fn for_each_disk_span(
+        &self,
+        slots: &BTreeMap<PartitionChunkOffset, SweepSlot>,
+        mut visit: impl FnMut(&[QueuedOffset]) -> bool,
+    ) {
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let hole = self.config.node_config.storage.entropy_coalesce_hole_bytes;
+        let cap = self.hold_cap_bytes();
+        let mut open: Vec<QueuedOffset> = Vec::new();
+        let mut group = None;
+        for (offset, slot) in slots {
+            if memory_entropy(slot) {
+                continue;
+            }
+            #[cfg(test)]
+            self.disk.span_walk_slots.fetch_add(1, Ordering::Relaxed);
+            let next_group = self.disk_span_group(*offset);
+            let next = QueuedOffset {
+                offset: *offset,
+                priority: slot.priority,
+                enqueued_at: slot.enqueued_at,
+            };
+            if let Some(current) = group {
+                let start = open[0].offset.0;
+                let end = open[open.len() - 1].offset.0;
+                let grows = current == next_group
+                    && span_can_grow(start, end, next.offset.0, chunk, hole, cap);
+                if !grows {
+                    if visit(&open) {
+                        return;
+                    }
+                    open.clear();
+                    group = None;
+                }
+            }
+            if open.is_empty() {
+                group = Some(next_group);
+            }
+            open.push(next);
+        }
+        if !open.is_empty() {
+            let _ = visit(&open);
+        }
     }
 
     fn pack_one(&self, slot: SweepSlot) {
@@ -2344,16 +2488,18 @@ impl StorageModule {
     fn fail_slots(&self, mut pred: impl FnMut(&SweepSlot) -> bool, error: &WriteDataChunkError) {
         let removed = {
             let mut queue = self.disk.queue();
-            let mut removed = Vec::new();
-            let mut keep = Vec::new();
-            for slot in queue.slots.drain(..) {
-                if pred(&slot) {
+            let offsets: Vec<PartitionChunkOffset> = queue
+                .slots
+                .iter()
+                .filter(|(_, slot)| pred(slot))
+                .map(|(offset, _)| *offset)
+                .collect();
+            let mut removed = Vec::with_capacity(offsets.len());
+            for offset in offsets {
+                if let Some(slot) = queue.remove_slot(offset) {
                     removed.push(slot);
-                } else {
-                    keep.push(slot);
                 }
             }
-            queue.slots = keep;
             removed
         };
         for slot in removed {
@@ -2709,11 +2855,7 @@ impl StorageModule {
         if !self.disk.disk_available() {
             return "inflight_budget";
         }
-        let queued = {
-            let queue = self.disk.queue();
-            !self.maximal_disk_spans(&queue.slots).is_empty()
-        };
-        if queued {
+        if self.disk.queue().disk_len() > 0 {
             return "read_grace";
         }
         if self.durable_point_remaining().is_some() {
@@ -2752,27 +2894,36 @@ impl StorageModule {
     /// the in-flight budget still gate the read.
     fn read_grace_remaining(&self) -> Option<Duration> {
         let queue = self.disk.queue();
-        let spans = self.maximal_disk_spans(&queue.slots);
-        if spans.is_empty() {
+        if queue.disk_len() == 0 {
             return None;
         }
         let grace = self.entropy_read_grace();
-        if grace.is_zero() || spans.iter().any(|span| self.span_ready(span, &queue.slots)) {
+        if grace.is_zero() {
             return Some(Duration::ZERO);
         }
+        let chunk = self.config.consensus.chunk_size.max(1);
+        let mut seen = false;
+        let mut ready = false;
         let mut soonest = grace;
-        for span in &spans {
-            let Some(oldest) = span
-                .indexes
-                .iter()
-                .map(|&index| queue.slots[index].enqueued_at)
-                .min()
-            else {
-                continue;
-            };
-            soonest = soonest.min(grace.saturating_sub(oldest.elapsed()));
+        self.for_each_disk_span(&queue.slots, |span| {
+            seen = true;
+            if self.span_slots_ready(span, chunk) {
+                ready = true;
+                return true;
+            }
+            if let Some(oldest) = span.iter().map(|slot| slot.enqueued_at).min() {
+                soonest = soonest.min(grace.saturating_sub(oldest.elapsed()));
+            }
+            false
+        });
+        if !seen {
+            return None;
         }
-        Some(soonest)
+        if ready {
+            Some(Duration::ZERO)
+        } else {
+            Some(soonest)
+        }
     }
 
     /// Soonest of the write grace, the read grace, and a due interval
@@ -2831,13 +2982,10 @@ impl StorageModule {
     /// priority keeps the file read ahead of the fold.
     fn memory_entropy_can_fold(&self) -> bool {
         let queue = self.disk.queue();
-        let Some(best) = queue.slots.iter().map(|slot| slot.priority).min() else {
+        let Some(best) = queue.best_priority() else {
             return false;
         };
-        queue
-            .slots
-            .iter()
-            .any(|slot| slot.priority == best && memory_entropy(slot))
+        queue.memory_slots[priority_index(best)] > 0
     }
 
     fn disk_lane_pass(&self) {
@@ -2984,14 +3132,19 @@ fn entropy_read_unfinished() -> WriteDataChunkError {
     WriteDataChunkError::Backpressure
 }
 
-struct SpanAnchor {
-    index: usize,
-    offset: u32,
+/// One disk slot copied out of the map so the span callback does not borrow it.
+#[derive(Clone, Copy)]
+struct QueuedOffset {
+    offset: PartitionChunkOffset,
+    priority: WritePriority,
+    enqueued_at: Instant,
 }
 
-struct DiskSpan {
-    indexes: Vec<usize>,
-    start: u32,
+/// Coalesce key. `Lone` is the offset, so two unassigned slots never join.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpanGroup {
+    Submodule(u32),
+    Lone(u32),
 }
 
 fn span_command_bytes(start: u32, end: u32, chunk_size: u64) -> u64 {
@@ -3002,70 +3155,31 @@ fn memory_entropy(slot: &SweepSlot) -> bool {
     slot.pending_entropy.is_some() || slot.cached_entropy.is_some()
 }
 
-/// Pread bytes of one formed span, holes included.
-fn span_disk_bytes(span: &DiskSpan, slots: &[SweepSlot], chunk_size: u64) -> u64 {
-    let mut low = u32::MAX;
-    let mut high = 0_u32;
-    if span.indexes.is_empty() {
+/// Pread bytes of one formed span, holes included. `span` is in offset order.
+fn span_queued_bytes(span: &[QueuedOffset], chunk_size: u64) -> u64 {
+    let Some(first) = span.first() else {
         return 0;
-    }
-    for &index in &span.indexes {
-        let offset = slots[index].offset.0;
-        low = low.min(offset);
-        high = high.max(offset);
-    }
-    span_command_bytes(low, high, chunk_size)
+    };
+    let Some(last) = span.last() else {
+        return 0;
+    };
+    span_command_bytes(first.offset.0, last.offset.0, chunk_size)
 }
 
 fn span_can_grow(
-    start: &SpanAnchor,
-    end: &SpanAnchor,
-    next: &SpanAnchor,
+    start: u32,
+    end: u32,
+    next: u32,
     chunk_size: u64,
     hole_bytes: u64,
     max_bytes: u64,
 ) -> bool {
-    if next.offset <= end.offset {
+    if next <= end {
         return false;
     }
-    let gap_bytes = u64::from(next.offset - end.offset - 1).saturating_mul(chunk_size);
-    let bytes = span_command_bytes(start.offset, next.offset, chunk_size);
+    let gap_bytes = u64::from(next - end - 1).saturating_mul(chunk_size);
+    let bytes = span_command_bytes(start, next, chunk_size);
     gap_bytes <= hole_bytes && bytes <= max_bytes
-}
-
-fn partition_file_spans(
-    anchors: &[SpanAnchor],
-    chunk_size: u64,
-    hole_bytes: u64,
-    max_bytes: u64,
-) -> Vec<DiskSpan> {
-    let mut spans = Vec::new();
-    let mut start = 0_usize;
-    while start < anchors.len() {
-        let mut end = start;
-        while end + 1 < anchors.len()
-            && span_can_grow(
-                &anchors[start],
-                &anchors[end],
-                &anchors[end + 1],
-                chunk_size,
-                hole_bytes,
-                max_bytes,
-            )
-        {
-            end += 1;
-        }
-        spans.push(disk_span_from(&anchors[start..=end]));
-        start = end + 1;
-    }
-    spans
-}
-
-fn disk_span_from(anchors: &[SpanAnchor]) -> DiskSpan {
-    DiskSpan {
-        indexes: anchors.iter().map(|anchor| anchor.index).collect(),
-        start: anchors[0].offset,
-    }
 }
 
 fn clone_error(error: &WriteDataChunkError) -> WriteDataChunkError {
@@ -3250,7 +3364,7 @@ mod tests {
         {
             let mut queue = module.disk.queue();
             for offset in queue_order {
-                queue.slots.push(sweep_slot(offset));
+                queue.insert_slot(sweep_slot(offset));
             }
         }
         let span = module.take_disk_span().expect("span");
@@ -3286,8 +3400,8 @@ mod tests {
         {
             let mut queue = module.disk.queue();
             let now = Instant::now();
-            queue.slots.push(sweep_slot_at(0, now));
-            queue.slots.push(sweep_slot_at(1, now));
+            queue.insert_slot(sweep_slot_at(0, now));
+            queue.insert_slot(sweep_slot_at(1, now));
         }
         assert!(
             module.take_disk_span().is_none(),
@@ -3298,7 +3412,7 @@ mod tests {
             let aged = Instant::now()
                 .checked_sub(grace + Duration::from_millis(1))
                 .expect("grace fits in the clock");
-            for slot in &mut queue.slots {
+            for slot in queue.slots.values_mut() {
                 slot.enqueued_at = aged;
             }
         }
@@ -3319,7 +3433,7 @@ mod tests {
             let mut queue = module.disk.queue();
             let now = Instant::now();
             for offset in 0..8_u32 {
-                queue.slots.push(sweep_slot_at(offset, now));
+                queue.insert_slot(sweep_slot_at(offset, now));
             }
         }
         let span = module
@@ -3336,7 +3450,7 @@ mod tests {
             let mut queue = module.disk.queue();
             let mut slot = sweep_slot_at(0, Instant::now());
             slot.priority = super::WritePriority::Packing;
-            queue.slots.push(slot);
+            queue.insert_slot(slot);
         }
         assert!(
             module.take_disk_span().is_some(),
@@ -3351,7 +3465,7 @@ mod tests {
         let (_tmp, module) = span_fixture_grace("span_lone", 8, 8, 0, grace.as_millis() as u64)?;
         {
             let mut queue = module.disk.queue();
-            queue.slots.push(sweep_slot_at(3, Instant::now()));
+            queue.insert_slot(sweep_slot_at(3, Instant::now()));
         }
         let remain = module
             .read_grace_remaining()
@@ -3361,7 +3475,12 @@ mod tests {
         assert!(module.take_disk_span().is_none());
         {
             let mut queue = module.disk.queue();
-            queue.slots[0].enqueued_at = ago(grace + Duration::from_millis(1));
+            queue
+                .slots
+                .values_mut()
+                .next()
+                .expect("queued slot")
+                .enqueued_at = ago(grace + Duration::from_millis(1));
         }
         assert_eq!(module.read_grace_remaining(), Some(Duration::ZERO));
         let span = module.take_disk_span().expect("aged lone chunk");
@@ -3375,20 +3494,20 @@ mod tests {
         let (_tmp, module) = span_fixture_grace("span_burst", 8, 8, 0, grace.as_millis() as u64)?;
         {
             let mut queue = module.disk.queue();
-            queue.slots.push(sweep_slot_at(0, Instant::now()));
+            queue.insert_slot(sweep_slot_at(0, Instant::now()));
         }
         assert!(!module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
         {
             let mut queue = module.disk.queue();
-            queue.slots.push(sweep_slot_at(1, Instant::now()));
+            queue.insert_slot(sweep_slot_at(1, Instant::now()));
         }
         assert!(!module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
         {
             let mut queue = module.disk.queue();
             let aged = ago(grace + Duration::from_millis(1));
-            for slot in &mut queue.slots {
+            for slot in queue.slots.values_mut() {
                 slot.enqueued_at = aged;
             }
         }
@@ -3405,9 +3524,7 @@ mod tests {
         let (_tmp, module) = span_fixture_grace("span_recall", 8, 8, 0, 80)?;
         {
             let mut queue = module.disk.queue();
-            queue
-                .slots
-                .push(sweep_slot_at(0, ago(Duration::from_millis(81))));
+            queue.insert_slot(sweep_slot_at(0, ago(Duration::from_millis(81))));
         }
         let hold = module.disk.begin_recall();
         assert!(!module.sweep_one());
@@ -3425,7 +3542,7 @@ mod tests {
         let (_tmp, module) = span_fixture_grace("span_drain", 8, 8, 0, grace.as_millis() as u64)?;
         {
             let mut queue = module.disk.queue();
-            queue.slots.push(sweep_slot_at(0, Instant::now()));
+            queue.insert_slot(sweep_slot_at(0, Instant::now()));
         }
         let started = Instant::now();
         module.drive_entropy_queue_for_test();
@@ -3459,7 +3576,7 @@ mod tests {
         {
             let mut queue = module.disk.queue();
             for offset in [0_u32, 3, 4, 5] {
-                queue.slots.push(sweep_slot(offset));
+                queue.insert_slot(sweep_slot(offset));
             }
         }
         module.disk.arm_recall_flush();
@@ -3476,7 +3593,7 @@ mod tests {
         {
             let mut queue = module.disk.queue();
             for offset in [0_u32, 3, 4, 5] {
-                queue.slots.push(sweep_slot(offset));
+                queue.insert_slot(sweep_slot(offset));
             }
         }
         module.disk.occupy_for_test();
@@ -3504,7 +3621,7 @@ mod tests {
         {
             let mut queue = module.disk.queue();
             for offset in 0..8 {
-                queue.slots.push(sweep_slot(offset));
+                queue.insert_slot(sweep_slot(offset));
             }
         }
         let span = module.take_disk_span().expect("span");
@@ -3519,9 +3636,9 @@ mod tests {
         {
             let mut queue = module.disk.queue();
             for offset in 0..8 {
-                queue.slots.push(sweep_slot(offset));
+                queue.insert_slot(sweep_slot(offset));
             }
-            queue.slots.push(sweep_slot(10));
+            queue.insert_slot(sweep_slot(10));
         }
         // Offset order keeps the full span ahead of the later short span.
         // The short span is still eligible while the disk is busy.
@@ -3659,7 +3776,7 @@ mod tests {
             .unwrap()
             .occupancy
             .insert(slot.offset, slot.generation);
-        module.disk.queue().slots.push(slot);
+        module.disk.queue().insert_slot(slot);
         rx
     }
 
@@ -3790,6 +3907,108 @@ mod tests {
         assert_eq!(*kind, super::super::ChunkType::Entropy);
         assert_eq!(bytes.first().copied(), Some(0xAB));
         Ok(())
+    }
+
+    /// Taking the front of a fragmented queue must not rescan the tail.
+    /// A 16× longer queue that still yields 32 one-slot spans should stay
+    /// well under 16× the cost. The old walk rebuilt every span on every take.
+    #[test]
+    fn fragmented_span_take_does_not_rescan_the_tail() -> eyre::Result<()> {
+        fn queue_fragmented(
+            prefix: &str,
+            slots: u32,
+        ) -> eyre::Result<(
+            irys_testing_utils::utils::tempfile::TempDir,
+            super::super::StorageModule,
+        )> {
+            let last = u64::from(slots) * 2;
+            let queued = span_fixture(prefix, last + 1, 1, 0)?;
+            {
+                let mut queue = queued.1.disk.queue();
+                for index in 0..slots {
+                    queue.insert_slot(sweep_slot(index * 2));
+                }
+            }
+            Ok(queued)
+        }
+        fn take_front(module: &super::super::StorageModule, takes: usize) -> (Duration, u64) {
+            module.disk.span_walk_slots.store(0, Ordering::SeqCst);
+            let started = Instant::now();
+            for _ in 0..takes {
+                let span = module.take_disk_span().expect("fragmented span");
+                assert_eq!(span.len(), 1, "hole of 0 must not coalesce");
+            }
+            (
+                started.elapsed(),
+                module.disk.span_walk_slots.load(Ordering::SeqCst),
+            )
+        }
+
+        let (_small_dir, small) = queue_fragmented("span_scale_small", 2_000)?;
+        let (_large_dir, large) = queue_fragmented("span_scale_large", 32_000)?;
+        let (small_time, small_visits) = take_front(&small, 32);
+        let (large_time, large_visits) = take_front(&large, 32);
+        eprintln!(
+            "fragmented take 32 spans: queue 2000 {small_time:?} visits {small_visits}, queue 32000 {large_time:?} visits {large_visits}"
+        );
+        // Each take looks at the closed span plus the next slot that ends it.
+        // A rebuild visits every queued slot on every take.
+        assert!(
+            large_visits < 1_000,
+            "front span take walked the backlog: 2000 slots {small_visits} visits, 32000 slots {large_visits} visits"
+        );
+        assert!(large_visits >= 32, "span walk counter did not move");
+        assert!(
+            large_time < small_time.saturating_mul(8) || large_time < Duration::from_millis(80),
+            "front span take rescanned the queue: 2000 slots {small_time:?}, 32000 slots {large_time:?}"
+        );
+        Ok(())
+    }
+
+    /// Newest-first removal walks the FIFO order. Quadratic in the pad count.
+    #[test]
+    fn entropy_cache_newest_remove_scales() {
+        fn remove_newest_first(pads: u32) -> Duration {
+            let mut cache = super::EntropyPadCache::default();
+            let cap = u64::from(pads) * 32;
+            for index in 0..pads {
+                assert!(cache.insert(PartitionChunkOffset::from(index), vec![1; 32], 1, cap,));
+            }
+            let started = Instant::now();
+            for index in (0..pads).rev() {
+                assert!(cache.take(PartitionChunkOffset::from(index), 1).is_some());
+            }
+            started.elapsed()
+        }
+
+        let small = remove_newest_first(2_000);
+        let large = remove_newest_first(8_000);
+        eprintln!("entropy cache newest-first remove: 2000 pads {small:?}, 8000 pads {large:?}");
+        assert!(
+            large < small.saturating_mul(8) || large < Duration::from_millis(50),
+            "cache remove scanned the FIFO: 2000 pads {small:?}, 8000 pads {large:?}"
+        );
+    }
+
+    /// A reinserted pad is the newest. Eviction must not treat the stale
+    /// FIFO row as the live pad.
+    #[test]
+    fn entropy_cache_reinsert_evicts_the_oldest_live_pad() {
+        let mut cache = super::EntropyPadCache::default();
+        let cap = 32 * 2;
+        for index in 0..2_u32 {
+            assert!(cache.insert(PartitionChunkOffset::from(index), vec![1; 32], 1, cap,));
+        }
+        assert!(cache.insert(PartitionChunkOffset::from(0), vec![2; 32], 1, cap));
+        assert!(cache.take(PartitionChunkOffset::from(0), 1).is_some());
+        assert!(cache.insert(PartitionChunkOffset::from(2), vec![3; 32], 1, cap));
+        assert!(cache.insert(PartitionChunkOffset::from(3), vec![4; 32], 1, cap));
+        assert!(
+            cache.take(PartitionChunkOffset::from(1), 1).is_none(),
+            "the stale front row evicted a newer pad, or the oldest live pad survived"
+        );
+        assert!(cache.take(PartitionChunkOffset::from(2), 1).is_some());
+        assert!(cache.take(PartitionChunkOffset::from(3), 1).is_some());
     }
 
     #[test]
