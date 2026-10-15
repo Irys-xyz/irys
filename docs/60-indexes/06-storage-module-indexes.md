@@ -3,11 +3,12 @@
 Each submodule keeps its index in `db/` (MDBX) or `rocks/` (RocksDB).
 `database.submodule_index` selects the engine. The value is `mdbx` or
 `rocksdb`. The node opens only that directory. It refuses a layout that
-does not match the config. The node refuses to open MDBX when `rocks/`
-also exists, because after a conversion `rocks/` is the live index and
-`db/` stays beside it unread. A rollback to MDBX moves `rocks/` out of
-the module directory (for example, rename it to `rocks.retired`) before
-the node starts.
+does not match the config. The node refuses to open MDBX when
+`rocks/SCHEMA` or `rocks/CURRENT` exists, because after a conversion
+`rocks/` is the live index and `db/` stays beside it unread. A `rocks/`
+directory that contains only `CONVERTING` does not count. A rollback to
+MDBX moves `rocks/` out of the module directory (for example, rename it
+to `rocks.retired`) before the node starts.
 
 MDBX schema v1 is the on-disk format of release 4.0.8. The node migrates
 that `db/` to MDBX schema v2 in place the first time this release opens
@@ -17,8 +18,25 @@ into a per-offset table in batches, then drops the old hash-keyed table,
 so the module is not served until it finishes and free space must hold
 both copies until the drop. A v1 data-path hash with no stored blob
 refuses open, and each later start retries it, until the file is
-repaired or the module is reset. Both a schema v1 and a schema v2 `db/` convert to
-RocksDB, so the conversion can run before or after the first start.
+repaired or the module is reset. Both a finished schema v1 `db/` and a
+schema v2 `db/` convert to RocksDB, so the conversion can run before or
+after the first start. A schema row that still starts with
+`irys-submodule-index migrate-v1 ` is neither. The converter refuses it
+and does not modify the directory. Start the node so the in-place
+migration finishes, then convert. There is no separate v1 copy.
+
+An omitted `database.submodule_index` stays `mdbx`. That first open is
+also when these storage defaults take effect. Mining recall reads
+`chunks.dat` with `O_DIRECT` (`storage.recall_direct_io`, default true).
+An open that returns `EINVAL` or `EOPNOTSUPP` (tmpfs returns `EINVAL`)
+logs one warning and keeps the buffered descriptor. Any other errno
+fails module open. Durable points wait up to
+`min_durable_interval_ms` (250). `intervals.json` completion rewrites
+wait up to `intervals_persist_secs` (30). A write-ahead `Interrupted`
+mark is still immediate. `NodeConfig::testing()` sets the recall flag
+false and both of those intervals to 0. A config that sets only
+`num_writes_before_sync` still takes the other defaults. The RocksDB
+cache and write-buffer keys are ignored while the engine stays MDBX.
 
 A fresh RocksDB index is RocksDB v1. The marker, in `rocks/SCHEMA` and
 in the metadata schema row, is `irys-submodule-index rocksdb 1`. Any
@@ -33,9 +51,10 @@ too old. An unknown `ro_compat` bit refuses a writable open and still
 allows a read-only open. An unknown `compat` bit is ignored.
 
 Open reads the on-disk column-family list and opens every family. A
-family this binary does not know gets RocksDB's default options. The
-node does not read, write, or drop it, and logs the name once. A family
-that needs another comparator or a prefix extractor is not ignorable.
+family this binary does not know is opened with auto compaction
+disabled, so this process does not rewrite that family's SSTs. The node
+does not read, write, or drop it, and logs the name once. A family that
+needs another comparator or a prefix extractor is not ignorable.
 
 A later change that old binaries can ignore sets a `compat` or
 `ro_compat` bit and keeps the RocksDB v1 marker. A change to an existing
