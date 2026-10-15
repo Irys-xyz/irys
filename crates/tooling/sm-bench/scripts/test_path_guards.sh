@@ -1211,6 +1211,79 @@ test_teardown_restores_when_the_numeric_pid_is_already_gone() {
     rm -rf "$root"
 }
 
+install_rounding_df() {
+    local root=$1
+    mkdir -p "$root/bin"
+    cat >"$root/bin/df" <<'EOF'
+#!/bin/bash
+if [ "$1" = "-B1G" ]; then
+    printf 'Avail\n2\n'
+    exit 0
+fi
+if [ "$1" = "-B1" ]; then
+    # 1.6 GiB. df -B1G rounds this to 2, which is under a 2 GiB floor.
+    printf 'Avail\n1717986918\n'
+    exit 0
+fi
+exec /usr/bin/df "$@"
+EOF
+    chmod +x "$root/bin/df"
+}
+
+test_run_refuses_a_floor_that_df_would_round_up() {
+    local name=run-floor-bytes root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    install_rounding_df "$root"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 2 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh accepted 1.6 GiB free against a 2 GiB floor"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran below the floor"
+    elif ! grep -q "below 2" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_allows_a_floor_under_the_byte_count() {
+    local name=run-floor-allow root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/safe/loadtest"
+    dev=$(mount_dev_for "$root/safe/loadtest")
+    mnt=$(mount_of "$root/safe/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    install_rounding_df "$root"
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if ! PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 1 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused 1.6 GiB free against a 1 GiB floor: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_run_removes_the_pid_after_the_bench_exits() {
     local name=run-pid-removed root err dev mnt
     root=$(tmpdir)

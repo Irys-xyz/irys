@@ -49,7 +49,7 @@ crates/tooling/sm-bench/scripts/fill.sh \
 
 The file must already exist. `fill.sh` does not allocate it.
 
-`scripts/run.sh` refuses the run when the mount has less than 500 GiB free. `--min-free-gib` changes that floor. `df -B1G` counts GiB.
+`scripts/run.sh` refuses the run when the mount has less than 500 GiB free. `--min-free-gib` changes that floor. The check reads `df -B1` and compares bytes, so a value just under the floor does not round up to a pass.
 
 Record the queue before a ladder changes it. On the lab host the stock values were `max_sectors_kb=1280` (hardware max 32767), `read_ahead_kb=128`, `nr_requests=64`, scheduler `mq-deadline`. Use the file you record when the host differs. `examples/sysfs-orig.example.txt` is a host log of that record. It also has `rotational` and `queue_depth`, which `teardown.sh` does not restore. `run.sh` writes the four keys `teardown.sh` accepts to `<out>/sysfs.txt`. The scheduler value is the active name in brackets. A `# scheduler_raw=` line keeps the full queue string. `ladder.sh` sets `max_sectors_kb` for the ladder and restores it on EXIT, INT, and TERM. The restored value is the value read before the set, unless `restore_sectors_kb` names another value.
 
