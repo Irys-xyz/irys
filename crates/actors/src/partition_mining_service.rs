@@ -272,17 +272,17 @@ impl PartitionMiningServiceInner {
     }
 
     /// Finish an expiry reset that returned an error. No-op when none is
-    /// pending, and when another caller already finished the reset.
+    /// pending. `reset` returning `Ok`, or never running, is not completion.
+    /// The expiry is done when the capacity assignment is stored, or when
+    /// the slot now stored is one this notice must keep.
     fn finish_expiry_reset(&mut self) {
         if !self.expiry_reset_pending {
             return;
         }
-        if !self.storage_module.reset_incomplete() {
-            self.expiry_reset_pending = false;
-            return;
-        }
         // A ledger installed while the reset was pending owns the module.
-        // Retrying the capacity reset would remove that slot.
+        // Retrying the capacity reset would remove that slot. A read error
+        // here is not that ledger: the locked call below leaves the index
+        // in place and keeps the expiry armed.
         if self.ledger_slot_stored_since(self.expiry_update_height) {
             self.expiry_reset_pending = false;
             return;
@@ -1076,7 +1076,7 @@ impl PartitionMiningService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_domain::StorageModuleInfo;
+    use irys_domain::{PACKING_PARAMS_FILE_NAME, PackingParams, StorageModuleInfo};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         ConsensusConfig, ConsensusOptions, DataLedger, DataTransactionLedger, H256, H256List,
@@ -1648,6 +1648,223 @@ mod tests {
             .partition_assignment_with_height()
             .expect("packing params");
         assert_eq!(height, Some(50));
+        assert!(receivers.packing.try_recv().is_ok());
+    }
+
+    fn write_packing_params(path: &std::path::Path, params: &PackingParams) {
+        params.write_to_disk(path).expect("rewrite packing params");
+    }
+
+    /// The slot this notice must keep is Publish at the notice height. A
+    /// packing file that cannot be read must not clear that index. The expiry
+    /// stays armed until the file can be read, then the ledger stays.
+    #[test]
+    fn unreadable_packing_params_does_not_reset_a_ledger_the_notice_keeps() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x81);
+        let miner = config.node_config.miner_address();
+        let publish = PartitionAssignment {
+            partition_hash,
+            miner_address: miner,
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(1),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(publish),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        storage_module
+            .assign_partition(publish, 20)
+            .expect("store the ledger at the notice height");
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage_module.write_chunk(offset, vec![0x51_u8; 32], ChunkType::Data));
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+        let params_path = tmp_dir.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
+        std::fs::write(&params_path, b"not toml\n").expect("corrupt packing params");
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data),
+            "an unreadable packing file must not clear the index"
+        );
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert!(inner.expiry_reset_pending);
+        assert!(!storage_module.reset_incomplete());
+        assert!(receivers.packing.try_recv().is_err());
+
+        inner.finish_expiry_reset();
+        assert!(
+            inner.expiry_reset_pending,
+            "the expiry stays armed until the capacity assignment is stored or the slot is kept"
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+
+        write_packing_params(
+            &params_path,
+            &PackingParams {
+                packing_address: miner,
+                partition_hash: Some(partition_hash),
+                ledger: Some(DataLedger::Publish.into()),
+                slot: Some(1),
+                last_updated_height: Some(20),
+                entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
+                chunk_size: Some(32),
+            },
+        );
+        inner.finish_expiry_reset();
+        assert!(!inner.expiry_reset_pending);
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(assignment.slot_index, Some(1));
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+        assert!(receivers.packing.try_recv().is_err());
+    }
+
+    /// A real expiry whose packing file cannot be read must not reset yet.
+    /// Once the file is readable again, the old slot is reset and packed.
+    #[test]
+    fn unreadable_packing_params_retries_an_expiry_that_must_reset() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x82);
+        let miner = config.node_config.miner_address();
+        let submit = PartitionAssignment {
+            partition_hash,
+            miner_address: miner,
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(submit),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the expiring slot");
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage_module.write_chunk(offset, vec![0x61_u8; 32], ChunkType::Data));
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+        let params_path = tmp_dir.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
+        std::fs::write(&params_path, b"not toml\n").expect("corrupt packing params");
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+        assert!(inner.expiry_reset_pending);
+        assert!(receivers.packing.try_recv().is_err());
+
+        inner.finish_expiry_reset();
+        assert!(inner.expiry_reset_pending);
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+
+        write_packing_params(
+            &params_path,
+            &PackingParams {
+                packing_address: miner,
+                partition_hash: Some(partition_hash),
+                ledger: Some(DataLedger::Submit.into()),
+                slot: Some(0),
+                last_updated_height: Some(10),
+                entropy_packing_iterations: Some(config.consensus.entropy_packing_iterations),
+                chunk_size: Some(32),
+            },
+        );
+        inner.finish_expiry_reset();
+        assert!(!inner.expiry_reset_pending);
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.ledger_id, None);
+        assert_eq!(assignment.slot_index, None);
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized)
+        );
+        let (_assignment, height) = storage_module
+            .partition_assignment_with_height()
+            .expect("packing params");
+        assert_eq!(height, Some(20));
         assert!(receivers.packing.try_recv().is_ok());
     }
 
