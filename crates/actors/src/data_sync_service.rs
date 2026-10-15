@@ -1630,6 +1630,25 @@ fn take_offset_prefix(start: u32, end: u32, mut sampled: usize, out: &mut Vec<u3
     sampled
 }
 
+/// A failed peer-event receive. `Closed` stays ready on every `select`.
+/// Continuing the loop busy-spins, and a new subscribe cannot reopen a
+/// channel whose senders are already gone.
+enum PeerEventChannelFault {
+    /// Missed events. The caller resyncs membership.
+    Lagged,
+    /// Every sender is gone. The caller stops the service.
+    Closed,
+}
+
+fn peer_event_channel_fault(
+    error: tokio::sync::broadcast::error::RecvError,
+) -> PeerEventChannelFault {
+    match error {
+        tokio::sync::broadcast::error::RecvError::Lagged(_) => PeerEventChannelFault::Lagged,
+        tokio::sync::broadcast::error::RecvError::Closed => PeerEventChannelFault::Closed,
+    }
+}
+
 impl DataSyncService {
     pub fn spawn_service(
         rx: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
@@ -1737,12 +1756,17 @@ impl DataSyncService {
                             debug!("Peer removed: {}", mining_addr);
                             self.inner.handle_peer_disconnection(mining_addr);
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            // Missed events; do a conservative resync
-                            self.inner.synchronize_peers_and_orchestrators();
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            warn!("peer events channel closed in DataSyncService; resubscribing");
+                        Err(error) => match peer_event_channel_fault(error) {
+                            PeerEventChannelFault::Lagged => {
+                                // Missed events; do a conservative resync
+                                self.inner.synchronize_peers_and_orchestrators();
+                            }
+                            PeerEventChannelFault::Closed => {
+                                warn!(
+                                    "peer events channel closed in DataSyncService; stopping"
+                                );
+                                break;
+                            }
                         }
                     }
                 }
@@ -1757,6 +1781,48 @@ impl DataSyncService {
 
         tracing::info!("shutting down DataSync Service gracefully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod peer_event_channel_tests {
+    use super::{PeerEventChannelFault, peer_event_channel_fault};
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn closed_peer_event_channel_stops_instead_of_spinning() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel::<()>(1);
+        drop(sender);
+        let started = Instant::now();
+        let mut continued = 0_u32;
+        loop {
+            match receiver.recv().await {
+                Ok(()) => {}
+                Err(error) => match peer_event_channel_fault(error) {
+                    PeerEventChannelFault::Lagged => {}
+                    PeerEventChannelFault::Closed => break,
+                },
+            }
+            continued += 1;
+            if continued > 10 {
+                panic!("closed peer-event channel kept the loop running");
+            }
+        }
+        assert_eq!(continued, 0, "Closed must stop before another iteration");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn lagged_peer_events_do_not_stop_the_loop() {
+        let error = tokio::sync::broadcast::error::RecvError::Lagged(3);
+        assert!(matches!(
+            peer_event_channel_fault(error),
+            PeerEventChannelFault::Lagged
+        ));
     }
 }
 
