@@ -363,11 +363,18 @@ impl SweepQueue {
             .find(|priority| self.priority_slots[priority_index(*priority)] > 0)
     }
 
-    fn insert_slot(&mut self, slot: SweepSlot) {
+    /// Returns the slot this offset already held.
+    ///
+    /// The caller finishes that group and releases its unpacked length.
+    /// Dropping the slot leaves the oneshot unfinished and the length in
+    /// `queued_unpacked_bytes`.
+    fn insert_slot(&mut self, slot: SweepSlot) -> Option<SweepSlot> {
         let offset = slot.offset;
-        if self.slots.contains_key(&offset) {
-            self.remove_slot(offset);
-        }
+        let displaced = if self.slots.contains_key(&offset) {
+            self.remove_slot(offset)
+        } else {
+            None
+        };
         let index = priority_index(slot.priority);
         self.priority_slots[index] = self.priority_slots[index].saturating_add(1);
         if memory_entropy(&slot) {
@@ -375,6 +382,7 @@ impl SweepQueue {
             self.memory_offsets.insert(offset);
         }
         self.slots.insert(offset, slot);
+        displaced
     }
 
     fn remove_slot(&mut self, offset: PartitionChunkOffset) -> Option<SweepSlot> {
@@ -1434,6 +1442,7 @@ impl StorageModule {
             return Err(WriteDataChunkError::WritesPaused);
         }
         let mut groups = Vec::with_capacity(occupied.len());
+        let mut displaced = Vec::new();
         for chunk in occupied {
             let group_id = queue.next_group;
             queue.next_group = queue.next_group.wrapping_add(1);
@@ -1449,7 +1458,7 @@ impl StorageModule {
             );
             let enqueued_at = Instant::now();
             for (offset, generation, pending_entropy, cached_entropy) in chunk.selected {
-                queue.insert_slot(SweepSlot {
+                if let Some(previous) = queue.insert_slot(SweepSlot {
                     group: group_id,
                     offset,
                     unpacked: Arc::clone(&chunk.unpacked),
@@ -1461,11 +1470,14 @@ impl StorageModule {
                     cached_entropy,
                     byte_len,
                     enqueued_at,
-                });
+                }) {
+                    displaced.push(previous);
+                }
             }
             groups.push(group_id);
         }
         drop(queue);
+        self.retire_displaced_slots(displaced);
         #[cfg(test)]
         {
             self.disk.enqueue_notifies.fetch_add(1, Ordering::SeqCst);
@@ -1759,10 +1771,17 @@ impl StorageModule {
             packed_any = true;
         }
         if !deferred.is_empty() {
-            let mut queue = self.disk.queue();
-            for slot in deferred {
-                queue.insert_slot(slot);
-            }
+            let displaced = {
+                let mut queue = self.disk.queue();
+                let mut displaced = Vec::new();
+                for slot in deferred {
+                    if let Some(previous) = queue.insert_slot(slot) {
+                        displaced.push(previous);
+                    }
+                }
+                displaced
+            };
+            self.retire_displaced_slots(displaced);
         }
         packed_any
     }
@@ -2180,9 +2199,25 @@ impl StorageModule {
     }
 
     fn restore_span(&self, span: Vec<SweepSlot>) {
-        let mut queue = self.disk.queue();
-        for slot in span {
-            queue.insert_slot(slot);
+        let displaced = {
+            let mut queue = self.disk.queue();
+            let mut displaced = Vec::new();
+            for slot in span {
+                if let Some(previous) = queue.insert_slot(slot) {
+                    displaced.push(previous);
+                }
+            }
+            displaced
+        };
+        self.retire_displaced_slots(displaced);
+    }
+
+    /// Finish a slot `insert_slot` removed. The group gets backpressure and
+    /// its unpacked length leaves `queued_unpacked_bytes`.
+    fn retire_displaced_slots(&self, displaced: Vec<SweepSlot>) {
+        for slot in displaced {
+            self.release_queued_offset(slot.offset, slot.generation, slot.byte_len);
+            self.mark_group_slot_done(slot.group, Some(WriteDataChunkError::Backpressure));
         }
     }
 
@@ -3774,6 +3809,50 @@ mod tests {
             .insert(slot.offset, slot.generation);
         module.disk.queue().insert_slot(slot);
         rx
+    }
+
+    /// A later occupy at the same offset must finish the group it displaces.
+    /// The old oneshot and its unpacked length belong to that group.
+    #[test]
+    fn replacing_a_queued_sweep_slot_finishes_the_old_group() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("sweep_replace", 4, 4, 0)?;
+        let mut slot = sweep_slot(0);
+        slot.byte_len = 32;
+        let mut rx = arm_slot_group(&module, slot);
+        module.index_write_generation.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut pending = module.pending_writes.write().unwrap();
+            pending.occupancy.clear();
+            // Occupy counted the original slot and the replacement.
+            pending.queued_unpacked_bytes = 64;
+        }
+        let occupied = super::OccupiedChunk {
+            unpacked: Arc::new(vec![1; 32]),
+            data_path: Arc::new(Vec::new()),
+            path_hash: H256::zero(),
+            priority: super::WritePriority::Ingress,
+            waited: false,
+            notify: None,
+            selected: vec![(PartitionChunkOffset::from(0), 1, None, None)],
+        };
+        module
+            .push_occupied(vec![occupied])
+            .expect("replacement queued");
+        module.fail_queued_sweeps();
+        match rx.try_recv() {
+            Ok(Err(super::super::WriteDataChunkError::Backpressure)) => {}
+            other => eyre::bail!("original sweep group was not finished: {other:?}"),
+        }
+        assert!(
+            !module.disk.queue().groups.contains_key(&1),
+            "original group is still queued"
+        );
+        assert_eq!(
+            module.pending_writes.read().unwrap().queued_unpacked_bytes,
+            0,
+            "replaced slot bytes stayed in the pending total"
+        );
+        Ok(())
     }
 
     #[test]
