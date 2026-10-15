@@ -353,8 +353,14 @@ impl StorageModuleServiceInner {
                         let range =
                             self.reset_and_install(existing, Some(info_pa), update_height)?;
                         self.enqueue_packing(existing, range);
-                    } else {
-                        existing.assign_partition(info_pa, update_height)?;
+                    } else if let Err(err) = existing.assign_partition(info_pa, update_height) {
+                        // The packing-params write failed before memory changed.
+                        // Retry the same update. Do not stop the service.
+                        warn!(
+                            storage_module.id = existing.id,
+                            "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
+                        );
+                        return Err(ResetNotFinished.into());
                     }
                 }
             }
@@ -1046,6 +1052,188 @@ mod assignment_reset_tests {
         assert!(
             harness.module.take_crc_repair_ranges().is_empty(),
             "the tick drained the repair"
+        );
+    }
+
+    fn publish_update(
+        path: &std::path::Path,
+        hash: H256,
+        miner: irys_types::IrysAddress,
+    ) -> Arc<Vec<StorageModuleInfo>> {
+        Arc::new(vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: Some(DataLedger::Publish.into()),
+                slot_index: Some(0),
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), path.to_path_buf())],
+        }])
+    }
+
+    fn set_dir_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(mode);
+        std::fs::set_permissions(path, perms).expect("set permissions");
+    }
+
+    /// Restores directory writes if the test exits while the dir is read-only.
+    struct WritableDir(std::path::PathBuf);
+
+    impl Drop for WritableDir {
+        fn drop(&mut self) {
+            set_dir_mode(&self.0, 0o755);
+        }
+    }
+
+    /// A packing-params write error on capacity→ledger is retried. The
+    /// in-memory assignment stays capacity. A later successful write stores
+    /// the ledger. A path mismatch is still fatal.
+    #[tokio::test]
+    async fn capacity_to_ledger_write_error_is_retried() {
+        let mut harness = harness(None);
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        let hash = harness.module.partition_hash().expect("assigned");
+        let miner = harness
+            .module
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = publish_update(&harness.path, hash, miner);
+        let _restore = WritableDir(harness.path.clone());
+        set_dir_mode(&harness.path, 0o555);
+
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: Arc::clone(&update),
+                update_height: 6,
+            })
+            .await
+            .expect("a packing-params write error is retried, not fatal");
+        assert!(
+            harness.inner.pending_assignment.is_some(),
+            "the update is stored for the retry tick"
+        );
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None,
+            "a failed write leaves the in-memory assignment unchanged"
+        );
+        assert!(!harness.module.reset_incomplete());
+        assert!(harness.receivers.packing.try_recv().is_err());
+
+        set_dir_mode(&harness.path, 0o755);
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: update,
+                update_height: 6,
+            })
+            .await
+            .expect("retry stores the ledger");
+        assert!(harness.inner.pending_assignment.is_none());
+        let assignment = harness.module.partition_assignment().unwrap();
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(assignment.slot_index, Some(0));
+        assert_eq!(assignment.partition_hash, hash);
+    }
+
+    /// Capacity→ledger does not reset. Packed bytes stay, and packing is not
+    /// asked to rewrite the partition.
+    #[tokio::test]
+    async fn capacity_to_ledger_keeps_packed_bytes() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(None);
+        let offset = PartitionChunkOffset::from(0);
+        assert!(
+            harness
+                .module
+                .write_chunk(offset, vec![0x5A_u8; 32], ChunkType::Entropy,)
+        );
+        harness
+            .module
+            .force_sync_pending_chunks()
+            .expect("entropy is durable");
+        assert_eq!(
+            harness.module.get_chunk_type(&offset),
+            Some(ChunkType::Entropy)
+        );
+
+        let hash = harness.module.partition_hash().expect("assigned");
+        let miner = harness
+            .module
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: publish_update(&harness.path, hash, miner),
+                update_height: 7,
+            })
+            .await
+            .expect("capacity to ledger");
+        assert!(harness.inner.pending_assignment.is_none());
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert_eq!(
+            harness.module.get_chunk_type(&offset),
+            Some(ChunkType::Entropy),
+            "capacity to ledger stores the assignment without resetting the index"
+        );
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "capacity to ledger does not enqueue a reset pack"
+        );
+    }
+
+    #[tokio::test]
+    async fn assignment_path_mismatch_is_not_retried() {
+        let mut harness = harness(None);
+        let hash = harness.module.partition_hash().expect("assigned");
+        let miner = harness
+            .module
+            .partition_assignment()
+            .expect("assigned")
+            .miner_address;
+        let update = Arc::new(vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: Some(DataLedger::Publish.into()),
+                slot_index: Some(0),
+            }),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                harness.path.join("not-the-module"),
+            )],
+        }]);
+        let err = harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: update,
+                update_height: 8,
+            })
+            .await
+            .expect_err("a path mismatch is not an I/O retry");
+        assert!(
+            !super::is_reset_not_finished(&err),
+            "path mismatch must not take the reset retry: {err:#}"
+        );
+        assert!(harness.inner.pending_assignment.is_none());
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
         );
     }
 }
