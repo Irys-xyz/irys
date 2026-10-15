@@ -1868,6 +1868,100 @@ mod tests {
         assert!(receivers.packing.try_recv().is_ok());
     }
 
+    /// The reset failed, then the storage task stored Publish at the notice
+    /// height and wrote a chunk. The retry must keep that slot and must not
+    /// pack over it.
+    #[test]
+    fn finish_expiry_reset_keeps_a_ledger_installed_while_pending() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x83);
+        let miner = config.node_config.miner_address();
+        let submit = PartitionAssignment {
+            partition_hash,
+            miner_address: miner,
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(submit),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store submit slot 0");
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+
+        storage_module.fail_next_reset_for_test();
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
+        assert!(inner.expiry_reset_pending);
+        assert!(storage_module.reset_incomplete());
+        assert!(receivers.packing.try_recv().is_err());
+
+        let publish = PartitionAssignment {
+            partition_hash,
+            miner_address: miner,
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(1),
+        };
+        storage_module
+            .assign_partition(publish, 20)
+            .expect("install publish while the reset is pending");
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage_module.write_chunk(offset, vec![0x71_u8; 32], ChunkType::Data));
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+
+        inner.finish_expiry_reset();
+        assert!(!inner.expiry_reset_pending);
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.partition_hash, partition_hash);
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(assignment.slot_index, Some(1));
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+        let (_assignment, height) = storage_module
+            .partition_assignment_with_height()
+            .expect("packing params");
+        assert_eq!(height, Some(20));
+        assert!(receivers.packing.try_recv().is_err());
+    }
+
     /// The consumer half of the in-process VDF re-anchor: `handle_reanchored` — the
     /// one-line dispatch target of `MiningBroadcastEvent::Reanchored` in the service
     /// loop — must reset the efficient-sampling rotation so the next recall-range
