@@ -1393,11 +1393,12 @@ impl DataSyncServiceInner {
                 continue;
             }
 
-            // Use the factory to create a chunk_fetcher (allows mock chunk fetchers for testing)
-            let chunk_fetcher = (self.chunk_fetcher_factory)(pa.ledger_id.unwrap());
+            // The fetcher is bound to this ledger. A second read inside the
+            // constructor must still see the same ledger, or the build aborts.
+            let ledger_id = pa.ledger_id.unwrap();
+            let chunk_fetcher = (self.chunk_fetcher_factory)(ledger_id);
 
-            // Create a chunk orchestrator for storage modules that needs to sync data
-            let orchestrator = ChunkOrchestrator::new(
+            let Some(orchestrator) = ChunkOrchestrator::try_new_for_ledger(
                 sm.clone(),
                 self.active_peer_bandwidth_managers.clone(),
                 self.block_tree.clone(),
@@ -1406,7 +1407,10 @@ impl DataSyncServiceInner {
                 self.config.node_config.clone(),
                 self.runtime_handle.clone(),
                 self.db.clone(),
-            );
+                ledger_id,
+            ) else {
+                continue;
+            };
 
             self.chunk_orchestrators.insert(sm_id, orchestrator);
         }

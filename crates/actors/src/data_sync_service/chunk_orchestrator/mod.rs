@@ -53,6 +53,18 @@ const DELAYED_REQUEST_LIMIT_MULTIPLIER: usize = 1;
 /// when the scan cursor wraps.
 const BLOCKED_REQUEST_LIMIT_MULTIPLIER: usize = 4;
 
+/// One attempt to start a fetch for a ready offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchStart {
+    /// A fetch task was spawned.
+    Started,
+    /// This offset cannot start now. The caller tries the next ready offset.
+    Skip,
+    /// The local ledger range is gone. The offset is back on the ready
+    /// queue, and the same peer would be selected again this round.
+    Stop,
+}
+
 /// How to request a missing body from a selected peer.
 ///
 /// Assignees use ledger-offset; ingress-proof signers (often no SM) use data_root.
@@ -264,6 +276,65 @@ impl ChunkOrchestrator {
             .ledger_id
             .expect("storage_module should be assigned to a data ledger");
 
+        Self::from_parts(
+            storage_module,
+            sync_peers,
+            block_tree,
+            service_senders,
+            chunk_fetcher,
+            config,
+            runtime_handle,
+            db,
+            ledger_id,
+        )
+    }
+
+    /// Builds only when the live assignment is still `ledger_id`.
+    ///
+    /// The fetcher is created for one ledger before this read. A clear or a
+    /// ledger change between those two reads must not pair that fetcher with a
+    /// different ledger. The caller retries on a later sync.
+    pub(crate) fn try_new_for_ledger(
+        storage_module: Arc<StorageModule>,
+        sync_peers: Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>,
+        block_tree: BlockTreeReadGuard,
+        service_senders: &ServiceSenders,
+        chunk_fetcher: Arc<dyn ChunkFetcher>,
+        config: NodeConfig,
+        runtime_handle: tokio::runtime::Handle,
+        db: DatabaseProvider,
+        ledger_id: u32,
+    ) -> Option<Self> {
+        let live = storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.ledger_id);
+        if live != Some(ledger_id) {
+            return None;
+        }
+        Some(Self::from_parts(
+            storage_module,
+            sync_peers,
+            block_tree,
+            service_senders,
+            chunk_fetcher,
+            config,
+            runtime_handle,
+            db,
+            ledger_id,
+        ))
+    }
+
+    fn from_parts(
+        storage_module: Arc<StorageModule>,
+        sync_peers: Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>,
+        block_tree: BlockTreeReadGuard,
+        service_senders: &ServiceSenders,
+        chunk_fetcher: Arc<dyn ChunkFetcher>,
+        config: NodeConfig,
+        runtime_handle: tokio::runtime::Handle,
+        db: DatabaseProvider,
+        ledger_id: u32,
+    ) -> Self {
         Self {
             storage_module,
             chunk_requests: Default::default(),
@@ -282,7 +353,7 @@ impl ChunkOrchestrator {
             active_sync_peers: sync_peers,
             service_senders: service_senders.clone(),
             ledger_id,
-            chunk_fetcher, // Store the chunk fetcher
+            chunk_fetcher,
             config,
             runtime_handle,
             db,
@@ -660,7 +731,12 @@ impl ChunkOrchestrator {
         let hot_count = self.hot_request_count();
 
         let max_chunk_offset = self.get_max_chunk_offset();
-        let pa = self.storage_module.partition_assignment().unwrap();
+        // `prepare_tick` checks the assignment, then drops that lock to read
+        // coverage. A reset can store None before this queue fill. Stop the
+        // fill; the requests already queued stay until the module is dropped.
+        let Some(pa) = self.storage_module.partition_assignment() else {
+            return;
+        };
 
         let Some((max_chunk_offset, _)) = max_chunk_offset else {
             // Not requests needed
@@ -941,8 +1017,12 @@ impl ChunkOrchestrator {
                 return false;
             };
 
-            if self.dispatch_chunk_request(chunk_offset, peer_address) {
-                return true;
+            match self.dispatch_chunk_request(chunk_offset, peer_address) {
+                DispatchStart::Started => return true,
+                DispatchStart::Skip => {}
+                // The offset was put back and the same peer is still
+                // selectable. Another pop this round would spin.
+                DispatchStart::Stop => return false,
             }
         }
 
@@ -1604,9 +1684,9 @@ impl ChunkOrchestrator {
         &mut self,
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
-    ) -> bool {
+    ) -> DispatchStart {
         let Some(request) = self.chunk_requests.get_mut(&chunk_offset) else {
-            return false;
+            return DispatchStart::Skip;
         };
 
         let slot_index = self
@@ -1619,14 +1699,14 @@ impl ChunkOrchestrator {
                 Ok(p) => p,
                 Err(_) => {
                     self.ready_offsets.push_back(chunk_offset);
-                    return false;
+                    return DispatchStart::Skip;
                 }
             };
             let Some(peer_manager) = peers.get(&peer_addr) else {
                 // The peer can disappear between selection and dispatch. Keep
                 // the still-Pending offset in the FIFO for another peer.
                 self.ready_offsets.push_back(chunk_offset);
-                return false;
+                return DispatchStart::Skip;
             };
             (
                 peer_manager.peer_address.api,
@@ -1640,12 +1720,14 @@ impl ChunkOrchestrator {
         // Resolve mode *before* accounting a started request so we do not
         // penalize proof signers when we cannot map the residual hole.
         let fetch_mode = if use_ledger_offset {
-            let start_ledger_offset = u64::from(
-                self.storage_module
-                    .get_storage_module_ledger_offsets()
-                    .unwrap()
-                    .start(),
-            );
+            let Ok(range) = self.storage_module.get_storage_module_ledger_offsets() else {
+                // The local assignment can clear while the peer map lock was
+                // held. The peer is still selectable, so continuing this round
+                // would pop the same offset again. Leave it Pending.
+                self.ready_offsets.push_back(chunk_offset);
+                return DispatchStart::Stop;
+            };
+            let start_ledger_offset = u64::from(range.start());
             let ledger_chunk_offset =
                 LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
             FetchMode::LedgerOffset(ledger_chunk_offset)
@@ -1665,7 +1747,7 @@ impl ChunkOrchestrator {
                     );
                     request.excluded.insert(peer_addr);
                     self.ready_offsets.push_back(chunk_offset);
-                    return false;
+                    return DispatchStart::Skip;
                 }
                 Err(e) => {
                     warn!(
@@ -1676,7 +1758,7 @@ impl ChunkOrchestrator {
                     );
                     request.excluded.insert(peer_addr);
                     self.ready_offsets.push_back(chunk_offset);
-                    return false;
+                    return DispatchStart::Skip;
                 }
             }
         };
@@ -1769,7 +1851,7 @@ impl ChunkOrchestrator {
             }
             .instrument(tracing::Span::current()),
         );
-        true
+        DispatchStart::Started
     }
 
     /// Peer delivered the chunk body. Credits peer bandwidth stats but leaves

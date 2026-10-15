@@ -1,4 +1,4 @@
-use super::*;
+use super::{DispatchStart, *};
 use crate::{
     chunk_fetcher::{ChunkFetchFailureKind, MockChunkFetcher},
     metrics,
@@ -93,6 +93,29 @@ fn open_test_db(config: &Config) -> DatabaseProvider {
 fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrator {
     let db = open_test_db(config);
     make_orchestrator_with_db(sm, config, db).0
+}
+
+fn try_make_orchestrator(
+    sm: Arc<StorageModule>,
+    config: &Config,
+    ledger_id: u32,
+) -> Option<ChunkOrchestrator> {
+    let db = open_test_db(config);
+    let genesis = irys_testing_utils::new_mock_signed_header();
+    let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+    let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+    let (service_senders, _receivers) = build_test_service_senders();
+    ChunkOrchestrator::try_new_for_ledger(
+        sm,
+        Arc::new(RwLock::new(HashMap::new())),
+        block_tree_guard,
+        &service_senders,
+        Arc::new(MockChunkFetcher::new(ledger_id as usize)),
+        config.node_config.clone(),
+        tokio::runtime::Handle::current(),
+        db,
+        ledger_id,
+    )
 }
 
 fn make_orchestrator_with_db(
@@ -227,6 +250,35 @@ fn add_assigned_peer(
             .partition_assignment()
             .expect("assigned storage module"),
     );
+    orch.active_sync_peers
+        .write()
+        .unwrap()
+        .insert(address, manager);
+    orch.add_peer(address);
+    address
+}
+
+fn add_peer_with_assignment(
+    orch: &mut ChunkOrchestrator,
+    config: &Config,
+    byte: u8,
+    port: u16,
+    assignment: PartitionAssignment,
+) -> IrysAddress {
+    let address = IrysAddress::from([byte; 20]);
+    let api = format!("127.0.0.1:{port}").parse().unwrap();
+    let item = PeerListItem {
+        mining_address: address,
+        address: PeerAddress {
+            api,
+            gossip: api,
+            ..Default::default()
+        },
+        is_online: true,
+        ..Default::default()
+    };
+    let mut manager = PeerBandwidthManager::new(&address, &item, config);
+    manager.partition_assignments.push(assignment);
     orch.active_sync_peers
         .write()
         .unwrap()
@@ -1012,7 +1064,10 @@ async fn dispatch_restores_pending_offset_when_selected_peer_disappears() {
     orch.ready_offsets.clear();
     orch.active_sync_peers.write().unwrap().remove(&peer);
 
-    assert!(!orch.dispatch_chunk_request(offset, peer));
+    assert_eq!(
+        orch.dispatch_chunk_request(offset, peer),
+        DispatchStart::Skip
+    );
     assert!(matches!(
         orch.chunk_requests[&offset].request_state,
         ChunkRequestState::Pending
@@ -2162,5 +2217,163 @@ async fn blocked_cap_keeps_the_term_ledger_write_head() {
     assert!(
         orch.chunk_requests
             .contains_key(&PartitionChunkOffset::from(0_u32))
+    );
+}
+
+/// An assigned module still queues entropy. After the assignment is cleared,
+/// the same populate returns without adding requests. The clear can land
+/// after `prepare_tick`'s guard and before this read.
+#[test_log::test(tokio::test)]
+async fn assigned_populate_queues_and_cleared_assignment_returns() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 4;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm_for_ledger(&config, num_chunks, DataLedger::Publish);
+    let mut orch =
+        make_orchestrator_with_ledger_total(sm.clone(), &config, DataLedger::Publish, num_chunks);
+
+    orch.populate_request_queue_at(Instant::now());
+    assert!(
+        !orch.chunk_requests.is_empty(),
+        "an assigned ledger with entropy still queues chunk requests"
+    );
+    let queued = orch.chunk_requests.len();
+
+    *sm.partition_assignment.write().unwrap() = None;
+    orch.populate_request_queue_at(Instant::now());
+    assert_eq!(
+        orch.chunk_requests.len(),
+        queued,
+        "a cleared assignment adds no requests"
+    );
+}
+
+/// A peer can still look assigned to the captured slot after the local module
+/// loses its ledger range. The offset goes back to the ready queue. No fetch
+/// is accounted.
+#[test_log::test(tokio::test)]
+async fn cleared_assignment_requeues_a_ledger_fetch() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let mut orch = make_orchestrator(sm.clone(), &config);
+
+    let live_peer = add_assigned_peer(&mut orch, &config, 41, 9041);
+    let live_offset = PartitionChunkOffset::from(0);
+    insert_pending(&mut orch, live_offset);
+    orch.ready_offsets.clear();
+    assert_eq!(
+        orch.dispatch_chunk_request(live_offset, live_peer),
+        DispatchStart::Started,
+        "a live assignment still starts a ledger fetch"
+    );
+    assert!(matches!(
+        orch.chunk_requests[&live_offset].request_state,
+        ChunkRequestState::Requested(..)
+    ));
+
+    let stale = PartitionAssignment {
+        ledger_id: Some(orch.ledger_id()),
+        slot_index: None,
+        miner_address: IrysAddress::from([42_u8; 20]),
+        partition_hash: H256::repeat_byte(9),
+    };
+    let peer = add_peer_with_assignment(&mut orch, &config, 42, 9042, stale);
+    *sm.partition_assignment.write().unwrap() = None;
+    let offset = PartitionChunkOffset::from(1);
+    insert_pending(&mut orch, offset);
+    orch.ready_offsets.clear();
+
+    assert_eq!(
+        orch.dispatch_chunk_request(offset, peer),
+        DispatchStart::Stop,
+        "the offset is not fetched when the local ledger range is gone"
+    );
+    assert!(
+        matches!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::Pending
+        ),
+        "the request stays pending for a later assignment"
+    );
+    assert_eq!(orch.chunk_requests[&offset].attempt_count, 0);
+    assert_eq!(orch.ready_offsets.front(), Some(&offset));
+    let peers = orch.active_sync_peers.read().unwrap();
+    assert_eq!(
+        peers.get(&peer).unwrap().active_requests(),
+        0,
+        "a local addressing failure is not a peer request"
+    );
+}
+
+/// `dispatch_next` pops the offset it just put back. Stopping the round is
+/// required, or this one offset is fetched forever.
+#[test_log::test(tokio::test)]
+async fn dispatch_does_not_spin_when_ledger_offsets_are_gone() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let mut orch = make_orchestrator(sm.clone(), &config);
+    let stale = PartitionAssignment {
+        ledger_id: Some(orch.ledger_id()),
+        slot_index: None,
+        miner_address: IrysAddress::from([43_u8; 20]),
+        partition_hash: H256::repeat_byte(10),
+    };
+    let _peer = add_peer_with_assignment(&mut orch, &config, 43, 9043, stale);
+    *sm.partition_assignment.write().unwrap() = None;
+    let offset = PartitionChunkOffset::from(0);
+    insert_pending(&mut orch, offset);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let progressed = orch.dispatch_next();
+        let pending = matches!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::Pending
+        );
+        let requeued = orch.ready_offsets.contains(&offset);
+        let _ = tx.send((progressed, pending, requeued));
+    });
+
+    let (progressed, pending, requeued) =
+        rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| {
+            panic!("dispatch_next did not return; a missing ledger range must stop the round")
+        });
+    assert!(!progressed, "a missing ledger range must stop this round");
+    assert!(pending, "the offset stays pending");
+    assert!(requeued, "the offset is back on the ready queue");
+}
+
+/// The fetcher is created for one ledger, then the assignment is read again.
+/// A match builds. A clear, or a different live ledger, aborts the build.
+#[test_log::test(tokio::test)]
+async fn cleared_assignment_does_not_panic_orchestrator_construction() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 4);
+    let sm = packed_sm(&config, 4);
+    let publish = u32::from(DataLedger::Publish);
+
+    let orch = try_make_orchestrator(sm.clone(), &config, publish)
+        .expect("an assigned module builds for its ledger");
+    assert_eq!(orch.ledger_id(), publish);
+    drop(orch);
+
+    *sm.partition_assignment.write().unwrap() = None;
+    assert!(
+        try_make_orchestrator(Arc::clone(&sm), &config, publish).is_none(),
+        "a cleared assignment aborts the build"
+    );
+
+    let submit = u32::from(DataLedger::Submit);
+    *sm.partition_assignment.write().unwrap() = Some(PartitionAssignment {
+        ledger_id: Some(submit),
+        slot_index: Some(0),
+        miner_address: IrysAddress::from([1_u8; 20]),
+        partition_hash: H256::repeat_byte(3),
+    });
+    assert!(
+        try_make_orchestrator(sm, &config, publish).is_none(),
+        "a live ledger that differs from the fetcher ledger aborts the build"
     );
 }
