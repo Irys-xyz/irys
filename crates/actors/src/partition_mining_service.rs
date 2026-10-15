@@ -227,9 +227,16 @@ impl PartitionMiningServiceInner {
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_partitions_expiration(&mut self, expired: &H256List, update_height: u64) {
         let Some(partition_hash) = self.storage_module.partition_hash() else {
+            // Unassigned. An armed expiry must not fire later and stamp its
+            // height onto whatever gets stored next.
+            self.drop_armed_expiry();
             return;
         };
         if !expired.0.contains(&partition_hash) {
+            // This notice does not name the hash. A failed expiry of an older
+            // hash stays armed otherwise, and the retry stores capacity at
+            // that older height.
+            self.drop_armed_expiry();
             return;
         }
         // The assignment update is the last writer for a ledger slot. This
@@ -255,6 +262,13 @@ impl PartitionMiningServiceInner {
             "Expiring partition hash",
             "Expiring partition hash, could not reset its storage module",
         );
+    }
+
+    /// Drop an armed expiry without resetting. The named hash is cleared so
+    /// a later retry cannot store capacity for it.
+    fn drop_armed_expiry(&mut self) {
+        self.expiry_reset_pending = false;
+        self.expiry_partition_hash = None;
     }
 
     /// Finish an expiry reset that returned an error. No-op when none is
@@ -1474,6 +1488,167 @@ mod tests {
             .partition_assignment_with_height()
             .expect("packing params");
         assert_eq!(height, Some(15));
+    }
+
+    /// A failed expiry stays armed. A later notice that does not name this
+    /// hash drops that expiry. The retry must not store capacity, and it
+    /// must not stamp the old expiry height onto the slot.
+    #[test]
+    fn notice_that_omits_the_hash_clears_a_failed_expiry() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x7c);
+        let miner = config.node_config.miner_address();
+        let submit = PartitionAssignment {
+            partition_hash,
+            miner_address: miner,
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(submit),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the failed expiry");
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage_module.write_chunk(offset, vec![0x41_u8; 32], ChunkType::Data));
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync data");
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+
+        storage_module.fail_next_reset_for_test();
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 40);
+        assert!(inner.expiry_reset_pending);
+        assert!(storage_module.reset_incomplete());
+        assert!(receivers.packing.try_recv().is_err());
+
+        inner.handle_partitions_expiration(&H256List(vec![H256::repeat_byte(0x7d)]), 50);
+        assert!(
+            !inner.expiry_reset_pending,
+            "a notice that omits this hash must drop the armed expiry"
+        );
+
+        inner.finish_expiry_reset();
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.partition_hash, partition_hash);
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Submit.into()));
+        assert_eq!(assignment.slot_index, Some(0));
+        assert_eq!(
+            storage_module.get_chunk_type(&offset),
+            Some(ChunkType::Data)
+        );
+        let (_assignment, height) = storage_module
+            .partition_assignment_with_height()
+            .expect("packing params");
+        assert_eq!(height, Some(10));
+        assert!(receivers.packing.try_recv().is_err());
+    }
+
+    /// A later notice that still names the hash finishes the failed expiry.
+    #[test]
+    fn later_notice_that_names_the_hash_still_resets() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = H256::repeat_byte(0x7e);
+        let miner = config.node_config.miner_address();
+        let submit = PartitionAssignment {
+            partition_hash,
+            miner_address: miner,
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(submit),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, 10),
+                tmp_dir.path().join("hdd0"),
+            )],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        storage_module
+            .assign_partition(submit, 10)
+            .expect("store the slot before the failed expiry");
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, mut receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        );
+
+        storage_module.fail_next_reset_for_test();
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 40);
+        assert!(inner.expiry_reset_pending);
+        assert!(receivers.packing.try_recv().is_err());
+
+        inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 50);
+        assert!(!inner.expiry_reset_pending);
+        let assignment = storage_module.partition_assignment().expect("assigned");
+        assert_eq!(assignment.partition_hash, partition_hash);
+        assert_eq!(assignment.ledger_id, None);
+        assert_eq!(assignment.slot_index, None);
+        let (_assignment, height) = storage_module
+            .partition_assignment_with_height()
+            .expect("packing params");
+        assert_eq!(height, Some(50));
+        assert!(receivers.packing.try_recv().is_ok());
     }
 
     /// The consumer half of the in-process VDF re-anchor: `handle_reanchored` — the
