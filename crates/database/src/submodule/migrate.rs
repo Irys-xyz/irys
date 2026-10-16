@@ -1224,59 +1224,45 @@ mod tests {
         Ok(())
     }
 
-    /// `CONVERTING` is written before the convert-incomplete schema row.
-    /// An empty open must not stamp that directory as a current index.
+    /// `CONVERTING` is written before the schema row. A short file is the same
+    /// unfinished conversion: open must not stamp the directory.
     #[test]
-    fn converting_sentinel_without_a_schema_row_is_not_stamped() -> eyre::Result<()> {
-        let dir = temp("sm-converting-only");
-        std::fs::write(
-            dir.path().join("CONVERTING"),
-            super::SUBMODULE_CONVERT_INCOMPLETE,
-        )?;
-        let args = testing_args()?;
-        let err = open_submodule_index(
-            dir.path(),
-            args.clone(),
-            SubmoduleMigrationOptions::default(),
-        )
-        .unwrap_err();
-        let text = format!("{err:#}");
-        assert!(text.contains("incomplete MDBX conversion"), "{text}");
-        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
-        assert_eq!(schema_of(&env)?, None);
-        drop(env);
-        assert_eq!(
-            std::fs::read(dir.path().join("CONVERTING"))?,
-            super::SUBMODULE_CONVERT_INCOMPLETE.as_bytes()
-        );
-        let err = open_submodule_index(dir.path(), args, SubmoduleMigrationOptions::default())
+    fn converting_sentinel_is_not_stamped() -> eyre::Result<()> {
+        for (label, bytes) in [
+            ("full", super::SUBMODULE_CONVERT_INCOMPLETE.as_bytes()),
+            ("torn", &b""[..]),
+        ] {
+            let dir = temp(&format!("sm-converting-{label}"));
+            std::fs::write(dir.path().join("CONVERTING"), bytes)?;
+            let args = testing_args()?;
+            let err = open_submodule_index(
+                dir.path(),
+                args.clone(),
+                SubmoduleMigrationOptions::default(),
+            )
             .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("incomplete MDBX conversion"),
-            "{err:#}"
-        );
-        Ok(())
-    }
-
-    /// A crash between create and write leaves a short sentinel. It still
-    /// marks an unfinished conversion.
-    #[test]
-    fn torn_converting_sentinel_is_not_stamped() -> eyre::Result<()> {
-        let dir = temp("sm-converting-torn");
-        std::fs::write(dir.path().join("CONVERTING"), b"")?;
-        let args = testing_args()?;
-        let err = open_submodule_index(
-            dir.path(),
-            args.clone(),
-            SubmoduleMigrationOptions::default(),
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("incomplete MDBX conversion"),
-            "{err:#}"
-        );
-        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args)?;
-        assert_eq!(schema_of(&env)?, None);
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("incomplete MDBX conversion"),
+                "{label}: {text}"
+            );
+            let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
+            assert_eq!(schema_of(&env)?, None, "{label}");
+            drop(env);
+            if label == "full" {
+                assert_eq!(
+                    std::fs::read(dir.path().join("CONVERTING"))?,
+                    super::SUBMODULE_CONVERT_INCOMPLETE.as_bytes()
+                );
+                let err =
+                    open_submodule_index(dir.path(), args, SubmoduleMigrationOptions::default())
+                        .unwrap_err();
+                assert!(
+                    format!("{err:#}").contains("incomplete MDBX conversion"),
+                    "{err:#}"
+                );
+            }
+        }
         Ok(())
     }
 

@@ -4169,6 +4169,28 @@ mod tests {
         Ok(consensus)
     }
 
+    /// A schema v2 index plus the consensus chain the converter derives from.
+    struct Populated {
+        root: tempfile::TempDir,
+        consensus: PathBuf,
+        mdbx: PathBuf,
+        rocks: PathBuf,
+        options: ConvertOptions,
+    }
+
+    fn populated(prefix: &str) -> eyre::Result<Populated> {
+        let root = temp(prefix);
+        let consensus = populate_mdbx(root.path())?;
+        let options = options_for(&consensus)?;
+        Ok(Populated {
+            mdbx: root.path().join("db"),
+            rocks: root.path().join("rocks"),
+            consensus,
+            options,
+            root,
+        })
+    }
+
     fn assert_v2(store: &impl SubmoduleStore, consensus: &Path) -> eyre::Result<()> {
         let pair = derived_pair(consensus)?;
         store.view(|tx| {
@@ -4349,12 +4371,14 @@ mod tests {
     #[test]
     fn convert_round_trip_mdbx_rocks_mdbx() -> eyre::Result<()> {
         let rss_before = vm_kib("VmRSS:");
-        let root = temp("convert-round");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
+        let Populated {
+            root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-round")?;
         let back = root.path().join("db-back");
-        let options = options_for(&consensus)?;
 
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         let (dir_bytes, wal_bytes, wal_files) = wal_snapshot(&rocks);
@@ -4440,11 +4464,14 @@ mod tests {
 
     #[test]
     fn convert_interrupt_leaves_no_marker_and_can_be_redone() -> eyre::Result<()> {
-        let root = temp("convert-interrupt");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let mut broken = options_for(&consensus)?;
+        let Populated {
+            root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-interrupt")?;
+        let mut broken = options.clone();
         broken.batch_rows = 1;
         broken.fail_after_batches = Some(1);
         let err = convert_mdbx_to_rocks(&mdbx, &rocks, &broken).unwrap_err();
@@ -4464,11 +4491,7 @@ mod tests {
         broken.replace_incomplete = true;
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &broken)?;
         assert_copy_counts(&stats);
-        assert_equivalent(&verify_mdbx_and_rocks(
-            &mdbx,
-            &rocks,
-            &options_for(&consensus)?,
-        )?);
+        assert_equivalent(&verify_mdbx_and_rocks(&mdbx, &rocks, &options)?);
 
         let mdbx_back = root.path().join("db-back");
         broken.fail_after_batches = Some(1);
@@ -4515,11 +4538,13 @@ mod tests {
 
     #[test]
     fn convert_refuses_same_path_and_non_empty_target() -> eyre::Result<()> {
-        let root = temp("convert-refuse-target");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root: _root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-refuse-target")?;
         let err = convert_mdbx_to_rocks(&mdbx, &mdbx, &options).unwrap_err();
         assert!(format!("{err:#}").contains("same path"), "{err:#}");
         fs::create_dir_all(&rocks)?;
@@ -4539,11 +4564,13 @@ mod tests {
 
     #[test]
     fn verify_reports_a_row_only_one_engine_has() -> eyre::Result<()> {
-        let root = temp("convert-mismatch");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-mismatch")?;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         {
             let opened = RocksSubmoduleStore::open(&rocks)?;
@@ -4560,11 +4587,13 @@ mod tests {
 
     #[test]
     fn verify_counts_a_derived_path_mismatch() -> eyre::Result<()> {
-        let root = temp("convert-verify-path");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-verify-path")?;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         {
             let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
@@ -4585,10 +4614,13 @@ mod tests {
 
     #[test]
     fn convert_aborts_when_stored_bytes_differ() -> eyre::Result<()> {
-        let root = temp("convert-abort-bytes");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-abort-bytes")?;
         {
             let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
             let hash = store.view(|tx| {
@@ -4599,7 +4631,7 @@ mod tests {
             })?;
             store.update(|tx| tx.add_full_tx_path(hash, b"not-the-derived-path".to_vec()))?;
         }
-        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?).unwrap_err();
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("partition offset"), "{message}");
         assert!(!rocks.join("SCHEMA").exists());
@@ -4698,10 +4730,13 @@ mod tests {
 
     #[test]
     fn replace_refuses_storage_files_consensus_v1_and_a_held_lock() -> eyre::Result<()> {
-        let root = temp("convert-refuse-delete");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root,
+            consensus,
+            mdbx,
+            options,
+            ..
+        } = populated("convert-refuse-delete")?;
 
         for name in [
             "chunks.dat",
@@ -4873,16 +4908,19 @@ mod tests {
 
     #[test]
     fn dry_run_matches_a_later_convert_and_writes_nothing() -> eyre::Result<()> {
-        let root = temp("convert-dry");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let mut dry = options_for(&consensus)?;
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-dry")?;
+        let mut dry = options.clone();
         dry.dry_run = true;
         let preview = convert_mdbx_to_rocks(&mdbx, &rocks, &dry)?;
         assert!(!rocks.exists());
         assert_copy_counts(&preview);
-        let written = convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let written = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         assert_eq!(preview.intervals, written.intervals);
         assert_eq!(preview.data_paths, written.data_paths);
         assert_eq!(preview.pending, written.pending);
@@ -4893,16 +4931,19 @@ mod tests {
 
     #[test]
     fn reset_marker_writes_an_empty_index() -> eyre::Result<()> {
-        let root = temp("convert-reset");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
+        let Populated {
+            root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-reset")?;
         let back = root.path().join("db-back");
         {
             let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
             store.set_reset_in_progress()?;
         }
-        let mut dry = options_for(&consensus)?;
+        let mut dry = options.clone();
         dry.dry_run = true;
         let preview = convert_mdbx_to_rocks(&mdbx, &rocks, &dry)?;
         assert!(!rocks.exists());
@@ -4910,7 +4951,7 @@ mod tests {
         assert_eq!(preview.intervals, 0);
         assert_eq!(preview.data_paths, 0);
 
-        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         assert!(stats.reset_marker);
         assert_eq!(stats.intervals, 0);
         assert_eq!(stats.data_paths, 0);
@@ -4933,7 +4974,7 @@ mod tests {
         )?;
         assert!(MdbxSubmoduleStore::open(&mdbx, testing_args()?)?.reset_in_progress()?);
 
-        let back_stats = convert_rocks_to_mdbx(&rocks, &back, &options_for(&consensus)?)?;
+        let back_stats = convert_rocks_to_mdbx(&rocks, &back, &options)?;
         assert!(back_stats.reset_marker);
         assert_eq!(back_stats.intervals, 0);
         let restored = MdbxSubmoduleStore::open(&back, testing_args()?)?;
@@ -4942,7 +4983,7 @@ mod tests {
             assert!(tx.get_tx_path_by_offset(PartitionChunkOffset(0))?.is_none());
             Ok(())
         })?;
-        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!report.has_mismatch(), "{report}");
         Ok(())
     }
@@ -4965,13 +5006,16 @@ mod tests {
 
     #[test]
     fn unresolved_placements_fail_unless_allowed() -> eyre::Result<()> {
-        let root = temp("convert-skip");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-skip")?;
         add_orphan_and_frontier(&mdbx)?;
 
-        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?).unwrap_err();
+        let err = convert_mdbx_to_rocks(&mdbx, &rocks, &options).unwrap_err();
         let text = format!("{err:#}");
         assert!(text.contains("does not cover"), "{text}");
         assert!(text.contains("frontier is 13"), "{text}");
@@ -4980,13 +5024,13 @@ mod tests {
             "a behind consensus database must not create the target"
         );
 
-        let mut dry = options_for(&consensus)?;
+        let mut dry = options.clone();
         dry.dry_run = true;
         let err = convert_mdbx_to_rocks(&mdbx, &rocks, &dry).unwrap_err();
         assert!(format!("{err:#}").contains("does not cover"), "{err:#}");
         assert!(!rocks.exists());
 
-        let mut allowed = options_for(&consensus)?;
+        let mut allowed = options.clone();
         allowed.allow_unresolved = true;
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &allowed)?;
         assert!(stats.skipped_orphans >= 1, "{stats}");
@@ -5006,7 +5050,7 @@ mod tests {
                 Ok(())
             })?;
         }
-        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(report.has_mismatch(), "{report}");
         assert!(report.skipped_orphans >= 1, "{report}");
         assert!(report.skipped_frontier >= 1, "{report}");
@@ -5015,10 +5059,13 @@ mod tests {
 
     #[test]
     fn empty_consensus_block_index_is_refused() -> eyre::Result<()> {
-        let root = temp("convert-empty-consensus");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
+        let Populated {
+            root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-empty-consensus")?;
         let empty = root.path().join("empty-consensus");
         fs::create_dir_all(&empty)?;
         let db = open_or_create_db(&empty, IrysTables::ALL, testing_args()?)?;
@@ -5036,7 +5083,7 @@ mod tests {
         assert!(text.contains("even with --allow-unresolved"), "{text}");
         assert!(!rocks.exists());
 
-        convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         let back = root.path().join("db-back");
         let err = convert_rocks_to_mdbx(&rocks, &back, &allowed).unwrap_err();
         assert!(
@@ -5049,12 +5096,15 @@ mod tests {
 
     #[test]
     fn verify_counts_a_missing_target_placement() -> eyre::Result<()> {
-        let root = temp("convert-missing-place");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        convert_mdbx_to_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
-        let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-missing-place")?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!clean.has_mismatch(), "{clean}");
         {
             let opened = RocksSubmoduleStore::open(&rocks)?;
@@ -5067,7 +5117,7 @@ mod tests {
                 Ok(())
             })?;
         }
-        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options_for(&consensus)?)?;
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(report.intervals_mismatches >= 1, "{report}");
         assert!(report.has_mismatch(), "{report}");
         Ok(())
@@ -5233,21 +5283,23 @@ mod tests {
         Ok(())
     }
 
-    /// One v1 tx covers every chunk. Adjacent offsets share its tx-path hash,
-    /// so the copy keeps one run. Each data path is 16 distinct bytes.
-    fn write_v1_one_tx_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
+    /// Consensus chain plus an open schema-v1 index. One empty block, then
+    /// one block that holds `txs` and covers `total` chunks.
+    fn open_v1_fixture(
+        root: &Path,
+        txs: &[DataTransactionHeader],
+        total: u64,
+    ) -> eyre::Result<(PathBuf, DatabaseEnv, DatabaseEnv)> {
         use crate::submodule::tables::v1_fixture::master;
-        use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
-        use reth_db::Database as _;
-        use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
         let consensus = root.join("consensus");
         fs::create_dir_all(&consensus)?;
-        let txs = [tx_at(1, n.saturating_mul(32))];
-        let blocks = [block_with(0, &[], 0), block_with(1, &txs, n)];
+        let blocks = [block_with(0, &[], 0), block_with(1, txs, total)];
         let db = open_or_create_db(&consensus, IrysTables::ALL, testing_args()?)?;
         db.update_eyre(|tx| {
-            insert_tx_header(tx, &txs[0])?;
+            for header in txs {
+                insert_tx_header(tx, header)?;
+            }
             for block in &blocks {
                 insert_block_header(tx, block)?;
                 insert_block_index_items_for_block(tx, block)?;
@@ -5256,11 +5308,26 @@ mod tests {
             Ok(())
         })?;
         drop(db);
-
         let opened = open_consensus(&consensus)?;
+        let index = open_or_create_db(
+            &root.join("db"),
+            master::MasterV1Tables::ALL,
+            testing_args()?,
+        )?;
+        Ok((consensus, opened, index))
+    }
+
+    /// One v1 tx covers every chunk. Adjacent offsets share its tx-path hash,
+    /// so the copy keeps one run. Each data path is 16 distinct bytes.
+    fn write_v1_one_tx_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
+        use crate::submodule::tables::v1_fixture::master;
+        use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
+        use reth_db::Database as _;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let txs = [tx_at(1, n.saturating_mul(32))];
+        let (consensus, opened, index) = open_v1_fixture(root, &txs, n)?;
         let mut cache = TxPathBlockCache::new();
-        let mdbx = root.join("db");
-        let index = open_or_create_db(&mdbx, master::MasterV1Tables::ALL, testing_args()?)?;
         {
             let tx = index.tx_mut()?;
             let mut data_root = None;
@@ -5364,11 +5431,13 @@ mod tests {
     /// Path hashes for a v2 batch are read in the same view as the data paths.
     #[test]
     fn verify_loads_path_hashes_in_the_data_path_view() -> eyre::Result<()> {
-        let root = temp("convert-verify-views");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-verify-views")?;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         reset_verify_views();
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
@@ -5411,28 +5480,9 @@ mod tests {
         use reth_db::Database as _;
         use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
-        let consensus = root.join("consensus");
-        fs::create_dir_all(&consensus)?;
         let txs: Vec<_> = (0..n).map(|i| tx_at(i + 1, 32)).collect();
-        let blocks = [block_with(0, &[], 0), block_with(1, &txs, n)];
-        let db = open_or_create_db(&consensus, IrysTables::ALL, testing_args()?)?;
-        db.update_eyre(|tx| {
-            for header in &txs {
-                insert_tx_header(tx, header)?;
-            }
-            for block in &blocks {
-                insert_block_header(tx, block)?;
-                insert_block_index_items_for_block(tx, block)?;
-            }
-            crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
-            Ok(())
-        })?;
-        drop(db);
-
-        let opened = open_consensus(&consensus)?;
+        let (consensus, opened, index) = open_v1_fixture(root, &txs, n)?;
         let mut cache = TxPathBlockCache::new();
-        let mdbx = root.join("db");
-        let index = open_or_create_db(&mdbx, master::MasterV1Tables::ALL, testing_args()?)?;
         {
             let tx = index.tx_mut()?;
             for offset in 0..n {
@@ -5508,31 +5558,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[ignore = "throughput sample for the v1 convert path"]
-    fn measure_v1_one_chunk_convert() -> eyre::Result<()> {
-        const N: u64 = 2048;
-        let root = temp("convert-v1-rate");
-        let consensus = write_v1_one_chunk_partition(root.path(), N)?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let mut options = options_for(&consensus)?;
-        options.slot_index = 0;
-        options.chunks_per_partition = N;
-        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
-        assert_eq!(stats.intervals, N);
-        assert_eq!(stats.data_paths, N);
-        assert_eq!(stats.skipped_frontier, 0);
-        let per_s = (N as f64) * 1000.0 / (stats.elapsed_ms.max(1) as f64);
-        eprintln!(
-            "v1_convert placements={N} elapsed_ms={} placements_per_s={per_s:.1}",
-            stats.elapsed_ms
-        );
-        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
-        assert!(!report.has_mismatch(), "{report}");
-        Ok(())
-    }
-
     /// The sealed directory has no recycled WAL files.
     #[test]
     fn convert_large_paths_leave_no_wal() -> eyre::Result<()> {
@@ -5596,11 +5621,13 @@ mod tests {
         if let Ok(kind) = std::env::var("IRYS_CONVERT_LOCK_CHILD") {
             return hold_index_lock(&kind);
         }
-        let root = temp("convert-lock");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root,
+            consensus,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-lock")?;
 
         let ready = root.path().join("mdbx.ready");
         let mut child = spawn_lock_child("mdbx", &mdbx, &ready)?;
@@ -5839,7 +5866,10 @@ mod tests {
     }
 
     #[test]
-    fn verify_rocks_counts_one_byte_in_each_family() -> eyre::Result<()> {
+    fn verify_rocks_counts_one_changed_byte() -> eyre::Result<()> {
+        use crate::metadata::MetadataKey;
+        use reth_db::table::Encode as _;
+
         let root = temp("verify-rocks-families");
         let left = root.path().join("left");
         let right = root.path().join("right");
@@ -5852,34 +5882,24 @@ mod tests {
         }
         assert_eq!(family_mismatches(&equal, "default"), 0, "{equal}");
 
-        for family in INDEX_FAMILIES {
-            refresh_from(&left, &right)?;
-            flip_one_stored_byte(&right, family, None)?;
-            let report = verify_rocks_records(&left, &right)?;
-            assert_eq!(family_mismatches(&report, family), 1, "{family}: {report}");
+        let assert_one = |family: &str, report: &super::EngineEquivalenceReport| {
+            assert_eq!(family_mismatches(report, family), 1, "{family}: {report}");
             assert!(report.has_mismatch(), "{family}: {report}");
             for other in INDEX_FAMILIES {
                 if other != family {
                     assert_eq!(
-                        family_mismatches(&report, other),
+                        family_mismatches(report, other),
                         0,
                         "{family} also changed {other}: {report}"
                     );
                 }
             }
+        };
+        for family in INDEX_FAMILIES {
+            refresh_from(&left, &right)?;
+            flip_one_stored_byte(&right, family, None)?;
+            assert_one(family, &verify_rocks_records(&left, &right)?);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn verify_rocks_counts_one_byte_in_each_identity_key() -> eyre::Result<()> {
-        use crate::metadata::MetadataKey;
-        use reth_db::table::Encode as _;
-
-        let root = temp("verify-rocks-identity");
-        let left = root.path().join("left");
-        let right = root.path().join("right");
-        seed_rocks_families(&left)?;
         let keys = [
             MetadataKey::DBSchemaVersion.encode(),
             MetadataKey::PartitionHash.encode(),
@@ -5889,25 +5909,20 @@ mod tests {
         for key in keys {
             refresh_from(&left, &right)?;
             flip_one_stored_byte(&right, "Metadata", Some(&key))?;
-            let report = verify_rocks_records(&left, &right)?;
-            assert_eq!(family_mismatches(&report, "Metadata"), 1, "{report}");
-            assert!(report.has_mismatch(), "{report}");
-            for name in INDEX_FAMILIES {
-                if name != "Metadata" {
-                    assert_eq!(family_mismatches(&report, name), 0, "{report}");
-                }
-            }
+            assert_one("Metadata", &verify_rocks_records(&left, &right)?);
         }
         Ok(())
     }
 
     #[test]
     fn verify_flags_an_invented_checksum() -> eyre::Result<()> {
-        let root = temp("verify-invented-crc");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("verify-invented-crc")?;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!clean.has_mismatch(), "{clean}");
@@ -5938,12 +5953,14 @@ mod tests {
     /// none. Forward verify flags that; rollback verify reports it as dropped.
     #[test]
     fn rollback_verify_accepts_a_copy_that_dropped_node_checksums() -> eyre::Result<()> {
-        let root = temp("verify-rollback-crc");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
+        let Populated {
+            root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("verify-rollback-crc")?;
         let back = root.path().join("back");
-        let options = options_for(&consensus)?;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         {
             let opened = RocksSubmoduleStore::open(&rocks)?;
@@ -5983,11 +6000,13 @@ mod tests {
 
     #[test]
     fn verify_flags_a_checksum_only_row_the_source_lacks() -> eyre::Result<()> {
-        let root = temp("verify-crc-only");
-        let consensus = populate_mdbx(root.path())?;
-        let mdbx = root.path().join("db");
-        let rocks = root.path().join("rocks");
-        let options = options_for(&consensus)?;
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("verify-crc-only")?;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         {
             let opened = RocksSubmoduleStore::open(&rocks)?;
