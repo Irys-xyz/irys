@@ -1458,7 +1458,7 @@ mod assignment_reset_tests {
             .expect("an open channel accepts the reset pack");
         assert_full_partition_span(&request);
         assert!(
-            harness.inner.pending_ranges.get(&0).is_none(),
+            !harness.inner.pending_ranges.contains_key(&0),
             "an accepted reset pack is not retried"
         );
     }
@@ -1508,7 +1508,7 @@ mod assignment_reset_tests {
             .try_recv()
             .expect("the reset span is sent once the channel has room");
         assert_full_partition_span(&request);
-        assert!(harness.inner.pending_ranges.get(&0).is_none());
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
     }
 
     #[tokio::test]
@@ -1594,7 +1594,7 @@ mod assignment_reset_tests {
         let path = harness.path.clone();
         fill_packing_channel(&harness);
         apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
-        assert!(harness.inner.pending_ranges.get(&0).is_some());
+        assert!(harness.inner.pending_ranges.contains_key(&0));
         apply_update(
             &mut harness,
             Arc::new(vec![StorageModuleInfo {
@@ -1607,7 +1607,7 @@ mod assignment_reset_tests {
         .await;
         assert!(harness.module.partition_assignment().is_none());
         assert!(
-            harness.inner.pending_ranges.get(&0).is_none(),
+            !harness.inner.pending_ranges.contains_key(&0),
             "unassign must drop a span the channel did not accept"
         );
         let _fillers = drain_packing(&mut harness);
