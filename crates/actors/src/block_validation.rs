@@ -8046,8 +8046,6 @@ mod tests {
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,
         pub consensus_config: ConsensusConfig,
-        #[expect(dead_code)]
-        pub node_config: NodeConfig,
     }
 
     async fn init() -> (TempDir, TestContext) {
@@ -8068,9 +8066,7 @@ mod tests {
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
         let chunk_size = 32;
-        let mut node_config = NodeConfig::testing();
-        node_config.storage.num_writes_before_sync = 1;
-        node_config.base_directory = data_dir.path().to_path_buf();
+        let node_config = NodeConfig::testing();
         let consensus_config = ConsensusConfig {
             chunk_size,
             num_chunks_in_partition: 10,
@@ -8138,7 +8134,6 @@ mod tests {
                 partition_hash,
                 partition_assignment,
                 consensus_config,
-                node_config,
             },
         )
     }
