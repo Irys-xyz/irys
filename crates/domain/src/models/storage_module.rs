@@ -472,17 +472,6 @@ enum SyncPausePoint {
     AfterCrcConfirm,
 }
 
-/// One armed pause. The durable point waits until the test releases it.
-#[cfg(test)]
-#[derive(Debug)]
-struct SyncPauseGate {
-    point: Mutex<Option<SyncPausePoint>>,
-    arrived: Mutex<bool>,
-    arrived_cv: Condvar,
-    release: Mutex<bool>,
-    release_cv: Condvar,
-}
-
 /// Test barrier in a registration, after the rows are computed and before
 /// they are committed. The registration does not hold `sync_in_progress`
 /// or the assignment lock while it waits.
@@ -492,11 +481,13 @@ enum RegistrationPausePoint {
     AfterRowsComputed,
 }
 
-/// One armed registration pause.
+/// One armed pause. `wait_if` clears the point before it waits, so a second
+/// caller at that point returns. `reset` can rewrite the interval file while
+/// a test still holds the first writer.
 #[cfg(test)]
 #[derive(Debug)]
-struct RegistrationPauseGate {
-    point: Mutex<Option<RegistrationPausePoint>>,
+struct PauseGate<T> {
+    point: Mutex<Option<T>>,
     arrived: Mutex<bool>,
     arrived_cv: Condvar,
     release: Mutex<bool>,
@@ -504,7 +495,7 @@ struct RegistrationPauseGate {
 }
 
 #[cfg(test)]
-impl RegistrationPauseGate {
+impl<T: Copy + PartialEq> PauseGate<T> {
     fn new() -> Self {
         Self {
             point: Mutex::new(None),
@@ -514,17 +505,43 @@ impl RegistrationPauseGate {
             release_cv: Condvar::new(),
         }
     }
-}
 
-#[cfg(test)]
-impl SyncPauseGate {
-    fn new() -> Self {
-        Self {
-            point: Mutex::new(None),
-            arrived: Mutex::new(false),
-            arrived_cv: Condvar::new(),
-            release: Mutex::new(false),
-            release_cv: Condvar::new(),
+    fn arm(&self, point: T) {
+        *self.release.lock().unwrap() = false;
+        *self.arrived.lock().unwrap() = false;
+        *self.point.lock().unwrap() = Some(point);
+    }
+
+    fn wait_arrived(&self, timeout: Duration) -> bool {
+        let guard = self.arrived.lock().unwrap();
+        let (guard, _) = self
+            .arrived_cv
+            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
+            .unwrap();
+        *guard
+    }
+
+    fn release(&self) {
+        *self.release.lock().unwrap() = true;
+        self.release_cv.notify_all();
+    }
+
+    fn wait_if(&self, point: T) {
+        {
+            let mut armed = self.point.lock().unwrap();
+            if *armed != Some(point) {
+                return;
+            }
+            *armed = None;
+        }
+        {
+            let mut arrived = self.arrived.lock().unwrap();
+            *arrived = true;
+            self.arrived_cv.notify_all();
+        }
+        let mut release = self.release.lock().unwrap();
+        while !*release {
+            release = self.release_cv.wait(release).unwrap();
         }
     }
 }
@@ -765,18 +782,18 @@ pub struct StorageModule {
     sync_failure: Mutex<Option<SyncFailurePoint>>,
     /// Pauses one durable point so a test can call `reset` in the gap.
     #[cfg(test)]
-    sync_pause: SyncPauseGate,
+    sync_pause: PauseGate<SyncPausePoint>,
     /// Pauses one checksum check after the bytes are read and before the
     /// offset row is loaded. The durable point can commit in that gap.
     #[cfg(test)]
-    crc_check_pause: SyncPauseGate,
+    crc_check_pause: PauseGate<SyncPausePoint>,
     /// Pauses one interval rewrite after the map copy and before the file lock.
     /// The pause disarms itself, so `reset` does not wait on its own rewrite.
     #[cfg(test)]
-    interval_image_pause: SyncPauseGate,
+    interval_image_pause: PauseGate<SyncPausePoint>,
     /// Pauses one registration after its rows are computed and before commit.
     #[cfg(test)]
-    registration_pause: RegistrationPauseGate,
+    registration_pause: PauseGate<RegistrationPausePoint>,
     /// Registrations dropped because the assignment changed. Tests read this.
     /// The production counter is `irys.storage.registration_dropped_total`.
     #[cfg(test)]
@@ -2032,13 +2049,13 @@ impl StorageModule {
             #[cfg(test)]
             sync_failure: Mutex::new(None),
             #[cfg(test)]
-            sync_pause: SyncPauseGate::new(),
+            sync_pause: PauseGate::new(),
             #[cfg(test)]
-            crc_check_pause: SyncPauseGate::new(),
+            crc_check_pause: PauseGate::new(),
             #[cfg(test)]
-            interval_image_pause: SyncPauseGate::new(),
+            interval_image_pause: PauseGate::new(),
             #[cfg(test)]
-            registration_pause: RegistrationPauseGate::new(),
+            registration_pause: PauseGate::new(),
             #[cfg(test)]
             registration_drops: AtomicU64::new(0),
             last_pending_write: RwLock::new(Instant::now()),
@@ -2663,93 +2680,67 @@ impl StorageModule {
     /// The next durable point waits at `point` until [`Self::release_sync_pause`].
     #[cfg(test)]
     fn pause_next_sync_at(&self, point: SyncPausePoint) {
-        *self.sync_pause.release.lock().unwrap() = false;
-        *self.sync_pause.arrived.lock().unwrap() = false;
-        *self.sync_pause.point.lock().unwrap() = Some(point);
+        self.sync_pause.arm(point);
     }
 
     /// `true` when the armed point was reached before `timeout`.
     #[cfg(test)]
     fn wait_for_sync_pause(&self, timeout: Duration) -> bool {
-        let guard = self.sync_pause.arrived.lock().unwrap();
-        let (guard, _) = self
-            .sync_pause
-            .arrived_cv
-            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
-            .unwrap();
-        *guard
+        self.sync_pause.wait_arrived(timeout)
     }
 
     /// Let a paused durable point continue.
     #[cfg(test)]
     fn release_sync_pause(&self) {
-        *self.sync_pause.release.lock().unwrap() = true;
-        self.sync_pause.release_cv.notify_all();
+        self.sync_pause.release();
     }
 
     #[cfg(test)]
     fn wait_if_sync_paused(&self, point: SyncPausePoint) {
-        Self::wait_on_pause_gate(&self.sync_pause, point);
+        self.sync_pause.wait_if(point);
     }
 
     /// The next checksum check waits after its bytes are read.
     #[cfg(test)]
     fn pause_next_crc_check(&self) {
-        *self.crc_check_pause.release.lock().unwrap() = false;
-        *self.crc_check_pause.arrived.lock().unwrap() = false;
-        *self.crc_check_pause.point.lock().unwrap() = Some(SyncPausePoint::AfterPresenceCopy);
+        self.crc_check_pause.arm(SyncPausePoint::AfterPresenceCopy);
     }
 
     /// `true` when the checksum check reached its pause before `timeout`.
     #[cfg(test)]
     fn wait_for_crc_check_pause(&self, timeout: Duration) -> bool {
-        let guard = self.crc_check_pause.arrived.lock().unwrap();
-        let (guard, _) = self
-            .crc_check_pause
-            .arrived_cv
-            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
-            .unwrap();
-        *guard
+        self.crc_check_pause.wait_arrived(timeout)
     }
 
     /// Let a paused checksum check continue.
     #[cfg(test)]
     fn release_crc_check_pause(&self) {
-        *self.crc_check_pause.release.lock().unwrap() = true;
-        self.crc_check_pause.release_cv.notify_all();
+        self.crc_check_pause.release();
     }
 
     #[cfg(test)]
     fn wait_if_crc_check_paused(&self) {
-        Self::wait_on_pause_gate(&self.crc_check_pause, SyncPausePoint::AfterPresenceCopy);
+        self.crc_check_pause
+            .wait_if(SyncPausePoint::AfterPresenceCopy);
     }
 
     /// The next interval-file rewrite waits after it copies the live map.
     #[cfg(test)]
     fn pause_next_interval_image(&self) {
-        *self.interval_image_pause.release.lock().unwrap() = false;
-        *self.interval_image_pause.arrived.lock().unwrap() = false;
-        *self.interval_image_pause.point.lock().unwrap() =
-            Some(SyncPausePoint::AfterIntervalSnapshot);
+        self.interval_image_pause
+            .arm(SyncPausePoint::AfterIntervalSnapshot);
     }
 
     /// `true` when the interval rewrite reached its pause before `timeout`.
     #[cfg(test)]
     fn wait_for_interval_image_pause(&self, timeout: Duration) -> bool {
-        let guard = self.interval_image_pause.arrived.lock().unwrap();
-        let (guard, _) = self
-            .interval_image_pause
-            .arrived_cv
-            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
-            .unwrap();
-        *guard
+        self.interval_image_pause.wait_arrived(timeout)
     }
 
     /// Let a paused interval rewrite continue.
     #[cfg(test)]
     fn release_interval_image_pause(&self) {
-        *self.interval_image_pause.release.lock().unwrap() = true;
-        self.interval_image_pause.release_cv.notify_all();
+        self.interval_image_pause.release();
     }
 
     /// One-shot. The first writer disarms the pause before it waits, so a
@@ -2757,77 +2748,31 @@ impl StorageModule {
     /// not block on this gate. `reset` holds `sync_in_progress`.
     #[cfg(test)]
     fn wait_if_interval_image_paused(&self) {
-        Self::wait_on_pause_gate(
-            &self.interval_image_pause,
-            SyncPausePoint::AfterIntervalSnapshot,
-        );
-    }
-
-    #[cfg(test)]
-    fn wait_on_pause_gate(gate: &SyncPauseGate, point: SyncPausePoint) {
-        {
-            let mut armed = gate.point.lock().unwrap();
-            if *armed != Some(point) {
-                return;
-            }
-            *armed = None;
-        }
-        {
-            let mut arrived = gate.arrived.lock().unwrap();
-            *arrived = true;
-            gate.arrived_cv.notify_all();
-        }
-        let mut release = gate.release.lock().unwrap();
-        while !*release {
-            release = gate.release_cv.wait(release).unwrap();
-        }
+        self.interval_image_pause
+            .wait_if(SyncPausePoint::AfterIntervalSnapshot);
     }
 
     /// The next registration waits after its rows are computed.
     #[cfg(test)]
     fn pause_next_registration_at(&self, point: RegistrationPausePoint) {
-        *self.registration_pause.release.lock().unwrap() = false;
-        *self.registration_pause.arrived.lock().unwrap() = false;
-        *self.registration_pause.point.lock().unwrap() = Some(point);
+        self.registration_pause.arm(point);
     }
 
     /// `true` when the armed registration pause was reached before `timeout`.
     #[cfg(test)]
     fn wait_for_registration_pause(&self, timeout: Duration) -> bool {
-        let guard = self.registration_pause.arrived.lock().unwrap();
-        let (guard, _) = self
-            .registration_pause
-            .arrived_cv
-            .wait_timeout_while(guard, timeout, |arrived| !*arrived)
-            .unwrap();
-        *guard
+        self.registration_pause.wait_arrived(timeout)
     }
 
     /// Let a paused registration continue.
     #[cfg(test)]
     fn release_registration_pause(&self) {
-        *self.registration_pause.release.lock().unwrap() = true;
-        self.registration_pause.release_cv.notify_all();
+        self.registration_pause.release();
     }
 
     #[cfg(test)]
     fn wait_if_registration_paused(&self, point: RegistrationPausePoint) {
-        {
-            let mut armed = self.registration_pause.point.lock().unwrap();
-            if *armed != Some(point) {
-                return;
-            }
-            *armed = None;
-        }
-        {
-            let mut arrived = self.registration_pause.arrived.lock().unwrap();
-            *arrived = true;
-            self.registration_pause.arrived_cv.notify_all();
-        }
-        let mut release = self.registration_pause.release.lock().unwrap();
-        while !*release {
-            release = self.registration_pause.release_cv.wait(release).unwrap();
-        }
+        self.registration_pause.wait_if(point);
     }
 
     /// Resolves every local partition placement funded for one transaction
