@@ -14811,115 +14811,63 @@ mod tests {
     }
 
     #[test]
-    fn durable_point_defers_while_pending_bytes_stay_inside_the_line() {
-        let mut query = defer_query();
-        query.pending_bytes = 400;
-        let decision = durable_point_decision(query);
-        assert_eq!(decision.cause, None);
-        assert!(decision.headroom_open);
-
-        query.pending_bytes = 300;
-        let inside = durable_point_decision(query);
-        assert_eq!(inside.cause, None);
-        assert!(inside.headroom_open);
-
-        query.since_last = Some(Duration::from_millis(249));
-        query.pending_bytes = 0;
-        let young = durable_point_decision(query);
-        assert_eq!(young.cause, None);
-        assert!(young.headroom_open);
-    }
-
-    #[test]
-    fn durable_point_runs_when_the_headroom_signal_trips() {
-        let mut query = defer_query();
-        query.pending_bytes = 401;
-        let crossed = durable_point_decision(query);
-        assert_eq!(crossed.cause, Some(DurablePointCause::Headroom));
-        assert!(!crossed.headroom_open);
-
+    fn durable_point_decisions() {
         // An owed recall flush does not fdatasync only because the line broke.
-        // The latch stays closed for the next call.
-        query.recall_flush_owed = true;
-        let owed = durable_point_decision(query);
-        assert_eq!(owed.cause, None);
-        assert!(!owed.headroom_open);
-
-        query.recall_flush_owed = false;
-        query.headroom_open = false;
-        query.pending_bytes = 201;
-        let held = durable_point_decision(query);
-        assert_eq!(held.cause, Some(DurablePointCause::Headroom));
-        assert!(!held.headroom_open);
-
-        query.pending_bytes = 200;
-        let reopened = durable_point_decision(query);
-        assert_eq!(reopened.cause, None);
-        assert!(reopened.headroom_open);
-
-        query.pending_bytes = 0;
-        query.headroom_open = false;
-        let cleared = durable_point_decision(query);
-        assert_eq!(cleared.cause, None);
-        assert!(cleared.headroom_open);
-    }
-
-    #[test]
-    fn durable_point_never_waits_past_the_interval() {
-        let mut query = defer_query();
-        query.since_last = Some(Duration::from_millis(250));
-        query.pending_bytes = 0;
-        let elapsed = durable_point_decision(query);
-        assert_eq!(elapsed.cause, Some(DurablePointCause::Interval));
-        assert!(elapsed.headroom_open);
-
-        // A completed wait counts as the interval even when the latch is closed.
-        query.pending_bytes = 401;
-        query.headroom_open = false;
-        let both = durable_point_decision(query);
-        assert_eq!(both.cause, Some(DurablePointCause::Interval));
-        assert!(!both.headroom_open);
-
-        query.interval = Duration::ZERO;
-        query.since_last = Some(Duration::from_millis(1));
-        query.pending_bytes = 0;
-        query.headroom_open = true;
-        let off = durable_point_decision(query);
-        assert_eq!(off.cause, Some(DurablePointCause::Interval));
-
-        query.interval = Duration::from_millis(250);
-        query.since_last = None;
-        query.pending_bytes = 5_000;
-        let first = durable_point_decision(query);
-        assert_eq!(first.cause, Some(DurablePointCause::Interval));
-        assert!(!first.headroom_open);
-    }
-
-    #[test]
-    fn durable_point_bypasses_are_unchanged() {
-        let mut query = defer_query();
-        query.force = true;
-        query.pending_bytes = 0;
-        let forced = durable_point_decision(query);
-        assert_eq!(forced.cause, Some(DurablePointCause::Forced));
-
-        query.force = false;
-        query.pending_bytes = 1_001;
-        query.recall_flush_owed = true;
-        let ceiling = durable_point_decision(query);
-        assert_eq!(ceiling.cause, Some(DurablePointCause::Ceiling));
-        assert!(!ceiling.headroom_open);
-
+        // A finished wait is the interval even when the latch is closed.
         // Pending bytes equal to the ceiling still defer. The bypass is strict `>`.
-        query.pending_bytes = 1_000;
-        query.ceiling_bytes = 1_000;
-        query.headroom_bytes = 1_000;
-        query.headroom_open = true;
-        query.recall_flush_owed = false;
-        query.since_last = Some(Duration::from_millis(1));
-        let equal = durable_point_decision(query);
-        assert_eq!(equal.cause, None);
-        assert!(equal.headroom_open);
+        //
+        // pending, since_ms (-1 is the first point), interval_ms, force, recall,
+        // open_in, ceiling, headroom, cause, open_out.
+        // cause: 0 defer, 1 Forced, 2 Ceiling, 3 Headroom, 4 Interval.
+        // Each row is a full query. The decision is not written back.
+        let rows = [
+            (400, 1, 250, false, false, true, 1_000, 400, 0, true),
+            (300, 1, 250, false, false, true, 1_000, 400, 0, true),
+            (0, 249, 250, false, false, true, 1_000, 400, 0, true),
+            (401, 1, 250, false, false, true, 1_000, 400, 3, false),
+            (401, 1, 250, false, true, true, 1_000, 400, 0, false),
+            (201, 1, 250, false, false, false, 1_000, 400, 3, false),
+            (200, 1, 250, false, false, false, 1_000, 400, 0, true),
+            (0, 1, 250, false, false, false, 1_000, 400, 0, true),
+            (0, 250, 250, false, false, true, 1_000, 400, 4, true),
+            (401, 250, 250, false, false, false, 1_000, 400, 4, false),
+            (0, 1, 0, false, false, true, 1_000, 400, 4, true),
+            (5_000, -1, 250, false, false, true, 1_000, 400, 4, false),
+            (0, 1, 250, true, false, true, 1_000, 400, 1, true),
+            (1_001, 1, 250, false, true, true, 1_000, 400, 2, false),
+            (1_000, 1, 250, false, false, true, 1_000, 1_000, 0, true),
+        ];
+        for (
+            i,
+            (pending, since, interval, force, recall, open_in, ceiling, headroom, cause, open_out),
+        ) in rows.into_iter().enumerate()
+        {
+            let mut query = defer_query();
+            query.pending_bytes = pending;
+            query.since_last = (since >= 0)
+                .then(|| Duration::from_millis(u64::try_from(since).expect("since_ms")));
+            query.interval = Duration::from_millis(interval);
+            query.force = force;
+            query.recall_flush_owed = recall;
+            query.headroom_open = open_in;
+            query.ceiling_bytes = ceiling;
+            query.headroom_bytes = headroom;
+            let decision = durable_point_decision(query);
+            let expected = match cause {
+                0 => None,
+                1 => Some(DurablePointCause::Forced),
+                2 => Some(DurablePointCause::Ceiling),
+                3 => Some(DurablePointCause::Headroom),
+                4 => Some(DurablePointCause::Interval),
+                _ => panic!("cause {cause}"),
+            };
+            assert_eq!(decision.cause, expected, "row {i}");
+            assert!(
+                decision.headroom_open == open_out,
+                "row {i}: latch is {} want {open_out}",
+                decision.headroom_open
+            );
+        }
     }
 
     #[test]
