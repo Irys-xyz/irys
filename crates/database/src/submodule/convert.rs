@@ -5310,7 +5310,7 @@ mod tests {
         drop(db);
         let opened = open_consensus(&consensus)?;
         let index = open_or_create_db(
-            &root.join("db"),
+            root.join("db"),
             master::MasterV1Tables::ALL,
             testing_args()?,
         )?;
