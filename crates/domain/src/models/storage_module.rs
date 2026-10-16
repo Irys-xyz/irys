@@ -11804,31 +11804,25 @@ mod tests {
         let base_path = tmp_dir.path().to_path_buf();
         let config = testing_config(&base_path, 32, 20);
 
-        // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = StorageModule::new(storage_module_info, &config)?;
 
-        // Verify the packing params file was crated in the submodule
         let params_path = base_path.join("hdd0-4TB").join("packing_params.toml");
         let params = PackingParams::from_toml(params_path).expect("packing params to load");
         assert_eq!(params.partition_hash, None);
 
-        // Verify the entire storage module range is uninitialized
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(unpacked, [partition_chunk_offset_ii!(0, 19)]);
 
-        // Create a test (fake) entropy chunk
-        let entropy_chunk = vec![0xff; 32]; // All bytes set to 0xff
+        let entropy_chunk = vec![0xff; 32];
         storage_module.write_chunk(
             PartitionChunkOffset::from(1),
             entropy_chunk.clone(),
             ChunkType::Entropy,
         );
 
-        // Invoke the sync task so it gets written to disk
         let _ = storage_module.sync_pending_chunks();
 
-        // Validate the uninitialized intervals have been updated to reflect the new chunk
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(
             unpacked,
@@ -11838,25 +11832,21 @@ mod tests {
             ]
         );
 
-        // Validate the Entropy (Packed/unsynced) intervals have been updated
         let packed = storage_module.get_intervals(ChunkType::Entropy);
         assert_eq!(packed, [partition_chunk_offset_ii!(1, 1)]);
 
-        // Validate entropy chunk can be read after writing
         let chunks = storage_module
             .read_chunks(partition_chunk_offset_ii!(1, 1))
             .unwrap();
         let chunk = chunks.get(&PartitionChunkOffset::from(1)).unwrap();
         assert_eq!(*chunk, (entropy_chunk.clone(), ChunkType::Entropy));
 
-        // Validate that uninitialized chunks are not returned by read_chunks
         let chunks = storage_module
             .read_chunks(partition_chunk_offset_ii!(1, 2))
             .unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(*chunk, (entropy_chunk.clone(), ChunkType::Entropy));
 
-        // Write and sync two sequential data chunks that span a submodule boundary
         let data1_chunk = vec![0x4; 32];
         let data2_chunk = vec![0x5; 32];
 
@@ -11871,21 +11861,17 @@ mod tests {
             ChunkType::Data,
         );
 
-        // Validate that the pending_writes has two entries
         let num_pending_writes: usize;
         {
             num_pending_writes = storage_module.pending_writes.read().unwrap().len();
         }
         assert_eq!(num_pending_writes, 2);
 
-        // Write the data chunks to disk
         let _ = storage_module.sync_pending_chunks();
 
-        // Validate the data intervals
         let data = storage_module.get_intervals(ChunkType::Data);
         assert_eq!(data, [partition_chunk_offset_ii!(4, 5)]);
 
-        // Validate the unpacked intervals are updated
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(
             unpacked,
@@ -11896,7 +11882,6 @@ mod tests {
             ]
         );
 
-        // Validate a read_chunks operation across submodule boundaries
         let chunks = storage_module
             .read_chunks(partition_chunk_offset_ii!(4, 5))
             .unwrap();
@@ -11920,7 +11905,6 @@ mod tests {
             .read_chunks(partition_chunk_offset_ii!(0, 25))
             .unwrap();
 
-        // Verify only initialized chunks are returned
         assert_eq!(
             chunks.into_iter().collect::<Vec<_>>(),
             [
@@ -11952,7 +11936,6 @@ mod tests {
             ),]
         );
 
-        // Load up the intervals from file
         let intervals = StorageModule::load_intervals_from_submodules(
             &storage_module.submodules,
             storage_module.id,
@@ -11964,17 +11947,14 @@ mod tests {
             let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
             assert_eq!(file_intervals, module_intervals);
         }
-        // Test intervals reset
         let intervals = storage_module.reset().unwrap();
 
         // The hole storage interval is returned
         assert_eq!(intervals, partition_chunk_offset_ii!(0, 19));
 
-        // Verify the entire storage module range is uninitialized again
         let unpacked = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(unpacked, [partition_chunk_offset_ii!(0, 19)]);
 
-        // Check intervals file is also reinitialized
         let intervals = StorageModule::load_intervals_from_submodules(
             &storage_module.submodules,
             storage_module.id,
@@ -12358,11 +12338,9 @@ mod tests {
         let config = Config::new_with_random_peer_id(node_config);
         let chunk_size = config.consensus.chunk_size as usize;
 
-        // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = StorageModule::new(storage_module_info, &config)?;
 
-        // Queue up some entropy chunks in the pending writes queue
         let entropy_bytes = vec![0_u8; chunk_size];
         for chunk_offset in 0..10_u32 {
             storage_module.write_chunk(
@@ -12372,7 +12350,6 @@ mod tests {
             );
         }
 
-        // Sync the chunks
         storage_module.sync_pending_chunks()?;
         assert!(
             (0..10_u32)
@@ -12381,7 +12358,6 @@ mod tests {
             "entropy writes must never be reported as durable transaction data"
         );
 
-        // Write 9 more entropy chunks
         for chunk_offset in 10..19_u32 {
             storage_module.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
@@ -12409,7 +12385,6 @@ mod tests {
         assert_eq!(uninitialized[0], partition_chunk_offset_ii!(19, 50));
 
         {
-            // Verify that the correct number of writes are still pending
             let pending = storage_module
                 .pending_writes
                 .read()
@@ -12423,7 +12398,6 @@ mod tests {
         storage_module.write_chunk(chunk_offset, bytes.clone(), ChunkType::Data);
 
         {
-            // Verify the resulting intervals
             let data = storage_module.get_intervals(ChunkType::Data);
             assert_eq!(data.len(), 1);
             assert_eq!(
@@ -12436,7 +12410,6 @@ mod tests {
                 .read()
                 .expect("to read pending writes");
 
-            // Verify the pending chunk now has the data bytes and correct chunk type
             let (pending_chunk_bytes, pending_chunk_type) = pending.get(&chunk_offset).unwrap();
             assert_eq!(pending_chunk_bytes, &bytes);
             assert_eq!(*pending_chunk_type, ChunkType::Data);
@@ -12448,7 +12421,6 @@ mod tests {
         storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
 
         {
-            // Verify the resulting intervals
             let data = storage_module.get_intervals(ChunkType::Data);
             assert_eq!(data.len(), 2);
             assert_eq!(
@@ -12464,7 +12436,6 @@ mod tests {
         let chunk_offset = PartitionChunkOffset::from(20);
         storage_module.write_chunk(chunk_offset, bytes, ChunkType::Entropy);
         {
-            // Verify the resulting intervals
             let entropy = storage_module.get_intervals(ChunkType::Entropy);
             debug!("{:#?}", entropy);
             assert_eq!(entropy.len(), 4);
@@ -12487,7 +12458,6 @@ mod tests {
         let chunk_offset = PartitionChunkOffset::from(19);
         storage_module.write_chunk(chunk_offset, bytes, ChunkType::Data);
         {
-            // Verify the resulting intervals
             let data = storage_module.get_intervals(ChunkType::Data);
             assert_eq!(data.len(), 3);
             assert_eq!(data[0], partition_chunk_offset_ii!(2, 2));
@@ -12499,7 +12469,6 @@ mod tests {
             assert_eq!(uninitialized[0], partition_chunk_offset_ii!(21, 50));
         }
 
-        // Record the chunks before sync
         let read_range = partition_chunk_offset_ii!(0, 50);
         let before_chunks = storage_module
             .read_chunks(read_range)
@@ -12516,7 +12485,6 @@ mod tests {
         }
 
         {
-            // Ensure all pending writes were written to disk
             let pending = storage_module
                 .pending_writes
                 .read()
@@ -12525,19 +12493,16 @@ mod tests {
             assert_eq!(pending.len(), 0);
         }
 
-        // Get the chunks after the sync
         let after_chunks = storage_module
             .read_chunks(read_range)
             .expect("to read chunks");
 
-        // Compare before and after chunk maps
         assert_eq!(
             before_chunks.len(),
             after_chunks.len(),
             "Maps have different sizes"
         );
 
-        // compare all the values in the before map to the after map
         for (key, before_value) in before_chunks.iter() {
             match after_chunks.get(key) {
                 Some(after_value) => {
@@ -12579,7 +12544,6 @@ mod tests {
         let base_path = tmp_dir.path().to_path_buf();
         let config = testing_config(&base_path, 5, 5);
 
-        // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = StorageModule::new(storage_module_info, &config)?;
         let chunk_data = vec![0, 1, 2, 3, 4];
@@ -12588,10 +12552,8 @@ mod tests {
         let data_root = H256::zero();
         let data_size = chunk_data.len() as u64;
 
-        // Pack the storage module
         storage_module.pack_with_zeros();
 
-        // Create a dummy data tx header to provide the data_size and data_root
         let data_tx = data_header(data_root, data_size);
 
         let _ = storage_module.index_transaction_data(
@@ -12620,7 +12582,6 @@ mod tests {
 
         assert_eq!(ret_path, Some(data_path));
 
-        // check db is cleared
         let _intervals = storage_module.reset().unwrap();
 
         let (tx_path, ret_path) = storage_module.read_tx_data_path(LedgerChunkOffset::from(0))?;
@@ -12633,9 +12594,6 @@ mod tests {
 
     #[test]
     fn test_write_interruption_flow() -> eyre::Result<()> {
-        // This test verifies the interruption flow by checking the interval
-        // files that are written during the write_chunk_internal process
-
         let tmp_dir = TempDirBuilder::new()
             .prefix("write_interruption_test")
             .with_tracing()
@@ -12648,11 +12606,9 @@ mod tests {
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
-        // Verify initial state is uninitialized
         let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(uninitialized, [partition_chunk_offset_ii!(0, 10)]);
 
-        // Write a successful chunk to verify normal flow
         let test_chunk = vec![0x42; 32];
         storage_module.write_chunk_internal(
             PartitionChunkOffset::from(5),
@@ -12660,11 +12616,9 @@ mod tests {
             ChunkType::Data,
         )?;
 
-        // After successful write, chunk should be marked as Data
         let data = storage_module.get_intervals(ChunkType::Data);
         assert_eq!(data, [partition_chunk_offset_ii!(5, 5)]);
 
-        // Verify no Interrupted chunks remain after successful write
         let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
         assert_eq!(interrupted, vec![]);
 
@@ -12679,10 +12633,8 @@ mod tests {
             );
         }
 
-        // Write the intervals to disk
         storage_module.write_intervals_to_submodules()?;
 
-        // Verify the Interrupted chunk is in memory
         let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
         assert_eq!(interrupted, [partition_chunk_offset_ii!(7, 7)]);
 
@@ -12703,36 +12655,30 @@ mod tests {
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
-        // Create test chunks
         let data_chunk = vec![0xDA; 32];
         let entropy_chunk = vec![0xEE; 32];
 
-        // Write a data chunk successfully
         storage_module.write_chunk_internal(
             PartitionChunkOffset::from(3),
             data_chunk,
             ChunkType::Data,
         )?;
 
-        // Write an entropy chunk successfully
         storage_module.write_chunk_internal(
             PartitionChunkOffset::from(7),
             entropy_chunk,
             ChunkType::Entropy,
         )?;
 
-        // Verify the chunks are marked with their correct types
         let data_intervals = storage_module.get_intervals(ChunkType::Data);
         assert_eq!(data_intervals, [partition_chunk_offset_ii!(3, 3)]);
 
         let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
         assert_eq!(entropy_intervals, [partition_chunk_offset_ii!(7, 7)]);
 
-        // Verify no Interrupted chunks remain
         let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
         assert_eq!(interrupted, vec![]);
 
-        // Verify uninitialized chunks are correctly updated
         let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(
             uninitialized,
@@ -12743,7 +12689,6 @@ mod tests {
             ]
         );
 
-        // Verify we can read the chunks back
         let chunks = storage_module.read_chunks(partition_chunk_offset_ii!(3, 7))?;
         assert_eq!(chunks.len(), 2);
         assert_eq!(
@@ -12802,10 +12747,8 @@ mod tests {
                 );
             }
 
-            // Write the intervals to disk
             storage_module.write_intervals_to_submodules()?;
 
-            // Verify Interrupted chunks are set
             let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
             assert_eq!(
                 interrupted,
@@ -12820,7 +12763,6 @@ mod tests {
         let storage_module =
             StorageModule::new(&infos[0], &Config::new_with_random_peer_id(node_config))?;
 
-        // Verify that Interrupted chunks are reset to Uninitialized on load
         let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
         assert_eq!(
             interrupted,
@@ -12828,7 +12770,6 @@ mod tests {
             "Interrupted chunks should be reset on load"
         );
 
-        // Verify all chunks are now Uninitialized
         let uninitialized = storage_module.get_intervals(ChunkType::Uninitialized);
         assert_eq!(uninitialized, [partition_chunk_offset_ii!(0, 10)]);
 
@@ -13345,17 +13286,12 @@ mod tests {
             )],
         }];
 
-        // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
         let storage_module = StorageModule::new(storage_module_info, &config)?;
 
         storage_module.pack_with_zeros();
 
-        // create & write 100_000 chunks worth of txs
-        // randomly select the size in chunks for the tx
-        // assume we have 100 txs/block
-        // so we have log2(100) = 6.6 (so 7)
-        // 7 32B segments + 1 64B leaf (leaf & note)
+        // log2(100 txs/block) is 7 segments of 32 bytes, plus one 64-byte leaf.
         let tx_path = [1; (7 * 32) + 64].to_vec();
         let mut chunks_left = config.consensus.num_chunks_in_partition as u32;
         let mut rng = SimpleRNG::new(42);
