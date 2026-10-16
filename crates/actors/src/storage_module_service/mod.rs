@@ -19,7 +19,7 @@ use eyre::OptionExt as _;
 use index_heal::{HealOutcome, INDEX_HEAL_RETRY_INTERVAL, IndexHealCtx, heal_ledger_data_indexes};
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME, PackingParams,
+    BlockIndexReadGuard, BlockTreeReadGuard, ChunkType, PACKING_PARAMS_FILE_NAME, PackingParams,
     StorageModule, StorageModuleInfo,
 };
 use irys_types::{Config, PartitionChunkRange, TokioServiceHandle, Traced};
@@ -368,18 +368,21 @@ impl StorageModuleServiceInner {
                             self.reset_and_install(existing, Some(info_pa), update_height)?;
                         self.enqueue_packing(existing, range);
                     } else {
-                        // Capacity→ledger does not reset and must not repack.
-                        // Drop a span the capacity reset could not send.
+                        // Capacity→ledger does not reset. Entropy and Data stay.
+                        // A span the channel never accepted is still Uninitialized.
+                        // Send that part. Do not pack offsets that are already
+                        // Entropy or Data.
                         if let Err(err) = existing.assign_partition(info_pa, update_height) {
                             // The packing-params write failed before memory changed.
                             // Retry the same update. Do not stop the service.
+                            // The deferred span stays until this write succeeds.
                             warn!(
                                 storage_module.id = existing.id,
                                 "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
                             );
                             return Err(ResetNotFinished.into());
                         }
-                        self.pending_ranges.remove(&existing.id);
+                        self.enqueue_deferred_uninitialized(existing);
                     }
                 }
             }
@@ -427,6 +430,49 @@ impl StorageModuleServiceInner {
                 );
                 Err(ResetNotFinished.into())
             }
+        }
+    }
+
+    /// Offsets of `range` whose live label is still `Uninitialized`.
+    /// Pending writes are applied. Entropy and Data are left out.
+    fn uninitialized_covering(
+        module: &StorageModule,
+        range: PartitionChunkRange,
+    ) -> Vec<PartitionChunkRange> {
+        let start = range.0.start().0;
+        let end = range.0.end().0;
+        let mut spans = Vec::new();
+        for interval in module.get_intervals(ChunkType::Uninitialized) {
+            let span_start = interval.start().0.max(start);
+            let span_end = interval.end().0.min(end);
+            if span_start <= span_end {
+                spans.push(PartitionChunkRange(irys_types::ii(
+                    irys_types::PartitionChunkOffset::from(span_start),
+                    irys_types::PartitionChunkOffset::from(span_end),
+                )));
+            }
+        }
+        spans
+    }
+
+    /// Send a deferred span that is still `Uninitialized`. A full channel
+    /// keeps that part for `tick`. Entropy and Data are not sent.
+    fn enqueue_deferred_uninitialized(&mut self, module: &Arc<StorageModule>) {
+        let Some(waiting) = self.pending_ranges.remove(&module.id) else {
+            return;
+        };
+        let mut deferred = Vec::new();
+        for range in waiting {
+            for span in Self::uninitialized_covering(module, range) {
+                match self.try_enqueue_packing(module, span) {
+                    PackSend::Accepted => {}
+                    PackSend::Deferred => deferred.push(span),
+                    PackSend::Rejected => {}
+                }
+            }
+        }
+        if !deferred.is_empty() {
+            self.pending_ranges.insert(module.id, deferred);
         }
     }
 
@@ -1463,30 +1509,232 @@ mod assignment_reset_tests {
         );
     }
 
-    /// A span remembered for the capacity reset must not run after the
-    /// partition is given a ledger slot. That transition does not repack.
-    #[tokio::test]
-    async fn capacity_to_ledger_does_not_send_a_deferred_reset_pack() {
-        let mut harness = harness(Some(DataLedger::Publish.into()));
+    fn write_span(module: &StorageModule, from: u32, to: u32, kind: irys_domain::ChunkType) {
+        for offset in from..=to {
+            assert!(
+                module.write_chunk(PartitionChunkOffset::from(offset), vec![0x5A_u8; 32], kind),
+                "write offset {offset}"
+            );
+        }
+        module.force_sync_pending_chunks().expect("sync span");
+    }
+
+    /// Ledger→capacity while the channel is full, then capacity→ledger.
+    /// The reset span is still `Uninitialized` because the channel never
+    /// accepted it. The ledger slot must be packed.
+    async fn defer_capacity_reset(harness: &mut Harness) {
         let (hash, miner) = assigned_hash_and_miner(&harness.module);
         let path = harness.path.clone();
-        fill_packing_channel(&harness);
-        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        fill_packing_channel(harness);
+        apply_update(harness, capacity_update(&path, hash, miner), 4).await;
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
             None
         );
+        assert!(
+            harness.inner.pending_ranges.contains_key(&0),
+            "a full channel keeps the reset span"
+        );
+        let uninitialized = harness
+            .module
+            .get_intervals(irys_domain::ChunkType::Uninitialized);
+        assert_eq!(
+            uninitialized.len(),
+            1,
+            "reset publishes one uninitialized span"
+        );
+        assert_eq!(*uninitialized[0].start(), 0);
+        assert_eq!(*uninitialized[0].end(), 9);
+    }
+
+    /// The channel is still full at the epoch boundary. After it drains, tick
+    /// sends the uninitialized span the capacity reset could not send.
+    #[tokio::test]
+    async fn capacity_to_ledger_sends_a_deferred_uninitialized_span() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        defer_capacity_reset(&mut harness).await;
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
         apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert_eq!(
+            harness
+                .module
+                .get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(irys_domain::ChunkType::Uninitialized)
+        );
+        let _fillers = drain_packing(&mut harness);
+        harness.inner.tick();
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("capacity to ledger must pack a reset span the channel never accepted");
+        assert_full_partition_span(&request);
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// The channel has room before the epoch boundary. The update itself sends
+    /// the uninitialized span. It does not wait for a later tick.
+    #[tokio::test]
+    async fn capacity_to_ledger_sends_a_deferred_span_when_the_channel_has_room() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        defer_capacity_reset(&mut harness).await;
+        let _fillers = drain_packing(&mut harness);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("an open channel accepts the uninitialized span during capacity to ledger");
+        assert_full_partition_span(&request);
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
+    }
+
+    /// The capacity pack already landed. Capacity→ledger must not send the
+    /// remembered span once those offsets are Entropy.
+    #[tokio::test]
+    async fn capacity_to_ledger_drops_a_deferred_span_that_is_entropy() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        defer_capacity_reset(&mut harness).await;
+        write_span(&harness.module, 0, 9, irys_domain::ChunkType::Entropy);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness
+                .module
+                .get_chunk_type(&PartitionChunkOffset::from(3)),
+            Some(irys_domain::ChunkType::Entropy)
+        );
+        assert!(
+            !harness.inner.pending_ranges.contains_key(&0),
+            "entropy offsets are not packed again"
+        );
+        let _fillers = drain_packing(&mut harness);
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "capacity to ledger must not repack entropy"
+        );
+    }
+
+    /// Data on the deferred span is the ledger's bytes. Do not pack over it.
+    #[tokio::test]
+    async fn capacity_to_ledger_drops_a_deferred_span_that_is_data() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        defer_capacity_reset(&mut harness).await;
+        write_span(&harness.module, 0, 9, irys_domain::ChunkType::Data);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness
+                .module
+                .get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(irys_domain::ChunkType::Data)
+        );
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
+        let _fillers = drain_packing(&mut harness);
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "capacity to ledger must not pack over data"
+        );
+    }
+
+    /// A prefix that became Data stays. Only the uninitialized suffix is sent.
+    #[tokio::test]
+    async fn capacity_to_ledger_sends_only_the_uninitialized_suffix() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        defer_capacity_reset(&mut harness).await;
+        write_span(&harness.module, 0, 4, irys_domain::ChunkType::Data);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        let _fillers = drain_packing(&mut harness);
+        harness.inner.tick();
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the uninitialized suffix is still packed");
+        assert_eq!(*request.chunk_range().0.start(), 5);
+        assert_eq!(*request.chunk_range().0.end(), 9);
+        assert!(harness.receivers.packing.try_recv().is_err());
+        assert_eq!(
+            harness
+                .module
+                .get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(irys_domain::ChunkType::Data)
+        );
+    }
+
+    /// A packing-params write error must not drop the uninitialized span.
+    /// The retry still sends it.
+    #[tokio::test]
+    async fn capacity_to_ledger_write_error_keeps_the_deferred_span() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        defer_capacity_reset(&mut harness).await;
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let update = publish_update(&path, hash, miner);
+        let _restore = WritableDir(path.clone());
+        set_dir_mode(&path, 0o555);
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: Arc::clone(&update),
+                update_height: 5,
+            })
+            .await
+            .expect("a packing-params write error is retried");
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None,
+            "a failed write leaves the capacity assignment"
+        );
+        let pending = harness
+            .inner
+            .pending_ranges
+            .get(&0)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            pending.len(),
+            1,
+            "a failed capacity-to-ledger write must keep the uninitialized span"
+        );
+        assert_eq!(*pending[0].0.start(), 0);
+        assert_eq!(*pending[0].0.end(), 9);
+
+        set_dir_mode(&path, 0o755);
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: update,
+                update_height: 5,
+            })
+            .await
+            .expect("retry stores the ledger");
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
             Some(DataLedger::Publish.into())
         );
         let _fillers = drain_packing(&mut harness);
         harness.inner.tick();
-        assert!(
-            harness.receivers.packing.try_recv().is_err(),
-            "capacity to ledger must not pack a span deferred from the capacity reset"
-        );
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the retry packs the span the failed write kept");
+        assert_full_partition_span(&request);
     }
 
     fn assert_only_filler_ranges(queued: &[PackingRequest]) {
