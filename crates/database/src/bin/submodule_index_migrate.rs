@@ -1,8 +1,6 @@
 //! Migrate a copy of a schema v1 submodule `db/` and print the counts.
 //!
-//! The directory name must contain `copy`. A symlink whose target name does
-//! not contain `copy` is refused. This tool never opens a live `db/`.
-//!
+//! The directory name must contain `copy`. This tool never opens a live `db/`.
 //! Stop the node before copying. A copy taken while the node is writing can
 //! be torn.
 //!
@@ -14,13 +12,8 @@
 //!     --verify-against /tmp/submodule-db.copy /tmp/submodule-db.migrated-copy
 //! ```
 //!
-//! `--verify-against` opens the pristine v1 copy read-only and compares the
-//! reads the node makes. That copy must have no schema row. The tool checks
-//! the row before it migrates the positional path. The pristine copy is not
-//! written. A mismatch exits 1.
-//!
-//! Open uses the production submodule arguments: durable sync and a 2 TiB
-//! geometry cap.
+//! `--verify-against` compares node reads against a pristine v1 copy that has
+//! no schema row. That copy is not written. A mismatch exits 1.
 
 use std::path::{Path, PathBuf};
 

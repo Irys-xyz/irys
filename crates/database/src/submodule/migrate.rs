@@ -562,7 +562,7 @@ fn legacy_row_count<T: DbTx>(tx: &T) -> eyre::Result<u64> {
     }
 }
 
-fn missing_table(err: &DatabaseError) -> bool {
+pub(super) fn missing_table(err: &DatabaseError) -> bool {
     let DatabaseError::Open(info) = err else {
         return false;
     };

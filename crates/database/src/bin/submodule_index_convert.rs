@@ -1,23 +1,6 @@
 //! Offline copy between an MDBX submodule index and RocksDB v1.
 //!
-//! Stop the node first. This tool takes the engine lock and refuses to run
-//! when that lock is already held. The directory name does not need to contain
-//! `copy`.
-//!
-//! `mdbx-to-rocks` writes RocksDB v1 from an MDBX schema v1 or v2 index.
-//! `rocks-to-mdbx` rebuilds MDBX schema v2 from RocksDB v1. It drops
-//! checksum-only rows and copies the proof bytes from the offset record.
-//! Each stored tx path must equal the path derived from the consensus
-//! database. A mismatch aborts and names the partition offset. The ledger
-//! offset is `slot * chunks_per_partition + partition_offset`.
-//!
-//! The source is never modified, including a schema v1 MDBX directory.
-//! The completion marker is written last. A crash before that marker leaves
-//! a `CONVERTING` file and no marker. A finished index removes `CONVERTING`
-//! after the marker is durable. `--replace-incomplete` deletes only a
-//! directory this tool marked with that file and that has no marker.
-//!
-//! See `--help` for the node steps.
+//! Stop the node first. See `--help`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -185,22 +168,16 @@ fn run() -> eyre::Result<ExitCode> {
 
 /// Consensus flags for a command that derives tx paths.
 /// `verify-rocks` does not call this.
+fn required<T>(flag: &str, value: Option<T>) -> eyre::Result<T> {
+    value.ok_or_else(|| eyre::eyre!("{flag} is required for this command"))
+}
+
 fn consensus_options(tool: &ToolArgs) -> eyre::Result<ConvertOptions> {
-    let Some(consensus_db) = tool.consensus_db.clone() else {
-        eyre::bail!("--consensus-db is required for this command");
-    };
-    let Some(ledger_id) = tool.ledger_id else {
-        eyre::bail!("--ledger is required for this command");
-    };
-    let Some(slot_index) = tool.slot_index else {
-        eyre::bail!("--slot is required for this command");
-    };
-    let Some(chunks_per_partition) = tool.chunks_per_partition else {
-        eyre::bail!("--chunks-per-partition is required for this command");
-    };
-    let Some(chunk_size) = tool.chunk_size else {
-        eyre::bail!("--chunk-size is required for this command");
-    };
+    let consensus_db = required("--consensus-db", tool.consensus_db.clone())?;
+    let ledger_id = required("--ledger", tool.ledger_id)?;
+    let slot_index = required("--slot", tool.slot_index)?;
+    let chunks_per_partition = required("--chunks-per-partition", tool.chunks_per_partition)?;
+    let chunk_size = required("--chunk-size", tool.chunk_size)?;
     let mut options = ConvertOptions::new(submodule_db_args(&DatabaseConfig::default())?);
     options.consensus = consensus_db_args(&DatabaseConfig::default())?;
     options.replace_incomplete = tool.replace_incomplete;
@@ -329,7 +306,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
                 };
                 match arg {
                     "--consensus-db" => consensus_db = Some(PathBuf::from(value)),
-                    "--ledger" => ledger_id = Some(parse_u32(value)?),
+                    "--ledger" => ledger_id = Some(parse_u32_flag("--ledger", value)?),
                     "--slot" => slot_index = Some(parse_u64("--slot", value)?),
                     "--chunks-per-partition" => {
                         chunks_per_partition = Some(parse_u64("--chunks-per-partition", value)?)
@@ -412,11 +389,6 @@ fn parse_address(text: &str) -> eyre::Result<IrysAddress> {
 fn parse_u32_flag(flag: &str, text: &str) -> eyre::Result<u32> {
     text.parse::<u32>()
         .map_err(|err| eyre::eyre!("{flag} {text}: {err}"))
-}
-
-fn parse_u32(text: &str) -> eyre::Result<u32> {
-    text.parse::<u32>()
-        .map_err(|err| eyre::eyre!("--ledger {text}: {err}"))
 }
 
 fn parse_u64(flag: &str, text: &str) -> eyre::Result<u64> {

@@ -1,29 +1,13 @@
-//! Offline copy between submodule indexes.
+//! Offline copy between an MDBX submodule index and RocksDB v1.
 //!
-//! `mdbx-to-rocks` writes a RocksDB v1 index.
-//! `rocks-to-mdbx` rebuilds an MDBX schema v2 index from RocksDB v1. Each
-//! stored tx path must equal the path derived from the consensus database.
-//! A mismatch aborts and names the partition offset.
+//! The source is never modified. The completion marker (`rocks/SCHEMA`, or the
+//! MDBX schema row) is written last. A crash before that marker leaves
+//! `CONVERTING` and no marker. `--replace-incomplete` deletes only a directory
+//! that contains `CONVERTING` and none of the protected names.
 //!
-//! The node must be stopped. This tool takes the engine lock (MDBX exclusive
-//! open, RocksDB `LOCK`) and refuses the run when that lock is already held.
-//! It does not require the directory name to contain `copy`.
-//!
-//! The source is never modified. A schema v1 MDBX directory is read as v1
-//! and converted directly. The completion marker is written last: the
-//! RocksDB `SCHEMA` file, or the MDBX schema row [`SUBMODULE_SCHEMA`].
-//! A crash before that marker leaves a `CONVERTING` file and no marker.
-//! A finished index removes `CONVERTING` after the marker is durable.
-//! A crash between the two leaves both files. The marker still protects
-//! the directory. `--replace-incomplete` deletes only a directory that
-//! contains `CONVERTING` and none of the protected names (a storage module,
-//! a consensus database, or a finished index).
-//!
-//! Rows are written in bounded batches. The RocksDB target disables the WAL.
-//! The seal flush, then the SCHEMA file, makes that copy durable. An MDBX
-//! target commits each batch in durable sync mode. Its schema row stays
-//! incomplete until the last commit. Verification compares stored bytes
-//! with a fresh tx-path derive.
+//! The RocksDB target disables the WAL. The seal flush, then the SCHEMA file,
+//! makes that copy durable. An MDBX target commits each batch in durable sync
+//! mode and keeps the schema row incomplete until the last commit.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -38,7 +22,6 @@ use irys_types::{
 };
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::mdbx::DatabaseArguments;
-use reth_db::mdbx::Error as MdbxError;
 use reth_db::table::Table as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind, DatabaseError};
@@ -131,93 +114,86 @@ pub struct EngineEquivalenceReport {
     pub samples: Vec<EngineMismatch>,
 }
 
+fn write_labeled(
+    f: &mut std::fmt::Formatter<'_>,
+    rows: &[(&str, &dyn std::fmt::Display)],
+) -> std::fmt::Result {
+    for (label, value) in rows {
+        writeln!(f, "{label}: {value}")?;
+    }
+    Ok(())
+}
+
 impl EngineEquivalenceReport {
     pub fn has_mismatch(&self) -> bool {
-        self.offset_mismatches > 0
-            || self.intervals_mismatches > 0
-            || self.tx_paths_mismatches > 0
-            || self.tx_leaf_bindings_mismatches > 0
-            || self.data_roots_mismatches > 0
-            || self.pending_mismatches > 0
-            || self.reset_marker_mismatch > 0
-            || self.schema_mismatch > 0
-            || self.content_offset_mismatches > 0
-            || self.mismatch_data_path_hash > 0
-            || self.mismatch_tx_path_hash > 0
-            || self.skipped_frontier > 0
-            || self.index_audit_findings > 0
-            || self.mismatch_chunk_crc > 0
+        let counts = [
+            self.offset_mismatches,
+            self.intervals_mismatches,
+            self.tx_paths_mismatches,
+            self.tx_leaf_bindings_mismatches,
+            self.data_roots_mismatches,
+            self.pending_mismatches,
+            self.reset_marker_mismatch,
+            self.schema_mismatch,
+            self.content_offset_mismatches,
+            self.mismatch_data_path_hash,
+            self.mismatch_tx_path_hash,
+            self.skipped_frontier,
+            self.index_audit_findings,
+            self.mismatch_chunk_crc,
+        ];
+        counts.into_iter().any(|count| count > 0)
             || self.family_mismatches.iter().any(|row| row.mismatches > 0)
     }
 }
 
 impl std::fmt::Display for EngineEquivalenceReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "offsets_checked: {}", self.offsets_checked)?;
-        writeln!(f, "offset_mismatches: {}", self.offset_mismatches)?;
-        writeln!(f, "mismatch_data_path: {}", self.mismatch_data_path)?;
-        writeln!(f, "mismatch_tx_path: {}", self.mismatch_tx_path)?;
-        writeln!(
+        write_labeled(
             f,
-            "mismatch_data_path_hash: {}",
-            self.mismatch_data_path_hash
+            &[
+                ("offsets_checked", &self.offsets_checked),
+                ("offset_mismatches", &self.offset_mismatches),
+                ("mismatch_data_path", &self.mismatch_data_path),
+                ("mismatch_tx_path", &self.mismatch_tx_path),
+                ("mismatch_data_path_hash", &self.mismatch_data_path_hash),
+                ("mismatch_tx_path_hash", &self.mismatch_tx_path_hash),
+                ("intervals_checked", &self.intervals_checked),
+                ("intervals_mismatches", &self.intervals_mismatches),
+                ("TxPathByTxPathHash_checked", &self.tx_paths_checked),
+                ("TxPathByTxPathHash_mismatches", &self.tx_paths_mismatches),
+                (
+                    "TxLeafBindingByTxPathHash_checked",
+                    &self.tx_leaf_bindings_checked,
+                ),
+                (
+                    "TxLeafBindingByTxPathHash_mismatches",
+                    &self.tx_leaf_bindings_mismatches,
+                ),
+                ("DataRootInfosByDataRoot_checked", &self.data_roots_checked),
+                (
+                    "DataRootInfosByDataRoot_mismatches",
+                    &self.data_roots_mismatches,
+                ),
+                (
+                    "PendingBodyMigrationsByOffset_checked",
+                    &self.pending_checked,
+                ),
+                (
+                    "PendingBodyMigrationsByOffset_mismatches",
+                    &self.pending_mismatches,
+                ),
+                ("reset_marker_mismatch", &self.reset_marker_mismatch),
+                ("schema_mismatch", &self.schema_mismatch),
+                ("content_offsets_checked", &self.content_offsets_checked),
+                ("content_offset_mismatches", &self.content_offset_mismatches),
+                ("skipped_orphans", &self.skipped_orphans),
+                ("skipped_frontier", &self.skipped_frontier),
+                ("index_audit_findings", &self.index_audit_findings),
+                ("mismatch_chunk_crc", &self.mismatch_chunk_crc),
+                ("dropped_checksums", &self.dropped_checksums),
+            ],
         )?;
-        writeln!(f, "mismatch_tx_path_hash: {}", self.mismatch_tx_path_hash)?;
-        writeln!(f, "intervals_checked: {}", self.intervals_checked)?;
-        writeln!(f, "intervals_mismatches: {}", self.intervals_mismatches)?;
-        writeln!(f, "TxPathByTxPathHash_checked: {}", self.tx_paths_checked)?;
-        writeln!(
-            f,
-            "TxPathByTxPathHash_mismatches: {}",
-            self.tx_paths_mismatches
-        )?;
-        writeln!(
-            f,
-            "TxLeafBindingByTxPathHash_checked: {}",
-            self.tx_leaf_bindings_checked
-        )?;
-        writeln!(
-            f,
-            "TxLeafBindingByTxPathHash_mismatches: {}",
-            self.tx_leaf_bindings_mismatches
-        )?;
-        writeln!(
-            f,
-            "DataRootInfosByDataRoot_checked: {}",
-            self.data_roots_checked
-        )?;
-        writeln!(
-            f,
-            "DataRootInfosByDataRoot_mismatches: {}",
-            self.data_roots_mismatches
-        )?;
-        writeln!(
-            f,
-            "PendingBodyMigrationsByOffset_checked: {}",
-            self.pending_checked
-        )?;
-        writeln!(
-            f,
-            "PendingBodyMigrationsByOffset_mismatches: {}",
-            self.pending_mismatches
-        )?;
-        writeln!(f, "reset_marker_mismatch: {}", self.reset_marker_mismatch)?;
-        writeln!(f, "schema_mismatch: {}", self.schema_mismatch)?;
-        writeln!(
-            f,
-            "content_offsets_checked: {}",
-            self.content_offsets_checked
-        )?;
-        writeln!(
-            f,
-            "content_offset_mismatches: {}",
-            self.content_offset_mismatches
-        )?;
-        writeln!(f, "skipped_orphans: {}", self.skipped_orphans)?;
-        writeln!(f, "skipped_frontier: {}", self.skipped_frontier)?;
-        writeln!(f, "index_audit_findings: {}", self.index_audit_findings)?;
-        writeln!(f, "mismatch_chunk_crc: {}", self.mismatch_chunk_crc)?;
-        writeln!(f, "dropped_checksums: {}", self.dropped_checksums)?;
         for row in &self.family_mismatches {
             writeln!(f, "family {}: {}", row.family, row.mismatches)?;
         }
@@ -250,20 +226,24 @@ pub struct ConvertStats {
 
 impl std::fmt::Display for ConvertStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "migrated_v1: {}", self.migrated_v1)?;
-        writeln!(f, "source_v1: {}", self.source_v1)?;
-        writeln!(f, "tx_paths: {}", self.tx_paths)?;
-        writeln!(f, "tx_leaf_bindings: {}", self.tx_leaf_bindings)?;
-        writeln!(f, "intervals: {}", self.intervals)?;
-        writeln!(f, "path_hashes: {}", self.path_hashes)?;
-        writeln!(f, "data_paths: {}", self.data_paths)?;
-        writeln!(f, "data_roots: {}", self.data_roots)?;
-        writeln!(f, "pending: {}", self.pending)?;
-        writeln!(f, "reset_marker: {}", self.reset_marker)?;
-        writeln!(f, "skipped_orphans: {}", self.skipped_orphans)?;
-        writeln!(f, "skipped_frontier: {}", self.skipped_frontier)?;
-        writeln!(f, "elapsed_ms: {}", self.elapsed_ms)?;
-        Ok(())
+        write_labeled(
+            f,
+            &[
+                ("migrated_v1", &self.migrated_v1),
+                ("source_v1", &self.source_v1),
+                ("tx_paths", &self.tx_paths),
+                ("tx_leaf_bindings", &self.tx_leaf_bindings),
+                ("intervals", &self.intervals),
+                ("path_hashes", &self.path_hashes),
+                ("data_paths", &self.data_paths),
+                ("data_roots", &self.data_roots),
+                ("pending", &self.pending),
+                ("reset_marker", &self.reset_marker),
+                ("skipped_orphans", &self.skipped_orphans),
+                ("skipped_frontier", &self.skipped_frontier),
+                ("elapsed_ms", &self.elapsed_ms),
+            ],
+        )
     }
 }
 
@@ -918,6 +898,70 @@ fn open_consensus(options: &ConvertOptions) -> eyre::Result<DatabaseEnv> {
     Ok(db)
 }
 
+/// Orphan and frontier skips for rows that follow a placement pass.
+struct SkipCounts<'a> {
+    skips: &'a FrontierSkips,
+    orphans: &'a mut u64,
+    frontier: &'a mut u64,
+}
+
+impl SkipCounts<'_> {
+    /// `false` when the row is outside every written placement, or inside a frontier skip.
+    fn keep(&mut self, offset: u32, covered: bool) -> bool {
+        if !covered {
+            *self.orphans = self.orphans.saturating_add(1);
+            return false;
+        }
+        if self.skips.covers(offset) {
+            *self.frontier = self.frontier.saturating_add(1);
+            return false;
+        }
+        true
+    }
+}
+
+fn copy_covered_rows<S, T>(
+    src: &S,
+    dst: Option<&RocksSubmoduleStore>,
+    progress: &mut CopyProgress,
+    skip: &mut SkipCounts<'_>,
+    mut read: impl FnMut(Option<PartitionChunkOffset>) -> eyre::Result<Vec<(PartitionChunkOffset, T)>>,
+    mut write: impl FnMut(&mut dyn SubmoduleWrite, PartitionChunkOffset, T) -> eyre::Result<()>,
+    kind: &'static str,
+) -> eyre::Result<u64>
+where
+    S: SubmoduleStore,
+{
+    copy_rows(
+        &mut read,
+        |batch| {
+            let mut kept = Vec::new();
+            for (offset, value) in batch {
+                let covered = src.view(|tx| tx.tx_interval_at(offset))?.is_some();
+                if !skip.keep(offset.0, covered) {
+                    continue;
+                }
+                kept.push((offset, value));
+            }
+            let copied = u64::try_from(kept.len()).unwrap_or(u64::MAX);
+            if kept.is_empty() {
+                return Ok(0);
+            }
+            if let Some(dst) = dst {
+                dst.update(|tx| {
+                    for (offset, value) in kept {
+                        require_interval(tx, offset, kind)?;
+                        write(tx, offset, value)?;
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(copied)
+        },
+        progress,
+    )
+}
+
 fn copy_mdbx_into_rocks<S>(
     src: &S,
     dst: Option<&RocksSubmoduleStore>,
@@ -975,70 +1019,32 @@ where
         &mut progress,
     )?;
     let mut skipped_orphans = 0_u64;
-    let data_paths = copy_rows(
-        |after| src.read_data_paths(after, limits),
-        |batch| {
-            let mut kept = Vec::new();
-            for (offset, path) in batch {
-                if src.view(|tx| tx.tx_interval_at(offset))?.is_none() {
-                    skipped_orphans = skipped_orphans.saturating_add(1);
-                    continue;
-                }
-                if skips.covers(offset.0) {
-                    skipped_frontier = skipped_frontier.saturating_add(1);
-                    continue;
-                }
-                kept.push((offset, path));
-            }
-            let copied = u64::try_from(kept.len()).unwrap_or(u64::MAX);
-            if kept.is_empty() {
-                return Ok(0);
-            }
-            if let Some(dst) = dst {
-                dst.update(|tx| {
-                    for (offset, path) in kept {
-                        require_interval(tx, offset, "data path")?;
-                        tx.add_full_data_path(offset, path)?;
-                    }
-                    Ok(())
-                })?;
-            }
-            Ok(copied)
-        },
-        &mut progress,
-    )?;
-    let pending = copy_rows(
-        |after| src.read_pending(after, limits),
-        |batch| {
-            let mut kept = Vec::new();
-            for (offset, job) in batch {
-                if src.view(|tx| tx.tx_interval_at(offset))?.is_none() {
-                    skipped_orphans = skipped_orphans.saturating_add(1);
-                    continue;
-                }
-                if skips.covers(offset.0) {
-                    skipped_frontier = skipped_frontier.saturating_add(1);
-                    continue;
-                }
-                kept.push((offset, job));
-            }
-            let copied = u64::try_from(kept.len()).unwrap_or(u64::MAX);
-            if kept.is_empty() {
-                return Ok(0);
-            }
-            if let Some(dst) = dst {
-                dst.update(|tx| {
-                    for (offset, job) in &kept {
-                        require_interval(tx, *offset, "pending body migration")?;
-                        tx.add_pending_body_migration(*offset, job)?;
-                    }
-                    Ok(())
-                })?;
-            }
-            Ok(copied)
-        },
-        &mut progress,
-    )?;
+    let (data_paths, pending) = {
+        let mut skip = SkipCounts {
+            skips: &skips,
+            orphans: &mut skipped_orphans,
+            frontier: &mut skipped_frontier,
+        };
+        let data_paths = copy_covered_rows(
+            src,
+            dst,
+            &mut progress,
+            &mut skip,
+            |after| src.read_data_paths(after, limits),
+            |tx, offset, path| tx.add_full_data_path(offset, path),
+            "data path",
+        )?;
+        let pending = copy_covered_rows(
+            src,
+            dst,
+            &mut progress,
+            &mut skip,
+            |after| src.read_pending(after, limits),
+            |tx, offset, job| tx.add_pending_body_migration(offset, &job),
+            "pending body migration",
+        )?;
+        (data_paths, pending)
+    };
     Ok(ConvertStats {
         tx_paths: intervals,
         tx_leaf_bindings: bindings,
@@ -1107,6 +1113,11 @@ fn copy_rocks_into_mdbx(
         after = Some(last);
     }
     let mut skipped_orphans = 0_u64;
+    let mut skip = SkipCounts {
+        skips: &skips,
+        orphans: &mut skipped_orphans,
+        frontier: &mut skipped_frontier,
+    };
     let data_paths = copy_keyed(
         |after| src.read_offset_row_keys(after, limit),
         |keys| {
@@ -1125,12 +1136,7 @@ fn copy_rocks_into_mdbx(
                     // Checksum-only entropy row. MDBX stores proofs only.
                     continue;
                 };
-                if !covered {
-                    skipped_orphans = skipped_orphans.saturating_add(1);
-                    continue;
-                }
-                if skips.covers(offset.0) {
-                    skipped_frontier = skipped_frontier.saturating_add(1);
+                if !skip.keep(offset.0, covered) {
                     continue;
                 }
                 kept.push((offset, path));
@@ -1171,12 +1177,7 @@ fn copy_rocks_into_mdbx(
                 let Some(job) = job else {
                     eyre::bail!("pending key {} has no job", offset.0);
                 };
-                if !covered {
-                    skipped_orphans = skipped_orphans.saturating_add(1);
-                    continue;
-                }
-                if skips.covers(offset.0) {
-                    skipped_frontier = skipped_frontier.saturating_add(1);
+                if !skip.keep(offset.0, covered) {
                     continue;
                 }
                 kept.push((offset, job));
@@ -1982,20 +1983,14 @@ fn compare_one_placement<S: SubmoduleStore>(
         report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
         note(report, "data_root", format!("offset {}", key.0));
     }
-    let filled = place.tx_start_offset.0 != 0 || place.data_size != 0;
-    if filled {
-        let base = ledger_base(map.slot_index, map.chunks_per_partition);
-        let expected = i64::try_from(derived.tx_ledger_start)
-            .ok()
-            .zip(base)
-            .and_then(|(start, base)| start.checked_sub(base));
-        let start_ok =
-            expected.and_then(|value| i32::try_from(value).ok()) == Some(place.tx_start_offset.0);
-        if !start_ok || place.data_size != header.data_size {
-            report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
-            note(report, "data_root", format!("offset {} chain", key.0));
-        }
-    }
+    note_chain_extent(
+        &place,
+        derived.tx_ledger_start,
+        header.data_size,
+        map,
+        key,
+        report,
+    );
     if is_first {
         note_missing_later_segments(v3, db, cache, map, &segments, key, report)?;
     }
@@ -2075,24 +2070,45 @@ fn read_pending_at(
         .collect()
 }
 
+fn note_reset(report: &mut EngineEquivalenceReport, differs: bool) {
+    if differs {
+        report.reset_marker_mismatch = 1;
+        note(report, "reset_marker", "metadata".to_owned());
+    }
+}
+
+fn note_schema(report: &mut EngineEquivalenceReport, ok: bool) {
+    if !ok {
+        report.schema_mismatch = 1;
+        note(report, "schema", "metadata".to_owned());
+    }
+}
+
 fn verify_markers<S: SubmoduleStore>(
     v2: &S,
     v3: &RocksSubmoduleStore,
     v2_schema: Option<Vec<u8>>,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
-    if v2.reset_in_progress()? != v3.reset_in_progress()? {
-        report.reset_marker_mismatch = 1;
-        note(report, "reset_marker", "metadata".to_owned());
-    }
-    let v3_schema = v3.schema_bytes()?;
-    let v2_ok = v2_schema.as_deref() == Some(SUBMODULE_SCHEMA.as_bytes());
-    let v3_ok = v3_schema.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
-    if !v2_ok || !v3_ok {
-        report.schema_mismatch = 1;
-        note(report, "schema", "metadata".to_owned());
-    }
+    note_reset(report, v2.reset_in_progress()? != v3.reset_in_progress()?);
+    let schema_ok = v2_schema.as_deref() == Some(SUBMODULE_SCHEMA.as_bytes())
+        && v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
+    note_schema(report, schema_ok);
     Ok(())
+}
+
+fn refuse_existing_rocks_schema(path: &Path) -> eyre::Result<()> {
+    match rocks_schema_text(path)? {
+        Some(text) if text == SUBMODULE_SCHEMA_ROCKS_V1 => eyre::bail!(
+            "target {} is a completed RocksDB index. Refusing to replace it.",
+            path.display()
+        ),
+        Some(_) => eyre::bail!(
+            "target {} has an existing index schema. Refusing to delete it.",
+            path.display()
+        ),
+        None => Ok(()),
+    }
 }
 
 fn rocks_schema_text(path: &Path) -> eyre::Result<Option<String>> {
@@ -2260,6 +2276,32 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
         return false;
     }
     left.starts_with(&right) || right.starts_with(&left)
+}
+
+/// A filled placement must match the derived tx start and the header size.
+fn note_chain_extent(
+    place: &super::tables::Placement,
+    tx_ledger_start: u64,
+    header_data_size: u64,
+    map: &PlacementMap,
+    at: PartitionChunkOffset,
+    report: &mut EngineEquivalenceReport,
+) {
+    let filled = place.tx_start_offset.0 != 0 || place.data_size != 0;
+    if !filled {
+        return;
+    }
+    let base = ledger_base(map.slot_index, map.chunks_per_partition);
+    let expected = i64::try_from(tx_ledger_start)
+        .ok()
+        .zip(base)
+        .and_then(|(start, base)| start.checked_sub(base));
+    let start_ok =
+        expected.and_then(|value| i32::try_from(value).ok()) == Some(place.tx_start_offset.0);
+    if !start_ok || place.data_size != header_data_size {
+        report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
+        note(report, "data_root", format!("offset {} chain", at.0));
+    }
 }
 
 /// First ledger offset of the submodule's slot, `slot * chunks_per_partition`.
@@ -2437,10 +2479,30 @@ where
 }
 
 fn table_missing(err: &DatabaseError) -> bool {
-    let DatabaseError::Open(info) = err else {
-        return false;
-    };
-    *info == MdbxError::NotFound.into()
+    migrate::missing_table(err)
+}
+
+fn write_rocks_copy(
+    highest: eyre::Result<Option<PartitionChunkOffset>>,
+    dir: &Path,
+    options: &ConvertOptions,
+    db: &DatabaseEnv,
+    map: &PlacementMap,
+    copy: impl FnOnce(Option<&RocksSubmoduleStore>) -> eyre::Result<ConvertStats>,
+) -> eyre::Result<ConvertStats> {
+    ensure_consensus_covers(db, map, highest?, options.allow_unresolved)?;
+    if options.dry_run {
+        let stats = copy(None)?;
+        refuse_unresolved(&stats, options)?;
+        return Ok(stats);
+    }
+    prepare_rocks_target(dir, options.replace_incomplete)?;
+    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
+    let stats = copy(Some(&dst))?;
+    refuse_unresolved(&stats, options)?;
+    seal_rocks_target(dst, options)?;
+    clear_converting_sentinel(dir)?;
+    Ok(stats)
 }
 
 fn copy_v2_rocks<S>(
@@ -2453,35 +2515,28 @@ fn copy_v2_rocks<S>(
 where
     S: RowSource + SubmoduleStore,
 {
-    ensure_consensus_covers(
-        db,
-        map,
-        src.highest_placement_end()?,
-        options.allow_unresolved,
-    )?;
-    if options.dry_run {
-        let stats = copy_mdbx_into_rocks(src, None, options, db, map)?;
-        refuse_unresolved(&stats, options)?;
-        return Ok(stats);
-    }
+    write_rocks_copy(src.highest_placement_end(), dir, options, db, map, |dst| {
+        copy_mdbx_into_rocks(src, dst, options, db, map)
+    })
+}
+
+fn open_converting_rocks(
+    dir: &Path,
+    options: &ConvertOptions,
+) -> eyre::Result<RocksSubmoduleStore> {
     prepare_rocks_target(dir, options.replace_incomplete)?;
     let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
-    let stats = copy_mdbx_into_rocks(src, Some(&dst), options, db, map)?;
-    refuse_unresolved(&stats, options)?;
-    seal_rocks_target(dst, options)?;
-    clear_converting_sentinel(dir)?;
-    Ok(stats)
+    if options.fail_after_batches == Some(0) {
+        eyre::bail!("injected conversion interrupt after 0 batches");
+    }
+    Ok(dst)
 }
 
 fn write_empty_rocks(dir: &Path, options: &ConvertOptions) -> eyre::Result<ConvertStats> {
     if options.dry_run {
         return Ok(ConvertStats::default());
     }
-    prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
-    if options.fail_after_batches == Some(0) {
-        eyre::bail!("injected conversion interrupt after 0 batches");
-    }
+    let dst = open_converting_rocks(dir, options)?;
     seal_rocks_target(dst, options)?;
     clear_converting_sentinel(dir)?;
     Ok(ConvertStats::default())
@@ -2499,11 +2554,7 @@ fn write_reset_rocks(
             ..ConvertStats::default()
         });
     }
-    prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
-    if options.fail_after_batches == Some(0) {
-        eyre::bail!("injected conversion interrupt after 0 batches");
-    }
+    let dst = open_converting_rocks(dir, options)?;
     dst.set_reset_in_progress()?;
     seal_rocks_target(dst, options)?;
     clear_converting_sentinel(dir)?;
@@ -2543,24 +2594,9 @@ fn copy_v1_rocks(
     db: &DatabaseEnv,
     map: &PlacementMap,
 ) -> eyre::Result<ConvertStats> {
-    ensure_consensus_covers(
-        db,
-        map,
-        highest_v1_placement(env)?,
-        options.allow_unresolved,
-    )?;
-    if options.dry_run {
-        let stats = copy_mdbx_v1_into_rocks(env, None, options, db, map)?;
-        refuse_unresolved(&stats, options)?;
-        return Ok(stats);
-    }
-    prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
-    let stats = copy_mdbx_v1_into_rocks(env, Some(&dst), options, db, map)?;
-    refuse_unresolved(&stats, options)?;
-    seal_rocks_target(dst, options)?;
-    clear_converting_sentinel(dir)?;
-    Ok(stats)
+    write_rocks_copy(highest_v1_placement(env), dir, options, db, map, |dst| {
+        copy_mdbx_v1_into_rocks(env, dst, options, db, map)
+    })
 }
 
 /// Last offset that carries a tx-path hash. An orphan data-path row past that
@@ -3089,29 +3125,66 @@ fn v1_data_path_in_tx(
     }
 }
 
-fn read_v1_tx_path(env: &DatabaseEnv, hash: H256) -> eyre::Result<Option<TxPath>> {
-    env.view_eyre(|tx| match tx.get::<TxPathByTxPathHash>(hash) {
-        Ok(path) => Ok(path),
+fn read_v1_row<T>(env: &DatabaseEnv, key: T::Key) -> eyre::Result<Option<T::Value>>
+where
+    T: reth_db::table::Table,
+    T::Key: Copy,
+{
+    env.view_eyre(|tx| match tx.get::<T>(key) {
+        Ok(row) => Ok(row),
         Err(err) if table_missing(&err) => Ok(None),
         Err(err) => Err(err.into()),
     })
+}
+
+fn read_v1_tx_path(env: &DatabaseEnv, hash: H256) -> eyre::Result<Option<TxPath>> {
+    read_v1_row::<TxPathByTxPathHash>(env, hash)
 }
 
 fn read_v1_binding(env: &DatabaseEnv, hash: H256) -> eyre::Result<Option<TxLeafBinding>> {
-    env.view_eyre(|tx| match tx.get::<TxLeafBindingByTxPathHash>(hash) {
-        Ok(binding) => Ok(binding),
-        Err(err) if table_missing(&err) => Ok(None),
-        Err(err) => Err(err.into()),
-    })
+    read_v1_row::<TxLeafBindingByTxPathHash>(env, hash)
 }
 
 fn v1_infos(env: &DatabaseEnv, data_root: H256) -> eyre::Result<Vec<DataRootInfo>> {
-    env.view_eyre(|tx| match tx.get::<DataRootInfosByDataRoot>(data_root) {
-        Ok(Some(DataRootInfos(infos))) => Ok(infos),
-        Ok(None) => Ok(Vec::new()),
-        Err(err) if table_missing(&err) => Ok(Vec::new()),
-        Err(err) => Err(err.into()),
-    })
+    Ok(read_v1_row::<DataRootInfosByDataRoot>(env, data_root)?
+        .map(|DataRootInfos(infos)| infos)
+        .unwrap_or_default())
+}
+
+fn walk_v1_path_range(
+    env: &DatabaseEnv,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    limits: Limits,
+    mut on_rows: impl FnMut(Vec<(PartitionChunkOffset, H256)>) -> eyre::Result<()>,
+) -> eyre::Result<()> {
+    let mut after = start.0.checked_sub(1).map(PartitionChunkOffset);
+    loop {
+        let batch = read_v1_hash_batch(env, after, limits)?;
+        if batch.is_empty() {
+            break;
+        }
+        let mut passed = false;
+        let mut rows = Vec::new();
+        for (offset, hashes) in &batch {
+            if *offset > end {
+                passed = true;
+                break;
+            }
+            if let Some(hash) = hashes.data_path_hash {
+                rows.push((*offset, hash));
+            }
+        }
+        if !rows.is_empty() {
+            on_rows(rows)?;
+        }
+        let last = batch.last().map(|(key, _)| *key);
+        if passed || last.is_some_and(|key| key >= end) {
+            break;
+        }
+        after = last;
+    }
+    Ok(())
 }
 
 fn copy_v1_range_paths(
@@ -3122,44 +3195,26 @@ fn copy_v1_range_paths(
     limits: Limits,
     progress: &mut CopyProgress,
 ) -> eyre::Result<u64> {
-    let mut after = start.0.checked_sub(1).map(PartitionChunkOffset);
     let mut copied = 0_u64;
-    loop {
-        let batch = read_v1_hash_batch(env, after, limits)?;
-        if batch.is_empty() {
-            break;
+    walk_v1_path_range(env, start, end, limits, |rows| {
+        let mut kept = Vec::with_capacity(rows.len());
+        for (offset, hash) in rows {
+            kept.push((offset, read_v1_data_path(env, offset, hash)?));
         }
-        let mut kept = Vec::new();
-        let mut passed = false;
-        for (offset, hashes) in &batch {
-            if *offset > end {
-                passed = true;
-                break;
-            }
-            if let Some(hash) = hashes.data_path_hash {
-                kept.push((*offset, read_v1_data_path(env, *offset, hash)?));
-            }
+        let n = u64::try_from(kept.len()).unwrap_or(u64::MAX);
+        if let Some(dst) = dst {
+            dst.update(|tx| {
+                for (offset, path) in kept {
+                    require_interval(tx, offset, "data path")?;
+                    tx.add_full_data_path(offset, path)?;
+                }
+                Ok(())
+            })?;
+            progress.note()?;
         }
-        let last = batch.last().map(|(key, _)| *key);
-        if !kept.is_empty() {
-            let n = u64::try_from(kept.len()).unwrap_or(u64::MAX);
-            if let Some(dst) = dst {
-                dst.update(|tx| {
-                    for (offset, path) in kept {
-                        require_interval(tx, offset, "data path")?;
-                        tx.add_full_data_path(offset, path)?;
-                    }
-                    Ok(())
-                })?;
-                progress.note()?;
-            }
-            copied = copied.saturating_add(n);
-        }
-        if passed || last.is_some_and(|key| key >= end) {
-            break;
-        }
-        after = last;
-    }
+        copied = copied.saturating_add(n);
+        Ok(())
+    })?;
     Ok(copied)
 }
 
@@ -3242,11 +3297,7 @@ fn v1_hashes_at(
     env: &DatabaseEnv,
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkPathHashes>> {
-    env.view_eyre(|tx| match tx.get::<ChunkPathHashesByOffset>(offset) {
-        Ok(row) => Ok(row),
-        Err(err) if table_missing(&err) => Ok(None),
-        Err(err) => Err(err.into()),
-    })
+    read_v1_row::<ChunkPathHashesByOffset>(env, offset)
 }
 
 fn v1_interval_starts_at(env: &DatabaseEnv, offset: PartitionChunkOffset) -> eyre::Result<bool> {
@@ -3293,14 +3344,14 @@ fn verify_mdbx_v1_against_rocks(
     map: &PlacementMap,
 ) -> eyre::Result<EngineEquivalenceReport> {
     let mut report = EngineEquivalenceReport::default();
-    if v3.schema_bytes()?.as_deref() != Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()) {
-        report.schema_mismatch = 1;
-        note(&mut report, "schema", "metadata".to_owned());
-    }
-    if reset_marker_on(env)? != v3.reset_in_progress()? {
-        report.reset_marker_mismatch = 1;
-        note(&mut report, "reset_marker", "metadata".to_owned());
-    }
+    note_schema(
+        &mut report,
+        v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()),
+    );
+    note_reset(
+        &mut report,
+        reset_marker_on(env)? != v3.reset_in_progress()?,
+    );
     let limits = Limits {
         rows: VERIFY_KEYS,
         value_bytes: usize::MAX,
@@ -3484,20 +3535,14 @@ fn compare_v1_interval(
             }
         }
         report.data_roots_checked = report.data_roots_checked.saturating_add(1);
-        let filled = place.tx_start_offset.0 != 0 || place.data_size != 0;
-        if filled {
-            let base = ledger_base(map.slot_index, map.chunks_per_partition);
-            let expected = i64::try_from(seg_derived.tx_ledger_start)
-                .ok()
-                .zip(base)
-                .and_then(|(ledger_start, base)| ledger_start.checked_sub(base));
-            let start_ok = expected.and_then(|value| i32::try_from(value).ok())
-                == Some(place.tx_start_offset.0);
-            if !start_ok || place.data_size != seg_header.data_size {
-                report.data_roots_mismatches = report.data_roots_mismatches.saturating_add(1);
-                note(report, "data_root", format!("offset {} chain", seg_start.0));
-            }
-        }
+        note_chain_extent(
+            &place,
+            seg_derived.tx_ledger_start,
+            seg_header.data_size,
+            map,
+            seg_start,
+            report,
+        );
     }
     if let Some(path_end) = written_end
         && !stop_paths
@@ -3538,62 +3583,38 @@ fn compare_v1_paths(
     limits: Limits,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
-    let mut after = start.0.checked_sub(1).map(PartitionChunkOffset);
-    loop {
-        let batch = read_v1_hash_batch(env, after, limits)?;
-        if batch.is_empty() {
-            break;
-        }
-        let mut passed = false;
-        let mut rows = Vec::new();
-        for (offset, hashes) in &batch {
-            if *offset > end {
-                passed = true;
-                break;
+    walk_v1_path_range(env, start, end, limits, |rows| {
+        note_verify_view();
+        let paths = read_v1_data_paths(env, &rows)?;
+        note_verify_view();
+        let (rights, metas) = v3.view(|tx| {
+            let rights = rows
+                .iter()
+                .map(|(offset, _)| tx.get_data_path_by_offset(*offset))
+                .collect::<eyre::Result<Vec<_>>>()?;
+            let metas = rows
+                .iter()
+                .map(|(offset, _)| tx.get_offset_meta(*offset))
+                .collect::<eyre::Result<Vec<_>>>()?;
+            Ok((rights, metas))
+        })?;
+        for (index, (offset, hash)) in rows.iter().enumerate() {
+            let path = &paths[index];
+            report.offsets_checked = report.offsets_checked.saturating_add(1);
+            if rights[index].as_ref() != Some(path) {
+                report.offset_mismatches = report.offset_mismatches.saturating_add(1);
+                report.mismatch_data_path = report.mismatch_data_path.saturating_add(1);
+                note(report, "data_path", format!("offset {}", offset.0));
             }
-            if let Some(hash) = hashes.data_path_hash {
-                rows.push((*offset, hash));
-            }
-        }
-        if !rows.is_empty() {
-            note_verify_view();
-            let paths = read_v1_data_paths(env, &rows)?;
-            note_verify_view();
-            let (rights, metas) = v3.view(|tx| {
-                let rights = rows
-                    .iter()
-                    .map(|(offset, _)| tx.get_data_path_by_offset(*offset))
-                    .collect::<eyre::Result<Vec<_>>>()?;
-                let metas = rows
-                    .iter()
-                    .map(|(offset, _)| tx.get_offset_meta(*offset))
-                    .collect::<eyre::Result<Vec<_>>>()?;
-                Ok((rights, metas))
-            })?;
-            for (index, (offset, hash)) in rows.iter().enumerate() {
-                let path = &paths[index];
-                report.offsets_checked = report.offsets_checked.saturating_add(1);
-                if rights[index].as_ref() != Some(path) {
-                    report.offset_mismatches = report.offset_mismatches.saturating_add(1);
-                    report.mismatch_data_path = report.mismatch_data_path.saturating_add(1);
-                    note(report, "data_path", format!("offset {}", offset.0));
-                }
-                // A rollback copy is always MDBX v2, never v1.
-                note_mdbx_checksum(true, metas[index].as_ref(), *offset, false, report);
-                if H256::from(hash_sha256(path)) != *hash {
-                    report.mismatch_data_path_hash =
-                        report.mismatch_data_path_hash.saturating_add(1);
-                    note(report, "data_path_hash", format!("offset {}", offset.0));
-                }
+            // A rollback copy is always MDBX v2, never v1.
+            note_mdbx_checksum(true, metas[index].as_ref(), *offset, false, report);
+            if H256::from(hash_sha256(path)) != *hash {
+                report.mismatch_data_path_hash = report.mismatch_data_path_hash.saturating_add(1);
+                note(report, "data_path_hash", format!("offset {}", offset.0));
             }
         }
-        let last = batch.last().map(|(key, _)| *key);
-        if passed || last.is_some_and(|key| key >= end) {
-            break;
-        }
-        after = last;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn note_rocks_placements_absent_from_v1(
@@ -3743,21 +3764,7 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
             path.display()
         );
     }
-    match rocks_schema_text(path)? {
-        Some(text) if text == SUBMODULE_SCHEMA_ROCKS_V1 => {
-            eyre::bail!(
-                "target {} is a completed RocksDB index. Refusing to replace it.",
-                path.display()
-            );
-        }
-        Some(_) => {
-            eyre::bail!(
-                "target {} has an existing index schema. Refusing to delete it.",
-                path.display()
-            );
-        }
-        None => {}
-    }
+    refuse_existing_rocks_schema(path)?;
     replace_marked_incomplete(path, replace)?;
     Ok(())
 }
@@ -3771,23 +3778,8 @@ fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> e
         write_converting_sentinel(path)?;
         return Ok(());
     }
-    // `SCHEMA` beside `CONVERTING` is a finished RocksDB index. The sentinel
-    // is removed only after that file is durable. Refuse it before any delete.
-    match rocks_schema_text(path)? {
-        Some(text) if text == SUBMODULE_SCHEMA_ROCKS_V1 => {
-            eyre::bail!(
-                "target {} is a completed RocksDB index. Refusing to replace it.",
-                path.display()
-            );
-        }
-        Some(_) => {
-            eyre::bail!(
-                "target {} has an existing index schema. Refusing to delete it.",
-                path.display()
-            );
-        }
-        None => {}
-    }
+    // SCHEMA beside CONVERTING is a finished index. Refuse it before any delete.
+    refuse_existing_rocks_schema(path)?;
     refuse_forbidden(path)?;
     if path.join("mdbx.dat").is_file() {
         let args = args.with_exclusive(Some(true));
@@ -3909,14 +3901,11 @@ fn verify_reset_target(
     v3: &RocksSubmoduleStore,
 ) -> eyre::Result<EngineEquivalenceReport> {
     let mut report = EngineEquivalenceReport::default();
-    if v3.reset_in_progress()? != source_reset {
-        report.reset_marker_mismatch = 1;
-        note(&mut report, "reset_marker", "metadata".to_owned());
-    }
-    if v3.schema_bytes()?.as_deref() != Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()) {
-        report.schema_mismatch = 1;
-        note(&mut report, "schema", "metadata".to_owned());
-    }
+    note_reset(&mut report, v3.reset_in_progress()? != source_reset);
+    note_schema(
+        &mut report,
+        v3.schema_bytes()?.as_deref() == Some(SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()),
+    );
     if !v3.read_placements(None, 1)?.is_empty() {
         report.intervals_mismatches = 1;
         note(&mut report, "interval", "reset or empty source".to_owned());
