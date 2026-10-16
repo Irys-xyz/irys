@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use irys_domain::StorageModule;
@@ -11,6 +14,14 @@ use irys_types::{Config, PartitionChunkOffset, PartitionChunkRange, partition::P
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::{JoinHandle, yield_now};
 use tracing::{debug, trace, warn};
+
+/// Test gate. `pack` notifies `started`, then waits until `release` is
+/// notified. `notify_one` stores a permit, so the release can land first.
+#[cfg(test)]
+pub(crate) struct PackPause {
+    pub started: Notify,
+    pub release: Notify,
+}
 
 /// CPU-based packing strategy
 pub(crate) struct CpuPackingStrategy {
@@ -26,6 +37,10 @@ pub(crate) struct CpuPackingStrategy {
     concurrency: u16,
     #[cfg(test)]
     peak_retained_joins: AtomicUsize,
+    #[cfg(test)]
+    chunks_started: AtomicUsize,
+    #[cfg(test)]
+    pack_pause: Arc<Mutex<Option<Arc<PackPause>>>>,
 }
 
 impl CpuPackingStrategy {
@@ -36,6 +51,7 @@ impl CpuPackingStrategy {
         runtime_handle: tokio::runtime::Handle,
         chain_id: u64,
         concurrency: u16,
+        #[cfg(test)] pack_pause: Arc<Mutex<Option<Arc<PackPause>>>>,
     ) -> Self {
         Self {
             chunk_size: config.consensus.chunk_size as usize,
@@ -47,6 +63,10 @@ impl CpuPackingStrategy {
             concurrency,
             #[cfg(test)]
             peak_retained_joins: AtomicUsize::new(0),
+            #[cfg(test)]
+            chunks_started: AtomicUsize::new(0),
+            #[cfg(test)]
+            pack_pause,
         }
     }
 
@@ -103,11 +123,25 @@ impl super::PackingStrategy for CpuPackingStrategy {
         let range_start = *chunk_range.0.start();
         let range_end = *chunk_range.0.end();
 
+        #[cfg(test)]
+        {
+            let pause = self.pack_pause.lock().expect("pack pause").clone();
+            if let Some(pause) = pause {
+                pause.started.notify_one();
+                pause.release.notified().await;
+            }
+        }
+
         let mut handles = VecDeque::new();
         let join_cap = usize::from(self.concurrency).max(1);
         let mut failed = None;
 
         for i in range_start..=range_end {
+            #[cfg(test)]
+            {
+                self.chunks_started
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             // Wait for the disk before queueing more entropy.
             if i % short_writes_before_sync == 0 {
                 if let Err(err) = crate::packing_service::wait_for_pending_room(
@@ -182,6 +216,10 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 && let Some(oldest) = handles.pop_front()
             {
                 Self::collect_join(oldest, storage_module_id, &mut failed).await;
+                if failed.is_some() {
+                    // A refused write fails the whole range. Do not hash the rest.
+                    break;
+                }
             }
 
             // Log progress periodically
@@ -292,7 +330,42 @@ mod tests {
             tokio::runtime::Handle::current(),
             config.consensus.chain_id,
             CONCURRENCY,
+            Arc::new(std::sync::Mutex::new(None)),
         )
+    }
+
+    /// A refused write fails the range. The loop must not hash every later chunk.
+    #[test_log::test(tokio::test)]
+    async fn cpu_pack_stops_after_a_refused_write() {
+        const CHUNKS: u32 = 16;
+        let (_tmp, config, module, _hash) = test_module_span("cpu_stop_refused", u64::from(CHUNKS));
+        let packer = strategy(config.clone());
+        let result = packer
+            .pack(
+                &module,
+                PartitionChunkRange(partition_chunk_offset_ii!(0, CHUNKS - 1)),
+                config.node_config.miner_address(),
+                PartitionHash::repeat_byte(0x11),
+                module.id,
+                100,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "a refused write must fail the pack, got {result:?}"
+        );
+        let started = packer
+            .chunks_started
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            started >= 1,
+            "the loop must attempt the first chunk, started {started}"
+        );
+        assert!(
+            started <= usize::from(packer.concurrency),
+            "refused write must stop the range; started {started} chunks, cap {}",
+            packer.concurrency
+        );
     }
 
     /// A pack for another partition hash fails and stores nothing. A pack for

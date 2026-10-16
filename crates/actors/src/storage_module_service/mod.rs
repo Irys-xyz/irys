@@ -64,6 +64,10 @@ pub struct StorageModuleServiceInner {
     index_heal_needs_retry: bool,
     /// Assignment update whose reset did not finish. The next tick retries it.
     pending_assignment: Option<StorageModuleServiceMessage>,
+    /// Spans the packing channel did not accept. `tick` sends them until the
+    /// channel accepts. A range stays one interval, so a full partition is not
+    /// expanded into one repair offset per chunk.
+    pending_ranges: HashMap<usize, Vec<PartitionChunkRange>>,
 }
 
 /// Reset did not finish. The assignment is unchanged. The service stays up
@@ -78,6 +82,15 @@ impl std::fmt::Display for ResetNotFinished {
 }
 
 impl std::error::Error for ResetNotFinished {}
+
+/// Outcome of one non-blocking send to the packing channel.
+enum PackSend {
+    Accepted,
+    /// The channel is full or closed. The caller keeps the range.
+    Deferred,
+    /// The request is not valid. An unassigned module is not retried.
+    Rejected,
+}
 
 fn is_reset_not_finished(err: &eyre::Report) -> bool {
     err.downcast_ref::<ResetNotFinished>().is_some()
@@ -119,6 +132,7 @@ impl StorageModuleServiceInner {
             shutdown,
             index_heal_needs_retry: true, // force heal until first pass reports clean
             pending_assignment: None,
+            pending_ranges: HashMap::new(),
         }
     }
 
@@ -192,7 +206,7 @@ impl StorageModuleServiceInner {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    fn tick(&self) {
+    fn tick(&mut self) {
         let storage_modules = {
             let guard = self.storage_modules.read().unwrap();
             guard.clone()
@@ -417,15 +431,18 @@ impl StorageModuleServiceInner {
         let _ = self.try_enqueue_packing(module, range);
     }
 
-    /// `false` when the request was not accepted. The caller decides whether
-    /// to retry. No partition assignment is not a warning: packing cannot run.
-    fn try_enqueue_packing(&self, module: &Arc<StorageModule>, range: PartitionChunkRange) -> bool {
+    /// No partition assignment is not a warning: packing cannot run.
+    fn try_enqueue_packing(
+        &self,
+        module: &Arc<StorageModule>,
+        range: PartitionChunkRange,
+    ) -> PackSend {
         let sender = self.service_senders.packing_sender();
         let Ok(req) = PackingRequest::new(module.clone(), range) else {
-            return false;
+            return PackSend::Rejected;
         };
         match sender.try_send(req) {
-            Ok(()) => true,
+            Ok(()) => PackSend::Accepted,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!(
                     target = "irys::packing",
@@ -433,7 +450,7 @@ impl StorageModuleServiceInner {
                     storage_module.packing_interval = ?range,
                     "Dropping packing request due to a saturated channel"
                 );
-                false
+                PackSend::Deferred
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                 tracing::error!(
@@ -442,31 +459,60 @@ impl StorageModuleServiceInner {
                     storage_module.packing_interval = ?range,
                     "Packing channel closed; failed to enqueue repacking request"
                 );
-                false
+                PackSend::Deferred
             }
         }
     }
 
-    /// Hand crc mismatches to the existing packing queue. A failed send puts
-    /// the range back so the next tick tries again.
-    fn enqueue_crc_repairs(&self, module: &Arc<StorageModule>) {
-        for range in module.take_crc_repair_ranges() {
-            if !self.try_enqueue_packing(module, PartitionChunkRange(range)) {
-                module.requeue_crc_repair_range(range);
+    /// Hand crc mismatches to the packing queue. A full channel keeps the
+    /// range here, as one interval. An unassigned module drops it.
+    fn enqueue_crc_repairs(&mut self, module: &Arc<StorageModule>) {
+        if module.partition_assignment().is_none() {
+            // The module cannot pack. Leaving the range queued makes every
+            // later tick expand it and try again.
+            let _dropped = module.take_crc_repair_ranges();
+            self.pending_ranges.remove(&module.id);
+            return;
+        }
+
+        let mut waiting = self.pending_ranges.remove(&module.id).unwrap_or_default();
+        waiting.extend(
+            module
+                .take_crc_repair_ranges()
+                .into_iter()
+                .map(PartitionChunkRange),
+        );
+        let mut deferred = Vec::new();
+        for range in waiting {
+            match self.try_enqueue_packing(module, range) {
+                PackSend::Accepted => {}
+                PackSend::Deferred => deferred.push(range),
+                PackSend::Rejected => {
+                    // `new` failed while the module is still assigned: the
+                    // range does not fit the partition. Put that range back.
+                    // An assignment cleared during the send is not retried.
+                    if module.partition_assignment().is_some() {
+                        module.requeue_crc_repair_range(range.0);
+                    }
+                }
             }
+        }
+        if !deferred.is_empty() {
+            self.pending_ranges.insert(module.id, deferred);
         }
     }
 
     fn clear_assignment_if_outdated(
-        &self,
+        &mut self,
         module: &Arc<StorageModule>,
         update_height: u64,
         reason: &'static str,
     ) -> eyre::Result<()> {
         if module.partition_assignment().is_none() {
-            // The assignment is already gone. Finish a reset that stopped
-            // before its marker was dropped. Do not write the assignment
-            // again: it is already `None`.
+            // The assignment is already gone. A span kept for a full channel
+            // must not be packed later. Finish a reset that stopped before
+            // its marker was dropped. Do not write the assignment again.
+            self.pending_ranges.remove(&module.id);
             if module.reset_incomplete() {
                 self.finish_reset(module)?;
             }
@@ -501,6 +547,8 @@ impl StorageModuleServiceInner {
         // Reset and clear the assignment under one write lock. A failure
         // leaves the assignment in place so the next update retries.
         let range = self.reset_and_install(module, None, update_height)?;
+        // The module is unassigned. Do not pack a span the channel deferred.
+        self.pending_ranges.remove(&module.id);
         debug!(
             packing.interval = ?range,
             storage_module.id = module.id,
@@ -745,10 +793,12 @@ mod assignment_reset_tests {
     use irys_testing_utils::{new_mock_signed_header, utils::TempDirBuilder};
     use irys_types::{
         Config, ConsensusConfig, ConsensusOptions, DataLedger, DatabaseProvider, H256, NodeConfig,
-        NodeMode, PartitionChunkOffset, partition::PartitionAssignment, partition_chunk_offset_ie,
+        NodeMode, PartitionChunkOffset, ii, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::{Arc, RwLock};
+    use tokio::sync::mpsc::error::TrySendError;
 
     struct Harness {
         _tmp: irys_testing_utils::tempfile::TempDir,
@@ -1234,6 +1284,198 @@ mod assignment_reset_tests {
         assert_eq!(
             harness.module.partition_assignment().unwrap().ledger_id,
             None
+        );
+    }
+
+    fn assigned_hash_and_miner(module: &StorageModule) -> (H256, irys_types::IrysAddress) {
+        let assignment = module.partition_assignment().expect("assigned");
+        (assignment.partition_hash, assignment.miner_address)
+    }
+
+    async fn apply_update(harness: &mut Harness, infos: Arc<Vec<StorageModuleInfo>>, height: u64) {
+        harness
+            .inner
+            .apply_assignment(StorageModuleServiceMessage::PartitionAssignmentsUpdated {
+                storage_module_infos: infos,
+                update_height: height,
+            })
+            .await
+            .expect("assignment update");
+    }
+
+    fn fill_packing_channel(harness: &Harness) {
+        let sender = harness.inner.service_senders.packing_sender();
+        let range = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 0));
+        loop {
+            let request =
+                PackingRequest::new(Arc::clone(&harness.module), range).expect("assigned");
+            match sender.try_send(request) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => break,
+                Err(TrySendError::Closed(_)) => panic!("packing channel closed while filling"),
+            }
+        }
+    }
+
+    fn drain_packing(harness: &mut Harness) -> Vec<PackingRequest> {
+        let mut queued = Vec::new();
+        while let Ok(request) = harness.receivers.packing.try_recv() {
+            queued.push(request);
+        }
+        queued
+    }
+
+    fn assert_full_partition_span(request: &PackingRequest) {
+        assert_eq!(*request.chunk_range().0.start(), 0);
+        assert_eq!(*request.chunk_range().0.end(), 9);
+    }
+
+    fn repair_one_to_three() -> PartitionChunkRange {
+        PartitionChunkRange(irys_types::partition_chunk_offset_ii!(1, 3))
+    }
+
+    /// An unassigned module cannot pack. The tick must drop the range.
+    /// Putting it back makes the next tick expand and retry it forever.
+    #[tokio::test]
+    async fn unassigned_module_drops_crc_repairs() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let path = harness.path.clone();
+        apply_update(
+            &mut harness,
+            Arc::new(vec![StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), path)],
+            }]),
+            4,
+        )
+        .await;
+        assert!(harness.module.partition_assignment().is_none());
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "an unassigned module must not enqueue a repair"
+        );
+        let left = harness.module.take_crc_repair_ranges();
+        assert!(
+            left.is_empty(),
+            "unassigned module must drop crc repairs, still queued: {left:?}"
+        );
+        harness.inner.tick();
+        let left = harness.module.take_crc_repair_ranges();
+        assert!(
+            left.is_empty(),
+            "a later tick must not restore dropped repairs: {left:?}"
+        );
+    }
+
+    /// A module that still has an assignment sends one range and does not
+    /// leave it queued.
+    #[tokio::test]
+    async fn assigned_module_enqueues_a_crc_repair() {
+        let mut harness = harness(None);
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("an assigned module enqueues the repair");
+        assert_eq!(*request.chunk_range().0.start(), 1);
+        assert_eq!(*request.chunk_range().0.end(), 3);
+        assert!(harness.module.take_crc_repair_ranges().is_empty());
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// A full channel must not expand the repair into one offset per chunk.
+    /// The same range is sent once a slot is free.
+    #[tokio::test]
+    async fn full_channel_retries_a_crc_repair_as_one_range() {
+        let mut harness = harness(None);
+        fill_packing_channel(&harness);
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        let left = harness.module.take_crc_repair_ranges();
+        assert!(
+            left.is_empty(),
+            "a full channel must keep the repair as one range, not put offsets back: {left:?}"
+        );
+        assert!(
+            harness.receivers.packing.try_recv().is_ok(),
+            "the filled channel still holds a filler request"
+        );
+        harness.inner.tick();
+        let mut saw = false;
+        for _ in 0..5_001 {
+            let Ok(request) = harness.receivers.packing.try_recv() else {
+                break;
+            };
+            if *request.chunk_range().0.start() == 1 && *request.chunk_range().0.end() == 3 {
+                saw = true;
+                break;
+            }
+            assert_eq!(
+                *request.chunk_range().0.end(),
+                0,
+                "unexpected packing range {request:?}"
+            );
+        }
+        assert!(saw, "the repair range is sent once the channel has room");
+    }
+
+    /// The channel has room. Ledger to capacity sends the reset span now.
+    #[tokio::test]
+    async fn open_packing_channel_sends_the_reset_pack() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("an open channel accepts the reset pack");
+        assert_full_partition_span(&request);
+        assert!(
+            harness.inner.pending_ranges.get(&0).is_none(),
+            "an accepted reset pack is not retried"
+        );
+    }
+
+    /// A span remembered for the capacity reset must not run after the
+    /// partition is given a ledger slot. That transition does not repack.
+    #[tokio::test]
+    async fn capacity_to_ledger_does_not_send_a_deferred_reset_pack() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        fill_packing_channel(&harness);
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        let _fillers = drain_packing(&mut harness);
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "capacity to ledger must not pack a span deferred from the capacity reset"
         );
     }
 }

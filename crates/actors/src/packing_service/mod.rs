@@ -161,6 +161,11 @@ pub struct PackingService {
     /// Packing strategies
     local_strategy: Arc<dyn PackingStrategy>,
     remote_strategy: Arc<RemotePackingStrategy>,
+
+    /// Shared with the CPU strategy. Tests pause `pack` after the assignment
+    /// is read and before the first write.
+    #[cfg(test)]
+    pack_pause: Arc<Mutex<Option<Arc<strategies::cpu::PackPause>>>>,
 }
 
 impl PackingService {
@@ -171,6 +176,8 @@ impl PackingService {
         let notify = Arc::new(Notify::new());
 
         let runtime_handle = tokio::runtime::Handle::current();
+        #[cfg(test)]
+        let pack_pause = Arc::new(Mutex::new(None));
 
         // Initialize local packing strategy based on PACKING_TYPE
         let local_strategy: Arc<dyn PackingStrategy> = match PACKING_TYPE {
@@ -183,6 +190,8 @@ impl PackingService {
                     runtime_handle,
                     packing_config.chain_id,
                     packing_config.concurrency,
+                    #[cfg(test)]
+                    pack_pause.clone(),
                 ))
             }
             #[cfg(feature = "nvidia")]
@@ -218,7 +227,14 @@ impl PackingService {
             notify,
             local_strategy,
             remote_strategy,
+            #[cfg(test)]
+            pack_pause,
         }
+    }
+
+    #[cfg(test)]
+    fn set_pack_pause_for_test(&self, pause: Option<Arc<strategies::cpu::PackPause>>) {
+        *self.pack_pause.lock().expect("pack pause") = pause;
     }
 
     /// Try to poll a job from any non-empty queue, or wait for new work
@@ -336,10 +352,13 @@ impl PackingService {
                 .await
             {
                 warn!(target: "irys::packing", "Local packing failed for SM {}: {}", storage_module_id, e);
-                // The range already left `crc_repairs` when it was sent. A
-                // refused write or a panicked worker has to put it back, or
-                // the offset stays Uninitialized with nothing queued.
-                storage_module.requeue_crc_repair_range(job_chunk_range.0);
+                // The range already left `crc_repairs` when it was sent. Put
+                // it back only while the module is still assigned. An
+                // unassigned module cannot pack, and returning the range
+                // makes every later tick expand it again.
+                if storage_module.partition_assignment().is_some() {
+                    storage_module.requeue_crc_repair_range(job_chunk_range.0);
+                }
             }
 
             sync_with_warning(&storage_module, "local packing completion");
@@ -593,6 +612,90 @@ mod tests {
         assert_eq!(
             queued,
             vec![ii(PartitionChunkOffset(0), PartitionChunkOffset(0))]
+        );
+        Ok(())
+    }
+
+    /// The assignment is read before `pack`. Clearing it while `pack` is
+    /// paused must not put the range back: the module can no longer pack.
+    #[cfg(not(feature = "nvidia"))]
+    #[test_log::test(tokio::test)]
+    async fn unassigned_during_pack_does_not_requeue() -> eyre::Result<()> {
+        use std::sync::Arc;
+
+        use super::strategies::cpu::PackPause;
+        use irys_domain::ChunkType;
+        use tokio::sync::Notify;
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("unassigned_pack_requeue")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 32,
+            ..consensus
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = PartitionHash::zero();
+        // Absolute. Assignment writes join this path, not the process cwd.
+        let submodule_dir = tmp_dir.path().join("hdd0");
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), submodule_dir)],
+        };
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        let request = PackingRequest::new(
+            storage_module.clone(),
+            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 0)),
+        )?;
+
+        let packing = PackingService::new(Arc::new(config));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = packing.spawn_packing_controllers(runtime_handle.clone());
+        let handle = packing.spawn_tokio_service(runtime_handle);
+        let pause = Arc::new(PackPause {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let started = pause.started.notified();
+        tokio::pin!(started);
+        assert!(
+            !started.as_mut().enable(),
+            "the pause must not already be notified"
+        );
+        packing.set_pack_pause_for_test(Some(Arc::clone(&pause)));
+        handle.send(request)?;
+
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .expect("pack starts while the module is still assigned");
+        storage_module.reset_with_assignment(None, 3)?;
+        assert!(storage_module.partition_assignment().is_none());
+        pause.release.notify_one();
+        handle
+            .waiter()
+            .wait_for_idle(Some(Duration::from_secs(10)))
+            .await?;
+
+        assert_ne!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Entropy),
+            "the write must be refused after the module is unassigned"
+        );
+        let ranges = storage_module.take_crc_repair_ranges();
+        assert!(
+            ranges.is_empty(),
+            "an unassigned module must not requeue the failed pack, still queued: {ranges:?}"
         );
         Ok(())
     }
