@@ -28,7 +28,11 @@ migration finishes, then convert. There is no separate v1 copy.
 An omitted `database.submodule_index` stays `mdbx`. That first open is
 also when these storage defaults take effect. Mining recall reads
 `chunks.dat` with `O_DIRECT` (`storage.recall_direct_io`, default true).
-An open that returns `EINVAL` or `EOPNOTSUPP` (tmpfs returns `EINVAL`)
+A direct read of a range that still has dirty buffered pages returns the
+new bytes. Linux writes that range back before the direct read (XFS and
+ext4 iomap). On a filesystem that accepts `O_DIRECT` and does not write
+dirty pages back first, a recall can hash bytes that are not the latest
+write. An open that returns `EINVAL` or `EOPNOTSUPP` (tmpfs returns `EINVAL`)
 logs one warning and keeps the buffered descriptor. Any other errno
 fails module open. Durable points wait up to
 `min_durable_interval_ms` (250), and `intervals.json` completion
