@@ -6,7 +6,7 @@ import unittest
 
 from analysis.disktime import IostatFormatError, parse_iostat, window_time
 from analysis.ladder import percentile, summarize_step
-from analysis.minutes import minute_bounds, minute_stats
+from analysis.minutes import iter_minutes, minute_bounds, minute_stats
 
 
 def sample(step, sec, driver, **fields):
@@ -122,6 +122,39 @@ class MinuteTests(unittest.TestCase):
         self.assertEqual(second["start_max_ms"], 900)
         self.assertEqual(second["pending_max"], 320)
         self.assertIsNone(minute_stats(rows, "ingest-32", 2))
+
+    def test_contiguous_minutes_have_no_gap(self):
+        rows = [
+            sample("s", sec, "ingest", enqueued=2**20, durable=2**20, pending_chunks=1)
+            for sec in range(1, 121)
+        ]
+        found = list(iter_minutes(rows, "s", 60))
+        self.assertEqual([item["minute"] for item in found], [1, 2])
+        self.assertTrue(all(not item.get("gap") for item in found))
+
+    def test_an_empty_minute_does_not_hide_later_minutes(self):
+        rows = []
+        for sec in list(range(1, 61)) + list(range(121, 181)):
+            rows.append(
+                sample("s", sec, "ingest", enqueued=2**20, durable=2**20, pending_chunks=1)
+            )
+        found = list(iter_minutes(rows, "s", 60))
+        self.assertEqual([item["minute"] for item in found], [1, 2, 3])
+        self.assertTrue(found[1].get("gap"))
+        self.assertFalse(found[0].get("gap"))
+        self.assertEqual(found[0]["secs"], 60)
+        self.assertEqual(found[2]["secs"], 60)
+
+    def test_a_leading_empty_minute_still_yields_the_later_one(self):
+        rows = [
+            sample("s", sec, "ingest", enqueued=2**20, durable=2**20, pending_chunks=1)
+            for sec in range(61, 121)
+        ]
+        found = list(iter_minutes(rows, "s", 60))
+        self.assertEqual([item["minute"] for item in found], [1, 2])
+        self.assertTrue(found[0].get("gap"))
+        self.assertFalse(found[1].get("gap"))
+        self.assertEqual(found[1]["secs"], 60)
 
 
 class DiskTimeTests(unittest.TestCase):

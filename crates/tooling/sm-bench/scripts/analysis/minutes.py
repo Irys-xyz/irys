@@ -71,13 +71,27 @@ def format_minute(stats):
 
 
 def iter_minutes(rows, step, minute_secs):
-    minute = 0
-    while True:
+    """Yield every minute through the last ingest sample of `step`.
+
+    An empty minute is `{"minute": n, "gap": True}`. Stopping at the first
+    gap would hide every later minute of the step.
+    """
+    last_sec = 0
+    for row in rows:
+        if row.get("step") != step or row.get("driver") != "ingest":
+            continue
+        sec = row["sec"]
+        if sec > last_sec:
+            last_sec = sec
+    if last_sec <= 0:
+        return
+    last_minute = (last_sec - 1) // minute_secs
+    for minute in range(last_minute + 1):
         stats = minute_stats(rows, step, minute, minute_secs)
         if stats is None:
-            return
-        yield stats
-        minute += 1
+            yield {"minute": minute + 1, "gap": True}
+        else:
+            yield stats
 
 
 def main(argv):
@@ -104,7 +118,10 @@ def main(argv):
         any_row = False
         for stats in iter_minutes(rows, step, minute_secs):
             any_row = True
-            print(format_minute(stats))
+            if stats.get("gap"):
+                print(f"  min{stats['minute']:2d} (no samples)")
+            else:
+                print(format_minute(stats))
         if not any_row:
             print("  (no samples)")
     return 0
