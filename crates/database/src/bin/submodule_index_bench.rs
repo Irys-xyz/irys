@@ -2,33 +2,9 @@
 //!
 //! Prints wall time and directory bytes. The path must contain an
 //! `index-bench` component and must be empty. This binary does not open a
-//! live node database.
-//!
-//! ```text
-//! cargo run -p irys-database --features rocksdb --bin submodule-index-bench -- \
-//!   --dir /tmp/index-bench --chunks 4096
-//! ```
-//!
-//! `--worst-case` stores a max-size data proof on every chunk. A full
-//! partition is `--chunks 75534400` and needs `IRYS_INDEX_BENCH_LARGE=1`.
-//! `--small-txs N` fills the same span with N-chunk transactions, each with
-//! its own data root. `--mid-txs` uses transactions of 257 to 4096 chunks.
-//! `--mid` writes 1_000_000 chunks of 4096-byte paths, past an HDD cache.
-//! It needs the same variable. `--profile filled|mid|worst` selects the
-//! older workloads. `--rocks <preset>` changes one RocksDB setting.
-//! `--engine rocks` skips MDBX. RocksDB is layout v1. MDBX stays schema v2.
-//! Production rocks open writes one placement and an inline data proof and
-//! does not store a tx path.
-//!
-//! `--data-fraction F` writes transactions and data rows for the first
-//! `F × --chunks` offsets. `--with-crc` stores the proof plus the checksum
-//! trailer from `encode_offset_meta`. `--entropy-fill` writes checksum-only
-//! rows. Both need `--engine rocks`. `entropy_range` and `recall_rows` time
-//! cold reads of those rows. They are skipped when the data region covers
-//! the whole partition.
-//!
-//! After the writes, each engine drops its file cache with `posix_fadvise`
-//! and times random lookups. This does not call `drop_caches`.
+//! live node database. `--help` lists the workloads. After the writes, each
+//! engine drops its file cache with `posix_fadvise` and times lookups.
+//! It does not call `drop_caches`.
 
 use std::fs::{self, File};
 use std::io::Error;
@@ -66,12 +42,10 @@ const LEAF_SIZE: usize = HASH_SIZE + NOTE_SIZE;
 const LARGE_RAW_BYTES: u64 = 8 << 30;
 /// Filled run past a typical HDD cache. 4096-byte paths, about 4 GiB raw.
 const MID_CHUNKS: u32 = 1_000_000;
-/// Transactions in one grouped commit. `--mid` uses this for MDBX.
-/// `--group-commit` uses it for both engines.
+/// Transactions per grouped commit. `--mid` uses this for MDBX. `--group-commit` uses it for both.
 const MID_MDBX_TXS_PER_COMMIT: u32 = 8;
-/// Data-path rows in one grouped commit. `--mid` uses this for MDBX.
-/// `--group-commit` uses it for both engines. Rocks without the flag stays
-/// at `--batch`.
+/// Data-path rows per grouped commit. `--mid` uses this for MDBX. `--group-commit` uses it for both.
+/// Rocks without the flag stays at `--batch`.
 const MID_MDBX_PATH_BATCH: u32 = 2048;
 /// First samples reported apart from the rest, in arrival order.
 const HEAD_SAMPLES: usize = 32;
@@ -105,7 +79,7 @@ const MID_TX_SEED: u64 = 0x5EED_71E5;
 /// Seed for the `--shuffle-paths` run order.
 const SHUFFLE_SEED: u64 = 0x5EED_5A1F;
 
-/// Workload shape. `mid` and `worst` are also the old flags.
+/// Workload shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Workload {
     Filled,
@@ -170,7 +144,7 @@ struct TxPlace {
     leaves: u64,
 }
 
-/// Which engines to write. A preset sweep uses `Rocks` so MDBX is not repeated.
+/// Which engines to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engines {
     Both,
@@ -197,9 +171,7 @@ impl Engines {
 }
 
 struct Args {
-    /// `--worst-case` writes one unrelated random proof per chunk (the layout of
-    /// runs before the shared-node generator). Off by default: real proofs of one
-    /// transaction share most tree nodes, which is what inline storage compresses.
+    /// Unrelated proof per chunk. Default worst-case proofs share tree nodes.
     uniform_proofs: bool,
     dir: PathBuf,
     chunks: u32,
@@ -223,11 +195,9 @@ struct Args {
     small_tx_chunks: u32,
     /// `(start, stored)` for `--mid-txs`. Empty otherwise.
     mid_spans: Vec<(u32, u32)>,
-    /// Data paths arrive as runs of this many chunks in a seeded random
-    /// order, like scattered data sync. `None` writes them in offset order.
+    /// Run length for scattered data-path writes. `None` writes in offset order.
     shuffle_run: Option<u32>,
-    /// Overrides the transaction rows per commit. Production commits one
-    /// block's transactions together.
+    /// Overrides transaction rows per commit. Production commits one block together.
     txs_per_commit: Option<u32>,
     /// Printed `--data-fraction`. `1` when the flag is absent.
     data_fraction: f64,
@@ -239,10 +209,9 @@ struct Args {
     entropy_fill: bool,
 }
 
-/// Every open gets its own block cache, sized like the production shared
-/// cache. The process-wide shared cache survives a reopen, so a cold shape
-/// would hit blocks an earlier shape loaded (serve samples overlap the random
-/// shape's offsets). Presets that already chose a private cache keep it.
+/// Private block cache per open. The process-wide cache survives a reopen, so a
+/// cold shape would hit blocks an earlier shape loaded. A preset that already
+/// chose a private cache keeps it.
 fn open_bench_rocks(path: &Path, args: &Args) -> eyre::Result<SubmoduleIndex> {
     let tuning = if args.rocks.share_resources {
         args.rocks
@@ -358,9 +327,7 @@ fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-/// One durable `update`. `--mid` groups MDBX only. `--group-commit` applies
-/// that grouping to both engines. Without it, Rocks keeps one transaction
-/// and the `--batch` data-path size.
+/// One durable `update`. `--mid` groups MDBX only. `--group-commit` groups both.
 struct CommitGrouping {
     txs_per_commit: u32,
     path_batch: u32,
@@ -373,11 +340,8 @@ fn bloom_bytes(keys: u64) -> u64 {
 
 fn memory_predict(args: &Args) -> String {
     let shared = args.rocks.share_resources;
-    // A shared open uses the process cache, not the private preset field.
-    // The bench does not install a custom size, so that cache is the default.
-    // Inline data-path blocks use this cache. There is no separate blob
-    // cache. These profiles store offset rows, so the figure is the bloom
-    // against that one cache.
+    // A shared open uses the process cache. These profiles store offset rows,
+    // so the figure is that cache against the bloom. There is no blob cache.
     let cache = if shared {
         irys_types::DEFAULT_ROCKSDB_BLOCK_CACHE_BYTES
     } else {
@@ -409,12 +373,7 @@ fn memory_predict(args: &Args) -> String {
                 args.batch
             )
         }
-        Workload::Filled
-        | Workload::Mid
-        | Workload::Worst
-        | Workload::SmallTxs
-        | Workload::MidTxs
-        | Workload::CrcRows => String::new(),
+        _ => String::new(),
     }
 }
 
@@ -423,22 +382,12 @@ fn run_memory(args: &Args) -> eyre::Result<()> {
         Workload::MemDbs => run_mem_dbs(args),
         Workload::IndexSpan => run_index_span(args),
         Workload::OffsetRows => run_offset_rows(args),
-        Workload::Filled
-        | Workload::Mid
-        | Workload::Worst
-        | Workload::SmallTxs
-        | Workload::MidTxs
-        | Workload::CrcRows => {
-            eyre::bail!("not a memory profile")
-        }
+        _ => eyre::bail!("not a memory profile"),
     }
 }
 
-/// Open several Rocks databases and leave them open.
-///
-/// Each one gets `chunks` offset rows, a flush, then a full scan. The scan
-/// fills that database's block cache. RSS after each database is the number
-/// to multiply toward a full host.
+/// Open several Rocks databases and leave them open. RSS after each scan is
+/// the number to multiply toward a full host.
 fn run_mem_dbs(args: &Args) -> eyre::Result<()> {
     let watch = MemWatch::start();
     note_mem("process", "start", &watch);
@@ -472,7 +421,7 @@ fn run_mem_dbs(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
-/// One production-shaped index update: every offset in the span, one commit.
+/// Every offset in one commit.
 fn run_index_span(args: &Args) -> eyre::Result<()> {
     let watch = MemWatch::start();
     let dir = args.dir.join("rocks");
@@ -508,7 +457,7 @@ fn run_index_span(args: &Args) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Offset rows and no data paths. The cold read is one family.
+/// Offset rows only. The cold read is one family.
 fn run_offset_rows(args: &Args) -> eyre::Result<()> {
     let watch = MemWatch::start();
     let dir = args.dir.join("rocks");
@@ -846,6 +795,14 @@ fn write_tx_index(store: &SubmoduleIndex, args: &Args, txs_per_commit: u32) -> e
     Ok(())
 }
 
+fn data_update(args: &Args, at: u32) -> (PartitionChunkOffset, H256, Vec<u8>) {
+    (
+        PartitionChunkOffset::from(at),
+        hash_at(u64::from(at) + 0x2000_0000),
+        data_path_bytes(args, at),
+    )
+}
+
 fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyre::Result<()> {
     if let Some(run) = args.shuffle_run {
         return write_shuffled_data_paths(store, args, path_batch, run);
@@ -855,12 +812,7 @@ fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyr
         let count = path_batch.min(args.data_chunks - offset);
         let mut updates = Vec::with_capacity(count as usize);
         for step in 0..count {
-            let at = offset + step;
-            updates.push((
-                PartitionChunkOffset::from(at),
-                hash_at(u64::from(at) + 0x2000_0000),
-                data_path_bytes(args, at),
-            ));
+            updates.push(data_update(args, offset + step));
         }
         write_data_batch(store, args, updates)?;
         offset += count;
@@ -868,9 +820,7 @@ fn write_data_paths(store: &SubmoduleIndex, args: &Args, path_batch: u32) -> eyr
     Ok(())
 }
 
-/// Each commit takes `path_batch` chunks from runs of `run` offsets visited
-/// in a seeded Fisher-Yates order, so most commits touch keys spread over
-/// the whole partition.
+/// Commits take `path_batch` chunks from runs visited in Fisher-Yates order.
 fn write_shuffled_data_paths(
     store: &SubmoduleIndex,
     args: &Args,
@@ -882,11 +832,7 @@ fn write_shuffled_data_paths(
     for start in runs {
         let end = start.saturating_add(run).min(args.data_chunks);
         for at in start..end {
-            updates.push((
-                PartitionChunkOffset::from(at),
-                hash_at(u64::from(at) + 0x2000_0000),
-                data_path_bytes(args, at),
-            ));
+            updates.push(data_update(args, at));
             if updates.len() >= path_batch as usize {
                 let batch = std::mem::take(&mut updates);
                 write_data_batch(store, args, batch)?;
@@ -899,7 +845,6 @@ fn write_shuffled_data_paths(
     Ok(())
 }
 
-/// One data-path commit. `--with-crc` uses the production offset record.
 fn write_data_batch(
     store: &SubmoduleIndex,
     args: &Args,
@@ -926,20 +871,14 @@ fn write_data_batch(
     Ok(())
 }
 
-/// Checksum stored in a bench offset row.
-///
-/// The bench has no packed chunk, so this is not the CRC32C of chunk bytes.
-/// The record is still [`encode_offset_meta`]: proof bytes, then the 4-byte
-/// checksum, the flags byte, and the format byte. Offset 0 stores checksum 0.
+/// Not the CRC32C of chunk bytes. Offset 0 stores checksum 0. The row is still
+/// [`encode_offset_meta`].
 fn bench_chunk_crc(offset: u32) -> u32 {
     offset.wrapping_mul(0x0100_0001)
 }
 
-/// Checksum-only rows for offsets the data region does not cover.
-///
-/// Rows go out in offset order. One `update` holds `batch` rows, the same
-/// commit size as the data-path writes. `update` is the commit. The bench
-/// does not add a sync between batches.
+/// Checksum-only rows past the data region. One `update` is the commit.
+/// There is no sync between batches.
 fn write_entropy_rows(store: &SubmoduleIndex, args: &Args, batch: u32) -> eyre::Result<()> {
     let mut offset = args.data_chunks;
     while offset < args.chunks {
@@ -960,7 +899,6 @@ fn write_entropy_rows(store: &SubmoduleIndex, args: &Args, batch: u32) -> eyre::
     Ok(())
 }
 
-/// Start offsets of `run`-sized runs covering `0..chunks`, shuffled.
 fn shuffled_runs(chunks: u32, run: u32) -> Vec<u32> {
     let step = usize::try_from(run.max(1)).unwrap_or(usize::MAX);
     let mut runs: Vec<u32> = (0..chunks).step_by(step).collect();
@@ -973,13 +911,10 @@ fn shuffled_runs(chunks: u32, run: u32) -> Vec<u32> {
     runs
 }
 
-/// Cold lookups. Each shape reopens the engine and drops the OS file cache.
-/// A shared Rocks block cache would turn the sequential scan into hits on the
-/// random sample. `drop_caches` is not used: another bench may share the host.
-///
-/// `data_path_random` then runs again on the same open engine. That pass
-/// still drops the page cache. The Rocks block cache stays warm, and table
-/// files stay open.
+/// Each shape reopens and drops the OS file cache. A shared Rocks block cache
+/// would turn the sequential scan into hits on the random sample. `drop_caches`
+/// is not used: another bench may share the host. `data_path_random_open` keeps
+/// that block cache warm and leaves table files open.
 fn read_phase(
     dir: &Path,
     engine: &str,
@@ -1230,8 +1165,7 @@ fn read_phase(
     Ok(())
 }
 
-/// Stored proof length at `at`. Tree shapes vary the depth per transaction
-/// (and per leaf in an odd tree), so ask the generator.
+/// Tree shapes vary the depth per leaf, so ask the generator.
 fn expected_path_len(args: &Args, at: u32) -> usize {
     if args.workload.is_tree() {
         data_path_bytes(args, at).len()
@@ -1245,20 +1179,11 @@ enum RmwRoot {
     Skipped(&'static str),
 }
 
-/// Why `rmw_root` does not write on RocksDB v1.
-///
-/// Production fills the data-root row once, in the same commit as the
-/// interval (`add_data_root_info` while the placement is still unfilled).
-/// After that commit the placement is filled. A later append has no unfilled
-/// placement, and `set_data_root_infos` will not add or replace the row while
-/// the interval exists. There is no production read-modify-write of this row.
+/// Printed when `rmw_root` does not write. The placement row is filled once,
+/// in the same commit as the interval, and cannot be replaced after that.
 const ROCKS_RMW_ROOT_SKIP: &str = "RocksDB v1 fills each placement's data-root row once, in the same commit as its interval. A later info append has no unfilled placement, and that row cannot be replaced while the interval exists. Production has no read-modify-write of this row.";
 
-/// Append one data-root info that is not already stored, so the commit is real.
-///
-/// MDBX keeps a list per data root. This sample pushes a new entry.
-/// RocksDB v1 returns [`RmwRoot::Skipped`] and does not write. See
-/// [`ROCKS_RMW_ROOT_SKIP`].
+/// MDBX appends one new data-root info. RocksDB v1 does not write.
 fn rmw_root_sample(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<RmwRoot> {
     if !store.stores_tx_paths() {
         return Ok(RmwRoot::Skipped(ROCKS_RMW_ROOT_SKIP));
@@ -1288,7 +1213,6 @@ fn read_one_data_path(store: &SubmoduleIndex, args: &Args, at: u32) -> eyre::Res
     Ok(())
 }
 
-/// Why `entropy_range` and `recall_rows` do not run.
 fn entropy_read_skip(engine: &str, args: &Args) -> Option<&'static str> {
     if args.data_chunks == args.chunks {
         Some("no entropy region")
@@ -1299,11 +1223,7 @@ fn entropy_read_skip(engine: &str, args: &Args) -> Option<&'static str> {
     }
 }
 
-/// Cold `--range-len` read of consecutive checksum-only rows.
-///
-/// The window sits in the entropy region. The call is `offset_metas_in_range`,
-/// the same range read production uses when it checks recall checksums.
-/// Returns the row count.
+/// `offset_metas_in_range` over checksum-only rows. Returns the row count.
 fn read_entropy_range(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<usize> {
     let entropy = args.chunks - args.data_chunks;
     eyre::ensure!(entropy > 0, "no entropy region");
@@ -1339,10 +1259,7 @@ fn read_entropy_range(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Resu
     Ok(rows.len())
 }
 
-/// Cold `--range-len` read at a random offset over the whole partition.
-///
-/// Data and entropy rows are both visible. The iterator is
-/// `offset_metas_in_range`. Returns the row count.
+/// `offset_metas_in_range` at a random start over the whole partition.
 fn read_recall_rows(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<usize> {
     let window = args.range_len.min(args.chunks);
     let start = sample_offset(i, args.chunks - window + 1);
@@ -1496,7 +1413,7 @@ struct Rank {
     max: u64,
 }
 
-/// Percentiles of `samples` in the order given. Sorting is a copy.
+/// Percentiles of `samples` in the order given. The sort is a copy.
 fn ranks(samples: &[u64]) -> Rank {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
@@ -1766,31 +1683,47 @@ fn run_crc_rows(args: &Args) -> eyre::Result<()> {
     ];
     for (shape, chunks, kind) in shapes {
         for layout in layouts {
-            measure_crc_layout(args, shape, chunks, kind, layout)?;
+            let name = layout.name();
+            measure_raw_rows(
+                args,
+                &format!("crc-{shape}-{name}"),
+                shape,
+                name,
+                chunks,
+                |index| {
+                    let proof = crc_shape_proof(kind, index);
+                    crc_layout_bytes(layout, &proof, index)
+                },
+            )?;
         }
     }
-    measure_crc_only(args, shared)?;
+    measure_raw_rows(args, "crc-only", "crc_only", "suffix", shared, |index| {
+        encode_offset_meta(&OffsetMeta {
+            crc: Some(bench_chunk_crc(index)),
+            proof: None,
+        })
+    })?;
     println!(
         "crc_rows note=sample partition_chunks={PARTITION_CHUNKS} extrapolated_sst is sample_sst / sample_chunks * partition_chunks"
     );
     Ok(())
 }
 
-fn measure_crc_layout(
+fn measure_raw_rows(
     args: &Args,
+    dir_name: &str,
     shape: &str,
+    layout: &str,
     chunks: u32,
-    kind: CrcShape,
-    layout: CrcLayout,
+    mut row: impl FnMut(u32) -> eyre::Result<Vec<u8>>,
 ) -> eyre::Result<()> {
-    let path = args.dir.join(format!("crc-{shape}-{}", layout.name()));
+    let path = args.dir.join(dir_name);
     fs::create_dir_all(&path)?;
     let store = open_bench_rocks(&path, args)?;
     let mut total_value = 0_u64;
     let mut batch = Vec::with_capacity(4_096);
     for index in 0..chunks {
-        let proof = crc_shape_proof(kind, index);
-        let bytes = crc_layout_bytes(layout, &proof, index)?;
+        let bytes = row(index)?;
         total_value = total_value.saturating_add(bytes.len() as u64);
         batch.push((PartitionChunkOffset::from(index), bytes));
         if batch.len() == 4_096 {
@@ -1803,35 +1736,7 @@ fn measure_crc_layout(
     store.compact_data_paths()?;
     let sst = data_path_sst_bytes(&store)?;
     drop(store);
-    print_crc_size(shape, layout.name(), chunks, total_value, sst);
-    fs::remove_dir_all(&path)?;
-    Ok(())
-}
-
-fn measure_crc_only(args: &Args, chunks: u32) -> eyre::Result<()> {
-    let path = args.dir.join("crc-only");
-    fs::create_dir_all(&path)?;
-    let store = open_bench_rocks(&path, args)?;
-    let mut total_value = 0_u64;
-    let mut batch = Vec::with_capacity(4_096);
-    for index in 0..chunks {
-        let bytes = encode_offset_meta(&OffsetMeta {
-            crc: Some(index.wrapping_mul(0x0100_0001)),
-            proof: None,
-        })?;
-        total_value = total_value.saturating_add(bytes.len() as u64);
-        batch.push((PartitionChunkOffset::from(index), bytes));
-        if batch.len() == 4_096 {
-            store.write_raw_data_paths(std::mem::take(&mut batch))?;
-        }
-    }
-    if !batch.is_empty() {
-        store.write_raw_data_paths(batch)?;
-    }
-    store.compact_data_paths()?;
-    let sst = data_path_sst_bytes(&store)?;
-    drop(store);
-    print_crc_size("crc_only", "suffix", chunks, total_value, sst);
+    print_crc_size(shape, layout, chunks, total_value, sst);
     fs::remove_dir_all(&path)?;
     Ok(())
 }
@@ -1909,7 +1814,7 @@ fn crc_shape_proof(kind: CrcShape, index: u32) -> Vec<u8> {
 }
 
 fn crc_layout_bytes(layout: CrcLayout, proof: &[u8], index: u32) -> eyre::Result<Vec<u8>> {
-    let crc = index.wrapping_mul(0x0100_0001);
+    let crc = bench_chunk_crc(index);
     match layout {
         CrcLayout::Raw => Ok(proof.to_vec()),
         CrcLayout::SuffixNoCrc => encode_offset_meta(&OffsetMeta {
@@ -1973,8 +1878,7 @@ fn print_column_files(store: &SubmoduleIndex, chunks: u32) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Leaf `data_hash` of a stored proof. `None` when the bytes are shorter
-/// than a leaf. This does not read the index.
+/// Leaf `data_hash` of a stored proof. `None` when the bytes are shorter than a leaf.
 fn content_hash_of_proof(proof: &[u8]) -> Option<H256> {
     const LEAF_LEN: usize = 64;
     if proof.len() < LEAF_LEN {
@@ -2002,8 +1906,7 @@ fn mdbx_map_bytes(chunks: u32, path_bytes: usize, worst_case: bool) -> usize {
     usize::try_from(cap).unwrap_or(usize::MAX)
 }
 
-/// Map size for one engine. The pinned estimate stays in [`mdbx_map_bytes`].
-/// Many-root shapes add the tx-path and binding bytes that estimate omits.
+/// [`mdbx_map_bytes`], plus tx-path bytes on many-root shapes.
 fn engine_map_bytes(args: &Args) -> usize {
     let base = mdbx_map_bytes(args.chunks, args.path_bytes, args.workload.is_worst());
     if !args.workload.is_many_tx() {
@@ -2023,56 +1926,38 @@ fn tx_count(args: &Args) -> u64 {
     }
 }
 
-/// Transaction that owns `offset`. Tree workloads use the full leaf count.
+/// Transaction that owns `offset`. A worst-case row keeps the full leaf count.
 fn place_tx(args: &Args, offset: u32) -> TxPlace {
-    match args.workload {
-        Workload::Worst => {
-            let span = u32::try_from(MAX_DATA_TX_CHUNKS).unwrap_or(u32::MAX);
-            let start = offset / span * span;
-            let stored = span.min(args.data_chunks - start);
-            TxPlace {
-                start,
-                stored,
-                leaves: MAX_DATA_TX_CHUNKS,
-            }
-        }
-        Workload::SmallTxs => {
-            let span = args.small_tx_chunks.max(1);
-            let start = offset / span * span;
-            let stored = span.min(args.data_chunks - start);
-            TxPlace {
-                start,
-                stored,
-                leaves: u64::from(stored),
-            }
-        }
-        Workload::MidTxs => {
-            let idx = args
-                .mid_spans
-                .partition_point(|(start, _)| *start <= offset)
-                .saturating_sub(1);
-            let (start, stored) = args.mid_spans[idx];
-            TxPlace {
-                start,
-                stored,
-                leaves: u64::from(stored),
-            }
-        }
-        _ => {
-            let span = args.tx_chunks.max(1);
-            let start = offset / span * span;
-            let stored = span.min(args.data_chunks - start);
-            TxPlace {
-                start,
-                stored,
-                leaves: u64::from(stored),
-            }
-        }
+    if args.workload == Workload::MidTxs {
+        let idx = args
+            .mid_spans
+            .partition_point(|(start, _)| *start <= offset)
+            .saturating_sub(1);
+        let (start, stored) = args.mid_spans[idx];
+        return TxPlace {
+            start,
+            stored,
+            leaves: u64::from(stored),
+        };
+    }
+    let (span, full_leaves) = match args.workload {
+        Workload::Worst => (
+            u32::try_from(MAX_DATA_TX_CHUNKS).unwrap_or(u32::MAX),
+            Some(MAX_DATA_TX_CHUNKS),
+        ),
+        Workload::SmallTxs => (args.small_tx_chunks.max(1), None),
+        _ => (args.tx_chunks.max(1), None),
+    };
+    let start = offset / span * span;
+    let stored = span.min(args.data_chunks - start);
+    TxPlace {
+        start,
+        stored,
+        leaves: full_leaves.unwrap_or(u64::from(stored)),
     }
 }
 
-/// Seeded sizes in [`MID_TX_MIN`]..=[`MID_TX_MAX`]. A remainder under the
-/// minimum is one short tail transaction.
+/// Seeded sizes in [`MID_TX_MIN`]..=[`MID_TX_MAX`]. A short remainder is one tail.
 fn mid_spans(chunks: u32) -> Vec<(u32, u32)> {
     let mut state = MID_TX_SEED;
     let mut spans = Vec::new();
@@ -2104,7 +1989,6 @@ fn indexed_data_size(args: &Args, count: u32) -> u64 {
     chunks * CHUNK_SIZE
 }
 
-/// Stored path with the last byte inverted. Same length, different value.
 fn rewritten_data_path(args: &Args, offset: u32) -> Vec<u8> {
     let mut path = data_path_bytes(args, offset);
     let last = path.len() - 1;
@@ -2113,10 +1997,9 @@ fn rewritten_data_path(args: &Args, offset: u32) -> Vec<u8> {
 }
 
 fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
-    if args.workload.is_many_tx() {
-        // Node bytes depend on `(data_root, level, index)`, so two chunks under
-        // one branch store the same 96 bytes. `--worst-case` stays a uniform
-        // max proof so its size stays comparable with earlier runs.
+    // Shared nodes key on `(data_root, level, index)`. A worst-case prefix
+    // still uses the full transaction leaf count, so the proof stays max depth.
+    if args.workload.is_many_tx() || (args.workload.is_worst() && !args.uniform_proofs) {
         let place = place_tx(args, offset);
         let root = hash_at(u64::from(place.start).wrapping_add(0x1000_0000));
         let leaf = u64::from(offset.saturating_sub(place.start));
@@ -2125,17 +2008,6 @@ fn data_path_bytes(args: &Args, offset: u32) -> Vec<u8> {
     if !args.workload.is_worst() {
         return fill(args.path_bytes, u64::from(offset));
     }
-    if !args.uniform_proofs {
-        // One max transaction per group, nodes shared by `(data_root, level,
-        // index)` like a real tree. A short --chunks prefix is still a leaf of
-        // the full transaction, so the proof keeps the max depth.
-        let place = place_tx(args, offset);
-        let root = hash_at(u64::from(place.start).wrapping_add(0x1000_0000));
-        let leaf = u64::from(offset.saturating_sub(place.start));
-        return shared_data_proof(&root.0, place.leaves, leaf, CHUNK_SIZE);
-    }
-    // Local index inside a max transaction. Depth stays at the max proof even
-    // when this run writes only a prefix of the transaction.
     let local = u64::from(offset) % MAX_DATA_TX_CHUNKS;
     let leaf_end = (local + 1) * CHUNK_SIZE;
     shaped_proof(
@@ -2167,12 +2039,8 @@ fn tx_path_bytes(args: &Args, tx_start: u32) -> Vec<u8> {
     )
 }
 
-/// Proof bytes in root-to-leaf order.
-///
-/// Each branch is two 32-byte ids plus a 32-byte note. The leaf is one id
-/// plus a note. A note is 24 zero bytes and a big-endian byte offset, which
-/// is the layout `to_note_vec` writes. Ids are not hashes. They only have to
-/// be incompressible so compression sees the same mix as a real proof.
+/// Root-to-leaf. A note is 24 zero bytes and a big-endian offset, the layout
+/// `to_note_vec` writes. Ids are not hashes; they only have to be incompressible.
 fn shaped_proof(layers: usize, leaf_end: u64, seed: u64) -> Vec<u8> {
     let mut out = vec![0_u8; proof_bytes(layers)];
     let mut state = mix_seed(seed);
@@ -2191,8 +2059,7 @@ fn shaped_proof(layers: usize, leaf_end: u64, seed: u64) -> Vec<u8> {
     out
 }
 
-/// Left-child boundary at this level. Root notes are wide. The parent of the
-/// leaf is one chunk. High bytes stay zero for a 5 TiB transaction.
+/// Left-child boundary. High bytes stay zero for a 5 TiB transaction.
 fn branch_pivot(leaf_end: u64, level: usize, layers: usize) -> u64 {
     let shift = u32::try_from(layers - 1 - level).unwrap_or(40).min(40);
     let span = CHUNK_SIZE.saturating_mul(1_u64 << shift);
@@ -2261,8 +2128,7 @@ fn refuse_large_payload(args: &Args) -> eyre::Result<()> {
     );
 }
 
-/// Upper bound used by the large-run gate. Worst-case stays
-/// `chunks * DATA_PROOF_BYTES`. Many-root shapes also count tx proofs.
+/// Upper bound for the large-run gate. Many-root shapes also count tx proofs.
 fn gated_raw_bytes(args: &Args) -> u64 {
     let per = if args.workload.is_tree() {
         DATA_PROOF_BYTES as u64
@@ -2308,9 +2174,8 @@ fn hash_at(n: u64) -> H256 {
     H256(raw)
 }
 
-/// SplitMix64 finaliser. `seed | 1` maps seeds 2k and 2k+1 to one stream,
-/// which made adjacent 1-chunk transactions share tx-path bytes and let LZ4
-/// store each pair once.
+/// SplitMix64, then force odd. A plain `seed | 1` maps 2k and 2k+1 onto one
+/// stream, so LZ4 stores each pair of 1-chunk tx paths once.
 fn mix_seed(seed: u64) -> u64 {
     let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -2321,10 +2186,7 @@ fn mix_seed(seed: u64) -> u64 {
 fn fill(len: usize, seed: u64) -> Vec<u8> {
     let mut out = vec![0_u8; len];
     let mut state = mix_seed(seed);
-    for byte in &mut out {
-        state = state.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
-        *byte = (state >> 33) as u8;
-    }
+    fill_span(&mut out, &mut state);
     out
 }
 
@@ -2347,10 +2209,7 @@ fn layer_widths(mut n: u64) -> Vec<u64> {
     widths
 }
 
-/// Proof nodes in stored order: root branch first, leaf last.
-///
-/// A promoted odd node is not a proof record. The walk skips it, which is
-/// the same rule a merkle build uses when it lifts an unpaired child.
+/// Root branch first, leaf last. A promoted odd node is not a proof record.
 fn proof_nodes(widths: &[u64], leaf: u64) -> Vec<ProofNode> {
     let mut branches = Vec::new();
     let mut index = leaf;
@@ -2386,11 +2245,8 @@ fn rightmost_leaf(widths: &[u64], level: u32, index: u64) -> u64 {
     idx
 }
 
-/// Data proof whose node bytes depend only on `(data_root, level, index)`.
-///
-/// Ids are not hashes. They are incompressible and stable, so two chunks
-/// under one branch store the same 96 bytes. This is the full-path layout.
-/// It does not store tiles.
+/// Node bytes depend only on `(data_root, level, index)`, so two chunks under
+/// one branch store the same 96 bytes. Ids are not hashes. Full path, no tiles.
 fn shared_data_proof(
     data_root: &[u8; 32],
     num_leaves: u64,
@@ -2462,8 +2318,8 @@ enum MissingPart {
     ParentDir,
 }
 
-/// Canonicalize the deepest existing ancestor, then apply the missing tail.
-/// `..` in that tail is applied, so `index-bench/../../outside` does not keep the component.
+/// Canonicalize the deepest existing ancestor, then apply the missing tail,
+/// including `..`, so `index-bench/../../outside` does not keep the component.
 fn resolve_with_ancestor(path: &Path) -> eyre::Result<PathBuf> {
     let mut missing = Vec::new();
     let mut cursor = path.to_path_buf();
@@ -2864,24 +2720,21 @@ fn resolve_workload(
     small_txs: bool,
     mid_txs: bool,
 ) -> eyre::Result<Workload> {
-    let picked = [mid, worst, small_txs, mid_txs]
-        .into_iter()
-        .filter(|flag| *flag)
-        .count();
-    if picked > 1 {
-        eyre::bail!("--profile, --mid, --worst-case, --small-txs, and --mid-txs disagree");
-    }
-    match (profile, mid, worst, small_txs, mid_txs) {
-        (None, false, false, false, false) => Ok(Workload::Filled),
-        (None, true, false, false, false) => Ok(Workload::Mid),
-        (None, false, true, false, false) => Ok(Workload::Worst),
-        (None, false, false, true, false) => Ok(Workload::SmallTxs),
-        (None, false, false, false, true) => Ok(Workload::MidTxs),
-        (Some(profile), false, false, false, false) => Ok(profile),
-        (Some(Workload::Mid), true, false, false, false) => Ok(Workload::Mid),
-        (Some(Workload::Worst), false, true, false, false) => Ok(Workload::Worst),
-        (Some(Workload::SmallTxs), false, false, true, false) => Ok(Workload::SmallTxs),
-        (Some(Workload::MidTxs), false, false, false, true) => Ok(Workload::MidTxs),
+    let from_flag = match (mid, worst, small_txs, mid_txs) {
+        (false, false, false, false) => None,
+        (true, false, false, false) => Some(Workload::Mid),
+        (false, true, false, false) => Some(Workload::Worst),
+        (false, false, true, false) => Some(Workload::SmallTxs),
+        (false, false, false, true) => Some(Workload::MidTxs),
+        _ => {
+            eyre::bail!("--profile, --mid, --worst-case, --small-txs, and --mid-txs disagree")
+        }
+    };
+    match (profile, from_flag) {
+        (None, None) => Ok(Workload::Filled),
+        (None, Some(flag)) => Ok(flag),
+        (Some(profile), None) => Ok(profile),
+        (Some(profile), Some(flag)) if profile == flag => Ok(profile),
         _ => eyre::bail!("--profile, --mid, --worst-case, --small-txs, and --mid-txs disagree"),
     }
 }
@@ -3101,32 +2954,51 @@ VmHWM:\t   8600000 kB
     }
 
     #[test]
-    fn mid_groups_mdbx_commits_and_leaves_rocks_alone() {
-        let mdbx = commits_for(true, 512, true, false);
-        assert_eq!(mdbx.txs_per_commit, MID_MDBX_TXS_PER_COMMIT);
-        assert_eq!(mdbx.path_batch, MID_MDBX_PATH_BATCH);
-        let rocks = commits_for(true, 512, false, false);
-        assert_eq!(rocks.txs_per_commit, 1);
-        assert_eq!(rocks.path_batch, 512);
-        let raised = commits_for(true, 4096, true, false);
-        assert_eq!(raised.path_batch, 4096);
-        let filled = commits_for(false, 512, true, false);
-        assert_eq!(filled.txs_per_commit, 1);
-        assert_eq!(filled.path_batch, 512);
-    }
-
-    #[test]
-    fn group_commit_uses_the_same_sizes_on_both_engines() {
-        let rocks = commits_for(true, 512, false, true);
-        let mdbx = commits_for(true, 512, true, true);
-        assert_eq!(rocks.txs_per_commit, MID_MDBX_TXS_PER_COMMIT);
-        assert_eq!(rocks.path_batch, MID_MDBX_PATH_BATCH);
-        assert_eq!(mdbx.txs_per_commit, rocks.txs_per_commit);
-        assert_eq!(mdbx.path_batch, rocks.path_batch);
-        let filled = commits_for(false, 512, false, true);
-        assert_eq!(filled.txs_per_commit, MID_MDBX_TXS_PER_COMMIT);
-        assert_eq!(filled.path_batch, MID_MDBX_PATH_BATCH);
-        assert_eq!(commits_for(false, 4096, true, true).path_batch, 4096);
+    fn commit_grouping_matches_mid_and_group_commit() {
+        // (mid, batch, mdbx, group_commit, txs_per_commit, path_batch)
+        let cases = [
+            (
+                true,
+                512_u32,
+                true,
+                false,
+                MID_MDBX_TXS_PER_COMMIT,
+                MID_MDBX_PATH_BATCH,
+            ),
+            (true, 512, false, false, 1, 512),
+            (true, 4096, true, false, MID_MDBX_TXS_PER_COMMIT, 4096),
+            (false, 512, true, false, 1, 512),
+            (
+                true,
+                512,
+                true,
+                true,
+                MID_MDBX_TXS_PER_COMMIT,
+                MID_MDBX_PATH_BATCH,
+            ),
+            (
+                true,
+                512,
+                false,
+                true,
+                MID_MDBX_TXS_PER_COMMIT,
+                MID_MDBX_PATH_BATCH,
+            ),
+            (
+                false,
+                512,
+                false,
+                true,
+                MID_MDBX_TXS_PER_COMMIT,
+                MID_MDBX_PATH_BATCH,
+            ),
+            (false, 4096, true, true, MID_MDBX_TXS_PER_COMMIT, 4096),
+        ];
+        for (mid, batch, mdbx, group, txs, paths) in cases {
+            let got = commits_for(mid, batch, mdbx, group);
+            assert_eq!(got.txs_per_commit, txs, "{mid} {batch} {mdbx} {group}");
+            assert_eq!(got.path_batch, paths, "{mid} {batch} {mdbx} {group}");
+        }
     }
 
     #[test]
@@ -3148,29 +3020,7 @@ VmHWM:\t   8600000 kB
 
     #[test]
     fn rewrite_changes_only_the_last_byte() {
-        let args = Args {
-            dir: std::path::PathBuf::from("index-bench"),
-            chunks: 8,
-            batch: 8,
-            tx_chunks: 4,
-            path_bytes: 4096,
-            workload: Workload::Filled,
-            engines: Engines::Both,
-            reads: 1,
-            range_len: 4,
-            rocks: irys_database::submodule::RocksTuning::baseline().with_block_cache(1024),
-            dbs: 1,
-            group_commit: false,
-            small_tx_chunks: 0,
-            mid_spans: Vec::new(),
-            shuffle_run: None,
-            txs_per_commit: None,
-            uniform_proofs: false,
-            data_fraction: 1.0,
-            data_chunks: 8,
-            with_crc: false,
-            entropy_fill: false,
-        };
+        let args = parse(&["--dir", "index-bench"]).unwrap();
         let stored = data_path_bytes(&args, 3);
         let rewritten = rewritten_data_path(&args, 3);
         assert_eq!(rewritten.len(), stored.len());
@@ -3183,6 +3033,18 @@ VmHWM:\t   8600000 kB
 
     fn parse(args: &[&str]) -> eyre::Result<Args> {
         parse_arg_list(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    fn rocks_case(
+        flags: &[&str],
+        prefix: &str,
+    ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, Args, SubmoduleIndex)> {
+        let args = parse(flags)?;
+        let dir = irys_testing_utils::TempDirBuilder::new()
+            .prefix(prefix)
+            .build();
+        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks)?;
+        Ok((dir, args, store))
     }
 
     #[test]
@@ -3495,28 +3357,25 @@ VmHWM:\t   8600000 kB
     #[test]
     fn small_txs_store_a_placement_and_no_tx_path() -> eyre::Result<()> {
         use irys_database::submodule::SubmoduleStore as _;
-        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::PartitionChunkOffset;
 
-        let args = parse(&[
-            "--dir",
-            "index-bench",
-            "--chunks",
-            "5",
-            "--small-txs",
-            "2",
-            "--engine",
-            "rocks",
-            "--reads",
-            "0",
-            "--batch",
-            "5",
-        ])
-        .unwrap();
-        let dir = TempDirBuilder::new()
-            .prefix("index_bench_small_txs")
-            .build();
-        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks)?;
+        let (_dir, args, store) = rocks_case(
+            &[
+                "--dir",
+                "index-bench",
+                "--chunks",
+                "5",
+                "--small-txs",
+                "2",
+                "--engine",
+                "rocks",
+                "--reads",
+                "0",
+                "--batch",
+                "5",
+            ],
+            "index_bench_small_txs",
+        )?;
         write_tx_index(&store, &args, 8)?;
         write_data_paths(&store, &args, 5)?;
         let mut at = 0_u32;
@@ -3565,26 +3424,25 @@ VmHWM:\t   8600000 kB
         // Breaks if the shape appends an info RocksDB v1 rejects, or if it
         // changes the placement data_size that production stored.
         use irys_database::submodule::SubmoduleStore as _;
-        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::PartitionChunkOffset;
 
-        let args = parse(&[
-            "--dir",
-            "index-bench",
-            "--chunks",
-            "4",
-            "--small-txs",
-            "2",
-            "--engine",
-            "rocks",
-            "--reads",
-            "1",
-            "--batch",
-            "4",
-        ])
-        .unwrap();
-        let dir = TempDirBuilder::new().prefix("index_bench_rmw_root").build();
-        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks)?;
+        let (_dir, args, store) = rocks_case(
+            &[
+                "--dir",
+                "index-bench",
+                "--chunks",
+                "4",
+                "--small-txs",
+                "2",
+                "--engine",
+                "rocks",
+                "--reads",
+                "1",
+                "--batch",
+                "4",
+            ],
+            "index_bench_rmw_root",
+        )?;
         write_tx_index(&store, &args, 8)?;
         let before = store
             .view(|tx| tx.placement_at(PartitionChunkOffset::from(0)))?
@@ -3673,27 +3531,26 @@ VmHWM:\t   8600000 kB
         // Breaks if the data row stays a proof with no trailer, or if the
         // stored checksum is not the one encode_offset_meta writes.
         use irys_database::submodule::SubmoduleStore as _;
-        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::PartitionChunkOffset;
 
-        let args = parse(&[
-            "--dir",
-            "index-bench",
-            "--chunks",
-            "4",
-            "--small-txs",
-            "2",
-            "--engine",
-            "rocks",
-            "--with-crc",
-            "--reads",
-            "0",
-            "--batch",
-            "4",
-        ])
-        .unwrap();
-        let dir = TempDirBuilder::new().prefix("index_bench_with_crc").build();
-        let store = SubmoduleIndex::open_rocks_bench(dir.path().join("rocks"), args.rocks)?;
+        let (_dir, args, store) = rocks_case(
+            &[
+                "--dir",
+                "index-bench",
+                "--chunks",
+                "4",
+                "--small-txs",
+                "2",
+                "--engine",
+                "rocks",
+                "--with-crc",
+                "--reads",
+                "0",
+                "--batch",
+                "4",
+            ],
+            "index_bench_with_crc",
+        )?;
         write_tx_index(&store, &args, 8)?;
         write_data_paths(&store, &args, 4)?;
         for (offset, crc) in [
@@ -3720,35 +3577,32 @@ VmHWM:\t   8600000 kB
         // Breaks if the second half gets a proof, if the first half loses its
         // proof, or if the new shapes do not read those rows.
         use irys_database::submodule::SubmoduleStore as _;
-        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::PartitionChunkOffset;
 
-        let args = parse(&[
-            "--dir",
-            "index-bench",
-            "--chunks",
-            "4",
-            "--small-txs",
-            "2",
-            "--engine",
-            "rocks",
-            "--data-fraction",
-            "0.5",
-            "--entropy-fill",
-            "--reads",
-            "1",
-            "--range-len",
-            "2",
-            "--batch",
-            "2",
-        ])
-        .unwrap();
+        let (dir, args, store) = rocks_case(
+            &[
+                "--dir",
+                "index-bench",
+                "--chunks",
+                "4",
+                "--small-txs",
+                "2",
+                "--engine",
+                "rocks",
+                "--data-fraction",
+                "0.5",
+                "--entropy-fill",
+                "--reads",
+                "1",
+                "--range-len",
+                "2",
+                "--batch",
+                "2",
+            ],
+            "index_bench_entropy_fill",
+        )?;
         assert_eq!(args.data_chunks, 2);
-        let dir = TempDirBuilder::new()
-            .prefix("index_bench_entropy_fill")
-            .build();
         let path = dir.path().join("rocks");
-        let store = SubmoduleIndex::open_rocks_bench(&path, args.rocks)?;
         write_tx_index(&store, &args, 8)?;
         write_data_paths(&store, &args, 2)?;
         write_entropy_rows(&store, &args, 2)?;
