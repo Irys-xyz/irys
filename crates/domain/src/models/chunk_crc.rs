@@ -920,9 +920,9 @@ mod tests {
             Some(first)
         );
 
-        module.note_crc_mismatch(PartitionChunkOffset::from(0), ChunkType::Entropy, "test");
+        module.note_crc_mismatch(PartitionChunkOffset::from(0), ChunkType::Entropy, "test")?;
         assert!(!module.take_crc_repair_ranges().is_empty());
-        module.note_crc_mismatch(PartitionChunkOffset::from(0), ChunkType::Entropy, "test");
+        module.note_crc_mismatch(PartitionChunkOffset::from(0), ChunkType::Entropy, "test")?;
         module.reset_with_assignment(Some(assign(hash_b)), 2)?;
         assert!(
             module.take_crc_repair_ranges().is_empty(),

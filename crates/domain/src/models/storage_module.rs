@@ -425,10 +425,13 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// Completions are stored after `fdatasync` and the presence commit, at most
 /// every `intervals_persist_secs`, or sooner on the next write-ahead,
 /// `force_sync`, or shutdown. A failed `pwrite` leaves the file
-/// `Interrupted`. A CRC mismatch cuts the live label to `Uninitialized`.
-/// The next rewrite stores that label. A crash reloads `Uninitialized`,
-/// and open drops the placement. Reset publishes `Uninitialized` after the
-/// index clear. The metadata marker covers a crash before that rewrite.
+/// `Interrupted`. A CRC mismatch cuts the live label to `Uninitialized` and
+/// rewrites that submodule's `intervals.json` before the confirm returns.
+/// The rewrite keeps the ahead mask, so it does not publish `Entropy` over a
+/// span the file still has to treat as `Interrupted`. A crash reloads
+/// `Uninitialized`, and open drops the placement. Reset publishes
+/// `Uninitialized` after the index clear. The metadata marker covers a crash
+/// before that rewrite.
 ///
 /// Period 0 rewrites on every sync and does not mark ahead. Queued or parked
 /// offsets stay `Interrupted`. Shutdown force-syncs, writes the live map, and
@@ -5168,7 +5171,7 @@ impl StorageModule {
         let complete = submodule.crc_complete.load(Ordering::SeqCst);
         match chunk_crc::classify(crc, &bytes, complete) {
             chunk_crc::CrcVerdict::Mismatch => {
-                self.note_crc_mismatch(offset, kind, caller);
+                self.note_crc_mismatch(offset, kind, caller)?;
                 Ok(CrcConfirm::Confirmed)
             }
             _ => Ok(CrcConfirm::NotConfirmed(bytes)),
@@ -5399,17 +5402,20 @@ impl StorageModule {
     /// Mark one offset untrustworthy and hand it to the packing queue.
     ///
     /// The live map becomes `Uninitialized`, so a later read does not serve
-    /// the bytes. The next interval rewrite stores that label. A crash
-    /// reloads `Uninitialized`, and open drops the presence row and the
-    /// placement. Packing repacks the span. The index is rebuilt from the
-    /// ledger, and data sync refills the bytes. The bytes were already
-    /// checksum-bad.
+    /// the bytes. This rewrites that submodule's `intervals.json` before it
+    /// returns, with the ahead mask still applied. A crash reloads
+    /// `Uninitialized`, and open drops the presence row and the placement.
+    /// Packing repacks the span. The index is rebuilt from the ledger, and
+    /// data sync refills the bytes. The bytes were already checksum-bad.
+    ///
+    /// The caller holds `sync_in_progress`, so a durable point is not between
+    /// its map clone and its file replace.
     fn note_crc_mismatch(
         &self,
         offset: PartitionChunkOffset,
         kind: ChunkType,
         caller: &'static str,
-    ) {
+    ) -> eyre::Result<()> {
         #[cfg(test)]
         self.wait_if_sync_paused(SyncPausePoint::AfterCrcConfirm);
         chunk_crc::note_mismatch(caller, kind);
@@ -5422,8 +5428,31 @@ impl StorageModule {
                 ChunkType::Uninitialized,
             );
         }
+        // The file replace follows the live cut. A crash after the replace
+        // reloads the cut even if this process dies before the repair is queued.
+        self.publish_crc_cut(offset)?;
         recover_mutex(&self.crc_repairs).insert(offset);
         self.entropy_cache.lock().unwrap().invalidate(offset);
+        Ok(())
+    }
+
+    /// Store the live map for the submodule that holds `offset`.
+    ///
+    /// Pending and parked offsets stay `Interrupted`. Spans in the ahead mask
+    /// stay `Interrupted` too. This does not replace the mask and does not
+    /// bump [`Self::interval_image_epoch`]: that bump makes
+    /// [`Self::persist_write_ahead`] skip its `Interrupted` mark.
+    fn publish_crc_cut(&self, offset: PartitionChunkOffset) -> eyre::Result<()> {
+        let snapshot_epoch = self.load_interval_image_epoch();
+        let mut memory = recover_read(&self.intervals).clone();
+        let nondurable = self.snapshot_nondurable_offsets();
+        Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
+        let mask = self.lock_interval_disk().mask.clone();
+        let projection = Self::project_interval_file(&memory, &mask)?;
+        let (interval, _) = self.get_submodule_for_offset(offset)?;
+        let touched = BTreeSet::from([interval.start()]);
+        self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)?;
+        Ok(())
     }
 
     /// Contiguous repair ranges. The storage-module service drains these.
@@ -15409,6 +15438,63 @@ mod tests {
         Ok(())
     }
 
+    /// A confirmed mismatch rewrites the interval file before it returns.
+    /// A crash with no later rewrite reloads `Uninitialized`. Open drops the
+    /// presence row and the placement. Period 0 and period 30 both rewrite
+    /// here: the completion flush does not, because the cut is not a dirty
+    /// completion.
+    #[rstest]
+    #[case::period_0(0_u64)]
+    #[case::period_30(30_u64)]
+    fn crc_cut_survives_crash_before_the_next_interval_rewrite(
+        #[case] persist_secs: u64,
+    ) -> eyre::Result<()> {
+        let prefix = format!("crc_cut_durable_{persist_secs}");
+        let (tmp, config, storage, ..) = settle_data_offset(&prefix, persist_secs)?;
+        let offset = PartitionChunkOffset::from(0);
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
+        assert_eq!(
+            live_label(&storage, 0),
+            Some(ChunkType::Uninitialized),
+            "the live map was not cut"
+        );
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Uninitialized),
+            "the checksum cut left intervals.json as Data"
+        );
+        assert!(
+            !storage.is_data_chunk_persisted_at(offset),
+            "persisted check still trusts the pre-cut file"
+        );
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = reopen_crc_module(tmp.path(), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "reopen reloaded Data"
+        );
+        assert_eq!(
+            file_label(&reopened, 0)?,
+            Some(ChunkType::Uninitialized),
+            "reopen file is not Uninitialized"
+        );
+        assert_not_served_as_data(&reopened, offset)?;
+        assert!(
+            !reopened.is_data_root_index_ready_at(offset),
+            "open kept the placement"
+        );
+        assert!(
+            reopened.take_crc_repair_ranges().is_empty(),
+            "the repair queue survived the crash"
+        );
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
     /// A mismatch publish, then a crash, reloads `Uninitialized`. Open drops
     /// the placement. Indexing the same tx puts the placement back. The bytes
     /// stay unserved until a later refill.
@@ -15420,7 +15506,7 @@ mod tests {
         let (tmp, config, storage, _unpacked, header, tx_path) =
             settle_data_offset(&prefix, persist_secs)?;
         let offset = PartitionChunkOffset::from(0);
-        storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
         storage.write_intervals_to_submodules()?;
         assert_ne!(
             file_label(&storage, 0)?,
@@ -15464,7 +15550,7 @@ mod tests {
         let prefix = format!("crc_crash_repair_{persist_secs}");
         let (tmp, config, storage, ..) = settle_data_offset(&prefix, persist_secs)?;
         let offset = PartitionChunkOffset::from(0);
-        storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
         assert!(storage.write_chunk(offset, vec![0xEE; 32], ChunkType::Entropy));
         storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalCommit);
         let err = storage.sync_pending_chunks().unwrap_err();
@@ -15495,7 +15581,7 @@ mod tests {
         let prefix = format!("crc_crash_rollback_{persist_secs}");
         let (tmp, config, storage, ..) = settle_data_offset(&prefix, persist_secs)?;
         let offset = PartitionChunkOffset::from(0);
-        storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
         storage.drop_pending_writes_in_range(offset, offset);
         storage.clear_offset_index_in_range(offset, offset)?;
         {
@@ -15532,7 +15618,7 @@ mod tests {
         let prefix = format!("crc_crash_refill_{persist_secs}");
         let (tmp, config, storage, unpacked, ..) = settle_data_offset(&prefix, persist_secs)?;
         let offset = PartitionChunkOffset::from(0);
-        storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
         assert!(storage.write_chunk(offset, vec![0xEE; 32], ChunkType::Entropy));
         storage.sync_pending_chunks()?;
         assert_eq!(live_label(&storage, 0), Some(ChunkType::Entropy));
