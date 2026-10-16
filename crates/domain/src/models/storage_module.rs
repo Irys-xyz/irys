@@ -477,6 +477,9 @@ enum SyncPausePoint {
     AfterPresenceCopy,
     /// The interval map is copied. `intervals.json` is not locked yet.
     AfterIntervalSnapshot,
+    /// A due completion has cloned the live map. The file replace has not
+    /// started. A checksum cut can land in this gap.
+    AfterCompletionClone,
     /// `reset` has cleared `pending` once. The interval map is still the
     /// pre-reset labels.
     AfterResetPendingClear,
@@ -827,6 +830,17 @@ pub struct StorageModule {
     /// read the map before the bump does not replace the reset image, and it
     /// does not put the old write-ahead mask back.
     interval_image_epoch: AtomicU64,
+    /// Held across an `intervals.json` replace. Lock order: this lock, then
+    /// `interval_disk`, then the submodule file mutex. Do not take it while
+    /// `intervals` or `interval_disk` is held. The map clone stays outside
+    /// the lock; the fsync is the section that has to be ordered.
+    interval_publish: Mutex<()>,
+    /// Bumped under [`Self::interval_publish`] when a checksum cut replaces
+    /// the file. A completion that cloned the map before the bump does not
+    /// commit that image and does not clear `dirty`. This is not
+    /// [`Self::interval_image_epoch`]: that bump makes
+    /// [`Self::persist_write_ahead`] skip its `Interrupted` mark.
+    crc_cut_epoch: AtomicU64,
     /// Bumped when an entropy `pwrite` lands. A disk read that captured an
     /// older value must not pack those bytes or cache them.
     entropy_write_epoch: AtomicU64,
@@ -2086,6 +2100,8 @@ impl StorageModule {
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             interval_disk: Mutex::new(Self::load_interval_disk(&submodule_map)),
             interval_image_epoch: AtomicU64::new(0),
+            interval_publish: Mutex::new(()),
+            crc_cut_epoch: AtomicU64::new(0),
             entropy_write_epoch: AtomicU64::new(0),
             #[cfg(test)]
             suppress_interval_flush: AtomicBool::new(false),
@@ -2749,6 +2765,20 @@ impl StorageModule {
     fn wait_if_interval_image_paused(&self) {
         self.interval_image_pause
             .wait_if(SyncPausePoint::AfterIntervalSnapshot);
+    }
+
+    /// The next due completion waits after it clones the live map and before
+    /// it replaces `intervals.json`. The pause disarms itself.
+    #[cfg(test)]
+    fn pause_next_completion_clone(&self) {
+        self.interval_image_pause
+            .arm(SyncPausePoint::AfterCompletionClone);
+    }
+
+    #[cfg(test)]
+    fn wait_if_completion_clone_paused(&self) {
+        self.interval_image_pause
+            .wait_if(SyncPausePoint::AfterCompletionClone);
     }
 
     /// The next registration waits after its rows are computed.
@@ -3887,6 +3917,14 @@ impl StorageModule {
         self.interval_image_epoch.load(Ordering::SeqCst)
     }
 
+    fn lock_interval_publish(&self) -> std::sync::MutexGuard<'_, ()> {
+        recover_mutex(&self.interval_publish)
+    }
+
+    fn load_crc_cut_epoch(&self) -> u64 {
+        self.crc_cut_epoch.load(Ordering::SeqCst)
+    }
+
     /// `false` when `reset` published a newer map after this snapshot was taken.
     /// The caller must not replace the file or restore that snapshot's mask.
     fn interval_snapshot_current(&self, snapshot_epoch: u64) -> bool {
@@ -3895,6 +3933,21 @@ impl StorageModule {
             debug!("skipping interval rewrite snapshotted before reset");
         }
         current
+    }
+
+    /// `false` when a checksum cut published after this snapshot was copied.
+    /// The caller must not commit the pre-cut image or clear `dirty`.
+    fn crc_cut_snapshot_current(&self, snapshot_crc_epoch: u64) -> bool {
+        let current = snapshot_crc_epoch == self.load_crc_cut_epoch();
+        if !current {
+            debug!("skipping interval rewrite snapshotted before a checksum cut");
+        }
+        current
+    }
+
+    fn interval_image_acceptable(&self, snapshot_epoch: u64, snapshot_crc_epoch: u64) -> bool {
+        self.interval_snapshot_current(snapshot_epoch)
+            && self.crc_cut_snapshot_current(snapshot_crc_epoch)
     }
 
     /// Time until a dirty completion may be rewritten. `None` when batching
@@ -3948,9 +4001,12 @@ impl StorageModule {
         if !self.intervals_batched() {
             return self.write_intervals_files(Some(touched), None);
         }
-        // Read the epoch before the map. A later reset fails this snapshot
-        // instead of letting it put the old mask back.
+        // Read both epochs before the map. A later reset fails this snapshot
+        // instead of letting it put the old mask back. A checksum cut fails
+        // it the same way, without using `interval_image_epoch`: that bump
+        // would take the success return below and skip this `Interrupted` mark.
         let snapshot_epoch = self.load_interval_image_epoch();
+        let snapshot_crc_epoch = self.load_crc_cut_epoch();
         // The file already says Interrupted for a covered batch. Return before
         // cloning the interval map: that clone is the whole fragment list, and
         // this runs on the durable-point path. The lock is not held across the
@@ -3991,9 +4047,18 @@ impl StorageModule {
             return Ok(());
         }
         drop(disk);
-        self.write_interval_image(&projection, Some(touched), snapshot_epoch, false)?;
+        self.write_interval_image(
+            &projection,
+            Some(touched),
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            false,
+        )?;
         let mut disk = self.lock_interval_disk();
-        if self.interval_snapshot_current(snapshot_epoch) {
+        // The replace already dropped the publish lock. A cut that landed
+        // after it rewrote the file; installing this mask would claim those
+        // spans are already `Interrupted`.
+        if self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
             disk.mask = mask;
         }
         Ok(())
@@ -4048,6 +4113,7 @@ impl StorageModule {
         }
         let period = self.intervals_persist_period();
         let snapshot_epoch = self.load_interval_image_epoch();
+        let snapshot_crc_epoch = self.load_crc_cut_epoch();
         // Due-ness does not need the interval map. A lane pass with nothing
         // due must not clone that map: after a crash it is the fragment list.
         let due_starts = {
@@ -4072,7 +4138,17 @@ impl StorageModule {
         }
         let projection = Self::project_interval_file(&memory, &disk.mask)?;
         drop(disk);
-        self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)
+        // The clone is done and the interval lock is released. A checksum cut
+        // can publish before this image reaches the file.
+        #[cfg(test)]
+        self.wait_if_completion_clone_paused();
+        self.write_interval_image(
+            &projection,
+            Some(&touched),
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            false,
+        )
     }
 
     fn due_completion_starts(
@@ -4118,6 +4194,7 @@ impl StorageModule {
             return Ok(());
         }
         let snapshot_epoch = self.load_interval_image_epoch();
+        let snapshot_crc_epoch = self.load_crc_cut_epoch();
         let mut memory = recover_read(&self.intervals).clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
@@ -4139,7 +4216,13 @@ impl StorageModule {
                 return Ok(());
             }
         }
-        self.write_interval_image(&memory, None, snapshot_epoch, force_replace)
+        self.write_interval_image(
+            &memory,
+            None,
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            force_replace,
+        )
     }
 
     /// Rewrite `intervals.json` from the live map. Offsets still queued or
@@ -4156,6 +4239,7 @@ impl StorageModule {
         durable_now: Option<&BTreeSet<PartitionChunkOffset>>,
     ) -> eyre::Result<()> {
         let snapshot_epoch = self.load_interval_image_epoch();
+        let snapshot_crc_epoch = self.load_crc_cut_epoch();
         let mut memory = recover_read(&self.intervals).clone();
         let mut nondurable = self.snapshot_nondurable_offsets();
         if let Some(durable_now) = durable_now {
@@ -4164,7 +4248,7 @@ impl StorageModule {
             }
         }
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
-        self.write_interval_image(&memory, only, snapshot_epoch, false)
+        self.write_interval_image(&memory, only, snapshot_epoch, snapshot_crc_epoch, false)
     }
 
     /// `pending.chunks` and `pending.written_ahead`. Caller released
@@ -4206,18 +4290,41 @@ impl StorageModule {
     /// timer for that submodule.
     ///
     /// `snapshot_epoch` is the value read before `image` was copied. `reset`
-    /// bumps the epoch after it publishes `Uninitialized`. A replace whose
-    /// epoch no longer matches does not write the file and does not change
-    /// `written` or the dirty set.
+    /// bumps that epoch after it publishes `Uninitialized`. `snapshot_crc_epoch`
+    /// is the checksum-cut epoch read at the same time. A replace whose epoch
+    /// no longer matches does not write the file and does not change `written`
+    /// or the dirty set.
+    ///
+    /// The publish lock covers the replace. A checksum cut holds it across
+    /// its own bump and replace, so this snapshot cannot commit afterwards.
     fn write_interval_image(
         &self,
         image: &StorageIntervals,
         only: Option<&BTreeSet<PartitionChunkOffset>>,
         snapshot_epoch: u64,
+        snapshot_crc_epoch: u64,
+        force_replace: bool,
+    ) -> eyre::Result<()> {
+        let _publish = self.lock_interval_publish();
+        self.write_interval_image_locked(
+            image,
+            only,
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            force_replace,
+        )
+    }
+
+    fn write_interval_image_locked(
+        &self,
+        image: &StorageIntervals,
+        only: Option<&BTreeSet<PartitionChunkOffset>>,
+        snapshot_epoch: u64,
+        snapshot_crc_epoch: u64,
         force_replace: bool,
     ) -> eyre::Result<()> {
         for (submodule_interval, submodule) in self.submodules.iter() {
-            if !self.interval_snapshot_current(snapshot_epoch) {
+            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
                 return Ok(());
             }
             let start = submodule_interval.start();
@@ -4236,7 +4343,7 @@ impl StorageModule {
                 // The epoch check and the dirty-bit clear share this lock.
                 // `reset` bumps the epoch under the same lock, so a stale
                 // snapshot cannot drop a dirty bit published after the bump.
-                if !self.interval_snapshot_current(snapshot_epoch) {
+                if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
                     return Ok(());
                 }
                 disk.dirty.remove(&start);
@@ -4245,7 +4352,9 @@ impl StorageModule {
             let path = recover_mutex(&submodule.intervals_file);
             // `reset` bumps the epoch before it takes this file lock. A
             // snapshot from before that bump must not replace the new image.
-            if !self.interval_snapshot_current(snapshot_epoch) {
+            // A checksum cut bumps `crc_cut_epoch` under the publish lock
+            // this caller already holds, so a pre-cut snapshot stops here.
+            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
                 return Ok(());
             }
             let mut file = get_atomic_file(path.clone())?;
@@ -4255,7 +4364,7 @@ impl StorageModule {
             file.commit()?;
             drop(path);
             let mut disk = self.lock_interval_disk();
-            if !self.interval_snapshot_current(snapshot_epoch) {
+            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
                 return Ok(());
             }
             Self::splice_interval_slice(&mut disk.written, *submodule_interval, &slice);
@@ -5451,7 +5560,17 @@ impl StorageModule {
         let projection = Self::project_interval_file(&memory, &mask)?;
         let (interval, _) = self.get_submodule_for_offset(offset)?;
         let touched = BTreeSet::from([interval.start()]);
-        self.write_interval_image(&projection, Some(&touched), snapshot_epoch, false)?;
+        let _publish = self.lock_interval_publish();
+        // The bump is under the same lock as the replace. A completion that
+        // cloned before this point fails its epoch check and does not commit.
+        let crc_epoch = self.crc_cut_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.write_interval_image_locked(
+            &projection,
+            Some(&touched),
+            snapshot_epoch,
+            crc_epoch,
+            false,
+        )?;
         Ok(())
     }
 
@@ -15435,6 +15554,85 @@ mod tests {
             storage.generate_full_chunk(offset)?.is_none(),
             "reopen served a proof"
         );
+        Ok(())
+    }
+
+    /// A due completion clones the live map, then a checksum cut publishes
+    /// `Uninitialized`, then the completion commits. The committed file must
+    /// stay `Uninitialized`. Period 0 does not clone: batching is off, so the
+    /// flush returns before the pause. A crash after either order reloads
+    /// `Uninitialized` and open drops the placement.
+    #[rstest]
+    #[case::period_0(0_u64)]
+    #[case::period_30(30_u64)]
+    fn crc_cut_beats_completion_cloned_before_the_cut(
+        #[case] persist_secs: u64,
+    ) -> eyre::Result<()> {
+        let prefix = format!("crc_cut_vs_flush_{persist_secs}");
+        let (tmp, config, storage, ..) = settle_data_offset(&prefix, persist_secs)?;
+        let storage = Arc::new(storage);
+        let offset = PartitionChunkOffset::from(0);
+        {
+            let mut disk = storage.lock_interval_disk();
+            disk.dirty.insert(PartitionChunkOffset::from(0));
+            disk.last_completion.clear();
+        }
+        storage.pause_next_completion_clone();
+        if persist_secs == 0 {
+            storage.flush_interval_completions_locked(true)?;
+            assert!(
+                !storage.wait_for_interval_image_pause(Duration::from_millis(200)),
+                "period 0 cloned a completion"
+            );
+            storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
+        } else {
+            let flush_mod = Arc::clone(&storage);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(flush_mod.flush_interval_completions_locked(true));
+            });
+            assert!(
+                storage.wait_for_interval_image_pause(Duration::from_secs(5)),
+                "the completion did not clone"
+            );
+            let noted = storage.note_crc_mismatch(offset, ChunkType::Data, "test");
+            storage.release_interval_image_pause();
+            let flushed = rx.recv_timeout(Duration::from_secs(10));
+            noted?;
+            flushed.map_err(|err| eyre!("completion flush did not finish: {err}"))??;
+        }
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Uninitialized),
+            "a stale completion published Data"
+        );
+        assert!(
+            !storage.is_data_chunk_persisted_at(offset),
+            "persisted check trusts the pre-cut image"
+        );
+        let storage =
+            Arc::try_unwrap(storage).map_err(|_| eyre!("flush still holds the module"))?;
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = reopen_crc_module(tmp.path(), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "reopen reloaded Data"
+        );
+        assert_eq!(
+            file_label(&reopened, 0)?,
+            Some(ChunkType::Uninitialized),
+            "reopen file is not Uninitialized"
+        );
+        assert_not_served_as_data(&reopened, offset)?;
+        assert!(
+            !reopened.is_data_root_index_ready_at(offset),
+            "open kept the placement"
+        );
+        drop(reopened);
+        drop(tmp);
         Ok(())
     }
 
