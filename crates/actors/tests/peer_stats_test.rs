@@ -473,20 +473,28 @@ async fn delivered_bytes_ramp_a_256kib_peer_to_the_sweep_ceiling() {
     );
 }
 
+/// Each timeout halves the in-flight allowance from the 10-slot baseline.
+/// One failure is 5 and two failures are 2, both above the floor, so a shift
+/// that is short or long by one fails. The third failure is the floor of 1.
+/// A completed request clears the streak.
 #[test]
 async fn consecutive_timeouts_shrink_inflight_before_any_bytes_and_a_success_recovers() {
     const CHUNK: u64 = 256 * 1024;
     let mut stats = PeerStats::new(100, CHUNK, DEFAULT_TIMEOUT);
     assert_eq!(stats.available_concurrency(), 10);
-    for _ in 0..3 {
-        stats.record_request_started();
-        stats.record_request_failed();
-    }
+
+    stats.record_request_started();
+    stats.record_request_failed();
+    assert_eq!(stats.available_concurrency(), 5);
+
+    stats.record_request_started();
+    stats.record_request_failed();
+    assert_eq!(stats.available_concurrency(), 2);
+
+    stats.record_request_started();
+    stats.record_request_failed();
     let shrunk = stats.available_concurrency();
-    assert!(
-        (1..=2).contains(&shrunk),
-        "in-flight allowance after timeouts is {shrunk}"
-    );
+    assert_eq!(shrunk, 1);
 
     stats.record_request_started();
     stats.record_request_completed(create_chunk_time_record(100));
