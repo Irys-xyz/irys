@@ -455,6 +455,9 @@ struct IntervalDisk {
 enum SyncFailurePoint {
     BeforeDataFsync,
     BeforeIntervalCommit,
+    /// Authoritative interval replace has not committed. The ahead mask must
+    /// still describe the previous file.
+    BeforeIntervalImageCommit,
     /// Reset marker is durable. The index clear has not run.
     AfterResetMarker,
     /// Index is cleared. The interval file is not rewritten yet.
@@ -4204,15 +4207,17 @@ impl StorageModule {
         #[cfg(test)]
         self.wait_if_interval_image_paused();
         {
-            let mut disk = self.lock_interval_disk();
+            let disk = self.lock_interval_disk();
             // A snapshot from before `reset` must not clear a mask that reset,
             // or a later write-ahead, already published.
             if !self.interval_snapshot_current(snapshot_epoch) {
                 return Ok(());
             }
-            disk.mask = Self::mask_for_offsets(&nondurable);
-            disk.dirty.clear();
             if !force_replace && disk.written == memory {
+                drop(disk);
+                // The file already has this image. Remember the nondurable
+                // spans so the next batch inside them does not rewrite.
+                self.install_authoritative_mask(&nondurable, snapshot_epoch, snapshot_crc_epoch);
                 return Ok(());
             }
         }
@@ -4222,7 +4227,26 @@ impl StorageModule {
             snapshot_epoch,
             snapshot_crc_epoch,
             force_replace,
-        )
+        )?;
+        // The mask means the file already says `Interrupted`. Install it
+        // only after the replace commits. A failed replace leaves the old
+        // mask, so the next write-ahead still rewrites those spans.
+        self.install_authoritative_mask(&nondurable, snapshot_epoch, snapshot_crc_epoch);
+        Ok(())
+    }
+
+    fn install_authoritative_mask(
+        &self,
+        nondurable: &BTreeSet<PartitionChunkOffset>,
+        snapshot_epoch: u64,
+        snapshot_crc_epoch: u64,
+    ) {
+        let mut disk = self.lock_interval_disk();
+        if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
+            return;
+        }
+        disk.mask = Self::mask_for_offsets(nondurable);
+        disk.dirty.clear();
     }
 
     /// Rewrite `intervals.json` from the live map. Offsets still queued or
@@ -4357,6 +4381,8 @@ impl StorageModule {
             if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
                 return Ok(());
             }
+            #[cfg(test)]
+            self.inject_sync_failure(SyncFailurePoint::BeforeIntervalImageCommit)?;
             let mut file = get_atomic_file(path.clone())?;
             // `file` is a temporary file. `commit` renames it over the
             // original after fsync, then fsyncs the directory.
@@ -13277,6 +13303,72 @@ mod tests {
             file.get_at_point(PartitionChunkOffset::from(6)).copied(),
             Some(ChunkType::Interrupted)
         );
+        Ok(())
+    }
+
+    /// A failed authoritative replace must not install the ahead mask. The
+    /// next write-ahead still stores `Interrupted` before the chunk fsync.
+    /// Period 0 does not consult that mask. A crash after the write-ahead
+    /// reloads `Uninitialized`.
+    #[rstest]
+    #[case::period_0(0_u64)]
+    #[case::period_30(30_u64)]
+    fn failed_authoritative_interval_write_does_not_skip_write_ahead(
+        #[case] persist_secs: u64,
+    ) -> eyre::Result<()> {
+        let prefix = format!("interval_mask_fail_{persist_secs}");
+        let (tmp, config, storage) = interval_batch_module(&prefix, persist_secs)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(offset).copied(),
+            Some(ChunkType::Uninitialized),
+            "a new module starts Uninitialized"
+        );
+        assert!(storage.write_chunk(offset, vec![7_u8; 32], ChunkType::Data));
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalImageCommit);
+        let failed = storage
+            .write_intervals_to_submodules()
+            .expect_err("the interval replace was injected to fail");
+        assert!(
+            format!("{failed:#}").contains("BeforeIntervalImageCommit"),
+            "{failed:#}"
+        );
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(offset).copied(),
+            Some(ChunkType::Uninitialized),
+            "a failed replace published the new image"
+        );
+
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeDataFsync);
+        let fsync_failed = storage
+            .sync_pending_chunks()
+            .expect_err("chunk fsync was injected to fail");
+        assert!(
+            format!("{fsync_failed:#}").contains("BeforeDataFsync"),
+            "{fsync_failed:#}"
+        );
+        assert_eq!(
+            file_intervals(&storage)?.get_at_point(offset).copied(),
+            Some(ChunkType::Interrupted),
+            "write-ahead trusted a mask the failed replace never stored"
+        );
+
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+        let reopened = StorageModule::new(&one_span(10, "sub", None), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "open kept a durable Data label"
+        );
+        assert_ne!(
+            file_intervals(&reopened)?.get_at_point(offset).copied(),
+            Some(ChunkType::Data),
+            "reopen file is Data"
+        );
+        assert!(!reopened.is_data_chunk_durable_at(offset));
+        drop(reopened);
+        drop(tmp);
         Ok(())
     }
 
