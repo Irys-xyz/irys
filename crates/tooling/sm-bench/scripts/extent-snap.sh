@@ -106,11 +106,27 @@ real=${clocks#* }
 
 list=$(mktemp)
 body=$(mktemp)
+py=
+# TERM of this shell does not reach a foreground child. The walk is waited in
+# the background so the trap can stop python and filefrag.
+stop_walk() {
+    if [ -z "${py:-}" ]; then
+        return 0
+    fi
+    kids=$(ps -o pid= --ppid "$py" 2>/dev/null || true)
+    if [ -n "$kids" ]; then
+        # filefrag is a child of the python walk.
+        # shellcheck disable=SC2086
+        kill -TERM $kids 2>/dev/null || true
+    fi
+    kill -TERM "$py" 2>/dev/null || true
+}
+trap 'stop_walk; exit 143' TERM
 trap 'rm -f "$list" "$body"' EXIT
 
 find "$dir" -xdev -type f -print0 >"$list"
 
-python3 - "$dir" "$fs_block" "$part_start" "$list" >"$body" <<'PY'
+python3 - "$dir" "$fs_block" "$part_start" "$list" >"$body" <<'PY' &
 import os
 import re
 import subprocess
@@ -197,6 +213,15 @@ for item in names:
     for start, end in rows:
         print(f"{start} {end} {rel}")
 PY
+py=$!
+set +e
+wait "$py"
+py_status=$?
+set -e
+py=
+if [ "$py_status" -ne 0 ]; then
+    exit "$py_status"
+fi
 
 dest="$out/extents-$mono.txt"
 {

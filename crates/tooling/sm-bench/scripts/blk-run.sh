@@ -76,6 +76,33 @@ fi
 
 bt=$here/blk-trace.bt
 snap=$here/extent-snap.sh
+
+# The snapshot's own process group, so TERM reaches filefrag and not only the shell.
+start_snap() {
+    set -m
+    "$snap" "$mnt" "$canon" "$out" &
+    snap_pid=$!
+    set +m
+}
+
+stop_snap() {
+    if [ -z "${snap_pid:-}" ]; then
+        return 0
+    fi
+    local pid=$snap_pid
+    snap_pid=
+    if ! kill -TERM -- "-$pid" 2>/dev/null; then
+        local kids
+        kids=$(ps -o pid= --ppid "$pid" 2>/dev/null || true)
+        if [ -n "$kids" ]; then
+            # shellcheck disable=SC2086
+            kill -TERM $kids 2>/dev/null || true
+        fi
+        kill -TERM "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+}
+
 if [ ! -f "$bt" ] || [ ! -f "$snap" ]; then
     echo "missing blk-trace.bt or extent-snap.sh next to blk-run.sh" >&2
     exit 1
@@ -115,11 +142,7 @@ cleanup() {
         wait "$sleep_pid" 2>/dev/null || true
         sleep_pid=
     fi
-    if [ -n "$snap_pid" ]; then
-        kill -TERM "$snap_pid" 2>/dev/null || true
-        wait "$snap_pid" 2>/dev/null || true
-        snap_pid=
-    fi
+    stop_snap
     if [ -n "$bpid" ]; then
         kill -INT "$bpid" 2>/dev/null || true
         child=$(ps -o pid= --ppid "$bpid" 2>/dev/null || true)
@@ -209,8 +232,7 @@ with open(path, "a", encoding="utf-8") as out:
 PY
 spid=$!
 
-"$snap" "$mnt" "$canon" "$out" &
-snap_pid=$!
+start_snap
 wait "$snap_pid" || echo "extent-snap failed" >&2
 snap_pid=
 
@@ -222,8 +244,7 @@ while kill -0 "$bpid" 2>/dev/null; do
     if ! kill -0 "$bpid" 2>/dev/null; then
         break
     fi
-    "$snap" "$mnt" "$canon" "$out" &
-    snap_pid=$!
+    start_snap
     wait "$snap_pid" || echo "extent-snap failed" >&2
     snap_pid=
 done

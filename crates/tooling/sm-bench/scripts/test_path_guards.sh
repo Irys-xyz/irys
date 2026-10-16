@@ -2004,6 +2004,153 @@ test_ladder_does_not_restore_a_state_dir_it_did_not_create() {
     rm -rf "$root"
 }
 
+# findmnt names a mapper node this container does not have. dm-0 is that disk.
+snap_findmnt() {
+    local root=$1
+    mkdir -p "$root/bin"
+    cat >"$root/bin/findmnt" <<'EOF'
+#!/bin/bash
+case "$*" in
+    *SOURCE*) printf '%s\n' "/dev/dm-0" ;;
+    *) printf '%s\n' "/workspaces" ;;
+esac
+EOF
+    chmod +x "$root/bin/findmnt"
+}
+
+test_extent_snap_writes_a_snapshot() {
+    local name=extent-snap-ok root mnt
+    # /tmp is tmpfs ("none") and has no device node. The snapshot needs one.
+    root=$(other_tmpdir)
+    mnt=$(mount_of "$root")
+    mkdir -p "$root/data" "$root/out"
+    printf 'x\n' >"$root/data/file"
+    snap_findmnt "$root"
+    if ! PATH="$root/bin:$PATH" "$here/extent-snap.sh" "$mnt" "$root/data" "$root/out" >"$root/err" 2>&1; then
+        bad "$name" "extent-snap failed: $(cat "$root/err")"
+    elif ! compgen -G "$root/out/extents-*.txt" >/dev/null; then
+        bad "$name" "no extents file: $(cat "$root/err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_extent_snap_term_stops_the_walk() {
+    local name=extent-snap-term root mnt snap walk tries
+    # /tmp is tmpfs ("none") and has no device node. The snapshot needs one.
+    root=$(other_tmpdir)
+    mnt=$(mount_of "$root")
+    mkdir -p "$root/bin" "$root/data" "$root/out"
+    printf 'x\n' >"$root/data/file"
+    snap_findmnt "$root"
+    cat >"$root/bin/python3" <<EOF
+#!/bin/bash
+if [ "\$1" = "-c" ]; then
+    exec /usr/bin/python3 "\$@"
+fi
+printf '%s\n' "\$\$" > "$root/py.pid"
+sleep 60 &
+printf '%s\n' "\$!" > "$root/walk.pid"
+wait
+EOF
+    chmod +x "$root/bin/python3"
+    PATH="$root/bin:$PATH" "$here/extent-snap.sh" "$mnt" "$root/data" "$root/out" >"$root/err" 2>&1 &
+    snap=$!
+    if ! wait_file "$root/walk.pid"; then
+        bad "$name" "walk did not start: $(cat "$root/err" 2>/dev/null)"
+        kill "$snap" 2>/dev/null || true
+        wait "$snap" 2>/dev/null || true
+        rm -rf "$root"
+        return
+    fi
+    walk=$(cat "$root/walk.pid")
+    kill -TERM "$snap" 2>/dev/null || true
+    tries=0
+    while alive "$snap" || alive "$walk"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 30 ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if alive "$walk"; then
+        bad "$name" "walk $walk still running after TERM"
+    elif alive "$snap"; then
+        bad "$name" "extent-snap $snap still running after TERM"
+    else
+        ok "$name"
+    fi
+    kill -9 "$snap" "$walk" 2>/dev/null || true
+    wait "$snap" 2>/dev/null || true
+    rm -rf "$root"
+}
+
+test_blk_run_term_stops_the_snapshot_child() {
+    local name=blk-run-term-snap-child root err dev outer blk snap child tries
+    root=$(tmpdir)
+    err=$root/err
+    dev=$(block_dev) || {
+        bad "$name" "no loop0 or dm-0 block device"
+        rm -rf "$root"
+        return
+    }
+    prepare_blk_run_fakes "$root" "$dev"
+    hold_bpftrace "$root"
+    cat >"$root/extent-snap.sh" <<EOF
+#!/bin/bash
+n=\$(cat "$root/snap.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$root/snap.count"
+printf '%s\n' "\$\$" > "$root/snap.pid"
+if [ "\$n" -eq 1 ]; then
+    sleep 60 &
+    printf '%s\n' "\$!" > "$root/child.pid"
+    wait
+fi
+exit 0
+EOF
+    chmod +x "$root/extent-snap.sh"
+    PATH="$root/bin:$PATH" with_binds "$root/sys" "$root/extent-snap.sh" "$here/extent-snap.sh" \
+        "$here/blk-run.sh" "$dev" "$root/safe/loadtest" "$root/trace" >"$err" 2>&1 &
+    outer=$!
+    if ! wait_file "$root/child.pid" || ! wait_file "$root/bpf.pid"; then
+        bad "$name" "snapshot child did not start: $(cat "$err" 2>/dev/null)"
+        kill "$outer" 2>/dev/null || true
+        wait "$outer" 2>/dev/null || true
+        rm -rf "$root"
+        return
+    fi
+    blk=$(ps -o ppid= -p "$(cat "$root/bpf.pid")" | tr -d '[:space:]')
+    snap=$(cat "$root/snap.pid")
+    child=$(cat "$root/child.pid")
+    local pgid
+    pgid=$(ps -o pgid= -p "$snap" | tr -d '[:space:]')
+    kill -TERM "$blk" 2>/dev/null || true
+    tries=0
+    while alive "$blk" || alive "$snap" || alive "$child"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 30 ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$pgid" != "$snap" ]; then
+        bad "$name" "snapshot pgid $pgid is not its pid $snap"
+    elif alive "$blk"; then
+        bad "$name" "blk-run $blk still running after TERM"
+    elif alive "$child"; then
+        bad "$name" "snapshot child $child still running after TERM"
+    elif alive "$snap"; then
+        bad "$name" "snapshot $snap still running after TERM"
+    else
+        ok "$name"
+    fi
+    kill -9 "$blk" "$snap" "$child" "$(cat "$root/bpf.pid" 2>/dev/null)" "$outer" 2>/dev/null || true
+    wait "$outer" 2>/dev/null || true
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
