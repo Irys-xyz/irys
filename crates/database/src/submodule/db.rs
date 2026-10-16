@@ -141,101 +141,6 @@ pub fn path_hashes_in_inclusive_range<T: DbTx>(
     Ok(rows)
 }
 
-/// First offset in half-open `[start, end)` absent from a fallible sorted key stream.
-///
-/// Returns as soon as the first hole is found (does not scan past it). Use
-/// [`gaps_with`] when every hole is required.
-///
-/// `next_key` yields the next ascending key (or `None` when exhausted). Shared by
-/// the MDBX cursor path and pure unit tests so both stay identical.
-pub fn first_gap_with(
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-    mut next_key: impl FnMut() -> eyre::Result<Option<PartitionChunkOffset>>,
-) -> eyre::Result<Option<PartitionChunkOffset>> {
-    if start >= end {
-        return Ok(None);
-    }
-    let mut expected = start;
-    while let Some(key) = next_key()? {
-        if key >= end {
-            break;
-        }
-        // Keys below the window (or behind expected) must not rewind `expected`
-        // or invent a false gap (e.g. stream [0,5,6,…] with start=5).
-        if key < expected {
-            continue;
-        }
-        if key > expected {
-            return Ok(Some(expected));
-        }
-        expected = key + 1;
-        if expected >= end {
-            return Ok(None);
-        }
-    }
-    Ok(if expected < end { Some(expected) } else { None })
-}
-
-/// All half-open missing ranges `[gap_start, gap_end)` inside `[start, end)`.
-///
-/// Consecutive missing offsets form one range. Indexed runs between holes are
-/// **not** included — callers can re-index only the holes instead of the whole
-/// tail after the first gap.
-pub fn gaps_with(
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-    mut next_key: impl FnMut() -> eyre::Result<Option<PartitionChunkOffset>>,
-) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
-    if start >= end {
-        return Ok(Vec::new());
-    }
-    let mut gaps = Vec::new();
-    let mut expected = start;
-    while let Some(key) = next_key()? {
-        if key >= end {
-            break;
-        }
-        if key < expected {
-            continue;
-        }
-        if key > expected {
-            gaps.push((expected, key));
-        }
-        // Advance past this present key (and any implied dense run of one).
-        expected = key + 1;
-        if expected >= end {
-            return Ok(gaps);
-        }
-    }
-    if expected < end {
-        gaps.push((expected, end));
-    }
-    Ok(gaps)
-}
-
-/// First offset in half-open `[start, end)` absent from a sorted key stream.
-///
-/// Infallible wrapper around [`first_gap_with`] for tests and pure call sites.
-pub fn first_gap_in_sorted_keys(
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-    keys: impl IntoIterator<Item = PartitionChunkOffset>,
-) -> Option<PartitionChunkOffset> {
-    let mut iter = keys.into_iter();
-    first_gap_with(start, end, || Ok(iter.next())).expect("infallible key stream")
-}
-
-/// All half-open missing ranges in `[start, end)` from a sorted key stream.
-pub fn gaps_in_sorted_keys(
-    start: PartitionChunkOffset,
-    end: PartitionChunkOffset,
-    keys: impl IntoIterator<Item = PartitionChunkOffset>,
-) -> Vec<(PartitionChunkOffset, PartitionChunkOffset)> {
-    let mut iter = keys.into_iter();
-    gaps_with(start, end, || Ok(iter.next())).expect("infallible key stream")
-}
-
 /// First offset in half-open `[start, end)` with no tx-path interval.
 ///
 /// A covered offset with no data-path row is indexed. Heal uses this coverage,
@@ -582,8 +487,7 @@ pub fn del_pending_body_migrations_in_ranges<T: DbTxMut + DbTx>(
     Ok(orphaned.len())
 }
 
-/// `true` when a pending-job key lies in `[start, end]`. Does not use the value.
-pub fn has_pending_body_migration_in_range<T: DbTx>(
+pub(super) fn has_pending_in_inclusive_range<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
@@ -600,11 +504,7 @@ pub fn has_pending_in_ranges<T: DbTx>(
     offset_key_in_spans::<PendingBodyMigrationsByOffset, T>(tx, &spans)
 }
 
-/// `true` when a tx-path interval overlaps `[start, end]`.
-///
-/// The value holds the inclusive end, so the scan reads it. A row that only
-/// touches a neighbor does not count.
-pub fn tx_interval_overlaps<T: DbTx>(
+pub(super) fn tx_interval_overlaps<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
@@ -665,6 +565,20 @@ pub fn list_data_root_infos<T: DbTx>(
     Ok(cursor.walk(None)?.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Inclusive extent `[start_offset, start_offset + ceil(data_size / chunk_size) - 1]`.
+///
+/// `chunk_size` must be non-zero. The chunk count must fit in `i32`.
+pub(super) fn placement_extent(info: &DataRootInfo, chunk_size: u64) -> eyre::Result<(i32, i32)> {
+    let extent_start = info.start_offset.0;
+    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
+        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
+    let extent_end = extent_start
+        .checked_add(extent_chunks)
+        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
+        .saturating_sub(1);
+    Ok((extent_start, extent_end))
+}
+
 /// `true` when the placement extent overlaps the inclusive span.
 ///
 /// Extent is `[start_offset, start_offset + ceil(data_size / chunk_size) - 1]`.
@@ -679,13 +593,7 @@ pub fn placement_overlaps_inclusive_span(
     if chunk_size == 0 {
         return Ok(true);
     }
-    let extent_start = info.start_offset.0;
-    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
-        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
-    let extent_end = extent_start
-        .checked_add(extent_chunks)
-        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
-        .saturating_sub(1);
+    let (extent_start, extent_end) = placement_extent(info, chunk_size)?;
     let span_start = i32::try_from(start.0)
         .map_err(|_| eyre::eyre!("partition offset {} does not fit in i32", start.0))?;
     let span_end = i32::try_from(end.0)
@@ -709,13 +617,7 @@ pub(super) fn info_overlaps_coalesced_spans(
     if spans.is_empty() {
         return Ok(false);
     }
-    let extent_start = info.start_offset.0;
-    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
-        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
-    let extent_end = extent_start
-        .checked_add(extent_chunks)
-        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
-        .saturating_sub(1);
+    let (_, extent_end) = placement_extent(info, chunk_size)?;
     if extent_end < 0 {
         return Ok(false);
     }
@@ -1082,19 +984,7 @@ where
     OffsetTable: Table<Key = PartitionChunkOffset>,
     T: DbTxMut + DbTx,
 {
-    let keys = {
-        let mut cursor = tx.cursor_write::<OffsetTable>()?;
-        let mut keys = Vec::new();
-        for row in cursor.walk_range(start..=end)? {
-            keys.push(row?.0);
-        }
-        keys
-    };
-    let removed = keys.len();
-    for key in keys {
-        tx.delete::<OffsetTable>(key, None)?;
-    }
-    Ok(removed)
+    delete_offset_rows_in_spans::<OffsetTable, T>(tx, &[(start, end)])
 }
 
 #[cfg(test)]
@@ -1434,114 +1324,31 @@ mod tests {
         irys_types::PartitionChunkOffset::from(v)
     }
 
-    #[test]
-    fn first_gap_in_sorted_keys_covers_hole_patterns() {
-        use super::first_gap_in_sorted_keys;
-
-        assert_eq!(first_gap_in_sorted_keys(o(0), o(0), []), None);
-        assert_eq!(first_gap_in_sorted_keys(o(0), o(10), []), Some(o(0)));
-        assert_eq!(
-            first_gap_in_sorted_keys(
-                o(0),
-                o(10),
-                [o(0), o(1), o(2), o(3), o(4), o(5), o(6), o(7), o(8), o(9)]
-            ),
-            None
-        );
-        // trailing suffix hole
-        assert_eq!(
-            first_gap_in_sorted_keys(o(0), o(10), [o(0), o(1), o(2), o(3), o(4)]),
-            Some(o(5))
-        );
-        // middle hole (binary-search failure mode)
-        assert_eq!(
-            first_gap_in_sorted_keys(o(0), o(10), [o(0), o(1), o(5), o(6), o(7), o(8), o(9)]),
-            Some(o(2))
-        );
-        // unindexed prefix
-        assert_eq!(
-            first_gap_in_sorted_keys(o(0), o(10), [o(5), o(6), o(7), o(8), o(9)]),
-            Some(o(0))
-        );
-        // multi-hole from offset 1
-        assert_eq!(
-            first_gap_in_sorted_keys(o(1), o(6), [o(1), o(3), o(5)]),
-            Some(o(2))
-        );
-        // Keys below start must not invent a false gap in a dense window.
-        assert_eq!(
-            first_gap_in_sorted_keys(o(5), o(10), [o(0), o(5), o(6), o(7), o(8), o(9)]),
-            None
-        );
+    fn sample_hashes() -> super::ChunkPathHashes {
+        super::ChunkPathHashes {
+            data_path_hash: Some(H256::random()),
+            tx_path_hash: Some(H256::random()),
+        }
     }
 
-    #[test]
-    fn gaps_in_sorted_keys_reports_each_hole_not_full_tail() {
-        use super::gaps_in_sorted_keys;
-
-        // Dense
-        assert!(
-            gaps_in_sorted_keys(
-                o(0),
-                o(10),
-                [o(0), o(1), o(2), o(3), o(4), o(5), o(6), o(7), o(8), o(9)]
-            )
-            .is_empty()
-        );
-
-        // Two disjoint holes: [2,5) and [8,9) — not [2,10)
-        assert_eq!(
-            gaps_in_sorted_keys(o(0), o(10), [o(0), o(1), o(5), o(6), o(7), o(9)]),
-            vec![(o(2), o(5)), (o(8), o(9))]
-        );
-
-        // Below-start keys ignored: dense [5,10) despite a leading key 0.
-        assert!(gaps_in_sorted_keys(o(5), o(10), [o(0), o(5), o(6), o(7), o(8), o(9)]).is_empty());
-
-        // Prefix + middle
-        assert_eq!(
-            gaps_in_sorted_keys(o(0), o(10), [o(2), o(3), o(7), o(8), o(9)]),
-            vec![(o(0), o(2)), (o(4), o(7))]
-        );
-
-        // Fully empty
-        assert_eq!(gaps_in_sorted_keys(o(0), o(5), []), vec![(o(0), o(5))]);
+    fn put_path_hashes(db: &reth_db::DatabaseEnv, offsets: &[u32]) -> eyre::Result<()> {
+        use super::set_path_hashes_by_offset;
+        let path_hashes = sample_hashes();
+        let tx = db.tx_mut()?;
+        for off in offsets {
+            set_path_hashes_by_offset(&tx, o(*off), path_hashes.clone())?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     #[test]
     fn first_missing_path_hash_offset_cursor_finds_middle_hole() -> eyre::Result<()> {
-        use super::{
-            ChunkPathHashes, first_missing_path_hash_offset_in_tx, set_path_hashes_by_offset,
-        };
-        use crate::submodule::tables::SubmoduleTables;
-        use crate::{IrysDatabaseArgs as _, open_or_create_db};
-        use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::H256;
-        use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
+        use super::first_missing_path_hash_offset_in_tx;
 
-        let temp_dir = TempDirBuilder::new()
-            .prefix("path_hash_gap")
-            .with_tracing()
-            .build();
-        let db = open_or_create_db(
-            temp_dir,
-            SubmoduleTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-
-        let path_hashes = ChunkPathHashes {
-            data_path_hash: Some(H256::random()),
-            tx_path_hash: Some(H256::random()),
-        };
-        {
-            let tx = db.tx_mut()?;
-            // indexed 0,1 and 5..9 — hole at 2
-            for off in [0_u32, 1, 5, 6, 7, 8, 9] {
-                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
-            }
-            tx.commit()?;
-        }
+        let db = open_test_submodule_db("path_hash_gap")?;
+        // indexed 0,1 and 5..9 — hole at 2
+        put_path_hashes(&db, &[0, 1, 5, 6, 7, 8, 9])?;
 
         let gap = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(10)))?;
         assert_eq!(gap, Some(o(2)));
@@ -1557,43 +1364,16 @@ mod tests {
 
     #[test]
     fn first_missing_path_hash_offset_density_fast_path_no_gap() -> eyre::Result<()> {
-        use super::{
-            ChunkPathHashes, first_missing_path_hash_offset_in_tx, set_path_hashes_by_offset,
-        };
-        use crate::submodule::tables::SubmoduleTables;
-        use crate::{IrysDatabaseArgs as _, open_or_create_db};
-        use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::H256;
-        use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
+        use super::first_missing_path_hash_offset_in_tx;
 
-        let temp_dir = TempDirBuilder::new()
-            .prefix("path_hash_dense")
-            .with_tracing()
-            .build();
-        let db = open_or_create_db(
-            temp_dir,
-            SubmoduleTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
+        let db = open_test_submodule_db("path_hash_dense")?;
+        put_path_hashes(&db, &(0..10).collect::<Vec<_>>())?;
 
-        let path_hashes = ChunkPathHashes {
-            data_path_hash: Some(H256::random()),
-            tx_path_hash: Some(H256::random()),
-        };
-        {
-            let tx = db.tx_mut()?;
-            for off in 0_u32..10 {
-                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
-            }
-            tx.commit()?;
-        }
-
-        // Dense [0, 10) — first/last/entries prove completeness without relying on a hole.
+        // Dense [0, 10). A complete window is not a hole.
         let none = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(10)))?;
         assert_eq!(none, None);
 
-        // Partial dense range with extra keys outside still falls through correctly.
+        // Keys outside the window do not fill a hole inside it, and there is none.
         let none_mid = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(3), o(7)))?;
         assert_eq!(none_mid, None);
 
@@ -1604,38 +1384,11 @@ mod tests {
     /// With `seek(start)` + whole-table count, {0,5,6,7,9} over [5,10) looked dense.
     #[test]
     fn first_missing_path_hash_offset_density_not_fooled_by_keys_below_start() -> eyre::Result<()> {
-        use super::{
-            ChunkPathHashes, first_missing_path_hash_offset_in_tx, set_path_hashes_by_offset,
-        };
-        use crate::submodule::tables::SubmoduleTables;
-        use crate::{IrysDatabaseArgs as _, open_or_create_db};
-        use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::H256;
-        use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
+        use super::first_missing_path_hash_offset_in_tx;
 
-        let temp_dir = TempDirBuilder::new()
-            .prefix("path_hash_pad")
-            .with_tracing()
-            .build();
-        let db = open_or_create_db(
-            temp_dir,
-            SubmoduleTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-
-        let path_hashes = ChunkPathHashes {
-            data_path_hash: Some(H256::random()),
-            tx_path_hash: Some(H256::random()),
-        };
-        {
-            let tx = db.tx_mut()?;
-            // 5 keys total; expected_len([5,10))=5. Hole at 8 inside the range.
-            for off in [0_u32, 5, 6, 7, 9] {
-                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
-            }
-            tx.commit()?;
-        }
+        let db = open_test_submodule_db("path_hash_pad")?;
+        // 5 keys total; expected_len([5,10))=5. Hole at 8 inside the range.
+        put_path_hashes(&db, &[0, 5, 6, 7, 9])?;
 
         let gap = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(5), o(10)))?;
         assert_eq!(gap, Some(o(8)), "must not treat padded entries() as dense");
@@ -1648,37 +1401,12 @@ mod tests {
     #[test]
     fn del_path_hashes_by_offset_makes_offset_a_gap() -> eyre::Result<()> {
         use super::{
-            ChunkPathHashes, del_path_hashes_by_offset, first_missing_path_hash_offset_in_tx,
-            get_path_hashes_by_offset, set_path_hashes_by_offset,
+            del_path_hashes_by_offset, first_missing_path_hash_offset_in_tx,
+            get_path_hashes_by_offset,
         };
-        use crate::submodule::tables::SubmoduleTables;
-        use crate::{IrysDatabaseArgs as _, open_or_create_db};
-        use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::H256;
-        use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
 
-        let temp_dir = TempDirBuilder::new()
-            .prefix("path_hash_delete")
-            .with_tracing()
-            .build();
-        let db = open_or_create_db(
-            temp_dir,
-            SubmoduleTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-
-        let path_hashes = ChunkPathHashes {
-            data_path_hash: Some(H256::random()),
-            tx_path_hash: Some(H256::random()),
-        };
-        {
-            let tx = db.tx_mut()?;
-            for off in 0_u32..10 {
-                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
-            }
-            tx.commit()?;
-        }
+        let db = open_test_submodule_db("path_hash_delete")?;
+        put_path_hashes(&db, &(0..10).collect::<Vec<_>>())?;
 
         db.update_eyre(|tx| del_path_hashes_by_offset(tx, o(3)))?;
 
@@ -1699,21 +1427,9 @@ mod tests {
             add_tx_path_hash_to_offset_range, get_data_path_by_offset, get_path_hashes_by_offset,
             path_hashes_in_inclusive_range, write_data_path_updates,
         };
-        use crate::submodule::tables::SubmoduleTables;
-        use crate::{IrysDatabaseArgs as _, open_or_create_db};
-        use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::H256;
-        use reth_db::mdbx::DatabaseArguments;
 
-        let temp_dir = TempDirBuilder::new()
-            .prefix("path_hash_range")
-            .with_tracing()
-            .build();
-        let db = open_or_create_db(
-            temp_dir,
-            SubmoduleTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
+        let db = open_test_submodule_db("path_hash_range")?;
 
         let tx_hash_1 = H256::from([1_u8; 32]);
         let tx_hash_2 = H256::from([2_u8; 32]);
