@@ -1672,169 +1672,108 @@ fn evict_cache(dir: &Path) -> eyre::Result<u32> {
     }
 }
 
-#[derive(Default)]
-struct PartialArgs {
-    db: Option<PathBuf>,
-    index: Option<PathBuf>,
-    engine: Option<Engine>,
-    mode: Option<Mode>,
-    samples: Option<usize>,
-    threads: Option<usize>,
-    chunk_size: Option<u64>,
-    ledgers: Option<Vec<DataLedger>>,
-    synthetic: Option<Vec<usize>>,
-    prefetch: Option<Vec<usize>>,
-    span: Option<(u32, u32)>,
-    prepare: Option<PathBuf>,
-    temperature: Option<bool>,
-    migrate_copy: bool,
-    migrate_index: bool,
-}
-
-impl PartialArgs {
-    fn into_args(self) -> Args {
-        let defaults = Args::default();
-        let (warm, cold) = match self.temperature {
-            Some(warm) => (warm, !warm),
-            None => (defaults.warm, defaults.cold),
-        };
-        Args {
-            db: self.db,
-            index: self.index,
-            engine: self.engine.unwrap_or(defaults.engine),
-            mode: self.mode.unwrap_or(defaults.mode),
-            samples: self.samples.unwrap_or(defaults.samples),
-            threads: self.threads.unwrap_or(defaults.threads),
-            chunk_size: self.chunk_size.unwrap_or(defaults.chunk_size),
-            ledgers: self.ledgers.unwrap_or(defaults.ledgers),
-            synthetic: self.synthetic.unwrap_or(defaults.synthetic),
-            prefetch: self.prefetch.unwrap_or(defaults.prefetch),
-            warm,
-            cold,
-            index_span: self.span,
-            migrate_copy: self.migrate_copy,
-            migrate_index: self.migrate_index,
-            prepare: self.prepare,
-        }
-    }
-}
-
 fn parse_args(raw: &[String]) -> eyre::Result<Option<Args>> {
     if raw.is_empty() || raw.iter().any(|arg| arg == "--help" || arg == "-h") {
         return Ok(None);
     }
-    let mut partial = PartialArgs::default();
+    let mut args = Args::default();
+    let mut seen = Vec::<&'static str>::new();
     let mut index_at = 0;
     while index_at < raw.len() {
         let flag = raw[index_at].as_str();
         index_at += 1;
-        apply_flag(&mut partial, raw, &mut index_at, flag)?;
+        apply_flag(&mut args, &mut seen, raw, &mut index_at, flag)?;
     }
-    let args = partial.into_args();
     validate(&args)?;
     Ok(Some(args))
 }
 
+fn mark_once(seen: &mut Vec<&'static str>, flag: &'static str) -> eyre::Result<()> {
+    if seen.contains(&flag) {
+        eyre::bail!("{flag} given twice");
+    }
+    seen.push(flag);
+    Ok(())
+}
+
 fn apply_flag(
-    partial: &mut PartialArgs,
+    args: &mut Args,
+    seen: &mut Vec<&'static str>,
     raw: &[String],
     index_at: &mut usize,
     flag: &str,
 ) -> eyre::Result<()> {
     match flag {
-        "--db" => set_once(
-            &mut partial.db,
-            PathBuf::from(next_value(raw, index_at, flag)?),
-            flag,
-        ),
-        "--index" => set_once(
-            &mut partial.index,
-            PathBuf::from(next_value(raw, index_at, flag)?),
-            flag,
-        ),
-        "--engine" => set_once(
-            &mut partial.engine,
-            parse_engine(next_value(raw, index_at, flag)?)?,
-            flag,
-        ),
-        "--mode" => set_once(
-            &mut partial.mode,
-            parse_mode(next_value(raw, index_at, flag)?)?,
-            flag,
-        ),
-        "--samples" => set_once(
-            &mut partial.samples,
-            parse_usize(next_value(raw, index_at, flag)?, flag)?,
-            flag,
-        ),
-        "--threads" => set_once(
-            &mut partial.threads,
-            parse_usize(next_value(raw, index_at, flag)?, flag)?,
-            flag,
-        ),
-        "--chunk-size" => set_once(
-            &mut partial.chunk_size,
-            parse_u64(next_value(raw, index_at, flag)?, flag)?,
-            flag,
-        ),
-        "--ledgers" => set_once(
-            &mut partial.ledgers,
-            parse_ledgers(next_value(raw, index_at, flag)?)?,
-            flag,
-        ),
-        "--synthetic" => set_once(
-            &mut partial.synthetic,
-            parse_synthetic(next_value(raw, index_at, flag)?)?,
-            flag,
-        ),
-        "--prefetch" => set_once(
-            &mut partial.prefetch,
-            parse_synthetic(next_value(raw, index_at, flag)?)?,
-            flag,
-        ),
-        "--index-span" => set_once(
-            &mut partial.span,
-            parse_span(next_value(raw, index_at, flag)?)?,
-            flag,
-        ),
-        "--prepare" => set_once(
-            &mut partial.prepare,
-            PathBuf::from(next_value(raw, index_at, flag)?),
-            flag,
-        ),
-        "--cold-only" => set_temperature(&mut partial.temperature, false),
-        "--warm-only" => set_temperature(&mut partial.temperature, true),
-        "--migrate-copy" => {
-            if partial.migrate_copy {
-                eyre::bail!("--migrate-copy given twice");
+        "--db" => {
+            mark_once(seen, "--db")?;
+            args.db = Some(PathBuf::from(next_value(raw, index_at, flag)?));
+        }
+        "--index" => {
+            mark_once(seen, "--index")?;
+            args.index = Some(PathBuf::from(next_value(raw, index_at, flag)?));
+        }
+        "--engine" => {
+            mark_once(seen, "--engine")?;
+            args.engine = parse_engine(next_value(raw, index_at, flag)?)?;
+        }
+        "--mode" => {
+            mark_once(seen, "--mode")?;
+            args.mode = parse_mode(next_value(raw, index_at, flag)?)?;
+        }
+        "--samples" => {
+            mark_once(seen, "--samples")?;
+            args.samples = parse_int(next_value(raw, index_at, flag)?, flag)?;
+        }
+        "--threads" => {
+            mark_once(seen, "--threads")?;
+            args.threads = parse_int(next_value(raw, index_at, flag)?, flag)?;
+        }
+        "--chunk-size" => {
+            mark_once(seen, "--chunk-size")?;
+            args.chunk_size = parse_int(next_value(raw, index_at, flag)?, flag)?;
+        }
+        "--ledgers" => {
+            mark_once(seen, "--ledgers")?;
+            args.ledgers = parse_ledgers(next_value(raw, index_at, flag)?)?;
+        }
+        "--synthetic" => {
+            mark_once(seen, "--synthetic")?;
+            args.synthetic = parse_synthetic(next_value(raw, index_at, flag)?)?;
+        }
+        "--prefetch" => {
+            mark_once(seen, "--prefetch")?;
+            args.prefetch = parse_synthetic(next_value(raw, index_at, flag)?)?;
+        }
+        "--index-span" => {
+            mark_once(seen, "--index-span")?;
+            args.index_span = Some(parse_span(next_value(raw, index_at, flag)?)?);
+        }
+        "--prepare" => {
+            mark_once(seen, "--prepare")?;
+            args.prepare = Some(PathBuf::from(next_value(raw, index_at, flag)?));
+        }
+        "--cold-only" | "--warm-only" => {
+            if seen
+                .iter()
+                .any(|item| *item == "--cold-only" || *item == "--warm-only")
+            {
+                eyre::bail!("pass only one of --cold-only and --warm-only");
             }
-            partial.migrate_copy = true;
-            Ok(())
+            let warm = flag == "--warm-only";
+            seen.push(if warm { "--warm-only" } else { "--cold-only" });
+            args.warm = warm;
+            args.cold = !warm;
+        }
+        "--migrate-copy" => {
+            mark_once(seen, "--migrate-copy")?;
+            args.migrate_copy = true;
         }
         "--migrate-index" => {
-            if partial.migrate_index {
-                eyre::bail!("--migrate-index given twice");
-            }
-            partial.migrate_index = true;
-            Ok(())
+            mark_once(seen, "--migrate-index")?;
+            args.migrate_index = true;
         }
         other => eyre::bail!("unknown argument {other}"),
     }
-}
-
-fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) -> eyre::Result<()> {
-    if slot.is_some() {
-        eyre::bail!("{flag} given twice");
-    }
-    *slot = Some(value);
-    Ok(())
-}
-
-fn set_temperature(slot: &mut Option<bool>, warm: bool) -> eyre::Result<()> {
-    if slot.is_some() {
-        eyre::bail!("pass only one of --cold-only and --warm-only");
-    }
-    *slot = Some(warm);
     Ok(())
 }
 
@@ -1849,13 +1788,8 @@ fn next_value<'a>(raw: &'a [String], index: &mut usize, flag: &str) -> eyre::Res
     Ok(value)
 }
 
-fn parse_usize(text: &str, flag: &str) -> eyre::Result<usize> {
-    text.parse::<usize>()
-        .map_err(|_| eyre!("{flag} expects an integer, got {text}"))
-}
-
-fn parse_u64(text: &str, flag: &str) -> eyre::Result<u64> {
-    text.parse::<u64>()
+fn parse_int<T: std::str::FromStr>(text: &str, flag: &str) -> eyre::Result<T> {
+    text.parse::<T>()
         .map_err(|_| eyre!("{flag} expects an integer, got {text}"))
 }
 
@@ -1886,9 +1820,6 @@ fn parse_ledgers(text: &str) -> eyre::Result<Vec<DataLedger>> {
         }
         ledgers.push(parse_ledger(part)?);
     }
-    if ledgers.is_empty() {
-        eyre::bail!("--ledgers needs at least one ledger");
-    }
     Ok(ledgers)
 }
 
@@ -1908,14 +1839,11 @@ fn parse_synthetic(text: &str) -> eyre::Result<Vec<usize>> {
         if part.is_empty() {
             eyre::bail!("empty synthetic width in {text}");
         }
-        let width = parse_usize(part, "--synthetic")?;
+        let width = parse_int(part, "--synthetic")?;
         if width == 0 {
             eyre::bail!("synthetic width must be >= 1");
         }
         widths.push(width);
-    }
-    if widths.is_empty() {
-        eyre::bail!("--synthetic needs at least one width");
     }
     Ok(widths)
 }
@@ -1967,14 +1895,19 @@ mod tests {
             .build()
     }
 
+    fn live_link(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("LIVE"), b"live").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        (real, link)
+    }
+
     #[test]
     fn require_copy_dir_refuses_a_missing_name_through_a_symlink() {
         let tmp = temp();
-        let real = tmp.path().join("real");
-        std::fs::create_dir(&real).unwrap();
-        std::fs::write(real.join("LIVE"), b"live").unwrap();
-        let link = tmp.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (real, link) = live_link(tmp.path());
         let path = link.join("new.copy");
         let err = super::require_copy_dir(&path, "consensus database").unwrap_err();
         let text = format!("{err:#}");
@@ -2016,11 +1949,7 @@ mod tests {
     #[test]
     fn prepare_fixture_does_not_create_through_a_symlink() {
         let tmp = temp();
-        let real = tmp.path().join("real");
-        std::fs::create_dir(&real).unwrap();
-        std::fs::write(real.join("LIVE"), b"live").unwrap();
-        let link = tmp.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (real, link) = live_link(tmp.path());
         let path = link.join("fixture.copy");
         let err = super::prepare_fixture(&path).unwrap_err();
         assert!(
