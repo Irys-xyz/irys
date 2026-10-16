@@ -46,8 +46,7 @@ impl Encode for MetadataKey {
 
 impl Decode for MetadataKey {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        // LE decoding to match LE encode — do NOT delegate to reth's
-        // u32::decode which uses BE, as our keys are stored in LE.
+        // Little-endian, matching [`Encode`]. Reth's `u32` decode is big-endian.
         let arr: [u8; 4] = value.try_into().map_err(|_| DatabaseError::Decode)?;
         match u32::from_le_bytes(arr) {
             1 => Ok(Self::DBSchemaVersion),

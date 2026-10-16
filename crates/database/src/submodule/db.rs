@@ -1165,7 +1165,7 @@ mod tests {
     fn job(data_root: H256, start_offset: i32, block_height: u64) -> PendingBodyMigration {
         PendingBodyMigration {
             data_root,
-            data_size: 4_430_000_000, // ~16.9k chunks, the n3 incident size
+            data_size: 4_430_000_000,
             start_offset: RelativeChunkOffset(start_offset),
             block_height,
             attempts: 0,

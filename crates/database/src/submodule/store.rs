@@ -220,7 +220,6 @@ pub trait SubmoduleRead {
     ///
     /// RocksDB v1 seeks `ChunkOffsetsByContentHash`. The result is sorted.
     /// An absent hash is an empty vec. MDBX returns an error.
-    /// They do not return an empty vec.
     fn offsets_for_content_hash(
         &self,
         _content_hash: H256,
@@ -434,8 +433,8 @@ pub trait SubmoduleWrite: SubmoduleRead {
     /// Replace each offset row with the packed checksum and optional proof.
     ///
     /// A proof that no interval covers is returned and not stored. Its
-    /// checksum is not stored either. MDBX ignores `crc` and
-    /// write proofs through [`Self::write_data_path_updates`].
+    /// checksum is not stored either. MDBX ignores `crc` and writes the
+    /// proof through [`Self::write_data_path_updates`].
     fn write_packed_offset_rows(
         &mut self,
         rows: Vec<PackedOffsetRow>,
