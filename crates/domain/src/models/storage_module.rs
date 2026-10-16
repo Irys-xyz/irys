@@ -1712,6 +1712,20 @@ fn split_write_label(file: &File, sub_base_path: &Path) -> PathBuf {
     sub_base_path.join("split-write")
 }
 
+/// A poisoned mutex still yields its guard. The poison flag stays set.
+/// [`StorageModule::lock_sync`] clears that flag: a later `try_lock` must
+/// not keep failing after the panic.
+fn recover_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn recover_read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl StorageModule {
     /// Initializes a new StorageModule. The index engine comes from
     /// `config.node_config.database.submodule_index`.
@@ -2171,18 +2185,12 @@ impl StorageModule {
             // Same advise as chunks.dat: a dup shares the open-file description,
             // and a large pread must not fetch past the range the caller sized.
             {
-                let recall = split
-                    .recall
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let recall = recover_mutex(&split.recall);
                 advise_chunks_random(&recall, Path::new("split recall"))
                     .wrap_err("Failed to disable read-ahead on the recall file")?;
             }
             {
-                let write = split
-                    .write
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let write = recover_mutex(&split.write);
                 // The write region stands in for `chunks.dat`. Reserve it the
                 // same way. The recall file stays untouched: it is read-only.
                 let label = split_write_label(&write, sub_base_path);
@@ -3014,20 +3022,11 @@ impl StorageModule {
         // A recall may already have queued a suspect against the old bytes.
         // Confirming it after this clear would judge the wiped module.
         // Repairs belong to those bytes. The next assignment must not repack them.
-        self.crc_suspects
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        self.crc_repairs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        recover_mutex(&self.crc_suspects).clear();
+        recover_mutex(&self.crc_repairs).clear();
         // The file publish below is the new label. Do not restore the one
         // these holds were keeping.
-        self.crc_file_holds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        recover_mutex(&self.crc_file_holds).clear();
         self.fail_queued_sweeps();
         // A body write can occupy after the clear above and before the
         // interval map flips. The test freezes that window here.
@@ -3317,17 +3316,11 @@ impl StorageModule {
     }
 
     fn load_last_durable_at(&self) -> Option<Instant> {
-        *self
-            .last_durable_at
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        *recover_mutex(&self.last_durable_at)
     }
 
     fn stamp_durable_point(&self) {
-        *self
-            .last_durable_at
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+        *recover_mutex(&self.last_durable_at) = Some(Instant::now());
     }
 
     /// True when this window must not fdatasync yet.
@@ -3929,9 +3922,7 @@ impl StorageModule {
     }
 
     fn lock_interval_disk(&self) -> std::sync::MutexGuard<'_, IntervalDisk> {
-        self.interval_disk
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        recover_mutex(&self.interval_disk)
     }
 
     fn load_interval_image_epoch(&self) -> u64 {
@@ -4014,11 +4005,7 @@ impl StorageModule {
                 return Ok(());
             }
         }
-        let memory = self
-            .intervals
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let memory = recover_read(&self.intervals).clone();
         let chunk = self.config.consensus.chunk_size.max(1);
         let budget = INTERVAL_WRITE_AHEAD_BYTES / chunk;
         // Clone before `interval_disk`. The two mutexes are not nested.
@@ -4118,11 +4105,7 @@ impl StorageModule {
         if due_starts.is_empty() {
             return Ok(());
         }
-        let memory = self
-            .intervals
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let memory = recover_read(&self.intervals).clone();
         // Clone before `interval_disk`. The two mutexes are not nested.
         let holds = self.crc_file_hold_snapshot();
         let disk = self.lock_interval_disk();
@@ -4183,11 +4166,7 @@ impl StorageModule {
             return Ok(());
         }
         let snapshot_epoch = self.load_interval_image_epoch();
-        let mut memory = self
-            .intervals
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let mut memory = recover_read(&self.intervals).clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
         // `reset` passes `force_replace` and has cleared the holds. Restoring
@@ -4230,11 +4209,7 @@ impl StorageModule {
         durable_now: Option<&BTreeSet<PartitionChunkOffset>>,
     ) -> eyre::Result<()> {
         let snapshot_epoch = self.load_interval_image_epoch();
-        let mut memory = self
-            .intervals
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let mut memory = recover_read(&self.intervals).clone();
         let mut nondurable = self.snapshot_nondurable_offsets();
         if let Some(durable_now) = durable_now {
             for offset in durable_now {
@@ -4250,20 +4225,14 @@ impl StorageModule {
     ///
     /// The guard is dropped before the caller takes `interval_disk`.
     fn crc_file_hold_snapshot(&self) -> BTreeMap<PartitionChunkOffset, ChunkType> {
-        self.crc_file_holds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        recover_mutex(&self.crc_file_holds).clone()
     }
 
     fn clear_crc_file_holds(&self, offsets: &[PartitionChunkOffset]) {
         if offsets.is_empty() {
             return;
         }
-        let mut holds = self
-            .crc_file_holds
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut holds = recover_mutex(&self.crc_file_holds);
         for offset in offsets {
             holds.remove(offset);
         }
@@ -4301,10 +4270,7 @@ impl StorageModule {
     /// `pending.chunks` and `pending.written_ahead`. Caller released
     /// `intervals` first. This does not take `interval_disk`.
     fn snapshot_nondurable_offsets(&self) -> BTreeSet<PartitionChunkOffset> {
-        let pending = self
-            .pending_writes
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = recover_read(&self.pending_writes);
         let mut offsets = BTreeSet::new();
         offsets.extend(pending.chunks.keys().copied());
         offsets.extend(pending.written_ahead.keys().copied());
@@ -4376,10 +4342,7 @@ impl StorageModule {
                 disk.dirty.remove(&start);
                 continue;
             }
-            let path = submodule
-                .intervals_file
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let path = recover_mutex(&submodule.intervals_file);
             // `reset` bumps the epoch before it takes this file lock. A
             // snapshot from before that bump must not replace the new image.
             if !self.interval_snapshot_current(snapshot_epoch) {
@@ -4569,10 +4532,7 @@ impl StorageModule {
         let now = Instant::now();
         for (submodule_interval, submodule) in submodules.iter() {
             last_completion.insert(submodule_interval.start(), now);
-            let path = submodule
-                .intervals_file
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let path = recover_mutex(&submodule.intervals_file);
             let Ok(raw) = read_intervals_file(&path) else {
                 continue;
             };
@@ -4724,11 +4684,7 @@ impl StorageModule {
             submodule.db.set_chunk_crc_complete(false)?;
             submodule.crc_complete.store(false, Ordering::SeqCst);
             submodule.db.update(|tx| tx.clear())?;
-            let path = submodule
-                .intervals_file
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
+            let path = recover_mutex(&submodule.intervals_file).clone();
             let mut map = StorageIntervals::new();
             map.insert_strict(*interval, ChunkType::Uninitialized)
                 .map_err(|err| eyre::eyre!("reset interval span: {err:?}"))?;
@@ -5055,9 +5011,7 @@ impl StorageModule {
                 // come back as the new bytes. `pending.chunks` is overlaid
                 // after this function returns.
                 let buffered = {
-                    let guard = file_arc
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let guard = recover_mutex(&file_arc);
                     guard
                         .try_clone()
                         .wrap_err("recall could not dup chunks.dat")?
@@ -5268,10 +5222,7 @@ impl StorageModule {
         }
         for (offset, kind) in mismatches {
             if recall {
-                self.crc_suspects
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(offset);
+                recover_mutex(&self.crc_suspects).insert(offset);
                 continue;
             }
             match self.note_if_crc_mismatch(offset, kind, caller)? {
@@ -5421,10 +5372,7 @@ impl StorageModule {
     /// lane is not running, after it has dropped the recall hold.
     pub fn confirm_crc_suspects(&self) {
         let suspects = {
-            let mut queued = self
-                .crc_suspects
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut queued = recover_mutex(&self.crc_suspects);
             std::mem::take(&mut *queued)
         };
         let mut retry = BTreeSet::new();
@@ -5451,10 +5399,7 @@ impl StorageModule {
         if retry.is_empty() {
             return;
         }
-        self.crc_suspects
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(retry);
+        recover_mutex(&self.crc_suspects).extend(retry);
     }
 
     /// Pending and written-ahead bytes are not the durable checksum's bytes.
@@ -5605,27 +5550,16 @@ impl StorageModule {
                 ChunkType::Uninitialized,
             );
         }
-        self.crc_repairs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(offset);
+        recover_mutex(&self.crc_repairs).insert(offset);
         if let Some(label @ (ChunkType::Data | ChunkType::Entropy)) = previous {
-            self.crc_file_holds
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(offset, label);
+            recover_mutex(&self.crc_file_holds).insert(offset, label);
         }
         self.entropy_cache.lock().unwrap().invalidate(offset);
     }
 
     /// Contiguous repair ranges. The storage-module service drains these.
     pub fn take_crc_repair_ranges(&self) -> Vec<Interval<PartitionChunkOffset>> {
-        let offsets = std::mem::take(
-            &mut *self
-                .crc_repairs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let offsets = std::mem::take(&mut *recover_mutex(&self.crc_repairs));
         let mut ranges = Vec::new();
         let mut iter = offsets.into_iter();
         let Some(first) = iter.next() else {
@@ -5648,10 +5582,7 @@ impl StorageModule {
 
     /// Put a range back when the packing channel did not accept it.
     pub fn requeue_crc_repair_range(&self, range: Interval<PartitionChunkOffset>) {
-        let mut repairs = self
-            .crc_repairs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut repairs = recover_mutex(&self.crc_repairs);
         let mut raw = range.start().0;
         loop {
             repairs.insert(PartitionChunkOffset::from(raw));
