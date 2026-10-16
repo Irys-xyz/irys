@@ -8366,6 +8366,105 @@ mod tests {
     };
     use nodit::interval::ii;
 
+    fn testing_config(dir: &Path, chunk_size: u64, chunks: u64) -> Config {
+        testing_config_tuned(dir, chunk_size, chunks, |_| {})
+    }
+
+    fn testing_config_tuned(
+        dir: &Path,
+        chunk_size: u64,
+        chunks: u64,
+        tune: impl FnOnce(&mut NodeConfig),
+    ) -> Config {
+        let mut node = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: chunks,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: dir.to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        tune(&mut node);
+        Config::new_with_random_peer_id(node)
+    }
+
+    fn submit_assignment(slot: usize) -> PartitionAssignment {
+        PartitionAssignment {
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(slot),
+            miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+            partition_hash: H256::random(),
+        }
+    }
+
+    fn one_span(
+        last: u32,
+        path: impl Into<PathBuf>,
+        assignment: Option<PartitionAssignment>,
+    ) -> StorageModuleInfo {
+        StorageModuleInfo {
+            id: 0,
+            partition_assignment: assignment,
+            submodules: vec![(partition_chunk_offset_ii!(0, last), path.into())],
+        }
+    }
+
+    fn data_header(data_root: H256, data_size: u64) -> DataTransactionHeader {
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        })
+    }
+
+    fn five_byte_chunk(data_root: H256) -> UnpackedChunk {
+        UnpackedChunk {
+            data_root,
+            data_size: 5,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0, 1, 2, 3, 4].into(),
+            tx_offset: TxChunkOffset::from(0),
+        }
+    }
+
+    fn fresh_module_dir(
+        prefix: &str,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, PathBuf)> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let module_dir = tmp.path().join("module");
+        fs::create_dir_all(&module_dir)?;
+        Ok((tmp, module_dir))
+    }
+
+    fn park_second_chunk(storage: &StorageModule) -> eyre::Result<PartitionChunkOffset> {
+        write_spacing_chunk(storage, 0, 1);
+        storage.sync_pending_chunks()?;
+        write_spacing_chunk(storage, 1, 2);
+        storage.sync_pending_chunks()?;
+        let deferred = PartitionChunkOffset::from(1);
+        assert!(!storage.is_data_chunk_durable_at(deferred));
+        Ok(deferred)
+    }
+
+    fn wait_until_drained(module: &StorageModule, timeout: Duration, message: &str) {
+        let started = Instant::now();
+        while module.has_pending_writes() {
+            assert!(started.elapsed() < timeout, "{message}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct SyncPauseRelease<'a>(&'a StorageModule);
+    impl Drop for SyncPauseRelease<'_> {
+        fn drop(&mut self) {
+            self.0.release_sync_pause();
+        }
+    }
+
     fn sample_placement(tx_start: i32, data_size: u64) -> Placement {
         Placement {
             data_root: H256::repeat_byte(1),
@@ -8438,22 +8537,9 @@ mod tests {
         StorageModuleInfo,
     )> {
         let tmp = TempDirBuilder::new().prefix(prefix).build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: RESERVE_CHUNK,
-                num_chunks_in_partition: RESERVE_CHUNKS,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(tmp.path(), RESERVE_CHUNK, RESERVE_CHUNKS);
         let last = u32::try_from(RESERVE_CHUNKS - 1).expect("chunk count");
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: None,
-            submodules: vec![(partition_chunk_offset_ii!(0, last), "hdd0".into())],
-        };
+        let info = one_span(last, "hdd0", None);
         Ok((tmp, config, info))
     }
 
@@ -8638,26 +8724,12 @@ mod tests {
             .write(true)
             .open(&write_path)?;
         let split = Arc::new(SplitBacking::open(recall, write, 0, RESERVE_CHUNKS)?);
-        let config = Config::new_with_random_peer_id(NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: RESERVE_CHUNK,
-                num_chunks_in_partition: RESERVE_CHUNKS,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        });
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: None,
-            submodules: vec![(
-                partition_chunk_offset_ii!(
-                    0,
-                    u32::try_from(RESERVE_CHUNKS - 1).expect("chunk count")
-                ),
-                "sub".into(),
-            )],
-        };
+        let config = testing_config(tmp.path(), RESERVE_CHUNK, RESERVE_CHUNKS);
+        let info = one_span(
+            u32::try_from(RESERVE_CHUNKS - 1).expect("chunk count"),
+            "sub",
+            None,
+        );
         let storage = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)?;
         drop(storage);
 
@@ -8681,11 +8753,7 @@ mod tests {
 
     #[test]
     fn submodule_index_engine_mdbx_fresh_does_not_create_rocks() -> eyre::Result<()> {
-        let tmp_dir = TempDirBuilder::new()
-            .prefix("submodule_index_engine_mdbx")
-            .build();
-        let module_dir = tmp_dir.path().join("module");
-        fs::create_dir_all(&module_dir)?;
+        let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_mdbx")?;
 
         let index = open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Mdbx))?;
         drop(index);
@@ -8697,11 +8765,7 @@ mod tests {
 
     #[test]
     fn submodule_index_engine_rocksdb_fresh_reads_back_a_row() -> eyre::Result<()> {
-        let tmp_dir = TempDirBuilder::new()
-            .prefix("submodule_index_engine_rocks")
-            .build();
-        let module_dir = tmp_dir.path().join("module");
-        fs::create_dir_all(&module_dir)?;
+        let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_rocks")?;
 
         let index =
             open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
@@ -8894,11 +8958,7 @@ mod tests {
 
     #[test]
     fn submodule_index_engine_mdbx_refuses_when_both_indexes_exist() -> eyre::Result<()> {
-        let tmp_dir = TempDirBuilder::new()
-            .prefix("submodule_index_engine_both")
-            .build();
-        let module_dir = tmp_dir.path().join("module");
-        fs::create_dir_all(&module_dir)?;
+        let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_both")?;
         let db_dir = write_unstamped_mdbx(&module_dir)?;
         let before = directory_fingerprint(&db_dir)?;
         assert!(before.contains_key("mdbx.dat"), "{before:?}");
@@ -8944,11 +9004,7 @@ mod tests {
     #[test]
     fn submodule_index_engine_rocksdb_reads_rocks_row_when_both_indexes_exist() -> eyre::Result<()>
     {
-        let tmp_dir = TempDirBuilder::new()
-            .prefix("submodule_index_engine_rocks_keeps_db")
-            .build();
-        let module_dir = tmp_dir.path().join("module");
-        fs::create_dir_all(&module_dir)?;
+        let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_rocks_keeps_db")?;
 
         let index =
             open_submodule_index(&module_dir, &index_database(SubmoduleIndexEngine::Rocksdb))?;
@@ -9004,25 +9060,10 @@ mod tests {
             engine: SubmoduleIndexEngine,
         ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
             let tmp = TempDirBuilder::new().prefix(prefix).build();
-            let node_config = NodeConfig {
-                consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                    chunk_size: 32,
-                    num_chunks_in_partition: 5,
-                    ..ConsensusConfig::testing()
-                }),
-                base_directory: tmp.path().to_path_buf(),
-                database: index_database(engine),
-                ..NodeConfig::testing()
-            };
-            let config = Config::new_with_random_peer_id(node_config);
-            let storage = StorageModule::new(
-                &StorageModuleInfo {
-                    id: 0,
-                    partition_assignment: None,
-                    submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-                },
-                &config,
-            )?;
+            let config = testing_config_tuned(tmp.path(), 32, 5, |node| {
+                node.database = index_database(engine);
+            });
+            let storage = StorageModule::new(&one_span(4, "hdd0", None), &config)?;
             Ok((tmp, storage))
         }
 
@@ -9298,23 +9339,15 @@ mod tests {
         StorageModule,
     )> {
         let tmp = TempDirBuilder::new().prefix(prefix).build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 8,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp.path(), 32, 8, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1,
                 intervals_persist_secs,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp.path().to_path_buf(),
-            database: index_database(engine),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+            node.database = index_database(engine);
+        });
         let storage = StorageModule::new(&presence_info(), &config)?;
         Ok((tmp, config, storage))
     }
@@ -9426,40 +9459,14 @@ mod tests {
             .with_tracing()
             .build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 20,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 20, |node| {
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
+        let storage_module =
+            StorageModule::new(&one_span(19, "hdd0", Some(submit_assignment(0))), &config)?;
         let data_root = H256::repeat_byte(4);
         let data_size = 8 * chunk_size;
-        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let header = data_header(data_root, data_size);
         let range = LedgerChunkRange(ledger_chunk_offset_ii!(0, 7));
         let height = 11_u64;
         storage_module.index_transaction_data(&header, &vec![1, 2, 3, 4], range, height)?;
@@ -9931,13 +9938,7 @@ mod tests {
                 let storage_ref = &storage;
                 let (sync_result, reset_result, reset_finished_while_paused, sync_still_held) =
                     std::thread::scope(|scope| {
-                        struct ReleasePause<'a>(&'a StorageModule);
-                        impl Drop for ReleasePause<'_> {
-                            fn drop(&mut self) {
-                                self.0.release_sync_pause();
-                            }
-                        }
-                        let _release = ReleasePause(storage_ref);
+                        let _release = SyncPauseRelease(storage_ref);
                         let sync_thread =
                             scope.spawn(move || storage_ref.force_sync_pending_chunks());
                         assert!(
@@ -10365,20 +10366,8 @@ mod tests {
             .write(true)
             .open(&write_path)?;
         let split = Arc::new(SplitBacking::open(recall, write, 0, 4)?);
-        let config = Config::new_with_random_peer_id(NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 4,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        });
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: None,
-            submodules: vec![(partition_chunk_offset_ii!(0, 3), "sub".into())],
-        };
+        let config = testing_config(tmp.path(), 32, 4);
+        let info = one_span(3, "sub", None);
 
         let rocks_err = StorageModule::open_split(
             &info,
@@ -10425,16 +10414,7 @@ mod tests {
             .prefix("pending_body_index_test")
             .with_tracing()
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 20,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(tmp_dir.path(), 32, 20);
 
         // Slot 1 => this module owns ledger offsets [20, 40).
         let storage_module = StorageModule::new(
@@ -10459,14 +10439,7 @@ mod tests {
         // this module, ends inside its third submodule.
         let data_root = H256::random();
         let data_size = 17 * config.consensus.chunk_size;
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, data_size);
         let tx_range = LedgerChunkRange(ledger_chunk_offset_ii!(15, 31));
         let block_height = 29_875;
 
@@ -10614,40 +10587,12 @@ mod tests {
             .with_tracing()
             .build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 20,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), chunk_size, 20);
+        let storage_module =
+            StorageModule::new(&one_span(19, "hdd0", Some(submit_assignment(0))), &config)?;
         let height = 4_u64;
         let place = |root: H256, at: u64| {
-            let header =
-                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-                    tx: DataTransactionHeaderV1 {
-                        data_root: root,
-                        data_size: chunk_size,
-                        ..Default::default()
-                    },
-                    metadata: irys_types::DataTransactionMetadata::new(),
-                });
+            let header = data_header(root, chunk_size);
             storage_module.index_transaction_data(
                 &header,
                 &vec![at as u8],
@@ -10721,39 +10666,12 @@ mod tests {
             .with_tracing()
             .build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 20,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), chunk_size, 20);
+        let storage_module =
+            StorageModule::new(&one_span(19, "hdd0", Some(submit_assignment(0))), &config)?;
         let height = 9_u64;
         let root = H256::repeat_byte(7);
-        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root: root,
-                data_size: chunk_size * 6,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let header = data_header(root, chunk_size * 6);
         storage_module.index_transaction_data(
             &header,
             &vec![1, 2, 3, 4, 5, 6],
@@ -10782,15 +10700,7 @@ mod tests {
         // A later job is visible when the cap includes it, and absent when the
         // cap is the first row only.
         let later = H256::repeat_byte(8);
-        let later_header =
-            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    data_root: later,
-                    data_size: chunk_size,
-                    ..Default::default()
-                },
-                metadata: irys_types::DataTransactionMetadata::new(),
-            });
+        let later_header = data_header(later, chunk_size);
         storage_module.index_transaction_data(
             &later_header,
             &vec![9],
@@ -10818,54 +10728,21 @@ mod tests {
             .prefix("pause_data_writes_test")
             .with_tracing()
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 5,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), 5, 5);
+        let storage_module =
+            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
         storage_module.pack_with_zeros();
         storage_module.force_sync_pending_chunks()?;
 
         let data_root = H256::random();
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size: 5,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, 5);
         storage_module.index_transaction_data(
             &data_tx,
             &vec![5, 6, 7, 8],
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             0,
         )?;
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size: 5,
-            data_path: vec![4, 3, 2, 1].into(),
-            bytes: vec![0, 1, 2, 3, 4].into(),
-            tx_offset: TxChunkOffset::from(0),
-        };
+        let chunk = five_byte_chunk(data_root);
 
         storage_module.pause_data_writes();
         assert!(storage_module.data_writes_paused());
@@ -10899,29 +10776,9 @@ mod tests {
             .prefix("reset_clears_pending")
             .with_tracing()
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 5,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), 5, 5);
+        let storage_module =
+            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
         storage_module.pack_with_zeros();
         storage_module.force_sync_pending_chunks()?;
 
@@ -10960,27 +10817,14 @@ mod tests {
         storage_module.pack_with_zeros();
         storage_module.force_sync_pending_chunks()?;
         let data_root = H256::random();
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size: 5,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, 5);
         storage_module.index_transaction_data(
             &data_tx,
             &vec![5, 6, 7, 8],
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             0,
         )?;
-        storage_module.write_data_chunk(&UnpackedChunk {
-            data_root,
-            data_size: 5,
-            data_path: vec![4, 3, 2, 1].into(),
-            bytes: vec![0, 1, 2, 3, 4].into(),
-            tx_offset: TxChunkOffset::from(0),
-        })?;
+        storage_module.write_data_chunk(&five_byte_chunk(data_root))?;
         assert!(storage_module.is_data_write_pending_at(PartitionChunkOffset::from(0)));
         Ok(())
     }
@@ -10993,56 +10837,24 @@ mod tests {
         UnpackedChunk,
     )> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let mut node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 5,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
         // A long interval must not delay the sweep. The lane and `drive_group`
         // run it when the slot is queued.
-        node_config.storage.entropy_sweep_interval_millis = 60_000;
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config_tuned(tmp_dir.path(), 5, 5, |node| {
+            node.storage.entropy_sweep_interval_millis = 60_000;
+        });
+        let storage_module =
+            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
         storage_module.pack_with_zeros();
         storage_module.force_sync_pending_chunks()?;
         let data_root = H256::random();
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size: 5,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, 5);
         storage_module.index_transaction_data(
             &data_tx,
             &vec![5, 6, 7, 8],
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             0,
         )?;
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size: 5,
-            data_path: vec![4, 3, 2, 1].into(),
-            bytes: vec![0, 1, 2, 3, 4].into(),
-            tx_offset: TxChunkOffset::from(0),
-        };
+        let chunk = five_byte_chunk(data_root);
         Ok((tmp_dir, storage_module, chunk))
     }
 
@@ -11069,53 +10881,20 @@ mod tests {
             .prefix("pending_entropy_after_ack")
             .with_tracing()
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 5,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), 5, 5);
+        let storage_module =
+            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
         let offset = PartitionChunkOffset::from(0);
         assert!(storage_module.write_chunk(offset, vec![0; 5], ChunkType::Entropy));
         let data_root = H256::random();
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size: 5,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, 5);
         storage_module.index_transaction_data(
             &data_tx,
             &vec![5, 6, 7, 8],
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             0,
         )?;
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size: 5,
-            data_path: vec![4, 3, 2, 1].into(),
-            bytes: vec![0, 1, 2, 3, 4].into(),
-            tx_offset: TxChunkOffset::from(0),
-        };
+        let chunk = five_byte_chunk(data_root);
         storage_module.fail_next_index_commit();
         assert!(storage_module.write_data_chunk(&chunk).is_err());
         assert_eq!(
@@ -11245,44 +11024,16 @@ mod tests {
             .prefix("entropy_sweep_hole")
             .with_tracing()
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), 32, 5);
+        let storage_module =
+            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
         storage_module.pack_with_zeros();
 
         for (ledger_offset, root_byte, path) in
             [(0_u64, 1_u8, vec![1_u8, 2, 3, 4]), (2, 2, vec![5, 6, 7, 8])]
         {
             let data_root = H256::from([root_byte; 32]);
-            let data_tx =
-                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-                    tx: DataTransactionHeaderV1 {
-                        data_root,
-                        data_size: 32,
-                        ..Default::default()
-                    },
-                    metadata: irys_types::DataTransactionMetadata::new(),
-                });
+            let data_tx = data_header(data_root, 32);
             storage_module.index_transaction_data(
                 &data_tx,
                 &path,
@@ -11346,29 +11097,9 @@ mod tests {
         prefix: &str,
     ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), 32, 5);
+        let storage_module =
+            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
         storage_module.pack_with_zeros();
         Ok((tmp_dir, storage_module))
     }
@@ -11383,15 +11114,7 @@ mod tests {
             (2, 3, vec![9, 10, 11, 12]),
         ] {
             let data_root = H256::from([root_byte; 32]);
-            let data_tx =
-                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-                    tx: DataTransactionHeaderV1 {
-                        data_root,
-                        data_size: 32,
-                        ..Default::default()
-                    },
-                    metadata: irys_types::DataTransactionMetadata::new(),
-                });
+            let data_tx = data_header(data_root, 32);
             storage.index_transaction_data(
                 &data_tx,
                 &path,
@@ -11458,19 +11181,8 @@ mod tests {
             ..NodeConfig::testing()
         };
         let config = Config::new_with_random_peer_id(node_config);
-        let storage = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 3), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let storage =
+            StorageModule::new(&one_span(3, "hdd0", Some(submit_assignment(0))), &config)?;
         storage.pack_with_zeros();
         Ok((tmp_dir, storage))
     }
@@ -11478,14 +11190,7 @@ mod tests {
     fn ingest_packed(storage: &StorageModule, byte: u8) -> eyre::Result<(Vec<u8>, Option<u32>)> {
         let data_root = H256::from([byte; 32]);
         let path = vec![byte, 2, 3, 4];
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size: 32,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, 32);
         storage.index_transaction_data(
             &data_tx,
             &path,
@@ -12097,16 +11802,7 @@ mod tests {
             .with_tracing()
             .build();
         let base_path = tmp_dir.path().to_path_buf();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 20,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: base_path.clone(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(&base_path, 32, 20);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -12309,16 +12005,7 @@ mod tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("range_partition_relative_test")
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 20,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(tmp_dir.path(), 32, 20);
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
         let full = storage_module
@@ -12352,24 +12039,15 @@ mod tests {
 
     #[test]
     fn drop_pending_writes_in_range_purges_only_the_range() -> eyre::Result<()> {
-        let infos = [StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment::default()),
-            submodules: vec![(partition_chunk_offset_ii!(0, 9), "hdd0-test".into())],
-        }];
+        let infos = [one_span(
+            9,
+            "hdd0-test",
+            Some(PartitionAssignment::default()),
+        )];
         let tmp_dir = TempDirBuilder::new()
             .prefix("drop_pending_writes_test")
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(tmp_dir.path(), 32, 10);
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
         // Queue writes at offsets 0..6.
@@ -12409,24 +12087,15 @@ mod tests {
         use irys_database::submodule::tables::DataRootInfo;
         use irys_types::RelativeChunkOffset;
 
-        let infos = [StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment::default()),
-            submodules: vec![(partition_chunk_offset_ii!(0, 9), "hdd0-test".into())],
-        }];
+        let infos = [one_span(
+            9,
+            "hdd0-test",
+            Some(PartitionAssignment::default()),
+        )];
         let tmp_dir = TempDirBuilder::new()
             .prefix("clear_dri_extent_test")
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(tmp_dir.path(), 32, 10);
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
         // Three placements of the same (orphaned) data_root; orphaned range is [3, 5].
@@ -12504,22 +12173,9 @@ mod tests {
             .with_tracing()
             .build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 100,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(tmp_dir.path(), chunk_size, 100);
         let sm = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment::default()),
-                submodules: vec![(partition_chunk_offset_ii!(0, 99), "hdd0".into())],
-            },
+            &one_span(99, "hdd0", Some(PartitionAssignment::default())),
             &config,
         )?;
         sm.pack_with_zeros();
@@ -12609,24 +12265,15 @@ mod tests {
     fn clear_offset_index_in_range_leaves_the_range_as_a_gap() -> eyre::Result<()> {
         use irys_database::submodule::tables::ChunkPathHashes;
 
-        let infos = [StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment::default()),
-            submodules: vec![(partition_chunk_offset_ii!(0, 9), "hdd0-test".into())],
-        }];
+        let infos = [one_span(
+            9,
+            "hdd0-test",
+            Some(PartitionAssignment::default()),
+        )];
         let tmp_dir = TempDirBuilder::new()
             .prefix("clear_offset_index_test")
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(tmp_dir.path(), 32, 10);
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
         // Index a dense range [0, 9].
@@ -12930,16 +12577,7 @@ mod tests {
             .with_tracing()
             .build();
         let base_path = tmp_dir.path().to_path_buf();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 5,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: base_path,
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(&base_path, 5, 5);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -12954,14 +12592,7 @@ mod tests {
         storage_module.pack_with_zeros();
 
         // Create a dummy data tx header to provide the data_size and data_root
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, data_size);
 
         let _ = storage_module.index_transaction_data(
             &data_tx,
@@ -13011,22 +12642,9 @@ mod tests {
             .build();
         let base_path = tmp_dir.path().to_path_buf();
 
-        let infos = [StorageModuleInfo {
-            id: 0,
-            partition_assignment: None,
-            submodules: vec![(partition_chunk_offset_ii!(0, 10), "test-submodule".into())],
-        }];
+        let infos = [one_span(10, "test-submodule", None)];
 
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 11,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: base_path,
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(&base_path, 32, 11);
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
@@ -13079,22 +12697,9 @@ mod tests {
             .build();
         let base_path = tmp_dir.path().to_path_buf();
 
-        let infos = [StorageModuleInfo {
-            id: 0,
-            partition_assignment: None,
-            submodules: vec![(partition_chunk_offset_ii!(0, 10), "test-submodule".into())],
-        }];
+        let infos = [one_span(10, "test-submodule", None)];
 
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 11,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: base_path,
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = testing_config(&base_path, 32, 11);
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
@@ -13161,11 +12766,7 @@ mod tests {
             .build();
         let base_path = tmp_dir.path().to_path_buf();
 
-        let infos = [StorageModuleInfo {
-            id: 0,
-            partition_assignment: None,
-            submodules: vec![(partition_chunk_offset_ii!(0, 10), "test-submodule".into())],
-        }];
+        let infos = [one_span(10, "test-submodule", None)];
 
         let node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
@@ -13243,30 +12844,15 @@ mod tests {
         StorageModule,
     )> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 11,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp_dir.path(), 32, 11, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1,
                 intervals_persist_secs: persist_secs,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: None,
-                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
-            },
-            &config,
-        )?;
+            };
+        });
+        let storage = StorageModule::new(&one_span(10, "sub", None), &config)?;
         Ok((tmp_dir, config, storage))
     }
 
@@ -13280,14 +12866,7 @@ mod tests {
         let path = submodule_interval_path(&storage, 0);
         drop(storage);
         fs::write(&path, b"not-json{{")?;
-        let opened = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: None,
-                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
-            },
-            &config,
-        );
+        let opened = StorageModule::new(&one_span(10, "sub", None), &config);
         let err = opened.expect_err("a corrupt intervals.json must not panic");
         let message = format!("{err:#}");
         assert!(message.contains(&path.display().to_string()), "{message}");
@@ -13347,14 +12926,7 @@ mod tests {
         let path = tmp.path().join("sub").join(PACKING_PARAMS_FILE_NAME);
         drop(storage);
         fs::write(&path, b"not toml {{{")?;
-        let opened = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: None,
-                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
-            },
-            &config,
-        );
+        let opened = StorageModule::new(&one_span(10, "sub", None), &config);
         let err = opened.expect_err("a corrupt packing_params.toml must not panic");
         let message = format!("{err:#}");
         assert!(message.contains(&path.display().to_string()), "{message}");
@@ -13386,14 +12958,7 @@ mod tests {
         // Absolute. `store_assignment` writes `submodule.path`, not
         // `base_directory.join`.
         let sub = tmp.path().join("sub");
-        let storage = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: None,
-                submodules: vec![(partition_chunk_offset_ii!(0, 3), sub.clone())],
-            },
-            &config,
-        )?;
+        let storage = StorageModule::new(&one_span(3, sub.clone(), None), &config)?;
         let path = sub.join(PACKING_PARAMS_FILE_NAME);
         fs::write(&path, b"not toml {{{")?;
         let err = storage
@@ -13448,25 +13013,17 @@ mod tests {
         StorageModule,
     )> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 8,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp_dir.path(), 32, 8, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
                 intervals_persist_secs: persist_secs,
                 min_durable_interval_ms: 60_000,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
         let storage = StorageModule::new(&parked_interval_info(), &config)?;
         Ok((tmp_dir, config, storage))
     }
@@ -13625,14 +13182,7 @@ mod tests {
         storage.suppress_interval_flush_for_test();
         drop(storage);
 
-        let reloaded = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: None,
-                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
-            },
-            &config,
-        )?;
+        let reloaded = StorageModule::new(&one_span(10, "sub", None), &config)?;
         assert_eq!(
             reloaded.get_chunk_type(&PartitionChunkOffset::from(0)),
             Some(ChunkType::Uninitialized)
@@ -13682,14 +13232,7 @@ mod tests {
         );
         drop(storage);
 
-        let reloaded = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: None,
-                submodules: vec![(partition_chunk_offset_ii!(0, 10), "sub".into())],
-            },
-            &config,
-        )?;
+        let reloaded = StorageModule::new(&one_span(10, "sub", None), &config)?;
         assert_eq!(
             reloaded.get_chunk_type(&PartitionChunkOffset::from(0)),
             Some(ChunkType::Data)
@@ -13783,23 +13326,15 @@ mod tests {
         let base_path = tmp_dir.path().to_path_buf();
         let chunk_size = 1;
 
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 10_000,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: base_path.clone(),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(&base_path, chunk_size, 10_000, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1000,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
-            },
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+        });
 
         let infos = [StorageModuleInfo {
             id: 0,
@@ -13873,29 +13408,17 @@ mod tests {
             .prefix("sync_retry_test")
             .with_tracing()
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 4,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp_dir.path(), 32, 4, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+        });
         let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment::default()),
-                submodules: vec![(partition_chunk_offset_ii!(0, 3), "chunks".into())],
-            },
+            &one_span(3, "chunks", Some(PartitionAssignment::default())),
             &config,
         )?;
 
@@ -13928,31 +13451,19 @@ mod tests {
             .with_tracing()
             .build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 4,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 4, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 0,
                 intervals_persist_secs: 0,
                 min_durable_interval_ms: 60_000,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
         let storage = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment::default()),
-                submodules: vec![(partition_chunk_offset_ii!(0, 3), "chunks".into())],
-            },
+            &one_span(3, "chunks", Some(PartitionAssignment::default())),
             &config,
         )?;
 
@@ -14040,30 +13551,18 @@ mod tests {
     ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
         let chunk_size = 32;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 8,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 8, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1000,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: chunk_size,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+        });
         let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment::default()),
-                submodules: vec![(partition_chunk_offset_ii!(0, 7), "chunks".into())],
-            },
+            &one_span(7, "chunks", Some(PartitionAssignment::default())),
             &config,
         )?;
         for offset in 0..6_u32 {
@@ -14455,14 +13954,11 @@ mod tests {
     }
 
     fn wait_for_pending_drain(storage_module: &StorageModule) {
-        let started = Instant::now();
-        while storage_module.has_pending_writes() {
-            assert!(
-                started.elapsed() < Duration::from_secs(2),
-                "packed chunks stayed pending"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_drained(
+            &storage_module,
+            Duration::from_secs(2),
+            "packed chunks stayed pending",
+        );
     }
 
     #[test]
@@ -14479,14 +13975,11 @@ mod tests {
         }
         let storage_module = Arc::new(storage_module);
         let lane = LaneGuard::start(Arc::clone(&storage_module))?;
-        let started = Instant::now();
-        while lane.module.has_pending_writes() {
-            assert!(
-                started.elapsed() < Duration::from_secs(15),
-                "idle disk left the short run queued"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_drained(
+            &lane.module,
+            Duration::from_secs(15),
+            "idle disk left the short run queued",
+        );
         assert!(
             lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
@@ -14522,14 +14015,11 @@ mod tests {
         }
         let storage_module = Arc::new(storage_module);
         let lane = LaneGuard::start(Arc::clone(&storage_module))?;
-        let started = Instant::now();
-        while lane.module.has_pending_writes() {
-            assert!(
-                started.elapsed() < Duration::from_secs(15),
-                "idle disk left a short run queued"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_drained(
+            &lane.module,
+            Duration::from_secs(15),
+            "idle disk left a short run queued",
+        );
         assert!(
             lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
@@ -14642,14 +14132,11 @@ mod tests {
         }
         let storage_module = Arc::new(storage_module);
         let lane = LaneGuard::start(Arc::clone(&storage_module))?;
-        let started = Instant::now();
-        while lane.module.has_pending_writes() {
-            assert!(
-                started.elapsed() < Duration::from_secs(15),
-                "full run stayed pending"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_drained(
+            &lane.module,
+            Duration::from_secs(15),
+            "full run stayed pending",
+        );
         assert!(
             lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
@@ -14684,14 +14171,11 @@ mod tests {
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
         );
         lane.module.disk.release_for_test();
-        let started = Instant::now();
-        while lane.module.has_pending_writes() {
-            assert!(
-                started.elapsed() < Duration::from_secs(15),
-                "idle disk left the short run queued"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_drained(
+            &lane.module,
+            Duration::from_secs(15),
+            "idle disk left the short run queued",
+        );
         assert!(
             lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
@@ -14726,14 +14210,11 @@ mod tests {
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
         );
         drop(hold);
-        let started = Instant::now();
-        while lane.module.has_pending_writes() {
-            assert!(
-                started.elapsed() < Duration::from_secs(15),
-                "idle disk left the short run queued after recall"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_until_drained(
+            &lane.module,
+            Duration::from_secs(15),
+            "idle disk left the short run queued after recall",
+        );
         assert!(
             lane.module
                 .is_data_chunk_durable_at(PartitionChunkOffset::from(0))
@@ -14759,13 +14240,9 @@ mod tests {
         writes_before_sync: u64,
     ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        // These tests read intervals.json as soon as sync returns.
+        let config = testing_config_tuned(tmp_dir.path(), 32, 10, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: writes_before_sync,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
@@ -14774,11 +14251,8 @@ mod tests {
                 intervals_persist_secs: 0,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+        });
         let storage = StorageModule::new(
             &StorageModuleInfo {
                 id: 0,
@@ -14974,30 +14448,23 @@ mod tests {
         last_offset: u32,
     ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: u64::from(last_offset) + 1,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
-                num_writes_before_sync: writes_before_sync,
-                max_pending_write_bytes: None,
-                entropy_sweep_interval_millis: 60_000,
-                entropy_sweep_max_bytes: chunk_size,
-                min_durable_interval_ms: 0,
-                ..StorageSyncConfig::default()
+        let config = testing_config_tuned(
+            tmp_dir.path(),
+            chunk_size,
+            u64::from(last_offset) + 1,
+            |node| {
+                node.storage = StorageSyncConfig {
+                    num_writes_before_sync: writes_before_sync,
+                    max_pending_write_bytes: None,
+                    entropy_sweep_interval_millis: 60_000,
+                    entropy_sweep_max_bytes: chunk_size,
+                    min_durable_interval_ms: 0,
+                    ..StorageSyncConfig::default()
+                };
             },
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        );
         let storage = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment::default()),
-                submodules: vec![(partition_chunk_offset_ii!(0, last_offset), "chunks".into())],
-            },
+            &one_span(last_offset, "chunks", Some(PartitionAssignment::default())),
             &config,
         )?;
         Ok((tmp_dir, storage))
@@ -15008,30 +14475,18 @@ mod tests {
         chunk_size: u64,
     ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 200,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 200, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1000,
                 max_pending_write_bytes: None,
                 entropy_sweep_interval_millis: 60_000,
                 entropy_sweep_max_bytes: chunk_size,
                 min_durable_interval_ms: 0,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+        });
         let storage = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment::default()),
-                submodules: vec![(partition_chunk_offset_ii!(0, 199), "chunks".into())],
-            },
+            &one_span(199, "chunks", Some(PartitionAssignment::default())),
             &config,
         )?;
         Ok((tmp_dir, storage))
@@ -15046,13 +14501,8 @@ mod tests {
     ) -> eyre::Result<(irys_testing_utils::tempfile::TempDir, StorageModule)> {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
         let chunk_size = 32;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 16,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 16, |node| {
+            node.storage = StorageSyncConfig {
                 num_writes_before_sync: 1,
                 max_pending_write_bytes,
                 entropy_sweep_interval_millis: 60_000,
@@ -15061,17 +14511,10 @@ mod tests {
                 min_durable_interval_ms,
                 durable_headroom_permille,
                 ..StorageSyncConfig::default()
-            },
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+            };
+        });
         let storage = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment::default()),
-                submodules: vec![(partition_chunk_offset_ii!(0, 15), "chunks".into())],
-            },
+            &one_span(15, "chunks", Some(PartitionAssignment::default())),
             &config,
         )?;
         Ok((tmp_dir, storage))
@@ -15174,12 +14617,7 @@ mod tests {
             None,
             irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
         )?;
-        write_spacing_chunk(&storage, 0, 1);
-        storage.sync_pending_chunks()?;
-        write_spacing_chunk(&storage, 1, 2);
-        storage.sync_pending_chunks()?;
-        let deferred = PartitionChunkOffset::from(1);
-        assert!(!storage.is_data_chunk_durable_at(deferred));
+        let deferred = park_second_chunk(&storage)?;
         let started = Instant::now();
         storage.force_sync_pending_chunks()?;
         assert!(
@@ -15226,12 +14664,7 @@ mod tests {
             None,
             irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
         )?;
-        write_spacing_chunk(&storage, 0, 1);
-        storage.sync_pending_chunks()?;
-        write_spacing_chunk(&storage, 1, 2);
-        storage.sync_pending_chunks()?;
-        let deferred = PartitionChunkOffset::from(1);
-        assert!(!storage.is_data_chunk_durable_at(deferred));
+        let deferred = park_second_chunk(&storage)?;
         let path = submodule_interval_path(&storage, 0);
         let started = Instant::now();
         drop(storage);
@@ -15255,12 +14688,7 @@ mod tests {
             None,
             irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
         )?;
-        write_spacing_chunk(&storage, 0, 1);
-        storage.sync_pending_chunks()?;
-        write_spacing_chunk(&storage, 1, 2);
-        storage.sync_pending_chunks()?;
-        let deferred = PartitionChunkOffset::from(1);
-        assert!(!storage.is_data_chunk_durable_at(deferred));
+        let deferred = park_second_chunk(&storage)?;
         assert!(storage.pending_write_bytes() > 0);
         let started = Instant::now();
         storage.reset()?;
@@ -15974,13 +15402,7 @@ mod tests {
         storage.pause_next_sync_at(SyncPausePoint::AfterPresenceCopy);
         let storage_ref = &storage;
         let outcome = std::thread::scope(|scope| -> eyre::Result<()> {
-            struct ReleasePause<'a>(&'a StorageModule);
-            impl Drop for ReleasePause<'_> {
-                fn drop(&mut self) {
-                    self.0.release_sync_pause();
-                }
-            }
-            let _release = ReleasePause(storage_ref);
+            let _release = SyncPauseRelease(storage_ref);
             let writer = scope.spawn(move || {
                 assert!(storage_ref.write_chunk(offset, vec![0xEE; 32], ChunkType::Entropy));
                 storage_ref.force_sync_pending_chunks()
@@ -16032,64 +15454,25 @@ mod tests {
             .prefix("reset_late_data")
             .with_tracing()
             .build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 5,
-                num_chunks_in_partition: 5,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let storage_module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                    ledger_id: Some(DataLedger::Submit.into()),
-                    slot_index: Some(0),
-                    miner_address: irys_types::IrysAddress::from([0xAA; 20]),
-                    partition_hash: H256::random(),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 4), "hdd0".into())],
-            },
-            &config,
-        )?;
+        let config = testing_config(tmp_dir.path(), 5, 5);
+        let storage_module =
+            StorageModule::new(&one_span(4, "hdd0", Some(submit_assignment(0))), &config)?;
         storage_module.pack_with_zeros();
         storage_module.force_sync_pending_chunks()?;
         let data_root = H256::random();
-        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_root,
-                data_size: 5,
-                ..Default::default()
-            },
-            metadata: irys_types::DataTransactionMetadata::new(),
-        });
+        let data_tx = data_header(data_root, 5);
         storage_module.index_transaction_data(
             &data_tx,
             &vec![5, 6, 7, 8],
             LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             0,
         )?;
-        let chunk = UnpackedChunk {
-            data_root,
-            data_size: 5,
-            data_path: vec![4, 3, 2, 1].into(),
-            bytes: vec![0, 1, 2, 3, 4].into(),
-            tx_offset: TxChunkOffset::from(0),
-        };
+        let chunk = five_byte_chunk(data_root);
 
         storage_module.pause_next_sync_at(SyncPausePoint::AfterResetPendingClear);
         let storage_ref = &storage_module;
         let outcome = std::thread::scope(|scope| -> eyre::Result<()> {
-            struct ReleasePause<'a>(&'a StorageModule);
-            impl Drop for ReleasePause<'_> {
-                fn drop(&mut self) {
-                    self.0.release_sync_pause();
-                }
-            }
-            let _release = ReleasePause(storage_ref);
+            let _release = SyncPauseRelease(storage_ref);
             let reset_thread = scope.spawn(move || storage_ref.reset());
             assert!(
                 storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
