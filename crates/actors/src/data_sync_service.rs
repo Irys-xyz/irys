@@ -200,6 +200,25 @@ const REARM_BACKOFF_INITIAL_SKIPS: u64 = 1;
 /// Cap zero-yield skip budget (~16s at 1s re-arm cadence).
 const REARM_BACKOFF_MAX_SKIPS: u64 = 16;
 
+/// Chunk size 32, one partition per slot, packing iterations 1, chain id 1.
+/// Callers that need a different storage sync overlay mutate the result.
+#[cfg(test)]
+fn sync_test_node_config(base: &std::path::Path, num_chunks: u64) -> irys_types::NodeConfig {
+    irys_types::NodeConfig {
+        consensus: irys_types::ConsensusOptions::Custom(irys_types::ConsensusConfig {
+            chunk_size: 32,
+            num_chunks_in_partition: num_chunks,
+            num_chunks_in_recall_range: 2,
+            num_partitions_per_slot: 1,
+            entropy_packing_iterations: 1,
+            chain_id: 1,
+            ..irys_types::ConsensusConfig::testing()
+        }),
+        base_directory: base.to_path_buf(),
+        ..irys_types::NodeConfig::testing()
+    }
+}
+
 /// Give every storage module one dispatch opportunity per round, rotating the
 /// first module between ticks. The callback returns whether it consumed work.
 /// Rounds stop once no module can use another shared peer permit.
@@ -1957,25 +1976,13 @@ mod storage_module_lookup_tests {
     use irys_domain::{StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PartitionChunkOffset,
+        Config, DataLedger, H256, IrysAddress, PartitionChunkOffset,
         partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::Arc;
 
     fn test_sm(id: usize, ledger: Option<u32>, base: &std::path::Path) -> Arc<StorageModule> {
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 4,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: base.join(format!("sm-{id}")),
-            ..NodeConfig::testing()
-        };
+        let node_config = super::sync_test_node_config(&base.join(format!("sm-{id}")), 4);
         let config = Config::new_with_random_peer_id(node_config);
         let pa = ledger.map(|ledger_id| PartitionAssignment {
             ledger_id: Some(ledger_id),
@@ -2037,11 +2044,11 @@ mod ingress_proof_peer_tests {
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, DataTransactionLedger, H256, IrysAddress,
-        IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
-        PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
-        app_state::DatabaseProvider, ingress::IngressProof, irys::IrysSigner,
-        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+        Config, DataLedger, DataTransactionLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
+        LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, PeerAddress, PeerListItem,
+        PeerScore, ProtocolVersion, app_state::DatabaseProvider, ingress::IngressProof,
+        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use std::{
@@ -2056,19 +2063,7 @@ mod ingress_proof_peer_tests {
     async fn get_best_available_peers_includes_online_proof_signer() {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 20,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
+        let node_config = super::sync_test_node_config(tmp.path(), 20);
         let config = Config::new_with_random_peer_id(node_config);
 
         // Assignee SM with residual hole: tx indexed, no body written.
@@ -2250,9 +2245,9 @@ mod write_outcome_tests {
     use irys_domain::{StorageModule, StorageModuleInfo, WriteDataChunkError};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PartitionChunkOffset,
-        RelativeChunkOffset, StorageSyncConfig, TxChunkOffset, UnpackedChunk,
-        partition::PartitionAssignment, partition_chunk_offset_ie,
+        Config, DataLedger, H256, IrysAddress, PartitionChunkOffset, RelativeChunkOffset,
+        StorageSyncConfig, TxChunkOffset, UnpackedChunk, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use std::sync::Arc;
 
@@ -2262,19 +2257,7 @@ mod write_outcome_tests {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let num_chunks = 4_u64;
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: num_chunks,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
+        let node_config = super::sync_test_node_config(tmp.path(), num_chunks);
         let config = Config::new_with_random_peer_id(node_config);
 
         let pa = PartitionAssignment {
@@ -2320,25 +2303,13 @@ mod write_outcome_tests {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let num_chunks = 10_u64;
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: num_chunks,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            storage: StorageSyncConfig {
-                num_writes_before_sync: num_chunks,
-                max_pending_write_bytes: None,
-                entropy_sweep_interval_millis: 0,
-                min_durable_interval_ms: 0,
-                ..StorageSyncConfig::default()
-            },
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
+        let mut node_config = super::sync_test_node_config(tmp.path(), num_chunks);
+        node_config.storage = StorageSyncConfig {
+            num_writes_before_sync: num_chunks,
+            max_pending_write_bytes: None,
+            entropy_sweep_interval_millis: 0,
+            min_durable_interval_ms: 0,
+            ..StorageSyncConfig::default()
         };
         let config = Config::new_with_random_peer_id(node_config);
         let info = StorageModuleInfo {
@@ -2408,9 +2379,8 @@ mod body_migration_holes_routing_tests {
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, NodeConfig,
-        PartitionChunkOffset, app_state::DatabaseProvider, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        Config, DataLedger, H256, IrysAddress, IrysBlockHeader, PartitionChunkOffset,
+        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::{Arc, RwLock};
 
@@ -2419,20 +2389,7 @@ mod body_migration_holes_routing_tests {
     #[tokio::test]
     async fn body_migration_holes_message_queues_on_that_storage_module() {
         let tmp = TempDirBuilder::new().with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 4,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = Config::new_with_random_peer_id(super::sync_test_node_config(tmp.path(), 4));
         let sm = Arc::new(
             StorageModule::new(
                 &StorageModuleInfo {
@@ -2534,11 +2491,10 @@ mod peer_chunk_validation_tests {
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Base64, ChunkFormat, Config, ConsensusConfig, DataLedger, H256, IrysAddress,
-        IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PartitionChunkOffset,
-        RelativeChunkOffset, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
-        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        Base64, ChunkFormat, Config, DataLedger, H256, IrysAddress, IrysBlockHeader,
+        LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, RelativeChunkOffset,
+        TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider, irys::IrysSigner,
+        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use std::{
@@ -2576,20 +2532,7 @@ mod peer_chunk_validation_tests {
     async fn peer_bytes_must_match_their_data_path_before_enqueue() {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 4,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = Config::new_with_random_peer_id(super::sync_test_node_config(tmp.path(), 4));
         let sm = Arc::new(
             StorageModule::new(
                 &StorageModuleInfo {
@@ -2733,20 +2676,7 @@ mod peer_chunk_validation_tests {
     async fn foreign_self_consistent_chunk_does_not_fill_the_requested_offset() {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let chunk_size = 32_u64;
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size,
-                num_chunks_in_partition: 4,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = Config::new_with_random_peer_id(super::sync_test_node_config(tmp.path(), 4));
         let sm = Arc::new(
             StorageModule::new(
                 &StorageModuleInfo {
@@ -2888,9 +2818,9 @@ mod entropy_peer_sync_tests {
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
-        NodeConfig, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
-        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+        Config, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId, PartitionChunkOffset,
+        PeerAddress, PeerListItem, PeerScore, ProtocolVersion, app_state::DatabaseProvider,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -2903,20 +2833,7 @@ mod entropy_peer_sync_tests {
     #[tokio::test]
     async fn new_entropy_interval_syncs_peers_when_the_module_has_none() {
         let tmp = TempDirBuilder::new().with_tracing().build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 4,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
+        let config = Config::new_with_random_peer_id(super::sync_test_node_config(tmp.path(), 4));
         let assignee = IrysAddress::from([0xA1; 20]);
         let pa = PartitionAssignment {
             ledger_id: Some(DataLedger::Submit.into()),
@@ -3147,28 +3064,15 @@ mod assignment_follow_tests {
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        Config, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
-        NodeConfig, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
-        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+        Config, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId, PartitionChunkOffset,
+        PeerAddress, PeerListItem, PeerScore, ProtocolVersion, app_state::DatabaseProvider,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Instant;
 
     fn test_config(base: &std::path::Path) -> Config {
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 4,
-                num_chunks_in_recall_range: 2,
-                num_partitions_per_slot: 1,
-                entropy_packing_iterations: 1,
-                chain_id: 1,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: base.to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        Config::new_with_random_peer_id(node_config)
+        Config::new_with_random_peer_id(super::sync_test_node_config(base, 4))
     }
 
     fn signed_genesis() -> IrysBlockHeader {

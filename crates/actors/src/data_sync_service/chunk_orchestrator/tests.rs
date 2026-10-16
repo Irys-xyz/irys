@@ -232,30 +232,11 @@ fn add_assigned_peer(
     byte: u8,
     port: u16,
 ) -> IrysAddress {
-    let address = IrysAddress::from([byte; 20]);
-    let api = format!("127.0.0.1:{port}").parse().unwrap();
-    let item = PeerListItem {
-        mining_address: address,
-        address: PeerAddress {
-            api,
-            gossip: api,
-            ..Default::default()
-        },
-        is_online: true,
-        ..Default::default()
-    };
-    let mut manager = PeerBandwidthManager::new(&address, &item, config);
-    manager.partition_assignments.push(
-        orch.storage_module
-            .partition_assignment()
-            .expect("assigned storage module"),
-    );
-    orch.active_sync_peers
-        .write()
-        .unwrap()
-        .insert(address, manager);
-    orch.add_peer(address);
-    address
+    let assignment = orch
+        .storage_module
+        .partition_assignment()
+        .expect("assigned storage module");
+    add_peer_with_assignment(orch, config, byte, port, assignment)
 }
 
 fn add_peer_with_assignment(
