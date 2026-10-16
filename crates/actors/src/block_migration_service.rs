@@ -798,56 +798,19 @@ impl BlockMigrationService {
                             }
                         };
 
-                        let range_start = *partition_range.start();
-                        let range_end = *partition_range.end();
+                        let range_start = PartitionChunkOffset::from(*partition_range.start());
+                        let range_end = PartitionChunkOffset::from(*partition_range.end());
 
-                        // Drop queued (not-yet-synced) writes in the orphaned range
-                        // first: a later `sync_pending_chunks` would otherwise replay
-                        // them and flip the intervals we clear below back to `Data`
-                        // over a now-empty offset index. This closes the queued-write
-                        // path; a sync already mid-flush (its batch snapshotted before
-                        // this drop) can still replay, but that window is transient and
-                        // healed by the repack enqueued below.
-                        module.drop_pending_writes_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
-                        );
-
-                        // Clear per-offset tx/data path index entries for orphaned txs.
-                        module.clear_offset_index_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
-                        )?;
-
-                        // Scope the DataRootInfos clear to the orphaned placements so
-                        // a data_root shared with a still-canonical block keeps its
-                        // canonical placement.
-                        module.clear_data_root_infos_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
+                        // Wait out a durable point that already copied this batch.
+                        // That point holds `sync_in_progress` until it has labeled
+                        // the run. The clear runs after that label, then publishes
+                        // `Uninitialized`. A missed packing send leaves that label,
+                        // so startup packing still repacks the span.
+                        module.rollback_unassigned_range(
+                            range_start,
+                            range_end,
                             &info.data_roots,
                         )?;
-                        // The chunk bodies those placements still owed belong to
-                        // orphaned txs: drop the jobs so the body worker never
-                        // writes them into the re-marked range.
-                        module.purge_pending_body_migrations_in_range(
-                            PartitionChunkOffset::from(range_start),
-                            PartitionChunkOffset::from(range_end),
-                        )?;
-
-                        // Mark offsets as Uninitialized (not Entropy — on-disk bytes are packed data)
-                        {
-                            let mut intervals = module.intervals().write().unwrap();
-                            for offset in range_start..=range_end {
-                                let part_offset = PartitionChunkOffset::from(offset);
-                                StorageModule::cut_then_insert_interval_if_touching(
-                                    &mut intervals,
-                                    part_offset,
-                                    ChunkType::Uninitialized,
-                                );
-                            }
-                        }
-                        module.write_intervals_to_submodules()?;
 
                         // The range is packed again. Zeros in the rewritten span
                         // must not stay mismatches under the old flag.

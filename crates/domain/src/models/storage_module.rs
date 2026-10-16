@@ -489,6 +489,8 @@ enum SyncPausePoint {
     /// A confirmed checksum mismatch is about to cut the live label.
     /// The cut has not run.
     AfterCrcConfirm,
+    /// Pwrite has returned. The live label for that run has not been updated.
+    AfterPwrite,
     /// The no-lane entropy pread has returned and dropped the file lock.
     /// The sweep has not checked the slot or queued packed bytes.
     AfterEntropyPread,
@@ -6069,6 +6071,42 @@ impl StorageModule {
     /// and re-marked `Uninitialized`, a stale pending write left in the queue
     /// would be replayed by `sync_pending_chunks` and flip the interval back to
     /// `Data` with a now-empty offset index.
+    /// Clear an orphaned partition range and publish `Uninitialized`.
+    ///
+    /// The interval rewrite is last. It waits on the disk lane, and the lane
+    /// takes `sync_in_progress`, so this does not hold that lock across the
+    /// rewrite. The clear does hold it: an in-flight durable point keeps the
+    /// lock through its label update, and must not publish `Data` after the
+    /// index is gone.
+    pub fn rollback_unassigned_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        data_roots: &[H256],
+    ) -> eyre::Result<()> {
+        {
+            let _sync = self.lock_sync();
+            self.drop_pending_writes_in_range(start, end);
+            self.clear_offset_index_in_range(start, end)?;
+            self.clear_data_root_infos_in_range(start, end, data_roots)?;
+            self.purge_pending_body_migrations_in_range(start, end)?;
+            let mut intervals = self.intervals.write().unwrap();
+            let mut cursor = start.0;
+            loop {
+                Self::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    PartitionChunkOffset::from(cursor),
+                    ChunkType::Uninitialized,
+                );
+                if cursor == end.0 {
+                    break;
+                }
+                cursor = cursor.saturating_add(1);
+            }
+        }
+        self.write_intervals_to_submodules()
+    }
+
     pub fn drop_pending_writes_in_range(
         &self,
         start: PartitionChunkOffset,
@@ -7771,6 +7809,8 @@ impl StorageModule {
     ) -> eyre::Result<()> {
         match write_result {
             Ok(()) => {
+                #[cfg(test)]
+                self.wait_if_sync_paused(SyncPausePoint::AfterPwrite);
                 let mut intervals = self
                     .intervals
                     .write()
@@ -13367,6 +13407,88 @@ mod tests {
             "reopen file is Data"
         );
         assert!(!reopened.is_data_chunk_durable_at(offset));
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A durable point paused after pwrite must not publish `Data` after
+    /// rollback cleared the index. Rollback waits out that point, then
+    /// publishes `Uninitialized`. Period 0 and period 30 both reload that
+    /// label, and open drops the placement.
+    #[rstest]
+    #[case::period_0(0_u64)]
+    #[case::period_30(30_u64)]
+    fn inflight_durable_point_cannot_publish_data_after_rollback(
+        #[case] persist_secs: u64,
+    ) -> eyre::Result<()> {
+        let prefix = format!("rollback_inflight_{persist_secs}");
+        let (tmp, config, storage) = crc_hold_module(&prefix, persist_secs)?;
+        let storage = Arc::new(storage);
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![0xAB; 32], ChunkType::Data));
+        storage.pause_next_sync_at(SyncPausePoint::AfterPwrite);
+        let sync_mod = Arc::clone(&storage);
+        let (sync_tx, sync_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sync_tx.send(sync_mod.sync_pending_chunks());
+        });
+        assert!(
+            storage.wait_for_sync_pause(Duration::from_secs(5)),
+            "the durable point did not reach the label update"
+        );
+
+        let rollback_mod = Arc::clone(&storage);
+        let (roll_tx, roll_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = roll_tx.send(rollback_mod.rollback_unassigned_range(offset, offset, &[]));
+        });
+        let blocked = roll_rx.recv_timeout(Duration::from_millis(500));
+        assert!(
+            blocked.is_err(),
+            "rollback finished while the durable point still held the sync lock"
+        );
+        storage.release_sync_pause();
+        roll_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|err| eyre!("rollback did not finish: {err}"))??;
+        sync_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|err| eyre!("durable point did not finish: {err}"))??;
+
+        assert_eq!(
+            live_label(&storage, 0),
+            Some(ChunkType::Uninitialized),
+            "the durable point restored Data after the index clear"
+        );
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Uninitialized),
+            "intervals.json published Data after rollback"
+        );
+        assert!(
+            !storage.is_data_chunk_durable_at(offset),
+            "rollback left the offset durable"
+        );
+        assert!(!storage.is_data_root_index_ready_at(offset));
+
+        let storage =
+            Arc::try_unwrap(storage).map_err(|_| eyre!("a worker still holds the module"))?;
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+        let reopened = reopen_crc_module(tmp.path(), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "reopen reloaded Data"
+        );
+        assert_eq!(
+            file_label(&reopened, 0)?,
+            Some(ChunkType::Uninitialized),
+            "reopen file is not Uninitialized"
+        );
+        assert_not_served_as_data(&reopened, offset)?;
+        assert!(!reopened.is_data_root_index_ready_at(offset));
         drop(reopened);
         drop(tmp);
         Ok(())
