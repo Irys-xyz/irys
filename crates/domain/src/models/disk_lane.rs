@@ -1541,9 +1541,9 @@ impl StorageModule {
             if let Some(result) = self.take_group_result(group) {
                 return result;
             }
-            // Recall can stay queued for the whole step. Stop this waiter on
-            // the wall clock so the wait does not run until recall goes idle.
-            // A group that finished during the wait keeps that result.
+            // Recall can stay queued for the whole step. Stop this waiter when
+            // the monotonic deadline passes, so the wait does not run until
+            // recall goes idle. A group that finished keeps that result.
             if Instant::now() >= deadline || !self.disk.yield_to_recall_until(deadline) {
                 if let Some(result) = self.take_group_result(group) {
                     return result;
