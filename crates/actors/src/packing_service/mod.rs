@@ -176,7 +176,7 @@ impl PackingService {
         let notify = Arc::new(Notify::new());
 
         let runtime_handle = tokio::runtime::Handle::current();
-        #[cfg(test)]
+        #[cfg(all(test, not(feature = "nvidia")))]
         let pack_pause = Arc::new(Mutex::new(None));
 
         // Initialize local packing strategy based on PACKING_TYPE
@@ -190,8 +190,11 @@ impl PackingService {
                     runtime_handle,
                     packing_config.chain_id,
                     packing_config.concurrency,
-                    #[cfg(test)]
+                    #[cfg(all(test, not(feature = "nvidia")))]
                     pack_pause.clone(),
+                    // No test drives the pause under nvidia.
+                    #[cfg(all(test, feature = "nvidia"))]
+                    Arc::new(Mutex::new(None)),
                 ))
             }
             #[cfg(feature = "nvidia")]
