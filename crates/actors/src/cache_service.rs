@@ -3221,16 +3221,10 @@ mod tests {
     }
 
     /// Truly anomalous `(None, None)` state: empty `txid_set`, no
-    /// `expiry_height`, no local ingress proof.  Under the lifetime model
-    /// this entry has no remaining tenants and no bound — evict on next
-    /// prune cycle.
-    ///
-    /// Note: the prior version of this test exercised a CDR with a pending
-    /// tx in `txid_set` and asserted eviction.  That semantics was changed
-    /// when the pending-tx guard was added to protect cross-ledger
-    /// same-`data_root` sibling txs from premature prune; pending txs now
-    /// keep the CDR alive (see `does_not_prune_cdr_with_pending_sibling_tx`).
-    /// The truly-anomalous arm now only fires when `txid_set` is empty.
+    /// `expiry_height`, no local ingress proof. Under the lifetime model
+    /// this entry has no remaining tenants and no bound, so the next prune
+    /// evicts it. A non-empty `txid_set` keeps the root
+    /// (`does_not_prune_cdr_with_pending_sibling_tx`).
     #[tokio::test]
     async fn prunes_truly_anomalous_empty_txid_set() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
