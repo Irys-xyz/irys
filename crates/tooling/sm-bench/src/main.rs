@@ -31,7 +31,7 @@ use crate::drivers::{
     take_fatal,
 };
 use crate::guard::{
-    CHUNK_SIZE, check_written_extents, create_small, require_loadtest, require_loadtest_ancestor,
+    CHUNK_SIZE, check_region_extents, create_small, require_loadtest, require_loadtest_ancestor,
 };
 use crate::module::{OpenRequest, flush_batch, open_module, pending_ceiling, span_limit};
 use crate::prepop::prepopulate;
@@ -326,11 +326,12 @@ fn run() -> eyre::Result<i32> {
         ));
     }
     std::fs::create_dir_all(&args.dir)?;
-    let write_created = if let Some(bytes) = args.create_small {
-        create_small(&args.recall_file, bytes, true)?;
-        create_small(&args.write_file, bytes, false)?
+    let (recall_created, write_created) = if let Some(bytes) = args.create_small {
+        let recall_created = create_small(&args.recall_file, bytes, true)?;
+        let write_created = create_small(&args.write_file, bytes, false)?;
+        (recall_created, write_created)
     } else {
-        false
+        (false, false)
     };
     let dir = require_loadtest("dir", &args.dir)?;
     let recall_file = require_loadtest("recall-file", &args.recall_file)?;
@@ -344,7 +345,7 @@ fn run() -> eyre::Result<i32> {
             "refusing to use chunks.dat; the bench does not open that name"
         ));
     }
-    check_written_extents(&write_file, write_created)?;
+    check_region_extents(&recall_file, recall_created, &write_file, write_created)?;
 
     let recall_len = std::fs::metadata(&recall_file)?.len();
     let write_len = std::fs::metadata(&write_file)?.len();

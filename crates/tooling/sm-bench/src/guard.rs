@@ -250,6 +250,23 @@ fn chmod_readonly(path: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
+/// FIEMAP check for the recall file and the write file.
+///
+/// A hole or an unwritten extent reads back as zeros, so the timed read is a
+/// memory copy. `recall_created` and `write_created` are the `--create-small`
+/// results for each file. A filesystem with no FIEMAP is allowed only for a
+/// file this process just wrote.
+pub(crate) fn check_region_extents(
+    recall_file: &Path,
+    recall_created: bool,
+    write_file: &Path,
+    write_created: bool,
+) -> eyre::Result<()> {
+    check_written_extents(write_file, write_created)?;
+    check_written_extents(recall_file, recall_created)?;
+    Ok(())
+}
+
 pub(crate) fn check_written_extents(path: &Path, created_this_run: bool) -> eyre::Result<()> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
@@ -334,6 +351,7 @@ mod tests {
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read as _, Write as _};
     use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::io::AsRawFd as _;
 
     use irys_testing_utils::TempDirBuilder;
 
@@ -518,5 +536,166 @@ mod tests {
         assert_eq!(fs::metadata(&path).unwrap().len(), CHUNK_SIZE);
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o444);
+    }
+
+    fn synced_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&vec![0_u8; CHUNK_SIZE as usize]).unwrap();
+        file.sync_all().unwrap();
+        path
+    }
+
+    fn sparse_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(CHUNK_SIZE).unwrap();
+        file.sync_all().unwrap();
+        path
+    }
+
+    fn trailing_hole_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&vec![0_u8; CHUNK_SIZE as usize]).unwrap();
+        file.sync_all().unwrap();
+        file.set_len(CHUNK_SIZE * 2).unwrap();
+        file.sync_all().unwrap();
+        path
+    }
+
+    fn unwritten_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, CHUNK_SIZE as libc::off_t) };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        file.sync_all().unwrap();
+        path
+    }
+
+    fn region_error(
+        recall: &Path,
+        recall_created: bool,
+        write: &Path,
+        write_created: bool,
+    ) -> String {
+        match check_region_extents(recall, recall_created, write, write_created) {
+            Ok(()) => "accepted a region file that is not fully written".to_string(),
+            Err(err) => format!("{err:#}"),
+        }
+    }
+
+    #[test]
+    fn sparse_recall_file_is_a_startup_error() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-hole-")
+            .build();
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = sparse_region(tmp.path(), "entropy-chunks.dat");
+        for recall_created in [false, true] {
+            let text = region_error(&recall, recall_created, &write, false);
+            assert!(
+                text.contains("entropy-chunks.dat"),
+                "created={recall_created}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn unwritten_recall_extent_is_a_startup_error() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-unwritten-")
+            .build();
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = unwritten_region(tmp.path(), "entropy-chunks.dat");
+        let text = region_error(&recall, false, &write, false);
+        assert!(text.contains("entropy-chunks.dat"), "{text}");
+        assert!(
+            text.contains("unwritten") || text.contains("hole") || text.contains("unmapped"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn trailing_hole_in_the_recall_file_is_a_startup_error() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-tail-hole-")
+            .build();
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = trailing_hole_region(tmp.path(), "entropy-chunks.dat");
+        let text = region_error(&recall, false, &write, false);
+        assert!(text.contains("entropy-chunks.dat"), "{text}");
+    }
+
+    #[test]
+    fn written_region_files_are_allowed() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-regions-written-")
+            .build();
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = synced_region(tmp.path(), "entropy-chunks.dat");
+        check_region_extents(&recall, false, &write, false).unwrap();
+    }
+
+    #[test]
+    fn files_created_this_run_are_allowed() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-regions-new-")
+            .build();
+        let dir = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&dir).unwrap();
+        let recall = dir.join("entropy-chunks.dat");
+        let write = dir.join("write-region.dat");
+        let recall_created = create_small(&recall, CHUNK_SIZE, true).unwrap();
+        let write_created = create_small(&write, CHUNK_SIZE, false).unwrap();
+        assert!(recall_created);
+        assert!(write_created);
+        check_region_extents(&recall, recall_created, &write, write_created).unwrap();
+    }
+
+    #[test]
+    fn existing_sparse_recall_is_refused_when_the_write_file_was_created() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-kept-hole-")
+            .build();
+        let dir = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&dir).unwrap();
+        let recall = sparse_region(&dir, "entropy-chunks.dat");
+        let write = dir.join("write-region.dat");
+        let recall_created = create_small(&recall, CHUNK_SIZE, true).unwrap();
+        let write_created = create_small(&write, CHUNK_SIZE, false).unwrap();
+        assert!(!recall_created);
+        assert!(write_created);
+        let text = region_error(&recall, recall_created, &write, write_created);
+        assert!(text.contains("entropy-chunks.dat"), "{text}");
+    }
+
+    #[test]
+    fn sparse_write_file_is_a_startup_error() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-write-hole-").build();
+        let write = sparse_region(tmp.path(), "write-region.dat");
+        let recall = synced_region(tmp.path(), "entropy-chunks.dat");
+        let text = region_error(&recall, false, &write, false);
+        assert!(text.contains("write-region.dat"), "{text}");
     }
 }

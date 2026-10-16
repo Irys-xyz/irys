@@ -14,7 +14,7 @@ The bench does not truncate, resize, or `fallocate` either file. A missing file 
 
 The recall file is opened `O_RDONLY`. After open, `fcntl(F_GETFL)` must show `O_ACCMODE == O_RDONLY`. The bench never writes that descriptor.
 
-Before the run, the write file is checked with `FIEMAP`. An unwritten extent, a hole, `UNKNOWN`, or `DELALLOC` is a refusal. A filesystem with no `FIEMAP` is allowed only when `--create-small` wrote that file in this process.
+Before the run, the recall file and the write file are checked with `FIEMAP`. An unwritten extent, a hole, `UNKNOWN`, or `DELALLOC` is a refusal. A filesystem with no `FIEMAP` is allowed only for a file `--create-small` wrote in this process.
 
 `--out` is not under the guard.
 
