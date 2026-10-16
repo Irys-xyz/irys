@@ -173,14 +173,23 @@ struct SweepSlot {
     /// Entropy taken from the read-ahead cache. Not pending-map entropy:
     /// the interval is checked again before the XOR.
     cached_entropy: Option<Vec<u8>>,
-    /// `entropy_write_epoch` at the pread. A later entropy pwrite must not
-    /// be packed from this buffer.
+    /// `entropy_write_epoch` when these entropy bytes were copied. A later
+    /// entropy pwrite bumps that epoch. Packing this buffer after the bump
+    /// stores the old bytes as data.
     entropy_epoch: u64,
 }
 
 /// One reserved offset. The third field is entropy already in `pending`.
 /// The fourth is a read-ahead cache pad. Only one of them is set.
-type SelectedOffset = (PartitionChunkOffset, u64, Option<Vec<u8>>, Option<Vec<u8>>);
+/// The fifth is `entropy_write_epoch` when those bytes were copied. `0` when
+/// the bytes are still on disk and this slot will pread them.
+type SelectedOffset = (
+    PartitionChunkOffset,
+    u64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    u64,
+);
 
 /// Read-ahead pads past a demand span. Oldest live pad is evicted first.
 ///
@@ -199,6 +208,8 @@ struct CachedPad {
     bytes: Vec<u8>,
     generation: u64,
     stamp: u64,
+    /// `entropy_write_epoch` of the pread that stored `bytes`.
+    entropy_epoch: u64,
 }
 
 impl EntropyPadCache {
@@ -262,9 +273,10 @@ impl EntropyPadCache {
     }
 
     /// Drop the pad. `Some` only when the generation still matches.
-    fn take(&mut self, offset: PartitionChunkOffset, generation: u64) -> Option<Vec<u8>> {
+    /// The epoch is the one stored with the bytes.
+    fn take(&mut self, offset: PartitionChunkOffset, generation: u64) -> Option<(Vec<u8>, u64)> {
         let pad = self.remove(offset)?;
-        (pad.generation == generation).then_some(pad.bytes)
+        (pad.generation == generation).then_some((pad.bytes, pad.entropy_epoch))
     }
 
     /// Keep `bytes` for `offset`. Evict the oldest pads until it fits.
@@ -275,6 +287,7 @@ impl EntropyPadCache {
         bytes: Vec<u8>,
         generation: u64,
         cap: u64,
+        entropy_epoch: u64,
     ) -> bool {
         let len = bytes.len() as u64;
         if cap == 0 || len == 0 || len > cap {
@@ -299,6 +312,7 @@ impl EntropyPadCache {
                 bytes,
                 generation,
                 stamp,
+                entropy_epoch,
             },
         );
         true
@@ -447,6 +461,20 @@ pub(super) struct DiskGate {
     /// the whole backlog on every take.
     #[cfg(test)]
     pub(super) span_walk_slots: AtomicU64,
+    /// One armed pause in the entropy-copy windows. Production builds omit it.
+    #[cfg(test)]
+    entropy_pack_pause: super::PauseGate<EntropyPackPause>,
+}
+
+/// Test barrier around a copied entropy pad. The slot is not in the sweep
+/// queue at either point, so `fail_sweep_offset` cannot see it.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntropyPackPause {
+    /// The pad or pending entropy is copied. `push_occupied` has not run.
+    AfterEntropyCopied,
+    /// The pre-XOR check passed. The XOR has not run.
+    BeforePackXor,
 }
 
 /// One posted flush or interval write, and the result the waiter collects.
@@ -694,6 +722,8 @@ impl DiskGate {
             enqueue_notifies: AtomicU64::new(0),
             #[cfg(test)]
             span_walk_slots: AtomicU64::new(0),
+            #[cfg(test)]
+            entropy_pack_pause: super::PauseGate::new(),
         }
     }
 
@@ -1419,8 +1449,11 @@ impl StorageModule {
                 pending.occupancy.insert(partition_offset, generation);
                 // A cache pad is disk entropy, not a pending write. Take it
                 // under this lock so a write cannot invalidate between the
-                // check and the take.
-                let cached_entropy = if pending_entropy.is_none() {
+                // check and the take. Keep the epoch stored with the pad.
+                // The bump is published before `stamp_pwrite` invalidates the
+                // cache, so a sample under this lock can see the new epoch
+                // and the old bytes.
+                let taken = if pending_entropy.is_none() {
                     self.entropy_cache
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -1428,6 +1461,8 @@ impl StorageModule {
                 } else {
                     None
                 };
+                let entropy_epoch = taken.as_ref().map(|(_, epoch)| *epoch).unwrap_or(0);
+                let cached_entropy = taken.map(|(bytes, _)| bytes);
                 if cached_entropy.is_some() {
                     super::super::index_read_metrics::note_readahead_hit();
                     #[cfg(any(test, feature = "bench"))]
@@ -1440,6 +1475,7 @@ impl StorageModule {
                     generation,
                     pending_entropy,
                     cached_entropy,
+                    entropy_epoch,
                 ));
             }
             if selected.is_empty() {
@@ -1448,6 +1484,12 @@ impl StorageModule {
             let queued = unpacked.len() as u64 * selected.len() as u64;
             pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_add(queued);
         }
+
+        // Not queued yet. A newer entropy write can durable-point in this gap.
+        #[cfg(test)]
+        self.disk
+            .entropy_pack_pause
+            .wait_if(EntropyPackPause::AfterEntropyCopied);
 
         Ok(Some(OccupiedChunk {
             unpacked,
@@ -1473,7 +1515,7 @@ impl StorageModule {
                 chunk
                     .selected
                     .iter()
-                    .any(|(_, generation, _, _)| *generation != generation_now)
+                    .any(|(_, generation, _, _, _)| *generation != generation_now)
             });
         if stale {
             drop(queue);
@@ -1496,7 +1538,9 @@ impl StorageModule {
                 },
             );
             let enqueued_at = Instant::now();
-            for (offset, generation, pending_entropy, cached_entropy) in chunk.selected {
+            for (offset, generation, pending_entropy, cached_entropy, entropy_epoch) in
+                chunk.selected
+            {
                 if let Some(previous) = queue.insert_slot(SweepSlot {
                     group: group_id,
                     offset,
@@ -1507,7 +1551,7 @@ impl StorageModule {
                     priority: chunk.priority,
                     pending_entropy,
                     cached_entropy,
-                    entropy_epoch: 0,
+                    entropy_epoch,
                     byte_len,
                     enqueued_at,
                 }) {
@@ -2244,7 +2288,13 @@ impl StorageModule {
                 continue;
             }
             let at = step * chunk_len;
-            if cache.insert(offset, buf[at..at + chunk_len].to_vec(), generation, cap) {
+            if cache.insert(
+                offset,
+                buf[at..at + chunk_len].to_vec(),
+                generation,
+                cap,
+                entropy_epoch,
+            ) {
                 super::super::index_read_metrics::note_readahead_store();
                 #[cfg(any(test, feature = "bench"))]
                 self.disk
@@ -2482,6 +2532,11 @@ impl StorageModule {
             self.fail_queued_group(group);
             return;
         }
+        // Off the queue. A newer entropy write can land during the XOR.
+        #[cfg(test)]
+        self.disk
+            .entropy_pack_pause
+            .wait_if(EntropyPackPause::BeforePackXor);
         // The data-path row is written after `chunks.dat` is fdatasync'd.
         // Failing here leaves no pending bytes and no index row.
         #[cfg(any(test, feature = "test-utils"))]
@@ -2515,6 +2570,7 @@ impl StorageModule {
             slot.byte_len,
             (slot.path_hash, (*slot.data_path).clone()),
             copied_pad,
+            slot.entropy_epoch,
         );
         if inserted.is_ok() && priority == WritePriority::Ingress && read_done.is_some() {
             super::super::index_read_metrics::note_ingest_stage(
@@ -2549,11 +2605,10 @@ impl StorageModule {
         if slot.pending_entropy.is_some() {
             return Ok(());
         }
-        // The pad was read from disk. An entropy pwrite since that read has
-        // newer bytes. Retry instead of packing the old pad.
-        if slot.cached_entropy.is_none()
-            && self.entropy_write_epoch.load(Ordering::SeqCst) != slot.entropy_epoch
-        {
+        // The bytes were copied earlier: a disk pread or a cache pad. An
+        // entropy pwrite since that copy bumps the epoch, then clears
+        // `pending` and `written_ahead`. Retry instead of packing the old pad.
+        if self.entropy_write_epoch.load(Ordering::SeqCst) != slot.entropy_epoch {
             return Err(WriteDataChunkError::Backpressure);
         }
         let intervals = self.intervals.read().unwrap();
@@ -2659,6 +2714,7 @@ impl StorageModule {
         unpacked_len: u64,
         proof: (ChunkPathHash, ChunkDataPath),
         copied_pad: bool,
+        entropy_epoch: u64,
     ) -> Result<(), WriteDataChunkError> {
         let mut pending = self.pending_writes.write().unwrap();
         pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_sub(unpacked_len);
@@ -2667,8 +2723,13 @@ impl StorageModule {
         }
         // `written_ahead` is a pwrite this commit did not do. Leave it.
         // A copied pad must not replace entropy that landed after the copy.
+        // The epoch covers the same pad after that write has been synced
+        // and both maps are empty. The XOR does not hold `pending_writes`.
+        let epoch_moved =
+            copied_pad && self.entropy_write_epoch.load(Ordering::SeqCst) != entropy_epoch;
         if pending.written_ahead.contains_key(&offset)
             || (copied_pad && pending.contains_key(&offset))
+            || epoch_moved
         {
             pending.occupancy.remove(&offset);
             return Err(WriteDataChunkError::Backpressure);
@@ -3304,8 +3365,9 @@ mod tests {
 
     use super::{DiskGate, INFLIGHT_DISK_OPS, INFLIGHT_WRITES};
     use irys_types::{
-        ConsensusConfig, ConsensusOptions, H256, NodeConfig, PartitionChunkOffset,
-        StorageSyncConfig,
+        ConsensusConfig, ConsensusOptions, DataTransactionHeader, DataTransactionHeaderV1, H256,
+        LedgerChunkOffset, LedgerChunkRange, NodeConfig, PartitionChunkOffset, StorageSyncConfig,
+        TxChunkOffset, UnpackedChunk, ledger_chunk_offset_ii,
     };
     use nodit::interval::ii;
 
@@ -3858,7 +3920,7 @@ mod tests {
             priority: super::WritePriority::Ingress,
             waited: false,
             notify: None,
-            selected: vec![(PartitionChunkOffset::from(0), 1, None, None)],
+            selected: vec![(PartitionChunkOffset::from(0), 1, None, None, 0)],
         };
         module
             .push_occupied(vec![occupied])
@@ -3935,6 +3997,7 @@ mod tests {
             32,
             (H256::zero(), Vec::new()),
             true,
+            module.entropy_write_epoch.load(Ordering::SeqCst),
         );
         assert!(
             matches!(
@@ -4149,7 +4212,7 @@ mod tests {
             let mut cache = super::EntropyPadCache::default();
             let cap = u64::from(pads) * 32;
             for index in 0..pads {
-                assert!(cache.insert(PartitionChunkOffset::from(index), vec![1; 32], 1, cap,));
+                assert!(cache.insert(PartitionChunkOffset::from(index), vec![1; 32], 1, cap, 0,));
             }
             let started = Instant::now();
             for index in (0..pads).rev() {
@@ -4174,12 +4237,12 @@ mod tests {
         let mut cache = super::EntropyPadCache::default();
         let cap = 32 * 2;
         for index in 0..2_u32 {
-            assert!(cache.insert(PartitionChunkOffset::from(index), vec![1; 32], 1, cap,));
+            assert!(cache.insert(PartitionChunkOffset::from(index), vec![1; 32], 1, cap, 0,));
         }
-        assert!(cache.insert(PartitionChunkOffset::from(0), vec![2; 32], 1, cap));
+        assert!(cache.insert(PartitionChunkOffset::from(0), vec![2; 32], 1, cap, 0));
         assert!(cache.take(PartitionChunkOffset::from(0), 1).is_some());
-        assert!(cache.insert(PartitionChunkOffset::from(2), vec![3; 32], 1, cap));
-        assert!(cache.insert(PartitionChunkOffset::from(3), vec![4; 32], 1, cap));
+        assert!(cache.insert(PartitionChunkOffset::from(2), vec![3; 32], 1, cap, 0));
+        assert!(cache.insert(PartitionChunkOffset::from(3), vec![4; 32], 1, cap, 0));
         assert!(
             cache.take(PartitionChunkOffset::from(1), 1).is_none(),
             "the stale front row evicted a newer pad, or the oldest live pad survived"
@@ -4216,6 +4279,330 @@ mod tests {
             ),
             "{finished:?}"
         );
+        Ok(())
+    }
+
+    /// One indexed chunk. Bytes are `0x01`, so packing entropy `0x11` yields `0x10`.
+    fn index_unpacked_byte(module: &super::super::StorageModule) -> eyre::Result<UnpackedChunk> {
+        let data_root = H256::repeat_byte(0x42);
+        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 32,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        module.index_transaction_data(
+            &header,
+            &vec![5, 6, 7, 8],
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        Ok(UnpackedChunk {
+            data_root,
+            data_size: 32,
+            data_path: vec![4, 3, 2, 1].into(),
+            bytes: vec![0x01; 32].into(),
+            tx_offset: TxChunkOffset::from(0),
+        })
+    }
+
+    fn cache_module(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        super::super::StorageModule,
+        UnpackedChunk,
+    )> {
+        let (tmp, module) = span_fixture_grace(prefix, 4, 4, 0, 0, 32 * 4)?;
+        let chunk = index_unpacked_byte(&module)?;
+        Ok((tmp, module, chunk))
+    }
+
+    /// Durable entropy `byte`, then the same bytes in the read-ahead cache.
+    fn cache_durable_entropy(module: &super::super::StorageModule, byte: u8) -> eyre::Result<()> {
+        let offset = PartitionChunkOffset::from(0);
+        let bytes = vec![byte; 32];
+        assert!(module.write_chunk(offset, bytes.clone(), super::super::ChunkType::Entropy));
+        module.sync_pending_chunks_inner(true)?;
+        let epoch = module.entropy_write_epoch.load(Ordering::SeqCst);
+        let verdicts = [super::super::chunk_crc::CrcVerdict::Match];
+        module.remember_readahead(offset, &bytes, std::iter::empty(), &verdicts, epoch);
+        assert_eq!(
+            module.entropy_cache_offsets_for_test(),
+            vec![0],
+            "durable entropy was not cached"
+        );
+        Ok(())
+    }
+
+    fn pending_head(
+        module: &super::super::StorageModule,
+    ) -> Option<(super::super::ChunkType, Option<u8>)> {
+        module
+            .pending_writes
+            .read()
+            .unwrap()
+            .get(&PartitionChunkOffset::from(0))
+            .map(|(bytes, kind)| (*kind, bytes.first().copied()))
+    }
+
+    struct StopLane {
+        module: Arc<super::super::StorageModule>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl StopLane {
+        fn start(module: Arc<super::super::StorageModule>) -> eyre::Result<Self> {
+            let handle = module
+                .spawn_disk_lane()?
+                .ok_or_else(|| eyre::eyre!("disk lane did not start"))?;
+            Ok(Self {
+                module,
+                handle: Some(handle),
+            })
+        }
+    }
+
+    impl Drop for StopLane {
+        fn drop(&mut self) {
+            self.module.stop_disk_lane();
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    struct ReleasePause<'a>(&'a super::DiskGate);
+
+    impl Drop for ReleasePause<'_> {
+        fn drop(&mut self) {
+            self.0.entropy_pack_pause.release();
+        }
+    }
+
+    /// `during` runs while the copied pad is off the sweep queue.
+    fn ingress_during_pause(
+        module: &Arc<super::super::StorageModule>,
+        chunk: &UnpackedChunk,
+        pause: super::EntropyPackPause,
+        during: impl FnOnce(),
+    ) -> Result<(), super::super::WriteDataChunkError> {
+        module.disk.entropy_pack_pause.arm(pause);
+        thread::scope(|scope| {
+            let writing = Arc::clone(module);
+            let chunk = chunk.clone();
+            let handle = scope.spawn(move || writing.write_data_chunk(&chunk));
+            let release = ReleasePause(&module.disk);
+            assert!(
+                module
+                    .disk
+                    .entropy_pack_pause
+                    .wait_arrived(Duration::from_secs(5)),
+                "ingress did not reach {pause:?}"
+            );
+            assert_eq!(
+                module.sweep_slot_count_for_test(),
+                0,
+                "the copied pad is still queued, so a write can cancel it"
+            );
+            during();
+            drop(release);
+            handle.join().expect("ingress thread")
+        })
+    }
+
+    fn assert_old_pad_not_packed(
+        result: Result<(), super::super::WriteDataChunkError>,
+        module: &super::super::StorageModule,
+        context: &str,
+    ) {
+        let head = pending_head(module);
+        assert!(
+            matches!(result, Err(super::super::WriteDataChunkError::Backpressure)),
+            "{context}: {result:?} pending {head:?}"
+        );
+        assert_ne!(
+            head,
+            Some((super::super::ChunkType::Data, Some(0x10))),
+            "{context}: packed the entropy copied before the replacement"
+        );
+    }
+
+    fn assert_fresh_pad_packed(module: &super::super::StorageModule) {
+        let head = pending_head(module);
+        assert_eq!(
+            head,
+            Some((super::super::ChunkType::Data, Some(0x10))),
+            "fresh entropy did not pack: {head:?}"
+        );
+    }
+
+    /// The cache still holds the pread pad after the epoch moves. Occupy must
+    /// not pack that pad. Sampling the epoch at the take would see the new
+    /// value and accept the old bytes.
+    #[test]
+    fn cached_pad_is_not_packed_after_the_epoch_moves() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_epoch_gap")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let stored = module.entropy_write_epoch.load(Ordering::SeqCst);
+        module.entropy_write_epoch.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            module.entropy_cache_offsets_for_test(),
+            vec![0],
+            "the epoch bump dropped the pad before occupy"
+        );
+        let wrote = module.write_data_chunk(&chunk);
+        assert_old_pad_not_packed(wrote, &module, "epoch moved before the cache take");
+        assert!(
+            stored < module.entropy_write_epoch.load(Ordering::SeqCst),
+            "the test did not move the epoch"
+        );
+        Ok(())
+    }
+
+    /// Occupy has the cached pad and has not queued it. A durable point then
+    /// replaces the entropy. The lane is down, so this thread syncs.
+    #[test]
+    fn cached_pad_is_not_packed_after_a_durable_point_without_a_lane() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_durable_down")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let module = Arc::new(module);
+        let offset = PartitionChunkOffset::from(0);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::AfterEntropyCopied,
+            || {
+                assert!(module.write_chunk(
+                    offset,
+                    vec![0x22; 32],
+                    super::super::ChunkType::Entropy
+                ));
+                module
+                    .sync_pending_chunks_inner(true)
+                    .expect("replacement sync");
+                assert!(
+                    pending_head(&module).is_none(),
+                    "replacement is still pending"
+                );
+                assert!(
+                    !module
+                        .pending_writes
+                        .read()
+                        .unwrap()
+                        .written_ahead
+                        .contains_key(&offset),
+                    "replacement is still write-ahead"
+                );
+            },
+        );
+        assert_old_pad_not_packed(wrote, &module, "durable point before push, lane down");
+        Ok(())
+    }
+
+    /// Same gap, with the lane thread committing the replacement.
+    #[test]
+    fn cached_pad_is_not_packed_after_a_durable_point_on_the_lane() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_durable_lane")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        let offset = PartitionChunkOffset::from(0);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::AfterEntropyCopied,
+            || {
+                assert!(module.write_chunk(
+                    offset,
+                    vec![0x22; 32],
+                    super::super::ChunkType::Entropy
+                ));
+                module
+                    .sync_pending_chunks_inner(true)
+                    .expect("lane replacement sync");
+                assert!(
+                    pending_head(&module).is_none(),
+                    "replacement is still pending"
+                );
+            },
+        );
+        assert_old_pad_not_packed(wrote, &module, "durable point before push, lane up");
+        drop(lane);
+        Ok(())
+    }
+
+    /// The fold already removed the slot and the pre-XOR check passed. A
+    /// durable point on this thread (no lane) then clears both maps.
+    #[test]
+    fn cached_pad_is_not_packed_when_a_durable_point_lands_during_xor() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_xor_down")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let module = Arc::new(module);
+        let offset = PartitionChunkOffset::from(0);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::BeforePackXor,
+            || {
+                assert!(module.write_chunk(
+                    offset,
+                    vec![0x22; 32],
+                    super::super::ChunkType::Entropy
+                ));
+                module
+                    .sync_pending_chunks_inner(true)
+                    .expect("replacement sync during xor");
+                assert!(
+                    pending_head(&module).is_none(),
+                    "replacement is still pending"
+                );
+                assert!(
+                    !module
+                        .pending_writes
+                        .read()
+                        .unwrap()
+                        .written_ahead
+                        .contains_key(&offset)
+                );
+            },
+        );
+        assert_old_pad_not_packed(wrote, &module, "durable point during xor, lane down");
+        Ok(())
+    }
+
+    /// No later entropy write. The cached pad packs.
+    #[test]
+    fn fresh_cached_entropy_still_packs() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_fresh")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let hits = module.disk.entropy_readahead_hits.load(Ordering::SeqCst);
+        module.write_data_chunk(&chunk)?;
+        assert!(
+            module.disk.entropy_readahead_hits.load(Ordering::SeqCst) > hits,
+            "the pack did not use the cached pad"
+        );
+        assert_fresh_pad_packed(&module);
+        Ok(())
+    }
+
+    /// The lane packs the same fresh pad.
+    #[test]
+    fn fresh_cached_entropy_still_packs_on_the_lane() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_fresh_lane")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        let hits = module.disk.entropy_readahead_hits.load(Ordering::SeqCst);
+        module.write_data_chunk(&chunk)?;
+        assert!(
+            module.disk.entropy_readahead_hits.load(Ordering::SeqCst) > hits,
+            "the lane pack did not use the cached pad"
+        );
+        assert_fresh_pad_packed(&module);
+        drop(lane);
         Ok(())
     }
 }
