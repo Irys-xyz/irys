@@ -1756,21 +1756,22 @@ fn entropy_fill_size(store: &SubmoduleIndex, args: &Args) -> eyre::Result<Entrop
     })
 }
 
-fn print_entropy_fill_size(size: &EntropyFillSize) {
-    let per_data = if size.data_rows == 0 {
+/// Mean SST bytes of the whole `ChunkMetaByOffset` family.
+fn format_entropy_fill_size(size: &EntropyFillSize) -> String {
+    let rows = size.data_rows.saturating_add(size.entropy_rows);
+    let per_row = if rows == 0 {
         0.0
     } else {
-        size.sst_bytes as f64 / size.data_rows as f64
+        size.sst_bytes as f64 / rows as f64
     };
-    let per_entropy = if size.entropy_rows == 0 {
-        0.0
-    } else {
-        size.sst_bytes as f64 / size.entropy_rows as f64
-    };
-    println!(
-        "  entropy_fill data_rows={} entropy_rows={} cf={CHUNK_META_BY_OFFSET_CF} sst_bytes={} sst_bytes_per_data_chunk={per_data:.2} sst_bytes_per_entropy_row={per_entropy:.2}",
+    format!(
+        "  entropy_fill data_rows={} entropy_rows={} cf={CHUNK_META_BY_OFFSET_CF} sst_bytes={} sst_bytes_per_row={per_row:.2}",
         size.data_rows, size.entropy_rows, size.sst_bytes
-    );
+    )
+}
+
+fn print_entropy_fill_size(size: &EntropyFillSize) {
+    println!("{}", format_entropy_fill_size(size));
 }
 
 fn print_crc_size(shape: &str, layout: &str, chunks: u32, total_value: u64, sst: u64) {
@@ -2796,6 +2797,8 @@ fn print_rocks() {
     }
 }
 
+const ENTROPY_FILL_HELP: &str = "--entropy-fill writes checksum-only rows (crc set, no proof) for every offset outside that data region. Rows are written in offset order, one commit per data-path batch. It needs --engine rocks. After settle the run prints data_rows, entropy_rows, ChunkMetaByOffset sst_bytes, and sst_bytes_per_row. sst_bytes_per_row is sst_bytes divided by data_rows + entropy_rows, one mean for the whole family.";
+
 fn print_help() {
     let presets = RocksTuning::preset_names();
     eprintln!(
@@ -2822,7 +2825,7 @@ Presets: {presets}. Each preset other than full-filters, fdatasync-wal-rotate, a
 --small-txs N stores one data root every N chunks. Sibling chunks in one transaction share branch bytes. --mid-txs draws each transaction from 257 to 4096 chunks. Neither flag takes --path-bytes or --tx-chunks.\n\
 --data-fraction F (default 1, and 0 < F <= 1) writes transactions, placements, and data rows for the first F × --chunks offsets. The transaction shape is the shape of that prefix. The header prints data_fraction and data_chunks.\n\
 --with-crc stores the proof plus the checksum trailer from encode_offset_meta. It needs --engine rocks.\n\
---entropy-fill writes checksum-only rows (crc set, no proof) for every offset outside that data region. Rows are written in offset order, one commit per data-path batch. It needs --engine rocks. After settle the run prints data_rows, entropy_rows, and ChunkMetaByOffset SST bytes per data chunk and per entropy row.\n\
+{ENTROPY_FILL_HELP}\n\
 --reads N (default 1024) is the sample count for each shape: data_path_random, data_path_random_open, data_path_seq, serve, range, span (range plus every proof in it, as paths_in_tx does), entropy_range, recall_rows, rmw_path, rmw_root. RocksDB also times content_lookup and content_miss. The data shapes sample the data region only.\n\
 entropy_range is a cold offset_metas_in_range of --range-len consecutive entropy offsets, sampled over the entropy region. recall_rows is the same call for --range-len offsets at a uniform start over the whole partition, so the window can mix data and entropy rows. Both use the cold-cache reopen the other shapes use. Both are skipped, with a printed reason, when there is no entropy region or the engine is not RocksDB.\n\
 data_path_random is scattered get_data_path_by_offset. data_path_random_open repeats it with the engine left open. data_path_seq is the same call on offsets 0, 1, 2, ...\n\
@@ -3333,6 +3336,59 @@ VmHWM:\t   8600000 kB
     }
 
     #[test]
+    fn entropy_fill_line_uses_one_family_mean() {
+        let mixed = super::EntropyFillSize {
+            data_rows: 10,
+            entropy_rows: 90,
+            sst_bytes: 1000,
+        };
+        let line = super::format_entropy_fill_size(&mixed);
+        assert!(line.contains("data_rows=10"), "{line}");
+        assert!(line.contains("entropy_rows=90"), "{line}");
+        assert!(line.contains("sst_bytes=1000"), "{line}");
+        assert!(line.contains("sst_bytes_per_row=10.00"), "{line}");
+        assert!(!line.contains("sst_bytes_per_data_chunk"), "{line}");
+        assert!(!line.contains("sst_bytes_per_entropy_row"), "{line}");
+
+        let data_only = super::EntropyFillSize {
+            data_rows: 4,
+            entropy_rows: 0,
+            sst_bytes: 400,
+        };
+        let line = super::format_entropy_fill_size(&data_only);
+        assert!(line.contains("entropy_rows=0"), "{line}");
+        assert!(line.contains("sst_bytes_per_row=100.00"), "{line}");
+
+        let entropy_only = super::EntropyFillSize {
+            data_rows: 0,
+            entropy_rows: 5,
+            sst_bytes: 50,
+        };
+        let line = super::format_entropy_fill_size(&entropy_only);
+        assert!(line.contains("data_rows=0"), "{line}");
+        assert!(line.contains("sst_bytes_per_row=10.00"), "{line}");
+
+        let empty = super::EntropyFillSize {
+            data_rows: 0,
+            entropy_rows: 0,
+            sst_bytes: 0,
+        };
+        let line = super::format_entropy_fill_size(&empty);
+        assert!(line.contains("sst_bytes_per_row=0.00"), "{line}");
+    }
+
+    #[test]
+    fn entropy_fill_help_names_one_family_mean() {
+        let help = super::ENTROPY_FILL_HELP;
+        assert!(help.contains("sst_bytes_per_row"), "{help}");
+        assert!(help.contains("data_rows + entropy_rows"), "{help}");
+        assert!(
+            !help.contains("per data chunk and per entropy row"),
+            "{help}"
+        );
+    }
+
+    #[test]
     fn percentiles_use_nearest_rank() {
         let samples = [10, 20, 30, 40];
         assert_eq!(percentile(&samples, 50), 20);
@@ -3753,6 +3809,18 @@ VmHWM:\t   8600000 kB
         assert_eq!(size.data_rows, 2);
         assert_eq!(size.entropy_rows, 2);
         assert!(size.sst_bytes > 0);
+        let rows = size.data_rows + size.entropy_rows;
+        let mean = size.sst_bytes as f64 / rows as f64;
+        let line = super::format_entropy_fill_size(&size);
+        assert!(
+            line.contains(&format!("sst_bytes_per_row={mean:.2}")),
+            "{line}"
+        );
+        assert!(
+            (mean * rows as f64 - size.sst_bytes as f64).abs() < 1.0,
+            "mean {mean} rows {rows} sst {}",
+            size.sst_bytes
+        );
         drop(store);
         super::read_phase(&path, "rocks", &args, &|dir| {
             SubmoduleIndex::open_rocks_bench(dir, args.rocks)
