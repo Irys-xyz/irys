@@ -429,7 +429,7 @@ Categories:
 | Name | Requests |
 | --- | --- |
 | `recall` | reads of `entropy-chunks.dat` |
-| `entropy_read` | reads of `write-region.dat` (entropy for packing) |
+| `entropy_read` | reads of `write-region.dat` (packing entropy and serve reads of the write file) |
 | `packed_write` | writes of `write-region.dat` |
 | `index_wal` | `*.log` WAL files, not RocksDB `LOG` |
 | `index_sst` | `*.sst` |
