@@ -672,8 +672,10 @@ pub struct StorageSyncConfig {
     /// of the ceiling, and a pending-byte level above the ceiling
     /// (`max_pending_write_bytes`, or
     /// `max(2 × num_writes_before_sync, 256) × chunk_size × submodules`).
-    /// Reset drops pending bytes instead of waiting. The interval is the
-    /// longest a point may wait. Headroom loss ends the wait sooner.
+    /// Reset drops pending bytes instead of waiting. Headroom loss ends the
+    /// wait sooner. The interval is not a bound while a mining recall holds
+    /// the disk: the lane does not start the point, and the `fdatasync`
+    /// waits until that `pread` returns.
     #[serde(default = "default_min_durable_interval_ms")]
     pub min_durable_interval_ms: u64,
     /// Pending bytes, in parts per thousand of the memory ceiling, above
