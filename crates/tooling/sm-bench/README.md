@@ -333,7 +333,7 @@ A step fails when any of these hold:
 - durable bytes are short of the enqueued bytes by more than one chunk (hard: backlog)
 - any recall was skipped (start lag of 3 steps or more, the mining rule)
 - recall start-delay p99 or recall latency p99 is over the bar below (soft)
-- serve ops are short of `serve_per_sec` times the scored seconds by more than one op (soft). The result column names that miss, for example `FAIL(serve 9.6k/18k)`. `serve_per_sec = 0` is not a target, so a recall-only step does not fail for serve
+- serve ops are short of the offered ops by more than one op (soft). Offered ops are `serve_per_sec` times the scored time after the first chunk this process made durable. Time before that chunk, and a step that never made a chunk durable, are not part of the offer. The result column names a miss, for example `FAIL(serve 9.6k/18k)`. `serve_per_sec = 0` is not a target, so a recall-only step does not fail for serve
 - more than 20% of seconds at or above 5 s were at the pending-write ceiling, or pending bytes are still above the ceiling after the drain
 - the pending-write backlog grew by more than one flush batch and is still high after the drain (needs at least 30 samples)
 - a body-migration row remains after the drain

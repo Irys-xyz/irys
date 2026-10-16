@@ -27,7 +27,8 @@ use tokio::sync::watch;
 
 use crate::drivers::{
     BenchIo, driver_error, fatal_reason, ingest_driver, migration_driver, note_fatal,
-    purge_migrations, recall_driver, resume_frontier, serve_driver, take_fatal,
+    purge_migrations, recall_driver, resume_frontier, serve_driver, serve_unread_prefix,
+    take_fatal,
 };
 use crate::guard::{
     CHUNK_SIZE, check_written_extents, create_small, require_loadtest, require_loadtest_ancestor,
@@ -40,7 +41,8 @@ use crate::report::{
 };
 use crate::schedule::{
     Plan, Rates, RecallBar, RecallRule, Step, StepMeasured, apply_step_secs, judge, load_schedule,
-    merge_tail, mib_bytes, parse_mix, preset, recall_bar, stop_for_score, tail_window,
+    merge_tail, mib_bytes, offered_serve_ops, parse_mix, preset, recall_bar, stop_for_score,
+    tail_window, unread_inside,
 };
 use crate::stats::{PermitGauge, StepAccum, fold_permit};
 
@@ -588,6 +590,7 @@ fn run() -> eyre::Result<i32> {
         serve_seq_chunks: args.serve_seq_chunks,
         buckets: std::sync::Mutex::new(crate::stats::Buckets::default()),
         written: std::sync::Mutex::new(crate::stats::Written::default()),
+        serve_ready: std::sync::Mutex::new(None),
         fatal: std::sync::Mutex::new(None),
         accept_new: std::sync::atomic::AtomicBool::new(false),
         open_txs: std::sync::atomic::AtomicUsize::new(0),
@@ -1043,6 +1046,15 @@ async fn run_step(
     // After the drain's index read, so that I/O stays inside the step window.
     step_log.mark(index, &step.name, "end")?;
     let aborted = if interrupted { None } else { take_fatal(io) };
+    let window = Duration::from_secs(accum.seconds);
+    let ready = *io
+        .serve_ready
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let step_prefix = serve_unread_prefix(started, ready, window);
+    let scheduled_serve = offered_serve_ops(step.rates.serve_per_sec, window, step_prefix);
+    let tail_span = Duration::from_secs(judge_tail_secs.min(accum.seconds));
+    let tail_prefix = unread_inside(step_prefix, window.saturating_sub(tail_span), tail_span);
     let recall_delay = crate::stats::summarize(&accum.recall.delays_us);
     let recall_lat = crate::stats::summarize(&accum.recall.lats_us);
     let measured = StepMeasured {
@@ -1054,7 +1066,7 @@ async fn run_step(
         durable_migration: accum.migration.durable,
         enqueued_migration: accum.migration.enqueued,
         serve_ops: accum.serve.ops,
-        scheduled_serve: step.rates.serve_per_sec.saturating_mul(accum.seconds),
+        scheduled_serve,
         chunk_size: CHUNK_SIZE,
         recall_ops: accum.recall.ops,
         recall_skips: accum.recall.skips,
@@ -1080,6 +1092,7 @@ async fn run_step(
             CHUNK_SIZE,
             ceiling,
             flush,
+            tail_prefix,
             &rule,
         )
     };

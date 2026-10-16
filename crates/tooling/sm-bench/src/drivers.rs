@@ -62,6 +62,8 @@ pub(crate) struct BenchIo {
     pub serve_seq_chunks: u32,
     pub buckets: Mutex<Buckets>,
     pub written: Mutex<Written>,
+    /// First time this process made a chunk durable. Later steps keep it.
+    pub serve_ready: Mutex<Option<tokio::time::Instant>>,
     pub fatal: Mutex<Option<String>>,
     pub accept_new: AtomicBool,
     pub open_txs: AtomicUsize,
@@ -321,10 +323,66 @@ fn record_pace(io: &BenchIo, kind: Kind, behind: Duration, slept: Duration, rele
 }
 
 fn mark_written(io: &BenchIo, offset: u32) {
-    io.written
+    let mut written = io
+        .written
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(offset);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let first = written.is_empty();
+    written.insert(offset);
+    if first {
+        note_serve_ready(&io.serve_ready, true, tokio::time::Instant::now());
+    }
+}
+
+/// Record `now` the first time a chunk becomes durable.
+fn note_serve_ready(
+    ready: &Mutex<Option<tokio::time::Instant>>,
+    first: bool,
+    now: tokio::time::Instant,
+) {
+    if !first {
+        return;
+    }
+    let mut slot = ready
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.is_none() {
+        *slot = Some(now);
+    }
+}
+
+/// Unreadable time from `started` until the first durable chunk, clamped to `window`.
+/// No ready instant means the whole window is unreadable.
+pub(crate) fn serve_unread_prefix(
+    started: tokio::time::Instant,
+    ready: Option<tokio::time::Instant>,
+    window: Duration,
+) -> Duration {
+    let Some(ready) = ready else {
+        return window;
+    };
+    if ready <= started {
+        return Duration::ZERO;
+    }
+    ready.saturating_duration_since(started).min(window)
+}
+
+/// Next serve deadline, and whether this wake should read.
+/// An empty durable set does not consume a period, so the first readable
+/// chunk is offered on the next poll instead of one period later.
+fn serve_offer(
+    now: tokio::time::Instant,
+    next_at: tokio::time::Instant,
+    period: Duration,
+    readable: bool,
+) -> (tokio::time::Instant, bool) {
+    if now < next_at {
+        return (next_at, false);
+    }
+    if !readable {
+        return (now, false);
+    }
+    (now + period, true)
 }
 
 /// Offer deadline. `due` is when the next release should happen. `last_active`
@@ -1184,18 +1242,11 @@ pub(crate) async fn serve_driver(
             continue;
         }
         let now = tokio::time::Instant::now();
-        if now < next_at {
-            tokio::select! {
-                _ = tokio::time::sleep_until(next_at) => {}
-                _ = stop.changed() => break,
-                _ = rates.changed() => {}
-            }
-            continue;
-        }
-        next_at =
-            tokio::time::Instant::now() + Duration::from_nanos(1_000_000_000 / rate.serve_per_sec);
-        let sequential = rng.gen_range(0..100) < rate.serve_seq_pct;
-        let range = {
+        let period = Duration::from_nanos(1_000_000_000 / rate.serve_per_sec);
+        let range = if now < next_at {
+            None
+        } else {
+            let sequential = rng.gen_range(0..100) < rate.serve_seq_pct;
             let written = io
                 .written
                 .lock()
@@ -1220,10 +1271,21 @@ pub(crate) async fn serve_driver(
                 written.get(index).map(|offset| (offset, offset))
             }
         };
-        let Some((start, end)) = range else {
-            tokio::time::sleep(IDLE_POLL).await;
+        let (deadline, read_now) = serve_offer(now, next_at, period, range.is_some());
+        next_at = deadline;
+        if !read_now {
+            if now < next_at {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(next_at) => {}
+                    _ = stop.changed() => break,
+                    _ = rates.changed() => {}
+                }
+            } else {
+                tokio::time::sleep(IDLE_POLL).await;
+            }
             continue;
-        };
+        }
+        let (start, end) = range.expect("serve offer without a readable range");
         let module = Arc::clone(&io.module);
         let chunk_size = io.chunk_size;
         let started = std::time::Instant::now();
@@ -1304,5 +1366,59 @@ mod tests {
             next_due.saturating_duration_since(start),
             Duration::from_millis(200)
         );
+    }
+
+    #[test]
+    fn an_empty_durable_set_does_not_consume_a_serve_period() {
+        // Breaks if an empty durable set still moves the offer deadline forward.
+        let now = tokio::time::Instant::now();
+        let period = Duration::from_millis(250);
+        let (deadline, read) = serve_offer(now, now, period, false);
+        assert!(!read);
+        assert_eq!(deadline, now);
+        let (deadline, read) = serve_offer(now, now, period, true);
+        assert!(read);
+        assert_eq!(deadline, now + period);
+        let next = now + period;
+        let early = now + Duration::from_millis(40);
+        let (deadline, read) = serve_offer(early, next, period, true);
+        assert!(!read);
+        assert_eq!(deadline, next);
+    }
+
+    #[test]
+    fn serve_unread_prefix_clamps_to_the_scored_window() {
+        let window = Duration::from_secs(8);
+        let started = tokio::time::Instant::now();
+        assert_eq!(serve_unread_prefix(started, None, window), window);
+        let ready_before = started;
+        let step_start = ready_before + Duration::from_millis(10);
+        assert_eq!(
+            serve_unread_prefix(step_start, Some(ready_before), window),
+            Duration::ZERO
+        );
+        assert_eq!(
+            serve_unread_prefix(started, Some(started), window),
+            Duration::ZERO
+        );
+        let ready = started + Duration::from_millis(750);
+        assert_eq!(
+            serve_unread_prefix(started, Some(ready), window),
+            Duration::from_millis(750)
+        );
+        let after = started + Duration::from_secs(9);
+        assert_eq!(serve_unread_prefix(started, Some(after), window), window);
+    }
+
+    #[test]
+    fn the_first_durable_chunk_records_one_ready_instant() {
+        let ready = Mutex::new(None);
+        let now = tokio::time::Instant::now();
+        note_serve_ready(&ready, false, now);
+        assert!(ready.lock().expect("ready").is_none());
+        note_serve_ready(&ready, true, now);
+        assert_eq!(*ready.lock().expect("ready"), Some(now));
+        note_serve_ready(&ready, true, now + Duration::from_secs(1));
+        assert_eq!(*ready.lock().expect("ready"), Some(now));
     }
 }

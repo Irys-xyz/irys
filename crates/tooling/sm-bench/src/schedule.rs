@@ -13,6 +13,7 @@
 //! whose mean meets the offer can still fail once the backlog fills.
 
 use std::path::Path;
+use std::time::Duration;
 
 use eyre::{WrapErr as _, eyre};
 use serde::Deserialize;
@@ -299,7 +300,8 @@ pub(crate) struct StepMeasured {
     pub enqueued_migration: u64,
     /// Serve reads finished during the step, including the drain.
     pub serve_ops: u64,
-    /// `serve_per_sec * scored seconds`. Zero means this step has no serve target.
+    /// `serve_per_sec` times the scored time after the first durable chunk.
+    /// Zero means this step has no serve target.
     pub scheduled_serve: u64,
     pub chunk_size: u64,
     pub recall_ops: u64,
@@ -597,8 +599,39 @@ pub(crate) struct TailWindow {
     pub findings: Vec<Finding>,
 }
 
+/// Offered serve ops in `window` after an unreadable `prefix`.
+///
+/// `prefix` is the time at the start of the window before any chunk this
+/// process made durable. A zero prefix and a whole-second window is
+/// `rate * seconds`.
+pub(crate) fn offered_serve_ops(rate_per_sec: u64, window: Duration, prefix: Duration) -> u64 {
+    if rate_per_sec == 0 || window.is_zero() {
+        return 0;
+    }
+    let active = window.saturating_sub(prefix.min(window));
+    let nanos = u64::try_from(active.as_nanos()).unwrap_or(u64::MAX);
+    rate_per_sec.saturating_mul(nanos) / 1_000_000_000
+}
+
+/// Unreadable time inside a window that starts `window_at` after the step start.
+/// `step_prefix` is unreadable time measured from the step start.
+pub(crate) fn unread_inside(
+    step_prefix: Duration,
+    window_at: Duration,
+    window: Duration,
+) -> Duration {
+    let end = window_at.saturating_add(window);
+    if step_prefix <= window_at {
+        Duration::ZERO
+    } else {
+        step_prefix.min(end).saturating_sub(window_at)
+    }
+}
+
 /// `tail_secs == 0` or an empty step returns `None`.
 /// A window longer than the step uses every scored second.
+/// `unread` is the part of this window before any chunk is readable.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn tail_window(
     views: &[SecondView],
     tail_secs: u64,
@@ -606,6 +639,7 @@ pub(crate) fn tail_window(
     chunk_size: u64,
     ceiling: u64,
     flush_batch: u64,
+    unread: Duration,
     rule: &RecallRule,
 ) -> Option<TailWindow> {
     if tail_secs == 0 || views.is_empty() {
@@ -658,7 +692,7 @@ pub(crate) fn tail_window(
         durable_migration: migration_durable,
         enqueued_migration: migration_enqueued,
         serve_ops,
-        scheduled_serve: rates.serve_per_sec.saturating_mul(secs),
+        scheduled_serve: offered_serve_ops(rates.serve_per_sec, Duration::from_secs(secs), unread),
         chunk_size,
         recall_ops,
         recall_skips,
@@ -762,6 +796,8 @@ fn backlog_grew(samples: &[u64], flush_batch: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -1007,7 +1043,17 @@ mod tests {
             judge(&whole, &rule).is_empty(),
             "360s at 32 MiB/s and 240s at 12 MiB/s average 24"
         );
-        let tail = tail_window(&views, 240, &rates, 262_144, 1_000_000, 100, &rule).unwrap();
+        let tail = tail_window(
+            &views,
+            240,
+            &rates,
+            262_144,
+            1_000_000,
+            100,
+            Duration::ZERO,
+            &rule,
+        )
+        .unwrap();
         assert_eq!(tail.secs, 240);
         assert!(!tail.passed);
         assert!(tail.findings.iter().all(|finding| finding.soft));
@@ -1038,7 +1084,7 @@ mod tests {
             starts.extend_from_slice(&view.recall_start_us);
         }
         assert_eq!(percentile(&starts, 99), 1_000);
-        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, Duration::ZERO, &rule).unwrap();
         assert!(tail.measured.recall_start_p99_us > 200_000);
         assert_eq!(tail.recall_start_max_us, 10_000_000);
         assert!(!tail.passed);
@@ -1055,7 +1101,7 @@ mod tests {
             view.ingest_durable = 0;
             views.push(view);
         }
-        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, Duration::ZERO, &rule).unwrap();
         assert!(tail.passed);
         assert_eq!(tail.measured.durable_ingest, 0);
         assert_eq!(tail.measured.enqueued_ingest, mib_bytes(16, 240));
@@ -1066,7 +1112,7 @@ mod tests {
         let rule = absolute();
         let rates = rates_at(8);
         let views = vec![quiet_second(1, 1_000); 8];
-        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, Duration::ZERO, &rule).unwrap();
         assert_eq!(tail.secs, 8);
         assert!(!tail.passed);
         let merged = merge_tail(Vec::new(), &tail, 8);
@@ -1077,12 +1123,12 @@ mod tests {
     fn tail_skips_are_hard_and_zero_disables_the_window() {
         let rule = absolute();
         let rates = rates_at(0);
-        assert!(tail_window(&[], 240, &rates, 1, 1, 1, &rule).is_none());
+        assert!(tail_window(&[], 240, &rates, 1, 1, 1, Duration::ZERO, &rule).is_none());
         let mut view = quiet_second(0, 1_000);
         view.recall_skips = 3;
         let views = vec![view; 300];
-        assert!(tail_window(&views, 0, &rates, 1, 1, 1, &rule).is_none());
-        let tail = tail_window(&views, 240, &rates, 1, 1, 1, &rule).unwrap();
+        assert!(tail_window(&views, 0, &rates, 1, 1, 1, Duration::ZERO, &rule).is_none());
+        let tail = tail_window(&views, 240, &rates, 1, 1, 1, Duration::ZERO, &rule).unwrap();
         assert!(!tail.passed);
         assert!(tail.findings.iter().any(|finding| !finding.soft));
         let merged = merge_tail(Vec::new(), &tail, 300);
@@ -1187,9 +1233,123 @@ mod tests {
         let views = vec![view; 240];
         let mut rates = rates_at(0);
         rates.serve_per_sec = 20;
-        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, &rule).unwrap();
+        let tail = tail_window(&views, 240, &rates, 262_144, 1, 1, Duration::ZERO, &rule).unwrap();
         assert!(!tail.passed);
         assert_eq!(tail.findings.len(), 1);
         assert_eq!(tail.findings[0].message, "serve 2.4k/4.8k");
+    }
+
+    #[test]
+    fn unread_prefix_is_not_part_of_the_serve_offer() {
+        // Breaks if scored time before the first durable chunk is still offered.
+        let window = Duration::from_secs(8);
+        let prefix = Duration::from_millis(750);
+        assert_eq!(offered_serve_ops(4, window, prefix), 29);
+        assert_eq!(offered_serve_ops(4, window, Duration::ZERO), 32);
+        assert_eq!(
+            offered_serve_ops(20, Duration::from_secs(240), Duration::ZERO),
+            4_800
+        );
+        assert_eq!(
+            offered_serve_ops(20, Duration::from_secs(900), Duration::ZERO),
+            18_000
+        );
+        assert_eq!(offered_serve_ops(4, window, window), 0);
+        assert_eq!(offered_serve_ops(0, window, Duration::ZERO), 0);
+        assert_eq!(offered_serve_ops(4, Duration::ZERO, Duration::ZERO), 0);
+
+        let rule = absolute();
+        let mut measured = base();
+        measured.secs = 8;
+        measured.scheduled_serve = offered_serve_ops(4, window, prefix);
+        measured.serve_ops = 30;
+        assert!(
+            judge(&measured, &rule).is_empty(),
+            "30 of 29 stays inside one op of slack"
+        );
+        measured.serve_ops = 27;
+        let findings = judge(&measured, &rule);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].soft);
+        assert_eq!(findings[0].message, "serve 27/29");
+
+        let mut steady = base();
+        steady.secs = 8;
+        steady.scheduled_serve = offered_serve_ops(4, window, Duration::ZERO);
+        steady.serve_ops = 30;
+        let findings = judge(&steady, &rule);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].message, "serve 30/32");
+
+        let views = vec![quiet_second(0, 1_000); 8];
+        let mut rates = rates_at(0);
+        rates.serve_per_sec = 4;
+        let tail = tail_window(&views, 8, &rates, 262_144, 1, 1, prefix, &rule).unwrap();
+        assert_eq!(tail.measured.scheduled_serve, 29);
+        let later = tail_window(&views, 4, &rates, 262_144, 1, 1, Duration::ZERO, &rule).unwrap();
+        assert_eq!(later.measured.scheduled_serve, 16);
+        let overlap = tail_window(
+            &views,
+            4,
+            &rates,
+            262_144,
+            1,
+            1,
+            Duration::from_secs(1),
+            &rule,
+        )
+        .unwrap();
+        assert_eq!(overlap.measured.scheduled_serve, 12);
+        let none = tail_window(
+            &views,
+            4,
+            &rates,
+            262_144,
+            1,
+            1,
+            Duration::from_secs(4),
+            &rule,
+        )
+        .unwrap();
+        assert_eq!(none.measured.scheduled_serve, 0);
+        assert!(none.passed);
+    }
+
+    #[test]
+    fn the_tail_keeps_only_the_unread_overlap() {
+        // Breaks if a prefix before the tail still shrinks the tail offer.
+        let prefix = Duration::from_millis(750);
+        assert_eq!(
+            unread_inside(prefix, Duration::ZERO, Duration::from_secs(8)),
+            prefix
+        );
+        assert_eq!(
+            unread_inside(prefix, Duration::from_secs(4), Duration::from_secs(4)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            unread_inside(
+                Duration::from_secs(5),
+                Duration::from_secs(4),
+                Duration::from_secs(4)
+            ),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            unread_inside(
+                Duration::from_secs(8),
+                Duration::from_secs(4),
+                Duration::from_secs(4)
+            ),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            unread_inside(
+                Duration::ZERO,
+                Duration::from_secs(4),
+                Duration::from_secs(4)
+            ),
+            Duration::ZERO
+        );
     }
 }
