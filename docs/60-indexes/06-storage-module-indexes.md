@@ -31,9 +31,11 @@ also when these storage defaults take effect. Mining recall reads
 An open that returns `EINVAL` or `EOPNOTSUPP` (tmpfs returns `EINVAL`)
 logs one warning and keeps the buffered descriptor. Any other errno
 fails module open. Durable points wait up to
-`min_durable_interval_ms` (250). `intervals.json` completion rewrites
-wait up to `intervals_persist_secs` (30). A write-ahead `Interrupted`
-mark is still immediate. `NodeConfig::testing()` sets the recall flag
+`min_durable_interval_ms` (250), and `intervals.json` completion
+rewrites wait up to `intervals_persist_secs` (30), once the disk lane
+can run. A mining recall holds that lane until its `pread` returns.
+A write-ahead `Interrupted` mark is still written before the `pwrite`.
+`NodeConfig::testing()` sets the recall flag
 false and both of those intervals to 0. A config that sets only
 `num_writes_before_sync` still takes the other defaults. The RocksDB
 cache and write-buffer keys are ignored while the engine stays MDBX.
@@ -311,8 +313,9 @@ submodule-index-convert verify --rollback \
 checksums the node wrote on RocksDB are reported as `dropped_checksums`,
 not as mismatches. Replace `db/` with `<new-db-dir>` only after verify passes. Move
 `rocks/` out of the submodule directory (for example, rename it to
-`rocks.retired`); the node refuses to open MDBX while `rocks/` is
-present. Set `database.submodule_index` to `mdbx`. Start the node.
+`rocks.retired`). Open refuses MDBX when `rocks/SCHEMA` or `rocks/CURRENT`
+is a file. A `rocks/` directory that contains only `CONVERTING` does not.
+Set `database.submodule_index` to `mdbx`. Start the node.
 
 ## Corrupt intervals.json
 
