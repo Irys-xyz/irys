@@ -5797,175 +5797,60 @@ impl SubmoduleRead for Rows<'_> {
     }
 }
 
-impl SubmoduleRead for Batch<'_> {
-    fn stores_tx_paths(&self) -> bool {
-        false
-    }
+/// `Batch` reads through its overlay. Two interval queries name the row helper.
+macro_rules! impl_batch_read {
+    ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+        impl SubmoduleRead for Batch<'_> {
+            $(
+                fn $name(&self, $($arg: $ty),*) -> $ret {
+                    self.rows().$name($($arg),*)
+                }
+            )*
 
-    fn stores_offset_crc(&self) -> bool {
-        self.rows().stores_offset_crc()
-    }
+            fn tx_interval_at(
+                &self,
+                offset: PartitionChunkOffset,
+            ) -> eyre::Result<Option<IntervalRow>> {
+                self.rows().interval_covering(offset)
+            }
 
-    fn get_data_path_by_offset(
-        &self,
-        offset: PartitionChunkOffset,
-    ) -> eyre::Result<Option<ChunkDataPath>> {
-        self.rows().get_data_path_by_offset(offset)
-    }
+            fn tx_intervals_in_range(
+                &self,
+                start: PartitionChunkOffset,
+                end: PartitionChunkOffset,
+            ) -> eyre::Result<Vec<IntervalRow>> {
+                self.rows().intervals_overlapping(start, end)
+            }
+        }
+    };
+}
 
-    fn get_offset_meta(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>> {
-        self.rows().get_offset_meta(offset)
-    }
-
-    fn offset_metas_in_range(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<Vec<(PartitionChunkOffset, OffsetMeta)>> {
-        self.rows().offset_metas_in_range(start, end)
-    }
-
-    fn offset_crc_missing(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<bool> {
-        self.rows().offset_crc_missing(start, end)
-    }
-
-    fn get_tx_path_by_offset(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> {
-        self.rows().get_tx_path_by_offset(offset)
-    }
-
-    fn get_path_hashes_by_offset(
-        &self,
-        offset: PartitionChunkOffset,
-    ) -> eyre::Result<Option<ChunkPathHashes>> {
-        self.rows().get_path_hashes_by_offset(offset)
-    }
-
-    fn path_hashes_in_inclusive_range(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
-        self.rows().path_hashes_in_inclusive_range(start, end)
-    }
-
-    fn first_missing_path_hash_offset(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<Option<PartitionChunkOffset>> {
-        self.rows().first_missing_path_hash_offset(start, end)
-    }
-
-    fn missing_path_hash_ranges(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
-        self.rows().missing_path_hash_ranges(start, end)
-    }
-
-    fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
-        self.rows().get_full_tx_path(path_hash)
-    }
-
-    fn get_tx_leaf_binding(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>> {
-        self.rows().get_tx_leaf_binding(path_hash)
-    }
-
-    fn get_data_root_infos_for_data_root(
-        &self,
-        data_root: DataRoot,
-    ) -> eyre::Result<Option<DataRootInfos>> {
-        self.rows().get_data_root_infos_for_data_root(data_root)
-    }
-
-    fn get_pending_body_migration(
-        &self,
-        offset: PartitionChunkOffset,
-    ) -> eyre::Result<Option<PendingBodyMigration>> {
-        self.rows().get_pending_body_migration(offset)
-    }
-
-    fn pending_body_migrations_from(
-        &self,
-        start: Option<PartitionChunkOffset>,
-        limit: Option<usize>,
-    ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
-        self.rows().pending_body_migrations_from(start, limit)
-    }
-
-    fn has_pending_in_inclusive_range(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<bool> {
-        self.rows().has_pending_in_inclusive_range(start, end)
-    }
-
-    fn tx_interval_overlaps(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<bool> {
-        self.rows().tx_interval_overlaps(start, end)
-    }
-
-    fn has_pending_in_ranges(
-        &self,
-        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<bool> {
-        self.rows().has_pending_in_ranges(ranges)
-    }
-
-    fn tx_intervals_overlap_ranges(
-        &self,
-        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<bool> {
-        self.rows().tx_intervals_overlap_ranges(ranges)
-    }
-
-    fn tx_interval_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> {
-        self.rows().interval_covering(offset)
-    }
-
-    fn tx_intervals_in_range(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<Vec<IntervalRow>> {
-        self.rows().intervals_overlapping(start, end)
-    }
-
-    fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
-        self.rows().data_root_entries()
-    }
-
-    fn placement_at(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<Placement>> {
-        self.rows().placement_at(offset)
-    }
-
-    fn placements_in_range(
-        &self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<Vec<Placement>> {
-        self.rows().placements_in_range(start, end)
-    }
-
-    fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
-        self.rows().placements_for_data_root(data_root)
-    }
-
-    fn offsets_for_content_hash(
-        &self,
-        content_hash: H256,
-    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        self.rows().offsets_for_content_hash(content_hash)
-    }
+impl_batch_read! {
+    stores_tx_paths() -> bool;
+    stores_offset_crc() -> bool;
+    get_data_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkDataPath>>;
+    get_offset_meta(offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>>;
+    offset_metas_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, OffsetMeta)>>;
+    offset_crc_missing(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
+    get_tx_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>>;
+    get_path_hashes_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkPathHashes>>;
+    path_hashes_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>>;
+    first_missing_path_hash_offset(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Option<PartitionChunkOffset>>;
+    missing_path_hash_ranges(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>>;
+    get_full_tx_path(path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
+    get_tx_leaf_binding(path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>>;
+    get_data_root_infos_for_data_root(data_root: DataRoot) -> eyre::Result<Option<DataRootInfos>>;
+    get_pending_body_migration(offset: PartitionChunkOffset) -> eyre::Result<Option<PendingBodyMigration>>;
+    pending_body_migrations_from(start: Option<PartitionChunkOffset>, limit: Option<usize>) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>>;
+    has_pending_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
+    tx_interval_overlaps(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool>;
+    has_pending_in_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool>;
+    tx_intervals_overlap_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool>;
+    data_root_entries() -> eyre::Result<Vec<(DataRoot, DataRootInfos)>>;
+    placement_at(offset: PartitionChunkOffset) -> eyre::Result<Option<Placement>>;
+    placements_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<Placement>>;
+    placements_for_data_root(data_root: DataRoot) -> eyre::Result<Vec<Placement>>;
+    offsets_for_content_hash(content_hash: H256) -> eyre::Result<Vec<PartitionChunkOffset>>;
 }
 
 impl SubmoduleWrite for Batch<'_> {
