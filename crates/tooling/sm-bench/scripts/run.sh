@@ -14,6 +14,7 @@
 #   pm2 is installed and the app "Irys Node" is online, or its jlist cannot be read
 #   a missing pm2 binary is allowed
 #   the loadtest disk has less than MIN_FREE_GIB free (default 500), counted in bytes
+#   MIN_FREE_GIB is not an integer from 0 through 8589934591
 #   --mount is not the mount that holds the loadtest directory
 #   loadtest, the recall file, or the write file has no `loadtest` path component
 #   on the given path, or on the deepest existing ancestor plus the missing tail
@@ -192,13 +193,7 @@ fi
 
 # df -B1G rounds to the nearest GiB, so a volume just under the floor can pass.
 # Measure the loadtest path. --mount is only the operator's name for that mount.
-avail_bytes=$(df -B1 --output=avail "$mount_at" | tail -n 1)
-avail_bytes=${avail_bytes//[[:space:]]/}
-min_free_bytes=$((min_free_gib * 1024 * 1024 * 1024))
-if [ "$avail_bytes" -lt "$min_free_bytes" ]; then
-    echo "$mount_at has ${avail_bytes} bytes free, below ${min_free_gib} GiB; refusing" >&2
-    exit 1
-fi
+require_free_bytes "$mount_at" "$min_free_gib"
 
 out=$out_root/$name
 mkdir -p "$out"

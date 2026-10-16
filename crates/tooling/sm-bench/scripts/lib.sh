@@ -61,6 +61,36 @@ require_loadtest() {
     fi
 }
 
+# Signed bash arithmetic wraps at 2^63. 8589934592 GiB is that boundary,
+# so a larger count is not a floor. Accept 0 through 8589934591.
+require_free_bytes() {
+    local path=$1
+    local gib_text=$2
+    case "$gib_text" in
+        '' | *[!0-9]*)
+            echo "min free GiB must be an integer from 0 through 8589934591: $gib_text" >&2
+            exit 1
+            ;;
+    esac
+    if [ "${#gib_text}" -gt 10 ]; then
+        echo "min free GiB must be an integer from 0 through 8589934591: $gib_text" >&2
+        exit 1
+    fi
+    local gib avail_bytes min_free_bytes
+    gib=$((10#$gib_text))
+    if [ "$gib" -gt 8589934591 ]; then
+        echo "min free GiB must be an integer from 0 through 8589934591: $gib_text" >&2
+        exit 1
+    fi
+    avail_bytes=$(df -B1 --output=avail "$path" | tail -n 1)
+    avail_bytes=${avail_bytes//[[:space:]]/}
+    min_free_bytes=$((gib * 1024 * 1024 * 1024))
+    if [ "$avail_bytes" -lt "$min_free_bytes" ]; then
+        echo "$path has ${avail_bytes} bytes free, below ${gib_text} GiB; refusing" >&2
+        exit 1
+    fi
+}
+
 # The queue write and the sampler must use the disk that holds this path.
 require_mount_device() {
     local canon=$1

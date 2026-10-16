@@ -1791,6 +1791,72 @@ test_teardown_does_not_stop_the_sampler_when_the_bench_pid_is_wrong() {
     rm -rf "$root"
 }
 
+test_run_refuses_a_negative_min_free_gib() {
+    local name=run-min-free-negative root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    stub_bench "$root"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib -1 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran below a negative floor"
+    elif ! grep -q "min free GiB" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_refuses_an_overflowing_min_free_gib() {
+    local name=run-min-free-overflow root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    stub_bench "$root"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 8589934592 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran below a wrapped floor"
+    elif ! grep -q "min free GiB" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_refuses_a_negative_min_free_gib_from_the_environment() {
+    local name=run-min-free-env root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    stub_bench "$root"
+    if MIN_FREE_GIB=-1 with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! grep -q "min free GiB" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
