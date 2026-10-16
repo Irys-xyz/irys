@@ -209,8 +209,8 @@ pub trait SubmoduleRead {
 
     /// Live placements of `data_root` in this submodule, in start order.
     ///
-    /// v2 probes each stored info, then scans intervals only when the probe
-    /// offset is not that placement (the tx was clipped to a later start, or
+    /// v2 probes each stored info. A hit keeps every live segment of that
+    /// info. A miss scans intervals (the tx was clipped to a later start, or
     /// a later write covered the probe).
     fn placements_for_data_root(&self, data_root: DataRoot) -> eyre::Result<Vec<Placement>> {
         super::placement::read_placements_for_data_root(self, data_root)
@@ -2641,6 +2641,91 @@ mod tests {
             );
             let none = store.view(|tx| tx.pending_body_migrations_from(None, Some(0)))?;
             assert!(none.is_empty());
+            Ok(())
+        })
+    }
+
+    fn placement_span(placement: &Placement) -> (u32, u32, i32) {
+        (
+            placement.start.0,
+            placement.end.0,
+            placement.tx_start_offset.0,
+        )
+    }
+
+    /// A middle hole splits one placement into two remnants that share a tx
+    /// start. Both engines list both remnants for that data root. No hole is
+    /// one segment. Dropping the left remnant still returns the right one.
+    /// A different root written into the hole does not hide either remnant.
+    /// Expiring both remnants removes the data root.
+    #[test]
+    fn middle_hole_lists_both_segments_for_the_data_root() -> eyre::Result<()> {
+        each_engine("submodule_middle_hole", |store| {
+            let root = H256::repeat_byte(7);
+            let other = H256::repeat_byte(8);
+            store.update(|tx| install_placement(tx, 0, 9, root, H256::repeat_byte(1), 0, 320))?;
+            let whole = store.view(|tx| tx.placements_for_data_root(root))?;
+            assert_eq!(
+                whole.iter().map(placement_span).collect::<Vec<_>>(),
+                vec![(0, 9, 0)]
+            );
+
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(4), PartitionChunkOffset::from(6))],
+                32,
+            )?;
+            let ranged = store.view(|tx| {
+                tx.placements_in_range(PartitionChunkOffset::from(0), PartitionChunkOffset::from(9))
+            })?;
+            let by_root = store.view(|tx| tx.placements_for_data_root(root))?;
+            let expect = vec![(0, 3, 0), (7, 9, 0)];
+            assert_eq!(
+                ranged.iter().map(placement_span).collect::<Vec<_>>(),
+                expect,
+                "ranged {ranged:?}"
+            );
+            assert_eq!(
+                by_root.iter().map(placement_span).collect::<Vec<_>>(),
+                expect,
+                "by root {by_root:?}"
+            );
+
+            store.update(|tx| install_placement(tx, 4, 6, other, H256::repeat_byte(2), 4, 96))?;
+            let by_root = store.view(|tx| tx.placements_for_data_root(root))?;
+            assert_eq!(
+                by_root.iter().map(placement_span).collect::<Vec<_>>(),
+                expect,
+                "hole filled by another root {by_root:?}"
+            );
+            let middle = store.view(|tx| tx.placements_for_data_root(other))?;
+            assert_eq!(
+                middle.iter().map(placement_span).collect::<Vec<_>>(),
+                vec![(4, 6, 4)]
+            );
+
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(0), PartitionChunkOffset::from(3))],
+                32,
+            )?;
+            let right = store.view(|tx| tx.placements_for_data_root(root))?;
+            assert_eq!(
+                right.iter().map(placement_span).collect::<Vec<_>>(),
+                vec![(7, 9, 0)],
+                "left remnant gone {right:?}"
+            );
+
+            store.drop_uninitialized_coverage(
+                &[(PartitionChunkOffset::from(7), PartitionChunkOffset::from(9))],
+                32,
+            )?;
+            let gone = store.view(|tx| tx.placements_for_data_root(root))?;
+            assert!(gone.is_empty(), "full expiry {gone:?}");
+            let middle = store.view(|tx| tx.placements_for_data_root(other))?;
+            assert_eq!(
+                middle.iter().map(placement_span).collect::<Vec<_>>(),
+                vec![(4, 6, 4)],
+                "the other root stays"
+            );
             Ok(())
         })
     }

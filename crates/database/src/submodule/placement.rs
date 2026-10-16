@@ -62,7 +62,16 @@ pub(super) fn read_placements_for_data_root<R: SubmoduleRead + ?Sized>(
             && found.data_root == data_root
             && found.tx_start_offset == info.start_offset
         {
-            push_unique(&mut out, &mut seen_starts, found);
+            // A middle hole leaves a second segment with the same tx start.
+            // The probe only sees the left one. `data_size` is bytes. Counting
+            // those bytes as offsets covers every chunk of this info, because
+            // a chunk is at least one byte.
+            let spanned = reader.placements_in_range(probe, scan_end_for_info(info))?;
+            for found in spanned {
+                if found.data_root == data_root && found.tx_start_offset == info.start_offset {
+                    push_unique(&mut out, &mut seen_starts, found);
+                }
+            }
             continue;
         }
         // The interval starts after the probe when this submodule clipped the
@@ -104,6 +113,13 @@ fn probe_offset(start: RelativeChunkOffset) -> PartitionChunkOffset {
     } else {
         PartitionChunkOffset(start.0 as u32)
     }
+}
+
+/// Last offset a one-byte chunk of this info could occupy.
+fn scan_end_for_info(info: &DataRootInfo) -> PartitionChunkOffset {
+    let start = probe_offset(info.start_offset).0;
+    let extra = u32::try_from(info.data_size.saturating_sub(1)).unwrap_or(u32::MAX);
+    PartitionChunkOffset(start.saturating_add(extra))
 }
 
 fn placement_for<R: SubmoduleRead + ?Sized>(
