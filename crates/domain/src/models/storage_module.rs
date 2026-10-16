@@ -379,6 +379,26 @@ impl DerefMut for PendingWrites {
     }
 }
 
+impl PendingWrites {
+    /// Stored priority, or Packing for entropy and Ingress for every other type.
+    fn indexed(&self) -> Vec<(disk_lane::WritePriority, PartitionChunkOffset)> {
+        self.chunks
+            .iter()
+            .map(|(offset, state)| {
+                let priority = self
+                    .priorities
+                    .get(offset)
+                    .copied()
+                    .unwrap_or(match state.1 {
+                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
+                        _ => disk_lane::WritePriority::Ingress,
+                    });
+                (priority, *offset)
+            })
+            .collect()
+    }
+}
+
 /// Storage submodules mapped to their chunk ranges
 type SubmoduleMap =
     NoditMap<PartitionChunkOffset, Interval<PartitionChunkOffset>, StorageSubmodule>;
@@ -2427,20 +2447,7 @@ impl StorageModule {
     /// ingress run once the pending set is wider than the scan.
     fn write_run_metas(&self, pending: &PendingWrites, cap: u64) -> Vec<RunMeta> {
         let chunk_size = self.config.consensus.chunk_size.max(1);
-        let mut indexed: Vec<(disk_lane::WritePriority, PartitionChunkOffset)> = pending
-            .iter()
-            .map(|(offset, state)| {
-                let priority = pending
-                    .priorities
-                    .get(offset)
-                    .copied()
-                    .unwrap_or(match state.1 {
-                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
-                        _ => disk_lane::WritePriority::Ingress,
-                    });
-                (priority, *offset)
-            })
-            .collect();
+        let mut indexed = pending.indexed();
         indexed.sort_by_key(|(_, offset)| *offset);
         indexed.truncate(disk_lane::write_reorder_scan(
             self.config.node_config.storage.num_writes_before_sync,
@@ -2949,6 +2956,24 @@ impl StorageModule {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Bump the index generation, wait out ops that captured the old one, and
+    /// drop queued bytes. Lock order: `pending_writes`, then `entropy_cache`.
+    fn clear_pending_for_reset(&self) {
+        let mut pending = self.pending_writes.write().unwrap();
+        self.index_write_generation.fetch_add(1, Ordering::SeqCst);
+        for (_, submodule) in self.submodules.iter() {
+            submodule.index_drain.wait_idle();
+        }
+        pending.chunks.clear();
+        pending.occupancy.clear();
+        pending.priorities.clear();
+        pending.queued_at.clear();
+        pending.pwrite_at.clear();
+        pending.proofs.clear();
+        pending.written_ahead.clear();
+        self.entropy_cache.lock().unwrap().clear();
+    }
+
     /// Erase the index, then mark every offset `Uninitialized`.
     ///
     /// Holds `sync_in_progress` for the whole call, and takes it before
@@ -2985,21 +3010,7 @@ impl StorageModule {
         // finished by `finish_pending_resets`, which clears the flag again.
         self.clear_chunk_crc_complete()?;
         self.reset_incomplete.store(true, Ordering::SeqCst);
-        {
-            let mut pending = self.pending_writes.write().unwrap();
-            self.index_write_generation.fetch_add(1, Ordering::SeqCst);
-            for (_, submodule) in self.submodules.iter() {
-                submodule.index_drain.wait_idle();
-            }
-            pending.chunks.clear();
-            pending.occupancy.clear();
-            pending.priorities.clear();
-            pending.queued_at.clear();
-            pending.pwrite_at.clear();
-            pending.proofs.clear();
-            pending.written_ahead.clear();
-            self.entropy_cache.lock().unwrap().clear();
-        }
+        self.clear_pending_for_reset();
         // A recall may already have queued a suspect against the old bytes.
         // Confirming it after this clear would judge the wiped module.
         // Repairs belong to those bytes. The next assignment must not repack them.
@@ -3066,21 +3077,7 @@ impl StorageModule {
         // after this map is `Uninitialized`. `commit_packed` does not read
         // the map. Drop that insert. Leave `data_writes_paused` alone: a
         // caller that paused before reset still resumes.
-        {
-            let mut pending = self.pending_writes.write().unwrap();
-            self.index_write_generation.fetch_add(1, Ordering::SeqCst);
-            for (_, submodule) in self.submodules.iter() {
-                submodule.index_drain.wait_idle();
-            }
-            pending.chunks.clear();
-            pending.occupancy.clear();
-            pending.priorities.clear();
-            pending.queued_at.clear();
-            pending.pwrite_at.clear();
-            pending.proofs.clear();
-            pending.written_ahead.clear();
-            self.entropy_cache.lock().unwrap().clear();
-        }
+        self.clear_pending_for_reset();
         self.fail_queued_sweeps();
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetIntervals)?;
@@ -7482,20 +7479,7 @@ impl StorageModule {
             return Vec::new();
         }
         let chunk_size = self.config.consensus.chunk_size.max(1);
-        let mut indexed: Vec<(disk_lane::WritePriority, PartitionChunkOffset)> = pending
-            .iter()
-            .map(|(offset, state)| {
-                let priority = pending
-                    .priorities
-                    .get(offset)
-                    .copied()
-                    .unwrap_or(match state.1 {
-                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
-                        _ => disk_lane::WritePriority::Ingress,
-                    });
-                (priority, *offset)
-            })
-            .collect();
+        let mut indexed = pending.indexed();
         indexed.sort_by_key(|(priority, offset)| (*priority, *offset));
 
         let mut out = Vec::new();
@@ -7567,20 +7551,7 @@ impl StorageModule {
             return Vec::new();
         }
         let chunk_size = self.config.consensus.chunk_size.max(1);
-        let mut indexed: Vec<(disk_lane::WritePriority, PartitionChunkOffset)> = pending
-            .iter()
-            .map(|(offset, state)| {
-                let priority = pending
-                    .priorities
-                    .get(offset)
-                    .copied()
-                    .unwrap_or(match state.1 {
-                        ChunkType::Entropy => disk_lane::WritePriority::Packing,
-                        _ => disk_lane::WritePriority::Ingress,
-                    });
-                (priority, *offset)
-            })
-            .collect();
+        let mut indexed = pending.indexed();
         indexed.sort_by_key(|(_, offset)| *offset);
         indexed.truncate(scan_chunks);
 
@@ -7684,13 +7655,15 @@ impl StorageModule {
 
     /// Runs in the order `batch` already has. The coalesce window is offset
     /// order. A new priority or a break in the adjacent range starts a run.
-    fn plan_ranked_runs(
+    fn plan_ranked_runs<'a>(
         &self,
-        batch: &[(
-            PartitionChunkOffset,
-            (ChunkBytes, ChunkType),
-            disk_lane::WritePriority,
-        )],
+        batch: impl IntoIterator<
+            Item = &'a (
+                PartitionChunkOffset,
+                (ChunkBytes, ChunkType),
+                disk_lane::WritePriority,
+            ),
+        >,
         cap: u64,
     ) -> Vec<WriteRun> {
         let chunk_size = self.config.consensus.chunk_size.max(1);
@@ -7753,7 +7726,6 @@ impl StorageModule {
         )],
         cap: u64,
     ) -> Vec<WriteRun> {
-        let chunk_size = self.config.consensus.chunk_size.max(1);
         let mut runs = Vec::new();
         for priority in [
             disk_lane::WritePriority::Migration,
@@ -7765,46 +7737,7 @@ impl StorageModule {
                 .filter(|(_, _, item_priority)| *item_priority == priority)
                 .collect();
             items.sort_by_key(|(offset, _, _)| *offset);
-            let mut current: Option<WriteRun> = None;
-            for (offset, (bytes, chunk_type), _) in items {
-                let can_extend = current.as_ref().is_some_and(|run| {
-                    let Some(last) = run.offsets.last().copied() else {
-                        return false;
-                    };
-                    self.can_extend_run(
-                        chunk_size,
-                        cap,
-                        &RunCursor {
-                            start: run.start,
-                            last,
-                            chunk_type: run.chunk_type,
-                            chunk_count: run.offsets.len(),
-                            byte_len: run.bytes.len() as u64,
-                        },
-                        *offset,
-                        *chunk_type,
-                        bytes.len() as u64,
-                    )
-                });
-                if can_extend {
-                    let run = current.as_mut().expect("extend checks the current run");
-                    run.bytes.extend_from_slice(bytes);
-                    run.offsets.push(*offset);
-                } else {
-                    if let Some(run) = current.take() {
-                        runs.push(run);
-                    }
-                    current = Some(WriteRun {
-                        start: *offset,
-                        chunk_type: *chunk_type,
-                        bytes: bytes.clone(),
-                        offsets: vec![*offset],
-                    });
-                }
-            }
-            if let Some(run) = current.take() {
-                runs.push(run);
-            }
+            runs.extend(self.plan_ranked_runs(items, cap));
         }
         runs
     }
@@ -8413,6 +8346,15 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
     Ok(result)
 }
 
+fn assigned_to_ledger(module: &StorageModule, ledger: DataLedger) -> bool {
+    module
+        .partition_assignment
+        .read()
+        .unwrap()
+        .and_then(|assignment| assignment.ledger_id)
+        == Some(ledger as u32)
+}
+
 /// Retrieves all the storage modules overlapped by a range in a given ledger
 pub fn get_overlapped_storage_modules(
     storage_modules_guard: &StorageModulesReadGuard,
@@ -8423,17 +8365,12 @@ pub fn get_overlapped_storage_modules(
         .read()
         .iter()
         .filter(|module| {
-            (module
-                .partition_assignment
-                .read()
-                .unwrap()
-                .and_then(|pa| pa.ledger_id)
-                == Some(ledger as u32))
+            assigned_to_ledger(module, ledger)
                 && module
                     .get_storage_module_ledger_offsets()
                     .is_ok_and(|range| range.overlaps(tx_chunk_range))
         })
-        .cloned() // Clone the Arc, which is cheap
+        .cloned()
         .collect()
 }
 
@@ -8448,12 +8385,7 @@ pub fn get_storage_module_at_offset(
         .read()
         .iter()
         .find(|module| {
-            (module
-                .partition_assignment
-                .read()
-                .unwrap()
-                .and_then(|pa| pa.ledger_id)
-                == Some(ledger as u32))
+            assigned_to_ledger(module, ledger)
                 && module
                     .get_storage_module_ledger_offsets()
                     .is_ok_and(|range| range.contains_point(chunk_offset))
