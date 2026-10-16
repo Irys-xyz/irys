@@ -98,7 +98,8 @@ pub struct EngineEquivalenceReport {
     pub content_offsets_checked: u64,
     /// A proof leaf with no reverse row, or a reverse row whose proof leaf differs.
     pub content_offset_mismatches: u64,
-    /// Source rows outside every interval. The node drops these at open.
+    /// Rows with no covering interval. Not a mismatch: the copy omits them, and
+    /// `audit_index` rejects a proof or pending job left with no interval.
     pub skipped_orphans: u64,
     /// Placements past the consensus frontier. The node has not indexed them yet.
     /// A non-zero count is a mismatch: verify must not accept a partial index.
