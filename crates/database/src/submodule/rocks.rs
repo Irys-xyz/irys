@@ -1834,12 +1834,17 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
-    /// Cumulative write-stall time and the current compaction and flush gauges.
+    /// Cumulative write-stall time, flush jobs, and the compaction gauges.
     ///
     /// Stall time comes from the cumulative line of `rocksdb.dbstats`. That
     /// string property also resets RocksDB's interval counters. Pending
-    /// compaction bytes and flushed immutable memtables are summed across
-    /// column families. Running flushes is the database-wide gauge.
+    /// compaction bytes are summed across column families. Flush jobs are
+    /// the high-priority compaction count in `cfstats`: RocksDB schedules a
+    /// flush on that pool and records the job there. Compactions are low,
+    /// bottom, or user priority, so they are not included.
+    /// `num-immutable-mem-table-flushed` is only the memtable history, and
+    /// that history stays empty with the default maintain size. Running
+    /// flushes is the database-wide gauge.
     pub fn ingest_stats(&self) -> eyre::Result<RocksIngestStats> {
         let stats = self
             .db
@@ -1857,11 +1862,7 @@ impl RocksSubmoduleStore {
                 handle,
                 "rocksdb.estimate-pending-compaction-bytes",
             )?);
-            flushes = flushes.saturating_add(int_property_cf(
-                &self.db,
-                handle,
-                "rocksdb.num-immutable-mem-table-flushed",
-            )?);
+            flushes = flushes.saturating_add(flush_jobs_cf(&self.db, handle)?);
         }
         if let Some(handle) = self.db.cf_handle("default") {
             pending_compaction_bytes = pending_compaction_bytes.saturating_add(int_property_cf(
@@ -1869,11 +1870,7 @@ impl RocksSubmoduleStore {
                 handle,
                 "rocksdb.estimate-pending-compaction-bytes",
             )?);
-            flushes = flushes.saturating_add(int_property_cf(
-                &self.db,
-                handle,
-                "rocksdb.num-immutable-mem-table-flushed",
-            )?);
+            flushes = flushes.saturating_add(flush_jobs_cf(&self.db, handle)?);
         }
         let running_flushes = self
             .db
@@ -3405,6 +3402,53 @@ fn int_property_cf(db: &DB, handle: &rocksdb::ColumnFamily, name: &str) -> eyre:
     db.property_int_value_cf(handle, name)
         .map_err(|error| eyre::eyre!("{name}: {error}"))
         .map(|value| value.unwrap_or(0))
+}
+
+/// Flush jobs since open for one column family.
+///
+/// RocksDB 10.4 prints them as the `High` priority `Comp(cnt)` in
+/// `cfstats-no-file-histogram`. A missing `High` row means no flush job
+/// has finished. A `High` row that is not the compaction table is an error:
+/// treating it as zero would hide a format change the same way a missing
+/// integer property did.
+fn flush_jobs_cf(db: &DB, handle: &impl rocksdb::AsColumnFamilyRef) -> eyre::Result<u64> {
+    const NAME: &str = "rocksdb.cfstats-no-file-histogram";
+    let stats = db
+        .property_value_cf(handle, NAME)
+        .map_err(|error| eyre::eyre!("{NAME}: {error}"))?
+        .ok_or_else(|| eyre::eyre!("{NAME} returned no value"))?;
+    parse_high_priority_flush_count(&stats)
+}
+
+fn parse_high_priority_flush_count(stats: &str) -> eyre::Result<u64> {
+    // `PrintLevelStats` order, split on whitespace. The size column is
+    // `BytesToHumanString` (`"0.00 KB"`), so it is two tokens. `Comp(cnt)`
+    // is the next token after the thirteen numeric columns that follow.
+    const COMP_COUNT_AFTER_FILES: usize = 15;
+    let mut total = 0_u64;
+    for line in stats.lines() {
+        let mut tokens = line.split_whitespace();
+        let Some(name) = tokens.next() else {
+            continue;
+        };
+        if name != "High" {
+            continue;
+        }
+        let Some(files) = tokens.next() else {
+            continue;
+        };
+        if !files.contains('/') {
+            continue;
+        }
+        let Some(count) = tokens.nth(COMP_COUNT_AFTER_FILES) else {
+            eyre::bail!("rocksdb cfstats high-priority line has no flush count: {line}");
+        };
+        let count = count.parse::<u64>().map_err(|_| {
+            eyre::eyre!("rocksdb cfstats high-priority flush count is not an integer: {line}")
+        })?;
+        total = total.saturating_add(count);
+    }
+    Ok(total)
 }
 
 /// `rocksdb.dbstats` prints cumulative stall time as `HH:MM:SS.mmm H:M:S`.
@@ -7788,6 +7832,95 @@ mod tests {
         Ok(())
     }
 
+    /// Compaction rows share the table. Only the high-priority count is flushes.
+    #[test]
+    fn high_priority_flush_count_ignores_compaction_rows() -> eyre::Result<()> {
+        fn row(name: &str, count: u64) -> String {
+            let mut tokens = vec![name.to_string(), "1/0".into(), "0.00".into(), "KB".into()];
+            for _ in 0..13 {
+                tokens.push("0.0".into());
+            }
+            tokens.push(count.to_string());
+            tokens.extend([
+                "0.000".into(),
+                "1".into(),
+                "0".into(),
+                "0.0".into(),
+                "0.0".into(),
+            ]);
+            tokens.join(" ")
+        }
+        let stats = format!(
+            "{}\n{}\n{}\n{}\n",
+            row("L0", 9),
+            row("Sum", 9),
+            row("Low", 4),
+            row("High", 2),
+        );
+        assert_eq!(super::parse_high_priority_flush_count(&stats)?, 2);
+        let both = format!("{}\n{}", row("High", 2), row("High", 1));
+        assert_eq!(super::parse_high_priority_flush_count(&both)?, 3);
+        assert_eq!(super::parse_high_priority_flush_count("no flush yet\n")?, 0);
+        let broken = row("High", 1).replace(" 1 ", " not-a-count ");
+        assert!(super::parse_high_priority_flush_count(&broken).is_err());
+        Ok(())
+    }
+
+    /// `flushes` is flush jobs since open. A write that stays in the memtable
+    /// does not count. A later compaction of those SSTs does not count either.
+    /// The bench subtracts two samples, so the second flush has to move the
+    /// counter by the same kind of delta.
+    #[test]
+    fn ingest_stats_counts_flushes_and_not_compactions() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_flush_count");
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        assert_eq!(store.ingest_stats()?.flushes, 0);
+        put_offset(&store, 1, 7)?;
+        assert_eq!(
+            store.ingest_stats()?.flushes,
+            0,
+            "a memtable write is not a flush"
+        );
+
+        flush_every_family(&store)?;
+        let flushed = store.ingest_stats()?.flushes;
+        assert!(
+            flushed > 0,
+            "flush jobs stayed at 0 after flushing every column family\n{}",
+            sample_cfstats(&store)
+        );
+
+        flush_every_family(&store)?;
+        assert_eq!(
+            store.ingest_stats()?.flushes,
+            flushed,
+            "flushing an empty memtable counted as another flush"
+        );
+
+        for cf in families() {
+            let handle = cf_handle(&store.db, cf)?;
+            store
+                .db
+                .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
+        }
+        assert_eq!(
+            store.ingest_stats()?.flushes,
+            flushed,
+            "compaction counted as a flush"
+        );
+
+        put_offset(&store, 2, 8)?;
+        let before = store.ingest_stats()?.flushes;
+        assert_eq!(before, flushed);
+        flush_every_family(&store)?;
+        let after = store.ingest_stats()?.flushes;
+        assert!(
+            after > before,
+            "second flush delta was 0 (before {before}, after {after})"
+        );
+        Ok(())
+    }
+
     #[test]
     fn production_open_keeps_tables_and_tickers() -> eyre::Result<()> {
         let dir = temp_dir("submodule_rocks_stats");
@@ -8033,6 +8166,34 @@ mod tests {
             Some(want),
             "{key} in {opts}"
         );
+    }
+
+    fn sample_cfstats(store: &RocksSubmoduleStore) -> String {
+        let Some(cf) = families().next() else {
+            return String::new();
+        };
+        let Ok(handle) = cf_handle(&store.db, cf) else {
+            return String::new();
+        };
+        store
+            .db
+            .property_value_cf(handle, "rocksdb.cfstats-no-file-histogram")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// Direct `flush_cf`. Not the store's flush helpers, so a counter bumped
+    /// only around those helpers stays at 0.
+    fn flush_every_family(store: &RocksSubmoduleStore) -> eyre::Result<()> {
+        for cf in families() {
+            let handle = cf_handle(&store.db, cf)?;
+            store
+                .db
+                .flush_cf(&handle)
+                .map_err(|error| eyre::eyre!("flush column family: {error}"))?;
+        }
+        Ok(())
     }
 
     fn put_offset(store: &RocksSubmoduleStore, offset: u32, byte: u8) -> eyre::Result<()> {
