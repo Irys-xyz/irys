@@ -22,7 +22,6 @@ use irys_database::submodule::{
         TxLeafBinding,
     },
 };
-use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
@@ -5434,6 +5433,7 @@ impl StorageModule {
 
     /// One settled chunk. `Skip` means the bytes are not durable yet, the
     /// label is `Interrupted` / `Uninitialized`, or this index stores no checksum.
+    #[cfg(test)]
     fn crc_verdict(
         &self,
         offset: PartitionChunkOffset,
@@ -5684,6 +5684,7 @@ impl StorageModule {
     }
 
     /// One chunk from the submodule file that holds `chunk_offset`.
+    #[cfg(test)]
     fn read_chunk_internal(&self, chunk_offset: PartitionChunkOffset) -> eyre::Result<ChunkBytes> {
         // Data lives in the write window when a bench split is installed.
         // Every other type stays on the entropy file. With no split both are
@@ -8260,49 +8261,6 @@ pub const fn checked_add_i32_u64(a: i32, b: u64) -> Option<u64> {
         let a_u64 = a as u64;
         b.checked_add(a_u64)
     }
-}
-
-// TODO: expand this, right now it's very specific
-pub fn find_invalid_packing_starts(sm: Arc<StorageModule>) -> Vec<PartitionChunkOffset> {
-    let mut invalid_starts = vec![];
-    for range in sm.get_intervals(ChunkType::Entropy) {
-        // binary search through packing, figuring out where the bad packing range starts
-        // we assume the packing will have a clear cut line where the invalid packing starts
-        let mut left = range.start();
-        let mut right = range.end();
-
-        while left < right {
-            let mid = left + (*right - *left) / 2;
-
-            if validate_packing_at_point(&sm, *mid).is_ok_and(|r| r) {
-                left = mid + 1;
-            } else {
-                right = mid;
-            }
-        }
-        if left != range.end() {
-            invalid_starts.push(left - PartitionChunkOffset::from(1_u64))
-        }
-    }
-    invalid_starts
-}
-
-pub fn validate_packing_at_point(sm: &Arc<StorageModule>, point: u32) -> eyre::Result<bool> {
-    let chunk = sm.read_chunk_internal(PartitionChunkOffset::from(point))?;
-    let chunk_size = sm.config.consensus.chunk_size;
-    let mut out = Vec::with_capacity(chunk_size.try_into().unwrap());
-
-    compute_entropy_chunk(
-        sm.config.node_config.miner_address(),
-        point as u64,
-        sm.partition_hash().unwrap().0,
-        sm.config.consensus.entropy_packing_iterations,
-        chunk_size.try_into()?,
-        &mut out,
-        sm.config.consensus.chain_id,
-    );
-
-    Ok(out == chunk)
 }
 
 /// Pending-body rows one coverage read decodes per submodule.
