@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use irys_domain::StorageModule;
 use irys_packing::{CUDAConfig, capacity_pack_range_cuda_c};
 use irys_types::{
-    Config, IrysAddress, PartitionChunkRange, partition::PartitionHash, split_interval,
+    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash,
+    split_interval,
 };
 use tokio::sync::Semaphore;
 use tokio::task::yield_now;
@@ -130,10 +131,28 @@ impl super::PackingStrategy for CudaPackingStrategy {
                     }
                 };
 
-                // Write packed chunks
+                // Write packed chunks. Re-check each offset: a retry must not
+                // replace Data, and a hash change is not this assignment.
                 for i in 0..num_chunks {
+                    let offset = PartitionChunkOffset::from(start + i);
+                    match crate::packing_service::classify_entropy_offset(
+                        &storage_module_clone,
+                        offset,
+                        partition_hash,
+                    ) {
+                        crate::packing_service::EntropyOffset::Skip => continue,
+                        crate::packing_service::EntropyOffset::Refused => {
+                            stop_flag.store(true, Ordering::Relaxed);
+                            return Err(format!(
+                                "entropy write refused at offset {} during CUDA packing for SM {}",
+                                start + i,
+                                storage_module_id
+                            ));
+                        }
+                        crate::packing_service::EntropyOffset::Pack => {}
+                    }
                     let wrote = storage_module_clone.write_entropy_chunk(
-                        (start + i).into(),
+                        offset,
                         out[(i * chunk_size as u32) as usize
                             ..((i + 1) * chunk_size as u32) as usize]
                             .to_vec(),

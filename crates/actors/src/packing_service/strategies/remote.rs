@@ -70,11 +70,21 @@ impl RemotePackingStrategy {
                     "remote packing produced a chunk past inclusive end {range_end}"
                 ));
             }
-            let wrote = storage_module.write_entropy_chunk(
+            // The stream is positional. A Data or Entropy offset consumes its
+            // bytes and is not written. A hash change fails the body.
+            let wrote = match crate::packing_service::classify_entropy_offset(
+                storage_module,
                 PartitionChunkOffset(range_start),
-                chunk_bytes.to_vec(),
                 partition_hash,
-            );
+            ) {
+                crate::packing_service::EntropyOffset::Skip => true,
+                crate::packing_service::EntropyOffset::Refused => false,
+                crate::packing_service::EntropyOffset::Pack => storage_module.write_entropy_chunk(
+                    PartitionChunkOffset(range_start),
+                    chunk_bytes.to_vec(),
+                    partition_hash,
+                ),
+            };
             if !wrote {
                 return Err(format!(
                     "entropy write refused at offset {range_start} for partition {partition_hash}"

@@ -142,6 +142,22 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 self.chunks_started
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            // Re-check before hashing. A retry must not pack Data, and must
+            // not treat a hash change as this assignment.
+            match crate::packing_service::classify_entropy_offset(
+                storage_module,
+                PartitionChunkOffset::from(i),
+                partition_hash,
+            ) {
+                crate::packing_service::EntropyOffset::Skip => continue,
+                crate::packing_service::EntropyOffset::Refused => {
+                    failed = Some(format!(
+                        "entropy write refused at offset {i} for SM {storage_module_id}"
+                    ));
+                    break;
+                }
+                crate::packing_service::EntropyOffset::Pack => {}
+            }
             // Wait for the disk before queueing more entropy.
             if i % short_writes_before_sync == 0 {
                 if let Err(err) = crate::packing_service::wait_for_pending_room(
@@ -194,6 +210,28 @@ impl super::PackingStrategy for CpuPackingStrategy {
                         &mining_address,
                         entropy_iterations
                     );
+
+                    // The label can change while this chunk is hashed. Data
+                    // that landed in that window is not overwritten.
+                    match crate::packing_service::classify_entropy_offset(
+                        &storage_module_clone,
+                        PartitionChunkOffset::from(i),
+                        partition_hash,
+                    ) {
+                        crate::packing_service::EntropyOffset::Skip => {
+                            drop(permit);
+                            notify.notify_waiters();
+                            return Ok(());
+                        }
+                        crate::packing_service::EntropyOffset::Refused => {
+                            drop(permit);
+                            notify.notify_waiters();
+                            return Err(format!(
+                                "entropy write refused at offset {i} for SM {storage_module_id}"
+                            ));
+                        }
+                        crate::packing_service::EntropyOffset::Pack => {}
+                    }
 
                     let wrote = storage_module_clone.write_entropy_chunk(
                         PartitionChunkOffset::from(i),
@@ -408,6 +446,93 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    /// A retried range can contain Data that landed after an earlier entropy
+    /// prefix. Those offsets stay Data. Uninitialized offsets are still packed.
+    #[test_log::test(tokio::test)]
+    async fn cpu_pack_does_not_write_entropy_over_data() {
+        let (_tmp, config, module, hash) = test_module_span("cpu_keep_data", 4);
+        for offset in [0_u32, 2] {
+            assert!(module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0xD4_u8; 32],
+                ChunkType::Data,
+            ));
+        }
+        module.force_sync_pending_chunks().expect("data is durable");
+        let result = strategy(config.clone())
+            .pack(
+                &module,
+                PartitionChunkRange(partition_chunk_offset_ii!(0, 3)),
+                config.node_config.miner_address(),
+                hash,
+                module.id,
+                100,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "data in the range must not fail the pack, got {result:?}"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Data),
+            "entropy must not replace data at the start of a retried range"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(2)),
+            Some(ChunkType::Data),
+            "entropy must not replace data in the middle of a retried range"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(1)),
+            Some(ChunkType::Entropy),
+            "an uninitialized offset in the same range is still packed"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(3)),
+            Some(ChunkType::Entropy),
+            "the uninitialized tail is still packed"
+        );
+    }
+
+    /// Entropy is already the pack target. The range still packs the holes
+    /// and does not fail because a prefix is packed.
+    #[test_log::test(tokio::test)]
+    async fn cpu_pack_skips_entropy_and_packs_the_uninitialized_tail() {
+        let (_tmp, config, module, hash) = test_module_span("cpu_skip_entropy", 2);
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0xE1_u8; 32],
+            ChunkType::Entropy,
+        ));
+        module
+            .force_sync_pending_chunks()
+            .expect("entropy is durable");
+        let result = strategy(config.clone())
+            .pack(
+                &module,
+                PartitionChunkRange(partition_chunk_offset_ii!(0, 1)),
+                config.node_config.miner_address(),
+                hash,
+                module.id,
+                100,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "an entropy prefix must not fail the pack, got {result:?}"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Entropy)
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(1)),
+            Some(ChunkType::Entropy),
+            "the uninitialized tail is still packed"
+        );
     }
 
     /// A long range used to push one join handle per chunk and await them only

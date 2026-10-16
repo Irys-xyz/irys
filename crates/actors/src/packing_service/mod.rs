@@ -54,6 +54,78 @@ const PENDING_ROOM_POLL: std::time::Duration = std::time::Duration::from_millis(
 /// How long packing waits for a module's pending writes to drain.
 const PENDING_ROOM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// What an entropy pack may do with one offset on this attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntropyOffset {
+    /// Live label is `Uninitialized` or `Interrupted`, and the hash matches.
+    Pack,
+    /// Live label is `Data` or `Entropy`. Do not write.
+    Skip,
+    /// The module is unassigned, or the hash is no longer `packed_for`.
+    Refused,
+}
+
+/// Re-check the assignment and the live label immediately before an entropy write.
+///
+/// `Data` is never a pack target. `Entropy` is already packed. A retry that
+/// starts again at the original offset must not replace either one.
+pub(crate) fn classify_entropy_offset(
+    storage_module: &irys_domain::StorageModule,
+    offset: PartitionChunkOffset,
+    packed_for: irys_types::partition::PartitionHash,
+) -> EntropyOffset {
+    let Some(assignment) = storage_module.partition_assignment() else {
+        return EntropyOffset::Refused;
+    };
+    if assignment.partition_hash != packed_for {
+        return EntropyOffset::Refused;
+    }
+    match storage_module.get_chunk_type(&offset) {
+        Some(irys_domain::ChunkType::Uninitialized | irys_domain::ChunkType::Interrupted) => {
+            EntropyOffset::Pack
+        }
+        Some(irys_domain::ChunkType::Data | irys_domain::ChunkType::Entropy) | None => {
+            EntropyOffset::Skip
+        }
+    }
+}
+
+/// Spans inside `range` that an entropy retry may still pack.
+///
+/// Empty when the assignment is gone or the hash changed. A range that is
+/// still entirely uninitialized comes back as that one span.
+pub(crate) fn entropy_target_ranges(
+    storage_module: &irys_domain::StorageModule,
+    packed_for: irys_types::partition::PartitionHash,
+    range: PartitionChunkRange,
+) -> Vec<PartitionChunkRange> {
+    let Some(assignment) = storage_module.partition_assignment() else {
+        return Vec::new();
+    };
+    if assignment.partition_hash != packed_for {
+        return Vec::new();
+    }
+    let start = range.0.start().0;
+    let end = range.0.end().0;
+    let mut spans = Vec::new();
+    for kind in [
+        irys_domain::ChunkType::Uninitialized,
+        irys_domain::ChunkType::Interrupted,
+    ] {
+        for interval in storage_module.get_intervals(kind) {
+            let span_start = interval.start().0.max(start);
+            let span_end = interval.end().0.min(end);
+            if span_start <= span_end {
+                spans.push(PartitionChunkRange(partition_chunk_offset_ii!(
+                    span_start, span_end
+                )));
+            }
+        }
+    }
+    spans.sort_by_key(|span| span.0.start().0);
+    spans
+}
+
 /// Wake the disk lane, then wait until the module has room for more pending
 /// chunks. Packing computes entropy faster than a disk writes it, and with the
 /// lane running a sync only wakes the lane, so without this wait the pending
@@ -291,8 +363,6 @@ impl PackingService {
                 self.semaphore.available_permits() as u64,
             );
 
-            // TODO(optimization): Check for already-packed ranges.
-
             let storage_module = next_range.storage_module().clone();
             let job_chunk_range = *next_range.chunk_range();
 
@@ -308,8 +378,12 @@ impl PackingService {
             let partition_hash = assignment.partition_hash;
             let storage_module_id = storage_module.id;
 
-            let range_start = *job_chunk_range.0.start();
-            let range_end = *job_chunk_range.0.end();
+            // Re-check labels before this attempt. A retry of the original
+            // range must not pack Data, or Entropy that already landed.
+            let targets = entropy_target_ranges(&storage_module, partition_hash, job_chunk_range);
+            if targets.is_empty() {
+                continue;
+            }
 
             let short_writes_before_sync: u32 = (self
                 .config
@@ -320,47 +394,50 @@ impl PackingService {
             .try_into()
             .expect("Should be able to convert min_writes_before_sync to u32");
 
-            let current_chunk_range =
-                PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
+            for target in targets {
+                // Try remote packing first if configured
+                if !self.packing_config.remotes.is_empty()
+                    && self
+                        .remote_strategy
+                        .pack(
+                            &storage_module,
+                            target,
+                            mining_address,
+                            partition_hash,
+                            storage_module_id,
+                            short_writes_before_sync,
+                        )
+                        .await
+                        .is_ok()
+                {
+                    continue;
+                }
 
-            // Try remote packing first if configured
-            if !self.packing_config.remotes.is_empty()
-                && let Ok(()) = self
-                    .remote_strategy
+                // Fall back to local packing strategy
+                if let Err(e) = self
+                    .local_strategy
                     .pack(
                         &storage_module,
-                        current_chunk_range,
+                        target,
                         mining_address,
                         partition_hash,
                         storage_module_id,
                         short_writes_before_sync,
                     )
                     .await
-            {
-                sync_with_warning(&storage_module, "remote packing completion");
-                continue;
-            }
-
-            // Fall back to local packing strategy
-            if let Err(e) = self
-                .local_strategy
-                .pack(
-                    &storage_module,
-                    current_chunk_range,
-                    mining_address,
-                    partition_hash,
-                    storage_module_id,
-                    short_writes_before_sync,
-                )
-                .await
-            {
-                warn!(target: "irys::packing", "Local packing failed for SM {}: {}", storage_module_id, e);
-                // The range already left `crc_repairs` when it was sent. Put
-                // it back only while the module is still assigned. An
-                // unassigned module cannot pack, and returning the range
-                // makes every later tick expand it again.
-                if storage_module.partition_assignment().is_some() {
-                    storage_module.requeue_crc_repair_range(job_chunk_range.0);
+                {
+                    warn!(target: "irys::packing", "Local packing failed for SM {}: {}", storage_module_id, e);
+                    // Put back only offsets that are still an entropy target,
+                    // and only while this job's hash is still assigned. A hash
+                    // change has its own pack. Data must not be queued again.
+                    let same_hash = storage_module
+                        .partition_assignment()
+                        .is_some_and(|current| current.partition_hash == partition_hash);
+                    if same_hash {
+                        for span in entropy_target_ranges(&storage_module, partition_hash, target) {
+                            storage_module.requeue_crc_repair_range(span.0);
+                        }
+                    }
                 }
             }
 
@@ -699,6 +776,183 @@ mod tests {
         assert!(
             ranges.is_empty(),
             "an unassigned module must not requeue the failed pack, still queued: {ranges:?}"
+        );
+        Ok(())
+    }
+
+    /// The hash changed while the pack was paused. The failed job must not
+    /// come back: the new assignment has its own pack, and this job was for
+    /// the previous hash.
+    #[cfg(not(feature = "nvidia"))]
+    #[test_log::test(tokio::test)]
+    async fn reassigned_during_pack_does_not_requeue_the_old_range() -> eyre::Result<()> {
+        use std::sync::Arc;
+
+        use super::strategies::cpu::PackPause;
+        use irys_domain::ChunkType;
+        use tokio::sync::Notify;
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("reassigned_pack_requeue")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 32,
+            ..consensus
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = PartitionHash::zero();
+        let submodule_dir = tmp_dir.path().join("hdd0");
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), submodule_dir)],
+        };
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        let request = PackingRequest::new(
+            storage_module.clone(),
+            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 0)),
+        )?;
+
+        let packing = PackingService::new(Arc::new(config.clone()));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = packing.spawn_packing_controllers(runtime_handle.clone());
+        let handle = packing.spawn_tokio_service(runtime_handle);
+        let pause = Arc::new(PackPause {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        let started = pause.started.notified();
+        tokio::pin!(started);
+        assert!(
+            !started.as_mut().enable(),
+            "the pause must not already be notified"
+        );
+        packing.set_pack_pause_for_test(Some(Arc::clone(&pause)));
+        handle.send(request)?;
+
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .expect("pack starts while the module still has the old hash");
+        let new_hash = PartitionHash::repeat_byte(0x44);
+        storage_module.reset_with_assignment(
+            Some(PartitionAssignment {
+                partition_hash: new_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            4,
+        )?;
+        assert_eq!(
+            storage_module
+                .partition_assignment()
+                .expect("still assigned")
+                .partition_hash,
+            new_hash
+        );
+        pause.release.notify_one();
+        handle
+            .waiter()
+            .wait_for_idle(Some(Duration::from_secs(10)))
+            .await?;
+
+        assert_ne!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Entropy),
+            "the old job must not write entropy for the new hash"
+        );
+        let ranges = storage_module.take_crc_repair_ranges();
+        assert!(
+            ranges.is_empty(),
+            "a hash change must not requeue the old pack, still queued: {ranges:?}"
+        );
+        Ok(())
+    }
+
+    /// A pack that fails after Data has replaced the prefix must put back only
+    /// the offsets that are still uninitialized. The Data prefix is not packed
+    /// again.
+    #[cfg(not(feature = "nvidia"))]
+    #[test_log::test(tokio::test)]
+    async fn failed_pack_requeues_only_uninitialized_offsets() -> eyre::Result<()> {
+        use irys_types::ii;
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("requeue_uninitialized_only")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 16,
+            ..consensus
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = PartitionHash::zero();
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), "hdd0".into())],
+        };
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        assert!(storage_module.write_chunk(
+            PartitionChunkOffset(0),
+            vec![0xD4_u8; 16],
+            ChunkType::Data,
+        ));
+        storage_module.force_sync_pending_chunks()?;
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Data)
+        );
+        let request = PackingRequest::new(
+            storage_module.clone(),
+            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 1)),
+        )?;
+
+        let packing = PackingService::new(Arc::new(config));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = packing.spawn_packing_controllers(runtime_handle.clone());
+        let handle = packing.spawn_tokio_service(runtime_handle);
+        handle.send(request)?;
+
+        let start = std::time::Instant::now();
+        let queued = loop {
+            let ranges = storage_module.take_crc_repair_ranges();
+            if !ranges.is_empty() {
+                break ranges;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                eyre::bail!("a failed pack must put the uninitialized suffix back");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            queued,
+            vec![ii(PartitionChunkOffset(1), PartitionChunkOffset(1))],
+            "the data prefix must not be queued again"
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Data),
+            "the failed pack must leave the data prefix in place"
         );
         Ok(())
     }
