@@ -3377,7 +3377,7 @@ fn verify_mdbx_v1_against_rocks(
     report.skipped_orphans = report.skipped_orphans.saturating_add(orphans);
     note_rocks_placements_absent_from_v1(env, v3, &mut report)?;
     compare_v1_pending(env, v3, &written, &frontier, &mut report)?;
-    note_extra_rocks_offset_rows(v3, &written, &frontier, &mut report)?;
+    note_extra_rocks_offset_rows(env, v3, &written, &frontier, &mut report)?;
     verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     Ok(report)
@@ -3646,6 +3646,7 @@ fn note_rocks_placements_absent_from_v1(
 }
 
 fn note_extra_rocks_offset_rows(
+    env: &DatabaseEnv,
     v3: &RocksSubmoduleStore,
     written: &FrontierSkips,
     frontier: &FrontierSkips,
@@ -3658,7 +3659,34 @@ fn note_extra_rocks_offset_rows(
             break;
         }
         for key in &keys {
+            // A placement covers every offset in the tx, including one whose
+            // v1 hash row has no data path. That offset is not a compared
+            // path. A rocks proof or checksum there is extra.
             if written.covers(key.0) {
+                let has_data_path = v1_hashes_at(env, *key)?
+                    .and_then(|row| row.data_path_hash)
+                    .is_some();
+                if has_data_path {
+                    continue;
+                }
+                let meta = v3.view(|tx| tx.get_offset_meta(*key))?;
+                let proof = meta.as_ref().is_some_and(|row| row.proof.is_some());
+                if !proof && meta.as_ref().is_none_or(|row| row.crc.is_none()) {
+                    continue;
+                }
+                report.offsets_checked = report.offsets_checked.saturating_add(1);
+                if proof {
+                    report.offset_mismatches = report.offset_mismatches.saturating_add(1);
+                    report.mismatch_data_path = report.mismatch_data_path.saturating_add(1);
+                    note(
+                        report,
+                        "data_path",
+                        format!("offset {} is only in v3", key.0),
+                    );
+                }
+                // Checksum-only rows are counted here. A proof that also
+                // carries a checksum is the data-path mismatch above.
+                note_mdbx_checksum(false, meta.as_ref(), *key, false, report);
                 continue;
             }
             if frontier.covers(key.0) {
@@ -5378,6 +5406,64 @@ mod tests {
         data
     }
 
+    /// One v1 tx over `n` chunks. `hole` keeps the tx-path hash and stores no
+    /// data path, so the placement still covers that offset.
+    fn write_v1_one_tx_with_hole(root: &Path, n: u64, hole: u64) -> eyre::Result<PathBuf> {
+        use crate::submodule::tables::v1_fixture::master;
+        use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
+        use reth_db::Database as _;
+        use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+        let txs = [tx_at(1, n.saturating_mul(32))];
+        let (consensus, opened, index) = open_v1_fixture(root, &txs, n)?;
+        let mut cache = TxPathBlockCache::new();
+        {
+            let tx = index.tx_mut()?;
+            let mut data_root = None;
+            for offset in 0..n {
+                let derived = derive_tx_path_at_offset_cached(
+                    &opened,
+                    &mut cache,
+                    DataLedger::Publish,
+                    offset,
+                    32,
+                )?;
+                let proof = derived.proof.proof;
+                let path_hash = tx_path_hash(&proof);
+                let key = PartitionChunkOffset(offset as u32);
+                let data_path_hash = if offset == hole {
+                    None
+                } else {
+                    let data = v1_path_bytes(offset);
+                    let data_hash = H256::from(hash_sha256(&data));
+                    tx.put::<master::ChunkDataPathByPathHash>(data_hash, data)?;
+                    Some(data_hash)
+                };
+                tx.put::<master::ChunkPathHashesByOffset>(
+                    key,
+                    ChunkPathHashes {
+                        data_path_hash,
+                        tx_path_hash: Some(path_hash),
+                    },
+                )?;
+                tx.put::<master::TxPathByTxPathHash>(path_hash, proof)?;
+                data_root = Some(derived.data_root);
+            }
+            let root = data_root.ok_or_else(|| eyre::eyre!("no v1 chunks"))?;
+            tx.put::<master::DataRootInfosByDataRoot>(
+                root,
+                DataRootInfos(vec![DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: n.saturating_mul(32),
+                }]),
+            )?;
+            tx.commit()?;
+        }
+        drop(index);
+        drop(opened);
+        Ok(consensus)
+    }
+
     /// A path batch smaller than one data path still copies the run. Offsets
     /// after the cap is crossed are not read until the range copy. A batch
     /// that can hold the paths reads each one once.
@@ -5996,6 +6082,68 @@ mod tests {
         assert!(changed.has_mismatch(), "{changed}");
         assert!(changed.mismatch_data_path >= 1, "{changed}");
         assert!(changed.dropped_checksums >= 1, "{changed}");
+        Ok(())
+    }
+
+    /// A placement that covers a v1 offset with no data path is not equality.
+    /// A later checksum or proof at that hole is a mismatch. The same verify
+    /// is clean before the node writes the row. Audit still allows a
+    /// checksum inside a placement, so the mismatch has to come from verify.
+    #[test]
+    fn verify_v1_flags_a_row_inside_a_path_hole() -> eyre::Result<()> {
+        const N: u64 = 3;
+        const HOLE: u32 = 1;
+        let root = temp("convert-v1-path-hole");
+        let consensus = write_v1_one_tx_with_hole(root.path(), N, u64::from(HOLE))?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.data_paths, N - 1, "{stats}");
+        let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!clean.has_mismatch(), "{clean}");
+        assert_eq!(clean.index_audit_findings, 0, "{clean}");
+
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                    offset: PartitionChunkOffset(HOLE),
+                    crc: Some(0x0102_0304),
+                    proof: None,
+                }])?;
+                Ok(())
+            })?;
+        }
+        let crc = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(
+            crc.has_mismatch(),
+            "checksum-only row inside a path hole must fail verify: {crc}"
+        );
+        assert!(crc.mismatch_chunk_crc >= 1, "{crc}");
+        assert_eq!(crc.index_audit_findings, 0, "{crc}");
+
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                    offset: PartitionChunkOffset(HOLE),
+                    crc: None,
+                    proof: Some(b"hole-proof".to_vec()),
+                }])?;
+                Ok(())
+            })?;
+        }
+        let proof = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(
+            proof.has_mismatch(),
+            "proof inside a path hole must fail verify: {proof}"
+        );
+        assert!(proof.mismatch_data_path >= 1, "{proof}");
+        assert_eq!(proof.mismatch_chunk_crc, 0, "{proof}");
+        assert_eq!(proof.index_audit_findings, 0, "{proof}");
         Ok(())
     }
 
