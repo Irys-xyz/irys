@@ -74,6 +74,40 @@ fn packed_sm_for_ledger(
     sm
 }
 
+fn unpacked_sm_for_ledger(
+    config: &Config,
+    num_chunks: u64,
+    ledger: DataLedger,
+) -> Arc<StorageModule> {
+    let pa = PartitionAssignment {
+        ledger_id: Some(ledger.into()),
+        slot_index: Some(0),
+        miner_address: IrysAddress::from([1_u8; 20]),
+        partition_hash: H256::random(),
+    };
+    let info = StorageModuleInfo {
+        id: 0,
+        partition_assignment: Some(pa),
+        submodules: vec![(
+            partition_chunk_offset_ie!(0, num_chunks as u32),
+            "chunks".into(),
+        )],
+    };
+    Arc::new(StorageModule::new(&info, config).expect("storage module"))
+}
+
+fn write_synced_chunk(sm: &StorageModule, offset: u32, chunk_size: usize, kind: ChunkType) {
+    assert!(
+        sm.write_chunk(
+            PartitionChunkOffset::from(offset),
+            vec![0xD4; chunk_size],
+            kind,
+        ),
+        "write at {offset}"
+    );
+    sm.force_sync_pending_chunks().expect("sync");
+}
+
 fn open_test_db(config: &Config) -> DatabaseProvider {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -1301,6 +1335,160 @@ async fn term_ledger_reverse_scan_visits_the_prefix_after_the_frontier() {
             .contains_key(&PartitionChunkOffset::from(0_u32)),
         "the prefix must still wait until higher offsets have been scanned"
     );
+}
+
+fn interval_count(sm: &StorageModule) -> usize {
+    sm.intervals().read().unwrap().iter().count()
+}
+
+/// Non-entropy fragments must spend the scan budget. A Publish slot whose
+/// only Entropy sits past more fragments than `max_pending * 4` must not
+/// queue that Entropy on the first tick, and the cursor must move so the
+/// next tick continues.
+#[test_log::test(tokio::test)]
+async fn publish_entropy_scan_bounds_non_entropy_fragments() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 24, 1);
+    let sm = unpacked_sm_for_ledger(&config, 24, DataLedger::Publish);
+    for offset in (0..23).step_by(2) {
+        write_synced_chunk(&sm, offset, 32, ChunkType::Data);
+    }
+    write_synced_chunk(&sm, 23, 32, ChunkType::Entropy);
+    assert!(
+        interval_count(&sm) > 4,
+        "the fixture must be more fragments than the interval budget"
+    );
+    let mut orch = make_orchestrator_with_ledger_chunks(Arc::clone(&sm), &config, 24);
+    let entropy = PartitionChunkOffset::from(23_u32);
+
+    orch.populate_request_queue();
+    assert!(
+        !orch.chunk_requests.contains_key(&entropy),
+        "the first tick must not walk every non-entropy fragment to the entropy tail"
+    );
+    assert!(
+        (1..23).contains(&orch.scan_cursor),
+        "the cursor must move into the map, got {}",
+        orch.scan_cursor
+    );
+
+    let mut ticks = 0_u32;
+    while !orch.chunk_requests.contains_key(&entropy) {
+        let before = orch.scan_cursor;
+        orch.populate_request_queue();
+        ticks += 1;
+        assert!(
+            ticks < 30,
+            "the scan did not reach offset 23; cursor stayed near {before}"
+        );
+        if !orch.chunk_requests.contains_key(&entropy) {
+            assert_ne!(
+                orch.scan_cursor, before,
+                "a tick that finds no entropy must still advance the cursor"
+            );
+        }
+    }
+}
+
+/// One Uninitialized span is one visit. Entropy after it, still inside the
+/// interval budget, is queued on the same tick.
+#[test_log::test(tokio::test)]
+async fn publish_entropy_scan_crosses_one_uninitialized_span() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 24, 1);
+    let sm = unpacked_sm_for_ledger(&config, 24, DataLedger::Publish);
+    write_synced_chunk(&sm, 23, 32, ChunkType::Entropy);
+    assert!(
+        interval_count(&sm) <= 4,
+        "a fresh reset plus one entropy tail must stay inside the interval budget, got {}",
+        interval_count(&sm)
+    );
+    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 24);
+    orch.populate_request_queue();
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(23_u32)),
+        "one uninitialized span must not hide later entropy in the same tick"
+    );
+}
+
+/// A chunk-budget clip inside one Entropy interval resumes at the next
+/// offset. The interval budget must not jump the cursor past that run.
+#[test_log::test(tokio::test)]
+async fn publish_entropy_scan_keeps_the_cursor_inside_a_clipped_entropy_run() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 24, 1);
+    let sm = packed_sm(&config, 24);
+    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 24);
+    orch.populate_request_queue();
+    assert!(
+        orch.chunk_requests
+            .contains_key(&PartitionChunkOffset::from(0_u32))
+    );
+    assert_eq!(
+        orch.scan_cursor, 1,
+        "a one-slot hot budget stops inside the entropy run"
+    );
+    assert!(
+        !orch
+            .chunk_requests
+            .contains_key(&PartitionChunkOffset::from(1_u32)),
+        "the next entropy offset waits for the next tick"
+    );
+}
+
+/// Term ledgers walk high to low. Data fragments at the write head must
+/// spend the interval budget, so Entropy at offset 0 is not queued on the
+/// first tick. The cursor moves down from the top.
+#[test_log::test(tokio::test)]
+async fn term_ledger_entropy_scan_bounds_high_fragments() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 24, 1);
+    let sm = unpacked_sm_for_ledger(&config, 24, DataLedger::Submit);
+    write_synced_chunk(&sm, 0, 32, ChunkType::Entropy);
+    for offset in [16_u32, 18, 20, 22] {
+        write_synced_chunk(&sm, offset, 32, ChunkType::Data);
+    }
+    assert_ne!(
+        sm.get_chunk_type(&PartitionChunkOffset::from(23_u32)),
+        Some(ChunkType::Entropy),
+        "the write head must not be the special-cased entropy offset"
+    );
+    assert!(
+        interval_count(&sm) > 4,
+        "the high end must be more fragments than the interval budget"
+    );
+    let mut orch =
+        make_orchestrator_with_ledger_total(Arc::clone(&sm), &config, DataLedger::Submit, 24);
+    let entropy = PartitionChunkOffset::from(0_u32);
+
+    orch.populate_request_queue();
+    assert!(
+        !orch.chunk_requests.contains_key(&entropy),
+        "the first reverse tick must not walk every high fragment down to offset 0"
+    );
+    assert!(
+        orch.scan_cursor < 23,
+        "the reverse cursor must move down from the write head, got {}",
+        orch.scan_cursor
+    );
+
+    let mut ticks = 0_u32;
+    while !orch.chunk_requests.contains_key(&entropy) {
+        let before = orch.scan_cursor;
+        orch.populate_request_queue();
+        ticks += 1;
+        assert!(
+            ticks < 30,
+            "the reverse scan did not reach offset 0; cursor stayed near {before}"
+        );
+        if !orch.chunk_requests.contains_key(&entropy) {
+            assert_ne!(
+                orch.scan_cursor, before,
+                "a tick that finds no entropy must still advance the cursor"
+            );
+        }
+    }
 }
 
 fn signed_tx(config: &Config, num_chunks: u64) -> (DataTransaction, Vec<u8>) {

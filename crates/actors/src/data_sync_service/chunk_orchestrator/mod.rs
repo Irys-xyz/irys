@@ -807,22 +807,18 @@ impl ChunkOrchestrator {
                 if budget == 0 {
                     break;
                 }
-                let runs =
-                    entropy_scan_runs(&self.storage_module, range_start, range_end, true, budget);
-                for (start, end) in runs {
-                    for interval_step in (start..=end).rev() {
-                        if self.note_scan_offset(
-                            interval_step,
-                            max_offset,
-                            true,
-                            now,
-                            &mut probes,
-                            max_probes,
-                            &mut requests_to_add,
-                        ) {
-                            break 'scan;
-                        }
-                    }
+                if self.consume_entropy_scan(
+                    range_start,
+                    range_end,
+                    true,
+                    budget,
+                    max_offset,
+                    now,
+                    &mut probes,
+                    max_probes,
+                    &mut requests_to_add,
+                ) {
+                    break 'scan;
                 }
             }
         } else {
@@ -839,25 +835,101 @@ impl ChunkOrchestrator {
                 if budget == 0 {
                     break;
                 }
-                let runs =
-                    entropy_scan_runs(&self.storage_module, range_start, range_end, false, budget);
-                for (start, end) in runs {
-                    for interval_step in start..=end {
-                        if self.note_scan_offset(
-                            interval_step,
-                            max_offset,
-                            false,
-                            now,
-                            &mut probes,
-                            max_probes,
-                            &mut requests_to_add,
-                        ) {
-                            break 'scan;
-                        }
-                    }
+                if self.consume_entropy_scan(
+                    range_start,
+                    range_end,
+                    false,
+                    budget,
+                    max_offset,
+                    now,
+                    &mut probes,
+                    max_probes,
+                    &mut requests_to_add,
+                ) {
+                    break 'scan;
                 }
             }
         }
+    }
+
+    /// Walk one query window. Returns true when this tick must stop.
+    ///
+    /// Entropy offsets still move the cursor through [`Self::note_scan_offset`].
+    /// A window of non-entropy intervals never calls that path, so when the
+    /// interval budget is spent the cursor jumps past the window. The wrap
+    /// range then waits for the next tick. A chunk-budget clip does not jump:
+    /// the returned run is only a prefix of its interval.
+    fn consume_entropy_scan(
+        &mut self,
+        range_start: u32,
+        range_end: u32,
+        reverse: bool,
+        budget: usize,
+        max_offset: u32,
+        now: Instant,
+        probes: &mut usize,
+        max_probes: usize,
+        requests_to_add: &mut usize,
+    ) -> bool {
+        let scan = entropy_scan_runs(
+            &self.storage_module,
+            range_start,
+            range_end,
+            reverse,
+            budget,
+        );
+        let mut stop = false;
+        if reverse {
+            for (start, end) in scan.runs {
+                for interval_step in (start..=end).rev() {
+                    if self.note_scan_offset(
+                        interval_step,
+                        max_offset,
+                        true,
+                        now,
+                        probes,
+                        max_probes,
+                        requests_to_add,
+                    ) {
+                        stop = true;
+                        break;
+                    }
+                }
+                if stop {
+                    break;
+                }
+            }
+        } else {
+            for (start, end) in scan.runs {
+                for interval_step in start..=end {
+                    if self.note_scan_offset(
+                        interval_step,
+                        max_offset,
+                        false,
+                        now,
+                        probes,
+                        max_probes,
+                        requests_to_add,
+                    ) {
+                        stop = true;
+                        break;
+                    }
+                }
+                if stop {
+                    break;
+                }
+            }
+        }
+        if stop {
+            return true;
+        }
+        if scan.interval_budget_spent
+            && let Some(edge) = scan.visited_edge
+        {
+            self.scan_cursor = resume_scan_cursor(edge, max_offset, reverse);
+            return true;
+        }
+        false
     }
 
     /// Submit / OneYear / ThirtyDay: prefer the migrated write head. Publish
@@ -2273,20 +2345,38 @@ pub struct OrchestrationMetrics {
     pub total_throughput_bps: u64,
 }
 
+/// One pass over the live interval map inside `[range_start, range_end]`.
+struct EntropyScan {
+    /// Entropy sub-ranges to enqueue. Width is at most `max_offsets` chunks.
+    runs: Vec<(u32, u32)>,
+    /// Inclusive edge of the intervals this pass walked.
+    /// Forward: highest offset. Reverse: lowest offset.
+    visited_edge: Option<u32>,
+    /// The interval count hit `max_offsets` before the chunk budget did.
+    interval_budget_spent: bool,
+}
+
 /// Entropy runs from the live interval map inside `[range_start, range_end]`.
 ///
-/// Returned width is at most `max_offsets`. A packing tail is clipped to that
-/// budget. Reverse scans keep the high end of each run. Pending writes are
-/// not in this map; the caller checks chunk type before it enqueues.
+/// Each overlapping interval costs one visit, whether or not it is Entropy.
+/// Entropy width is still at most `max_offsets` chunks. A packing tail is
+/// clipped to that chunk budget, and that clip does not set
+/// [`EntropyScan::interval_budget_spent`]: the caller resumes inside the run.
+/// Reverse scans keep the high end of each run. Pending writes are not in
+/// this map; the caller checks chunk type before it enqueues.
 fn entropy_scan_runs(
     storage_module: &StorageModule,
     range_start: u32,
     range_end: u32,
     reverse: bool,
     max_offsets: usize,
-) -> Vec<(u32, u32)> {
+) -> EntropyScan {
     if max_offsets == 0 || range_start > range_end {
-        return Vec::new();
+        return EntropyScan {
+            runs: Vec::new(),
+            visited_edge: None,
+            interval_budget_spent: false,
+        };
     }
     let intervals = storage_module.intervals().read().unwrap();
     let query = ii(
@@ -2294,15 +2384,34 @@ fn entropy_scan_runs(
         PartitionChunkOffset::from(range_end),
     );
     let mut left = max_offsets;
+    let mut intervals_seen = 0_usize;
     let mut runs = Vec::new();
+    let mut visited_edge = None;
+    let mut interval_budget_spent = false;
     let mut push = |start: u32, end: u32, chunk_type: &ChunkType| -> bool {
+        let clipped_start = start.max(range_start);
+        let clipped_end = end.min(range_end);
+        if clipped_start > clipped_end {
+            return false;
+        }
+        intervals_seen += 1;
+        visited_edge = Some(if reverse { clipped_start } else { clipped_end });
         if *chunk_type == ChunkType::Entropy
             && let Some(run) =
                 clip_entropy_run(start, end, range_start, range_end, reverse, &mut left)
         {
             runs.push(run);
         }
-        left == 0
+        // The chunk budget stopped inside an entropy interval. Leave the
+        // interval flag clear so the cursor stays on the returned prefix.
+        if left == 0 {
+            return true;
+        }
+        if intervals_seen >= max_offsets {
+            interval_budget_spent = true;
+            return true;
+        }
+        false
     };
     if reverse {
         for (interval, chunk_type) in intervals.overlapping(query).rev() {
@@ -2317,7 +2426,23 @@ fn entropy_scan_runs(
             }
         }
     }
-    runs
+    EntropyScan {
+        runs,
+        visited_edge,
+        interval_budget_spent,
+    }
+}
+
+/// Next cursor after an interval window. Forward steps past `edge`. Reverse
+/// steps below it. Either side wraps to the start of that direction.
+fn resume_scan_cursor(edge: u32, max_offset: u32, reverse: bool) -> u32 {
+    if reverse {
+        if edge == 0 { u32::MAX } else { edge - 1 }
+    } else if edge >= max_offset {
+        0
+    } else {
+        edge + 1
+    }
 }
 
 fn clip_entropy_run(
