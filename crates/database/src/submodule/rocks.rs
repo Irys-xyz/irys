@@ -1,35 +1,23 @@
 //! RocksDB submodule index.
 //!
-//! One plain database, one column family per table, HDD-oriented options.
-//! `update` holds a mutex for the whole closure and applies a `WriteBatch`
-//! only when the closure returns `Ok`. Reads inside that closure consult an
-//! overlay first, so the batch sees its own uncommitted puts and deletes.
-//! `view` takes a snapshot and does not take the write mutex.
+//! One database, one column family per table. `update` holds the write mutex
+//! and commits a `WriteBatch` only when the closure returns `Ok`. Reads in
+//! that closure see the overlay. `view` uses a snapshot and does not take
+//! the mutex.
 //!
-//! Gap scans walk tx-path intervals. A covered offset with no data-path row
-//! is indexed. RocksDB has no O(1) count once the overlay hides keys, so a
-//! heal scan reads the intervals that touch the window.
+//! Gap scans walk placement intervals. With an overlay, key counts are not
+//! O(1), so a heal scan reads the intervals that touch the window.
 //!
-//! Data-path and tx-path values stay in SST blocks. LZ4 compresses
-//! neighbouring proofs inside one block. The `blobs` preset still extracts
-//! values at or above [`BLOB_MIN_BYTES`] into blob files. A directory that
-//! already has blob files keeps reading them. A compaction that rewrites
-//! the SST stores those values inline, including the bottommost compaction
-//! a normal open schedules once no snapshot still needs the old sequence
-//! numbers. A trivial move does not rewrite the SST, so that blob file
-//! stays until a later compaction reads it. rust-rocksdb 0.24 has no
-//! `set_allow_fallocate` (the RocksDB default stays on). WAL recycle,
-//! `wal_bytes_per_sync`,
-//! `use_fsync`, and `max_total_wal_size` are the durability knobs this
-//! binding exposes. Every open keeps SST readers (`max_open_files=-1`,
-//! 16 opening threads). Legacy blob readers stay lazy.
-//!
-//! A production open shares one block cache, one write-buffer manager, and
-//! the process Env thread pools. Inline path blocks use that cache. There
-//! is no separate blob cache for new values. Legacy blob reads use the same
-//! cache until compaction drops the files. A bench preset can opt out and
-//! keep a private cache. `max_open_files` stays `-1`: a finite cap drops
-//! table readers and reloads the filter on the next read.
+//! Path values stay in SST blocks so LZ4 can share neighbouring proofs.
+//! The `blobs` preset extracts values at or above [`BLOB_MIN_BYTES`].
+//! Compaction inlines an old blob file. A trivial move does not.
+//! rust-rocksdb 0.24 cannot clear `allow_fallocate`. WAL recycle,
+//! `wal_bytes_per_sync`, `use_fsync`, and `max_total_wal_size` are the
+//! durability knobs this binding exposes. Every open keeps SST readers
+//! (`max_open_files=-1`): a finite cap drops table readers and reloads the
+//! filter. Production shares one block cache, one write-buffer manager, and
+//! the process Env pools. There is no separate blob cache for new values.
+//! A bench preset can keep a private cache.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
@@ -76,13 +64,8 @@ pub const BLOCK_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// Uncompressed size at or above which the `blobs` preset writes a path
 /// value to a blob file. Baseline stores that value in the SST.
 pub const BLOB_MIN_BYTES: u64 = 2048;
-/// Age cutoff for blob GC when new blob files are off.
-///
-/// 1.0 marks every existing blob file old, so a compaction that rewrites
-/// the SST stores each value inline. A trivial move does not read the
-/// value, so that file stays until a later compaction rewrites it.
-/// Bottommost compaction is one of those rewrites: a normal open runs it
-/// for a file whose sequence numbers no snapshot still needs.
+/// Blob GC cutoff when new blob files are off. 1.0 marks every existing
+/// blob file old, so a rewrite inlines it. A trivial move does not.
 const LEGACY_BLOB_GC_AGE_CUTOFF: f64 = 1.0;
 /// Per-database background-job cap. The process Env pools are separate.
 /// The bench can select another preset.
@@ -118,45 +101,26 @@ pub struct ColumnFileUsage {
 
 /// One RocksDB open. Production uses [`RocksTuning::baseline`].
 ///
-/// The bench names the other values. Each of those changes one field, so a
-/// sweep can attribute a difference to that field. Three presets change more
-/// than one field: `full-filters` (one shard and a 128 MiB cache),
-/// `fdatasync-wal-rotate` (`fdatasync` plus the WAL cap), and
-/// `fdatasync-wal-rotate-compact` (that rotate pair plus a 64-file compact).
-/// `share_resources` is not one of those fields. `cache-1g` and
-/// `full-filters` turn it off so the private cache size is the one that
-/// opens. `no-wal-recycle` turns WAL file reuse off (baseline reuses 4).
-/// `fdatasync-wal` keeps every other baseline field and selects `fdatasync`.
-/// The rotate presets cap the live WAL at [`WAL_ROTATE_BYTES`]. `all-blooms`
-/// puts the 10-bit bloom on every column family. Baseline puts it only on
-/// families whose point lookups miss. Options are fixed at open. A new block
-/// size or a switch between partitioned and full filters needs an empty
-/// directory for a fair read. An existing SST keeps the filter it was built
-/// with until a compaction rewrites it. Opening that directory with the other
-/// bloom scope is safe: a family with no filter policy skips a stored filter,
-/// and a family whose policy name matches uses it.
+/// Each other preset changes one field, except `full-filters`,
+/// `fdatasync-wal-rotate`, and `fdatasync-wal-rotate-compact`.
+/// `share_resources` selects the process cache and is not one of those
+/// fields. Options are fixed at open. An existing SST keeps its filter
+/// until compaction rewrites it. A family with no filter policy skips a
+/// stored filter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RocksTuning {
     pub name: &'static str,
     pub block_bytes: usize,
     pub block_cache_bytes: usize,
-    /// `2^bits` block-cache shards. `-1` lets RocksDB choose, and that choice
-    /// caps at 6 (64 shards). `0` is one shard.
-    ///
-    /// A filter block has to fit in one shard. The default 64 MiB cache is
-    /// 1 MiB per shard, so a full filter of tens of millions of keys is
-    /// inserted and dropped. `full-filters` uses one shard and 128 MiB so
-    /// that block can stay.
+    /// `2^bits` block-cache shards. `-1` caps at 64 shards. `0` is one shard.
+    /// A filter block must fit in one shard or RocksDB inserts it and drops it.
     pub cache_shard_bits: i32,
     /// `true` is LZ4 on SST blocks and, when blob files are on, on blob files.
     /// `false` stores both uncompressed.
     pub compress: bool,
-    /// Blob files for new data-path and tx-path values.
-    ///
-    /// `false` (baseline) stores those values in SST blocks. A family that
-    /// already has blob files still reads them, and compaction inlines them.
-    /// `true` (`blobs`) writes values at or above [`BLOB_MIN_BYTES`] to blob
-    /// files.
+    /// Blob files for new path values at or above [`BLOB_MIN_BYTES`].
+    /// `false` keeps them in the SST. An existing blob file is still read,
+    /// and compaction inlines it.
     pub blobs: bool,
     /// Direct I/O for flush and compaction. Reads stay buffered.
     pub direct_io: bool,
@@ -164,91 +128,42 @@ pub struct RocksTuning {
     pub target_file_bytes: u64,
     /// Universal compaction. `false` is leveled compaction.
     pub universal: bool,
-    /// Partitioned full filters and a two-level index. The top index and
-    /// filter stay pinned. `false` is one full filter per SST.
-    ///
-    /// Production open is `true`. A full filter for tens of millions of keys
-    /// is larger than one shard of the 64 MiB block cache. Once that SST
-    /// leaves level 0, every lookup reads the filter, checksums it, and
-    /// drops it.
+    /// Partitioned filters and a two-level index. `false` is one full filter
+    /// per SST, which does not fit in one shard of the 64 MiB cache.
     pub partition_filters: bool,
-    /// Retired WAL files to overwrite instead of allocating a new file.
+    /// Retired WAL files to overwrite. Baseline is 4. `0` allocates a new file.
     ///
-    /// The baseline (production open) is `4`: that many retired files are kept
-    /// and overwritten, so a later sync writes inside a file that already has
-    /// blocks. `0` (`no-wal-recycle`): each WAL switch creates a file, and each
-    /// sync of that growing file updates its size.
-    ///
-    /// RocksDB 10.4 keeps a non-zero count for `kPointInTimeRecovery` (this
-    /// open's default; the binding does not set a recovery mode) and for
-    /// `kSkipAnyCorruptedRecords`. Open sets the count back to 0 for
-    /// `kTolerateCorruptedTailRecords` and `kAbsoluteConsistency`. A write
-    /// with `disableWAL` is rejected while the count is non-zero. Production
-    /// writes keep the WAL. The converting open sets this count to 0 so its
-    /// bulk load can disable the WAL. `WAL_ttl_seconds` and
-    /// `WAL_size_limit_MB` are unset; either one would also force the count
-    /// to 0.
+    /// A `disableWAL` write is rejected while this count is non-zero.
+    /// The converting open sets it to 0. `WAL_ttl_seconds` or
+    /// `WAL_size_limit_MB` would also force it to 0. Recovery stays
+    /// `kPointInTimeRecovery`, which keeps a non-zero count.
     pub recycle_log_file_num: usize,
-    /// `true` syncs the WAL, the MANIFEST, SST files, and blob files with
-    /// `fsync`. `false` uses `fdatasync`.
-    ///
-    /// RocksDB treats the two calls as equally durable. The flag exists for
-    /// old filesystem bugs (fdatasync on ext4 before Linux 3.7). It is not a
-    /// separate mode for directory entries. A new file still syncs its
-    /// directory through `FsyncWithDirOptions`, and that path ignores this
-    /// flag.
-    ///
-    /// Baseline (production) is `true`. `fdatasync-wal` is `false`.
+    /// `true` uses `fsync` for the WAL, MANIFEST, SST, and blob files.
+    /// `false` uses `fdatasync`. RocksDB treats them as equally durable.
+    /// Directory sync uses `FsyncWithDirOptions` and ignores this flag.
+    /// Baseline is `true`.
     pub use_fsync: bool,
     /// Live WAL bytes that force a memtable switch and a flush.
-    ///
-    /// `0` (baseline) lets RocksDB pick
-    /// `4 * sum(write_buffer_size * max_write_buffer_number)`. That product
-    /// is about 4 GiB with these buffers, so a bench step never fills a log.
-    /// A non-zero value switches once the live logs pass it. RocksDB applies
-    /// the value only when the database has more than one column family.
-    /// This store has the default family plus six user families, including
-    /// `ChunkOffsetsByContentHash`.
-    ///
-    /// The switch flushes every column family that still references the
-    /// oldest log. Each non-empty family writes an L0 SST, and compaction
-    /// reads those files again. `recycle_log_file_num` can then reuse the
-    /// retired log. A reused file keeps its old size, so later syncs overwrite
-    /// bytes that are already allocated.
+    /// `0` lets RocksDB pick about 4 GiB, so a bench step never rotates.
+    /// RocksDB applies a non-zero cap only when there is more than one
+    /// column family. The switch flushes every family that still references
+    /// the oldest log.
     pub max_total_wal_size: u64,
-    /// Live SST files on one column family that start a whole-range compact.
-    ///
-    /// `0` (baseline) leaves the hook off. A positive value runs
-    /// `compact_range_cf` with `BottommostLevelCompaction::Force` on that
-    /// family so small files at the bottom level merge. The call runs on a
-    /// dedicated thread, off the write lock, and at most one compact is in
-    /// flight per database.
+    /// Live SST files that start one `compact_range` with bottommost force.
+    /// `0` leaves the hook off. The call runs off the write lock, one at a time.
     pub small_file_compact_threshold: usize,
-    /// `false` (baseline): 10-bit bloom only on families whose point lookups
-    /// can miss. `true` (`all-blooms`): the same bloom on every family.
-    ///
-    /// `ChunkOffsetsByContentHash` is not controlled by this flag. A lookup
-    /// seeks the 32-byte content hash. The offset suffix is not known, so a
-    /// whole-key bloom cannot answer it. That family always uses a fixed
-    /// 32-byte prefix extractor and a prefix bloom (`whole_key_filtering`
-    /// off), full filter, 10 bits per prefix. Partitioned filters stay on
-    /// in production so one filter block can be read without the whole SST
-    /// filter.
-    ///
-    /// Does not change `partition_filters`. An existing SST keeps its own
-    /// filter until compaction rewrites the file.
+    /// `true`: 10-bit bloom on every family. `false`: only families whose
+    /// point lookups can miss. `ChunkOffsetsByContentHash` always uses a
+    /// 32-byte prefix bloom. A whole-key bloom cannot answer that seek.
+    /// Does not change `partition_filters`.
     pub bloom_all_families: bool,
     /// Bloom on `ChunkMetaByOffset`. A proof write reads the stored row first,
     /// and a new offset misses. Off by default: a full-partition measurement
     /// did not change proof-write time. The `datapath-bloom` preset turns it on.
     pub data_path_bloom: bool,
-    /// Use the process-wide block cache, write-buffer manager, and Env pools.
-    ///
-    /// `false` builds a private cache of `block_cache_bytes` and does not
-    /// attach the write-buffer manager or a rate limiter. `cache_shard_bits`
-    /// applies to that private cache. The process cache uses shard bits `-1`.
-    /// `cache-1g`, `full-filters`, and [`Self::with_block_cache`] set `false`
-    /// so a bench can compare cache sizes. Preset diffs do not count this flag.
+    /// Process-wide cache, write buffer, and Env pools. `false` builds a
+    /// private cache of `block_cache_bytes` and skips the write-buffer manager.
+    /// Preset diffs do not count this flag.
     pub share_resources: bool,
 }
 
@@ -297,7 +212,6 @@ impl RocksTuning {
                 share_resources: false,
                 ..base
             },
-            // Blob files for new path values. Baseline stores them in the SST.
             Self {
                 name: "blobs",
                 blobs: true,
@@ -329,34 +243,25 @@ impl RocksTuning {
                 share_resources: false,
                 ..base
             },
-            // WAL file reuse off, for an A/B against the baseline's 4.
-            // Baseline keeps four retired files: RocksDB 10.4 does not scale
-            // the count with `max_write_buffer_number` (2 here) or the column
-            // family count, and one WAL covers every family. Recovery stays
-            // `kPointInTimeRecovery`, which keeps a non-zero count.
+            // RocksDB 10.4 does not scale this count with buffers or families.
             Self {
                 name: "no-wal-recycle",
                 recycle_log_file_num: 0,
                 ..base
             },
-            // `fdatasync` for the WAL, the MANIFEST, SST files, and blob files.
-            // Baseline stays on `fsync`. See `RocksTuning::use_fsync`.
             Self {
                 name: "fdatasync-wal",
                 use_fsync: false,
                 ..base
             },
-            // Same `fdatasync`, plus a 1 MiB live-WAL cap. A full log
-            // switches, the flush retires it, and the next log can reuse
-            // that file. See `RocksTuning::max_total_wal_size`.
+            // A full log switches, and the next log reuses that file.
             Self {
                 name: "fdatasync-wal-rotate",
                 use_fsync: false,
                 max_total_wal_size: WAL_ROTATE_BYTES,
                 ..base
             },
-            // Same 1 MiB cap with baseline `fsync`. A run can separate the
-            // sync call from the rotation.
+            // Same cap with baseline `fsync`, so a run can separate the two.
             Self {
                 name: "fsync-wal-rotate",
                 max_total_wal_size: WAL_ROTATE_BYTES,
@@ -373,8 +278,6 @@ impl RocksTuning {
                 small_file_compact_threshold: SMALL_FILE_COMPACT_THRESHOLD,
                 ..base
             },
-            // Same partitioned filter as baseline, on every column family.
-            // Baseline leaves offset families that never miss without one.
             Self {
                 name: "all-blooms",
                 bloom_all_families: true,
@@ -559,22 +462,13 @@ impl RocksResourceLimits {
     }
 }
 
-/// One block cache and one write-buffer manager for every submodule index
-/// that opts in. The Env is the process default. Its flush and compaction
-/// pools are raised to these limits and are never reduced.
+/// Shared block cache, write-buffer manager, and process Env. Pools only grow.
 ///
-/// The write-buffer manager charges memtable bytes to the block cache and
-/// does not stall writers. A stall waits for every writer that shares the
-/// manager. The idle arena is about 1 MiB per column family and a flush
-/// replaces it with another arena, so a stall cannot reclaim that floor.
-/// Forty databases and nine families are about 360 MiB. That fits in the
-/// 512 MiB budget. Above that floor, raise both this budget and the cache.
-///
-/// A path value sits in the memtable until flush whether or not blob files
-/// are enabled, so this floor does not change when values stay inline.
-/// After flush those bytes are SST blocks in the block cache, not a second
-/// blob cache. Legacy blob reads use the same cache until compaction
-/// inlines them.
+/// The manager charges memtables to the cache and does not stall writers: a
+/// stall waits for every writer that shares it. Each family keeps about 1 MiB
+/// of arena that a flush replaces, so a stall cannot reclaim that floor.
+/// Forty databases and nine families are about 360 MiB of the 512 MiB budget.
+/// Path bytes sit in that arena until flush whether blob files are on.
 pub struct RocksResources {
     limits: RocksResourceLimits,
     cache: rocksdb::Cache,
@@ -759,12 +653,9 @@ impl Cf {
         matches!(self, Self::OffsetMeta)
     }
 
-    /// Point lookups on this family can miss, so a bloom can reject a block.
-    ///
-    /// `bloom_all_families` forces the filter on the other families too.
+    /// A bloom can reject a miss. `bloom_all_families` forces one elsewhere.
     /// [`Self::Content`] always has a prefix bloom. Data-root reads are
-    /// prefix seeks. A whole-key bloom cannot answer them. See
-    /// [`RocksTuning::bloom_all_families`].
+    /// prefix seeks, and a whole-key bloom cannot answer them.
     fn uses_bloom(self, tuning: &RocksTuning) -> bool {
         matches!(self, Self::Content)
             || tuning.bloom_all_families
@@ -774,9 +665,8 @@ impl Cf {
 
 /// Count-triggered whole-range compact. One thread per database.
 ///
-/// The thread waits on [`SMALL_FILE_COMPACT_POLL`]. `compact_range_cf` then
-/// runs on RocksDB's background pool and this thread blocks until it
-/// finishes. The write mutex stays free. `threshold == 0` skips the thread.
+/// `compact_range_cf` runs on RocksDB's pool. This thread waits. The write
+/// mutex stays free. `threshold == 0` skips the thread.
 struct SmallFileCompactor {
     state: Arc<CompactState>,
     join: Mutex<Option<JoinHandle<()>>>,
@@ -2906,32 +2796,15 @@ fn open_db(
     // binary does not know is not a reason for RocksDB to refuse.
     db_opts.create_if_missing(create_missing);
     db_opts.create_missing_column_families(create_missing);
-    // Per-database cap so one index cannot take every shared pool thread.
-    // The pools themselves are process-wide. This value stays at or below
-    // those pools for the baseline (2 jobs asks for 1 flush and 1
-    // compaction). A higher `background_jobs` still grows the pool:
-    // RocksDB only increases it.
+    // Per-database cap on the process pools. RocksDB only raises a pool.
     db_opts.set_max_background_jobs(tuning.background_jobs);
     db_opts.set_bytes_per_sync(1024 * 1024);
     db_opts.set_wal_bytes_per_sync(1024 * 1024);
-    // Baseline (production) is 4; `no-wal-recycle` is 0.
-    // Point-in-time recovery, the default, keeps a non-zero count.
-    // See `RocksTuning::recycle_log_file_num`.
     db_opts.set_recycle_log_file_num(tuning.recycle_log_file_num);
-    // Baseline (production) is fsync. A bench preset can select fdatasync.
-    // The flag also covers the MANIFEST, SST files, and blob files.
-    // See `RocksTuning::use_fsync`.
     db_opts.set_use_fsync(tuning.use_fsync);
-    // `0` keeps the RocksDB dynamic cap. A rotate preset sets 1 MiB.
-    // See `RocksTuning::max_total_wal_size`.
     db_opts.set_max_total_wal_size(tuning.max_total_wal_size);
-    // A 512 cap evicts SST readers. The next Get then reads the footer,
-    // index, and filter. -1 keeps every table open. Legacy blob readers
-    // stay lazy. A full submodule is a few dozen SST files. A directory
-    // that still has blob files adds those, and they go away as compaction
-    // inlines them.
-    // Forty of those stay under a normal nofile limit. A finite cap brings
-    // the table-reader reload cliff back, so this stays -1.
+    // -1 keeps every SST reader. A finite cap drops them, and the next Get
+    // reloads the footer, index, and filter.
     db_opts.set_max_open_files(-1);
     db_opts.set_max_file_opening_threads(16);
     if preload_tables {
@@ -3032,30 +2905,16 @@ fn block_cache(tuning: &RocksTuning) -> rocksdb::Cache {
 fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Options {
     let mut table = BlockBasedOptions::default();
     table.set_block_size(tuning.block_bytes);
-    // Full filter, 10 bits per key. `false` is not a block-based filter.
-    // Only families whose point Gets can miss pay for one. A hit still
-    // reads the value, and an iterator seek never consults a filter, so
-    // the filter is a second I/O and a cache resident on those families.
-    //
-    // Offset, interval, pending, and data-root reads seek a key the caller
-    // already has. A bloom there is a second read and a pinned L0 filter.
-    // Content is the miss: the lookup knows the hash and not the offset.
-    // Partitioned filters are the production shape. See
-    // `RocksTuning::partition_filters`. `all-blooms` restores the filter
-    // on the other families.
+    // Full filter, 10 bits. `false` is not a block-based filter.
+    // Only miss families pay: a seek of a known key never consults a bloom.
     let bloom = cf.uses_bloom(tuning);
     if bloom {
         table.set_bloom_filter(10.0, false);
     }
-    // A content-hash lookup seeks the 32-byte prefix. The offset suffix is
-    // not known. A whole-key bloom stores hash‖offset, so it cannot answer
-    // that seek. This family uses a fixed 32-byte prefix extractor and a
-    // prefix bloom (`whole_key_filtering` off). The filter is a full filter,
-    // 10 bits per prefix, the same density as the other miss families.
-    // Partitioned filters stay on in production so one filter block can be
-    // read without the whole SST filter. An iterator that must see every
-    // prefix sets `total_order_seek`. A prefix seek leaves that off and sets
-    // `prefix_same_as_start`, which is what consults this bloom.
+    // The seek is the 32-byte prefix. A whole-key bloom stores hash‖offset
+    // and cannot answer it, so `whole_key_filtering` is off. A full scan
+    // sets `total_order_seek`. A prefix seek sets `prefix_same_as_start`,
+    // which is what consults this bloom.
     if matches!(cf, Cf::Content) {
         table.set_whole_key_filtering(false);
     }
@@ -3110,11 +2969,7 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
             opts.set_blob_compression_type(compression);
             opts.set_enable_blob_gc(true);
         } else {
-            // `enable_blob_files` stays off, so a flushed value is an SST
-            // record. GC still runs: a compaction that rewrites an old blob
-            // index stores the bytes inline. Cutoff 1.0 selects every blob
-            // file. A trivial move does not rewrite, so that file stays
-            // until a later compaction reads it.
+            // New values stay in the SST. GC still inlines an old blob file.
             opts.set_enable_blob_files(false);
             opts.set_enable_blob_gc(true);
             opts.set_blob_gc_age_cutoff(LEGACY_BLOB_GC_AGE_CUTOFF);
@@ -3122,9 +2977,8 @@ fn column_options(cache: &rocksdb::Cache, cf: Cf, tuning: &RocksTuning) -> Optio
     }
     #[cfg(test)]
     if OPEN_DISABLE_AUTO_COMPACTION.with(std::cell::Cell::get) {
-        // A normal open schedules bottommost compaction, which rewrites a
-        // blob SST and inlines it. Tests that must read the blob file set
-        // this before open. Manual compaction still runs.
+        // A normal open compacts and inlines a blob SST. Tests that must
+        // read the blob file set this first. Manual compaction still runs.
         opts.set_disable_auto_compactions(true);
     }
     opts
