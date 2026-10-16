@@ -2446,18 +2446,46 @@ fn finish_stats(mut stats: ConvertStats, started: Instant, source_v1: bool) -> C
 
 #[derive(Default)]
 struct FrontierSkips {
-    ranges: Vec<(u32, u32)>,
+    ranges: std::cell::RefCell<Vec<(u32, u32)>>,
+    prepared: std::cell::Cell<bool>,
 }
 
 impl FrontierSkips {
     fn covers(&self, offset: u32) -> bool {
-        self.ranges
-            .iter()
-            .any(|&(start, end)| start <= offset && offset <= end)
+        self.prepare();
+        let ranges = self.ranges.borrow();
+        let index = ranges.partition_point(|&(start, _)| start <= offset);
+        let Some(&(start, end)) = index.checked_sub(1).and_then(|at| ranges.get(at)) else {
+            return false;
+        };
+        start <= offset && offset <= end
     }
 
     fn push(&mut self, start: PartitionChunkOffset, end: PartitionChunkOffset) {
-        self.ranges.push((start.0, end.0));
+        self.ranges.get_mut().push((start.0, end.0));
+        self.prepared.set(false);
+    }
+
+    /// Sort and merge so one binary search answers `covers`.
+    fn prepare(&self) {
+        if self.prepared.get() {
+            return;
+        }
+        let mut ranges = self.ranges.borrow_mut();
+        ranges.sort_unstable_by_key(|range| (range.0, range.1));
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+        for &(start, end) in ranges.iter() {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+                continue;
+            }
+            merged.push((start, end));
+        }
+        *ranges = merged;
+        drop(ranges);
+        self.prepared.set(true);
     }
 }
 
@@ -3151,6 +3179,42 @@ fn v1_data_path_reads() -> usize {
 
 #[cfg(test)]
 thread_local! {
+    static V1_HASH_POINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static V1_HASH_POINT_COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn reset_v1_hash_point_reads() {
+    V1_HASH_POINT_READS.with(|cell| cell.set(0));
+}
+
+/// Counts `v1_hashes_at` only inside the extra-row scan. Placement-start
+/// checks also call that helper and are not the copied-offset point reads.
+#[cfg(test)]
+struct CountV1HashPointReads;
+
+#[cfg(test)]
+impl CountV1HashPointReads {
+    fn enter() -> Self {
+        V1_HASH_POINT_COUNTING.with(|cell| cell.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for CountV1HashPointReads {
+    fn drop(&mut self) {
+        V1_HASH_POINT_COUNTING.with(|cell| cell.set(false));
+    }
+}
+
+#[cfg(test)]
+fn v1_hash_point_reads() -> usize {
+    V1_HASH_POINT_READS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
     static V1_RANGE_COPY_BATCHES: std::cell::RefCell<Vec<usize>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -3408,7 +3472,33 @@ fn v1_hashes_at(
     env: &DatabaseEnv,
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkPathHashes>> {
+    #[cfg(test)]
+    if V1_HASH_POINT_COUNTING.with(std::cell::Cell::get) {
+        V1_HASH_POINT_READS.with(|cell| cell.set(cell.get().saturating_add(1)));
+    }
     read_v1_row::<ChunkPathHashesByOffset>(env, offset)
+}
+
+/// Hash rows for covered offsets that `compare_v1_paths` did not already read.
+/// One view for the batch. This is not a point read.
+fn v1_uncompared_hash_rows(
+    env: &DatabaseEnv,
+    keys: &[PartitionChunkOffset],
+) -> eyre::Result<Vec<(PartitionChunkOffset, Option<ChunkPathHashes>)>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    note_verify_view();
+    let rows = env.view_eyre(|tx| {
+        keys.iter()
+            .map(|key| match tx.get::<ChunkPathHashesByOffset>(*key) {
+                Ok(row) => Ok(row),
+                Err(err) if table_missing(&err) => Ok(None),
+                Err(err) => Err(err.into()),
+            })
+            .collect::<eyre::Result<Vec<_>>>()
+    })?;
+    Ok(keys.iter().copied().zip(rows).collect())
 }
 
 fn v1_interval_starts_at(env: &DatabaseEnv, offset: PartitionChunkOffset) -> eyre::Result<bool> {
@@ -3470,6 +3560,7 @@ fn verify_mdbx_v1_against_rocks(
     let mut cache = TxPathBlockCache::new();
     let mut written = FrontierSkips::default();
     let mut frontier = FrontierSkips::default();
+    let mut accepted = BTreeSet::new();
     let orphans = walk_v1_intervals(env, limits, |run| {
         compare_v1_interval(
             env,
@@ -3481,13 +3572,14 @@ fn verify_mdbx_v1_against_rocks(
             limits,
             &mut written,
             &mut frontier,
+            &mut accepted,
             &mut report,
         )
     })?;
     report.skipped_orphans = report.skipped_orphans.saturating_add(orphans);
     note_rocks_placements_absent_from_v1(env, v3, &mut report)?;
     compare_v1_pending(env, v3, &written, &frontier, &mut report)?;
-    note_extra_rocks_offset_rows(env, v3, &written, &frontier, &mut report)?;
+    note_extra_rocks_offset_rows(env, v3, &written, &frontier, &accepted, &mut report)?;
     verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
     Ok(report)
@@ -3503,6 +3595,7 @@ fn compare_v1_interval(
     limits: Limits,
     written: &mut FrontierSkips,
     frontier: &mut FrontierSkips,
+    accepted: &mut BTreeSet<u32>,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     let start = PartitionChunkOffset(run.start);
@@ -3658,7 +3751,7 @@ fn compare_v1_interval(
     if let Some(path_end) = written_end
         && !stop_paths
     {
-        compare_v1_paths(env, v3, start, path_end, limits, report)?;
+        compare_v1_paths(env, v3, start, path_end, limits, accepted, report)?;
     }
     Ok(())
 }
@@ -3692,6 +3785,7 @@ fn compare_v1_paths(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
     limits: Limits,
+    accepted: &mut BTreeSet<u32>,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     walk_v1_path_range(env, start, end, limits, |rows| {
@@ -3710,6 +3804,7 @@ fn compare_v1_paths(
             Ok((rights, metas))
         })?;
         for (index, (offset, hash)) in rows.iter().enumerate() {
+            accepted.insert(offset.0);
             let path = &paths[index];
             report.offsets_checked = report.offsets_checked.saturating_add(1);
             if rights[index].as_ref() != Some(path) {
@@ -3760,20 +3855,36 @@ fn note_extra_rocks_offset_rows(
     v3: &RocksSubmoduleStore,
     written: &FrontierSkips,
     frontier: &FrontierSkips,
+    accepted: &BTreeSet<u32>,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
+    #[cfg(test)]
+    let _count_point_reads = CountV1HashPointReads::enter();
     let mut after = None;
     loop {
         let keys = v3.read_offset_row_keys(after, VERIFY_KEYS)?;
         if keys.is_empty() {
             break;
         }
+        // Compared rows already proved the source hash. Read the rest once.
+        let pending: Vec<PartitionChunkOffset> = keys
+            .iter()
+            .copied()
+            .filter(|key| written.covers(key.0) && !accepted.contains(&key.0))
+            .collect();
+        let pending_rows = v1_uncompared_hash_rows(env, &pending)?;
         for key in &keys {
             // A placement covers every offset in the tx, including one whose
             // v1 hash row has no data path. That offset is not a compared
             // path. A rocks proof or checksum there is extra.
             if written.covers(key.0) {
-                let has_data_path = v1_hashes_at(env, *key)?
+                if accepted.contains(&key.0) {
+                    continue;
+                }
+                let has_data_path = pending_rows
+                    .iter()
+                    .find(|(offset, _)| *offset == *key)
+                    .and_then(|(_, row)| row.as_ref())
                     .and_then(|row| row.data_path_hash)
                     .is_some();
                 if has_data_path {
@@ -4096,9 +4207,9 @@ mod tests {
     };
     use super::{
         ConvertOptions, ConvertStats, convert_mdbx_to_rocks, convert_rocks_to_mdbx,
-        reset_v1_data_path_reads, reset_v1_range_copy_batches, reset_verify_views,
-        v1_data_path_reads, v1_range_copy_batches, verify_mdbx_and_rocks, verify_rocks_records,
-        verify_views,
+        reset_v1_data_path_reads, reset_v1_hash_point_reads, reset_v1_range_copy_batches,
+        reset_verify_views, v1_data_path_reads, v1_hash_point_reads, v1_range_copy_batches,
+        verify_mdbx_and_rocks, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -5819,6 +5930,46 @@ mod tests {
         Ok(())
     }
 
+    /// Offsets whose hash row was already compared do not need another read.
+    #[test]
+    fn verify_v1_does_not_point_read_accepted_hash_rows() -> eyre::Result<()> {
+        const N: u64 = 3;
+        let root = temp("convert-verify-v1-point-reads");
+        let consensus = write_v1_one_tx_partition(root.path(), N)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        reset_v1_hash_point_reads();
+        reset_verify_views();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(
+            v1_hash_point_reads(),
+            0,
+            "accepted hash rows are already compared"
+        );
+        assert_eq!(verify_views(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_v1_skip_set_covers_out_of_order_ranges() {
+        let mut skips = super::FrontierSkips::default();
+        skips.push(PartitionChunkOffset(10), PartitionChunkOffset(12));
+        skips.push(PartitionChunkOffset(0), PartitionChunkOffset(8));
+        skips.push(PartitionChunkOffset(4), PartitionChunkOffset(6));
+        assert!(skips.covers(0));
+        assert!(skips.covers(8));
+        assert!(!skips.covers(9));
+        assert!(skips.covers(11));
+        assert!(!skips.covers(13));
+        skips.push(PartitionChunkOffset(9), PartitionChunkOffset(9));
+        assert!(skips.covers(9));
+    }
+
     /// One-chunk v1 placements, one tx each, in a single block.
     fn write_v1_one_chunk_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
         write_v1_one_chunk_partition_with(root, n, 4)
@@ -6369,8 +6520,10 @@ mod tests {
         options.chunks_per_partition = N;
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         assert_eq!(stats.data_paths, N - 1, "{stats}");
+        reset_v1_hash_point_reads();
         let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!clean.has_mismatch(), "{clean}");
+        assert_eq!(v1_hash_point_reads(), 0, "{clean}");
         assert_eq!(clean.index_audit_findings, 0, "{clean}");
 
         {
