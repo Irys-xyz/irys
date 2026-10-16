@@ -15951,8 +15951,9 @@ mod tests {
     }
 
     /// Entropy repair commits, then the process dies before the completion
-    /// rewrite. Period 0 closes that window before `sync` returns, so the
-    /// test stops at the interval commit. The reloaded label is not `Data`.
+    /// rewrite. The file stays `Interrupted`. Open loads that as
+    /// `Uninitialized` and drops the placement. Period 0 closes the window
+    /// before `sync` returns, so the test stops at the interval commit.
     #[rstest]
     #[case::period_0(0_u64)]
     #[case::period_30(30_u64)]
@@ -15976,7 +15977,21 @@ mod tests {
         drop(storage);
 
         let reopened = reopen_crc_module(tmp.path(), &config)?;
+        assert_eq!(
+            reopened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "open did not convert Interrupted"
+        );
+        assert_eq!(
+            file_label(&reopened, 0)?,
+            Some(ChunkType::Interrupted),
+            "the completion rewrite ran before the crash"
+        );
         assert_not_served_as_data(&reopened, offset)?;
+        assert!(
+            !reopened.is_data_root_index_ready_at(offset),
+            "open kept the placement"
+        );
         drop(reopened);
         drop(tmp);
         Ok(())
