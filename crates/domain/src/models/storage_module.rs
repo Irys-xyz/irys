@@ -13891,7 +13891,7 @@ mod tests {
 
     fn wait_for_pending_drain(storage_module: &StorageModule) {
         wait_until_drained(
-            &storage_module,
+            storage_module,
             Duration::from_secs(2),
             "packed chunks stayed pending",
         );
