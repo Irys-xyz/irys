@@ -27,9 +27,12 @@
 # is renamed into loadtest/state-<name>/ before the next run. Nothing is
 # deleted. An existing state directory is an error.
 #
-# The loadtest path and the mount disk are checked before that rename and
-# before max_sectors_kb is written. A path without a loadtest component, or a
-# mount whose disk is not --device, leaves the index files and the queue alone.
+# The loadtest path, the mount disk, pm2, and the free-space floor are checked
+# before that rename and before max_sectors_kb is written. The floor is
+# MIN_FREE_GIB (default 500), the same value run.sh uses. A refusal leaves
+# the index files and the queue alone. If run.sh still refuses after the
+# rename, those files move back and that state directory is removed. A state
+# directory this run did not create stays where it is.
 #
 # max_sectors_kb is restored on EXIT, INT, and TERM. The current run and the
 # tracer are stopped before that restore. A foreground wait would defer the
@@ -302,6 +305,8 @@ done_written=0
 run_pid=
 trace_pid=
 pause_pid=
+# 1 only after this loop created state-<name>. A pre-existing state dir is not restored.
+stashed_now=0
 
 write_queue() {
     local key=$1
@@ -381,6 +386,7 @@ stash() {
     local dest=$loadtest/state-$name
     local any=0
     local item
+    stashed_now=0
     for item in "${state_names[@]}"; do
         if [ -e "$loadtest/$item" ]; then
             any=1
@@ -395,6 +401,8 @@ stash() {
         return 1
     fi
     mkdir "$dest" || return 1
+    # From here this run owns the directory. A later failure moves the files back.
+    stashed_now=1
     for item in "${state_names[@]}"; do
         if [ -e "$loadtest/$item" ]; then
             mv "$loadtest/$item" "$dest/" || return 1
@@ -402,10 +410,40 @@ stash() {
     done
 }
 
+# Move state-<name> back to the module root and remove the directory.
+# A file that is in both places is left for the operator. An empty directory
+# is removed so the next stash is not blocked by it.
+unstash() {
+    local name=$1
+    local dest=$loadtest/state-$name
+    local item
+    if [ ! -e "$dest" ]; then
+        return 0
+    fi
+    for item in "${state_names[@]}"; do
+        if [ -e "$dest/$item" ]; then
+            if [ -e "$loadtest/$item" ]; then
+                echo "cannot restore $item: $loadtest/$item already exists" >&2
+                return 1
+            fi
+            mv "$dest/$item" "$loadtest/" || return 1
+        fi
+    done
+    if [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+        echo "state dir not empty after restore: $dest" >&2
+        return 1
+    fi
+    rmdir "$dest" || return 1
+}
+
 require_loadtest "loadtest" "$loadtest"
 require_loadtest "recall-file" "$recall_file"
 require_loadtest "write-file" "$write_file"
 require_mount_device "$(readlink -f "$loadtest")" "$device"
+# Same guards run.sh applies before it will start the bench. Checked here so a
+# refusal does not rename the index first. run.sh checks them again.
+refuse_if_irys_node_online
+require_free_bytes "$loadtest" "${MIN_FREE_GIB:-500}"
 
 if [ -n "$max_sectors_kb" ]; then
     current=$(cat "$queue/max_sectors_kb")
@@ -494,9 +532,15 @@ run_one() {
 prev=$prior_name
 for i in "${!run_names[@]}"; do
     if ! stash "$prev"; then
+        if [ "$stashed_now" = 1 ]; then
+            unstash "$prev" || true
+        fi
         fail "stash $prev failed"
     fi
     if ! run_one "${run_names[$i]}" "${run_args[$i]}"; then
+        if [ "$stashed_now" = 1 ]; then
+            unstash "$prev" || true
+        fi
         fail "run ${run_names[$i]} failed"
     fi
     prev=${run_names[$i]}

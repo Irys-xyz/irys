@@ -1791,6 +1791,20 @@ test_teardown_does_not_stop_the_sampler_when_the_bench_pid_is_wrong() {
     rm -rf "$root"
 }
 
+low_df() {
+    local root=$1
+    mkdir -p "$root/bin"
+    cat >"$root/bin/df" <<'EOF'
+#!/bin/bash
+if [ "$1" = "-B1" ]; then
+    printf 'Avail\n1024\n'
+    exit 0
+fi
+exec /usr/bin/df "$@"
+EOF
+    chmod +x "$root/bin/df"
+}
+
 test_run_refuses_a_negative_min_free_gib() {
     local name=run-min-free-negative root err dev mnt
     root=$(tmpdir)
@@ -1851,6 +1865,139 @@ test_run_refuses_a_negative_min_free_gib_from_the_environment() {
         bad "$name" "bench ran"
     elif ! grep -q "min free GiB" "$err"; then
         bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_does_not_stash_when_free_space_is_below_the_floor() {
+    local name=ladder-free-floor root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    low_df "$root"
+    if PATH="$root/bin:$PATH" with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --max-sectors-kb 64 --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! grep -q "below" "$err"; then
+        bad "$name" "stderr did not refuse free space: $(cat "$err")"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index state was moved"
+    elif ! grep -q '^111$' "$sys/block/$dev/queue/max_sectors_kb"; then
+        bad "$name" "queue value changed: $(cat "$sys/block/$dev/queue/max_sectors_kb")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_restores_state_when_run_refuses_after_stash() {
+    local name=ladder-restore-after-refuse root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    if [ "$mnt" = "/workspaces" ]; then
+        bad "$name" "loadtest mount is /workspaces; this case needs two mounts"
+        rm -rf "$root"
+        return
+    fi
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount /workspaces --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! grep -q "not the loadtest mount" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index state was not restored"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_stashes_before_a_run_that_starts() {
+    local name=ladder-stash-on-success root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if ! MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh refused a run: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif [ ! -f "$module/state-prior/db" ]; then
+        bad "$name" "prior index was not stashed"
+    elif [ -e "$module/db" ]; then
+        bad "$name" "db stayed in the module root"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "stashed db bytes changed"
+    elif [ ! -f "$module/chunks.dat" ]; then
+        bad "$name" "chunks.dat was moved"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_does_not_restore_a_state_dir_it_did_not_create() {
+    local name=ladder-keep-existing-state root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$module/state-prior"
+    printf 'OLD\n' >"$module/state-prior/db"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! grep -q "already exists" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/db"; then
+        bad "$name" "live db changed: $(cat "$module/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'OLD\n') "$module/state-prior/db"; then
+        bad "$name" "existing state dir changed: $(cat "$module/state-prior/db" 2>/dev/null)"
     else
         ok "$name"
     fi

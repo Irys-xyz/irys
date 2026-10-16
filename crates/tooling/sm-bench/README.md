@@ -98,7 +98,7 @@ setsid nohup crates/tooling/sm-bench/scripts/ladder.sh \
     > /home/ubuntu/loadtest/ladder.log 2>&1 < /dev/null &
 ```
 
-The script writes `<out_root>/ladder.done` when it exits, including after a failure. Before each run it renames `db`, `rocks`, `intervals.json`, `packing_params.toml`, and `bench-prepop.json` into `loadtest/state-<name>/`. An existing destination is an error. Nothing is deleted. The last run's state stays in `loadtest/`. `prior_name` (default `prior`) is the directory name for state that is already there at the start.
+The script writes `<out_root>/ladder.done` when it exits, including after a failure. Before each run it renames `db`, `rocks`, `intervals.json`, `packing_params.toml`, and `bench-prepop.json` into `loadtest/state-<name>/`. An existing destination is an error. Nothing is deleted. The last run's state stays in `loadtest/`. `prior_name` (default `prior`) is the directory name for state that is already there at the start. The loadtest path, the mount disk, pm2, and the free-space floor are checked before that rename and before `max_sectors_kb` is written. If `run.sh` still refuses after the rename, the files move back and that state directory is removed. A state directory this run did not create stays.
 
 `run.sh` exits 0 when the bench exits non-zero, so the ladder continues after a scored failure. A guard failure exits 1 and stops the ladder. Guards: the pm2 app `Irys Node` is online, `pm2 jlist` cannot be read, free space is below the floor, or a path has no `loadtest` component. A missing `pm2` binary is allowed.
 

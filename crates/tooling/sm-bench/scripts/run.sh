@@ -137,39 +137,7 @@ require_loadtest "loadtest" "$loadtest"
 require_loadtest "recall-file" "$recall_file"
 require_loadtest "write-file" "$write_file"
 
-if command -v pm2 >/dev/null 2>&1; then
-    jlist=$(pm2 jlist 2>/dev/null || true)
-    pm_status=0
-    printf '%s' "$jlist" | python3 -c '
-import json, sys
-raw = sys.stdin.read().strip()
-if not raw:
-    sys.exit(2)
-try:
-    apps = json.loads(raw)
-except json.JSONDecodeError:
-    sys.exit(2)
-if not isinstance(apps, list):
-    sys.exit(2)
-online = False
-for app in apps:
-    if not isinstance(app, dict):
-        continue
-    env = app.get("pm2_env") or {}
-    if app.get("name") == "Irys Node" and env.get("status") == "online":
-        online = True
-        break
-sys.exit(0 if online else 1)
-' || pm_status=$?
-    if [ "$pm_status" -eq 0 ]; then
-        echo "Irys Node is online; refusing" >&2
-        exit 1
-    fi
-    if [ "$pm_status" -ne 1 ]; then
-        echo "pm2 jlist was not readable; refusing" >&2
-        exit 1
-    fi
-fi
+refuse_if_irys_node_online
 
 queue=/sys/block/$device/queue
 if [ ! -d "$queue" ]; then
