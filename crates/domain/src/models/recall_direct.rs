@@ -1,23 +1,13 @@
 //! Mining-recall reads through an `O_DIRECT` descriptor.
 //!
-//! A recall range is read once per step. A buffered `pread` of that range
-//! puts the pages into the cache, and nothing else reads them again. Those
-//! pages evict file data that is reused, including RocksDB SST pages.
+//! A one-shot buffered `pread` fills the page cache and evicts reused file
+//! data, including RocksDB SST pages. Serving, the entropy sweep, and packing
+//! validation stay on the buffered descriptor.
 //!
-//! The second descriptor is read-only and is used only by mining recall.
-//! Serving, the entropy sweep, and packing validation stay on the buffered
-//! descriptor.
-//!
-//! A buffered write that has not been `fdatasync`'d can still have dirty
-//! pages for the range. Linux writes that range back before the direct read
-//! (XFS and ext4 iomap), so the read returns the bytes last written, not the
-//! bytes last synced. The caller overlays `pending.chunks` after the read.
-//! Those bytes are newer than the file. `written_ahead` is not in that
-//! overlay: the chunks were `pwrite`n and may still be dirty, and this read
-//! is what returns them.
-//!
-//! The checksum check uses the bytes returned here. It does not read the
-//! page cache.
+//! Linux writes dirty pages back before the direct read, so the bytes are the
+//! last `pwrite`, not the last `fdatasync`. The caller overlays `pending.chunks`
+//! after the read. `written_ahead` is left to this read. The checksum uses
+//! these bytes, not the page cache.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind};
@@ -176,23 +166,19 @@ pub(super) fn read_recall_piece(
     nbytes: usize,
 ) -> io::Result<RecallBytes> {
     if !direct_requested {
-        return read_buffered(buffered, offset, nbytes)
-            .map(|bytes| RecallBytes::exact(bytes, MODE_BUFFERED));
+        return recall_from_buffered(buffered, offset, nbytes, MODE_BUFFERED);
     }
     let Some(direct) = direct else {
-        return read_buffered(buffered, offset, nbytes)
-            .map(|bytes| RecallBytes::exact(bytes, MODE_FALLBACK));
+        return recall_from_buffered(buffered, offset, nbytes, MODE_FALLBACK);
     };
     if !range_is_direct_aligned(offset, nbytes) {
-        return read_buffered(buffered, offset, nbytes)
-            .map(|bytes| RecallBytes::exact(bytes, MODE_FALLBACK));
+        return recall_from_buffered(buffered, offset, nbytes, MODE_FALLBACK);
     }
     match read_direct(direct, offset, nbytes) {
         Ok(bytes) => Ok(bytes),
         Err(DirectReadError::Rejected(error)) => {
             warn_direct_read_rejected(offset, &error);
-            read_buffered(buffered, offset, nbytes)
-                .map(|bytes| RecallBytes::exact(bytes, MODE_FALLBACK))
+            recall_from_buffered(buffered, offset, nbytes, MODE_FALLBACK)
         }
         Err(DirectReadError::Io(error)) => Err(error),
     }
@@ -204,6 +190,15 @@ pub(super) fn range_is_direct_aligned(offset: u64, len: usize) -> bool {
     };
     let align = RECALL_DIRECT_ALIGN as u64;
     len > 0 && len.is_multiple_of(align) && offset.is_multiple_of(align)
+}
+
+fn recall_from_buffered(
+    file: &File,
+    offset: u64,
+    nbytes: usize,
+    mode: &'static str,
+) -> io::Result<RecallBytes> {
+    read_buffered(file, offset, nbytes).map(|bytes| RecallBytes::exact(bytes, mode))
 }
 
 fn read_buffered(file: &File, offset: u64, nbytes: usize) -> io::Result<Vec<u8>> {
