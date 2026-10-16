@@ -1,20 +1,17 @@
-//! One thread per storage module. Callers enqueue. This thread locks `chunks.dat`.
+//! One thread per storage module locks `chunks.dat`. Order is mining recall,
+//! then a ready packed write, then an entropy read. A recall does not cancel
+//! a `pwrite` already in the kernel, and this thread submits no new write
+//! while `recall_waiters` is set.
 //!
-//! Order is mining recall, then a ready packed write, then an entropy read.
-//! A recall `pread` does not cancel a `pwrite` already in the kernel. This
-//! thread submits no new write while `recall_waiters` is set.
-//!
-//! Presence rows and packed-byte checksums are written only after this gap's
-//! `chunks.dat` fdatasync. `min_durable_interval_ms` can defer that pair.
-//! `0` does not. Force, shutdown, drop, pending bytes over the headroom line,
-//! and the pending-byte ceiling do not defer it. Recall does not wait on a
-//! deferred pair. `intervals.json` gets an `Interrupted` mark before the
-//! `pwrite`s. A completion is rewritten with the next write-ahead, on the
-//! persist interval, or on shutdown.
+//! Presence rows and packed checksums are written only after this gap's
+//! `fdatasync`. `min_durable_interval_ms` can defer that pair. `0`, force,
+//! shutdown, drop, and the pending-byte headroom or ceiling do not. Recall
+//! does not wait on a deferred pair. `intervals.json` gets an `Interrupted`
+//! mark before the `pwrite`s. A completion is rewritten with the next
+//! write-ahead, on the persist interval, or on shutdown.
 //!
 //! Reset, a partition-hash change, `pause_data_writes`, and a write at the
-//! offset drop read-ahead pads still in the cache. The generation has to
-//! match.
+//! offset drop cached read-ahead pads. The generation has to match.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -69,10 +66,8 @@ fn service_us(count: u64, bytes: u64) -> u64 {
 
 /// Wait before a short run is eligible while the chunk disk is busy.
 ///
-/// One capped run costs about `service_us(1, WRITE_RUN_MAX_BYTES)`. That
-/// interval is too short to use as the wait: a short run would flush before
-/// a neighbor was queued. This wait is the service time of one default
-/// reorder scan filled with capped runs, so neighbors can still join.
+/// One capped run is too short: a neighbor would miss the flush. This is the
+/// service time of one default reorder scan of capped runs.
 pub(super) fn reorder_grace(chunk_size: u64) -> Duration {
     let chunk = chunk_size.max(1);
     let per_run = (WRITE_RUN_MAX_BYTES / chunk).max(1);
@@ -183,12 +178,10 @@ struct SweepSlot {
 /// The fourth is a read-ahead cache pad. Only one of them is set.
 type SelectedOffset = (PartitionChunkOffset, u64, Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Disk entropy read past a demand span. Oldest live pad first.
+/// Read-ahead pads past a demand span. Oldest live pad is evicted first.
 ///
-/// `order` is a FIFO of `(offset, stamp)`. A hit or an overwrite drops the
-/// map entry and leaves the FIFO row in place. Eviction skips a row whose
-/// stamp is no longer current, so a remove does not scan the FIFO. Stale
-/// rows are dropped once they outnumber the live pads.
+/// `order` is a FIFO of `(offset, stamp)`. A hit leaves the FIFO row. Eviction
+/// skips a stale stamp, so a remove does not scan the FIFO.
 #[derive(Debug, Default)]
 pub(super) struct EntropyPadCache {
     order: std::collections::VecDeque<(PartitionChunkOffset, u64)>,
@@ -844,16 +837,15 @@ impl DiskGate {
             && self.budget_allows(self.disk_ops.load(Ordering::SeqCst), 0)
     }
 
-    /// True when no chunk command is in the kernel and no recall, write hold,
-    /// or exclusive IO owns the disk. A short packed write may wait for a
-    /// neighbor only while this is false. A short entropy span may wait while
-    /// this is true. Room left in the service budget is still busy: the
-    /// in-flight command keeps the disk active, and a short write can grow.
     /// No lane `pread` or `pwrite` is in the kernel, and no syscall holds the file.
+    /// Room left in the service budget is still busy.
     pub(super) fn no_chunk_command(&self) -> bool {
         self.disk_ops.load(Ordering::SeqCst) == 0 && self.io_exclusive.load(Ordering::SeqCst) == 0
     }
 
+    /// No recall, write hold, exclusive IO, or in-kernel chunk command.
+    /// A short packed write waits for a neighbor only while this is false.
+    /// A short entropy span may wait while this is true.
     pub(super) fn chunk_disk_idle(&self) -> bool {
         self.disk_ops.load(Ordering::SeqCst) == 0
             && self.recall_waiters.load(Ordering::SeqCst) == 0
@@ -1127,14 +1119,10 @@ impl Drop for ClearRecallFlush<'_> {
 }
 
 impl StorageModule {
-    /// Mining recall. The caller announces before `chunks.dat` is locked, so a
-    /// sweep or write that has not taken the file yet lets this read run first.
-    ///
-    /// The `pread`s stay on this caller and start while packed writes already
-    /// in the kernel are still running. Two slices of the range are in the
-    /// kernel together. While this recall holds the disk the lane submits no
-    /// new writes. When the hold drops, the lane resumes windows of packed
-    /// chunks.
+    /// Mining recall. Announced before `chunks.dat` is locked, so a sweep or
+    /// write that has not taken the file yet yields. The `pread`s stay on this
+    /// caller and overlap `pwrite`s already in the kernel. The lane submits no
+    /// new write while the hold is set.
     pub fn read_recall_chunks(
         &self,
         chunk_range: Interval<PartitionChunkOffset>,
@@ -1149,16 +1137,11 @@ impl StorageModule {
                 self.id
             );
         }
-        // Entropy stays behind the packed window. The lane thread sweeps
-        // itself; this caller only does it when that thread is not running.
-        //
-        // Checksum suspects are not confirmed on the mining thread. This
-        // recall held `begin_recall` across the pread. A durable point waits
-        // in `yield_to_recall` while it holds `sync_in_progress`, so taking
-        // that lock under the recall deadlocks. Taking it after the hold
-        // drops still stalls mining for the durable point's fdatasync.
-        // Suspects stay queued for the storage-module service tick. With no
-        // lane there is no tick, so confirm once the recall hold is gone.
+        // Entropy stays behind the packed window. The lane sweeps itself.
+        // Do not confirm checksum suspects on this thread: a durable point
+        // holds `sync_in_progress` inside `yield_to_recall`, so taking that
+        // lock under the recall deadlocks. With no lane there is no service
+        // tick, so confirm once the hold has dropped.
         if !self.disk.lane_running() {
             self.pump_entropy_reads();
             self.confirm_crc_suspects();
@@ -1771,17 +1754,7 @@ impl StorageModule {
             packed_any = true;
         }
         if !deferred.is_empty() {
-            let displaced = {
-                let mut queue = self.disk.queue();
-                let mut displaced = Vec::new();
-                for slot in deferred {
-                    if let Some(previous) = queue.insert_slot(slot) {
-                        displaced.push(previous);
-                    }
-                }
-                displaced
-            };
-            self.retire_displaced_slots(displaced);
+            self.restore_span(deferred);
         }
         packed_any
     }
@@ -2234,12 +2207,10 @@ impl StorageModule {
         self.take_ready_span()
     }
 
-    /// Remove the lowest-offset span that is ready to read.
+    /// Lowest-offset span that is ready to read.
     ///
-    /// The walk stops at that span. A fragmented backlog stays queued behind
-    /// it, and this call does not rebuild those spans. The lane issues one
-    /// span at a time, so a full rebuild on every take was quadratic in the
-    /// backlog.
+    /// The walk stops there. Later spans stay queued and are not rebuilt, so
+    /// one take does not rescan the backlog.
     fn take_ready_span(&self) -> Option<Vec<SweepSlot>> {
         let mut queue = self.disk.queue();
         let offsets = self.first_ready_span(&queue)?;
@@ -2989,15 +2960,8 @@ impl StorageModule {
         .min()
     }
 
-    /// Ready to run a pass. A recall, a file holder, or a full window is not
-    /// ready: the loop waits for the notify. An idle disk with a queued short
-    /// packed write is ready, so the lane does not sleep on `reorder_grace`.
-    /// While the disk is busy, a short packed run waits for the cap, the
-    /// durability count, or `reorder_grace`. A short entropy span is not
-    /// ready until the read grace ends, even on an idle disk. A span at the
-    /// batch target is ready at once. A full run, an owed recall flush, an
-    /// aged short run, memory entropy, or an external flush or interval
-    /// write is ready.
+    /// A pass can run. A recall, a file holder, or a full window is not ready.
+    /// A short entropy span waits out its grace even when the disk is idle.
     fn lane_work_ready(&self) -> bool {
         if !self.disk.disk_available() {
             return false;
@@ -3408,17 +3372,9 @@ mod tests {
 
     #[test]
     fn take_disk_span_orders_slots_by_offset() -> eyre::Result<()> {
-        let (_tmp, module) = span_order_fixture()?;
-        let queue_order = [2_u32, 0, 1];
-        {
-            let mut queue = module.disk.queue();
-            for offset in queue_order {
-                queue.insert_slot(sweep_slot(offset));
-            }
-        }
-        let span = module.take_disk_span().expect("span");
-        let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
-        assert_eq!(offsets, vec![0, 1, 2]);
+        let (_tmp, module) = span_fixture("span_order", 8, 8, 8)?;
+        insert_slots(&module, &[2, 0, 1], Instant::now());
+        assert_eq!(taken_offsets(&module).expect("span"), vec![0, 1, 2]);
         Ok(())
     }
 
@@ -3442,34 +3398,39 @@ mod tests {
         }
     }
 
+    fn insert_slots(module: &super::super::StorageModule, offsets: &[u32], enqueued_at: Instant) {
+        let mut queue = module.disk.queue();
+        for &offset in offsets {
+            queue.insert_slot(sweep_slot_at(offset, enqueued_at));
+        }
+    }
+
+    fn age_queued(module: &super::super::StorageModule, enqueued_at: Instant) {
+        let mut queue = module.disk.queue();
+        for slot in queue.slots.values_mut() {
+            slot.enqueued_at = enqueued_at;
+        }
+    }
+
+    fn taken_offsets(module: &super::super::StorageModule) -> Option<Vec<u32>> {
+        module
+            .take_disk_span()
+            .map(|span| span.iter().map(|slot| slot.offset.0).collect())
+    }
+
     #[test]
     fn young_short_span_waits_out_the_entropy_read_grace() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
         let (_tmp, module) = span_fixture_grace("span_grace", 8, 8, 0, grace.as_millis() as u64)?;
-        {
-            let mut queue = module.disk.queue();
-            let now = Instant::now();
-            queue.insert_slot(sweep_slot_at(0, now));
-            queue.insert_slot(sweep_slot_at(1, now));
-        }
+        let now = Instant::now();
+        insert_slots(&module, &[0, 1], now);
         assert!(
-            module.take_disk_span().is_none(),
+            taken_offsets(&module).is_none(),
             "a short span younger than the grace stays queued"
         );
-        {
-            let mut queue = module.disk.queue();
-            let aged = Instant::now()
-                .checked_sub(grace + Duration::from_millis(1))
-                .expect("grace fits in the clock");
-            for slot in queue.slots.values_mut() {
-                slot.enqueued_at = aged;
-            }
-        }
-        let span = module
-            .take_disk_span()
-            .expect("an aged short span is issued");
+        age_queued(&module, ago(grace + Duration::from_millis(1)));
         assert_eq!(
-            span.iter().map(|slot| slot.offset.0).collect::<Vec<_>>(),
+            taken_offsets(&module).expect("an aged short span is issued"),
             vec![0, 1]
         );
         Ok(())
@@ -3478,17 +3439,13 @@ mod tests {
     #[test]
     fn span_at_the_batch_target_is_issued_while_young() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture_grace("span_target", 8, 8, 0, 80)?;
-        {
-            let mut queue = module.disk.queue();
-            let now = Instant::now();
-            for offset in 0..8_u32 {
-                queue.insert_slot(sweep_slot_at(offset, now));
-            }
-        }
-        let span = module
-            .take_disk_span()
-            .expect("a span at the batch target does not wait");
-        assert_eq!(span.len(), 8);
+        insert_slots(&module, &(0..8).collect::<Vec<_>>(), Instant::now());
+        assert_eq!(
+            taken_offsets(&module)
+                .expect("a span at the batch target does not wait")
+                .len(),
+            8
+        );
         Ok(())
     }
 
@@ -3512,28 +3469,16 @@ mod tests {
     fn lone_chunk_becomes_eligible_when_the_grace_ends() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
         let (_tmp, module) = span_fixture_grace("span_lone", 8, 8, 0, grace.as_millis() as u64)?;
-        {
-            let mut queue = module.disk.queue();
-            queue.insert_slot(sweep_slot_at(3, Instant::now()));
-        }
+        insert_slots(&module, &[3], Instant::now());
         let remain = module
             .read_grace_remaining()
             .expect("a queued span has a grace");
         assert!(remain > Duration::from_millis(40), "remain {remain:?}");
         assert!(remain <= grace);
-        assert!(module.take_disk_span().is_none());
-        {
-            let mut queue = module.disk.queue();
-            queue
-                .slots
-                .values_mut()
-                .next()
-                .expect("queued slot")
-                .enqueued_at = ago(grace + Duration::from_millis(1));
-        }
+        assert!(taken_offsets(&module).is_none());
+        age_queued(&module, ago(grace + Duration::from_millis(1)));
         assert_eq!(module.read_grace_remaining(), Some(Duration::ZERO));
-        let span = module.take_disk_span().expect("aged lone chunk");
-        assert_eq!(span[0].offset.0, 3);
+        assert_eq!(taken_offsets(&module).expect("aged lone chunk"), vec![3]);
         Ok(())
     }
 
@@ -3541,25 +3486,13 @@ mod tests {
     fn adjacent_chunks_inside_the_grace_are_one_entropy_read() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
         let (_tmp, module) = span_fixture_grace("span_burst", 8, 8, 0, grace.as_millis() as u64)?;
-        {
-            let mut queue = module.disk.queue();
-            queue.insert_slot(sweep_slot_at(0, Instant::now()));
-        }
+        insert_slots(&module, &[0], Instant::now());
         assert!(!module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
-        {
-            let mut queue = module.disk.queue();
-            queue.insert_slot(sweep_slot_at(1, Instant::now()));
-        }
+        insert_slots(&module, &[1], Instant::now());
         assert!(!module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
-        {
-            let mut queue = module.disk.queue();
-            let aged = ago(grace + Duration::from_millis(1));
-            for slot in queue.slots.values_mut() {
-                slot.enqueued_at = aged;
-            }
-        }
+        age_queued(&module, ago(grace + Duration::from_millis(1)));
         assert!(module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 1);
         assert_eq!(module.disk.entropy_pread_slots.load(Ordering::SeqCst), 2);
@@ -3571,10 +3504,7 @@ mod tests {
     #[test]
     fn recall_preempts_an_aged_entropy_span() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture_grace("span_recall", 8, 8, 0, 80)?;
-        {
-            let mut queue = module.disk.queue();
-            queue.insert_slot(sweep_slot_at(0, ago(Duration::from_millis(81))));
-        }
+        insert_slots(&module, &[0], ago(Duration::from_millis(81)));
         let hold = module.disk.begin_recall();
         assert!(!module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
@@ -3589,10 +3519,7 @@ mod tests {
     fn young_lone_chunk_drains_inside_the_grace() -> eyre::Result<()> {
         let grace = Duration::from_millis(40);
         let (_tmp, module) = span_fixture_grace("span_drain", 8, 8, 0, grace.as_millis() as u64)?;
-        {
-            let mut queue = module.disk.queue();
-            queue.insert_slot(sweep_slot_at(0, Instant::now()));
-        }
+        insert_slots(&module, &[0], Instant::now());
         let started = Instant::now();
         module.drive_entropy_queue_for_test();
         let elapsed = started.elapsed();
@@ -3618,16 +3545,10 @@ mod tests {
     #[test]
     fn due_reads_issue_the_lower_offset_first() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("span_rank", 8, 8, 1)?;
-        {
-            let mut queue = module.disk.queue();
-            for offset in [0_u32, 3, 4, 5] {
-                queue.insert_slot(sweep_slot(offset));
-            }
-        }
+        insert_slots(&module, &[0, 3, 4, 5], Instant::now());
         module.disk.arm_recall_flush();
-        let span = module.take_disk_span().expect("span");
+        let offsets = taken_offsets(&module).expect("span");
         module.disk.clear_recall_flush();
-        let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
         assert_eq!(offsets, vec![0]);
         Ok(())
     }
@@ -3635,25 +3556,14 @@ mod tests {
     #[test]
     fn young_short_span_is_issued_in_offset_order() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("span_young", 8, 8, 1)?;
-        {
-            let mut queue = module.disk.queue();
-            for offset in [0_u32, 3, 4, 5] {
-                queue.insert_slot(sweep_slot(offset));
-            }
-        }
+        insert_slots(&module, &[0, 3, 4, 5], Instant::now());
         module.disk.occupy_for_test();
-        let first = module
-            .take_disk_span()
-            .expect("a short span is eligible while the disk is busy");
         assert_eq!(
-            first.iter().map(|slot| slot.offset.0).collect::<Vec<_>>(),
+            taken_offsets(&module).expect("a short span is eligible while the disk is busy"),
             vec![0]
         );
-        let second = module
-            .take_disk_span()
-            .expect("the later span stays queued");
         assert_eq!(
-            second.iter().map(|slot| slot.offset.0).collect::<Vec<_>>(),
+            taken_offsets(&module).expect("the later span stays queued"),
             vec![3, 4, 5]
         );
         module.disk.release_for_test();
@@ -3663,50 +3573,30 @@ mod tests {
     #[test]
     fn full_span_is_read_while_young() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("span_full", 8, 8, 1)?;
-        {
-            let mut queue = module.disk.queue();
-            for offset in 0..8 {
-                queue.insert_slot(sweep_slot(offset));
-            }
-        }
-        let span = module.take_disk_span().expect("span");
-        let offsets: Vec<u32> = span.iter().map(|slot| slot.offset.0).collect();
-        assert_eq!(offsets, (0..8).collect::<Vec<_>>());
+        insert_slots(&module, &(0..8).collect::<Vec<_>>(), Instant::now());
+        assert_eq!(
+            taken_offsets(&module).expect("span"),
+            (0..8).collect::<Vec<_>>()
+        );
         Ok(())
     }
 
     #[test]
     fn full_span_stays_ahead_of_an_aged_short_span() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("span_short_first", 16, 8, 1)?;
-        {
-            let mut queue = module.disk.queue();
-            for offset in 0..8 {
-                queue.insert_slot(sweep_slot(offset));
-            }
-            queue.insert_slot(sweep_slot(10));
-        }
+        let now = Instant::now();
+        insert_slots(&module, &(0..8).collect::<Vec<_>>(), now);
+        insert_slots(&module, &[10], now);
         // Offset order keeps the full span ahead of the later short span.
         // The short span is still eligible while the disk is busy.
         module.disk.occupy_for_test();
-        let full = module.take_disk_span().expect("full");
         assert_eq!(
-            full.iter().map(|slot| slot.offset.0).collect::<Vec<_>>(),
+            taken_offsets(&module).expect("full"),
             (0..8).collect::<Vec<_>>()
         );
-        let short = module.take_disk_span().expect("short");
-        assert_eq!(
-            short.iter().map(|slot| slot.offset.0).collect::<Vec<_>>(),
-            vec![10]
-        );
+        assert_eq!(taken_offsets(&module).expect("short"), vec![10]);
         module.disk.release_for_test();
         Ok(())
-    }
-
-    fn span_order_fixture() -> eyre::Result<(
-        irys_testing_utils::utils::tempfile::TempDir,
-        super::super::StorageModule,
-    )> {
-        span_fixture("span_order", 8, 8, 8)
     }
 
     fn span_fixture(
@@ -3798,6 +3688,32 @@ mod tests {
         slot
     }
 
+    fn pack_queued_slot(
+        module: &super::super::StorageModule,
+        slot: super::SweepSlot,
+    ) -> Result<(), super::super::WriteDataChunkError> {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let offset = slot.offset;
+        let generation = slot.generation;
+        module.disk.queue().groups.insert(
+            slot.group,
+            super::SweepGroup {
+                remaining: 1,
+                failed: None,
+                waited: true,
+                notify: Some(tx),
+            },
+        );
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .insert(offset, generation);
+        module.pack_one(slot);
+        rx.try_recv().expect("the slot must finish")
+    }
+
     fn arm_slot_group(
         module: &super::super::StorageModule,
         slot: super::SweepSlot,
@@ -3887,25 +3803,7 @@ mod tests {
                 },
             );
         }
-        let slot = slot_holding_zero_pad(0x11);
-        let (tx, mut rx) = tokio::sync::oneshot::channel();
-        module.disk.queue().groups.insert(
-            slot.group,
-            super::SweepGroup {
-                remaining: 1,
-                failed: None,
-                waited: true,
-                notify: Some(tx),
-            },
-        );
-        module
-            .pending_writes
-            .write()
-            .unwrap()
-            .occupancy
-            .insert(offset, 0);
-        module.pack_one(slot);
-        let finished = rx.try_recv().expect("the slot must finish");
+        let finished = pack_queued_slot(&module, slot_holding_zero_pad(0x11));
         assert!(
             matches!(
                 finished,
@@ -3965,25 +3863,7 @@ mod tests {
             let mut pending = module.pending_writes.write().unwrap();
             pending.insert(offset, (vec![0xAB; 32], super::super::ChunkType::Entropy));
         }
-        let slot = slot_holding_zero_pad(0x11);
-        let (tx, mut rx) = tokio::sync::oneshot::channel();
-        module.disk.queue().groups.insert(
-            slot.group,
-            super::SweepGroup {
-                remaining: 1,
-                failed: None,
-                waited: true,
-                notify: Some(tx),
-            },
-        );
-        module
-            .pending_writes
-            .write()
-            .unwrap()
-            .occupancy
-            .insert(offset, 0);
-        module.pack_one(slot);
-        let finished = rx.try_recv().expect("the slot must finish");
+        let finished = pack_queued_slot(&module, slot_holding_zero_pad(0x11));
         assert!(
             matches!(
                 finished,
@@ -3999,8 +3879,7 @@ mod tests {
     }
 
     /// Taking the front of a fragmented queue must not rescan the tail.
-    /// A 16× longer queue that still yields 32 one-slot spans should stay
-    /// well under 16× the cost. The old walk rebuilt every span on every take.
+    /// Thirty-two one-slot takes on a 16× longer queue stay well under 16× the cost.
     #[test]
     fn fragmented_span_take_does_not_rescan_the_tail() -> eyre::Result<()> {
         fn queue_fragmented(
@@ -4041,7 +3920,6 @@ mod tests {
             "fragmented take 32 spans: queue 2000 {small_time:?} visits {small_visits}, queue 32000 {large_time:?} visits {large_visits}"
         );
         // Each take looks at the closed span plus the next slot that ends it.
-        // A rebuild visits every queued slot on every take.
         assert!(
             large_visits < 1_000,
             "front span take walked the backlog: 2000 slots {small_visits} visits, 32000 slots {large_visits} visits"
@@ -4054,7 +3932,7 @@ mod tests {
         Ok(())
     }
 
-    /// Newest-first removal walks the FIFO order. Quadratic in the pad count.
+    /// Newest-first removal must not scan the FIFO.
     #[test]
     fn entropy_cache_newest_remove_scales() {
         fn remove_newest_first(pads: u32) -> Duration {
