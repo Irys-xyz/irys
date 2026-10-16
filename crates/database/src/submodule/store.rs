@@ -1249,8 +1249,8 @@ fn info_extent_query_range(
     if extent_end < 0 {
         return Ok(None);
     }
-    let start = u32::try_from(extent_start.max(0)).unwrap_or(0);
-    let end = u32::try_from(extent_end).unwrap_or(u32::MAX);
+    let start = extent_start.max(0) as u32;
+    let end = extent_end as u32;
     Ok(Some((start, end)))
 }
 

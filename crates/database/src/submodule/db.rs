@@ -621,7 +621,7 @@ pub(super) fn info_overlaps_coalesced_spans(
     if extent_end < 0 {
         return Ok(false);
     }
-    let extent_end_u = u32::try_from(extent_end).unwrap_or(u32::MAX);
+    let extent_end_u = extent_end as u32;
     let idx = spans.partition_point(|(start, _)| start.0 <= extent_end_u);
     let Some(index) = idx.checked_sub(1) else {
         return Ok(false);
