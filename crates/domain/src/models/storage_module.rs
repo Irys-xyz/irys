@@ -5184,6 +5184,16 @@ impl StorageModule {
         Ok(by_offset)
     }
 
+    /// `disk_lane` confirms one suspect offset under `sync_in_progress`.
+    fn note_if_crc_mismatch(
+        &self,
+        offset: PartitionChunkOffset,
+        kind: ChunkType,
+        caller: &'static str,
+    ) -> eyre::Result<CrcConfirm> {
+        self.confirm_crc_mismatch(offset, kind, caller)
+    }
+
     /// Re-read one offset and its checksum under `sync_in_progress`.
     ///
     /// Every write to an offset is in `pending.chunks` before its pwrite and
