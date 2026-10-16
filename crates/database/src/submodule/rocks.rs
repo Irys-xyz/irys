@@ -5896,6 +5896,10 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{H256, RelativeChunkOffset};
 
+    fn temp_dir(prefix: &str) -> irys_testing_utils::utils::tempfile::TempDir {
+        TempDirBuilder::new().prefix(prefix).build()
+    }
+
     #[test]
     fn offset_range_membership_is_logarithmic() {
         fn linear(ranges: &[(u32, u32)], offset: u32) -> bool {
@@ -5968,7 +5972,7 @@ mod tests {
     #[test]
     fn many_disjoint_spans_share_one_pending_pass() -> eyre::Result<()> {
         let n = 2_000_u32;
-        let dir = TempDirBuilder::new().prefix("submodule_span_pass").build();
+        let dir = temp_dir("submodule_span_pass");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         store.disable_auto_compaction()?;
         let job = PendingBodyMigration {
@@ -6041,9 +6045,7 @@ mod tests {
 
     #[test]
     fn reopen_reads_the_row_and_keeps_the_schema_across_clear() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_reopen")
-            .build();
+        let dir = temp_dir("submodule_rocks_reopen");
         let path = dir.path().join("index");
         let offset = PartitionChunkOffset::from(3);
         let root = H256::repeat_byte(2);
@@ -6082,9 +6084,7 @@ mod tests {
     /// A marker that is not RocksDB v1 is refused. Open writes nothing.
     #[test]
     fn foreign_marker_is_refused_and_writes_nothing() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_foreign")
-            .build();
+        let dir = temp_dir("submodule_rocks_foreign");
         let path = dir.path().join("index");
         fs::create_dir_all(&path)?;
         let marker = "foreign-layout\n";
@@ -6099,37 +6099,66 @@ mod tests {
     }
 
     /// An existing database that lacks a RocksDB v1 family is refused.
-    /// Open does not create the family.
+    /// Open does not create the family. The offset family is created with
+    /// default options. The placement family keeps the content prefix
+    /// extractor so open fails on the missing family, not on that extractor.
     #[test]
     fn missing_known_family_is_refused_and_not_created() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_missing_cf")
-            .build();
-        let path = dir.path().join("index");
-        let mut db_opts = Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
-        let families = [
-            "default",
-            "PlacementIntervals",
-            "DataRootPlacements",
-            "PendingBodyMigrations",
-            "Metadata",
-            "ChunkOffsetsByContentHash",
-        ]
-        .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()));
-        {
-            let _db = DB::open_cf_descriptors(&db_opts, &path, families)?;
+        let cases: &[(&str, &str, &[&str], bool)] = &[
+            (
+                "submodule_rocks_missing_cf",
+                CHUNK_META_BY_OFFSET_CF,
+                &[
+                    "default",
+                    "PlacementIntervals",
+                    "DataRootPlacements",
+                    "PendingBodyMigrations",
+                    "Metadata",
+                    "ChunkOffsetsByContentHash",
+                ],
+                false,
+            ),
+            (
+                "submodule_rocks_missing_placement",
+                "PlacementIntervals",
+                &[
+                    "default",
+                    "DataRootPlacements",
+                    "PendingBodyMigrations",
+                    "Metadata",
+                    "ChunkOffsetsByContentHash",
+                    CHUNK_META_BY_OFFSET_CF,
+                ],
+                true,
+            ),
+        ];
+        for &(prefix, missing, names, with_prefix) in cases {
+            let dir = temp_dir(prefix);
+            let path = dir.path().join("index");
+            let mut db_opts = Options::default();
+            db_opts.create_if_missing(true);
+            db_opts.create_missing_column_families(true);
+            let families = names.iter().map(|name| {
+                let opts = if with_prefix {
+                    reopen_options(name)
+                } else {
+                    Options::default()
+                };
+                rocksdb::ColumnFamilyDescriptor::new(*name, opts)
+            });
+            {
+                let _db = DB::open_cf_descriptors(&db_opts, &path, families)?;
+            }
+            fs::write(path.join(SCHEMA_FILE), SUBMODULE_SCHEMA_ROCKS_V1)?;
+            let before = DB::list_cf(&Options::default(), &path)?;
+            let err = RocksSubmoduleStore::open(&path).unwrap_err();
+            let text = err.to_string();
+            assert!(text.contains(missing), "{text}");
+            assert!(text.contains("does not create it empty"), "{text}");
+            let after = DB::list_cf(&Options::default(), &path)?;
+            assert_eq!(before, after);
+            assert!(!after.iter().any(|name| name == missing));
         }
-        fs::write(path.join(SCHEMA_FILE), SUBMODULE_SCHEMA_ROCKS_V1)?;
-        let before = DB::list_cf(&Options::default(), &path)?;
-        let err = RocksSubmoduleStore::open(&path).unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains(CHUNK_META_BY_OFFSET_CF), "{text}");
-        assert!(text.contains("does not create it empty"), "{text}");
-        let after = DB::list_cf(&Options::default(), &path)?;
-        assert_eq!(before, after);
-        assert!(!after.iter().any(|name| name == CHUNK_META_BY_OFFSET_CF));
         Ok(())
     }
 
@@ -6204,9 +6233,7 @@ mod tests {
     /// both store 24 zero bytes. A read-only open does not write the row.
     #[test]
     fn writable_open_stamps_absent_feature_flags_as_zeros() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_feature_stamp")
-            .build();
+        let dir = temp_dir("submodule_rocks_feature_stamp");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
         let zeros = vec![0_u8; 24];
@@ -6233,9 +6260,7 @@ mod tests {
     /// An unknown family and an unknown compat bit both open. Neither is rewritten.
     #[test]
     fn unknown_compat_family_and_bit_open_and_stay_untouched() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_compat")
-            .build();
+        let dir = temp_dir("submodule_rocks_compat");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
 
@@ -6273,9 +6298,7 @@ mod tests {
     /// default options would rewrite its SSTs. Known families keep compaction.
     #[test]
     fn unknown_family_opens_with_auto_compaction_disabled() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_unknown_cf_compact")
-            .build();
+        let dir = temp_dir("submodule_rocks_unknown_cf_compact");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
 
@@ -6318,9 +6341,7 @@ mod tests {
     /// extractor. Read-only open does not flush, so the key stays readable.
     #[test]
     fn unknown_prefix_family_refuses_writable_open_and_keeps_the_key() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_unknown_prefix")
-            .build();
+        let dir = temp_dir("submodule_rocks_unknown_prefix");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
 
@@ -6358,9 +6379,7 @@ mod tests {
     /// The stored bytes stay.
     #[test]
     fn unknown_incompat_bit_refuses_and_keeps_the_row() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_incompat")
-            .build();
+        let dir = temp_dir("submodule_rocks_incompat");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
         let flags = feature_flag_bytes(0, 0, 1 << 3);
@@ -6389,9 +6408,7 @@ mod tests {
     /// An unknown ro_compat bit refuses a writable open and still allows read-only.
     #[test]
     fn unknown_ro_compat_bit_refuses_writable_open_only() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_ro_compat")
-            .build();
+        let dir = temp_dir("submodule_rocks_ro_compat");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
         let flags = feature_flag_bytes(0, 1, 0);
@@ -6417,55 +6434,25 @@ mod tests {
         Ok(())
     }
 
-    /// An existing database that lacks any RocksDB v1 family is refused.
-    /// Open does not create the family.
-    #[test]
-    fn missing_placement_family_is_refused_and_not_created() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_missing_placement")
-            .build();
-        let path = dir.path().join("index");
-        let mut db_opts = Options::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
-        let families = [
-            "default",
-            "DataRootPlacements",
-            "PendingBodyMigrations",
-            "Metadata",
-            "ChunkOffsetsByContentHash",
-            CHUNK_META_BY_OFFSET_CF,
-        ]
-        .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, reopen_options(name)));
-        {
-            let _db = DB::open_cf_descriptors(&db_opts, &path, families)?;
-        }
-        fs::write(path.join(SCHEMA_FILE), SUBMODULE_SCHEMA_ROCKS_V1)?;
-        let before = DB::list_cf(&Options::default(), &path)?;
-        let err = RocksSubmoduleStore::open(&path).unwrap_err();
-        let text = err.to_string();
-        assert!(text.contains("PlacementIntervals"), "{text}");
-        assert!(text.contains("does not create it empty"), "{text}");
-        let after = DB::list_cf(&Options::default(), &path)?;
-        assert_eq!(before, after);
-        assert!(!after.iter().any(|name| name == "PlacementIntervals"));
+    fn assert_incomplete_open_refused(path: &Path) -> eyre::Result<()> {
+        let err = RocksSubmoduleStore::open(path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("with --replace-incomplete"), "{text}");
+        assert!(text.contains("SCHEMA"), "{text}");
         Ok(())
     }
 
-    /// `CONVERTING` and no `SCHEMA` is an unfinished conversion. Open writes nothing.
+    /// A non-empty directory with no SCHEMA is not a new database.
+    /// `CONVERTING` is an unfinished conversion. A stray file is the same refusal.
+    /// Open writes nothing in either case.
     #[test]
-    fn converting_only_directory_refuses_and_writes_nothing() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_converting")
-            .build();
+    fn incomplete_directory_refuses_and_writes_nothing() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_converting");
         let path = dir.path().join("index");
         fs::create_dir_all(&path)?;
         let sentinel = b"irys-submodule-index convert-incomplete\n";
         fs::write(path.join("CONVERTING"), sentinel)?;
-        let err = RocksSubmoduleStore::open(&path).unwrap_err();
-        let text = format!("{err:#}");
-        assert!(text.contains("with --replace-incomplete"), "{text}");
-        assert!(text.contains("SCHEMA"), "{text}");
+        assert_incomplete_open_refused(&path)?;
         assert_eq!(fs::read(path.join("CONVERTING"))?, sentinel);
         let mut names = Vec::new();
         for entry in fs::read_dir(&path)? {
@@ -6473,22 +6460,12 @@ mod tests {
         }
         names.sort();
         assert_eq!(names, vec![std::ffi::OsString::from("CONVERTING")]);
-        Ok(())
-    }
 
-    /// A stray file and no `SCHEMA` is not a new database.
-    #[test]
-    fn non_empty_dir_without_schema_refuses_and_writes_nothing() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_stray")
-            .build();
+        let dir = temp_dir("submodule_rocks_stray");
         let path = dir.path().join("index");
         fs::create_dir_all(&path)?;
         fs::write(path.join("notes"), b"stray")?;
-        let err = RocksSubmoduleStore::open(&path).unwrap_err();
-        let text = format!("{err:#}");
-        assert!(text.contains("with --replace-incomplete"), "{text}");
-        assert!(text.contains("SCHEMA"), "{text}");
+        assert_incomplete_open_refused(&path)?;
         assert_eq!(fs::read(path.join("notes"))?, b"stray");
         assert!(!path.join("CURRENT").is_file());
         assert!(!path.join(SCHEMA_FILE).exists());
@@ -6499,9 +6476,7 @@ mod tests {
     /// `--replace-incomplete` does not delete that directory.
     #[test]
     fn crashed_first_open_names_delete_not_replace_incomplete() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_fresh_crash")
-            .build();
+        let dir = temp_dir("submodule_rocks_fresh_crash");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
         fs::remove_file(path.join(SCHEMA_FILE))?;
@@ -6521,9 +6496,7 @@ mod tests {
     /// The sentinel is removed after the marker. Open must not refuse it.
     #[test]
     fn schema_beside_converting_still_opens() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_schema_converting")
-            .build();
+        let dir = temp_dir("submodule_rocks_schema_converting");
         let path = dir.path().join("index");
         drop(RocksSubmoduleStore::open(&path)?);
         let sentinel = b"irys-submodule-index convert-incomplete\n";
@@ -6543,9 +6516,7 @@ mod tests {
     /// has neither file, still creates.
     #[test]
     fn schema_without_current_refuses_and_keeps_the_flushed_row() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_schema_no_current")
-            .build();
+        let dir = temp_dir("submodule_rocks_schema_no_current");
         let path = dir.path().join("index");
         let offset = PartitionChunkOffset::from(4);
         {
@@ -6600,9 +6571,7 @@ mod tests {
     /// offset in the same batch still is. The skipped offset is the result.
     #[test]
     fn uncovered_data_path_is_reported_and_not_stored() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_uncovered_path")
-            .build();
+        let dir = temp_dir("submodule_rocks_uncovered_path");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         let covered = PartitionChunkOffset::from(1);
         let missing = PartitionChunkOffset::from(4);
@@ -6654,9 +6623,7 @@ mod tests {
     #[test]
     fn clear_of_a_large_index_leaves_only_metadata() -> eyre::Result<()> {
         const ROWS: u32 = 100_000;
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_clear_large")
-            .build();
+        let dir = temp_dir("submodule_rocks_clear_large");
         let path = dir.path().join("index");
         let store = RocksSubmoduleStore::open(&path)?;
         let tx_hash = H256::repeat_byte(9);
@@ -6768,9 +6735,7 @@ mod tests {
 
     #[test]
     fn content_hash_index_tracks_writes_rewrites_and_deletes() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_content_index")
-            .build();
+        let dir = temp_dir("submodule_rocks_content_index");
         let path = dir.path().join("index");
         let store = RocksSubmoduleStore::open(&path)?;
         // A data path needs a covering interval. Offsets 4 and 9 sit inside it.
@@ -6852,9 +6817,7 @@ mod tests {
 
     #[test]
     fn checksum_only_row_is_not_a_stored_proof() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_crc_only")
-            .build();
+        let dir = temp_dir("submodule_rocks_crc_only");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         let entropy = PartitionChunkOffset::from(2);
         let data = PartitionChunkOffset::from(4);
@@ -7000,9 +6963,7 @@ mod tests {
     /// `audit_index` and `Rows::cursor` both walk every key.
     #[test]
     fn content_prefix_scans_see_every_hash() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_content_order")
-            .build();
+        let dir = temp_dir("submodule_rocks_content_order");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         place_span(&store, 0, 7, H256::repeat_byte(4), 0, 1, 0, &[], None)?;
         let inside = content_index_key(H256::repeat_byte(1), 1);
@@ -7054,9 +7015,7 @@ mod tests {
     /// outside a live interval.
     #[test]
     fn rows_stay_inside_live_intervals() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_no_leak")
-            .build();
+        let dir = temp_dir("submodule_rocks_no_leak");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         let root_a = H256::repeat_byte(4);
         let root_b = H256::repeat_byte(5);
@@ -7157,9 +7116,7 @@ mod tests {
 
     #[test]
     fn refuses_an_unbound_interval_and_an_unowned_info() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_owned")
-            .build();
+        let dir = temp_dir("submodule_rocks_owned");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         let root = H256::repeat_byte(4);
         let hash = H256::repeat_byte(6);
@@ -7246,9 +7203,7 @@ mod tests {
 
     #[test]
     fn clear_in_a_batch_does_not_count_snapshot_keys() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_cleared_count")
-            .build();
+        let dir = temp_dir("submodule_rocks_cleared_count");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         store.update(|tx| {
             tx.add_pending_body_migration(
@@ -7276,9 +7231,7 @@ mod tests {
 
     #[test]
     fn range_delete_hides_pending_from_a_later_check_in_the_same_batch() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_range_hides")
-            .build();
+        let dir = temp_dir("submodule_rocks_range_hides");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         store.update(|tx| {
             tx.add_pending_body_migration(
@@ -7306,9 +7259,7 @@ mod tests {
 
     #[test]
     fn packing_identity_binds_once_and_clear_releases_the_partition() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_packing")
-            .build();
+        let dir = temp_dir("submodule_rocks_packing");
         let path = dir.path().join("index");
         let partition = H256::repeat_byte(1);
         let other = H256::repeat_byte(2);
@@ -7364,9 +7315,7 @@ mod tests {
 
     #[test]
     fn metadata_flags_are_written_raw_and_read_as_set() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_raw_flags")
-            .build();
+        let dir = temp_dir("submodule_rocks_raw_flags");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         assert!(!store.reset_in_progress()?);
         assert!(!store.chunk_crc_complete()?);
@@ -7507,9 +7456,7 @@ mod tests {
         assert!(!private.share_resources);
         assert_eq!(private.block_cache_bytes, 4096);
 
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_presets")
-            .build();
+        let dir = temp_dir("submodule_rocks_presets");
         for preset in RocksTuning::presets() {
             let path = dir.path().join(preset.name);
             let store = RocksSubmoduleStore::open_with(&path, preset)?;
@@ -7523,84 +7470,54 @@ mod tests {
             drop(store);
         }
         let baseline_opts = persisted_options(&dir.path().join("baseline"))?;
-        assert!(
-            baseline_opts.contains("recycle_log_file_num=4"),
-            "{baseline_opts}"
+        assert_contains(
+            &baseline_opts,
+            &[
+                "recycle_log_file_num=4",
+                "wal_recovery_mode=kPointInTimeRecovery",
+                "partition_filters=true",
+                "index_type=kTwoLevelIndexSearch",
+                "pin_top_level_index_and_filter=true",
+                "[CFOptions \"PlacementIntervals\"]",
+                "[CFOptions \"DataRootPlacements\"]",
+                "[CFOptions \"PendingBodyMigrations\"]",
+                "[CFOptions \"ChunkMetaByOffset\"]",
+                "[CFOptions \"ChunkOffsetsByContentHash\"]",
+                "use_fsync=true",
+                "max_total_wal_size=0",
+            ],
         );
-        assert!(
-            baseline_opts.contains("wal_recovery_mode=kPointInTimeRecovery"),
-            "{baseline_opts}"
+        assert_lacks(
+            &baseline_opts,
+            &[
+                "ChunkDataPathByOffset",
+                "TxPathByTxPathHash",
+                "ChunkPathHashesByOffset",
+            ],
         );
-        assert!(
-            baseline_opts.contains("partition_filters=true"),
-            "{baseline_opts}"
+        assert_cf(
+            &baseline_opts,
+            CHUNK_META_BY_OFFSET_CF,
+            "enable_blob_files",
+            "false",
         );
-        assert!(
-            baseline_opts.contains("index_type=kTwoLevelIndexSearch"),
-            "{baseline_opts}"
+        assert_cf(
+            &baseline_opts,
+            CHUNK_META_BY_OFFSET_CF,
+            "enable_blob_garbage_collection",
+            "true",
         );
-        assert!(
-            baseline_opts.contains("pin_top_level_index_and_filter=true"),
-            "{baseline_opts}"
+        assert_cf(
+            &baseline_opts,
+            CHUNK_META_BY_OFFSET_CF,
+            "blob_garbage_collection_age_cutoff",
+            "1.000000",
         );
-        assert_eq!(
-            cf_option(&baseline_opts, CHUNK_META_BY_OFFSET_CF, "enable_blob_files").as_deref(),
-            Some("false"),
-            "{baseline_opts}"
-        );
-        assert_eq!(
-            cf_option(
-                &baseline_opts,
-                CHUNK_META_BY_OFFSET_CF,
-                "enable_blob_garbage_collection"
-            )
-            .as_deref(),
-            Some("true"),
-            "{baseline_opts}"
-        );
-        assert_eq!(
-            cf_option(
-                &baseline_opts,
-                CHUNK_META_BY_OFFSET_CF,
-                "blob_garbage_collection_age_cutoff"
-            )
-            .as_deref(),
-            Some("1.000000"),
-            "{baseline_opts}"
-        );
-        assert!(
-            baseline_opts.contains("[CFOptions \"PlacementIntervals\"]"),
-            "{baseline_opts}"
-        );
-        assert!(
-            baseline_opts.contains("[CFOptions \"DataRootPlacements\"]"),
-            "{baseline_opts}"
-        );
-        assert!(
-            baseline_opts.contains("[CFOptions \"PendingBodyMigrations\"]"),
-            "{baseline_opts}"
-        );
-        assert!(
-            baseline_opts.contains("[CFOptions \"ChunkMetaByOffset\"]"),
-            "{baseline_opts}"
-        );
-        assert!(
-            !baseline_opts.contains("ChunkDataPathByOffset"),
-            "{baseline_opts}"
-        );
-        assert!(
-            baseline_opts.contains("[CFOptions \"ChunkOffsetsByContentHash\"]"),
-            "{baseline_opts}"
-        );
-        assert_eq!(
-            cf_option(
-                &baseline_opts,
-                "ChunkOffsetsByContentHash",
-                "prefix_extractor"
-            )
-            .as_deref(),
-            Some("rocksdb.FixedPrefix.32"),
-            "{baseline_opts}"
+        assert_cf(
+            &baseline_opts,
+            "ChunkOffsetsByContentHash",
+            "prefix_extractor",
+            "rocksdb.FixedPrefix.32",
         );
         assert!(
             cf_option(
@@ -7625,113 +7542,65 @@ mod tests {
             Some("false"),
             "{baseline_opts}"
         );
-        assert!(
-            !baseline_opts.contains("TxPathByTxPathHash"),
-            "{baseline_opts}"
-        );
-        assert!(
-            !baseline_opts.contains("ChunkPathHashesByOffset"),
-            "{baseline_opts}"
-        );
         let blobs_opts = persisted_options(&dir.path().join("blobs"))?;
         let min_blob = BLOB_MIN_BYTES.to_string();
-        assert_eq!(
-            cf_option(&blobs_opts, CHUNK_META_BY_OFFSET_CF, "enable_blob_files").as_deref(),
-            Some("true"),
-            "{blobs_opts}"
+        assert_cf(
+            &blobs_opts,
+            CHUNK_META_BY_OFFSET_CF,
+            "enable_blob_files",
+            "true",
         );
-        assert_eq!(
-            cf_option(&blobs_opts, CHUNK_META_BY_OFFSET_CF, "min_blob_size").as_deref(),
-            Some(min_blob.as_str()),
-            "{blobs_opts}"
+        assert_cf(
+            &blobs_opts,
+            CHUNK_META_BY_OFFSET_CF,
+            "min_blob_size",
+            min_blob.as_str(),
         );
-        assert_eq!(
-            cf_option(
-                &blobs_opts,
-                CHUNK_META_BY_OFFSET_CF,
-                "enable_blob_garbage_collection"
-            )
-            .as_deref(),
-            Some("true"),
-            "{blobs_opts}"
+        assert_cf(
+            &blobs_opts,
+            CHUNK_META_BY_OFFSET_CF,
+            "enable_blob_garbage_collection",
+            "true",
         );
-        assert_eq!(
-            cf_option(
-                &blobs_opts,
-                CHUNK_META_BY_OFFSET_CF,
-                "blob_garbage_collection_age_cutoff"
-            )
-            .as_deref(),
-            Some("0.250000"),
-            "{blobs_opts}"
+        assert_cf(
+            &blobs_opts,
+            CHUNK_META_BY_OFFSET_CF,
+            "blob_garbage_collection_age_cutoff",
+            "0.250000",
         );
         // An external block cache is not written to the OPTIONS file.
         // `cache_shard_bits` is checked on the preset above.
         let full = persisted_options(&dir.path().join("full-filters"))?;
-        assert!(full.contains("partition_filters=false"), "{full}");
-        assert!(!full.contains("index_type=kTwoLevelIndexSearch"), "{full}");
-        let no_recycle_opts = persisted_options(&dir.path().join("no-wal-recycle"))?;
-        assert!(
-            no_recycle_opts.contains("recycle_log_file_num=0"),
-            "{no_recycle_opts}"
+        assert_contains(&full, &["partition_filters=false"]);
+        assert_lacks(&full, &["index_type=kTwoLevelIndexSearch"]);
+        assert_contains(
+            &persisted_options(&dir.path().join("no-wal-recycle"))?,
+            &[
+                "recycle_log_file_num=0",
+                "wal_recovery_mode=kPointInTimeRecovery",
+                "partition_filters=true",
+            ],
         );
-        assert!(
-            no_recycle_opts.contains("wal_recovery_mode=kPointInTimeRecovery"),
-            "{no_recycle_opts}"
+        assert_contains(
+            &persisted_options(&dir.path().join("fdatasync-wal"))?,
+            &[
+                "use_fsync=false",
+                "max_total_wal_size=0",
+                "recycle_log_file_num=4",
+            ],
         );
-        assert!(
-            no_recycle_opts.contains("partition_filters=true"),
-            "{no_recycle_opts}"
+        let wal_cap = format!("max_total_wal_size={WAL_ROTATE_BYTES}");
+        assert_contains(
+            &persisted_options(&dir.path().join("fdatasync-wal-rotate"))?,
+            &["use_fsync=false", wal_cap.as_str()],
         );
-        assert!(baseline_opts.contains("use_fsync=true"), "{baseline_opts}");
-        assert!(
-            baseline_opts.contains("max_total_wal_size=0"),
-            "{baseline_opts}"
+        assert_contains(
+            &persisted_options(&dir.path().join("fsync-wal-rotate"))?,
+            &["use_fsync=true", wal_cap.as_str(), "recycle_log_file_num=4"],
         );
-        let fdatasync_opts = persisted_options(&dir.path().join("fdatasync-wal"))?;
-        assert!(
-            fdatasync_opts.contains("use_fsync=false"),
-            "{fdatasync_opts}"
-        );
-        assert!(
-            fdatasync_opts.contains("max_total_wal_size=0"),
-            "{fdatasync_opts}"
-        );
-        assert!(
-            fdatasync_opts.contains("recycle_log_file_num=4"),
-            "{fdatasync_opts}"
-        );
-        let fdatasync_rotate_opts = persisted_options(&dir.path().join("fdatasync-wal-rotate"))?;
-        assert!(
-            fdatasync_rotate_opts.contains("use_fsync=false"),
-            "{fdatasync_rotate_opts}"
-        );
-        assert!(
-            fdatasync_rotate_opts.contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}")),
-            "{fdatasync_rotate_opts}"
-        );
-        let fsync_rotate_opts = persisted_options(&dir.path().join("fsync-wal-rotate"))?;
-        assert!(
-            fsync_rotate_opts.contains("use_fsync=true"),
-            "{fsync_rotate_opts}"
-        );
-        assert!(
-            fsync_rotate_opts.contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}")),
-            "{fsync_rotate_opts}"
-        );
-        assert!(
-            fsync_rotate_opts.contains("recycle_log_file_num=4"),
-            "{fsync_rotate_opts}"
-        );
-        let rotate_compact_opts =
-            persisted_options(&dir.path().join("fdatasync-wal-rotate-compact"))?;
-        assert!(
-            rotate_compact_opts.contains("use_fsync=false"),
-            "{rotate_compact_opts}"
-        );
-        assert!(
-            rotate_compact_opts.contains(&format!("max_total_wal_size={WAL_ROTATE_BYTES}")),
-            "{rotate_compact_opts}"
+        assert_contains(
+            &persisted_options(&dir.path().join("fdatasync-wal-rotate-compact"))?,
+            &["use_fsync=false", wal_cap.as_str()],
         );
         Ok(())
     }
@@ -7742,9 +7611,7 @@ mod tests {
     /// `ChunkOffsetsByContentHash` keeps its prefix bloom on every open.
     #[test]
     fn bloom_scope_change_reopens_an_existing_db() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_bloom_scope")
-            .build();
+        let dir = temp_dir("submodule_rocks_bloom_scope");
         let path = dir.path().join("index");
         let offset = PartitionChunkOffset::from(4);
         let path_bytes = b"data-path".to_vec();
@@ -7883,7 +7750,7 @@ mod tests {
         const LEGACY_PATHS: u32 = 4_096;
         const INLINE_PATHS: u32 = 256;
 
-        let dir = TempDirBuilder::new().prefix("submodule_rocks_blob").build();
+        let dir = temp_dir("submodule_rocks_blob");
         let path = dir.path().join("index");
         let total = LEGACY_PATHS + INLINE_PATHS;
         let removed = [0_u32, LEGACY_PATHS];
@@ -7946,22 +7813,11 @@ mod tests {
 
     #[test]
     fn small_file_compact_stays_off_when_the_threshold_is_zero() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_compact_off")
-            .build();
+        let dir = temp_dir("submodule_rocks_compact_off");
         let store =
             RocksSubmoduleStore::open_with(dir.path().join("index"), RocksTuning::baseline())?;
-        store.disable_auto_compaction()?;
         let rows = 20_u32;
-        for offset in 0..rows {
-            put_offset(&store, offset, offset as u8)?;
-            store.flush_memtables()?;
-        }
-        let files = store.sst_file_count(Cf::Interval)?;
-        assert!(
-            files > 8,
-            "expected many tiny SSTs after per-row flushes, got {files}"
-        );
+        let files = plant_tiny_ssts(&store, rows)?;
         std::thread::sleep(Duration::from_millis(400));
         let stats = store.ingest_stats()?;
         assert_eq!(stats.small_file_compactions, 0);
@@ -7969,34 +7825,17 @@ mod tests {
             store.sst_file_count(Cf::Interval)? > 8,
             "threshold 0 must leave the tiny SSTs in place, started with {files}"
         );
-        for offset in 0..rows {
-            assert_eq!(
-                path_hashes_at(&store, offset)?,
-                Some(hashes_for(offset as u8))
-            );
-        }
-        Ok(())
+        assert_planted_rows(&store, rows)
     }
 
     #[test]
     fn small_file_compact_merges_tiny_ssts_past_the_threshold() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_compact_on")
-            .build();
+        let dir = temp_dir("submodule_rocks_compact_on");
         let path = dir.path().join("index");
         let rows = 20_u32;
         let files = {
             let store = RocksSubmoduleStore::open_with(&path, RocksTuning::baseline())?;
-            store.disable_auto_compaction()?;
-            for offset in 0..rows {
-                put_offset(&store, offset, offset as u8)?;
-                store.flush_memtables()?;
-            }
-            let files = store.sst_file_count(Cf::Interval)?;
-            assert!(
-                files > 8,
-                "expected many tiny SSTs after per-row flushes, got {files}"
-            );
+            let files = plant_tiny_ssts(&store, rows)?;
             assert_eq!(store.ingest_stats()?.small_file_compactions, 0);
             files
         };
@@ -8026,22 +7865,14 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        for offset in 0..rows {
-            assert_eq!(
-                path_hashes_at(&store, offset)?,
-                Some(hashes_for(offset as u8))
-            );
-        }
-        Ok(())
+        assert_planted_rows(&store, rows)
     }
 
     /// Writes, flushes until a retired WAL is reused, then reopens.
     /// The last row is only in that WAL.
     #[test]
     fn wal_recycle_reopens_after_a_reused_log() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_wal_recycle")
-            .build();
+        let dir = temp_dir("submodule_rocks_wal_recycle");
         let path = dir.path().join("index");
         let preset = RocksTuning::baseline();
         let durable = [(1_u32, 11_u8), (2, 22), (3, 33), (4, 44)];
@@ -8084,9 +7915,7 @@ mod tests {
         );
         assert!(parse_cumulative_stall_micros("no stall line").is_none());
 
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_stats")
-            .build();
+        let dir = temp_dir("submodule_rocks_stats");
         let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
         let stats = store.ingest_stats()?;
         assert_eq!(stats.write_stall_micros, 0);
@@ -8107,9 +7936,7 @@ mod tests {
 
     #[test]
     fn production_open_keeps_tables_and_tickers() -> eyre::Result<()> {
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_stats")
-            .build();
+        let dir = temp_dir("submodule_rocks_stats");
         let bench = RocksSubmoduleStore::open_with_stats(
             dir.path().join("bench"),
             RocksTuning::baseline(),
@@ -8206,9 +8033,7 @@ mod tests {
         let limits = RocksResourceLimits::production();
         let resources = RocksResources::new(limits)?;
         let before = rocksdb_thread_count();
-        let dir = TempDirBuilder::new()
-            .prefix("submodule_rocks_shared")
-            .build();
+        let dir = temp_dir("submodule_rocks_shared");
         let mut stores = Vec::with_capacity(40);
         for index in 0..40 {
             let path = dir.path().join(format!("db-{index}"));
@@ -8272,7 +8097,7 @@ mod tests {
             rate_limit_bytes_per_sec: 1024 * 1024,
         };
         let resources = RocksResources::new(limits)?;
-        let dir = TempDirBuilder::new().prefix("submodule_rocks_rate").build();
+        let dir = temp_dir("submodule_rocks_rate");
         let first =
             RocksSubmoduleStore::open_with_resources(dir.path().join("a"), Arc::clone(&resources))?;
         let second =
@@ -8310,6 +8135,50 @@ mod tests {
             data_path_hash: None,
             tx_path_hash: Some(H256::repeat_byte(byte.wrapping_add(1))),
         }
+    }
+
+    fn plant_tiny_ssts(store: &RocksSubmoduleStore, rows: u32) -> eyre::Result<u64> {
+        store.disable_auto_compaction()?;
+        for offset in 0..rows {
+            put_offset(store, offset, offset as u8)?;
+            store.flush_memtables()?;
+        }
+        let files = store.sst_file_count(Cf::Interval)?;
+        assert!(
+            files > 8,
+            "expected many tiny SSTs after per-row flushes, got {files}"
+        );
+        Ok(files)
+    }
+
+    fn assert_planted_rows(store: &RocksSubmoduleStore, rows: u32) -> eyre::Result<()> {
+        for offset in 0..rows {
+            assert_eq!(
+                path_hashes_at(store, offset)?,
+                Some(hashes_for(offset as u8))
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_contains(opts: &str, needles: &[&str]) {
+        for needle in needles {
+            assert!(opts.contains(needle), "missing {needle} in {opts}");
+        }
+    }
+
+    fn assert_lacks(opts: &str, needles: &[&str]) {
+        for needle in needles {
+            assert!(!opts.contains(needle), "unexpected {needle} in {opts}");
+        }
+    }
+
+    fn assert_cf(opts: &str, cf: &str, key: &str, want: &str) {
+        assert_eq!(
+            cf_option(opts, cf, key).as_deref(),
+            Some(want),
+            "{key} in {opts}"
+        );
     }
 
     fn put_offset(store: &RocksSubmoduleStore, offset: u32, byte: u8) -> eyre::Result<()> {
