@@ -4017,7 +4017,7 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
         );
     }
     refuse_existing_rocks_schema(path)?;
-    replace_marked_incomplete(path, replace)?;
+    replace_marked_incomplete(path, replace, true)?;
     Ok(())
 }
 
@@ -4074,11 +4074,11 @@ fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> e
         }
         drop(env);
     }
-    replace_marked_incomplete(path, replace)?;
+    replace_marked_incomplete(path, replace, false)?;
     Ok(())
 }
 
-fn replace_marked_incomplete(path: &Path, replace: bool) -> eyre::Result<()> {
+fn replace_marked_incomplete(path: &Path, replace: bool, refuse_mdbx: bool) -> eyre::Result<()> {
     if !migrate::converting_sentinel_present(path)? {
         eyre::bail!(
             "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
@@ -4091,9 +4091,20 @@ fn replace_marked_incomplete(path: &Path, replace: bool) -> eyre::Result<()> {
             path.display()
         );
     }
-    // Unlock before delete. A missing LOCK file means nothing holds it.
-    drop(rocks::hold_rocks_lock(path)?);
+    // Hold LOCK across the marker check and the delete. Seal writes SCHEMA
+    // before it drops that lock. `remove_dir_all` unlinks LOCK, so the flock
+    // does not cover the directory created below.
+    let hold = rocks::hold_rocks_lock(path)?;
+    refuse_existing_rocks_schema(path)?;
+    refuse_forbidden(path)?;
+    if refuse_mdbx && path.join("mdbx.dat").is_file() {
+        eyre::bail!(
+            "target {} contains mdbx.dat. Refusing to delete an MDBX index or a consensus database.",
+            path.display()
+        );
+    }
     fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
+    drop(hold);
     fs::create_dir_all(path)?;
     write_converting_sentinel(path)?;
     Ok(())
@@ -5113,6 +5124,84 @@ mod tests {
         let err = super::prepare_rocks_target(&held, true).unwrap_err();
         assert!(format!("{err:#}").contains("may be running"), "{err:#}");
         assert!(held.join("CONVERTING").is_file());
+        Ok(())
+    }
+
+    /// A dropped conversion holds no lock and has no SCHEMA file.
+    /// `--replace-incomplete` deletes that directory and starts again.
+    #[test]
+    fn replace_incomplete_deletes_a_dropped_converting_directory() -> eyre::Result<()> {
+        let root = temp("convert-replace-dropped");
+        let rocks = root.path().join("rocks");
+        super::prepare_rocks_target(&rocks, false)?;
+        drop(RocksSubmoduleStore::open_converting(&rocks)?);
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        assert!(rocks.join("CONVERTING").is_file());
+        assert!(!rocks.join("SCHEMA").is_file());
+        super::prepare_rocks_target(&rocks, true)?;
+        assert!(!rocks.join("KEEP").is_file());
+        assert!(rocks.join("CONVERTING").is_file());
+        assert!(!rocks.join("SCHEMA").is_file());
+        Ok(())
+    }
+
+    /// SCHEMA can land after the earlier look and before the delete.
+    /// The delete must see that marker and leave the directory in place.
+    #[test]
+    fn replace_incomplete_keeps_a_schema_seen_under_the_lock() -> eyre::Result<()> {
+        let root = temp("convert-replace-schema-recheck");
+        let rocks = root.path().join("rocks");
+        fs::create_dir_all(&rocks)?;
+        fs::write(rocks.join("SCHEMA"), SUBMODULE_SCHEMA_ROCKS_V1)?;
+        fs::write(
+            rocks.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        let err = super::replace_marked_incomplete(&rocks, true, true).unwrap_err();
+        assert!(format!("{err:#}").contains("completed"), "{err:#}");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(rocks.join("SCHEMA").is_file());
+        Ok(())
+    }
+
+    /// A replace that runs after the database closes and before SCHEMA exists
+    /// must not delete the directory being sealed.
+    #[test]
+    fn replace_incomplete_does_not_delete_during_schema_write() -> eyre::Result<()> {
+        let root = temp("convert-replace-sealing");
+        let rocks = root.path().join("rocks");
+        super::prepare_rocks_target(&rocks, false)?;
+        let mut opened = RocksSubmoduleStore::open_converting(&rocks)?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let path = rocks.clone();
+        let flag = std::sync::Arc::clone(&seen);
+        opened.set_before_schema_hook(move || {
+            let text = match super::prepare_rocks_target(&path, true) {
+                Ok(()) => "ok".to_owned(),
+                Err(err) => format!("{err:#}"),
+            };
+            *flag.lock().expect("seal window") = Some((
+                text,
+                path.join("CONVERTING").is_file(),
+                path.join("SCHEMA").is_file(),
+                path.join("KEEP").is_file(),
+            ));
+        });
+        opened.seal_and_stamp()?;
+        let (text, converting, schema, kept) =
+            seen.lock().expect("seal window").clone().expect("hook");
+        assert!(text.contains("may be running"), "{text}");
+        assert!(converting);
+        assert!(!schema);
+        assert!(kept);
+        assert!(rocks.join("SCHEMA").is_file());
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        let err = super::prepare_rocks_target(&rocks, true).unwrap_err();
+        assert!(format!("{err:#}").contains("completed"), "{err:#}");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(rocks.join("SCHEMA").is_file());
         Ok(())
     }
 

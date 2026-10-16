@@ -859,6 +859,9 @@ pub struct RocksSubmoduleStore {
     /// The field is read by drop. Nothing else inspects it.
     #[expect(dead_code, reason = "held only so drop releases the lock")]
     lock_file: Option<Arc<File>>,
+    /// Runs after this database is closed and before the SCHEMA file.
+    #[cfg(any(test, feature = "test-utils"))]
+    before_schema: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Background work visible around one bench read shape.
@@ -1016,6 +1019,8 @@ impl RocksSubmoduleStore {
             read_only: true,
             bulk_load: false,
             lock_file,
+            #[cfg(any(test, feature = "test-utils"))]
+            before_schema: None,
         })
     }
 
@@ -1188,17 +1193,30 @@ impl RocksSubmoduleStore {
             read_only: false,
             bulk_load: false,
             lock_file: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            before_schema: None,
         })
+    }
+
+    /// Observe the window after close and before the SCHEMA file.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn set_before_schema_hook(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        self.before_schema = Some(Arc::new(hook));
     }
 
     /// Flush copied rows into SST files, drop WAL logs, then write SCHEMA.
     ///
-    /// The database is closed before the log files are removed, and the
-    /// SCHEMA file is written after that. A crash before the file leaves no
-    /// completion marker, so the run is redone. A family with more than one
-    /// SST is compacted so the finished directory is not a pile of flushes.
+    /// The database is closed before the log files are removed. `flock` on
+    /// `LOCK` is taken before that close and dropped only after SCHEMA is
+    /// synced. RocksDB's own lock is `fcntl`, which does not block `flock`,
+    /// so this can be taken while the database is still open. A crash before
+    /// the file leaves no completion marker, and the flock dies with the
+    /// process, so the run is redone. A family with more than one SST is
+    /// compacted so the finished directory is not a pile of flushes.
     pub(super) fn seal_and_stamp(self) -> eyre::Result<()> {
         let path = self.path.clone();
+        #[cfg(any(test, feature = "test-utils"))]
+        let before_schema = self.before_schema.clone();
         {
             self.ensure_writable()?;
             let _guard = self.lock_write();
@@ -1209,9 +1227,16 @@ impl RocksSubmoduleStore {
             self.flush_families_locked()?;
             self.compact_split_families_locked();
         }
+        // Held across close, WAL removal, and the SCHEMA write. A second
+        // process takes this flock before it deletes a CONVERTING directory.
+        let _flock = hold_rocks_flock(&path)?;
         drop(self);
         remove_rocks_wal_files(&path)?;
         sync_dir(&path)?;
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(hook) = before_schema {
+            hook();
+        }
         write_schema_marker_file(&path, SUBMODULE_SCHEMA_ROCKS_V1)
     }
 
@@ -2825,6 +2850,30 @@ pub(super) fn hold_rocks_lock(path: &Path) -> eyre::Result<Option<Arc<File>>> {
         );
     }
     Ok(Some(Arc::new(file)))
+}
+
+/// `flock` on `LOCK` when the file exists. Does not take `fcntl`.
+///
+/// RocksDB locks with `fcntl`. That lock does not block `flock`, and
+/// `flock` does not block it. Seal uses this so it can hold the file that
+/// [`hold_rocks_lock`] checks while the database is still open.
+fn hold_rocks_flock(path: &Path) -> eyre::Result<Option<File>> {
+    let lock_path = path.join("LOCK");
+    if !lock_path.is_file() {
+        return Ok(None);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .wrap_err("open rocksdb LOCK")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        eyre::bail!(
+            "refusing to run because the rocksdb LOCK is held, so the node may be running. Stop the node and retry. {err}"
+        );
+    }
+    Ok(Some(file))
 }
 
 fn open_db_read_only(path: &Path) -> eyre::Result<DB> {
