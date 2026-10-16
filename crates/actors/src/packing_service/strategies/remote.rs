@@ -344,6 +344,18 @@ mod short_stream_tests {
         Arc<StorageModule>,
         PartitionHash,
     ) {
+        test_module_with_ceiling(prefix, None)
+    }
+
+    fn test_module_with_ceiling(
+        prefix: &str,
+        ceiling_bytes: Option<u64>,
+    ) -> (
+        irys_testing_utils::tempfile::TempDir,
+        Arc<irys_types::Config>,
+        Arc<StorageModule>,
+        PartitionHash,
+    ) {
         let tmp_dir = TempDirBuilder::new().prefix(prefix).build();
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = tmp_dir.path().to_path_buf();
@@ -354,6 +366,9 @@ mod short_stream_tests {
             chunk_size: 32,
             ..consensus
         });
+        if let Some(ceiling) = ceiling_bytes {
+            node_config.storage.max_pending_write_bytes = Some(ceiling);
+        }
         let config = Arc::new(irys_types::Config::new_with_random_peer_id(node_config));
         let partition_hash = PartitionHash::repeat_byte(0x3C);
         let info = StorageModuleInfo {
@@ -507,139 +522,97 @@ mod short_stream_tests {
         );
     }
 
+    /// Remote body outcomes for one inclusive range. Each row is the case the
+    /// named test used to assert on its own.
     #[test_log::test(tokio::test)]
-    async fn empty_remote_body_is_not_a_successful_inclusive_range() {
-        let (_tmp, config, module, hash) = test_module("remote_empty_body");
-        let host = PackHost::spawn(200, Vec::new());
-        let result = pack_from(&host, config, &module, 0, 0, hash).await;
-        assert_requested(&host);
-        assert!(
-            result.is_err(),
-            "an empty body on inclusive 0..=0 must fail, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(0)),
-            Some(ChunkType::Uninitialized)
-        );
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn short_remote_body_does_not_finish_the_inclusive_range() {
-        let (_tmp, config, module, hash) = test_module("remote_short_body");
-        let host = PackHost::spawn(200, vec![0x11; 64]);
-        let result = pack_from(&host, config, &module, 0, 2, hash).await;
-        assert_requested(&host);
-        assert!(
-            result.is_err(),
-            "two chunks for inclusive 0..=2 must fail, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(2)),
-            Some(ChunkType::Uninitialized)
-        );
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn short_trailing_remote_buffer_is_rejected() {
-        let (_tmp, config, module, hash) = test_module("remote_trailing_buffer");
-        let host = PackHost::spawn(200, vec![0x22; 16]);
-        let result = pack_from(&host, config, &module, 0, 0, hash).await;
-        assert_requested(&host);
-        assert!(
-            result.is_err(),
-            "a short trailing buffer must fail, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(0)),
-            Some(ChunkType::Uninitialized),
-            "a short buffer must not be stored as a chunk"
-        );
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn remote_http_error_does_not_pack_the_body() {
-        let (_tmp, config, module, hash) = test_module("remote_http_error");
-        let host = PackHost::spawn(500, vec![0x33; 32]);
-        let result = pack_from(&host, config, &module, 0, 0, hash).await;
-        assert_requested(&host);
-        assert!(
-            result.is_err(),
-            "HTTP 500 must fail the range, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(0)),
-            Some(ChunkType::Uninitialized),
-            "an error body must not be stored as entropy"
-        );
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn remote_refused_entropy_write_fails_the_range() {
-        let (_tmp, config, module, _hash) = test_module("remote_refused_write");
-        let host = PackHost::spawn(200, vec![0x44; 32]);
-        let other_hash = PartitionHash::repeat_byte(0x11);
-        let result = pack_from(&host, config, &module, 0, 0, other_hash).await;
-        assert_requested(&host);
-        assert!(
-            result.is_err(),
-            "a refused entropy write must fail the range, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(0)),
-            Some(ChunkType::Uninitialized)
-        );
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn complete_remote_body_packs_the_inclusive_range() {
-        let (_tmp, config, module, hash) = test_module("remote_complete_body");
-        let host = PackHost::spawn(200, vec![0x55; 32]);
-        let result = pack_from(&host, config, &module, 0, 0, hash).await;
-        assert_requested(&host);
-        assert!(
-            result.is_ok(),
-            "one full chunk for inclusive 0..=0 must succeed, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(0)),
-            Some(ChunkType::Entropy)
-        );
-    }
-
-    fn module_with_pending_ceiling(
-        prefix: &str,
-        ceiling_bytes: u64,
-    ) -> (
-        irys_testing_utils::tempfile::TempDir,
-        Arc<irys_types::Config>,
-        Arc<StorageModule>,
-        PartitionHash,
-    ) {
-        let tmp_dir = TempDirBuilder::new().prefix(prefix).build();
-        let mut node_config = NodeConfig::testing();
-        node_config.base_directory = tmp_dir.path().to_path_buf();
-        let consensus = node_config.consensus_config();
-        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
-            entropy_packing_iterations: 1,
-            num_chunks_in_partition: 4,
-            chunk_size: 32,
-            ..consensus
-        });
-        node_config.storage.max_pending_write_bytes = Some(ceiling_bytes);
-        let config = Arc::new(irys_types::Config::new_with_random_peer_id(node_config));
-        let partition_hash = PartitionHash::repeat_byte(0x3C);
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(irys_types::partition::PartitionAssignment {
-                partition_hash,
-                miner_address: config.node_config.miner_address(),
-                ledger_id: None,
-                slot_index: None,
-            }),
-            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), "hdd0".into())],
-        };
-        let module = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
-        (tmp_dir, config, module, partition_hash)
+    async fn remote_pack_body_outcomes() {
+        // status, body, start, end, use the module hash, expect success,
+        // offset to read, stored type, failure text.
+        let cases: [(u16, Vec<u8>, u32, u32, bool, bool, u32, ChunkType, &str); 6] = [
+            (
+                200,
+                Vec::new(),
+                0,
+                0,
+                true,
+                false,
+                0,
+                ChunkType::Uninitialized,
+                "an empty body on inclusive 0..=0 must fail",
+            ),
+            (
+                200,
+                vec![0x11; 64],
+                0,
+                2,
+                true,
+                false,
+                2,
+                ChunkType::Uninitialized,
+                "two chunks for inclusive 0..=2 must fail",
+            ),
+            (
+                200,
+                vec![0x22; 16],
+                0,
+                0,
+                true,
+                false,
+                0,
+                ChunkType::Uninitialized,
+                "a short trailing buffer must fail",
+            ),
+            (
+                500,
+                vec![0x33; 32],
+                0,
+                0,
+                true,
+                false,
+                0,
+                ChunkType::Uninitialized,
+                "HTTP 500 must fail the range",
+            ),
+            (
+                200,
+                vec![0x44; 32],
+                0,
+                0,
+                false,
+                false,
+                0,
+                ChunkType::Uninitialized,
+                "a refused entropy write must fail the range",
+            ),
+            (
+                200,
+                vec![0x55; 32],
+                0,
+                0,
+                true,
+                true,
+                0,
+                ChunkType::Entropy,
+                "one full chunk for inclusive 0..=0 must succeed",
+            ),
+        ];
+        for (status, body, start, end, own_hash, expect_ok, offset, kind, message) in cases {
+            let (_tmp, config, module, hash) = test_module("remote_pack_body");
+            let host = PackHost::spawn(status, body);
+            let hash = if own_hash {
+                hash
+            } else {
+                PartitionHash::repeat_byte(0x11)
+            };
+            let result = pack_from(&host, config, &module, start, end, hash).await;
+            assert_requested(&host);
+            assert_eq!(result.is_ok(), expect_ok, "{message}, got {result:?}");
+            assert_eq!(
+                module.get_chunk_type(&PartitionChunkOffset(offset)),
+                Some(kind),
+                "{message}"
+            );
+        }
     }
 
     /// Accepts the TCP connection and never answers. A client with no read
@@ -786,7 +759,7 @@ mod short_stream_tests {
     #[test_log::test(tokio::test)]
     async fn one_remote_stream_item_stays_within_the_pending_ceiling() {
         let (_tmp, config, module, hash) =
-            module_with_pending_ceiling("remote_pending_ceiling", 32);
+            test_module_with_ceiling("remote_pending_ceiling", Some(32));
         assert_eq!(
             module.pending_memory_ceiling_bytes(),
             32,

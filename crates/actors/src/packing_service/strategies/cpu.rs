@@ -295,51 +295,46 @@ mod tests {
         )
     }
 
+    /// A pack for another partition hash fails and stores nothing. A pack for
+    /// the assigned hash writes entropy.
     #[test_log::test(tokio::test)]
-    async fn refused_entropy_write_fails_cpu_pack() {
-        let (_tmp, config, module, _assigned) = test_module("cpu_refused_write");
-        let other_hash = PartitionHash::repeat_byte(0x11);
-        let result = strategy(config.clone())
-            .pack(
-                &module,
-                PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
-                config.node_config.miner_address(),
-                other_hash,
-                module.id,
-                100,
-            )
-            .await;
-        assert!(
-            result.is_err(),
-            "a refused entropy write must fail the pack, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(0)),
-            Some(ChunkType::Uninitialized)
-        );
-    }
-
-    #[test_log::test(tokio::test)]
-    async fn cpu_pack_writes_entropy_for_the_assigned_hash() {
-        let (_tmp, config, module, hash) = test_module("cpu_assigned_write");
-        let result = strategy(config.clone())
-            .pack(
-                &module,
-                PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
-                config.node_config.miner_address(),
-                hash,
-                module.id,
-                100,
-            )
-            .await;
-        assert!(
-            result.is_ok(),
-            "packing for the assigned hash must succeed, got {result:?}"
-        );
-        assert_eq!(
-            module.get_chunk_type(&PartitionChunkOffset(0)),
-            Some(ChunkType::Entropy)
-        );
+    async fn cpu_pack_follows_the_assigned_hash() {
+        let cases = [
+            (
+                false,
+                "a refused entropy write must fail the pack",
+                ChunkType::Uninitialized,
+            ),
+            (
+                true,
+                "packing for the assigned hash must succeed",
+                ChunkType::Entropy,
+            ),
+        ];
+        for (own_hash, message, kind) in cases {
+            let (_tmp, config, module, hash) = test_module("cpu_assigned_hash");
+            let hash = if own_hash {
+                hash
+            } else {
+                PartitionHash::repeat_byte(0x11)
+            };
+            let result = strategy(config.clone())
+                .pack(
+                    &module,
+                    PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+                    config.node_config.miner_address(),
+                    hash,
+                    module.id,
+                    100,
+                )
+                .await;
+            assert_eq!(result.is_ok(), own_hash, "{message}, got {result:?}");
+            assert_eq!(
+                module.get_chunk_type(&PartitionChunkOffset(0)),
+                Some(kind),
+                "{message}"
+            );
+        }
     }
 
     /// A long range used to push one join handle per chunk and await them only
