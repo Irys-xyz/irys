@@ -51,6 +51,80 @@ other_tmpdir() {
     mktemp -d "$base/sm-bench-guards.XXXXXX"
 }
 
+stub_bench() {
+    local root=$1
+    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+}
+
+# safe/loadtest and a queue for the disk that holds it.
+loadtest_disk() {
+    local root=$1
+    local -n _dev=$2
+    local -n _mnt=$3
+    mkdir -p "$root/safe/loadtest"
+    _dev=$(mount_dev_for "$root/safe/loadtest")
+    _mnt=$(mount_of "$root/safe/loadtest")
+    queue_files "$root/sys/block/$_dev/queue"
+}
+
+# A pid that has already exited.
+finished_pid() {
+    local pid
+    sleep 30 &
+    pid=$!
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    printf '%s\n' "$pid"
+}
+
+# bpftrace that records its pid and exits on INT or TERM.
+# GNU sleep ignores SIGINT, so this stub cannot be sleep.
+hold_bpftrace() {
+    local root=$1
+    mkdir -p "$root/bin"
+    cat >"$root/bin/bpftrace" <<EOF
+#!/bin/bash
+printf '%s\n' "\$\$" > "$root/bpf.pid"
+exec python3 -c 'import signal,sys,time
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+time.sleep(120)'
+EOF
+    chmod +x "$root/bin/bpftrace"
+}
+
+# $1 ok-name, $2 charset|later, $3 needle, $4 1 to require that the bench did not run.
+# Uses the caller's err file and root.
+name_guard() {
+    local ok_name=$1 mode=$2 needle=$3 check_bench=$4
+    shift 4
+    if "$@" >"$err" 2>&1; then
+        bad "$ok_name" "exited 0: $(cat "$err")"
+        return
+    fi
+    if [ "$mode" = charset ]; then
+        if ! grep -q "$needle" "$err"; then
+            bad "$ok_name" "did not reject: $(cat "$err")"
+            return
+        fi
+    else
+        if grep -q "alphanumeric" "$err"; then
+            bad "$ok_name" "rejected the name: $(cat "$err")"
+            return
+        fi
+        if ! grep -q "$needle" "$err"; then
+            bad "$ok_name" "did not reach the later check: $(cat "$err")"
+            return
+        fi
+    fi
+    if [ "$check_bench" = 1 ] && [ -e "$root/bench-ran" ]; then
+        bad "$ok_name" "bench ran"
+        return
+    fi
+    ok "$ok_name"
+}
+
 test_fill_refuses_file_outside_loadtest() {
     local name=fill-outside root file log err
     root=$(tmpdir)
@@ -372,8 +446,7 @@ test_ladder_does_not_stash_without_loadtest() {
     err=$root/err
     seed_module "$module"
     fake_sys "$sys"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$sys" "$here/ladder.sh" \
         --device loop0 --mount /tmp --loadtest "$module" \
         --out-root "$root/out" --bench "$root/bench" --run only-run \
@@ -399,8 +472,7 @@ test_ladder_does_not_write_queue_when_mount_disk_differs() {
     err=$root/err
     seed_module "$module"
     fake_sys "$sys"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$sys" "$here/ladder.sh" \
         --device loop0 --mount /tmp --loadtest "$module" \
         --out-root "$root/out" --bench "$root/bench" \
@@ -438,8 +510,7 @@ test_run_refuses_a_missing_path_that_escapes_loadtest() {
     err=$root/err
     mkdir -p "$root/safe/loadtest" "$root/sys/block/none/queue"
     queue_files "$root/sys/block/none/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device none --mount /tmp \
         --loadtest "$root/safe/loadtest" \
@@ -464,8 +535,7 @@ test_run_rejects_a_dotdot_name() {
     err=$root/err
     mkdir -p "$root/safe/loadtest" "$root/out" "$root/sys/block/none/queue"
     queue_files "$root/sys/block/none/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$root/sys" "$here/run.sh" \
         --name .. --device none --mount /tmp \
         --loadtest "$root/safe/loadtest" \
@@ -490,8 +560,7 @@ test_run_rejects_a_dot_name() {
     err=$root/err
     mkdir -p "$root/safe/loadtest" "$root/out" "$root/sys/block/none/queue"
     queue_files "$root/sys/block/none/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$root/sys" "$here/run.sh" \
         --name . --device none --mount /tmp \
         --loadtest "$root/safe/loadtest" \
@@ -517,8 +586,7 @@ test_ladder_rejects_a_dotdot_name() {
     seed_module "$module"
     mkdir -p "$sys/block/none/queue" "$root/out"
     queue_files "$sys/block/none/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
         --device none --mount /tmp --loadtest "$module" \
         --out-root "$root/out" --bench "$root/bench" \
@@ -543,8 +611,7 @@ test_run_refuses_a_device_that_is_not_the_mount_disk() {
     err=$root/err
     mkdir -p "$root/safe/loadtest" "$root/sys/block/loop0/queue"
     queue_files "$root/sys/block/loop0/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device loop0 --mount /tmp \
         --loadtest "$root/safe/loadtest" \
@@ -577,8 +644,7 @@ test_run_allows_a_missing_path_when_the_disk_is_not_named_none() {
     fi
     mkdir -p "$root/safe/loadtest" "$root/sys/block/$dev/queue"
     queue_files "$root/sys/block/$dev/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if ! with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount "$(mount_of "$root")" \
         --loadtest "$root/safe/loadtest/newdir" \
@@ -597,13 +663,8 @@ test_run_allows_a_missing_path_under_loadtest() {
     local name=run-allow-missing root err dev mnt
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
-    mkdir -p "$root/sys/block/$dev/queue"
-    queue_files "$root/sys/block/$dev/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    loadtest_disk "$root" dev mnt
+    stub_bench "$root"
     if ! with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount "$mnt" \
         --loadtest "$root/safe/loadtest/newdir" \
@@ -754,8 +815,7 @@ test_ladder_does_not_stash_when_recall_file_escapes() {
     err=$root/err
     seed_module "$module"
     mkdir -p "$sys/block/none/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$sys" "$here/ladder.sh" \
         --device none --mount /tmp --loadtest "$module" \
         --recall-file "$module/../../escaped-recall.dat" \
@@ -790,11 +850,7 @@ test_run_records_the_bench_and_term_stops_it() {
     local bench_pid run_pid
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
-    mkdir -p "$root/sys/block/$dev/queue"
-    queue_files "$root/sys/block/$dev/queue"
+    loadtest_disk "$root" dev mnt
     cat >"$root/bench" <<EOF
 #!/bin/bash
 printf '%s\n' "\$\$" > "$root/bench.pid"
@@ -958,65 +1014,27 @@ test_device_name_allows_a_hyphen_and_rejects_dot_and_slash() {
     mkdir -p "$module" "$queue" "$sys/block/data-root/queue" "$root/out"
     queue_files "$queue"
     queue_files "$sys/block/data-root/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
 
-    if with_fake_sys "$sys" "$here/run.sh" \
-        --name t --device dm-0 --mount /tmp \
-        --loadtest "$module" \
-        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
-        >"$err" 2>&1; then
-        bad "$name" "run.sh exited 0 for dm-0: $(cat "$err")"
-    elif grep -q "alphanumeric" "$err"; then
-        bad "$name" "run.sh rejected dm-0: $(cat "$err")"
-    elif ! grep -q "not dm-0" "$err"; then
-        bad "$name" "run.sh did not reach the mount check for dm-0: $(cat "$err")"
-    elif [ -e "$root/bench-ran" ]; then
-        bad "$name" "bench ran for dm-0"
-    else
-        ok "$name-run"
-    fi
+    local spec ok_name mode needle check_bench dev
+    local -a run_rows=(
+        'run|later|not dm-0|1|dm-0'
+        'run-mapper|later|not data-root|0|data-root'
+        'run-dotdot|charset|alphanumeric|1|..'
+    )
+    for spec in "${run_rows[@]}"; do
+        IFS='|' read -r ok_name mode needle check_bench dev <<<"$spec"
+        name_guard "$name-$ok_name" "$mode" "$needle" "$check_bench" \
+            with_fake_sys "$sys" "$here/run.sh" \
+            --name t --device "$dev" --mount /tmp \
+            --loadtest "$module" \
+            --out-root "$root/out" --bench "$root/bench" --min-free-gib 0
+    done
 
-    if with_fake_sys "$sys" "$here/run.sh" \
-        --name t --device data-root --mount /tmp \
-        --loadtest "$module" \
-        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
-        >"$err" 2>&1; then
-        bad "$name" "run.sh exited 0 for data-root: $(cat "$err")"
-    elif grep -q "alphanumeric" "$err"; then
-        bad "$name" "run.sh rejected data-root: $(cat "$err")"
-    elif ! grep -q "not data-root" "$err"; then
-        bad "$name" "run.sh did not reach the mount check for data-root: $(cat "$err")"
-    else
-        ok "$name-run-mapper"
-    fi
-
-    if with_fake_sys "$sys" "$here/run.sh" \
-        --name t --device .. --mount /tmp \
-        --loadtest "$module" \
-        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
-        >"$err" 2>&1; then
-        bad "$name" "run.sh accepted .."
-    elif ! grep -q "alphanumeric" "$err"; then
-        bad "$name" "run.sh did not reject ..: $(cat "$err")"
-    elif [ -e "$root/bench-ran" ]; then
-        bad "$name" "bench ran for .."
-    else
-        ok "$name-run-dotdot"
-    fi
-
-    if with_fake_sys "$sys" "$here/ladder.sh" \
+    name_guard "$name-ladder" later "not dm-0" 0 \
+        with_fake_sys "$sys" "$here/ladder.sh" \
         --device dm-0 --mount /tmp --loadtest "$module" \
-        --out-root "$root/out" --bench "$root/bench" --run only-run \
-        >"$err" 2>&1; then
-        bad "$name" "ladder.sh exited 0 for dm-0: $(cat "$err")"
-    elif grep -q "alphanumeric" "$err"; then
-        bad "$name" "ladder.sh rejected dm-0: $(cat "$err")"
-    elif ! grep -q "not dm-0" "$err"; then
-        bad "$name" "ladder.sh did not reach the mount check: $(cat "$err")"
-    else
-        ok "$name-ladder"
-    fi
+        --out-root "$root/out" --bench "$root/bench" --run only-run
 
     printf '999\n' >"$queue/max_sectors_kb"
     cat >"$root/out/sysfs.txt" <<'EOF'
@@ -1026,10 +1044,7 @@ nr_requests=64
 scheduler=[mq-deadline]
 EOF
     # A finished pid is enough. The charset case is not a live bench.
-    sleep 0.1 &
-    dead=$!
-    wait "$dead" 2>/dev/null || true
-    printf '%s\n' "$dead" >"$root/out/run.pid"
+    printf '%s\n' "$(finished_pid)" >"$root/out/run.pid"
     if ! with_fake_sys "$sys" "$here/teardown.sh" dm-0 "$root/out/sysfs.txt" >"$err" 2>&1; then
         bad "$name" "teardown.sh rejected dm-0: $(cat "$err")"
     elif grep -q "alphanumeric" "$err"; then
@@ -1041,59 +1056,31 @@ EOF
     fi
 
     printf '999\n' >"$queue/max_sectors_kb"
-    if with_fake_sys "$sys" "$here/teardown.sh" . "$root/out/sysfs.txt" >"$err" 2>&1; then
-        bad "$name" "teardown.sh accepted ."
-    elif ! grep -q "alphanumeric" "$err"; then
-        bad "$name" "teardown.sh did not reject .: $(cat "$err")"
-    elif ! grep -q '^999$' "$queue/max_sectors_kb"; then
-        bad "$name" "teardown.sh wrote the queue for ."
-    else
-        ok "$name-teardown-dot"
-    fi
+    local -a teardown_rows=(
+        'teardown-dot|.|1'
+        'teardown-empty||0'
+    )
+    for spec in "${teardown_rows[@]}"; do
+        IFS='|' read -r ok_name dev check_bench <<<"$spec"
+        if with_fake_sys "$sys" "$here/teardown.sh" "$dev" "$root/out/sysfs.txt" >"$err" 2>&1; then
+            bad "$name-$ok_name" "teardown.sh accepted ${dev:-an empty name}"
+        elif ! grep -q "alphanumeric" "$err"; then
+            bad "$name-$ok_name" "teardown.sh did not reject ${dev:-an empty name}: $(cat "$err")"
+        elif [ "$check_bench" = 1 ] && ! grep -q '^999$' "$queue/max_sectors_kb"; then
+            bad "$name-$ok_name" "teardown.sh wrote the queue for $dev"
+        else
+            ok "$name-$ok_name"
+        fi
+    done
 
-    if with_fake_sys "$sys" "$here/teardown.sh" "" "$root/out/sysfs.txt" >"$err" 2>&1; then
-        bad "$name" "teardown.sh accepted an empty name"
-    elif ! grep -q "alphanumeric" "$err"; then
-        bad "$name" "teardown.sh did not reject an empty name: $(cat "$err")"
-    else
-        ok "$name-teardown-empty"
-    fi
-
-    if "$here/sample.sh" dm-0 "$root/out" >"$err" 2>&1; then
-        bad "$name" "sample.sh exited 0"
-    elif grep -q "alphanumeric" "$err"; then
-        bad "$name" "sample.sh rejected dm-0: $(cat "$err")"
-    elif ! grep -q "iostat" "$err"; then
-        bad "$name" "sample.sh did not reach iostat: $(cat "$err")"
-    else
-        ok "$name-sample"
-    fi
-
-    if "$here/sample.sh" "sda/sdb" "$root/out" >"$err" 2>&1; then
-        bad "$name" "sample.sh accepted a slash"
-    elif ! grep -q "alphanumeric" "$err"; then
-        bad "$name" "sample.sh did not reject a slash: $(cat "$err")"
-    else
-        ok "$name-sample-slash"
-    fi
-
-    if "$here/blk-run.sh" dm-0 "$module" "$root/trace" >"$err" 2>&1; then
-        bad "$name" "blk-run.sh exited 0 for dm-0: $(cat "$err")"
-    elif grep -q "alphanumeric" "$err"; then
-        bad "$name" "blk-run.sh rejected dm-0: $(cat "$err")"
-    elif ! grep -q "not dm-0" "$err"; then
-        bad "$name" "blk-run.sh did not reach the mount check: $(cat "$err")"
-    else
-        ok "$name-blk-run"
-    fi
-
-    if "$here/blk-run.sh" .. "$module" "$root/trace" >"$err" 2>&1; then
-        bad "$name" "blk-run.sh accepted .."
-    elif ! grep -q "alphanumeric" "$err"; then
-        bad "$name" "blk-run.sh did not reject ..: $(cat "$err")"
-    else
-        ok "$name-blk-run-dotdot"
-    fi
+    name_guard "$name-sample" later iostat 0 \
+        "$here/sample.sh" dm-0 "$root/out"
+    name_guard "$name-sample-slash" charset alphanumeric 0 \
+        "$here/sample.sh" "sda/sdb" "$root/out"
+    name_guard "$name-blk-run" later "not dm-0" 0 \
+        "$here/blk-run.sh" dm-0 "$module" "$root/trace"
+    name_guard "$name-blk-run-dotdot" charset alphanumeric 0 \
+        "$here/blk-run.sh" .. "$module" "$root/trace"
 
     rm -rf "$root"
 }
@@ -1116,57 +1103,36 @@ scheduler=[mq-deadline]
 EOF
 }
 
-test_teardown_does_not_restore_when_the_pid_is_not_numeric() {
-    local name=teardown-bad-pid root err
-    root=$(tmpdir)
-    err=$root/err
-    queue_restore_fixture "$root"
-    printf 'not-a-pid\n' >"$root/run/run.pid"
-    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
-        bad "$name" "teardown exited 0 for a non-numeric pid"
-    elif ! grep -q "not a pid" "$err"; then
-        bad "$name" "stderr: $(cat "$err")"
-    elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
-        bad "$name" "queue changed: $(cat "$root/sys/block/notadisk/queue/max_sectors_kb")"
-    else
-        ok "$name"
-    fi
-    rm -rf "$root"
-}
-
-test_teardown_does_not_restore_when_the_pid_file_is_missing() {
-    local name=teardown-missing-pid root err
-    root=$(tmpdir)
-    err=$root/err
-    queue_restore_fixture "$root"
-    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
-        bad "$name" "teardown exited 0 with no run.pid"
-    elif ! grep -q "missing" "$err"; then
-        bad "$name" "stderr: $(cat "$err")"
-    elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
-        bad "$name" "queue changed: $(cat "$root/sys/block/notadisk/queue/max_sectors_kb")"
-    else
-        ok "$name"
-    fi
-    rm -rf "$root"
-}
-
-test_teardown_does_not_restore_when_the_pid_file_is_empty() {
-    local name=teardown-empty-pid root err
-    root=$(tmpdir)
-    err=$root/err
-    queue_restore_fixture "$root"
-    : >"$root/run/run.pid"
-    if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
-        bad "$name" "teardown exited 0 for an empty run.pid"
-    elif ! grep -q "not a pid" "$err"; then
-        bad "$name" "stderr: $(cat "$err")"
-    elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
-        bad "$name" "queue changed"
-    else
-        ok "$name"
-    fi
-    rm -rf "$root"
+# A bad run.pid must not restore the queue.
+# Rows: ok-name, how to prepare the pid file, file text, stderr needle, exit-0 message.
+test_teardown_does_not_restore_for_a_bad_run_pid() {
+    local spec name mode payload needle exited root err
+    local -a rows=(
+        'teardown-bad-pid|write|not-a-pid|not a pid|teardown exited 0 for a non-numeric pid'
+        'teardown-missing-pid|missing||missing|teardown exited 0 with no run.pid'
+        'teardown-empty-pid|empty||not a pid|teardown exited 0 for an empty run.pid'
+    )
+    for spec in "${rows[@]}"; do
+        IFS='|' read -r name mode payload needle exited <<<"$spec"
+        root=$(tmpdir)
+        err=$root/err
+        queue_restore_fixture "$root"
+        case "$mode" in
+            write) printf '%s\n' "$payload" >"$root/run/run.pid" ;;
+            empty) : >"$root/run/run.pid" ;;
+            missing) ;;
+        esac
+        if with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
+            bad "$name" "$exited"
+        elif ! grep -q "$needle" "$err"; then
+            bad "$name" "stderr: $(cat "$err")"
+        elif ! grep -q '^999$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
+            bad "$name" "queue changed: $(cat "$root/sys/block/notadisk/queue/max_sectors_kb" 2>/dev/null)"
+        else
+            ok "$name"
+        fi
+        rm -rf "$root"
+    done
 }
 
 test_teardown_does_not_signal_a_pid_whose_comm_is_not_the_bench() {
@@ -1192,15 +1158,11 @@ test_teardown_does_not_signal_a_pid_whose_comm_is_not_the_bench() {
 }
 
 test_teardown_restores_when_the_numeric_pid_is_already_gone() {
-    local name=teardown-dead-pid root err dead
+    local name=teardown-dead-pid root err
     root=$(tmpdir)
     err=$root/err
     queue_restore_fixture "$root"
-    sleep 30 &
-    dead=$!
-    kill "$dead" 2>/dev/null || true
-    wait "$dead" 2>/dev/null || true
-    printf '%s\n' "$dead" >"$root/run/run.pid"
+    printf '%s\n' "$(finished_pid)" >"$root/run/run.pid"
     if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
         bad "$name" "teardown refused a dead pid: $(cat "$err")"
     elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
@@ -1244,8 +1206,7 @@ test_run_refuses_when_mount_is_not_the_loadtest_mount() {
     fi
     mkdir -p "$root/sys/block/$dev/queue"
     queue_files "$root/sys/block/$dev/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount /workspaces \
         --loadtest "$root/safe/loadtest" \
@@ -1266,19 +1227,15 @@ test_run_measures_free_space_on_the_loadtest_path() {
     local name=run-df-loadtest root err dev mnt
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest" "$root/bin"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
-    mkdir -p "$root/sys/block/$dev/queue"
-    queue_files "$root/sys/block/$dev/queue"
+    loadtest_disk "$root" dev mnt
+    mkdir -p "$root/bin"
     cat >"$root/bin/df" <<EOF
 #!/bin/bash
 printf '%s\\n' "\$*" >> "$root/df.args"
 exec /usr/bin/df "\$@"
 EOF
     chmod +x "$root/bin/df"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if ! PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount "$mnt" \
         --loadtest "$root/safe/loadtest" \
@@ -1299,13 +1256,8 @@ test_run_allows_the_floor_on_the_loadtest_mount() {
     local name=run-floor-same-mount root err dev mnt
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
-    mkdir -p "$root/sys/block/$dev/queue"
-    queue_files "$root/sys/block/$dev/queue"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    loadtest_disk "$root" dev mnt
+    stub_bench "$root"
     if ! with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount "$mnt" \
         --loadtest "$root/safe/loadtest" \
@@ -1324,14 +1276,9 @@ test_run_refuses_a_floor_that_df_would_round_up() {
     local name=run-floor-bytes root err dev mnt
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
-    mkdir -p "$root/sys/block/$dev/queue"
-    queue_files "$root/sys/block/$dev/queue"
+    loadtest_disk "$root" dev mnt
     install_rounding_df "$root"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount "$mnt" \
         --loadtest "$root/safe/loadtest" \
@@ -1352,14 +1299,9 @@ test_run_allows_a_floor_under_the_byte_count() {
     local name=run-floor-allow root err dev mnt
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
-    mkdir -p "$root/sys/block/$dev/queue"
-    queue_files "$root/sys/block/$dev/queue"
+    loadtest_disk "$root" dev mnt
     install_rounding_df "$root"
-    printf '#!/bin/sh\necho ran >"%s/bench-ran"\nexit 0\n' "$root" >"$root/bench"
-    chmod +x "$root/bench"
+    stub_bench "$root"
     if ! PATH="$root/bin:$PATH" with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount "$mnt" \
         --loadtest "$root/safe/loadtest" \
@@ -1378,11 +1320,7 @@ test_run_removes_the_pid_after_the_bench_exits() {
     local name=run-pid-removed root err dev mnt
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
-    mkdir -p "$root/sys/block/$dev/queue"
-    queue_files "$root/sys/block/$dev/queue"
+    loadtest_disk "$root" dev mnt
     cat >"$root/bench" <<'EOF'
 #!/bin/bash
 printf '%s' irys-sm-bench > /proc/$$/comm
@@ -1441,15 +1379,7 @@ test_blk_run_term_does_not_wait_out_sleep() {
         return
     }
     prepare_blk_run_fakes "$root" "$dev"
-    # bpftrace exits on SIGINT. GNU sleep ignores SIGINT, so the stub cannot be sleep.
-    cat >"$root/bin/bpftrace" <<EOF
-#!/bin/bash
-printf '%s\n' "\$\$" > "$root/bpf.pid"
-exec python3 -c 'import signal,sys,time
-signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-time.sleep(120)'
-EOF
+    hold_bpftrace "$root"
     cat >"$root/bin/sleep" <<EOF
 #!/bin/bash
 printf '%s\n' "\$*" >> "$root/sleep.log"
@@ -1459,7 +1389,7 @@ EOF
 #!/bin/bash
 exit 0
 EOF
-    chmod +x "$root/bin/bpftrace" "$root/bin/sleep" "$root/extent-snap.sh"
+    chmod +x "$root/bin/sleep" "$root/extent-snap.sh"
     PATH="$root/bin:$PATH" with_binds "$root/sys" "$root/extent-snap.sh" "$here/extent-snap.sh" \
         "$here/blk-run.sh" "$dev" "$root/safe/loadtest" "$root/trace" >"$err" 2>&1 &
     outer=$!
@@ -1507,15 +1437,7 @@ test_blk_run_term_does_not_wait_out_the_snapshot() {
         return
     }
     prepare_blk_run_fakes "$root" "$dev"
-    # bpftrace exits on SIGINT. GNU sleep ignores SIGINT, so the stub cannot be sleep.
-    cat >"$root/bin/bpftrace" <<EOF
-#!/bin/bash
-printf '%s\n' "\$\$" > "$root/bpf.pid"
-exec python3 -c 'import signal,sys,time
-signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-time.sleep(120)'
-EOF
+    hold_bpftrace "$root"
     cat >"$root/extent-snap.sh" <<EOF
 #!/bin/bash
 n=\$(cat "$root/snap.count" 2>/dev/null || echo 0)
@@ -1527,7 +1449,7 @@ if [ "\$n" -eq 1 ]; then
 fi
 exit 0
 EOF
-    chmod +x "$root/bin/bpftrace" "$root/extent-snap.sh"
+    chmod +x "$root/extent-snap.sh"
     PATH="$root/bin:$PATH" with_binds "$root/sys" "$root/extent-snap.sh" "$here/extent-snap.sh" \
         "$here/blk-run.sh" "$dev" "$root/safe/loadtest" "$root/trace" >"$err" 2>&1 &
     outer=$!
@@ -1657,12 +1579,8 @@ test_run_records_the_sampler_and_stops_it_when_the_bench_exits() {
     local name=run-sample-exit root err dev mnt queue
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
+    loadtest_disk "$root" dev mnt
     queue=$root/sys/block/$dev/queue
-    mkdir -p "$queue"
-    queue_files "$queue"
     install_iostat_holder "$root" "$queue"
     cat >"$root/bench" <<EOF
 #!/bin/bash
@@ -1723,12 +1641,8 @@ test_teardown_stops_the_sampler_after_run_is_killed() {
     local bench_pid sample_pid io_pid
     root=$(tmpdir)
     err=$root/err
-    mkdir -p "$root/safe/loadtest"
-    dev=$(mount_dev_for "$root/safe/loadtest")
-    mnt=$(mount_of "$root/safe/loadtest")
+    loadtest_disk "$root" dev mnt
     queue=$root/sys/block/$dev/queue
-    mkdir -p "$queue"
-    queue_files "$queue"
     install_iostat_holder "$root" "$queue"
     cat >"$root/bench" <<EOF
 #!/bin/bash
@@ -1792,65 +1706,42 @@ EOF
     rm -rf "$root"
 }
 
-test_teardown_restores_when_sample_pid_is_missing() {
-    local name=teardown-sample-missing root err dead
-    root=$(tmpdir)
-    err=$root/err
-    queue_restore_fixture "$root"
-    sleep 30 &
-    dead=$!
-    kill "$dead" 2>/dev/null || true
-    wait "$dead" 2>/dev/null || true
-    printf '%s\n' "$dead" >"$root/run/run.pid"
-    if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
-        bad "$name" "teardown refused a missing sample.pid: $(cat "$err")"
-    elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
-        bad "$name" "queue was not restored"
-    else
-        ok "$name"
-    fi
-    rm -rf "$root"
-}
-
-test_teardown_restores_when_sample_pid_is_not_a_pid() {
-    local name=teardown-sample-bad root err dead
-    root=$(tmpdir)
-    err=$root/err
-    queue_restore_fixture "$root"
-    sleep 30 &
-    dead=$!
-    kill "$dead" 2>/dev/null || true
-    wait "$dead" 2>/dev/null || true
-    printf '%s\n' "$dead" >"$root/run/run.pid"
-    printf 'nope\n' >"$root/run/sample.pid"
-    if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
-        bad "$name" "teardown refused a non-numeric sample.pid: $(cat "$err")"
-    elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
-        bad "$name" "queue was not restored"
-    else
-        : >"$root/run/sample.pid"
-        printf '999\n' >"$root/sys/block/notadisk/queue/max_sectors_kb"
+# Missing, non-numeric, and empty sample.pid values still restore the queue.
+test_teardown_restores_for_a_harmless_sample_pid() {
+    local spec name mode payload root err
+    local -a rows=(
+        'teardown-sample-missing|absent|teardown refused a missing sample.pid'
+        'teardown-sample-bad|nope|teardown refused a non-numeric sample.pid'
+        'teardown-sample-empty|empty|teardown refused an empty sample.pid'
+    )
+    for spec in "${rows[@]}"; do
+        IFS='|' read -r name mode payload <<<"$spec"
+        root=$(tmpdir)
+        err=$root/err
+        queue_restore_fixture "$root"
+        printf '%s\n' "$(finished_pid)" >"$root/run/run.pid"
+        case "$mode" in
+            absent) ;;
+            nope) printf 'nope\n' >"$root/run/sample.pid" ;;
+            empty) : >"$root/run/sample.pid" ;;
+        esac
         if ! with_fake_sys "$root/sys" "$here/teardown.sh" notadisk "$root/run/sysfs.txt" >"$err" 2>&1; then
-            bad "$name" "teardown refused an empty sample.pid: $(cat "$err")"
+            bad "$name" "$payload: $(cat "$err")"
         elif ! grep -q '^111$' "$root/sys/block/notadisk/queue/max_sectors_kb"; then
-            bad "$name" "queue was not restored for an empty sample.pid"
+            bad "$name" "queue was not restored"
         else
             ok "$name"
         fi
-    fi
-    rm -rf "$root"
+        rm -rf "$root"
+    done
 }
 
 test_teardown_does_not_signal_a_sample_pid_that_is_not_the_sampler() {
-    local name=teardown-sample-other root err dead decoy
+    local name=teardown-sample-other root err decoy
     root=$(tmpdir)
     err=$root/err
     queue_restore_fixture "$root"
-    sleep 30 &
-    dead=$!
-    kill "$dead" 2>/dev/null || true
-    wait "$dead" 2>/dev/null || true
-    printf '%s\n' "$dead" >"$root/run/run.pid"
+    printf '%s\n' "$(finished_pid)" >"$root/run/run.pid"
     sleep 60 &
     decoy=$!
     printf '%s\n' "$decoy" >"$root/run/sample.pid"
