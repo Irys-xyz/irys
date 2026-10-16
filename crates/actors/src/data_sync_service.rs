@@ -1100,7 +1100,7 @@ impl DataSyncServiceInner {
                     peer.address = %peer_addr,
                     reason = "other",
                     error = %err,
-                    "data_sync write failed; re-queueing and forwarding to chunk ingress"
+                    "data_sync write failed; re-queueing"
                 );
                 self.requeue_requested(storage_module_id, chunk_offset)?;
             }
@@ -1549,7 +1549,8 @@ impl DataSyncServiceInner {
         // Check to see that the partition hash hasn't been re-assigned to capacity and no longer
         // has any data to sync
         if pa.ledger_id.is_none() {
-            // We don't remove the orchestrator for the partition because it's not hurting anything to keep it around...
+            // Capacity stores entropy, not ledger bodies. Membership sync drops
+            // this orchestrator; until then there is nothing to fetch.
             return Vec::new();
         }
 
