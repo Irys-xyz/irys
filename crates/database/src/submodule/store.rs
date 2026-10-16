@@ -1651,6 +1651,16 @@ impl SubmoduleIndex {
         }
     }
 
+    /// The next synced RocksDB write or compaction WAL flush fails once.
+    /// An unsynced group append does not take this.
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    pub fn fail_next_synced_write(&self) {
+        match self {
+            Self::Mdbx(_) => panic!("fail_next_synced_write is rocks only"),
+            Self::Rocks(store) => store.fail_next_synced_write(),
+        }
+    }
+
     /// `true` after a RocksDB WAL sync failure until this index is dropped.
     #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
     pub fn wal_sync_failed(&self) -> bool {
@@ -3681,6 +3691,169 @@ mod tests {
         );
         assert!(path_at(&store, 2)?.is_none());
         assert!(path_at(&store, 3)?.is_none());
+        Ok(())
+    }
+
+    /// A synced `WriteBatch` shares the sticky failure with `SyncWAL`.
+    ///
+    /// A write that returns `Ok` does not set it. The rejected batch is not
+    /// visible. Later `update` and `update_covered` calls fail while the
+    /// flag is set. Group commit stays on so `update_covered` is the
+    /// unsynced path, which must still stop.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_synced_batch_wal_failure_rejects_later_writes() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_synced_batch_fail")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        store.set_wal_backstop(Duration::from_secs(60));
+        store.enable_group_commit(8)?;
+        store.update(|tx| {
+            let at = PartitionChunkOffset::from(1);
+            ensure_placement_cover(tx, at)?;
+            tx.add_full_data_path(at, vec![1])?;
+            tx.set_path_hashes_by_offset(
+                at,
+                ChunkPathHashes {
+                    data_path_hash: Some(H256::repeat_byte(1)),
+                    tx_path_hash: None,
+                },
+            )
+        })?;
+        assert!(!store.wal_sync_failed());
+        assert!(path_at(&store, 1)?.is_some());
+        store.fail_next_synced_write();
+        let err = store
+            .update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(1),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(2)),
+                        tx_path_hash: None,
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("injected"),
+            "synced update must hit the write failure: {err}"
+        );
+        assert!(store.wal_sync_failed(), "a failed synced write must stick");
+        assert!(
+            path_at(&store, 1)?.is_some(),
+            "the rejected batch must not clear the row"
+        );
+        let update_err = store
+            .update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(3),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(3)),
+                        tx_path_hash: None,
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(update_err.to_string().contains("read-only"), "{update_err}");
+        let covered_err = store
+            .update_covered(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(4),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(4)),
+                        tx_path_hash: None,
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(
+            covered_err.to_string().contains("read-only"),
+            "{covered_err}"
+        );
+        assert!(path_at(&store, 3)?.is_none());
+        assert!(path_at(&store, 4)?.is_none());
+        Ok(())
+    }
+
+    /// Metadata uses the same synced batch helper as a reset marker.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_metadata_synced_batch_wal_failure_rejects_later_writes() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_metadata_batch_fail")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        store.fail_next_synced_write();
+        let err = store.set_reset_in_progress().unwrap_err();
+        assert!(
+            err.to_string().contains("injected"),
+            "reset marker must hit the synced write: {err}"
+        );
+        assert!(store.wal_sync_failed());
+        assert!(!store.reset_in_progress()?);
+        let later = put_registration(&store, 1, 1).unwrap_err();
+        assert!(later.to_string().contains("read-only"), "{later}");
+        assert!(path_at(&store, 1)?.is_none());
+        Ok(())
+    }
+
+    /// Compaction's `flush_wal(true)` is a durable point. Its failure sticks.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_flush_synced_batch_wal_failure_rejects_later_writes() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_flush_wal_fail")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        put_registration(&store, 1, 1)?;
+        assert!(!store.wal_sync_failed());
+        store.fail_next_synced_write();
+        let err = store.settle_files().unwrap_err();
+        assert!(
+            err.to_string().contains("injected"),
+            "compaction wal flush must hit the failure: {err}"
+        );
+        assert!(store.wal_sync_failed());
+        assert!(path_at(&store, 1)?.is_some());
+        let later = put_registration(&store, 2, 2).unwrap_err();
+        assert!(later.to_string().contains("read-only"), "{later}");
+        assert!(path_at(&store, 2)?.is_none());
+        Ok(())
+    }
+
+    /// Group commit appends the WAL without syncing. That append must leave
+    /// the synced-write failure armed for the next `update`.
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocks_unsynced_write_preserves_synced_batch_wal_failure() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new()
+            .prefix("submodule_rocks_unsynced_keeps_fail")
+            .build();
+        let store = SubmoduleIndex::open_rocks(dir.path().join("index"))?;
+        store.set_wal_backstop(Duration::from_secs(60));
+        store.enable_group_commit(8)?;
+        store.fail_next_synced_write();
+        put_registration(&store, 1, 1)?;
+        assert!(!store.wal_sync_failed());
+        assert!(path_at(&store, 1)?.is_some());
+        let err = store
+            .update(|tx| {
+                tx.set_path_hashes_by_offset(
+                    PartitionChunkOffset::from(2),
+                    ChunkPathHashes {
+                        data_path_hash: Some(H256::repeat_byte(2)),
+                        tx_path_hash: None,
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("injected"),
+            "the unsynced append must not take the synced failure: {err}"
+        );
+        assert!(store.wal_sync_failed());
+        assert!(path_at(&store, 1)?.is_some());
         Ok(())
     }
 

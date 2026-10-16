@@ -1527,6 +1527,13 @@ impl RocksSubmoduleStore {
         self.group.arm_fail_next_sync();
     }
 
+    /// The next synced write or compaction WAL flush fails once.
+    /// An unsynced group append does not take this.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn fail_next_synced_write(&self) {
+        self.group.arm_fail_next_synced_write();
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn wal_sync_failed(&self) -> bool {
         self.group.wal_failed()
@@ -1649,7 +1656,12 @@ impl RocksSubmoduleStore {
         let result = f(&mut batch)?;
         // Conversion skips the WAL. Durability is the later memtable flush.
         let disable_wal = self.bulk_load;
-        batch.commit(sync && !disable_wal, disable_wal, &self.submodule)?;
+        batch.commit(
+            sync && !disable_wal,
+            disable_wal,
+            &self.submodule,
+            &self.group,
+        )?;
         if sync && !disable_wal {
             self.group.note_wal_sync();
         }
@@ -1826,7 +1838,27 @@ impl RocksSubmoduleStore {
             self.db
                 .compact_range_cf(&handle, None::<&[u8]>, None::<&[u8]>);
         }
-        self.db.flush_wal(true).wrap_err("sync wal")?;
+        // The injected failure stands in for `flush_wal` returning an error.
+        // It is taken only for a normal open. A bulk-load copy has no WAL replay.
+        #[cfg(any(test, feature = "test-utils"))]
+        if !self.bulk_load && self.group.take_fail_next_synced_write() {
+            return Err(note_wal_sync_failure(
+                &self.group,
+                &self.submodule,
+                eyre::eyre!(
+                    "injected submodule index synced write failure for {}",
+                    self.submodule
+                ),
+            ));
+        }
+        if let Err(err) = self.db.flush_wal(true) {
+            let report = eyre::eyre!("sync wal: {err}");
+            // A bulk-load copy disables the WAL. There is nothing to replay.
+            if self.bulk_load {
+                return Err(report);
+            }
+            return Err(note_wal_sync_failure(&self.group, &self.submodule, report));
+        }
         // The synced WAL covers any open registration group. This flush is
         // the caller's durable point, not a backstop sync.
         self.group.note_wal_sync();
@@ -2519,9 +2551,26 @@ impl RocksSubmoduleStore {
     /// Caller holds the write lock, except [`Self::write_metadata_batch`].
     fn write_synced_batch(&self, batch: WriteBatch, action: &'static str) -> eyre::Result<()> {
         let disable_wal = self.bulk_load;
-        self.db
-            .write_opt(batch, &write_opts(true, disable_wal))
-            .wrap_err(action)?;
+        // Taken only when this batch syncs the WAL. A bulk-load copy does not.
+        #[cfg(any(test, feature = "test-utils"))]
+        if !disable_wal && self.group.take_fail_next_synced_write() {
+            return Err(note_wal_sync_failure(
+                &self.group,
+                &self.submodule,
+                eyre::eyre!(
+                    "injected submodule index synced write failure for {}",
+                    self.submodule
+                ),
+            ));
+        }
+        if let Err(err) = self.db.write_opt(batch, &write_opts(true, disable_wal)) {
+            return Err(latch_wal_write_error(
+                &self.group,
+                disable_wal,
+                &self.submodule,
+                eyre::eyre!("{action}: {err}"),
+            ));
+        }
         if !disable_wal {
             self.group.note_wal_sync();
             self.group.cover_durable();
@@ -2577,6 +2626,21 @@ fn note_wal_sync_failure(group: &GroupCommit, submodule: &str, err: eyre::Report
     group.note_wal_failure();
     tracing::error!(submodule, %err, "submodule index wal sync failed");
     err
+}
+
+/// A failed WAL write can replay after RocksDB clears its own background error.
+/// Stick the process flag unless this batch never wrote a WAL.
+fn latch_wal_write_error(
+    group: &GroupCommit,
+    disable_wal: bool,
+    submodule: &str,
+    err: eyre::Report,
+) -> eyre::Report {
+    if disable_wal {
+        err
+    } else {
+        note_wal_sync_failure(group, submodule, err)
+    }
 }
 
 fn submodule_label(rocks_path: &Path) -> String {
@@ -4188,7 +4252,13 @@ impl<'a> Batch<'a> {
         Ok(())
     }
 
-    fn commit(&self, sync: bool, disable_wal: bool, submodule: &str) -> eyre::Result<()> {
+    fn commit(
+        &self,
+        sync: bool,
+        disable_wal: bool,
+        submodule: &str,
+        group: &GroupCommit,
+    ) -> eyre::Result<()> {
         let mut batch = WriteBatch::new();
         for cf in families() {
             let handle = cf_handle(self.db, cf)?;
@@ -4227,9 +4297,25 @@ impl<'a> Batch<'a> {
         // `disable_wal` is the conversion copy. Those rows become durable when
         // the memtables are flushed. `sync` false still appends the WAL. A
         // later synced write or `flush_wal` makes that group durable.
-        self.db
-            .write_opt(batch, &write_opts(sync, disable_wal))
-            .wrap_err("commit submodule index batch")
+        // The injected failure stands in for `write_opt` returning an error
+        // on a synced batch. An unsynced append does not take it.
+        #[cfg(any(test, feature = "test-utils"))]
+        if sync && !disable_wal && group.take_fail_next_synced_write() {
+            return Err(note_wal_sync_failure(
+                group,
+                submodule,
+                eyre::eyre!("injected submodule index synced write failure for {submodule}"),
+            ));
+        }
+        if let Err(err) = self.db.write_opt(batch, &write_opts(sync, disable_wal)) {
+            return Err(latch_wal_write_error(
+                group,
+                disable_wal,
+                submodule,
+                eyre::eyre!("commit submodule index batch: {err}"),
+            ));
+        }
+        Ok(())
     }
 }
 

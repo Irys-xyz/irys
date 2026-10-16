@@ -49,6 +49,11 @@ pub(super) struct GroupCommit {
     /// Test hook. The next dirty WAL sync fails once and sets [`Self::wal_failed`].
     #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
     fail_next_sync: AtomicBool,
+    /// Test hook. The next synced write or compaction WAL flush fails once.
+    /// An unsynced group append does not take it. The write path latches
+    /// [`Self::wal_failed`]; this flag does not.
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    fail_next_synced_write: AtomicBool,
     state: Mutex<State>,
     wake: Condvar,
 }
@@ -86,6 +91,8 @@ impl GroupCommit {
             wal_failed: AtomicBool::new(false),
             #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
             fail_next_sync: AtomicBool::new(false),
+            #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+            fail_next_synced_write: AtomicBool::new(false),
             state: Mutex::new(State {
                 stop: false,
                 spawned: false,
@@ -164,6 +171,16 @@ impl GroupCommit {
     #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
     pub(super) fn take_fail_next_sync(&self) -> bool {
         self.fail_next_sync.swap(false, Ordering::AcqRel)
+    }
+
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    pub(super) fn arm_fail_next_synced_write(&self) {
+        self.fail_next_synced_write.store(true, Ordering::Release);
+    }
+
+    #[cfg(all(feature = "rocksdb", any(test, feature = "test-utils")))]
+    pub(super) fn take_fail_next_synced_write(&self) -> bool {
+        self.fail_next_synced_write.swap(false, Ordering::AcqRel)
     }
 
     /// Replace the quiet-group bound and wake the delay thread.
