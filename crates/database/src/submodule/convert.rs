@@ -3086,6 +3086,28 @@ fn v1_data_path_reads() -> usize {
     V1_DATA_PATH_READS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    static V1_RANGE_COPY_BATCHES: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn reset_v1_range_copy_batches() {
+    V1_RANGE_COPY_BATCHES.with(|cell| cell.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn v1_range_copy_batches() -> Vec<usize> {
+    V1_RANGE_COPY_BATCHES.with(|cell| cell.borrow().clone())
+}
+
+#[cfg_attr(not(test), expect(unused_variables))]
+fn note_v1_range_copy_batch(bytes: usize) {
+    #[cfg(test)]
+    V1_RANGE_COPY_BATCHES.with(|cell| cell.borrow_mut().push(bytes));
+}
+
 fn read_v1_data_path(
     env: &DatabaseEnv,
     offset: PartitionChunkOffset,
@@ -3198,25 +3220,50 @@ fn copy_v1_range_paths(
 ) -> eyre::Result<u64> {
     let mut copied = 0_u64;
     walk_v1_path_range(env, start, end, limits, |rows| {
-        let mut kept = Vec::with_capacity(rows.len());
+        let mut kept = Vec::new();
+        let mut path_bytes = 0_usize;
         for (offset, hash) in rows {
-            kept.push((offset, read_v1_data_path(env, offset, hash)?));
+            let path = read_v1_data_path(env, offset, hash)?;
+            let len = path.len();
+            // Same cap as `attach_v1_path`. An empty batch still takes the
+            // next path, including one path that is already over the cap.
+            if !kept.is_empty() && path_bytes.saturating_add(len) > limits.value_bytes {
+                copied = copied.saturating_add(commit_v1_range_paths(dst, progress, &mut kept)?);
+                path_bytes = 0;
+            }
+            path_bytes = path_bytes.saturating_add(len);
+            kept.push((offset, path));
         }
-        let n = u64::try_from(kept.len()).unwrap_or(u64::MAX);
-        if let Some(dst) = dst {
-            dst.update(|tx| {
-                for (offset, path) in kept {
-                    require_interval(tx, offset, "data path")?;
-                    tx.add_full_data_path(offset, path)?;
-                }
-                Ok(())
-            })?;
-            progress.note()?;
+        if !kept.is_empty() {
+            copied = copied.saturating_add(commit_v1_range_paths(dst, progress, &mut kept)?);
         }
-        copied = copied.saturating_add(n);
         Ok(())
     })?;
     Ok(copied)
+}
+
+fn commit_v1_range_paths(
+    dst: Option<&RocksSubmoduleStore>,
+    progress: &mut CopyProgress,
+    kept: &mut Vec<(PartitionChunkOffset, ChunkDataPath)>,
+) -> eyre::Result<u64> {
+    let n = u64::try_from(kept.len()).unwrap_or(u64::MAX);
+    let batch_bytes = kept.iter().map(|(_, path)| path.len()).sum();
+    note_v1_range_copy_batch(batch_bytes);
+    if let Some(dst) = dst {
+        let batch = std::mem::take(kept);
+        dst.update(|tx| {
+            for (offset, path) in batch {
+                require_interval(tx, offset, "data path")?;
+                tx.add_full_data_path(offset, path)?;
+            }
+            Ok(())
+        })?;
+        progress.note()?;
+    } else {
+        kept.clear();
+    }
+    Ok(n)
 }
 
 fn copy_v1_pending(
@@ -3981,8 +4028,9 @@ mod tests {
         SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
     };
     use super::{
-        ConvertOptions, convert_mdbx_to_rocks, convert_rocks_to_mdbx, reset_v1_data_path_reads,
-        reset_verify_views, v1_data_path_reads, verify_mdbx_and_rocks, verify_rocks_records,
+        ConvertOptions, ConvertStats, convert_mdbx_to_rocks, convert_rocks_to_mdbx,
+        reset_v1_data_path_reads, reset_v1_range_copy_batches, reset_verify_views,
+        v1_data_path_reads, v1_range_copy_batches, verify_mdbx_and_rocks, verify_rocks_records,
         verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
@@ -5349,6 +5397,11 @@ mod tests {
     /// One v1 tx covers every chunk. Adjacent offsets share its tx-path hash,
     /// so the copy keeps one run. Each data path is 16 distinct bytes.
     fn write_v1_one_tx_partition(root: &Path, n: u64) -> eyre::Result<PathBuf> {
+        write_v1_one_tx_paths(root, n, 16)
+    }
+
+    /// Same run as `write_v1_one_tx_partition`, with each data path `path_len` bytes.
+    fn write_v1_one_tx_paths(root: &Path, n: u64, path_len: usize) -> eyre::Result<PathBuf> {
         use crate::submodule::tables::v1_fixture::master;
         use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
         use reth_db::Database as _;
@@ -5370,7 +5423,7 @@ mod tests {
                 )?;
                 let proof = derived.proof.proof;
                 let path_hash = tx_path_hash(&proof);
-                let data = v1_path_bytes(offset);
+                let data = v1_path_of(offset, path_len);
                 let data_hash = H256::from(hash_sha256(&data));
                 let key = PartitionChunkOffset(offset as u32);
                 tx.put::<master::ChunkPathHashesByOffset>(
@@ -5400,9 +5453,14 @@ mod tests {
     }
 
     fn v1_path_bytes(offset: u64) -> Vec<u8> {
-        let mut data = vec![0_u8; 16];
+        v1_path_of(offset, 16)
+    }
+
+    fn v1_path_of(offset: u64, len: usize) -> Vec<u8> {
+        let mut data = vec![0_u8; len.max(1)];
         data[0] = u8::try_from(offset).unwrap_or(u8::MAX);
-        data[15] = 0x5a;
+        let last = data.len().saturating_sub(1);
+        data[last] = 0x5a;
         data
     }
 
@@ -5512,6 +5570,100 @@ mod tests {
             assert!(tx.placement_at(PartitionChunkOffset(4))?.is_some());
             Ok(())
         })?;
+        Ok(())
+    }
+
+    struct V1CapRun {
+        _root: tempfile::TempDir,
+        rocks: PathBuf,
+        stats: ConvertStats,
+        batches: Vec<usize>,
+        reads: usize,
+    }
+
+    /// One v1 run copied under a path-byte cap. `batches` is the path bytes
+    /// in each range-copy write.
+    fn run_v1_path_cap(
+        prefix: &str,
+        n: u64,
+        path_len: usize,
+        value_bytes: usize,
+    ) -> eyre::Result<V1CapRun> {
+        let root = temp(prefix);
+        let consensus = write_v1_one_tx_paths(root.path(), n, path_len)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = n;
+        options.batch_rows = 16;
+        options.batch_value_bytes = value_bytes;
+        reset_v1_data_path_reads();
+        reset_v1_range_copy_batches();
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        Ok(V1CapRun {
+            _root: root,
+            rocks,
+            stats,
+            batches: v1_range_copy_batches(),
+            reads: v1_data_path_reads(),
+        })
+    }
+
+    fn assert_v1_paths_stored(rocks: &Path, n: u64, path_len: usize) -> eyre::Result<()> {
+        let opened = RocksSubmoduleStore::open(rocks)?;
+        opened.view(|tx| {
+            for offset in 0..n {
+                assert_eq!(
+                    tx.get_data_path_by_offset(PartitionChunkOffset(offset as u32))?,
+                    Some(v1_path_of(offset, path_len)),
+                    "offset {offset}"
+                );
+            }
+            Ok(())
+        })
+    }
+
+    /// Four 80-byte paths. A 100-byte cap holds three hash rows, then one.
+    /// Two paths are 160 bytes, so each range-copy write is one path.
+    #[test]
+    fn v1_range_copy_splits_when_the_next_path_passes_the_byte_cap() -> eyre::Result<()> {
+        const N: u64 = 4;
+        let run = run_v1_path_cap("convert-v1-range-split", N, 80, 100)?;
+        assert_eq!(run.stats.intervals, 1, "{:?}", run.stats);
+        assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
+        assert_eq!(run.stats.skipped_frontier, 0, "{:?}", run.stats);
+        assert_eq!(
+            run.reads, 6,
+            "first pass reads two paths, range copy reads four"
+        );
+        assert_eq!(run.batches, vec![80, 80, 80, 80], "{:?}", run.batches);
+        assert_v1_paths_stored(&run.rocks, N, 80)?;
+        Ok(())
+    }
+
+    /// Seven 30-byte paths. Six hash rows fit in 200 bytes (180 path bytes)
+    /// and stay one write. The seventh path is its own write.
+    #[test]
+    fn v1_range_copy_keeps_a_hash_batch_that_fits() -> eyre::Result<()> {
+        const N: u64 = 7;
+        let run = run_v1_path_cap("convert-v1-range-fit", N, 30, 200)?;
+        assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
+        assert_eq!(run.reads, 14, "{:?}", run.reads);
+        assert_eq!(run.batches, vec![180, 30], "{:?}", run.batches);
+        assert_v1_paths_stored(&run.rocks, N, 30)?;
+        Ok(())
+    }
+
+    /// A path longer than the cap is still written. The next path is a new write.
+    #[test]
+    fn v1_range_copy_writes_a_path_larger_than_the_cap() -> eyre::Result<()> {
+        const N: u64 = 2;
+        let run = run_v1_path_cap("convert-v1-range-oversize", N, 120, 100)?;
+        assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
+        assert_eq!(run.reads, 4, "{:?}", run.reads);
+        assert_eq!(run.batches, vec![120, 120], "{:?}", run.batches);
+        assert_v1_paths_stored(&run.rocks, N, 120)?;
         Ok(())
     }
 
