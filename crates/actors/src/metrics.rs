@@ -55,7 +55,7 @@ irys_utils::define_metrics! {
     counter MINING_SOLUTIONS_FOUND("irys.mining.solutions_found_total", "Mining solutions found");
     counter TX_PATH_DERIVE_FAILED(
         "irys.mining.tx_path_derive_failed_total",
-        "Data solutions dropped because the tx path could not be derived"
+        "Tx path derive failures. Reason `startup` is a startup check: the service still mines and no solution was dropped. A dropped solution uses the derive error's reason."
     );
     gauge PACKING_ACTIVE_WORKERS("irys.packing.active_workers", "Number of active packing workers");
     gauge PACKING_SEMAPHORE_AVAILABLE("irys.packing.semaphore_available", "Available packing semaphore permits");
