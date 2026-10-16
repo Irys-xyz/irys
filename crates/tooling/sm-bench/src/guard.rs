@@ -593,6 +593,19 @@ mod tests {
         path
     }
 
+    /// CI temp dirs can sit on a filesystem with no FIEMAP. The extent
+    /// tests only check something where the ioctl answers.
+    fn fiemap_supported(dir: &Path) -> bool {
+        let probe = synced_region(dir, "fiemap-probe.dat");
+        let file = File::open(&probe).unwrap();
+        let supported = !matches!(
+            extents_are_written(&file, CHUNK_SIZE),
+            Ok(ExtentCheck::Unsupported)
+        );
+        fs::remove_file(&probe).unwrap();
+        supported
+    }
+
     fn region_error(
         recall: &Path,
         recall_created: bool,
@@ -610,6 +623,10 @@ mod tests {
         let tmp = TempDirBuilder::new()
             .prefix("sm-bench-recall-hole-")
             .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
         let write = synced_region(tmp.path(), "write-region.dat");
         let recall = sparse_region(tmp.path(), "entropy-chunks.dat");
         for recall_created in [false, true] {
@@ -626,6 +643,10 @@ mod tests {
         let tmp = TempDirBuilder::new()
             .prefix("sm-bench-recall-unwritten-")
             .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
         let write = synced_region(tmp.path(), "write-region.dat");
         let recall = unwritten_region(tmp.path(), "entropy-chunks.dat");
         let text = region_error(&recall, false, &write, false);
@@ -641,6 +662,10 @@ mod tests {
         let tmp = TempDirBuilder::new()
             .prefix("sm-bench-recall-tail-hole-")
             .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
         let write = synced_region(tmp.path(), "write-region.dat");
         let recall = trailing_hole_region(tmp.path(), "entropy-chunks.dat");
         let text = region_error(&recall, false, &write, false);
@@ -652,6 +677,10 @@ mod tests {
         let tmp = TempDirBuilder::new()
             .prefix("sm-bench-regions-written-")
             .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
         let write = synced_region(tmp.path(), "write-region.dat");
         let recall = synced_region(tmp.path(), "entropy-chunks.dat");
         check_region_extents(&recall, false, &write, false).unwrap();
@@ -678,6 +707,10 @@ mod tests {
         let tmp = TempDirBuilder::new()
             .prefix("sm-bench-recall-kept-hole-")
             .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
         let dir = tmp.path().join("safe/loadtest");
         fs::create_dir_all(&dir).unwrap();
         let recall = sparse_region(&dir, "entropy-chunks.dat");
@@ -693,6 +726,10 @@ mod tests {
     #[test]
     fn sparse_write_file_is_a_startup_error() {
         let tmp = TempDirBuilder::new().prefix("sm-bench-write-hole-").build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
         let write = sparse_region(tmp.path(), "write-region.dat");
         let recall = synced_region(tmp.path(), "entropy-chunks.dat");
         let text = region_error(&recall, false, &write, false);
