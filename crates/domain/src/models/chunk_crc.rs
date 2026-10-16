@@ -1,12 +1,8 @@
-//! Packed-chunk checksums stored in the offset index row.
+//! CRC32C of the packed bytes, stored in the offset index row.
 //!
-//! The checksum is CRC32C of the packed bytes just written to `chunks.dat`.
-//! It is committed in the same index batch as the presence row, after
-//! `chunks.dat` is `fdatasync`'d and before the interval label flips. A
-//! missing checksum is unknown until `crc_complete` is set. After that flag
-//! is set, a missing checksum is a mismatch.
-//!
-//! MDBX does not store the checksum and does not check one.
+//! Committed with the presence row, after `chunks.dat` is `fdatasync`'d and
+//! before the interval label flips. A missing checksum is unknown until
+//! `crc_complete` is set, then a mismatch. MDBX does not store or check one.
 
 use std::{
     sync::{
@@ -731,42 +727,11 @@ mod tests {
         Ok(())
     }
 
-    /// A stored data proof whose packed bytes were flipped is omitted and repaired.
-    /// RocksDB Publish module with one durable data chunk at offset 0.
+    /// Assigned RocksDB module with one durable data chunk at offset 0.
     fn durable_data_chunk_module(
         prefix: &str,
     ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
-        use irys_types::ledger_chunk_offset_ii;
-        use irys_types::partition::PartitionAssignment;
-        use irys_types::{DataLedger, DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange};
-
-        let tmp = TempDirBuilder::new().prefix(prefix).build();
-        let node_config = NodeConfig {
-            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: CHUNK as u64,
-                num_chunks_in_partition: N,
-                entropy_packing_iterations: 1,
-                ..ConsensusConfig::testing()
-            }),
-            storage: fast_storage(),
-            base_directory: tmp.path().to_path_buf(),
-            database: index_database(SubmoduleIndexEngine::Rocksdb),
-            ..NodeConfig::testing()
-        };
-        let config = irys_types::Config::new_with_random_peer_id(node_config);
-        let module = StorageModule::new(
-            &StorageModuleInfo {
-                id: 0,
-                partition_assignment: Some(PartitionAssignment {
-                    ledger_id: Some(DataLedger::Publish.into()),
-                    slot_index: Some(0),
-                    miner_address: config.node_config.miner_address(),
-                    partition_hash: irys_types::H256::repeat_byte(0x11),
-                }),
-                submodules: vec![(partition_chunk_offset_ii!(0, 7), "sub".into())],
-            },
-            &config,
-        )?;
+        let (tmp, config, module) = open_assigned(prefix)?;
         let mut entropy = Vec::with_capacity(CHUNK);
         irys_packing::capacity_single::compute_entropy_chunk(
             config.node_config.miner_address(),
@@ -779,20 +744,8 @@ mod tests {
         );
         assert!(module.write_chunk(PartitionChunkOffset::from(0), entropy, ChunkType::Entropy));
         module.sync_pending_chunks()?;
-
-        let signer = irys_types::irys::IrysSigner::random_signer(&config.consensus);
-        let data = vec![0x5A_u8; CHUNK];
-        let tx =
-            signer.sign_transaction(signer.create_transaction(data, irys_types::H256::zero())?)?;
-        let unpacked = tx.data_chunks()?;
-        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
-        module.index_transaction_data(
-            &tx.header,
-            &proofs[0].proof,
-            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
-            0,
-        )?;
-        module.write_data_chunk(&unpacked[0])?;
+        let chunk = index_one_chunk(&module, &config, vec![0x5A_u8; CHUNK])?;
+        module.write_data_chunk(&chunk)?;
         module.sync_pending_chunks()?;
         Ok((tmp, module))
     }
@@ -815,6 +768,7 @@ mod tests {
         Ok(())
     }
 
+    /// A stored data proof whose packed bytes were flipped is omitted and repaired.
     #[test]
     fn rocks_flipped_data_proof_is_omitted_from_generate_full_chunks() -> eyre::Result<()> {
         let (tmp, module) = durable_data_chunk_module("crc_serve_flip")?;
@@ -1263,8 +1217,10 @@ mod tests {
         Ok(())
     }
 
+    /// A reload during the paused rewrite is not an unknown serve.
+    /// Entropy omits the offset. Data is served once the row has a checksum.
     #[test]
-    fn unknown_count_skips_a_reload_that_omits_the_offset() -> eyre::Result<()> {
+    fn unknown_count_skips_a_reload_that_is_not_still_unknown() -> eyre::Result<()> {
         let (_tmp, module) = assigned_proof_only("crc_unknown_omit")?;
         let (len, delta) = serve_during_paused_rewrite(&module, 0xEE, ChunkType::Entropy)?;
         assert_eq!(len, 0, "a checksum-only entropy row is not served");
@@ -1276,11 +1232,7 @@ mod tests {
             .offset_meta_for_test(PartitionChunkOffset::from(0))?
             .expect("entropy row");
         assert!(finished.crc.is_some() && finished.proof.is_none());
-        Ok(())
-    }
 
-    #[test]
-    fn unknown_count_skips_a_reload_that_now_has_a_checksum() -> eyre::Result<()> {
         let (_tmp, module) = assigned_proof_only("crc_unknown_fresh_crc")?;
         let (len, delta) = serve_during_paused_rewrite(&module, 0xAB, ChunkType::Data)?;
         assert_eq!(len, 1, "a re-read whose row has a checksum is served");
