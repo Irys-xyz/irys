@@ -172,6 +172,9 @@ struct SweepSlot {
     /// Entropy taken from the read-ahead cache. Not pending-map entropy:
     /// the interval is checked again before the XOR.
     cached_entropy: Option<Vec<u8>>,
+    /// `entropy_write_epoch` at the pread. A later entropy pwrite must not
+    /// be packed from this buffer.
+    entropy_epoch: u64,
 }
 
 /// One reserved offset. The third field is entropy already in `pending`.
@@ -604,6 +607,8 @@ struct ClearExclusive<'a> {
 struct SpanLoad {
     start: PartitionChunkOffset,
     buf: Vec<u8>,
+    /// `entropy_write_epoch` captured before this pread.
+    entropy_epoch: u64,
 }
 
 pub(super) struct WriteHold<'a> {
@@ -1451,6 +1456,7 @@ impl StorageModule {
                     priority: chunk.priority,
                     pending_entropy,
                     cached_entropy,
+                    entropy_epoch: 0,
                     byte_len,
                     enqueued_at,
                 }) {
@@ -1815,8 +1821,13 @@ impl StorageModule {
             self.fail_span(span, &error);
             return true;
         }
+        // Captured before the file lock drops. A later entropy pwrite needs
+        // that lock, so it cannot land and then hide behind this value.
+        let entropy_epoch = self.entropy_write_epoch.load(Ordering::SeqCst);
         drop(file);
-        self.finish_span_read(span, start, &buf);
+        #[cfg(test)]
+        self.wait_if_sync_paused(super::SyncPausePoint::AfterEntropyPread);
+        self.finish_span_read(span, start, &buf, entropy_epoch);
         true
     }
 
@@ -1877,7 +1888,9 @@ impl StorageModule {
         });
         for (span, result) in spans.into_iter().zip(results) {
             match result {
-                Ok(load) => self.finish_span_read(span, load.start, &load.buf),
+                Ok(load) => {
+                    self.finish_span_read(span, load.start, &load.buf, load.entropy_epoch)
+                }
                 Err(error) => self.fail_span(span, &error),
             }
         }
@@ -1906,6 +1919,9 @@ impl StorageModule {
             })?
         };
         self.note_issued_entropy_pread(span.len(), buf.len() as u64);
+        // The cloned fd does not hold the chunk-file lock. Capture the epoch
+        // before the read so a pwrite that lands during it is visible.
+        let entropy_epoch = self.entropy_write_epoch.load(Ordering::SeqCst);
         cloned
             .read_exact_at(&mut buf, file_offset)
             .map_err(|error| {
@@ -1913,15 +1929,26 @@ impl StorageModule {
                     "entropy sweep at offset {start} count {span_chunks}: {error}"
                 ))
             })?;
-        Ok(SpanLoad { start, buf })
+        Ok(SpanLoad {
+            start,
+            buf,
+            entropy_epoch,
+        })
     }
 
-    fn finish_span_read(&self, span: Vec<SweepSlot>, start: PartitionChunkOffset, buf: &[u8]) {
+    fn finish_span_read(
+        &self,
+        span: Vec<SweepSlot>,
+        start: PartitionChunkOffset,
+        buf: &[u8],
+        entropy_epoch: u64,
+    ) {
         let read_done = Instant::now();
         let chunk_len = self.config.consensus.chunk_size.max(1) as usize;
         let mut failed_groups = std::collections::HashSet::new();
         let mut accepted = Vec::new();
-        for slot in span {
+        for mut slot in span {
+            slot.entropy_epoch = entropy_epoch;
             let group = slot.group;
             if failed_groups.contains(&group) {
                 self.fail_slot(slot, WriteDataChunkError::WritesPaused);
@@ -1973,6 +2000,7 @@ impl StorageModule {
             buf,
             pending_submit.iter().map(|(slot, _)| slot.offset),
             &verdicts,
+            entropy_epoch,
         );
         for (slot, entropy) in pending_submit {
             let at = slot.offset.0.saturating_sub(start.0) as usize;
@@ -2111,6 +2139,7 @@ impl StorageModule {
         buf: &[u8],
         packed: impl Iterator<Item = PartitionChunkOffset>,
         verdicts: &[super::chunk_crc::CrcVerdict],
+        entropy_epoch: u64,
     ) {
         let cap = self
             .config
@@ -2127,6 +2156,11 @@ impl StorageModule {
         let packed: std::collections::HashSet<u32> = packed.map(|offset| offset.0).collect();
         let generation = self.index_write_generation.load(Ordering::SeqCst);
         let intervals = self.intervals.read().unwrap();
+        // The bump is taken under this same lock. A mismatch means the buffer
+        // was read before a newer entropy pwrite.
+        if self.entropy_write_epoch.load(Ordering::SeqCst) != entropy_epoch {
+            return;
+        }
         let pending = self.pending_writes.read().unwrap();
         if self.index_write_generation.load(Ordering::SeqCst) != generation {
             return;
@@ -2465,6 +2499,13 @@ impl StorageModule {
         }
         if slot.pending_entropy.is_some() {
             return Ok(());
+        }
+        // The pad was read from disk. An entropy pwrite since that read has
+        // newer bytes. Retry instead of packing the old pad.
+        if slot.cached_entropy.is_none()
+            && self.entropy_write_epoch.load(Ordering::SeqCst) != slot.entropy_epoch
+        {
+            return Err(WriteDataChunkError::Backpressure);
         }
         let intervals = self.intervals.read().unwrap();
         if intervals
@@ -3393,6 +3434,7 @@ mod tests {
             priority: super::WritePriority::Ingress,
             pending_entropy: None,
             cached_entropy: None,
+            entropy_epoch: 0,
             byte_len: 32,
             enqueued_at,
         }
@@ -3421,7 +3463,7 @@ mod tests {
     #[test]
     fn young_short_span_waits_out_the_entropy_read_grace() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
-        let (_tmp, module) = span_fixture_grace("span_grace", 8, 8, 0, grace.as_millis() as u64)?;
+        let (_tmp, module) = span_fixture_grace("span_grace", 8, 8, 0, grace.as_millis() as u64, 0)?;
         let now = Instant::now();
         insert_slots(&module, &[0, 1], now);
         assert!(
@@ -3438,7 +3480,7 @@ mod tests {
 
     #[test]
     fn span_at_the_batch_target_is_issued_while_young() -> eyre::Result<()> {
-        let (_tmp, module) = span_fixture_grace("span_target", 8, 8, 0, 80)?;
+        let (_tmp, module) = span_fixture_grace("span_target", 8, 8, 0, 80, 0)?;
         insert_slots(&module, &(0..8).collect::<Vec<_>>(), Instant::now());
         assert_eq!(
             taken_offsets(&module)
@@ -3451,7 +3493,7 @@ mod tests {
 
     #[test]
     fn packing_span_is_issued_while_young() -> eyre::Result<()> {
-        let (_tmp, module) = span_fixture_grace("span_pack", 8, 8, 0, 80)?;
+        let (_tmp, module) = span_fixture_grace("span_pack", 8, 8, 0, 80, 0)?;
         {
             let mut queue = module.disk.queue();
             let mut slot = sweep_slot_at(0, Instant::now());
@@ -3468,7 +3510,7 @@ mod tests {
     #[test]
     fn lone_chunk_becomes_eligible_when_the_grace_ends() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
-        let (_tmp, module) = span_fixture_grace("span_lone", 8, 8, 0, grace.as_millis() as u64)?;
+        let (_tmp, module) = span_fixture_grace("span_lone", 8, 8, 0, grace.as_millis() as u64, 0)?;
         insert_slots(&module, &[3], Instant::now());
         let remain = module
             .read_grace_remaining()
@@ -3485,7 +3527,7 @@ mod tests {
     #[test]
     fn adjacent_chunks_inside_the_grace_are_one_entropy_read() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
-        let (_tmp, module) = span_fixture_grace("span_burst", 8, 8, 0, grace.as_millis() as u64)?;
+        let (_tmp, module) = span_fixture_grace("span_burst", 8, 8, 0, grace.as_millis() as u64, 0)?;
         insert_slots(&module, &[0], Instant::now());
         assert!(!module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
@@ -3503,7 +3545,7 @@ mod tests {
 
     #[test]
     fn recall_preempts_an_aged_entropy_span() -> eyre::Result<()> {
-        let (_tmp, module) = span_fixture_grace("span_recall", 8, 8, 0, 80)?;
+        let (_tmp, module) = span_fixture_grace("span_recall", 8, 8, 0, 80, 0)?;
         insert_slots(&module, &[0], ago(Duration::from_millis(81)));
         let hold = module.disk.begin_recall();
         assert!(!module.sweep_one());
@@ -3518,7 +3560,7 @@ mod tests {
     #[test]
     fn young_lone_chunk_drains_inside_the_grace() -> eyre::Result<()> {
         let grace = Duration::from_millis(40);
-        let (_tmp, module) = span_fixture_grace("span_drain", 8, 8, 0, grace.as_millis() as u64)?;
+        let (_tmp, module) = span_fixture_grace("span_drain", 8, 8, 0, grace.as_millis() as u64, 0)?;
         insert_slots(&module, &[0], Instant::now());
         let started = Instant::now();
         module.drive_entropy_queue_for_test();
@@ -3608,7 +3650,7 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
         super::super::StorageModule,
     )> {
-        span_fixture_grace(prefix, chunks, max_chunks, hole_chunks, 0)
+        span_fixture_grace(prefix, chunks, max_chunks, hole_chunks, 0, 0)
     }
 
     fn span_fixture_grace(
@@ -3617,6 +3659,7 @@ mod tests {
         max_chunks: u64,
         hole_chunks: u64,
         grace_ms: u64,
+        cache_bytes: u64,
     ) -> eyre::Result<(
         irys_testing_utils::utils::tempfile::TempDir,
         super::super::StorageModule,
@@ -3642,7 +3685,7 @@ mod tests {
                 entropy_read_grace_ms: grace_ms,
                 entropy_read_batch_bytes: chunk_size * max_chunks,
                 entropy_readahead_bytes: 0,
-                entropy_readahead_cache_bytes: 0,
+                entropy_readahead_cache_bytes: cache_bytes,
                 drop_recall_page_cache: false,
                 recall_direct_io: false,
                 intervals_persist_secs: 0,
@@ -3875,6 +3918,141 @@ mod tests {
         let (bytes, kind) = pending.get(&offset).expect("the new entropy stays queued");
         assert_eq!(*kind, super::super::ChunkType::Entropy);
         assert_eq!(bytes.first().copied(), Some(0xAB));
+        Ok(())
+    }
+
+    /// The sweep already read `0x11`. A newer entropy durable point lands
+    /// `0x22` and clears `pending` and `written_ahead` before the XOR. The
+    /// sweep must not queue `Data` packed with the old pad (`0x11 ^ 0x01`).
+    #[test]
+    fn pread_does_not_pack_entropy_replaced_before_submit() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("stale_pread", 4, 4, 0)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(
+            offset,
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        module.pause_next_sync_at(super::super::SyncPausePoint::AfterEntropyPread);
+        let mut slot = sweep_slot(0);
+        slot.unpacked = Arc::new(vec![0x01; 32]);
+        slot.byte_len = 32;
+        let mut rx = arm_slot_group(&module, slot);
+        std::thread::scope(|scope| {
+            let sweep = scope.spawn(|| module.sweep_one());
+            assert!(
+                module.wait_for_sync_pause(Duration::from_secs(5)),
+                "sweep did not pause after the entropy pread"
+            );
+            assert!(module.write_chunk(
+                offset,
+                vec![0x22; 32],
+                super::super::ChunkType::Entropy
+            ));
+            module
+                .sync_pending_chunks_inner(true)
+                .expect("replacement sync");
+            {
+                let pending = module.pending_writes.read().unwrap();
+                assert!(
+                    pending.get(&offset).is_none(),
+                    "replacement entropy is still pending"
+                );
+                assert!(
+                    !pending.written_ahead.contains_key(&offset),
+                    "replacement entropy is still write-ahead"
+                );
+            }
+            assert_eq!(
+                module
+                    .intervals
+                    .read()
+                    .unwrap()
+                    .get_at_point(offset)
+                    .copied(),
+                Some(super::super::ChunkType::Entropy)
+            );
+            module.release_sync_pause();
+            assert!(sweep.join().expect("sweep thread"), "sweep did not read");
+        });
+        let pending_byte = module
+            .pending_writes
+            .read()
+            .unwrap()
+            .get(&offset)
+            .map(|(bytes, kind)| (*kind, bytes.first().copied()));
+        match rx.try_recv() {
+            Ok(Err(super::super::WriteDataChunkError::Backpressure)) => {}
+            other => eyre::bail!(
+                "stale entropy pread was packed: result {other:?} pending {pending_byte:?}"
+            ),
+        }
+        assert_ne!(
+            pending_byte,
+            Some((super::super::ChunkType::Data, Some(0x10))),
+            "packed the entropy from before the replacement"
+        );
+        Ok(())
+    }
+
+    /// No newer entropy pwrite. The sweep packs the pad it just read.
+    #[test]
+    fn pread_packs_the_entropy_it_read() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("fresh_pread", 4, 4, 0)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(
+            offset,
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        let mut slot = sweep_slot(0);
+        slot.unpacked = Arc::new(vec![0x01; 32]);
+        slot.byte_len = 32;
+        let mut rx = arm_slot_group(&module, slot);
+        assert!(module.sweep_one(), "sweep did not read");
+        rx.try_recv().expect("slot finished").expect("pack");
+        let pending = module.pending_writes.read().unwrap();
+        let (bytes, kind) = pending.get(&offset).expect("packed data");
+        assert_eq!(*kind, super::super::ChunkType::Data);
+        assert_eq!(bytes.first().copied(), Some(0x10));
+        Ok(())
+    }
+
+    /// A read-ahead hole from before an entropy pwrite must not stay cached.
+    /// The same buffer is cached when the epoch still matches.
+    #[test]
+    fn remember_readahead_drops_entropy_from_before_a_later_write() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture_grace("stale_readahead", 4, 4, 0, 0, 32 * 4)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(
+            offset,
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        let epoch = module.entropy_write_epoch.load(Ordering::SeqCst);
+        let buf = vec![0x11; 32];
+        let verdicts = [super::super::chunk_crc::CrcVerdict::Match];
+        module.remember_readahead(offset, &buf, std::iter::empty(), &verdicts, epoch);
+        assert_eq!(
+            module.entropy_cache_offsets_for_test(),
+            vec![0],
+            "a current entropy read was not cached"
+        );
+        module.entropy_cache.lock().unwrap().clear();
+        assert!(module.write_chunk(
+            offset,
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        module.remember_readahead(offset, &buf, std::iter::empty(), &verdicts, epoch);
+        assert!(
+            module.entropy_cache_offsets_for_test().is_empty(),
+            "cached entropy from before the later pwrite"
+        );
         Ok(())
     }
 

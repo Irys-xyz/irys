@@ -480,6 +480,9 @@ enum SyncPausePoint {
     /// A confirmed checksum mismatch is about to cut the live label.
     /// The cut has not run.
     AfterCrcConfirm,
+    /// The no-lane entropy pread has returned and dropped the file lock.
+    /// The sweep has not checked the slot or queued packed bytes.
+    AfterEntropyPread,
 }
 
 /// Test barrier in a registration, after the rows are computed and before
@@ -818,6 +821,9 @@ pub struct StorageModule {
     /// read the map before the bump does not replace the reset image, and it
     /// does not put the old write-ahead mask back.
     interval_image_epoch: AtomicU64,
+    /// Bumped when an entropy `pwrite` lands. A disk read that captured an
+    /// older value must not pack those bytes or cache them.
+    entropy_write_epoch: AtomicU64,
     /// Crash tests drop the module without storing batched completions.
     #[cfg(test)]
     suppress_interval_flush: AtomicBool,
@@ -2074,6 +2080,7 @@ impl StorageModule {
             intervals: Arc::new(RwLock::new(loaded_intervals)),
             interval_disk: Mutex::new(Self::load_interval_disk(&submodule_map)),
             interval_image_epoch: AtomicU64::new(0),
+            entropy_write_epoch: AtomicU64::new(0),
             #[cfg(test)]
             suppress_interval_flush: AtomicBool::new(false),
             index_write_generation,
@@ -7591,6 +7598,9 @@ impl StorageModule {
                     .intervals
                     .write()
                     .map_err(|e| eyre::eyre!("Failed to acquire write lock on intervals: {}", e))?;
+                if run.chunk_type == ChunkType::Entropy {
+                    self.entropy_write_epoch.fetch_add(1, Ordering::SeqCst);
+                }
                 for chunk_offset in &run.offsets {
                     Self::cut_then_insert_interval_if_touching(
                         &mut intervals,
