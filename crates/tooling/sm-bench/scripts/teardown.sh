@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Stop irys-sm-bench and restore /sys/block/<dev>/queue settings.
 #
 # usage: teardown.sh <dev> <sysfs-orig-file>
@@ -33,6 +33,10 @@
 
 set -eu
 
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
 if [ "$#" -ne 2 ]; then
     echo "usage: teardown.sh <dev> <sysfs-orig-file>" >&2
     exit 1
@@ -41,12 +45,7 @@ fi
 dev=$1
 orig=$2
 
-case "$dev" in
-    "" | . | .. | *[!A-Za-z0-9-]*)
-        echo "device name must be alphanumeric or '-': $dev" >&2
-        exit 1
-        ;;
-esac
+require_device_name "$dev"
 
 if [ ! -f "$orig" ]; then
     echo "sysfs orig file not found: $orig" >&2

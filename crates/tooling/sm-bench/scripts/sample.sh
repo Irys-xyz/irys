@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Log disk and memory counters beside an irys-sm-bench run.
 #
 # usage: sample.sh <dev> <out-dir>
@@ -12,6 +12,10 @@
 
 set -eu
 
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
 if [ "$#" -ne 2 ]; then
     echo "usage: sample.sh <dev> <out-dir>" >&2
     exit 1
@@ -20,12 +24,7 @@ fi
 dev=$1
 out=$2
 
-case "$dev" in
-    "" | . | .. | *[!A-Za-z0-9-]*)
-        echo "device name must be alphanumeric or '-': $dev" >&2
-        exit 1
-        ;;
-esac
+require_device_name "$dev"
 
 if ! command -v iostat >/dev/null 2>&1; then
     echo "iostat is not installed (package sysstat)" >&2

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Trace one disk while irys-sm-bench runs.
 #
 # usage: blk-run.sh <dev> <loadtest-dir> <out-dir>
@@ -21,6 +21,10 @@
 
 set -eu
 
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
 if [ "$#" -ne 3 ]; then
     echo "usage: blk-run.sh <dev> <loadtest-dir> <out-dir>" >&2
     exit 1
@@ -33,32 +37,7 @@ dev=${dev#/dev/}
 
 # A mapper name such as dm-0 contains a hyphen. Empty, slash, and "." / ".."
 # stay refused.
-case "$dev" in
-    "" | . | .. | *[!A-Za-z0-9-]*)
-        echo "device name must be alphanumeric or '-': $dev" >&2
-        exit 1
-        ;;
-esac
-
-has_loadtest() {
-    path=$1
-    old_ifs=$IFS
-    IFS=/
-    set -f
-    found=0
-    for part in $path; do
-        if [ "$part" = "loadtest" ]; then
-            found=1
-            break
-        fi
-    done
-    set +f
-    IFS=$old_ifs
-    if [ "$found" -eq 1 ]; then
-        return 0
-    fi
-    return 1
-}
+require_device_name "$dev"
 
 if ! has_loadtest "$loadtest"; then
     echo "refusing: $loadtest has no loadtest path component" >&2
@@ -83,35 +62,18 @@ if [ -e "/sys/class/block/$dev/partition" ]; then
     exit 1
 fi
 
+require_mount_device "$canon" "$dev"
+# The snapshot needs the mount path as findmnt printed it, not the canonical path.
 if command -v findmnt >/dev/null 2>&1; then
-    mnt_src=$(findmnt -n -o SOURCE -T "$canon" || true)
     mnt=$(findmnt -n -o TARGET -T "$canon" || true)
 else
-    mnt_src=$(df -P "$canon" | awk 'NR==2 { print $1 }')
     mnt=$(df -P "$canon" | awk 'NR==2 { print $6 }')
 fi
-if [ -z "${mnt_src:-}" ] || [ -z "${mnt:-}" ]; then
+if [ -z "${mnt:-}" ]; then
     echo "no mount for $canon" >&2
     exit 1
 fi
-# findmnt appends a subvolume in brackets. The lab disk does not.
-mnt_src=${mnt_src%%[*}
-mnt_src=$(readlink -f "$mnt_src") || {
-    echo "cannot resolve mount source for $canon" >&2
-    exit 1
-}
-mnt_name=${mnt_src##*/}
-if [ -e "/sys/class/block/$mnt_name/partition" ]; then
-    parent=$(basename "$(readlink -f "/sys/class/block/$mnt_name/..")")
-else
-    parent=$mnt_name
-fi
-if [ "$parent" != "$dev" ]; then
-    echo "refusing: $canon is on $mnt_name, not $dev" >&2
-    exit 1
-fi
 
-here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 bt=$here/blk-trace.bt
 snap=$here/extent-snap.sh
 if [ ! -f "$bt" ] || [ ! -f "$snap" ]; then

@@ -24,6 +24,10 @@
 
 set -euo pipefail
 
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+source "$here/lib.sh"
+
 file=
 log=
 segment_bytes=$((64 * 1024 * 1024 * 1024))
@@ -92,13 +96,7 @@ if [ "$segment_bytes" -le 0 ]; then
     exit 1
 fi
 
-has_loadtest() {
-    case "/$1/" in
-        */loadtest/*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
+# Existing path only. A missing tail is not applied: mkdir is checked separately.
 require_loadtest() {
     local label=$1
     local path=$2
