@@ -1199,7 +1199,7 @@ impl RocksSubmoduleStore {
     }
 
     /// Observe the window after close and before the SCHEMA file.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     pub(super) fn set_before_schema_hook(&mut self, hook: impl Fn() + Send + Sync + 'static) {
         self.before_schema = Some(Arc::new(hook));
     }
