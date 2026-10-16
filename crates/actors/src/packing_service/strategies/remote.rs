@@ -16,6 +16,11 @@ use crate::packing_service::{
     REMOTE_STREAM_BUFFER_MULTIPLIER, client_pool::HttpClientPool, config::PackingConfig,
 };
 
+/// Chunks one remote `/pack` request may cover. The next span is a new request.
+const REMOTE_PACK_WINDOW_CHUNKS: u32 = 1024;
+/// Stream budget, in configured timeouts. Not one timeout per chunk.
+const REMOTE_STREAM_BUDGET_TIMEOUTS: u32 = 4;
+
 /// Remote packing strategy that delegates to external services
 pub(crate) struct RemotePackingStrategy {
     config: Arc<Config>,
@@ -212,11 +217,13 @@ impl RemotePackingStrategy {
 
         let stream = response.bytes_stream();
 
-        // One configured gap per chunk. A dribble that resets `read_timeout`
-        // still has to finish the body inside this budget.
+        // `read_timeout` resets after every byte. This budget does not. It is
+        // a few configured timeouts, so a dribble cannot hold the controller
+        // for one timeout per chunk. The request itself is at most one window.
         let chunks_in_range = u64::from(range_end.saturating_sub(range_start)).saturating_add(1);
+        let budget_chunks = chunks_in_range.min(u64::from(REMOTE_STREAM_BUDGET_TIMEOUTS));
         let stream_budget =
-            timeout.saturating_mul(u32::try_from(chunks_in_range).unwrap_or(u32::MAX));
+            timeout.saturating_mul(u32::try_from(budget_chunks).unwrap_or(u32::MAX));
 
         // Process response stream
         self.process_chunk_stream(
@@ -276,7 +283,45 @@ impl super::PackingStrategy for RemotePackingStrategy {
     ) -> Result<(), String> {
         let range_start = *chunk_range.0.start();
         let range_end = *chunk_range.0.end();
-        let mut current_start = range_start;
+        let mut window_start = range_start;
+
+        // One request per window. A window that misses its budget returns Err
+        // so the caller can pack locally. The next window is a new request.
+        while window_start <= range_end {
+            let window_end = window_start
+                .saturating_add(REMOTE_PACK_WINDOW_CHUNKS - 1)
+                .min(range_end);
+            self.pack_window(
+                storage_module,
+                window_start,
+                window_end,
+                mining_address,
+                partition_hash,
+                storage_module_id,
+                short_writes_before_sync,
+            )
+            .await?;
+            window_start = match window_end.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        Ok(())
+    }
+}
+
+impl RemotePackingStrategy {
+    async fn pack_window(
+        &self,
+        storage_module: &Arc<StorageModule>,
+        window_start: u32,
+        window_end: u32,
+        mining_address: IrysAddress,
+        partition_hash: PartitionHash,
+        storage_module_id: usize,
+        short_writes_before_sync: u32,
+    ) -> Result<(), String> {
+        let mut current_start = window_start;
 
         // Try each remote in order
         for remote in &self.packing_config.remotes {
@@ -285,7 +330,7 @@ impl super::PackingStrategy for RemotePackingStrategy {
                     remote,
                     storage_module,
                     current_start,
-                    range_end,
+                    window_end,
                     mining_address,
                     partition_hash,
                     storage_module_id,
@@ -294,12 +339,12 @@ impl super::PackingStrategy for RemotePackingStrategy {
                 .await
             {
                 Ok(new_start) => {
-                    // Inclusive range `range_start..=range_end` is done only when
-                    // the next offset is one past the end. `>= range_end` treats
-                    // a stream that stopped on the last offset as success.
-                    let Some(done) = range_end.checked_add(1) else {
+                    // Inclusive range is done only when the next offset is one
+                    // past the end. `>= window_end` treats a stream that
+                    // stopped on the last offset as success.
+                    let Some(done) = window_end.checked_add(1) else {
                         return Err(format!(
-                            "remote packing range end {range_end} has no following chunk"
+                            "remote packing range end {window_end} has no following chunk"
                         ));
                     };
                     if new_start == done {
@@ -307,7 +352,7 @@ impl super::PackingStrategy for RemotePackingStrategy {
                     }
                     if new_start > done {
                         return Err(format!(
-                            "remote packing advanced to {new_start}, past inclusive end {range_end}"
+                            "remote packing advanced to {new_start}, past inclusive end {window_end}"
                         ));
                     }
                     current_start = new_start;
@@ -355,6 +400,44 @@ mod short_stream_tests {
         PartitionHash,
     ) {
         test_module_with_ceiling(prefix, None)
+    }
+
+    fn test_module_with_chunks(
+        prefix: &str,
+        num_chunks: u64,
+    ) -> (
+        irys_testing_utils::tempfile::TempDir,
+        Arc<irys_types::Config>,
+        Arc<StorageModule>,
+        PartitionHash,
+    ) {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: num_chunks,
+            chunk_size: 32,
+            ..consensus
+        });
+        let config = Arc::new(irys_types::Config::new_with_random_peer_id(node_config));
+        let partition_hash = PartitionHash::repeat_byte(0x3C);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(
+                irys_types::partition_chunk_offset_ie!(0, num_chunks as u32),
+                "hdd0".into(),
+            )],
+        };
+        let module = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        (tmp_dir, config, module, partition_hash)
     }
 
     fn test_module_with_ceiling(
@@ -427,11 +510,15 @@ mod short_stream_tests {
 
     impl PackHost {
         fn spawn(status: u16, body: Vec<u8>) -> Self {
+            Self::spawn_for(status, body, Duration::from_secs(5))
+        }
+
+        fn spawn_for(status: u16, body: Vec<u8>, window: Duration) -> Self {
             let (listener, addr) = bind_local("bind pack host");
             let posts = Arc::new(AtomicUsize::new(0));
             let posts_thread = posts.clone();
             std::thread::spawn(move || {
-                serve_for(listener, Duration::from_secs(5), move |stream| {
+                serve_for(listener, window, move |stream| {
                     let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -866,6 +953,65 @@ mod short_stream_tests {
             started.elapsed() < Duration::from_millis(700),
             "the deadline must fire before the dribble finishes, elapsed {:?}",
             started.elapsed()
+        );
+    }
+
+    /// Two windows of 1024 chunks. The host returns exactly one window per
+    /// POST. The range is packed only when the client splits the request.
+    #[test_log::test(tokio::test)]
+    async fn remote_pack_splits_a_long_range_into_windows() {
+        const WINDOW: u32 = 1024;
+        let chunks = WINDOW * 2;
+        let (_tmp, config, module, hash) =
+            test_module_with_chunks("remote_pack_windows", u64::from(chunks));
+        let host = PackHost::spawn_for(
+            200,
+            vec![0xAB; 32 * WINDOW as usize],
+            Duration::from_secs(30),
+        );
+        let result = pack_from(&host, config, &module, 0, chunks - 1, hash).await;
+        assert_eq!(
+            result,
+            Ok(()),
+            "each window is its own request, got {result:?}"
+        );
+        assert_eq!(
+            host.posts.load(Ordering::SeqCst),
+            2,
+            "a 2048-chunk range must be two requests"
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Entropy)
+        );
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset(chunks - 1)),
+            Some(ChunkType::Entropy)
+        );
+    }
+
+    /// A dribble under the read timeout must not get one timeout per chunk.
+    /// 32 chunks at 100ms would be 3.2s. The cap is a few timeouts.
+    #[test_log::test(tokio::test)]
+    async fn remote_dribble_budget_is_capped_for_a_long_range() {
+        let (_tmp, config, module, hash) = test_module("remote_dribble_cap");
+        let addr = spawn_dribble_host(Duration::from_millis(40));
+        let result = tokio::time::timeout(
+            Duration::from_millis(900),
+            pack_range(
+                addr,
+                config,
+                &module,
+                0,
+                31,
+                hash,
+                Some(Duration::from_millis(100)),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "a long-range dribble must fail inside the capped budget, got {result:?}"
         );
     }
 
