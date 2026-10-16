@@ -3508,9 +3508,10 @@ fn exclusive_end_key(end: PartitionChunkOffset) -> Vec<u8> {
 
 /// Exclusive end of every key in `cf`.
 ///
-/// Offset families use a 4-byte big-endian key. Hash families use 32 bytes.
-/// The extra `0` sorts after the all-`0xFF` key of that width, so the
-/// half-open range covers the last key. `Metadata` is not cleared.
+/// Offset families use a 4-byte big-endian key. Data-root and content keys
+/// are 36 bytes. The extra `0` sorts after the all-`0xFF` key of that width,
+/// so the half-open range covers the last key. `clear` does not range-delete
+/// `Metadata`.
 fn full_cf_end(cf: Cf) -> Vec<u8> {
     match cf {
         Cf::OffsetMeta | Cf::Pending | Cf::Interval => {
