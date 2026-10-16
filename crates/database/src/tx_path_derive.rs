@@ -160,6 +160,36 @@ pub fn derive_tx_path_at_offset_with(
     Ok(derived)
 }
 
+fn load_bounds_and_header(
+    db: &DatabaseEnv,
+    ledger: DataLedger,
+    chunk_offset: u64,
+) -> eyre::Result<(BlockBounds, irys_types::IrysBlockHeader)> {
+    db.view_eyre(|tx| {
+        let bounds = locate_block(tx, ledger, chunk_offset)?;
+        let header = block_header_by_hash(tx, &bounds.block_hash, false)?.ok_or_else(|| {
+            eyre!(
+                "block header {} missing at height {}",
+                bounds.block_hash,
+                bounds.height
+            )
+        })?;
+        Ok((bounds, header))
+    })
+}
+
+fn committed_tx_root(
+    header: &irys_types::IrysBlockHeader,
+    ledger: DataLedger,
+) -> eyre::Result<H256> {
+    header
+        .data_ledgers
+        .iter()
+        .find(|item| item.ledger_id == ledger.get_id())
+        .map(|item| item.tx_root)
+        .ok_or_else(|| eyre!("ledger {ledger} absent on the block header"))
+}
+
 fn derive_tx_path_at_offset_timed(
     db: &DatabaseEnv,
     ledger: DataLedger,
@@ -170,17 +200,7 @@ fn derive_tx_path_at_offset_timed(
     eyre::ensure!(chunk_size > 0, "chunk size must be non-zero");
     let started = Instant::now();
     let cpu_nanos;
-    let (bounds, header) = db.view_eyre(|tx| {
-        let bounds = locate_block(tx, ledger, chunk_offset)?;
-        let header = block_header_by_hash(tx, &bounds.block_hash, false)?.ok_or_else(|| {
-            eyre!(
-                "block header {} missing at height {}",
-                bounds.block_hash,
-                bounds.height
-            )
-        })?;
-        Ok((bounds, header))
-    })?;
+    let (bounds, header) = load_bounds_and_header(db, ledger, chunk_offset)?;
     let headers = match pool {
         None => db.view_eyre(|tx| block_ledger_tx_headers(tx, &header, ledger))?,
         Some(pool) => {
@@ -198,12 +218,7 @@ fn derive_tx_path_at_offset_timed(
         let (tx_index, tx_ledger_start) =
             assign_tx_index(&headers, &bounds, chunk_offset, chunk_size)?;
         let (tx_root, proof) = proof_for_headers(&headers, tx_index)?;
-        let committed = header
-            .data_ledgers
-            .iter()
-            .find(|item| item.ledger_id == ledger.get_id())
-            .map(|item| item.tx_root)
-            .ok_or_else(|| eyre!("ledger {ledger} absent on the block header"))?;
+        let committed = committed_tx_root(&header, ledger)?;
         eyre::ensure!(
             tx_root == committed,
             "derived tx_root {tx_root} != header tx_root {committed}"
@@ -312,25 +327,10 @@ fn load_block(
     ledger: DataLedger,
     chunk_offset: u64,
 ) -> eyre::Result<LoadedBlock> {
-    let (bounds, header) = db.view_eyre(|tx| {
-        let bounds = locate_block(tx, ledger, chunk_offset)?;
-        let header = block_header_by_hash(tx, &bounds.block_hash, false)?.ok_or_else(|| {
-            eyre!(
-                "block header {} missing at height {}",
-                bounds.block_hash,
-                bounds.height
-            )
-        })?;
-        Ok((bounds, header))
-    })?;
+    let (bounds, header) = load_bounds_and_header(db, ledger, chunk_offset)?;
     let headers = db.view_eyre(|tx| block_ledger_tx_headers(tx, &header, ledger))?;
     let (tx_root, root) = tree_for_headers(&headers)?;
-    let committed = header
-        .data_ledgers
-        .iter()
-        .find(|item| item.ledger_id == ledger.get_id())
-        .map(|item| item.tx_root)
-        .ok_or_else(|| eyre!("ledger {ledger} absent on the block header"))?;
+    let committed = committed_tx_root(&header, ledger)?;
     eyre::ensure!(
         tx_root == committed,
         "derived tx_root {tx_root} != header tx_root {committed}"
