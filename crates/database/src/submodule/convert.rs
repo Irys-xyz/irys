@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use eyre::WrapErr as _;
@@ -522,6 +522,10 @@ pub fn convert_mdbx_to_rocks(
     rocks_dir: &Path,
     options: &ConvertOptions,
 ) -> eyre::Result<ConvertStats> {
+    let mdbx_dir = lexical_target(mdbx_dir)?;
+    let rocks_dir = lexical_target(rocks_dir)?;
+    let mdbx_dir = mdbx_dir.as_path();
+    let rocks_dir = rocks_dir.as_path();
     let started = Instant::now();
     guard_paths(mdbx_dir, rocks_dir, options)?;
     let map = require_map(options)?;
@@ -559,6 +563,10 @@ pub fn verify_rocks_records(
     left_dir: &Path,
     right_dir: &Path,
 ) -> eyre::Result<EngineEquivalenceReport> {
+    let left_dir = lexical_target(left_dir)?;
+    let right_dir = lexical_target(right_dir)?;
+    let left_dir = left_dir.as_path();
+    let right_dir = right_dir.as_path();
     require_rocks_v1(left_dir)?;
     require_rocks_v1(right_dir)?;
     let left = map_open(RocksSubmoduleStore::open_read_only(left_dir))?;
@@ -730,6 +738,10 @@ pub fn convert_rocks_to_mdbx(
     mdbx_dir: &Path,
     options: &ConvertOptions,
 ) -> eyre::Result<ConvertStats> {
+    let rocks_dir = lexical_target(rocks_dir)?;
+    let mdbx_dir = lexical_target(mdbx_dir)?;
+    let rocks_dir = rocks_dir.as_path();
+    let mdbx_dir = mdbx_dir.as_path();
     let started = Instant::now();
     guard_paths(rocks_dir, mdbx_dir, options)?;
     let map = require_map(options)?;
@@ -784,6 +796,10 @@ pub fn verify_mdbx_and_rocks(
     if options.dry_run {
         eyre::bail!("--dry-run is not valid for verify");
     }
+    let mdbx_dir = lexical_target(mdbx_dir)?;
+    let rocks_dir = lexical_target(rocks_dir)?;
+    let mdbx_dir = mdbx_dir.as_path();
+    let rocks_dir = rocks_dir.as_path();
     guard_paths(mdbx_dir, rocks_dir, options)?;
     let map = require_map(options)?;
     let db = open_consensus(options)?;
@@ -2267,10 +2283,14 @@ fn guard_paths(src: &Path, dst: &Path, options: &ConvertOptions) -> eyre::Result
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
-    let Some(left) = canonical_existing(left) else {
+    // A `..` that escapes has no safe canonical form. Treat that as overlap.
+    let (Ok(left), Ok(right)) = (lexical_target(left), lexical_target(right)) else {
+        return true;
+    };
+    let Some(left) = canonical_existing(&left) else {
         return false;
     };
-    let Some(right) = canonical_existing(right) else {
+    let Some(right) = canonical_existing(&right) else {
         return false;
     };
     if left == right {
@@ -2332,6 +2352,9 @@ fn canonical_existing(path: &Path) -> Option<PathBuf> {
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (lexical_target(left), lexical_target(right)) else {
+        return false;
+    };
     if left == right {
         return true;
     }
@@ -2339,6 +2362,46 @@ fn same_path(left: &Path, right: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
+}
+
+/// Collapse `.` and `..` without creating missing directories.
+///
+/// The kernel resolves `..` through a component that does not exist yet and
+/// can land in the source index or the storage module. A `..` that climbs
+/// past the root, or that leaves a relative path empty, is refused.
+fn lexical_target(path: &Path) -> eyre::Result<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !pop_normal(&mut out) {
+                    eyre::bail!(
+                        "target {} walks above its start. Refusing to read and write the same tree.",
+                        path.display()
+                    );
+                }
+            }
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                out.push(component.as_os_str());
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        eyre::bail!(
+            "target {} walks above its start. Refusing to read and write the same tree.",
+            path.display()
+        );
+    }
+    Ok(out)
+}
+
+/// Drop one normal component. A root or an empty path stays put.
+fn pop_normal(path: &mut PathBuf) -> bool {
+    if !matches!(path.components().next_back(), Some(Component::Normal(_))) {
+        return false;
+    }
+    path.pop()
 }
 
 fn exclusive_args(options: &ConvertOptions) -> DatabaseArguments {
@@ -3825,6 +3888,8 @@ fn compare_v1_pending(
 }
 
 fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
+    let path = lexical_target(path)?;
+    let path = path.as_path();
     if path.exists() && !path.is_dir() {
         eyre::bail!("target {} is not a directory", path.display());
     }
@@ -3846,6 +3911,8 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
 }
 
 fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> eyre::Result<()> {
+    let path = lexical_target(path)?;
+    let path = path.as_path();
     if path.exists() && !path.is_dir() {
         eyre::bail!("target {} is not a directory", path.display());
     }
@@ -4935,6 +5002,54 @@ mod tests {
         let err = super::prepare_rocks_target(&held, true).unwrap_err();
         assert!(format!("{err:#}").contains("may be running"), "{err:#}");
         assert!(held.join("CONVERTING").is_file());
+        Ok(())
+    }
+
+    /// `..` through a missing directory is the source or the storage module
+    /// after the kernel resolves it. The missing hop must not be created.
+    /// A path that collapses inside the parent is still a valid new target.
+    #[test]
+    fn dotted_target_does_not_write_through_a_missing_component() -> eyre::Result<()> {
+        let root = temp("convert-dotted-target");
+        let module = root.path().join("module");
+        let db = module.join("db");
+        fs::create_dir_all(&db)?;
+        fs::write(db.join("mdbx.dat"), b"index")?;
+
+        let into_source = module.join("other").join("..").join("db");
+        let err = super::prepare_rocks_target(&into_source, false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("mdbx.dat") || text.contains("same path"),
+            "{text}"
+        );
+        assert!(
+            !module.join("other").exists(),
+            "missing component must not be created"
+        );
+        assert!(!db.join("CONVERTING").is_file());
+
+        fs::write(module.join("chunks.dat"), b"chunks")?;
+        let into_module = module.join("db").join("ghost").join("..").join("..");
+        let err = super::prepare_rocks_target(&into_module, false).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("chunks.dat") || text.contains("overlap") || text.contains("same path"),
+            "{text}"
+        );
+        assert!(!module.join("db").join("ghost").exists());
+        assert!(!module.join("CONVERTING").is_file());
+
+        let collapsed = module.join("sub").join("..").join("rocks");
+        super::prepare_rocks_target(&collapsed, false)?;
+        assert!(module.join("rocks").join("CONVERTING").is_file());
+        assert!(!module.join("sub").exists());
+        assert!(!db.join("CONVERTING").is_file());
+
+        let options = super::ConvertOptions::new(testing_args()?);
+        let err = convert_mdbx_to_rocks(&db, &into_source, &options).unwrap_err();
+        assert!(format!("{err:#}").contains("same path"), "{err:#}");
+        assert!(!module.join("other").exists());
         Ok(())
     }
 
