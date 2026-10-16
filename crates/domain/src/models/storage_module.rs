@@ -483,6 +483,9 @@ enum SyncPausePoint {
     /// The no-lane entropy pread has returned and dropped the file lock.
     /// The sweep has not checked the slot or queued packed bytes.
     AfterEntropyPread,
+    /// Placements for one unpacked chunk are resolved. The occupy has not
+    /// read the interval map or taken `pending_writes`.
+    AfterOccupyResolved,
 }
 
 /// Test barrier in a registration, after the rows are computed and before
@@ -8237,13 +8240,13 @@ fn merge_inclusive_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
 mod tests {
     use super::*;
     use irys_testing_utils::{chunk_bytes_gen, utils::TempDirBuilder};
-    use rstest::rstest;
     use irys_types::{
         ConsensusConfig, DataTransactionHeaderV1, DataTransactionLedger, DbSyncMode, H256,
         NodeConfig, SimpleRNG, StorageSyncConfig, TxChunkOffset, irys::IrysSigner,
         ledger_chunk_offset_ii, partition_chunk_offset_ii,
     };
     use nodit::interval::ii;
+    use rstest::rstest;
 
     fn testing_config(dir: &Path, chunk_size: u64, chunks: u64) -> Config {
         testing_config_tuned(dir, chunk_size, chunks, |_| {})
@@ -15465,10 +15468,7 @@ mod tests {
         assert!(storage.write_chunk(offset, vec![0xEE; 32], ChunkType::Entropy));
         storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalCommit);
         let err = storage.sync_pending_chunks().unwrap_err();
-        assert!(
-            err.to_string().contains("BeforeIntervalCommit"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("BeforeIntervalCommit"), "{err}");
         assert_ne!(
             file_label(&storage, 0)?,
             Some(ChunkType::Data),
@@ -15569,5 +15569,124 @@ mod tests {
         drop(reopened);
         drop(tmp);
         Ok(())
+    }
+
+    fn capacity_assignment() -> irys_types::partition::PartitionAssignment {
+        irys_types::partition::PartitionAssignment {
+            ledger_id: None,
+            slot_index: None,
+            miner_address: irys_types::IrysAddress::from([0xAA; 20]),
+            partition_hash: H256::repeat_byte(0x11),
+        }
+    }
+
+    /// Entropy is on disk and the placement is still indexed. Ingress packs it.
+    #[test]
+    fn occupy_packs_entropy_when_the_placement_remains() -> eyre::Result<()> {
+        let (_tmp, _config, storage) = crc_hold_module("occupy_keeps_placement", 0)?;
+        storage.pack_with_zeros();
+        let (unpacked, ..) = index_partition(&storage)?;
+        let offset = PartitionChunkOffset::from(0);
+        let hash = H256::repeat_byte(0x11);
+        assert!(storage.write_entropy_chunk(offset, vec![0x22; 32], hash));
+        storage.sync_pending_chunks()?;
+        storage.write_data_chunk(&unpacked[0])?;
+        let pending = storage.pending_writes.read().unwrap();
+        let (bytes, kind) = pending.get(&offset).expect("packed data");
+        assert_eq!(*kind, ChunkType::Data);
+        // Chunk 0 of this tx is zeros, so the packed byte is the entropy byte.
+        assert_eq!(bytes.as_slice(), &[0x22; 32]);
+        Ok(())
+    }
+
+    /// Placements were resolved, then reset, then entropy was queued. The
+    /// interval is still `Uninitialized`. That occupy must not queue `Data`.
+    #[test]
+    fn occupy_after_reset_does_not_pack_pending_entropy() -> eyre::Result<()> {
+        let (_tmp, _config, storage, unpacked, ..) = settle_data_offset("occupy_reset_pending", 0)?;
+        let offset = PartitionChunkOffset::from(0);
+        let hash = H256::repeat_byte(0x11);
+        storage.pause_next_sync_at(SyncPausePoint::AfterOccupyResolved);
+        let storage_ref = &storage;
+        let pending_kind = std::thread::scope(|scope| {
+            let write = scope.spawn(move || storage_ref.write_data_chunk(&unpacked[0]));
+            assert!(
+                storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                "occupy did not pause after resolving placements"
+            );
+            storage_ref
+                .reset_with_assignment(Some(capacity_assignment()), 1)
+                .expect("reset");
+            assert!(storage_ref.write_entropy_chunk(offset, vec![0x22; 32], hash));
+            assert_eq!(
+                live_label(storage_ref, 0),
+                Some(ChunkType::Uninitialized),
+                "entropy is queued, not yet written"
+            );
+            storage_ref.release_sync_pause();
+            let wrote = write.join().expect("occupy thread");
+            let pending_kind = storage_ref
+                .pending_writes
+                .read()
+                .unwrap()
+                .get(&offset)
+                .map(|(_, kind)| *kind);
+            assert_ne!(
+                pending_kind,
+                Some(ChunkType::Data),
+                "occupy committed the pre-reset placement onto pending entropy: {wrote:?}"
+            );
+            pending_kind
+        });
+        assert_eq!(pending_kind, Some(ChunkType::Entropy));
+        Ok(())
+    }
+
+    /// The same occupy, after the post-reset entropy is already durable.
+    /// The index is gone. The occupy must not pack over that entropy.
+    #[test]
+    fn occupy_after_reset_does_not_pack_synced_entropy() -> eyre::Result<()> {
+        let (_tmp, _config, storage, unpacked, ..) = settle_data_offset("occupy_reset_synced", 0)?;
+        let offset = PartitionChunkOffset::from(0);
+        let hash = H256::repeat_byte(0x11);
+        storage.pause_next_sync_at(SyncPausePoint::AfterOccupyResolved);
+        let storage_ref = &storage;
+        std::thread::scope(|scope| {
+            let write = scope.spawn(move || storage_ref.write_data_chunk(&unpacked[0]));
+            assert!(
+                storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                "occupy did not pause after resolving placements"
+            );
+            storage_ref
+                .reset_with_assignment(Some(capacity_assignment()), 1)
+                .expect("reset");
+            assert!(storage_ref.write_entropy_chunk(offset, vec![0x22; 32], hash));
+            storage_ref.sync_pending_chunks().expect("entropy sync");
+            assert_eq!(live_label(storage_ref, 0), Some(ChunkType::Entropy));
+            assert!(
+                storage_ref
+                    .pending_writes
+                    .read()
+                    .unwrap()
+                    .get(&offset)
+                    .is_none(),
+                "synced entropy is still pending"
+            );
+            storage_ref.release_sync_pause();
+            let wrote = write.join().expect("occupy thread");
+            let pending_kind = storage_ref
+                .pending_writes
+                .read()
+                .unwrap()
+                .get(&offset)
+                .map(|(_, kind)| *kind);
+            assert_ne!(
+                pending_kind,
+                Some(ChunkType::Data),
+                "occupy committed the pre-reset placement onto synced entropy: {wrote:?}"
+            );
+            assert_eq!(live_label(storage_ref, 0), Some(ChunkType::Entropy));
+            Ok(())
+        })
     }
 }

@@ -24,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use irys_database::submodule::SubmoduleStore as _;
 use irys_packing::packing_xor_vec_u8;
 use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset, UnpackedChunk};
 use nodit::Interval;
@@ -1310,12 +1311,16 @@ impl StorageModule {
             }
             Err(error) => return Err(OccupyFailure::Write(error.into())),
         };
+        #[cfg(test)]
+        self.wait_if_sync_paused(super::SyncPausePoint::AfterOccupyResolved);
 
         let data_path = Arc::new(chunk.data_path.0.clone());
         let path_hash = UnpackedChunk::hash_data_path(&data_path);
         let unpacked = Arc::new(chunk.bytes.0.clone());
 
-        let disk_entropy: std::collections::HashSet<PartitionChunkOffset> = {
+        // Entropy on disk, read before `pending`. A queued entropy write is
+        // still a target when the interval has not flipped yet.
+        let disk_entropy: HashSet<PartitionChunkOffset> = {
             let intervals = self.intervals.read().unwrap();
             partition_offsets
                 .iter()
@@ -1327,6 +1332,8 @@ impl StorageModule {
                 })
                 .collect()
         };
+        let chunk_size = self.config.consensus.chunk_size;
+        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
 
         let mut selected: Vec<SelectedOffset> = Vec::new();
         {
@@ -1335,6 +1342,47 @@ impl StorageModule {
                 return Err(OccupyFailure::Write(WriteDataChunkError::WritesPaused));
             }
             let generation = self.index_write_generation.load(Ordering::SeqCst);
+            // Same funding math as `partition_offsets_for_data_root_chunk`,
+            // read again under this lock. It uses data-root rows only, so a
+            // short test path is not parsed. Reset clears those rows before
+            // a later entropy write can take `pending`.
+            let still_funded = (|| -> eyre::Result<HashSet<PartitionChunkOffset>> {
+                let raw_tx_offset = u32::from(chunk.tx_offset);
+                let chunk_byte_offset = u64::from(raw_tx_offset)
+                    .checked_mul(chunk_size)
+                    .ok_or_else(|| eyre::eyre!("chunk byte offset overflow"))?;
+                let mut funded = HashSet::new();
+                for (_, submodule) in self.submodules.iter() {
+                    let Some(infos) = submodule
+                        .db
+                        .view(|tx| tx.get_data_root_infos_for_data_root(chunk.data_root))?
+                    else {
+                        continue;
+                    };
+                    for info in infos.0 {
+                        if chunk_byte_offset >= info.data_size {
+                            continue;
+                        }
+                        let relative_offset =
+                            i64::from(info.start_offset.0) + i64::from(raw_tx_offset);
+                        if relative_offset < 0 || relative_offset as u64 >= num_chunks_in_partition
+                        {
+                            continue;
+                        }
+                        let relative_offset = u32::try_from(relative_offset).map_err(|_| {
+                            eyre::eyre!("partition-relative chunk offset exceeds u32")
+                        })?;
+                        funded.insert(PartitionChunkOffset::from(relative_offset));
+                    }
+                }
+                Ok(funded)
+            })();
+            let still_funded = match still_funded {
+                Ok(funded) => funded,
+                Err(error) => {
+                    return Err(OccupyFailure::Write(WriteDataChunkError::Other(error)));
+                }
+            };
             // A busy placement blocks the whole occupy. Writing the free
             // placements and returning Ok lets ingress accept the chunk while
             // the busy one can still fail and stay empty. Decide here, before
@@ -1357,6 +1405,9 @@ impl StorageModule {
                     .get(&partition_offset)
                     .and_then(|(bytes, ty)| (*ty == ChunkType::Entropy).then(|| bytes.clone()));
                 if pending_entropy.is_none() && !disk_entropy.contains(&partition_offset) {
+                    continue;
+                }
+                if !still_funded.contains(&partition_offset) {
                     continue;
                 }
                 planned.push((partition_offset, pending_entropy));
@@ -1888,9 +1939,7 @@ impl StorageModule {
         });
         for (span, result) in spans.into_iter().zip(results) {
             match result {
-                Ok(load) => {
-                    self.finish_span_read(span, load.start, &load.buf, load.entropy_epoch)
-                }
+                Ok(load) => self.finish_span_read(span, load.start, &load.buf, load.entropy_epoch),
                 Err(error) => self.fail_span(span, &error),
             }
         }
@@ -3463,7 +3512,8 @@ mod tests {
     #[test]
     fn young_short_span_waits_out_the_entropy_read_grace() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
-        let (_tmp, module) = span_fixture_grace("span_grace", 8, 8, 0, grace.as_millis() as u64, 0)?;
+        let (_tmp, module) =
+            span_fixture_grace("span_grace", 8, 8, 0, grace.as_millis() as u64, 0)?;
         let now = Instant::now();
         insert_slots(&module, &[0, 1], now);
         assert!(
@@ -3527,7 +3577,8 @@ mod tests {
     #[test]
     fn adjacent_chunks_inside_the_grace_are_one_entropy_read() -> eyre::Result<()> {
         let grace = Duration::from_millis(80);
-        let (_tmp, module) = span_fixture_grace("span_burst", 8, 8, 0, grace.as_millis() as u64, 0)?;
+        let (_tmp, module) =
+            span_fixture_grace("span_burst", 8, 8, 0, grace.as_millis() as u64, 0)?;
         insert_slots(&module, &[0], Instant::now());
         assert!(!module.sweep_one());
         assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
@@ -3560,7 +3611,8 @@ mod tests {
     #[test]
     fn young_lone_chunk_drains_inside_the_grace() -> eyre::Result<()> {
         let grace = Duration::from_millis(40);
-        let (_tmp, module) = span_fixture_grace("span_drain", 8, 8, 0, grace.as_millis() as u64, 0)?;
+        let (_tmp, module) =
+            span_fixture_grace("span_drain", 8, 8, 0, grace.as_millis() as u64, 0)?;
         insert_slots(&module, &[0], Instant::now());
         let started = Instant::now();
         module.drive_entropy_queue_for_test();
@@ -3928,11 +3980,7 @@ mod tests {
     fn pread_does_not_pack_entropy_replaced_before_submit() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("stale_pread", 4, 4, 0)?;
         let offset = PartitionChunkOffset::from(0);
-        assert!(module.write_chunk(
-            offset,
-            vec![0x11; 32],
-            super::super::ChunkType::Entropy
-        ));
+        assert!(module.write_chunk(offset, vec![0x11; 32], super::super::ChunkType::Entropy));
         module.sync_pending_chunks_inner(true)?;
         module.pause_next_sync_at(super::super::SyncPausePoint::AfterEntropyPread);
         let mut slot = sweep_slot(0);
@@ -3945,11 +3993,7 @@ mod tests {
                 module.wait_for_sync_pause(Duration::from_secs(5)),
                 "sweep did not pause after the entropy pread"
             );
-            assert!(module.write_chunk(
-                offset,
-                vec![0x22; 32],
-                super::super::ChunkType::Entropy
-            ));
+            assert!(module.write_chunk(offset, vec![0x22; 32], super::super::ChunkType::Entropy));
             module
                 .sync_pending_chunks_inner(true)
                 .expect("replacement sync");
@@ -4001,11 +4045,7 @@ mod tests {
     fn pread_packs_the_entropy_it_read() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("fresh_pread", 4, 4, 0)?;
         let offset = PartitionChunkOffset::from(0);
-        assert!(module.write_chunk(
-            offset,
-            vec![0x11; 32],
-            super::super::ChunkType::Entropy
-        ));
+        assert!(module.write_chunk(offset, vec![0x11; 32], super::super::ChunkType::Entropy));
         module.sync_pending_chunks_inner(true)?;
         let mut slot = sweep_slot(0);
         slot.unpacked = Arc::new(vec![0x01; 32]);
@@ -4026,11 +4066,7 @@ mod tests {
     fn remember_readahead_drops_entropy_from_before_a_later_write() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture_grace("stale_readahead", 4, 4, 0, 0, 32 * 4)?;
         let offset = PartitionChunkOffset::from(0);
-        assert!(module.write_chunk(
-            offset,
-            vec![0x11; 32],
-            super::super::ChunkType::Entropy
-        ));
+        assert!(module.write_chunk(offset, vec![0x11; 32], super::super::ChunkType::Entropy));
         module.sync_pending_chunks_inner(true)?;
         let epoch = module.entropy_write_epoch.load(Ordering::SeqCst);
         let buf = vec![0x11; 32];
@@ -4042,11 +4078,7 @@ mod tests {
             "a current entropy read was not cached"
         );
         module.entropy_cache.lock().unwrap().clear();
-        assert!(module.write_chunk(
-            offset,
-            vec![0x22; 32],
-            super::super::ChunkType::Entropy
-        ));
+        assert!(module.write_chunk(offset, vec![0x22; 32], super::super::ChunkType::Entropy));
         module.sync_pending_chunks_inner(true)?;
         module.remember_readahead(offset, &buf, std::iter::empty(), &verdicts, epoch);
         assert!(
