@@ -367,14 +367,19 @@ impl StorageModuleServiceInner {
                         let range =
                             self.reset_and_install(existing, Some(info_pa), update_height)?;
                         self.enqueue_packing(existing, range);
-                    } else if let Err(err) = existing.assign_partition(info_pa, update_height) {
-                        // The packing-params write failed before memory changed.
-                        // Retry the same update. Do not stop the service.
-                        warn!(
-                            storage_module.id = existing.id,
-                            "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
-                        );
-                        return Err(ResetNotFinished.into());
+                    } else {
+                        // Capacity→ledger does not reset and must not repack.
+                        // Drop a span the capacity reset could not send.
+                        if let Err(err) = existing.assign_partition(info_pa, update_height) {
+                            // The packing-params write failed before memory changed.
+                            // Retry the same update. Do not stop the service.
+                            warn!(
+                                storage_module.id = existing.id,
+                                "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
+                            );
+                            return Err(ResetNotFinished.into());
+                        }
+                        self.pending_ranges.remove(&existing.id);
                     }
                 }
             }
@@ -426,9 +431,14 @@ impl StorageModuleServiceInner {
     }
 
     /// Ask the packing service to fill the range. A full or closed channel
-    /// does not fail the assignment update.
-    fn enqueue_packing(&self, module: &Arc<StorageModule>, range: PartitionChunkRange) {
-        let _ = self.try_enqueue_packing(module, range);
+    /// does not fail the assignment update: `tick` sends the span later.
+    fn enqueue_packing(&mut self, module: &Arc<StorageModule>, range: PartitionChunkRange) {
+        // This span replaces any range the channel has not accepted. The
+        // reset already cleared the old bytes.
+        self.pending_ranges.remove(&module.id);
+        if matches!(self.try_enqueue_packing(module, range), PackSend::Deferred) {
+            self.pending_ranges.insert(module.id, vec![range]);
+        }
     }
 
     /// No partition assignment is not a warning: packing cannot run.
@@ -1476,6 +1486,171 @@ mod assignment_reset_tests {
         assert!(
             harness.receivers.packing.try_recv().is_err(),
             "capacity to ledger must not pack a span deferred from the capacity reset"
+        );
+    }
+
+    fn assert_only_filler_ranges(queued: &[PackingRequest]) {
+        assert!(
+            queued
+                .iter()
+                .all(|request| *request.chunk_range().0.end() == 0),
+            "a reset span was accepted while the channel was full"
+        );
+    }
+
+    fn deferred_span_is_sent_on_tick(harness: &mut Harness) {
+        let queued = drain_packing(harness);
+        assert_only_filler_ranges(&queued);
+        harness.inner.tick();
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the reset span is sent once the channel has room");
+        assert_full_partition_span(&request);
+        assert!(harness.inner.pending_ranges.get(&0).is_none());
+    }
+
+    #[tokio::test]
+    async fn full_packing_channel_retries_ledger_to_capacity_pack() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        fill_packing_channel(&harness);
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        deferred_span_is_sent_on_tick(&mut harness);
+    }
+
+    #[tokio::test]
+    async fn full_packing_channel_retries_ledger_to_ledger_pack() {
+        let mut harness = harness(Some(DataLedger::Submit.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        fill_packing_channel(&harness);
+        let update = Arc::new(vec![StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: miner,
+                ledger_id: Some(DataLedger::Publish.into()),
+                slot_index: Some(1),
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), harness.path.clone())],
+        }]);
+        apply_update(&mut harness, update, 8).await;
+        let assignment = harness.module.partition_assignment().unwrap();
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(assignment.slot_index, Some(1));
+        deferred_span_is_sent_on_tick(&mut harness);
+    }
+
+    #[tokio::test]
+    async fn full_packing_channel_retries_fresh_assignment_pack() {
+        let mut harness = harness(None);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        fill_packing_channel(&harness);
+        apply_update(
+            &mut harness,
+            Arc::new(vec![StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), path.clone())],
+            }]),
+            4,
+        )
+        .await;
+        assert!(harness.module.partition_assignment().is_none());
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 5).await;
+        assert!(harness.module.partition_assignment().is_some());
+        deferred_span_is_sent_on_tick(&mut harness);
+    }
+
+    /// A later update with the same ledger and slot must not drop a span the
+    /// channel has not accepted yet.
+    #[tokio::test]
+    async fn same_assignment_keeps_a_deferred_reset_pack() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        fill_packing_channel(&harness);
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 5).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        deferred_span_is_sent_on_tick(&mut harness);
+    }
+
+    /// Unassign drops a span the channel did not accept. The module cannot pack.
+    #[tokio::test]
+    async fn unassign_drops_a_deferred_reset_pack() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        fill_packing_channel(&harness);
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert!(harness.inner.pending_ranges.get(&0).is_some());
+        apply_update(
+            &mut harness,
+            Arc::new(vec![StorageModuleInfo {
+                id: 0,
+                partition_assignment: None,
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), path)],
+            }]),
+            5,
+        )
+        .await;
+        assert!(harness.module.partition_assignment().is_none());
+        assert!(
+            harness.inner.pending_ranges.get(&0).is_none(),
+            "unassign must drop a span the channel did not accept"
+        );
+        let _fillers = drain_packing(&mut harness);
+        harness.inner.tick();
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn closed_packing_channel_remembers_the_reset_pack() {
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(std::mem::replace(&mut harness.receivers.packing, rx));
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        let pending = harness
+            .inner
+            .pending_ranges
+            .get(&0)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            pending.len(),
+            1,
+            "a closed channel must remember the reset span"
+        );
+        assert_eq!(*pending[0].0.start(), 0);
+        assert_eq!(*pending[0].0.end(), 9);
+        harness.inner.tick();
+        let pending = harness
+            .inner
+            .pending_ranges
+            .get(&0)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            pending.len(),
+            1,
+            "tick retries a closed channel instead of dropping the span"
         );
     }
 }
