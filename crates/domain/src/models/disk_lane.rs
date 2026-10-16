@@ -2571,6 +2571,7 @@ impl StorageModule {
             (slot.path_hash, (*slot.data_path).clone()),
             copied_pad,
             slot.entropy_epoch,
+            slot.pending_entropy.as_deref(),
         );
         if inserted.is_ok() && priority == WritePriority::Ingress && read_done.is_some() {
             super::super::index_read_metrics::note_ingest_stage(
@@ -2601,9 +2602,19 @@ impl StorageModule {
             {
                 return Err(WriteDataChunkError::Backpressure);
             }
-        }
-        if slot.pending_entropy.is_some() {
-            return Ok(());
+            // The clone is the pack target only while the map still holds
+            // those bytes. A newer enqueue does not bump the epoch, and a
+            // durable point removes the entry. The interval may still be the
+            // type from before this queued write.
+            if let Some(cloned) = slot.pending_entropy.as_deref() {
+                let same = pending.get(&slot.offset).is_some_and(|(bytes, ty)| {
+                    *ty == ChunkType::Entropy && bytes.as_slice() == cloned
+                });
+                if same {
+                    return Ok(());
+                }
+                return Err(WriteDataChunkError::Backpressure);
+            }
         }
         // The bytes were copied earlier: a disk pread or a cache pad. An
         // entropy pwrite since that copy bumps the epoch, then clears
@@ -2715,6 +2726,7 @@ impl StorageModule {
         proof: (ChunkPathHash, ChunkDataPath),
         copied_pad: bool,
         entropy_epoch: u64,
+        pending_entropy: Option<&[u8]>,
     ) -> Result<(), WriteDataChunkError> {
         let mut pending = self.pending_writes.write().unwrap();
         pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_sub(unpacked_len);
@@ -2724,12 +2736,21 @@ impl StorageModule {
         // `written_ahead` is a pwrite this commit did not do. Leave it.
         // A copied pad must not replace entropy that landed after the copy.
         // The epoch covers the same pad after that write has been synced
-        // and both maps are empty. The XOR does not hold `pending_writes`.
+        // and both maps are empty. A pending clone is packed only while the
+        // map still holds those bytes: the XOR does not hold `pending_writes`,
+        // and a newer enqueue does not bump the epoch.
+        let pending_clone_stale = match pending_entropy {
+            Some(cloned) => !pending
+                .get(&offset)
+                .is_some_and(|(bytes, ty)| *ty == ChunkType::Entropy && bytes.as_slice() == cloned),
+            None => false,
+        };
         let epoch_moved =
             copied_pad && self.entropy_write_epoch.load(Ordering::SeqCst) != entropy_epoch;
         if pending.written_ahead.contains_key(&offset)
             || (copied_pad && pending.contains_key(&offset))
             || epoch_moved
+            || pending_clone_stale
         {
             pending.occupancy.remove(&offset);
             return Err(WriteDataChunkError::Backpressure);
@@ -3998,6 +4019,7 @@ mod tests {
             (H256::zero(), Vec::new()),
             true,
             module.entropy_write_epoch.load(Ordering::SeqCst),
+            None,
         );
         assert!(
             matches!(
@@ -4601,6 +4623,187 @@ mod tests {
             module.disk.entropy_readahead_hits.load(Ordering::SeqCst) > hits,
             "the lane pack did not use the cached pad"
         );
+        assert_fresh_pad_packed(&module);
+        drop(lane);
+        Ok(())
+    }
+
+    fn queue_entropy(module: &super::super::StorageModule, byte: u8) {
+        assert!(
+            module.write_chunk(
+                PartitionChunkOffset::from(0),
+                vec![byte; 32],
+                super::super::ChunkType::Entropy
+            ),
+            "entropy enqueue failed"
+        );
+    }
+
+    /// Replace the copied entropy. `sync` finishes the durable point on this
+    /// thread, or on the lane when that thread is running.
+    fn replace_entropy(module: &super::super::StorageModule, sync: bool) {
+        queue_entropy(module, 0x22);
+        if sync {
+            module
+                .sync_pending_chunks_inner(true)
+                .expect("replacement sync");
+            assert!(
+                pending_head(module).is_none(),
+                "replacement is still pending"
+            );
+        }
+    }
+
+    fn assert_newer_entropy_kept(module: &super::super::StorageModule) {
+        assert_eq!(
+            pending_head(module),
+            Some((super::super::ChunkType::Entropy, Some(0x22))),
+            "the newer entropy write is no longer pending"
+        );
+    }
+
+    /// Occupy copied pending entropy `0x11`. A newer pending write replaces
+    /// that map entry before the slot is queued. The lane is down.
+    #[test]
+    fn pending_entropy_is_not_packed_over_a_newer_write() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_newer")?;
+        queue_entropy(&module, 0x11);
+        let module = Arc::new(module);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::AfterEntropyCopied,
+            || replace_entropy(&module, false),
+        );
+        assert_old_pad_not_packed(wrote, &module, "newer pending entropy before push");
+        assert_newer_entropy_kept(&module);
+        Ok(())
+    }
+
+    /// The fold already accepted the clone. The newer bytes land during the
+    /// XOR, while the lane is down, and stay pending.
+    #[test]
+    fn pending_entropy_is_not_packed_when_a_newer_write_lands_during_xor() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_xor")?;
+        queue_entropy(&module, 0x11);
+        let module = Arc::new(module);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::BeforePackXor,
+            || replace_entropy(&module, false),
+        );
+        assert_old_pad_not_packed(wrote, &module, "newer pending entropy during xor");
+        assert_newer_entropy_kept(&module);
+        Ok(())
+    }
+
+    /// Same gap as the queued-body case. The replacement reaches a durable
+    /// point, so both maps are empty. The lane is down.
+    #[test]
+    fn pending_entropy_is_not_packed_after_a_durable_point_without_a_lane() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_durable_down")?;
+        queue_entropy(&module, 0x11);
+        let module = Arc::new(module);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::AfterEntropyCopied,
+            || replace_entropy(&module, true),
+        );
+        assert_old_pad_not_packed(wrote, &module, "durable point before push, lane down");
+        assert!(pending_head(&module).is_none());
+        Ok(())
+    }
+
+    /// The pre-XOR check passed on the original bytes. A durable point then
+    /// clears them. No lane is running, so this thread syncs during the XOR.
+    #[test]
+    fn pending_entropy_is_not_packed_when_a_durable_point_lands_during_xor() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_xor_durable")?;
+        queue_entropy(&module, 0x11);
+        let module = Arc::new(module);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::BeforePackXor,
+            || replace_entropy(&module, true),
+        );
+        assert_old_pad_not_packed(wrote, &module, "durable point during xor, lane down");
+        assert!(pending_head(&module).is_none());
+        Ok(())
+    }
+
+    /// The lane commits the replacement while the clone is still off the queue.
+    #[test]
+    fn pending_entropy_is_not_packed_after_a_durable_point_on_the_lane() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_durable_lane")?;
+        queue_entropy(&module, 0x11);
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::AfterEntropyCopied,
+            || replace_entropy(&module, true),
+        );
+        assert_old_pad_not_packed(wrote, &module, "durable point before push, lane up");
+        assert!(pending_head(&module).is_none());
+        drop(lane);
+        Ok(())
+    }
+
+    /// The lane is up and the replacement stays unsynced until the lane pass.
+    /// That pass may durable-point the new bytes before the fold, or the fold
+    /// may see them still pending. Neither order may pack the old clone.
+    #[test]
+    fn pending_entropy_is_not_packed_over_a_newer_write_on_the_lane() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_newer_lane")?;
+        queue_entropy(&module, 0x11);
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::AfterEntropyCopied,
+            || replace_entropy(&module, false),
+        );
+        assert_old_pad_not_packed(wrote, &module, "newer pending entropy, lane up");
+        let head = pending_head(&module);
+        assert_ne!(
+            head,
+            Some((super::super::ChunkType::Data, Some(0x10))),
+            "packed the entropy copied before the replacement"
+        );
+        drop(lane);
+        Ok(())
+    }
+
+    /// Pending entropy with no later write still packs. The interval may not
+    /// be Entropy yet: the bytes are only queued.
+    #[test]
+    fn fresh_pending_entropy_still_packs() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_fresh")?;
+        queue_entropy(&module, 0x11);
+        module.write_data_chunk(&chunk)?;
+        assert_fresh_pad_packed(&module);
+        Ok(())
+    }
+
+    /// The lane may durable-point that entropy before the fold. The first
+    /// call then returns backpressure and the retry reads the new bytes.
+    #[test]
+    fn fresh_pending_entropy_still_packs_on_the_lane() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_fresh_lane")?;
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        queue_entropy(&module, 0x11);
+        let first = module.write_data_chunk(&chunk);
+        if matches!(first, Err(super::super::WriteDataChunkError::Backpressure)) {
+            module.write_data_chunk(&chunk)?;
+        } else {
+            first?;
+        }
         assert_fresh_pad_packed(&module);
         drop(lane);
         Ok(())
