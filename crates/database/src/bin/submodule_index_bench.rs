@@ -2372,6 +2372,38 @@ fn apply_missing(base: &mut PathBuf, missing: &[MissingPart]) -> eyre::Result<()
     Ok(())
 }
 
+/// Absolute path with `.` and `..` collapsed and symlinks left in place.
+/// That is the directory the operator named, not the one a symlink reaches.
+fn lexical_absolute(path: &Path) -> eyre::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Ok(out)
+}
+
+fn lexical_parent(path: &Path) -> eyre::Result<PathBuf> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    lexical_absolute(parent)
+}
+
 fn prepare_dir(path: &Path) -> eyre::Result<()> {
     eyre::ensure!(
         has_index_bench(path),
@@ -2384,6 +2416,21 @@ fn prepare_dir(path: &Path) -> eyre::Result<()> {
         "refusing {}: it resolves to {}, which has no index-bench component",
         path.display(),
         resolved.display()
+    );
+    // `create_dir_all` follows a symlink ancestor. An existing empty directory
+    // reached the same way would be written in place. The parent the operator
+    // named has to be the parent after resolution.
+    let named_parent = lexical_parent(path)?;
+    let resolved_parent = match resolved.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("/"),
+    };
+    eyre::ensure!(
+        named_parent == resolved_parent,
+        "refusing {}: it resolves under {}, not {}",
+        path.display(),
+        resolved_parent.display(),
+        named_parent.display()
     );
     if path.exists() {
         eyre::ensure!(
@@ -2868,6 +2915,72 @@ mod tests {
         super::prepare_dir(&dir).unwrap();
         assert!(dir.is_dir());
         assert!(dir.read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn prepare_dir_accepts_an_empty_directory_under_index_bench() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new().prefix("index-bench-empty-").build();
+        let dir = tmp.path().join("safe/index-bench");
+        std::fs::create_dir_all(&dir).unwrap();
+        super::prepare_dir(&dir).unwrap();
+        assert!(dir.read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn prepare_dir_refuses_a_missing_name_through_a_symlink_parent() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new()
+            .prefix("index-bench-symlink-parent-")
+            .build();
+        let live = tmp.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&live, &link).unwrap();
+        let dir = link.join("index-bench");
+        let result = super::prepare_dir(&dir);
+        assert!(
+            result.is_err(),
+            "missing index-bench through {} was accepted and created {}",
+            link.display(),
+            live.join("index-bench").display()
+        );
+        assert!(
+            !live.join("index-bench").exists(),
+            "created {} through the symlink parent",
+            live.join("index-bench").display()
+        );
+        let text = format!("{:#}", result.unwrap_err());
+        assert!(
+            text.contains("resolves under"),
+            "symlink parent was not the parent check: {text}"
+        );
+    }
+
+    #[test]
+    fn prepare_dir_refuses_an_empty_directory_through_a_symlink_parent() {
+        use irys_testing_utils::TempDirBuilder;
+        let tmp = TempDirBuilder::new()
+            .prefix("index-bench-symlink-empty-")
+            .build();
+        let live = tmp.path().join("live/index-bench");
+        std::fs::create_dir_all(&live).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(tmp.path().join("live"), &link).unwrap();
+        let dir = link.join("index-bench");
+        let result = super::prepare_dir(&dir);
+        assert!(
+            result.is_err(),
+            "empty {} reached through {} was accepted",
+            live.display(),
+            dir.display()
+        );
+        assert!(live.read_dir().unwrap().next().is_none());
+        let text = format!("{:#}", result.unwrap_err());
+        assert!(
+            text.contains("resolves under"),
+            "existing empty dir through a symlink was not the parent check: {text}"
+        );
     }
 
     #[test]
