@@ -687,14 +687,8 @@ pub struct StorageSyncConfig {
     /// just under the line. An owed recall flush still defers on this line:
     /// that recall is waiting on the flush and must not wait on the fdatasync.
     ///
-    /// `400` is two fifths of the ceiling. With `num_writes_before_sync` 100,
-    /// 256 KiB chunks, and one submodule the ceiling is 64 MiB and the line
-    /// is about 26 MiB. A 16 MiB/s stream parks about 4 MiB in a 250 ms cap
-    /// and queues about one recall of backlog only while the disk is behind,
-    /// which stays under the line. A 24 MiB/s stream fills the recall's
-    /// second and queues more than 26 MiB, so the next point is immediate.
-    /// `1000` puts the line on the ceiling. `0` runs a point as soon as any
-    /// byte is pending, except while a recall flush is owed.
+    /// The default is 400. `1000` puts the line on the ceiling. `0` runs a
+    /// point as soon as any byte is pending, except while a recall flush is owed.
     #[serde(default = "default_durable_headroom_permille")]
     pub durable_headroom_permille: u64,
     /// Accepted so an older config that set this key still loads.
