@@ -1088,9 +1088,17 @@ mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::AtomicBool;
 
-    /// A failed expiry reset must not enqueue packing. The retry does.
-    #[test]
-    fn failed_expiry_reset_does_not_pack_until_retry() {
+    /// One capacity or ledger module (10 chunks, recall range 2) and the
+    /// absolute submodule path an expiry reset writes `packing_params.toml` into.
+    fn open_expiry_module(
+        hash_byte: u8,
+        ledger: Option<(DataLedger, usize)>,
+    ) -> (
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        Arc<StorageModule>,
+        H256,
+    ) {
         let tmp_dir = TempDirBuilder::new().build();
         let node_config = NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
@@ -1103,16 +1111,19 @@ mod tests {
             ..NodeConfig::testing()
         };
         let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x77);
+        let partition_hash = H256::repeat_byte(hash_byte);
+        let (ledger_id, slot_index) = match ledger {
+            Some((ledger, slot)) => (Some(ledger.into()), Some(slot)),
+            None => (None, None),
+        };
         let info = StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
                 partition_hash,
                 miner_address: config.node_config.miner_address(),
-                ledger_id: None,
-                slot_index: None,
+                ledger_id,
+                slot_index,
             }),
-            // Absolute: a successful expiry writes packing_params.toml here.
             submodules: vec![(
                 partition_chunk_offset_ie!(0, 10),
                 tmp_dir.path().join("hdd0"),
@@ -1120,22 +1131,49 @@ mod tests {
         };
         let storage_module =
             Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        (tmp_dir, config, storage_module, partition_hash)
+    }
+
+    fn expiry_service(
+        config: &Config,
+        storage_module: Arc<StorageModule>,
+    ) -> (
+        PartitionMiningServiceInner,
+        crate::services::ServiceReceivers,
+    ) {
         let vdf_state = Arc::new(RwLock::new(VdfState::new(
             8,
             0,
             Arc::new(AtomicBool::new(false)),
         )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
+        let (service_senders, receivers) = ServiceSenders::new();
+        let inner = PartitionMiningServiceInner::new(
+            config,
             service_senders,
-            Arc::clone(&storage_module),
+            storage_module,
             false,
             VdfStateReadonly::new(vdf_state),
             U256::zero(),
             None,
             None,
         );
+        (inner, receivers)
+    }
+
+    fn write_synced_data(storage: &StorageModule, byte: u8) {
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![byte; 32],
+            ChunkType::Data,
+        ));
+        storage.force_sync_pending_chunks().expect("sync data");
+    }
+
+    /// A failed expiry reset must not enqueue packing. The retry does.
+    #[test]
+    fn failed_expiry_reset_does_not_pack_until_retry() {
+        let (_tmp, config, storage_module, partition_hash) = open_expiry_module(0x77, None);
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
         inner.handle_partitions_expiration(&H256List(vec![H256::repeat_byte(0x01)]), 11);
         assert!(!inner.expiry_reset_pending);
@@ -1159,40 +1197,11 @@ mod tests {
     /// capacity, and it must not clear the index the assignment update owns.
     #[test]
     fn expiry_notice_keeps_a_ledger_installed_before_it() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x77);
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x77, Some((DataLedger::Submit, 0)));
         let miner = config.node_config.miner_address();
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash,
-                miner_address: miner,
-                ledger_id: Some(DataLedger::Submit.into()),
-                slot_index: Some(0),
-            }),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
         let offset = PartitionChunkOffset::from(0);
-        assert!(storage_module.write_chunk(offset, vec![0x11_u8; 32], ChunkType::Data));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
+        write_synced_data(&storage_module, 0x11);
         assert_eq!(
             storage_module.get_chunk_type(&offset),
             Some(ChunkType::Data)
@@ -1208,23 +1217,8 @@ mod tests {
                 20,
             )
             .expect("install the reassignment");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
 
         let assignment = storage_module.partition_assignment().expect("assigned");
@@ -1244,55 +1238,14 @@ mod tests {
     /// notice resets it to capacity and queues packing.
     #[test]
     fn expiry_notice_resets_a_ledger_stored_before_it() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x78);
-        let submit = PartitionAssignment {
-            partition_hash,
-            miner_address: config.node_config.miner_address(),
-            ledger_id: Some(DataLedger::Submit.into()),
-            slot_index: Some(0),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(submit),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x78, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
         storage_module
             .assign_partition(submit, 10)
             .expect("store the slot before the notice");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
 
         let assignment = storage_module.partition_assignment().expect("assigned");
@@ -1308,72 +1261,30 @@ mod tests {
     /// reset runs. That reset must see the new slot and leave it in place.
     #[test]
     fn expire_to_capacity_keeps_a_ledger_stored_after_the_height_check() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x79);
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x79, Some((DataLedger::Submit, 0)));
         let miner = config.node_config.miner_address();
-        let submit = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Submit.into()),
-            slot_index: Some(0),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(submit),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let submit = storage_module.partition_assignment().expect("assigned");
         storage_module
             .assign_partition(submit, 10)
             .expect("store the expiring slot");
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, _receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
+        let (mut inner, _receivers) = expiry_service(&config, Arc::clone(&storage_module));
         // The notice sampled this slot. The sample says "reset".
         assert!(!inner.ledger_slot_stored_since(20));
 
-        let publish = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Publish.into()),
-            slot_index: Some(1),
-        };
         storage_module
-            .assign_partition(publish, 20)
+            .assign_partition(
+                PartitionAssignment {
+                    partition_hash,
+                    miner_address: miner,
+                    ledger_id: Some(DataLedger::Publish.into()),
+                    slot_index: Some(1),
+                },
+                20,
+            )
             .expect("install the epoch ledger");
         let offset = PartitionChunkOffset::from(0);
-        assert!(storage_module.write_chunk(offset, vec![0x21_u8; 32], ChunkType::Data));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
+        write_synced_data(&storage_module, 0x21);
 
         inner.expiry_update_height = 20;
         inner.expiry_partition_hash = Some(partition_hash);
@@ -1405,67 +1316,25 @@ mod tests {
     /// assignment or stamp the expiry height onto it.
     #[test]
     fn expire_to_capacity_leaves_a_hash_the_notice_did_not_name() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let expired_hash = H256::repeat_byte(0x7a);
-        let other_hash = H256::repeat_byte(0x7b);
+        let (_tmp, config, storage_module, expired_hash) =
+            open_expiry_module(0x7a, Some((DataLedger::Submit, 0)));
         let miner = config.node_config.miner_address();
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash: expired_hash,
-                miner_address: miner,
-                ledger_id: Some(DataLedger::Submit.into()),
-                slot_index: Some(0),
-            }),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
-        let replacement = PartitionAssignment {
-            partition_hash: other_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Publish.into()),
-            slot_index: Some(1),
-        };
+        let other_hash = H256::repeat_byte(0x7b);
         storage_module
-            .assign_partition(replacement, 15)
+            .assign_partition(
+                PartitionAssignment {
+                    partition_hash: other_hash,
+                    miner_address: miner,
+                    ledger_id: Some(DataLedger::Publish.into()),
+                    slot_index: Some(1),
+                },
+                15,
+            )
             .expect("assign a different hash below the notice");
         let offset = PartitionChunkOffset::from(0);
-        assert!(storage_module.write_chunk(offset, vec![0x31_u8; 32], ChunkType::Data));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
+        write_synced_data(&storage_module, 0x31);
+        let (mut inner, _receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, _receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
         inner.expiry_update_height = 40;
         inner.expiry_partition_hash = Some(expired_hash);
         assert!(
@@ -1495,61 +1364,15 @@ mod tests {
     /// must not stamp the old expiry height onto the slot.
     #[test]
     fn notice_that_omits_the_hash_clears_a_failed_expiry() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x7c);
-        let miner = config.node_config.miner_address();
-        let submit = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Submit.into()),
-            slot_index: Some(0),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(submit),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x7c, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
         storage_module
             .assign_partition(submit, 10)
             .expect("store the slot before the failed expiry");
         let offset = PartitionChunkOffset::from(0);
-        assert!(storage_module.write_chunk(offset, vec![0x41_u8; 32], ChunkType::Data));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
-
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
+        write_synced_data(&storage_module, 0x41);
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
         storage_module.fail_next_reset_for_test();
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 40);
@@ -1582,56 +1405,13 @@ mod tests {
     /// A later notice that still names the hash finishes the failed expiry.
     #[test]
     fn later_notice_that_names_the_hash_still_resets() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x7e);
-        let miner = config.node_config.miner_address();
-        let submit = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Submit.into()),
-            slot_index: Some(0),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(submit),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x7e, Some((DataLedger::Submit, 0)));
+        let submit = storage_module.partition_assignment().expect("assigned");
         storage_module
             .assign_partition(submit, 10)
             .expect("store the slot before the failed expiry");
-
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
         storage_module.fail_next_reset_for_test();
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 40);
@@ -1660,63 +1440,19 @@ mod tests {
     /// stays armed until the file can be read, then the ledger stays.
     #[test]
     fn unreadable_packing_params_does_not_reset_a_ledger_the_notice_keeps() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x81);
+        let (tmp_dir, config, storage_module, partition_hash) =
+            open_expiry_module(0x81, Some((DataLedger::Publish, 1)));
         let miner = config.node_config.miner_address();
-        let publish = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Publish.into()),
-            slot_index: Some(1),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(publish),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let publish = storage_module.partition_assignment().expect("assigned");
         storage_module
             .assign_partition(publish, 20)
             .expect("store the ledger at the notice height");
         let offset = PartitionChunkOffset::from(0);
-        assert!(storage_module.write_chunk(offset, vec![0x51_u8; 32], ChunkType::Data));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
+        write_synced_data(&storage_module, 0x51);
         let params_path = tmp_dir.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
         std::fs::write(&params_path, b"not toml\n").expect("corrupt packing params");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
 
         assert_eq!(
@@ -1768,63 +1504,19 @@ mod tests {
     /// Once the file is readable again, the old slot is reset and packed.
     #[test]
     fn unreadable_packing_params_retries_an_expiry_that_must_reset() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x82);
+        let (tmp_dir, config, storage_module, partition_hash) =
+            open_expiry_module(0x82, Some((DataLedger::Submit, 0)));
         let miner = config.node_config.miner_address();
-        let submit = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Submit.into()),
-            slot_index: Some(0),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(submit),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let submit = storage_module.partition_assignment().expect("assigned");
         storage_module
             .assign_partition(submit, 10)
             .expect("store the expiring slot");
         let offset = PartitionChunkOffset::from(0);
-        assert!(storage_module.write_chunk(offset, vec![0x61_u8; 32], ChunkType::Data));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
+        write_synced_data(&storage_module, 0x61);
         let params_path = tmp_dir.path().join("hdd0").join(PACKING_PARAMS_FILE_NAME);
         std::fs::write(&params_path, b"not toml\n").expect("corrupt packing params");
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
         assert_eq!(
             storage_module.get_chunk_type(&offset),
@@ -1873,56 +1565,14 @@ mod tests {
     /// pack over it.
     #[test]
     fn finish_expiry_reset_keeps_a_ledger_installed_while_pending() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-        let partition_hash = H256::repeat_byte(0x83);
+        let (_tmp, config, storage_module, partition_hash) =
+            open_expiry_module(0x83, Some((DataLedger::Submit, 0)));
         let miner = config.node_config.miner_address();
-        let submit = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Submit.into()),
-            slot_index: Some(0),
-        };
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(submit),
-            submodules: vec![(
-                partition_chunk_offset_ie!(0, 10),
-                tmp_dir.path().join("hdd0"),
-            )],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let submit = storage_module.partition_assignment().expect("assigned");
         storage_module
             .assign_partition(submit, 10)
             .expect("store submit slot 0");
-
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, mut receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(vdf_state),
-            U256::zero(),
-            None,
-            None,
-        );
+        let (mut inner, mut receivers) = expiry_service(&config, Arc::clone(&storage_module));
 
         storage_module.fail_next_reset_for_test();
         inner.handle_partitions_expiration(&H256List(vec![partition_hash]), 20);
@@ -1930,20 +1580,19 @@ mod tests {
         assert!(storage_module.reset_incomplete());
         assert!(receivers.packing.try_recv().is_err());
 
-        let publish = PartitionAssignment {
-            partition_hash,
-            miner_address: miner,
-            ledger_id: Some(DataLedger::Publish.into()),
-            slot_index: Some(1),
-        };
         storage_module
-            .assign_partition(publish, 20)
+            .assign_partition(
+                PartitionAssignment {
+                    partition_hash,
+                    miner_address: miner,
+                    ledger_id: Some(DataLedger::Publish.into()),
+                    slot_index: Some(1),
+                },
+                20,
+            )
             .expect("install publish while the reset is pending");
         let offset = PartitionChunkOffset::from(0);
-        assert!(storage_module.write_chunk(offset, vec![0x71_u8; 32], ChunkType::Data));
-        storage_module
-            .force_sync_pending_chunks()
-            .expect("sync data");
+        write_synced_data(&storage_module, 0x71);
 
         inner.finish_expiry_reset();
         assert!(!inner.expiry_reset_pending);
@@ -1962,29 +1611,27 @@ mod tests {
         assert!(receivers.packing.try_recv().is_err());
     }
 
-    /// The consumer half of the in-process VDF re-anchor: `handle_reanchored` — the
-    /// one-line dispatch target of `MiningBroadcastEvent::Reanchored` in the service
-    /// loop — must reset the efficient-sampling rotation so the next recall-range
-    /// query REBUILDS from the (corrected) step buffer instead of continuing the
-    /// rotation derived from the poisoned seeds. The producer half (buffer swap,
-    /// broadcast-after-swap ordering) is pinned in `irys-vdf`, which cannot reach
-    /// this wiring.
-    #[test]
-    fn reanchored_event_rebuilds_recall_ranges_from_corrected_buffer() {
+    fn open_recall_miner(
+        recall_range: u64,
+    ) -> (
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        Arc<StorageModule>,
+        H256,
+        Arc<RwLock<VdfState>>,
+    ) {
         let tmp_dir = TempDirBuilder::new().build();
         let node_config = NodeConfig {
             consensus: ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size: 32,
                 num_chunks_in_partition: 10,
-                // 10 / 2 -> a 5-range rotation
-                num_chunks_in_recall_range: 2,
+                num_chunks_in_recall_range: recall_range,
                 ..ConsensusConfig::testing()
             }),
             base_directory: tmp_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
         let config = Config::new_with_random_peer_id(node_config);
-
         let partition_hash = H256::repeat_byte(0x77);
         let info = StorageModuleInfo {
             id: 0,
@@ -1998,13 +1645,39 @@ mod tests {
         };
         let storage_module =
             Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
-
-        // Step buffer holding the "poisoned" steps 1..=3.
         let vdf_state = Arc::new(RwLock::new(VdfState::new(
             8,
             0,
             Arc::new(AtomicBool::new(false)),
         )));
+        (tmp_dir, config, storage_module, partition_hash, vdf_state)
+    }
+
+    fn recall_inner(
+        config: &Config,
+        storage_module: Arc<StorageModule>,
+        vdf_state: Arc<RwLock<VdfState>>,
+    ) -> PartitionMiningServiceInner {
+        let (service_senders, _receivers) = ServiceSenders::new();
+        PartitionMiningServiceInner::new(
+            config,
+            service_senders,
+            storage_module,
+            false,
+            VdfStateReadonly::new(vdf_state),
+            U256::zero(),
+            None,
+            None,
+        )
+    }
+
+    /// `handle_reanchored` resets the recall rotation. The next query rebuilds
+    /// from the corrected step buffer. The seed swap itself lives in `irys-vdf`.
+    #[test]
+    fn reanchored_event_rebuilds_recall_ranges_from_corrected_buffer() {
+        // 10 / 2 is a 5-range rotation.
+        let (_tmp, config, storage_module, partition_hash, vdf_state) = open_recall_miner(2);
+        // Step buffer holding the "poisoned" steps 1..=3.
         for step in 1..=3_u64 {
             vdf_state
                 .write()
@@ -2012,17 +1685,7 @@ mod tests {
                 .store_step(Seed(H256::repeat_byte(0xA0 + step as u8)), step);
         }
 
-        let (service_senders, _receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            storage_module,
-            false,
-            VdfStateReadonly::new(Arc::clone(&vdf_state)),
-            U256::zero(),
-            None,
-            None,
-        );
+        let mut inner = recall_inner(&config, storage_module, Arc::clone(&vdf_state));
 
         // Prime the rotation across the poisoned era (consecutive-step fast path).
         for step in 1..=3_u64 {
@@ -2065,46 +1728,11 @@ mod tests {
         assert_eq!(inner.ranges.last_step_num, 4);
     }
 
-    /// A step BEHIND the rotation iterator must rebuild the rotation rather
-    /// than fast-path it. The pre-fix `>=` guard fast-pathed every
-    /// `step <= last_step_num + 1`, silently computing a recall range from
-    /// rotation state that belonged to a later step; the oracle here is a
-    /// second service that only ever stepped consecutively to the queried
-    /// step, so any stale-state answer mismatches it.
+    /// A step behind the rotation iterator must rebuild. The oracle only
+    /// stepped consecutively up to that step.
     #[test]
     fn behind_step_rebuilds_rotation_instead_of_fast_pathing() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                num_chunks_in_recall_range: 2,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-
-        let partition_hash = H256::repeat_byte(0x77);
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash,
-                miner_address: config.node_config.miner_address(),
-                ledger_id: None,
-                slot_index: None,
-            }),
-            submodules: vec![(partition_chunk_offset_ie!(0, 10), "hdd0".into())],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
-
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
+        let (_tmp, config, storage_module, partition_hash, vdf_state) = open_recall_miner(2);
         for step in 1..=3_u64 {
             vdf_state
                 .write()
@@ -2112,17 +1740,7 @@ mod tests {
                 .store_step(Seed(H256::repeat_byte(0xA0 + step as u8)), step);
         }
 
-        let (service_senders, _receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            Arc::clone(&storage_module),
-            false,
-            VdfStateReadonly::new(Arc::clone(&vdf_state)),
-            U256::zero(),
-            None,
-            None,
-        );
+        let mut inner = recall_inner(&config, Arc::clone(&storage_module), Arc::clone(&vdf_state));
         for step in 1..=3_u64 {
             inner.test_get_recall_range(step, H256::repeat_byte(step as u8), partition_hash);
         }
@@ -2130,17 +1748,7 @@ mod tests {
 
         // Oracle: an identical service that only ever reached step 2
         // consecutively — the correct answer for (2, seed) by construction.
-        let (oracle_senders, _oracle_receivers) = ServiceSenders::new();
-        let mut oracle = PartitionMiningServiceInner::new(
-            &config,
-            oracle_senders,
-            storage_module,
-            false,
-            VdfStateReadonly::new(Arc::clone(&vdf_state)),
-            U256::zero(),
-            None,
-            None,
-        );
+        let mut oracle = recall_inner(&config, storage_module, Arc::clone(&vdf_state));
         oracle.test_get_recall_range(1, H256::repeat_byte(0x01), partition_hash);
         let expected = oracle.test_get_recall_range(2, H256::repeat_byte(0x02), partition_hash);
 
@@ -2151,43 +1759,13 @@ mod tests {
         );
     }
 
-    /// Regression test for the sparse-map PoA offset bug. `read_chunks` skips
-    /// `Uninitialized` offsets, so the mining loop must key the solution's
-    /// partition offset off the returned map key, not a dense index. Offset 0
-    /// is left `Uninitialized` (a hole at the start of the recall range), so
-    /// the first returned chunk is offset 1 at dense index 0 — the old
-    /// `start + index` code produced offset 0 and a PoA over the wrong offset.
-    /// Difficulty 0 makes the first chunk win.
+    /// `read_chunks` skips `Uninitialized`. The solution offset is the map
+    /// key. Offset 0 is a hole, so the first returned chunk is offset 1.
+    /// One recall range covers the partition, so step 1 needs no VDF reads.
+    /// Difficulty 0 makes that chunk win.
     #[test]
     fn solution_offset_keys_off_map_over_uninitialized_hole() {
-        let tmp_dir = TempDirBuilder::new().build();
-        let node_config = NodeConfig {
-            consensus: ConsensusOptions::Custom(ConsensusConfig {
-                chunk_size: 32,
-                num_chunks_in_partition: 10,
-                // single recall range spanning the whole partition → index 0,
-                // so get_recall_range needs no VDF reconstruction
-                num_chunks_in_recall_range: 10,
-                ..ConsensusConfig::testing()
-            }),
-            base_directory: tmp_dir.path().to_path_buf(),
-            ..NodeConfig::testing()
-        };
-        let config = Config::new_with_random_peer_id(node_config);
-
-        let partition_hash = H256::repeat_byte(0x77);
-        let info = StorageModuleInfo {
-            id: 0,
-            partition_assignment: Some(PartitionAssignment {
-                partition_hash,
-                miner_address: config.node_config.miner_address(),
-                ledger_id: None,
-                slot_index: None,
-            }),
-            submodules: vec![(partition_chunk_offset_ie!(0, 10), "hdd0".into())],
-        };
-        let storage_module =
-            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+        let (_tmp, config, storage_module, _partition_hash, vdf_state) = open_recall_miner(10);
 
         // Pack offsets 1..10 as Entropy, leaving offset 0 Uninitialized (the hole).
         let chunk = vec![0_u8; config.consensus.chunk_size as usize];
@@ -2216,22 +1794,7 @@ mod tests {
             "first returned chunk is offset 1"
         );
 
-        let vdf_state = Arc::new(RwLock::new(VdfState::new(
-            8,
-            0,
-            Arc::new(AtomicBool::new(false)),
-        )));
-        let (service_senders, _receivers) = ServiceSenders::new();
-        let mut inner = PartitionMiningServiceInner::new(
-            &config,
-            service_senders,
-            storage_module,
-            false,
-            VdfStateReadonly::new(Arc::clone(&vdf_state)),
-            U256::zero(), // difficulty 0 → the first chunk wins
-            None,
-            None,
-        );
+        let mut inner = recall_inner(&config, storage_module, vdf_state);
 
         let seed = H256::repeat_byte(0x11);
         // step = 1 hits get_recall_range's consecutive fast path (no VDF reads).
