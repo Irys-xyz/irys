@@ -2101,14 +2101,7 @@ impl RocksSubmoduleStore {
                 batch.delete_cf(&handle, key);
             }
         }
-        let disable_wal = self.bulk_load;
-        self.db
-            .write_opt(batch, &write_opts(true, disable_wal))
-            .wrap_err("reconcile presence rows")?;
-        if !disable_wal {
-            self.group.note_wal_sync();
-            self.group.cover_durable();
-        }
+        self.write_synced_batch(batch, "reconcile presence rows")?;
         Ok(PresenceReconcile {
             path_hash_rows,
             data_path_rows,
@@ -2163,14 +2156,7 @@ impl RocksSubmoduleStore {
                 batch.delete_cf(&content, key);
             }
         }
-        let disable_wal = self.bulk_load;
-        self.db
-            .write_opt(batch, &write_opts(true, disable_wal))
-            .wrap_err("drop entropy proof rows")?;
-        if !disable_wal {
-            self.group.note_wal_sync();
-            self.group.cover_durable();
-        }
+        self.write_synced_batch(batch, "drop entropy proof rows")?;
         Ok(PresenceReconcile {
             path_hash_rows: 0,
             data_path_rows,
@@ -2626,16 +2612,29 @@ impl RocksSubmoduleStore {
     }
 
     fn write_raw_metadata(&self, key: MetadataKey, value: &[u8]) -> eyre::Result<()> {
-        self.ensure_writable()?;
-        let _guard = self.lock_write();
-        self.ensure_writable()?;
-        let handle = cf_handle(&self.db, Cf::Metadata)?;
-        let mut batch = WriteBatch::new();
-        batch.put_cf(&handle, encode_key(key), value);
+        self.write_metadata_batch("write submodule metadata", |handle, batch| {
+            batch.put_cf(handle, encode_key(key), value);
+        })
+    }
+
+    /// Synced metadata write. The value is raw. Same WAL barrier as `update`.
+    /// Not part of `clear`.
+    fn write_metadata(&self, key: MetadataKey, value: Option<Vec<u8>>) -> eyre::Result<()> {
+        self.write_metadata_batch("write submodule metadata", |handle, batch| {
+            let encoded = encode_key(key);
+            match &value {
+                Some(bytes) => batch.put_cf(handle, encoded, bytes),
+                None => batch.delete_cf(handle, encoded),
+            }
+        })
+    }
+
+    /// Caller holds the write lock, except [`Self::write_metadata_batch`].
+    fn write_synced_batch(&self, batch: WriteBatch, action: &'static str) -> eyre::Result<()> {
         let disable_wal = self.bulk_load;
         self.db
             .write_opt(batch, &write_opts(true, disable_wal))
-            .wrap_err("write submodule metadata")?;
+            .wrap_err(action)?;
         if !disable_wal {
             self.group.note_wal_sync();
             self.group.cover_durable();
@@ -2643,30 +2642,18 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
-    /// Synced metadata write. The value is raw. Same WAL barrier as `update`.
-    /// Not part of `clear`.
-    fn write_metadata(&self, key: MetadataKey, value: Option<Vec<u8>>) -> eyre::Result<()> {
+    fn write_metadata_batch(
+        &self,
+        action: &'static str,
+        fill: impl FnOnce(&rocksdb::ColumnFamily, &mut WriteBatch),
+    ) -> eyre::Result<()> {
         self.ensure_writable()?;
         let _guard = self.lock_write();
         self.ensure_writable()?;
         let handle = cf_handle(&self.db, Cf::Metadata)?;
         let mut batch = WriteBatch::new();
-        let encoded = encode_key(key);
-        match &value {
-            Some(bytes) => {
-                batch.put_cf(&handle, encoded, bytes);
-            }
-            None => batch.delete_cf(&handle, encoded),
-        }
-        let disable_wal = self.bulk_load;
-        self.db
-            .write_opt(batch, &write_opts(true, disable_wal))
-            .wrap_err("write submodule metadata")?;
-        if !disable_wal {
-            self.group.note_wal_sync();
-            self.group.cover_durable();
-        }
-        Ok(())
+        fill(handle, &mut batch);
+        self.write_synced_batch(batch, action)
     }
 }
 
@@ -4016,24 +4003,6 @@ impl<'a> Batch<'a> {
 
     fn delete(&mut self, cf: Cf, key: &[u8]) {
         self.overlay.maps[cf.index()].insert(key.to_vec(), None);
-    }
-
-    fn put_data_path_hash(
-        &mut self,
-        _offset: PartitionChunkOffset,
-        _path_hash: Option<ChunkPathHash>,
-    ) {
-        // RocksDB v1 has no path-hash family. A proof in the offset row is the
-        // presence bit. A checksum-only row is not.
-    }
-
-    fn assign_tx_interval(
-        &mut self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-        tx_path_hash: Option<H256>,
-    ) -> eyre::Result<()> {
-        self.assign_placement(start, end, tx_path_hash)
     }
 
     fn assign_placement(
@@ -5645,6 +5614,13 @@ impl_batch_read! {
     offsets_for_content_hash(content_hash: H256) -> eyre::Result<Vec<PartitionChunkOffset>>;
 }
 
+fn warn_uncovered_proof(offset: PartitionChunkOffset) {
+    tracing::warn!(
+        offset = offset.0,
+        "data path has no covering interval; the proof was not stored"
+    );
+}
+
 impl SubmoduleWrite for Batch<'_> {
     fn add_full_data_path(
         &mut self,
@@ -5656,10 +5632,7 @@ impl SubmoduleWrite for Batch<'_> {
         // A proof committed after its interval was cleared would outlive
         // the placement. Drop it. The batch overlay is visible here.
         if self.rows().interval_covering(offset)?.is_none() {
-            tracing::warn!(
-                offset = offset.0,
-                "data path has no covering interval; the proof was not stored"
-            );
+            warn_uncovered_proof(offset);
             return Ok(());
         }
         // A proof rewrite keeps the checksum already stored for these
@@ -5700,10 +5673,11 @@ impl SubmoduleWrite for Batch<'_> {
 
     fn add_data_path_hash_to_offset_index(
         &mut self,
-        offset: PartitionChunkOffset,
-        path_hash: Option<ChunkPathHash>,
+        _offset: PartitionChunkOffset,
+        _path_hash: Option<ChunkPathHash>,
     ) -> eyre::Result<()> {
-        self.put_data_path_hash(offset, path_hash);
+        // RocksDB v1 has no path-hash family. A proof in the offset row is the
+        // presence bit. A checksum-only row is not.
         Ok(())
     }
 
@@ -5712,7 +5686,7 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()> {
-        self.assign_tx_interval(offset, offset, path_hash)
+        self.assign_placement(offset, offset, path_hash)
     }
 
     fn add_tx_path_hash_to_offset_range(
@@ -5721,7 +5695,7 @@ impl SubmoduleWrite for Batch<'_> {
         end: PartitionChunkOffset,
         path_hash: Option<TxPathHash>,
     ) -> eyre::Result<()> {
-        self.assign_tx_interval(start, end, path_hash)
+        self.assign_placement(start, end, path_hash)
     }
 
     fn write_data_path_updates(
@@ -5730,21 +5704,17 @@ impl SubmoduleWrite for Batch<'_> {
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         updates.sort_by_key(|(offset, _, _)| *offset);
         let mut uncovered = Vec::new();
-        for (offset, path_hash, data_path) in updates {
-            // Skip the path write too. `add_full_data_path` would drop it and
-            // warn again, and a hash with no path is not a stored proof.
+        for (offset, _path_hash, data_path) in updates {
+            // The hash is not stored. A proof with no interval is dropped.
+            // `add_full_data_path` would warn again for the same offset.
             if self.layout == IndexLayout::RocksV1
                 && self.rows().interval_covering(offset)?.is_none()
             {
-                tracing::warn!(
-                    offset = offset.0,
-                    "data path has no covering interval; the proof was not stored"
-                );
+                warn_uncovered_proof(offset);
                 uncovered.push(offset);
                 continue;
             }
             self.add_full_data_path(offset, data_path)?;
-            self.put_data_path_hash(offset, Some(path_hash));
         }
         Ok(uncovered)
     }
@@ -5756,10 +5726,7 @@ impl SubmoduleWrite for Batch<'_> {
         let mut uncovered = Vec::new();
         for row in rows {
             if row.proof.is_some() && self.rows().interval_covering(row.offset)?.is_none() {
-                tracing::warn!(
-                    offset = row.offset.0,
-                    "data path has no covering interval; the proof was not stored"
-                );
+                warn_uncovered_proof(row.offset);
                 uncovered.push(row.offset);
                 continue;
             }
@@ -5779,8 +5746,8 @@ impl SubmoduleWrite for Batch<'_> {
         offset: PartitionChunkOffset,
         path_hashes: ChunkPathHashes,
     ) -> eyre::Result<()> {
-        self.put_data_path_hash(offset, path_hashes.data_path_hash);
-        self.assign_tx_interval(offset, offset, path_hashes.tx_path_hash)
+        // The data-path hash has no family. The tx hash is the placement.
+        self.assign_placement(offset, offset, path_hashes.tx_path_hash)
     }
 
     fn del_path_hashes_by_offset(&mut self, offset: PartitionChunkOffset) -> eyre::Result<()> {
@@ -5795,7 +5762,7 @@ impl SubmoduleWrite for Batch<'_> {
         if start > end {
             return Ok(());
         }
-        self.assign_tx_interval(start, end, None)?;
+        self.assign_placement(start, end, None)?;
 
         // `delete_offset_range` hides these keys from a later read.
         // Pending stays. The caller purges it in its own commit.
