@@ -36,6 +36,7 @@ use irys_types::{
 use nodit::{
     DiscreteFinite as _, InclusiveInterval as _, Interval, NoditMap, NoditSet, interval::ii,
 };
+#[cfg(test)]
 use openssl::sha;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -155,8 +156,8 @@ fn metas_in_tx(
         let (data_root, data_size) = if let Some(placement) = covered {
             (placement.data_root, placement.data_size)
         } else {
-            // No placement: the path bytes are missing (skip) or the data root
-            // has no info (the same error as before).
+            // No placement: missing path bytes are skipped. A data root with
+            // no info is an error.
             let data_root = if let Some(cached) = tx_roots.get(&tx_path_hash) {
                 *cached
             } else {
@@ -202,8 +203,8 @@ fn metas_in_tx(
             Ok(tx_offset) => tx_offset,
             Err(error) => {
                 // A zero leaf underflows the chunk index. A leaf past
-                // `u32::MAX` chunks does not fit `TxChunkOffset`. Either one
-                // used to panic the worker and fail the whole span.
+                // `u32::MAX` chunks does not fit `TxChunkOffset`. Skip it
+                // instead of failing the span.
                 warn!(
                     partition.offset = offset.0,
                     error = %error,
@@ -415,37 +416,27 @@ type IntervalMask = NoditSet<PartitionChunkOffset, Interval<PartitionChunkOffset
 /// node packs or syncs those chunks again. The run just written is extra.
 const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Last `intervals.json` image and the completions that are not in it yet.
+/// Last `intervals.json` image (`written`, including `Interrupted`) and the
+/// completions not in it yet. Load turns `Interrupted` into `Uninitialized`.
+/// An ahead mark lives only in `mask`, so the live map still says `Entropy`.
 ///
-/// `written` is the raw file, including `Interrupted`. The live interval map
-/// is not that image: load turns `Interrupted` into `Uninitialized`, and an
-/// ahead mark lives only in `mask`. `get_chunk_type` keeps reading the live
-/// map, so mining and migration still see `Entropy` under an ahead mark.
+/// Mark `Interrupted` before `pwrite` (skip a span already marked). The same
+/// rewrite may mark up to 512 MiB of following `Entropy` or `Uninitialized`
+/// in the submodule, stopping at live `Data` and at a CRC file hold.
+/// Completions are stored after `fdatasync` and the presence commit, at most
+/// every `intervals_persist_secs`, or sooner on the next write-ahead,
+/// `force_sync`, or shutdown. A failed `pwrite` leaves the file
+/// `Interrupted`. A CRC mismatch cuts the live label to `Uninitialized` and
+/// holds the previous `Data` or `Entropy` on the file until that offset's
+/// `pwrite` succeeds. Reset publishes `Uninitialized` after the index clear.
+/// The metadata marker covers a crash before that rewrite.
 ///
-/// # State machine
-///
-/// | Transition | When it is stored | Class |
-/// | --- | --- | --- |
-/// | `Entropy` / `Uninitialized` / `Data` → `Interrupted` for offsets about to be written | Before the `pwrite`, atomic replace. A span already marked is not rewritten | Write-ahead |
-/// | Ahead `Entropy` / `Uninitialized` → `Interrupted` on disk only | Same rewrite, up to 512 MiB forward inside the submodule. The walk stops at live `Data` and at a CRC file hold | Write-ahead coalesce |
-/// | CRC mismatch → live `Uninitialized`, file keeps the previous `Data` or `Entropy` | The hold stores that label. A completion flush and a lower-offset write-ahead both restore it over a projected `Uninitialized` or `Interrupted`. The hold drops after that offset's `pwrite` succeeds | Completion |
-/// | `Interrupted` → `Data` or `Entropy` | After `fdatasync` and the presence commit. At most every `intervals_persist_secs`, sooner on the next write-ahead rewrite, on `force_sync`, or on clean shutdown | Completion |
-/// | Failed `pwrite` → live `Uninitialized`, file stays `Interrupted` | No extra rewrite. Load maps both to `Uninitialized` | Completion lag is safe |
-/// | Any → `Uninitialized` on reset | After the index clear. A metadata marker covers a crash before the file rewrite | Write-ahead |
-/// | `index_transaction_data`, group commit, chunk `fdatasync` | Not an interval rewrite | Durable point is the chunk `fdatasync` plus the presence commit |
-///
-/// `intervals_persist_secs = 0` does both file rewrites on every sync and
-/// does not mark ahead. Offsets still queued or parked are stored as
-/// `Interrupted`. A completion of offsets this point already fsynced stores
-/// the live label.
-///
-/// Clean shutdown force-syncs first, then writes the live map and drops the
-/// mask. A crash leaves the mask on disk. Load turns it into `Uninitialized`,
-/// including entropy this process only marked ahead.
-///
-/// The packed-byte checksum is committed with the presence row, after the
-/// chunk `fdatasync` and before the completion label. The `Interrupted` mark
-/// still covers those bytes, so that crash drops the row.
+/// Period 0 rewrites on every sync and does not mark ahead. Queued or parked
+/// offsets stay `Interrupted`. Shutdown force-syncs, writes the live map, and
+/// drops the mask. A crash leaves the mask, so open treats it as
+/// `Uninitialized`, including entropy only marked ahead. The checksum commits
+/// with the presence row, after `fdatasync` and before the completion label,
+/// while that mark still covers the bytes.
 #[derive(Debug)]
 struct IntervalDisk {
     written: StorageIntervals,
@@ -1478,17 +1469,14 @@ fn allocated_bytes(meta: &fs::Metadata) -> u64 {
     meta.blocks().saturating_mul(512)
 }
 
-/// True when the file is shorter than the submodule, or when it already has
-/// that length but still has a hole (`st_blocks * 512 < st_size`).
+/// True when the file is shorter than the submodule, or when it has that
+/// length but still has a hole (`st_blocks * 512 < st_size`).
 ///
-/// A file that is already at least `full_len` and has a block for every byte
-/// is left alone. XFS `fallocate` mode 0 of a fully allocated file still
-/// walks the extent map: `xfs_alloc_file_space` commits one transaction per
-/// extent while it holds the inode I/O lock. The maximum XFS extent is 8 GiB,
-/// so an 18 TiB file is about 2300 extents. That walk is tens of milliseconds
-/// when the log stays in memory, and it can reach seconds when a checkpoint
-/// hits a HDD. Every read and write of the file waits for it. Open pays that
-/// only for a short file or a hole.
+/// A full file is left alone. XFS `fallocate` mode 0 of an allocated file
+/// walks the extent map under the inode I/O lock, one transaction per extent.
+/// The maximum extent is 8 GiB, so an 18 TiB file is about 2300 extents.
+/// That walk blocks every read and write, and it can take seconds when a
+/// checkpoint hits a HDD. Open pays it only for a short file or a hole.
 fn chunks_file_needs_reserve(len: u64, allocated: u64, full_len: u64) -> bool {
     len < full_len || allocated < len
 }
@@ -1938,8 +1926,6 @@ impl StorageModule {
                 &submodule_db,
             )?;
 
-            // The submodule_map maps submodule intervals to specific instance of StorageSubmodule
-            // that maintains system resources connected to the files in that submodule
             submodule_map
                 .insert_strict(
                     submodule_interval,
@@ -1970,7 +1956,6 @@ impl StorageModule {
                 })?;
             pack_binds.push((submodule_db, bound_partition, recorded));
 
-            // Initially just mark the global intervals as Uninitialized for this submodules interval
             global_intervals
                 .insert_merge_touching_if_values_equal(submodule_interval, ChunkType::Uninitialized)
                 .map_err(|e| eyre::eyre!("Failed to insert submodule interval: {:?}", e))?;
@@ -2868,21 +2853,14 @@ impl StorageModule {
             .is_some_and(|chunk_type| *chunk_type == ChunkType::Data)
     }
 
-    /// Candidate transaction-relative offsets of `data_root` whose bodies are
-    /// fsynced in this module as `ChunkType::Data` and recorded as `Data` in
-    /// `intervals.json`.
+    /// Transaction offsets whose bodies are fsynced as `Data` and already
+    /// stored as `Data` in `intervals.json`.
     ///
-    /// This is the gate cached-body reclamation uses. The live interval label
-    /// flips to `Data` when `pwrite` returns (`note_write_run`). Durability
-    /// stays false until that offset's `pending.chunks` and `written_ahead`
-    /// entries are gone, which is after the `fdatasync` and the presence
-    /// commit. `intervals.json` can lag that by `storage.intervals_persist_secs`,
-    /// and a crash in the lag forgets the chunk. A freshly uploaded chunk may
-    /// have no other replica, so the cached body is kept until the file says
-    /// `Data` ([`Self::is_data_chunk_persisted_at`]); after a crash, data sync
-    /// reads it from the local cache. Resolves the submodule index once per
-    /// root and checks only bodies the cache can actually reclaim, rather than
-    /// walking the transaction's entire funded range.
+    /// Cached-body reclamation uses this. The live label flips at `pwrite`,
+    /// and the file can lag by `intervals_persist_secs`. A crash in that lag
+    /// reloads the offset as `Uninitialized` and drops its rows. A fresh
+    /// upload may have no other replica, so the cache stays until the file
+    /// says `Data` ([`Self::is_data_chunk_persisted_at`]).
     pub fn durable_tx_offsets_for_data_root(
         &self,
         data_root: DataRoot,
@@ -2979,27 +2957,22 @@ impl StorageModule {
     /// Erase the index, then mark every offset `Uninitialized`.
     ///
     /// Holds `sync_in_progress` for the whole call, and takes it before
-    /// `pending_writes`. A durable point takes that lock first, copies proofs
-    /// out of `pending`, then writes them. The clear must not run in that
-    /// gap: the copied rows would land in the empty index.
+    /// `pending_writes`. A durable point takes that lock first and copies
+    /// proofs out of `pending`. The clear must not run in that gap: the
+    /// copied rows would land in the empty index. Interval files are written
+    /// here. Waiting on the lane deadlocks, because the lane takes
+    /// `sync_in_progress` to flush. [`Self::interval_image_epoch`] drops a
+    /// rewrite that snapshotted the map before this call.
     ///
-    /// Interval files are written on this thread. The lane handoff waits on
-    /// the lane, and the lane takes `sync_in_progress` to flush chunks.
-    /// Waiting here would deadlock. [`Self::interval_image_epoch`] drops a
-    /// lane rewrite that snapshotted the map before this call.
+    /// The metadata marker is durable before the clear. A crash before the
+    /// marker is dropped is finished on the next open. The in-memory map
+    /// flips when the clear commits, so this process does not serve the old
+    /// bytes while the file still names them `Data`.
     ///
-    /// The metadata marker is durable before the clear. A crash after the
-    /// marker and before the marker is dropped is finished on the next open:
-    /// the index is cleared again and that submodule's interval file is
-    /// rewritten to `Uninitialized`. The in-memory map flips to
-    /// `Uninitialized` as soon as the clear commits, so this process does not
-    /// serve the old bytes while the file still names them `Data`.
-    ///
-    /// This does not change the partition assignment. A caller that resets
-    /// because the assignment changes must use [`Self::reset_with_assignment`],
-    /// which stores the new assignment before releasing the assignment lock.
-    /// After `reset` alone, the previous assignment is still visible and a
-    /// registration can commit rows for it into the cleared index.
+    /// This does not change the assignment. A caller that resets because the
+    /// assignment changes must use [`Self::reset_with_assignment`], which
+    /// stores the new assignment before it releases the assignment lock.
+    /// After `reset` alone, the previous assignment is still visible.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let _sync_guard = self.lock_sync();
         #[cfg(any(test, feature = "test-utils"))]
@@ -3082,22 +3055,18 @@ impl StorageModule {
         Ok(storage_interval)
     }
 
-    /// Reset the index and install `next` before any registration can observe
-    /// the cleared module under the old assignment.
+    /// Reset the index and install `next` before a registration can see the
+    /// cleared module under the old assignment.
     ///
     /// Lock order, outer to inner: `partition_assignment` write, then
-    /// `sync_in_progress` (taken by [`Self::reset`]), then `pending_writes`
-    /// and the interval map. A registration takes the assignment read lock
-    /// only across its equality check and index commit. It does not take
+    /// `sync_in_progress` (inside [`Self::reset`]), then `pending_writes`
+    /// and the interval map. A registration holds the assignment read lock
+    /// only across its equality check and commit, and it does not take
     /// `sync_in_progress`. No holder of `sync_in_progress` takes
-    /// `partition_assignment`. Readers (mining, the chunk provider, data
-    /// sync, the body worker) take the assignment read lock and drop it
-    /// before they take `pending_writes`, `intervals`, or `sync_in_progress`.
-    ///
-    /// `write_entropy_chunk` holds the assignment read lock across its pending
-    /// insert. That is this same outer-to-inner order. A reset cannot clear
-    /// `pending` and then lose the insert. The entropy write does not take
-    /// `sync_in_progress`.
+    /// `partition_assignment`. Readers drop the assignment read lock before
+    /// `pending_writes`, `intervals`, or `sync_in_progress`.
+    /// `write_entropy_chunk` holds the assignment read lock across its
+    /// pending insert, so reset cannot clear `pending` and then lose it.
     ///
     /// `next` of `None` clears the assignment. A failed reset leaves the
     /// previous assignment in place.
@@ -3623,15 +3592,8 @@ impl StorageModule {
         max_runs: Option<usize>,
         coalesce: bool,
     ) -> eyre::Result<()> {
-        // TODO: rework this function
-        // 1.) use batches for fsync, instead of the all the pending writes (reduces impact of write errors)
-        // 2.) pending writes are per-sm, we should delegate flushing to the StorageSubmodule
-        // doing this removes having to locate the correct submodule again in `write_chunk_internal`,
-        // and lets us increase throughput - we can spawn blocking tasks in parallel for each submodule (as each is it's own IO domain/drive)
-
-        // Multiple services may request a flush concurrently. Serializing the
-        // operation avoids duplicate writes and lets `pending_writes` remain
-        // the single durability fence until this commit finishes.
+        // Several callers can flush at once. This lock keeps `pending_writes`
+        // the durability fence until the commit finishes.
         let _sync_guard = self.lock_sync();
 
         if max_runs.is_none() && self.disk.recall_flush_is_owed() {
@@ -4476,7 +4438,7 @@ impl StorageModule {
 
     /// The submodule's slice of `image`. Empty overlap becomes one
     /// `Uninitialized` range so the file always spans the submodule.
-    /// `None` when clipped intervals overlap, matching the old skip.
+    /// `None` when clipped intervals overlap.
     ///
     /// A map that already lies inside `range` is cloned. One submodule per
     /// partition hits that path. Clipping by copying the map and rebuilding
@@ -4596,19 +4558,12 @@ impl StorageModule {
 
     /// Drop presence rows whose loaded interval is not `Data`.
     ///
-    /// Runs after `Interrupted` has been reloaded as `Uninitialized`, and
-    /// before group commit or the disk lane. Cost is one in-memory walk of
-    /// the interval map, then one seek per non-`Data` span per presence
-    /// family, plus the rows removed. A fully `Data` module does not touch
-    /// the index. A span with no presence row does not commit. A capacity
-    /// partition that is all `Entropy` and has an empty index is those seeks
-    /// and no write.
-    ///
-    /// On a checksum index, an `Entropy` span keeps a checksum-only row and
-    /// drops a proof row. The checksum on a proof row described data bytes,
-    /// and this pass does not read `chunks.dat` to prove otherwise.
-    /// `Uninitialized` drops every row. MDBX and schema v2 drop every
-    /// non-`Data` row.
+    /// Runs after `Interrupted` is reloaded as `Uninitialized`, and before
+    /// group commit or the disk lane. A fully `Data` module does not touch
+    /// the index. On a checksum index, an `Entropy` span keeps a checksum-only
+    /// row and drops a proof row: that checksum described data bytes, and
+    /// this pass does not read `chunks.dat`. `Uninitialized` drops every row.
+    /// MDBX and schema v2 drop every non-`Data` row.
     fn reconcile_presence(
         submodules: &SubmoduleMap,
         intervals: &StorageIntervals,
@@ -5718,14 +5673,7 @@ impl StorageModule {
         })
     }
 
-    /// Reads a single chunk from its physical storage location
-    ///
-    /// Given a logical chunk offset, this function:
-    /// 1. Locates the appropriate submodule containing the chunk
-    /// 2. Calculates the physical file offset
-    /// 3. Reads the chunk data into a buffer
-    ///
-    /// Returns the chunk bytes or an error if read fails
+    /// One chunk from the submodule file that holds `chunk_offset`.
     fn read_chunk_internal(&self, chunk_offset: PartitionChunkOffset) -> eyre::Result<ChunkBytes> {
         // Data lives in the write window when a bench split is installed.
         // Every other type stays on the entropy file. With no split both are
@@ -7111,8 +7059,7 @@ impl StorageModule {
                 return Ok(None);
             }
             // The data root comes from the placement. A tx path with no
-            // covering info still resolves through the leaf binding, which is
-            // what this read did before the placement API.
+            // covering info still resolves through the leaf binding.
             let data_root = if let Some(placement) = tx.placement_at(partition_offset)? {
                 index_read_metrics::note("tx_path");
                 index_read_metrics::note("tx_leaf");
@@ -7957,15 +7904,12 @@ impl StorageModule {
         self.ledger_range_for_assignment(&part_assign)
     }
 
-    /// Internal utility function to take a ledger relative range and make it
-    /// Partition relative (relative to the partition assigned to the
-    /// StorageModule)
+    /// Ledger range as partition offsets.
     ///
-    /// Errors if `chunk_range` is not fully contained in this module's ledger
-    /// range: the offset subtraction would otherwise underflow (range starting
-    /// below the module) or yield offsets past the partition end (range ending
-    /// above it). Callers holding a merely overlapping range must intersect it
-    /// with [`Self::get_storage_module_ledger_offsets`] first.
+    /// Errors when `chunk_range` is not fully inside this module. The
+    /// subtraction would underflow, or the result would pass the partition
+    /// end. An overlapping caller must intersect with
+    /// [`Self::get_storage_module_ledger_offsets`] first.
     pub fn make_range_partition_relative(
         &self,
         chunk_range: LedgerChunkRange,
