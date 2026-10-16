@@ -1,17 +1,12 @@
 //! Submodule index boundary.
 //!
-//! Callers open one read view or one write batch. They do not see the
-//! engine. A view is one committed snapshot: it does not see a commit that
-//! starts after the view opens. A write batch reads its own uncommitted
-//! writes, and `update` is exclusive until the closure returns. The batch
-//! commits only when the closure returns `Ok`. A later engine has to keep
-//! those three rules; MDBX gets them from its transaction.
-//!
-//! `update` stays durable. [`SubmoduleIndex::update_registration`] is the
-//! same until group commit is enabled, which production does for RocksDB
-//! only. Then the registration is visible before it returns and stays
-//! unsynced until the next synced write, the WAL backstop, or shutdown. A failed RocksDB WAL sync rejects later `update`
-//! and `update_covered` calls.
+//! A view is one committed snapshot: it does not see a commit that starts
+//! after it opens. A write batch reads its own uncommitted writes. `update`
+//! commits only on `Ok` and stays durable. [`SubmoduleIndex::update_registration`]
+//! is the same until group commit is on (production: RocksDB only). Then the
+//! registration is visible before it returns and stays unsynced until the next
+//! synced write, the WAL backstop, or shutdown. A failed RocksDB WAL sync
+//! rejects later `update` and `update_covered` calls.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,10 +22,12 @@ use reth_db::{Database as _, DatabaseEnv, mdbx::DatabaseArguments};
 use super::group::{EnableStep, EngineLifetime, GroupCommit};
 
 use super::db::{
-    clear_tx_intervals_in_ranges, del_pending_body_migrations_in_ranges, delete_presence_in_ranges,
-    delete_reset_marker, ensure_span_offsets_fit_i32, has_pending_in_ranges,
-    info_overlaps_coalesced_spans, list_data_root_infos, presence_in_ranges, put_reset_marker,
-    read_reset_marker, tx_interval_at, tx_intervals_in_range, tx_intervals_overlap_ranges,
+    clear_tx_intervals_in_ranges, del_pending_body_migrations_in_range,
+    del_pending_body_migrations_in_ranges, delete_presence_in_ranges, delete_reset_marker,
+    ensure_span_offsets_fit_i32, has_pending_in_inclusive_range, has_pending_in_ranges,
+    info_overlaps_coalesced_spans, list_data_root_infos, placement_extent, presence_in_ranges,
+    put_reset_marker, read_reset_marker, tx_interval_at, tx_interval_overlaps,
+    tx_intervals_in_range, tx_intervals_overlap_ranges,
 };
 use super::interval::{IntervalRow, coalesce_inclusive_spans};
 #[cfg(feature = "rocksdb")]
@@ -829,6 +826,19 @@ impl MdbxSubmoduleStore {
         Ok(())
     }
 
+    /// When group commit is off, hold the same lock as `arm_group` so this
+    /// commit cannot set `MDBX_SAFE_NOSYNC` and then skip `sync_env`.
+    fn with_durable_commit<R>(&self, write: impl FnOnce() -> eyre::Result<R>) -> eyre::Result<R> {
+        let _guard = (!self.group.is_enabled()).then(|| {
+            self.nosync_enable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        });
+        let result = write()?;
+        finish_durable(&self.env, &self.group)?;
+        Ok(result)
+    }
+
     fn update_unsynced<R>(
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
@@ -928,264 +938,79 @@ struct MdbxWrite<'a> {
     tx: &'a <DatabaseEnv as reth_db::Database>::TXMut,
 }
 
-macro_rules! impl_submodule_read {
-    ($ty:ty) => {
+macro_rules! impl_mdbx_read {
+    ($ty:ty; $($name:ident($($arg:ident: $arg_ty:ty),*) -> $ret:ty = $call:path;)*) => {
         impl SubmoduleRead for $ty {
-            fn get_data_path_by_offset(
-                &self,
-                offset: PartitionChunkOffset,
-            ) -> eyre::Result<Option<ChunkDataPath>> {
-                get_data_path_by_offset(self.tx, offset)
-            }
-
-            fn get_tx_path_by_offset(
-                &self,
-                offset: PartitionChunkOffset,
-            ) -> eyre::Result<Option<TxPath>> {
-                get_tx_path_by_offset(self.tx, offset)
-            }
-
-            fn get_path_hashes_by_offset(
-                &self,
-                offset: PartitionChunkOffset,
-            ) -> eyre::Result<Option<ChunkPathHashes>> {
-                get_path_hashes_by_offset(self.tx, offset)
-            }
-
-            fn path_hashes_in_inclusive_range(
-                &self,
-                start: PartitionChunkOffset,
-                end: PartitionChunkOffset,
-            ) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> {
-                path_hashes_in_inclusive_range(self.tx, start, end)
-            }
-
-            fn first_missing_path_hash_offset(
-                &self,
-                start: PartitionChunkOffset,
-                end: PartitionChunkOffset,
-            ) -> eyre::Result<Option<PartitionChunkOffset>> {
-                first_missing_path_hash_offset_in_tx(self.tx, start, end)
-            }
-
-            fn missing_path_hash_ranges(
-                &self,
-                start: PartitionChunkOffset,
-                end: PartitionChunkOffset,
-            ) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
-                missing_path_hash_ranges_in_tx(self.tx, start, end)
-            }
-
-            fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> {
-                get_full_tx_path(self.tx, path_hash)
-            }
-
-            fn get_tx_leaf_binding(
-                &self,
-                path_hash: TxPathHash,
-            ) -> eyre::Result<Option<TxLeafBinding>> {
-                get_tx_leaf_binding(self.tx, path_hash)
-            }
-
-            fn get_data_root_infos_for_data_root(
-                &self,
-                data_root: DataRoot,
-            ) -> eyre::Result<Option<DataRootInfos>> {
-                get_data_root_infos_for_data_root(self.tx, data_root)
-            }
-
-            fn get_pending_body_migration(
-                &self,
-                offset: PartitionChunkOffset,
-            ) -> eyre::Result<Option<PendingBodyMigration>> {
-                get_pending_body_migration(self.tx, offset)
-            }
-
-            fn pending_body_migrations_from(
-                &self,
-                start: Option<PartitionChunkOffset>,
-                limit: Option<usize>,
-            ) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> {
-                pending_body_migrations_from(self.tx, start, limit)
-            }
-
-            fn has_pending_in_inclusive_range(
-                &self,
-                start: PartitionChunkOffset,
-                end: PartitionChunkOffset,
-            ) -> eyre::Result<bool> {
-                has_pending_in_ranges(self.tx, &[(start, end)])
-            }
-
-            fn has_pending_in_ranges(
-                &self,
-                ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-            ) -> eyre::Result<bool> {
-                has_pending_in_ranges(self.tx, ranges)
-            }
-
-            fn tx_interval_overlaps(
-                &self,
-                start: PartitionChunkOffset,
-                end: PartitionChunkOffset,
-            ) -> eyre::Result<bool> {
-                tx_intervals_overlap_ranges(self.tx, &[(start, end)])
-            }
-
-            fn tx_intervals_overlap_ranges(
-                &self,
-                ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-            ) -> eyre::Result<bool> {
-                tx_intervals_overlap_ranges(self.tx, ranges)
-            }
-
-            fn data_root_entries(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
-                list_data_root_infos(self.tx)
-            }
-
-            fn tx_interval_at(
-                &self,
-                offset: PartitionChunkOffset,
-            ) -> eyre::Result<Option<IntervalRow>> {
-                tx_interval_at(self.tx, offset)
-            }
-
-            fn tx_intervals_in_range(
-                &self,
-                start: PartitionChunkOffset,
-                end: PartitionChunkOffset,
-            ) -> eyre::Result<Vec<IntervalRow>> {
-                tx_intervals_in_range(self.tx, start, end)
-            }
+            $(
+                fn $name(&self, $($arg: $arg_ty),*) -> $ret {
+                    $call(self.tx, $($arg),*)
+                }
+            )*
         }
     };
 }
 
-impl_submodule_read!(MdbxRead<'_>);
-impl_submodule_read!(MdbxWrite<'_>);
+macro_rules! mdbx_read_forwards {
+    ($ty:ty) => {
+        impl_mdbx_read! {
+            $ty;
+            get_data_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkDataPath>> = get_data_path_by_offset;
+            get_tx_path_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<TxPath>> = get_tx_path_by_offset;
+            get_path_hashes_by_offset(offset: PartitionChunkOffset) -> eyre::Result<Option<ChunkPathHashes>> = get_path_hashes_by_offset;
+            path_hashes_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, ChunkPathHashes)>> = path_hashes_in_inclusive_range;
+            first_missing_path_hash_offset(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Option<PartitionChunkOffset>> = first_missing_path_hash_offset_in_tx;
+            missing_path_hash_ranges(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> = missing_path_hash_ranges_in_tx;
+            get_full_tx_path(path_hash: TxPathHash) -> eyre::Result<Option<TxPath>> = get_full_tx_path;
+            get_tx_leaf_binding(path_hash: TxPathHash) -> eyre::Result<Option<TxLeafBinding>> = get_tx_leaf_binding;
+            get_data_root_infos_for_data_root(data_root: DataRoot) -> eyre::Result<Option<DataRootInfos>> = get_data_root_infos_for_data_root;
+            get_pending_body_migration(offset: PartitionChunkOffset) -> eyre::Result<Option<PendingBodyMigration>> = get_pending_body_migration;
+            pending_body_migrations_from(start: Option<PartitionChunkOffset>, limit: Option<usize>) -> eyre::Result<Vec<(PartitionChunkOffset, PendingBodyMigration)>> = pending_body_migrations_from;
+            has_pending_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool> = has_pending_in_inclusive_range;
+            has_pending_in_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool> = has_pending_in_ranges;
+            tx_interval_overlaps(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<bool> = tx_interval_overlaps;
+            tx_intervals_overlap_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<bool> = tx_intervals_overlap_ranges;
+            data_root_entries() -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> = list_data_root_infos;
+            tx_interval_at(offset: PartitionChunkOffset) -> eyre::Result<Option<IntervalRow>> = tx_interval_at;
+            tx_intervals_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<Vec<IntervalRow>> = tx_intervals_in_range;
+        }
+    };
+}
 
-impl SubmoduleWrite for MdbxWrite<'_> {
-    fn add_full_data_path(
-        &mut self,
-        offset: PartitionChunkOffset,
-        data_path: ChunkDataPath,
-    ) -> eyre::Result<()> {
-        add_full_data_path(self.tx, offset, data_path)
-    }
+mdbx_read_forwards!(MdbxRead<'_>);
+mdbx_read_forwards!(MdbxWrite<'_>);
 
-    fn add_full_tx_path(&mut self, path_hash: TxPathHash, tx_path: TxPath) -> eyre::Result<()> {
-        add_full_tx_path(self.tx, path_hash, tx_path)
-    }
+macro_rules! impl_mdbx_write {
+    ($ty:ty; $($name:ident($($arg:ident: $arg_ty:ty),*) -> $ret:ty = $call:path;)*) => {
+        impl SubmoduleWrite for $ty {
+            $(
+                fn $name(&mut self, $($arg: $arg_ty),*) -> $ret {
+                    $call(self.tx, $($arg),*)
+                }
+            )*
+        }
+    };
+}
 
-    fn add_tx_leaf_binding(
-        &mut self,
-        path_hash: TxPathHash,
-        binding: &TxLeafBinding,
-    ) -> eyre::Result<()> {
-        add_tx_leaf_binding(self.tx, path_hash, binding)
-    }
-
-    fn add_data_path_hash_to_offset_index(
-        &mut self,
-        offset: PartitionChunkOffset,
-        path_hash: Option<ChunkPathHash>,
-    ) -> eyre::Result<()> {
-        add_data_path_hash_to_offset_index(self.tx, offset, path_hash)
-    }
-
-    fn add_tx_path_hash_to_offset_index(
-        &mut self,
-        offset: PartitionChunkOffset,
-        path_hash: Option<TxPathHash>,
-    ) -> eyre::Result<()> {
-        add_tx_path_hash_to_offset_index(self.tx, offset, path_hash)
-    }
-
-    fn add_tx_path_hash_to_offset_range(
-        &mut self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-        path_hash: Option<TxPathHash>,
-    ) -> eyre::Result<()> {
-        add_tx_path_hash_to_offset_range(self.tx, start, end, path_hash)
-    }
-
-    fn write_data_path_updates(
-        &mut self,
-        updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>,
-    ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        write_data_path_updates(self.tx, updates)
-    }
-
-    fn set_path_hashes_by_offset(
-        &mut self,
-        offset: PartitionChunkOffset,
-        path_hashes: ChunkPathHashes,
-    ) -> eyre::Result<()> {
-        set_path_hashes_by_offset(self.tx, offset, path_hashes)
-    }
-
-    fn del_path_hashes_by_offset(&mut self, offset: PartitionChunkOffset) -> eyre::Result<()> {
-        del_path_hashes_by_offset(self.tx, offset)
-    }
-
-    fn clear_paths_in_inclusive_range(
-        &mut self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<()> {
-        clear_paths_in_inclusive_range(self.tx, start, end)
-    }
-
-    fn set_data_root_infos_for_data_root(
-        &mut self,
-        data_root: DataRoot,
-        infos: DataRootInfos,
-    ) -> eyre::Result<()> {
-        set_data_root_infos_for_data_root(self.tx, data_root, infos)
-    }
-
-    fn add_data_root_info(&mut self, data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()> {
-        add_data_root_info(self.tx, data_root, info)
-    }
-
-    fn add_pending_body_migration(
-        &mut self,
-        offset: PartitionChunkOffset,
-        job: &PendingBodyMigration,
-    ) -> eyre::Result<()> {
-        add_pending_body_migration(self.tx, offset, job)
-    }
-
-    fn del_pending_body_migration(&mut self, offset: PartitionChunkOffset) -> eyre::Result<bool> {
-        del_pending_body_migration(self.tx, offset)
-    }
-
-    fn del_pending_body_migrations_in_range(
-        &mut self,
-        start: PartitionChunkOffset,
-        end: PartitionChunkOffset,
-    ) -> eyre::Result<usize> {
-        del_pending_body_migrations_in_ranges(self.tx, &[(start, end)])
-    }
-
-    fn del_pending_body_migrations_in_ranges(
-        &mut self,
-        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<usize> {
-        del_pending_body_migrations_in_ranges(self.tx, ranges)
-    }
-
-    fn clear_tx_coverage_in_ranges(
-        &mut self,
-        ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
-    ) -> eyre::Result<()> {
-        clear_tx_intervals_in_ranges(self.tx, ranges)
-    }
-
-    fn clear(&mut self) -> eyre::Result<()> {
-        clear_submodule_database(self.tx)
-    }
+impl_mdbx_write! {
+    MdbxWrite<'_>;
+    add_full_data_path(offset: PartitionChunkOffset, data_path: ChunkDataPath) -> eyre::Result<()> = add_full_data_path;
+    add_full_tx_path(path_hash: TxPathHash, tx_path: TxPath) -> eyre::Result<()> = add_full_tx_path;
+    add_tx_leaf_binding(path_hash: TxPathHash, binding: &TxLeafBinding) -> eyre::Result<()> = add_tx_leaf_binding;
+    add_data_path_hash_to_offset_index(offset: PartitionChunkOffset, path_hash: Option<ChunkPathHash>) -> eyre::Result<()> = add_data_path_hash_to_offset_index;
+    add_tx_path_hash_to_offset_index(offset: PartitionChunkOffset, path_hash: Option<TxPathHash>) -> eyre::Result<()> = add_tx_path_hash_to_offset_index;
+    add_tx_path_hash_to_offset_range(start: PartitionChunkOffset, end: PartitionChunkOffset, path_hash: Option<TxPathHash>) -> eyre::Result<()> = add_tx_path_hash_to_offset_range;
+    write_data_path_updates(updates: Vec<(PartitionChunkOffset, ChunkPathHash, ChunkDataPath)>) -> eyre::Result<Vec<PartitionChunkOffset>> = write_data_path_updates;
+    set_path_hashes_by_offset(offset: PartitionChunkOffset, path_hashes: ChunkPathHashes) -> eyre::Result<()> = set_path_hashes_by_offset;
+    del_path_hashes_by_offset(offset: PartitionChunkOffset) -> eyre::Result<()> = del_path_hashes_by_offset;
+    clear_paths_in_inclusive_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<()> = clear_paths_in_inclusive_range;
+    set_data_root_infos_for_data_root(data_root: DataRoot, infos: DataRootInfos) -> eyre::Result<()> = set_data_root_infos_for_data_root;
+    add_data_root_info(data_root: DataRoot, info: &DataRootInfo) -> eyre::Result<()> = add_data_root_info;
+    add_pending_body_migration(offset: PartitionChunkOffset, job: &PendingBodyMigration) -> eyre::Result<()> = add_pending_body_migration;
+    del_pending_body_migration(offset: PartitionChunkOffset) -> eyre::Result<bool> = del_pending_body_migration;
+    del_pending_body_migrations_in_range(start: PartitionChunkOffset, end: PartitionChunkOffset) -> eyre::Result<usize> = del_pending_body_migrations_in_range;
+    del_pending_body_migrations_in_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<usize> = del_pending_body_migrations_in_ranges;
+    clear_tx_coverage_in_ranges(ranges: &[(PartitionChunkOffset, PartitionChunkOffset)]) -> eyre::Result<()> = clear_tx_intervals_in_ranges;
+    clear() -> eyre::Result<()> = clear_submodule_database;
 }
 
 impl SubmoduleStore for MdbxSubmoduleStore {
@@ -1206,21 +1031,7 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
         self.ensure_mdbx_writable()?;
-        if self.group.is_enabled() {
-            let result = self.update_unsynced(f)?;
-            finish_durable(&self.env, &self.group)?;
-            return Ok(result);
-        }
-        // Group commit is off, or `arm_group` is between the flag and the
-        // bit. Hold the same lock as `arm_group` so this commit cannot use
-        // `MDBX_SAFE_NOSYNC` and then skip `sync_env`.
-        let _guard = self
-            .nosync_enable
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let result = self.update_unsynced(f)?;
-        finish_durable(&self.env, &self.group)?;
-        Ok(result)
+        self.with_durable_commit(|| self.update_unsynced(f))
     }
 
     fn drop_presence_in_ranges(
@@ -1236,27 +1047,15 @@ impl SubmoduleStore for MdbxSubmoduleStore {
         if !present {
             return Ok(PresenceReconcile::default());
         }
-        let commit = |tx: &_| {
-            let (path_hash_rows, data_path_rows) = delete_presence_in_ranges(tx, ranges)?;
-            Ok(PresenceReconcile {
-                path_hash_rows,
-                data_path_rows,
+        self.with_durable_commit(|| {
+            self.env.update_eyre(|tx| {
+                let (path_hash_rows, data_path_rows) = delete_presence_in_ranges(tx, ranges)?;
+                Ok(PresenceReconcile {
+                    path_hash_rows,
+                    data_path_rows,
+                })
             })
-        };
-        // Same durability split as `update`. Group commit is off at module
-        // open, so this commit is a normal synced write.
-        if self.group.is_enabled() {
-            let stats = self.env.update_eyre(commit)?;
-            finish_durable(&self.env, &self.group)?;
-            return Ok(stats);
-        }
-        let _guard = self
-            .nosync_enable
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let stats = self.env.update_eyre(commit)?;
-        finish_durable(&self.env, &self.group)?;
-        Ok(stats)
+        })
     }
 
     fn drop_uninitialized_coverage(
@@ -1284,25 +1083,15 @@ impl MdbxSubmoduleStore {
     /// Same durability split as `update`. The marker is not a registration.
     fn commit_marker(&self, present: bool) -> eyre::Result<()> {
         self.ensure_mdbx_writable()?;
-        let commit = |tx: &_| {
-            if present {
-                put_reset_marker(tx)
-            } else {
-                delete_reset_marker(tx)
-            }
-        };
-        if self.group.is_enabled() {
-            self.env.update_eyre(commit)?;
-            finish_durable(&self.env, &self.group)?;
-            return Ok(());
-        }
-        let _guard = self
-            .nosync_enable
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        self.env.update_eyre(commit)?;
-        finish_durable(&self.env, &self.group)?;
-        Ok(())
+        self.with_durable_commit(|| {
+            self.env.update_eyre(|tx| {
+                if present {
+                    put_reset_marker(tx)
+                } else {
+                    delete_reset_marker(tx)
+                }
+            })
+        })
     }
 }
 
@@ -1456,13 +1245,7 @@ fn info_extent_query_range(
     info: &DataRootInfo,
     chunk_size: u64,
 ) -> eyre::Result<Option<(u32, u32)>> {
-    let extent_start = info.start_offset.0;
-    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
-        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
-    let extent_end = extent_start
-        .checked_add(extent_chunks)
-        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
-        .saturating_sub(1);
+    let (extent_start, extent_end) = placement_extent(info, chunk_size)?;
     if extent_end < 0 {
         return Ok(None);
     }
@@ -1526,13 +1309,7 @@ fn info_extent_hits_live_interval(
     if live.is_empty() {
         return Ok(false);
     }
-    let extent_start = info.start_offset.0;
-    let extent_chunks = i32::try_from(info.data_size.div_ceil(chunk_size))
-        .map_err(|_| eyre::eyre!("chunk count does not fit in i32"))?;
-    let extent_end = extent_start
-        .checked_add(extent_chunks)
-        .ok_or_else(|| eyre::eyre!("placement extent does not fit in i32"))?
-        .saturating_sub(1);
+    let (extent_start, extent_end) = placement_extent(info, chunk_size)?;
     let idx = live.partition_point(|(start, _)| *start <= extent_end);
     let Some(index) = idx.checked_sub(1) else {
         return Ok(false);
@@ -1567,6 +1344,17 @@ pub enum SubmoduleIndex {
     Mdbx(MdbxSubmoduleStore),
     #[cfg(feature = "rocksdb")]
     Rocks(RocksSubmoduleStore),
+}
+
+/// Both engines, or only MDBX when the `rocksdb` feature is off.
+macro_rules! dispatch_index {
+    ($self:expr, |$store:ident| $body:expr) => {{
+        match $self {
+            Self::Mdbx($store) => $body,
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks($store) => $body,
+        }
+    }};
 }
 
 impl SubmoduleIndex {
@@ -1740,11 +1528,7 @@ impl SubmoduleIndex {
     /// records durable. [`Self::set_wal_backstop`] sets the Rocks bound.
     /// An unset bound is one second.
     pub fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
-        match self {
-            Self::Mdbx(store) => store.enable_group_commit(txs_per_sync),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.enable_group_commit(txs_per_sync),
-        }
+        dispatch_index!(self, |store| store.enable_group_commit(txs_per_sync))
     }
 
     pub fn group_commit_enabled(&self) -> bool {
@@ -1757,11 +1541,7 @@ impl SubmoduleIndex {
 
     /// Sync an open group. Does nothing when group commit is off or the group is clean.
     pub fn sync_group(&self) -> eyre::Result<()> {
-        match self {
-            Self::Mdbx(store) => store.sync_group(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.sync_group(),
-        }
+        dispatch_index!(self, |store| store.sync_group())
     }
 
     /// Commit one index registration.
@@ -1774,11 +1554,7 @@ impl SubmoduleIndex {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
-        match self {
-            Self::Mdbx(store) => store.update_registration(f),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.update_registration(f),
-        }
+        dispatch_index!(self, |store| store.update_registration(f))
     }
 
     /// Commit rows that must exist before a later durable write, and need
@@ -1795,11 +1571,7 @@ impl SubmoduleIndex {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
-        match self {
-            Self::Mdbx(store) => store.update_covered(f),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.update_covered(f),
-        }
+        dispatch_index!(self, |store| store.update_covered(f))
     }
 
     /// Bound how long a RocksDB index may leave an unsynced write in the
@@ -1899,11 +1671,7 @@ impl SubmoduleIndex {
 
     #[cfg(test)]
     fn interval_row_count(&self) -> eyre::Result<usize> {
-        match self {
-            Self::Mdbx(store) => store.interval_row_count(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.interval_row_count(),
-        }
+        dispatch_index!(self, |store| store.interval_row_count())
     }
 
     #[cfg(test)]
@@ -1930,11 +1698,7 @@ impl SubmoduleIndex {
     /// not move it. MDBX reports the snapshot id. RocksDB reports the WAL
     /// sequence.
     pub fn committed_sequence(&self) -> eyre::Result<u64> {
-        match self {
-            Self::Mdbx(store) => store.committed_sequence(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.committed_sequence(),
-        }
+        dispatch_index!(self, |store| store.committed_sequence())
     }
 }
 
@@ -1943,33 +1707,21 @@ impl SubmoduleStore for SubmoduleIndex {
         &self,
         f: impl FnOnce(&mut dyn SubmoduleRead) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
-        match self {
-            Self::Mdbx(store) => store.view(f),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.view(f),
-        }
+        dispatch_index!(self, |store| store.view(f))
     }
 
     fn update<R>(
         &self,
         f: impl FnOnce(&mut dyn SubmoduleWrite) -> eyre::Result<R>,
     ) -> eyre::Result<R> {
-        match self {
-            Self::Mdbx(store) => store.update(f),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.update(f),
-        }
+        dispatch_index!(self, |store| store.update(f))
     }
 
     fn drop_presence_in_ranges(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile> {
-        match self {
-            Self::Mdbx(store) => store.drop_presence_in_ranges(ranges),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.drop_presence_in_ranges(ranges),
-        }
+        dispatch_index!(self, |store| store.drop_presence_in_ranges(ranges))
     }
 
     fn drop_uninitialized_coverage(
@@ -1977,70 +1729,39 @@ impl SubmoduleStore for SubmoduleIndex {
         spans: &[(PartitionChunkOffset, PartitionChunkOffset)],
         chunk_size: u64,
     ) -> eyre::Result<()> {
-        match self {
-            Self::Mdbx(store) => store.drop_uninitialized_coverage(spans, chunk_size),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.drop_uninitialized_coverage(spans, chunk_size),
-        }
+        dispatch_index!(self, |store| store
+            .drop_uninitialized_coverage(spans, chunk_size))
     }
 
     fn reset_in_progress(&self) -> eyre::Result<bool> {
-        match self {
-            Self::Mdbx(store) => store.reset_in_progress(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.reset_in_progress(),
-        }
+        dispatch_index!(self, |store| store.reset_in_progress())
     }
 
     fn set_reset_in_progress(&self) -> eyre::Result<()> {
-        match self {
-            Self::Mdbx(store) => store.set_reset_in_progress(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.set_reset_in_progress(),
-        }
+        dispatch_index!(self, |store| store.set_reset_in_progress())
     }
 
     fn clear_reset_in_progress(&self) -> eyre::Result<()> {
-        match self {
-            Self::Mdbx(store) => store.clear_reset_in_progress(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.clear_reset_in_progress(),
-        }
+        dispatch_index!(self, |store| store.clear_reset_in_progress())
     }
 
     fn stores_offset_crc(&self) -> bool {
-        match self {
-            Self::Mdbx(store) => store.stores_offset_crc(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.stores_offset_crc(),
-        }
+        dispatch_index!(self, |store| store.stores_offset_crc())
     }
 
     fn chunk_crc_complete(&self) -> eyre::Result<bool> {
-        match self {
-            Self::Mdbx(store) => store.chunk_crc_complete(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.chunk_crc_complete(),
-        }
+        dispatch_index!(self, |store| store.chunk_crc_complete())
     }
 
     fn set_chunk_crc_complete(&self, complete: bool) -> eyre::Result<()> {
-        match self {
-            Self::Mdbx(store) => store.set_chunk_crc_complete(complete),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.set_chunk_crc_complete(complete),
-        }
+        dispatch_index!(self, |store| store.set_chunk_crc_complete(complete))
     }
 
     fn retain_entropy_crc_rows(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
     ) -> eyre::Result<PresenceReconcile> {
-        match self {
-            Self::Mdbx(store) => store.retain_entropy_crc_rows(ranges),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(store) => store.retain_entropy_crc_rows(ranges),
-        }
+        dispatch_index!(self, |store| store.retain_entropy_crc_rows(ranges))
     }
 }
 
