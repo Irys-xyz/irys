@@ -164,7 +164,7 @@ pub struct PackingService {
 
     /// Shared with the CPU strategy. Tests pause `pack` after the assignment
     /// is read and before the first write.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "nvidia")))]
     pack_pause: Arc<Mutex<Option<Arc<strategies::cpu::PackPause>>>>,
 }
 
@@ -227,12 +227,12 @@ impl PackingService {
             notify,
             local_strategy,
             remote_strategy,
-            #[cfg(test)]
+            #[cfg(all(test, not(feature = "nvidia")))]
             pack_pause,
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "nvidia")))]
     fn set_pack_pause_for_test(&self, pause: Option<Arc<strategies::cpu::PackPause>>) {
         *self.pack_pause.lock().expect("pack pause") = pause;
     }
