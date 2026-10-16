@@ -2628,12 +2628,6 @@ impl StorageModule {
         self.index_views.load(Ordering::SeqCst)
     }
 
-    /// Zero the submodule view counter.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn clear_index_view_count(&self) {
-        self.index_views.store(0, Ordering::SeqCst);
-    }
-
     #[cfg(test)]
     fn occupy_offset_for_test(&self, offset: PartitionChunkOffset) {
         let generation = self.index_write_generation.load(Ordering::SeqCst);
@@ -5225,7 +5219,7 @@ impl StorageModule {
                 recover_mutex(&self.crc_suspects).insert(offset);
                 continue;
             }
-            match self.note_if_crc_mismatch(offset, kind, caller)? {
+            match self.confirm_crc_mismatch(offset, kind, caller)? {
                 CrcConfirm::NotConfirmed(bytes) => {
                     chunk_map.insert(offset, (bytes, kind));
                 }
@@ -5233,21 +5227,6 @@ impl StorageModule {
             }
         }
         Ok(by_offset)
-    }
-
-    /// One suspect offset, judged again under `sync_in_progress`.
-    ///
-    /// `Confirmed` has already called `note_crc_mismatch` while that lock
-    /// was still held. `NotConfirmed` carries the fresh bytes that match
-    /// the stable row. `Unsettled` is still in `pending` or `written_ahead`:
-    /// the caller omits it and does not repair it.
-    fn note_if_crc_mismatch(
-        &self,
-        offset: PartitionChunkOffset,
-        kind: ChunkType,
-        caller: &'static str,
-    ) -> eyre::Result<CrcConfirm> {
-        self.confirm_crc_mismatch(offset, kind, caller)
     }
 
     /// Re-read one offset and its checksum under `sync_in_progress`.
@@ -5384,7 +5363,7 @@ impl StorageModule {
                 .get_at_point(offset)
                 .copied()
                 .unwrap_or(ChunkType::Uninitialized);
-            match self.note_if_crc_mismatch(offset, kind, index_read_metrics::RECALL) {
+            match self.confirm_crc_mismatch(offset, kind, index_read_metrics::RECALL) {
                 Ok(_) => {}
                 Err(error) => {
                     warn!(
@@ -5776,7 +5755,7 @@ impl StorageModule {
                     .get_at_point(chunk_offset)
                     .copied()
                     .unwrap_or(ChunkType::Uninitialized);
-                match self.note_if_crc_mismatch(chunk_offset, kind, caller)? {
+                match self.confirm_crc_mismatch(chunk_offset, kind, caller)? {
                     CrcConfirm::NotConfirmed(fresh) => return Ok(fresh),
                     CrcConfirm::Confirmed => {
                         return Err(eyre!("chunk crc mismatch at offset {chunk_offset}"));
@@ -6266,7 +6245,7 @@ impl StorageModule {
         // Use the captured slot. A later read could see a different slot and
         // back, and the equality check would then commit the wrong rows.
         let storage_range = self.ledger_range_for_assignment(&captured)?;
-        let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
+        let tx_path_hash = H256::from(irys_types::hash_sha256(tx_path));
         let (partition_overlap, start_offset) =
             self.partition_overlap_in(chunk_range, storage_range)?;
 
@@ -7044,7 +7023,7 @@ impl StorageModule {
                 let complete = submodule.crc_complete.load(Ordering::SeqCst);
                 match chunk_crc::classify(crc, &bytes, complete) {
                     chunk_crc::CrcVerdict::Mismatch => {
-                        match self.note_if_crc_mismatch(offset, kind, caller)? {
+                        match self.confirm_crc_mismatch(offset, kind, caller)? {
                             // A commit landed after the row was read: serve the
                             // fresh bytes only with the row committed with them.
                             CrcConfirm::NotConfirmed(fresh) => {
@@ -8268,13 +8247,6 @@ pub fn read_intervals_file(path: &Path) -> eyre::Result<StorageIntervals> {
         )
     })?;
     Ok(intervals)
-}
-
-fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
-    let mut hasher = sha::Sha256::new();
-    hasher.update(message);
-    let result = hasher.finish();
-    Ok(result)
 }
 
 fn assigned_to_ledger(module: &StorageModule, ledger: DataLedger) -> bool {
