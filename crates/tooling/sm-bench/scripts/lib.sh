@@ -46,6 +46,37 @@ resolve_path() {
     printf '%s\n' "$canon"
 }
 
+# Absolute path with . and .. collapsed. Symlinks stay in the path.
+# A relative path starts at the physical working directory.
+lexical_absolute() {
+    local path=$1
+    local out="/"
+    local part rest
+    if [ "${path:0:1}" != "/" ]; then
+        path=$(pwd -P)/$path
+    fi
+    rest=${path#/}
+    while [ -n "$rest" ]; do
+        part=${rest%%/*}
+        case "$rest" in
+            */*) rest=${rest#*/} ;;
+            *) rest= ;;
+        esac
+        case "$part" in
+            "" | ".") ;;
+            "..") out=$(dirname -- "$out") ;;
+            *)
+                if [ "$out" = "/" ]; then
+                    out="/$part"
+                else
+                    out="$out/$part"
+                fi
+                ;;
+        esac
+    done
+    printf '%s\n' "$out"
+}
+
 require_loadtest() {
     local label=$1
     local path=$2
@@ -57,6 +88,15 @@ require_loadtest() {
     resolved=$(resolve_path "$path") || exit 1
     if ! has_loadtest "$resolved"; then
         echo "$label resolves to $resolved, which has no loadtest path component; refusing" >&2
+        exit 1
+    fi
+    # mkdir and the bench follow a symlink ancestor. The parent the operator
+    # named must be the parent after resolution.
+    local named_parent resolved_parent
+    named_parent=$(dirname -- "$(lexical_absolute "$path")")
+    resolved_parent=$(dirname -- "$resolved")
+    if [ "$named_parent" != "$resolved_parent" ]; then
+        echo "refusing $label $path: it resolves under $resolved_parent, not $named_parent" >&2
         exit 1
     fi
 }

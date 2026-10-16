@@ -18,6 +18,7 @@
 #   --mount is not the mount that holds the loadtest directory
 #   loadtest, the recall file, or the write file has no `loadtest` path component
 #   on the given path, or on the deepest existing ancestor plus the missing tail
+#   the named parent of one of those paths differs from the parent after resolution
 #   --device is not the disk that holds the loadtest directory
 # The queue settings are written to <out>/sysfs.txt before the bench starts.
 # <out>/run.pid is the bench process, not this shell. The bench runs in its
@@ -26,8 +27,11 @@
 # reused pid. <out>/sample.pid is the sampler, written before the bench
 # starts. The EXIT trap removes it after the sampler is gone.
 #
-# The bench's exit code is appended to <out>/bench.out. This script exits 0
-# after a bench failure so a ladder can continue. A guard failure exits 1.
+# The bench's exit code is appended to <out>/bench.out. Bench exit 1 (a startup
+# refusal, or an interrupt with no scored failure) makes this script exit 1 so
+# the ladder puts the previous index back. Bench exit 0 and bench exit 2 (a
+# scored miss) make this script exit 0, so the new index stays. Any other bench
+# status also exits 0. A guard failure exits 1 before the bench starts.
 
 set -euo pipefail
 
@@ -227,4 +231,9 @@ set -e
 bp=
 echo "exit=$rc" >>"$out/bench.out"
 echo "# done $(date -Is)" >>"$out/bench.out"
+# Exit 1 is a startup refusal. The ladder moves the previous index back.
+# Exit 2 is a scored miss. The new index stays.
+if [ "$rc" -eq 1 ]; then
+    exit 1
+fi
 exit 0

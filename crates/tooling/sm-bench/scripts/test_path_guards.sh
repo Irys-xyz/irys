@@ -2151,6 +2151,299 @@ EOF
     rm -rf "$root"
 }
 
+test_run_exits_1_when_the_bench_exits_1() {
+    local name=run-bench-exit-1 root err dev mnt rc
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 1\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1
+    rc=$?
+    if [ "$rc" -ne 1 ]; then
+        bad "$name" "run.sh exited $rc: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$err")"
+    elif ! grep -q '^exit=1$' "$root/out/t/bench.out"; then
+        bad "$name" "bench.out: $(cat "$root/out/t/bench.out" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_exits_0_when_the_bench_exits_2() {
+    local name=run-bench-exit-2 root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 2\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited non-zero for a scored miss: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif ! grep -q '^exit=2$' "$root/out/t/bench.out"; then
+        bad "$name" "bench.out: $(cat "$root/out/t/bench.out" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_restores_the_index_when_the_bench_exits_1() {
+    local name=ladder-bench-exit-1 root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 1\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not start: $(cat "$err")"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index was not restored"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/db"; then
+        bad "$name" "db bytes changed: $(cat "$module/db" 2>/dev/null)"
+    elif [ -e "$module/state-prior" ]; then
+        bad "$name" "state-prior still exists"
+    elif ! grep -q '^exit=1$' "$root/out/only-run/bench.out"; then
+        bad "$name" "bench.out: $(cat "$root/out/only-run/bench.out" 2>/dev/null)"
+    elif grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker says success: $(cat "$root/out/ladder.done")"
+    elif ! grep -q 'run only-run failed' "$root/out/ladder.done"; then
+        bad "$name" "done marker: $(cat "$root/out/ladder.done" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_leaves_a_new_db_when_exit_1_created_it() {
+    local name=ladder-exit-1-keeps-new-db root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    cat >"$root/bench" <<EOF
+#!/bin/sh
+printf 'new-db\n' > "$module/db"
+printf ran > "$root/bench-ran"
+exit 1
+EOF
+    chmod +x "$root/bench"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not start: $(cat "$err")"
+    elif ! cmp -s <(printf 'new-db\n') "$module/db"; then
+        bad "$name" "new db was replaced: $(cat "$module/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "prior db changed: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker says success: $(cat "$root/out/ladder.done")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_keeps_the_new_index_when_the_bench_exits_2() {
+    local name=ladder-bench-exit-2 root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    cat >"$root/bench" <<EOF
+#!/bin/sh
+printf 'new-db\n' > "$module/db"
+printf ran > "$root/bench-ran"
+exit 2
+EOF
+    chmod +x "$root/bench"
+    if ! MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh refused a scored miss: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif ! cmp -s <(printf 'new-db\n') "$module/db"; then
+        bad "$name" "new db was replaced: $(cat "$module/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "prior db changed: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif ! grep -q '^exit=2$' "$root/out/only-run/bench.out"; then
+        bad "$name" "bench.out: $(cat "$root/out/only-run/bench.out" 2>/dev/null)"
+    elif ! grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker: $(cat "$root/out/ladder.done" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_ladder_refuses_a_symlink_ancestor_before_stash() {
+    local name=ladder-symlink-ancestor root real module sys err dev mnt
+    root=$(tmpdir)
+    real=$root/real
+    module=$real/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    ln -s "$real" "$root/alias"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$root/alias/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! state_in_place "$module"; then
+        bad "$name" "index was stashed"
+    elif ! grep -q "resolves under" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_refuses_a_symlink_ancestor() {
+    local name=run-symlink-ancestor root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/real/loadtest"
+    ln -s "$root/real" "$root/alias"
+    dev=$(mount_dev_for "$root/real/loadtest")
+    mnt=$(mount_of "$root/real/loadtest")
+    mkdir -p "$root/sys/block/$dev/queue"
+    queue_files "$root/sys/block/$dev/queue"
+    stub_bench "$root"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/alias/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! grep -q "resolves under" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_refuses_a_recall_file_through_a_symlink_parent() {
+    local name=run-recall-symlink-parent root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    mkdir -p "$root/safe/loadtest/real"
+    ln -s "$root/safe/loadtest/real" "$root/safe/loadtest/link"
+    printf 'entropy\n' >"$root/safe/loadtest/real/entropy-chunks.dat"
+    stub_bench "$root"
+    if with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --recall-file "$root/safe/loadtest/link/entropy-chunks.dat" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! cmp -s <(printf 'entropy\n') "$root/safe/loadtest/real/entropy-chunks.dat"; then
+        bad "$name" "recall bytes changed"
+    elif ! grep -q "resolves under" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_allows_a_recall_symlink_in_the_same_directory() {
+    local name=run-recall-symlink-same-dir root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    printf 'entropy\n' >"$root/safe/loadtest/real-entropy.dat"
+    ln -s real-entropy.dat "$root/safe/loadtest/entropy-chunks.dat"
+    stub_bench "$root"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --recall-file "$root/safe/loadtest/entropy-chunks.dat" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused a symlink in the same directory: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif ! cmp -s <(printf 'entropy\n') "$root/safe/loadtest/real-entropy.dat"; then
+        bad "$name" "recall bytes changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+test_run_allows_a_dotdot_that_stays_in_loadtest() {
+    local name=run-dotdot-stays root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    stub_bench "$root"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest/../loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused a collapsed .. that stays: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
