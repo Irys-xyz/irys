@@ -6,7 +6,7 @@ use irys_database::{
     insert_commitment_tx, insert_tx_header, prune_block_stream_below, tx_header_by_txid,
 };
 use irys_domain::{
-    BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
+    BlockIndex, BlockTree, StorageModule, StorageModulesReadGuard, SupplyState,
     block_index_guard::BlockIndexReadGuard, forkchoice_markers::finalized_height,
     get_overlapped_storage_modules,
 };
@@ -1244,7 +1244,7 @@ mod tests {
         IrysDatabaseArgs as _, cache_data_root, open_or_create_db, read_block_stream_from,
         tables::{CachedDataRoots, IrysTables},
     };
-    use irys_domain::{BlockTree, StorageModuleInfo};
+    use irys_domain::{BlockTree, ChunkType, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::partition::PartitionAssignment;
     use irys_types::{
