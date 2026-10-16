@@ -391,6 +391,24 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
+    fn closed_gate() -> Arc<(Mutex<bool>, Condvar)> {
+        Arc::new((Mutex::new(false), Condvar::new()))
+    }
+
+    fn wait_gate(gate: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, ready) = &**gate;
+        let mut open = lock.lock().expect("gate");
+        while !*open {
+            open = ready.wait(open).expect("gate wait");
+        }
+    }
+
+    fn release_gate(gate: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, ready) = &**gate;
+        *lock.lock().expect("gate") = true;
+        ready.notify_all();
+    }
+
     #[test]
     fn wait_returns_the_same_bytes_twice() {
         let job = TxPathJob::spawn(|| Ok(vec![1, 2, 3]));
@@ -402,25 +420,17 @@ mod tests {
 
     #[test]
     fn wait_times_out_and_the_worker_can_still_finish() {
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate = closed_gate();
         let release = Arc::clone(&gate);
         let job = TxPathJob::spawn(move || {
-            let (lock, ready) = &*release;
-            let mut open = lock.lock().expect("gate");
-            while !*open {
-                open = ready.wait(open).expect("gate wait");
-            }
+            wait_gate(&release);
             Ok(vec![9])
         });
         let error = job
             .wait(Duration::from_millis(30))
             .expect_err("still blocked");
         assert_eq!(error, TxPathError::TimedOut);
-        {
-            let (lock, ready) = &*gate;
-            *lock.lock().expect("gate") = true;
-            ready.notify_one();
-        }
+        release_gate(&gate);
         let path = job.wait(Duration::from_secs(2)).expect("released");
         assert_eq!(path, vec![9]);
     }
@@ -456,17 +466,13 @@ mod tests {
     fn try_spawn_refuses_work_past_the_limit() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate = closed_gate();
         let mut jobs = Vec::new();
         for _ in 0..2 {
             let release = Arc::clone(&gate);
             let job = TxPathJob::try_spawn_limited(
                 move || {
-                    let (lock, ready) = &*release;
-                    let mut open = lock.lock().expect("gate");
-                    while !*open {
-                        open = ready.wait(open).expect("gate wait");
-                    }
+                    wait_gate(&release);
                     Ok(vec![1])
                 },
                 &IN_FLIGHT,
@@ -480,11 +486,7 @@ mod tests {
             "the third derive must not start a thread"
         );
         assert_eq!(IN_FLIGHT.load(Ordering::Relaxed), 2);
-        {
-            let (lock, ready) = &*gate;
-            *lock.lock().expect("gate") = true;
-            ready.notify_all();
-        }
+        release_gate(&gate);
         for job in jobs {
             assert_eq!(job.wait(Duration::from_secs(2)).expect("released"), vec![1]);
         }
@@ -496,22 +498,14 @@ mod tests {
 
     #[test]
     fn try_get_is_none_until_the_job_finishes() {
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let gate = closed_gate();
         let release = Arc::clone(&gate);
         let job = TxPathJob::spawn(move || {
-            let (lock, ready) = &*release;
-            let mut open = lock.lock().expect("gate");
-            while !*open {
-                open = ready.wait(open).expect("gate wait");
-            }
+            wait_gate(&release);
             Ok(vec![4])
         });
         assert!(job.try_get().is_none());
-        {
-            let (lock, ready) = &*gate;
-            *lock.lock().expect("gate") = true;
-            ready.notify_one();
-        }
+        release_gate(&gate);
         let path = job.wait(Duration::from_secs(2)).expect("released");
         assert_eq!(path, vec![4]);
         assert_eq!(job.try_get().expect("done").expect("path"), vec![4]);
