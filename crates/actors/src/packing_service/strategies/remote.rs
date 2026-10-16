@@ -385,6 +385,30 @@ mod short_stream_tests {
         (tmp_dir, config, module, partition_hash)
     }
 
+    fn bind_local(name: &'static str) -> (TcpListener, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect(name);
+        listener.set_nonblocking(true).expect(name);
+        let addr = listener.local_addr().expect(name);
+        (listener, addr)
+    }
+
+    /// Nonblocking accept until `window` ends. A hard error stops the host.
+    fn serve_for(listener: TcpListener, window: Duration, mut on_conn: impl FnMut(TcpStream)) {
+        let deadline = std::time::Instant::now() + window;
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((stream, _)) => on_conn(stream),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
     /// One-shot HTTP/1.1 host. Counts `POST /v1/pack` requests.
     struct PackHost {
         addr: SocketAddr,
@@ -393,32 +417,16 @@ mod short_stream_tests {
 
     impl PackHost {
         fn spawn(status: u16, body: Vec<u8>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind pack host");
-            listener
-                .set_nonblocking(true)
-                .expect("pack host accepts without blocking the test thread");
-            let addr = listener.local_addr().expect("pack host addr");
+            let (listener, addr) = bind_local("bind pack host");
             let posts = Arc::new(AtomicUsize::new(0));
             let posts_thread = posts.clone();
             std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                while std::time::Instant::now() < deadline {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            let _ = stream.set_nonblocking(false);
-                            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                            handle_conn(stream, status, &body, &posts_thread);
-                        }
-                        Err(err)
-                            if err.kind() == std::io::ErrorKind::WouldBlock
-                                || err.kind() == std::io::ErrorKind::TimedOut =>
-                        {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(_) => break,
-                    }
-                }
+                serve_for(listener, Duration::from_secs(5), move |stream| {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    handle_conn(stream, status, &body, &posts_thread);
+                });
             });
             Self { addr, posts }
         }
@@ -490,29 +498,16 @@ mod short_stream_tests {
         end: u32,
         partition_hash: PartitionHash,
     ) -> Result<(), String> {
-        let packing_config = crate::packing_service::config::PackingConfig {
-            poll_duration: Duration::from_secs(1),
-            concurrency: 1,
-            #[cfg(feature = "nvidia")]
-            max_chunks: 1,
-            chain_id: config.consensus.chain_id,
-            remotes: vec![irys_types::RemotePackingConfig {
-                url: format!("http://{}", host.addr),
-                timeout: Some(Duration::from_secs(2)),
-            }],
-        };
-        let strategy =
-            RemotePackingStrategy::new(config.clone(), packing_config, Arc::new(Notify::new()));
-        strategy
-            .pack(
-                module,
-                PartitionChunkRange(partition_chunk_offset_ii!(start, end)),
-                config.node_config.miner_address(),
-                partition_hash,
-                module.id,
-                100,
-            )
-            .await
+        pack_range(
+            host.addr,
+            config,
+            module,
+            start,
+            end,
+            partition_hash,
+            Some(Duration::from_secs(2)),
+        )
+        .await
     }
 
     fn assert_requested(host: &PackHost) {
@@ -618,62 +613,30 @@ mod short_stream_tests {
     /// Accepts the TCP connection and never answers. A client with no read
     /// timeout waits here.
     fn spawn_stall_host() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stall host");
-        listener
-            .set_nonblocking(true)
-            .expect("stall host accepts without blocking the test thread");
-        let addr = listener.local_addr().expect("stall host addr");
+        let (listener, addr) = bind_local("bind stall host");
         std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            while std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let mut buf = [0_u8; 1024];
-                        let _ = stream.read(&mut buf);
-                        std::thread::sleep(Duration::from_secs(2));
-                    }
-                    Err(err)
-                        if err.kind() == std::io::ErrorKind::WouldBlock
-                            || err.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
+            serve_for(listener, Duration::from_secs(3), |mut stream| {
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(Duration::from_secs(2));
+            });
         });
         addr
     }
 
     /// Answers `/info`, then writes the pack body one byte at a time.
     fn spawn_dribble_host(gap: Duration) -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind dribble host");
-        listener
-            .set_nonblocking(true)
-            .expect("dribble host accepts without blocking the test thread");
-        let addr = listener.local_addr().expect("dribble host addr");
+        let (listener, addr) = bind_local("bind dribble host");
         std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_nodelay(true);
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                        handle_dribble(stream, gap);
-                    }
-                    Err(err)
-                        if err.kind() == std::io::ErrorKind::WouldBlock
-                            || err.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
+            serve_for(listener, Duration::from_secs(5), move |stream| {
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_nodelay(true);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                handle_dribble(stream, gap);
+            });
         });
         addr
     }
@@ -731,6 +694,18 @@ mod short_stream_tests {
         partition_hash: PartitionHash,
         timeout: Option<Duration>,
     ) -> Result<(), String> {
+        pack_range(addr, config, module, 0, 0, partition_hash, timeout).await
+    }
+
+    async fn pack_range(
+        addr: SocketAddr,
+        config: Arc<irys_types::Config>,
+        module: &Arc<StorageModule>,
+        start: u32,
+        end: u32,
+        partition_hash: PartitionHash,
+        timeout: Option<Duration>,
+    ) -> Result<(), String> {
         let packing_config = crate::packing_service::config::PackingConfig {
             poll_duration: Duration::from_secs(1),
             concurrency: 1,
@@ -747,7 +722,7 @@ mod short_stream_tests {
         strategy
             .pack(
                 module,
-                PartitionChunkRange(partition_chunk_offset_ii!(0, 0)),
+                PartitionChunkRange(partition_chunk_offset_ii!(start, end)),
                 config.node_config.miner_address(),
                 partition_hash,
                 module.id,
