@@ -2444,6 +2444,43 @@ fn finish_stats(mut stats: ConvertStats, started: Instant, source_v1: bool) -> C
     stats
 }
 
+/// Offsets whose v1 data path was compared.
+///
+/// Inserts arrive in ascending order. Adjacent offsets share one inclusive
+/// range. A hole is not inserted, so a later check does not treat it as
+/// already compared.
+#[derive(Default)]
+struct AcceptedOffsets {
+    ranges: Vec<(u32, u32)>,
+}
+
+impl AcceptedOffsets {
+    fn insert(&mut self, offset: u32) {
+        if let Some(last) = self.ranges.last_mut() {
+            if offset <= last.1 {
+                return;
+            }
+            if last.1.checked_add(1) == Some(offset) {
+                last.1 = offset;
+                return;
+            }
+        }
+        self.ranges.push((offset, offset));
+    }
+
+    fn contains(&self, offset: u32) -> bool {
+        let index = self.ranges.partition_point(|&(start, _)| start <= offset);
+        let Some(&(start, end)) = index.checked_sub(1).and_then(|at| self.ranges.get(at)) else {
+            return false;
+        };
+        start <= offset && offset <= end
+    }
+
+    fn range_count(&self) -> usize {
+        self.ranges.len()
+    }
+}
+
 #[derive(Default)]
 struct FrontierSkips {
     ranges: std::cell::RefCell<Vec<(u32, u32)>>,
@@ -3215,6 +3252,27 @@ fn v1_hash_point_reads() -> usize {
 
 #[cfg(test)]
 thread_local! {
+    static ACCEPTED_OFFSET_RANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_accepted_offset_ranges() {
+    ACCEPTED_OFFSET_RANGES.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn accepted_offset_ranges() -> usize {
+    ACCEPTED_OFFSET_RANGES.with(std::cell::Cell::get)
+}
+
+#[cfg_attr(not(test), expect(unused_variables))]
+fn note_accepted_offset_ranges(count: usize) {
+    #[cfg(test)]
+    ACCEPTED_OFFSET_RANGES.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+thread_local! {
     static V1_RANGE_COPY_BATCHES: std::cell::RefCell<Vec<usize>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -3560,7 +3618,7 @@ fn verify_mdbx_v1_against_rocks(
     let mut cache = TxPathBlockCache::new();
     let mut written = FrontierSkips::default();
     let mut frontier = FrontierSkips::default();
-    let mut accepted = BTreeSet::new();
+    let mut accepted = AcceptedOffsets::default();
     let orphans = walk_v1_intervals(env, limits, |run| {
         compare_v1_interval(
             env,
@@ -3582,6 +3640,7 @@ fn verify_mdbx_v1_against_rocks(
     note_extra_rocks_offset_rows(env, v3, &written, &frontier, &accepted, &mut report)?;
     verify_content_index(v3, &mut report)?;
     note_index_audit(v3, &mut report)?;
+    note_accepted_offset_ranges(accepted.range_count());
     Ok(report)
 }
 
@@ -3595,7 +3654,7 @@ fn compare_v1_interval(
     limits: Limits,
     written: &mut FrontierSkips,
     frontier: &mut FrontierSkips,
-    accepted: &mut BTreeSet<u32>,
+    accepted: &mut AcceptedOffsets,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     let start = PartitionChunkOffset(run.start);
@@ -3785,7 +3844,7 @@ fn compare_v1_paths(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
     limits: Limits,
-    accepted: &mut BTreeSet<u32>,
+    accepted: &mut AcceptedOffsets,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     walk_v1_path_range(env, start, end, limits, |rows| {
@@ -3855,7 +3914,7 @@ fn note_extra_rocks_offset_rows(
     v3: &RocksSubmoduleStore,
     written: &FrontierSkips,
     frontier: &FrontierSkips,
-    accepted: &BTreeSet<u32>,
+    accepted: &AcceptedOffsets,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     #[cfg(test)]
@@ -3870,7 +3929,7 @@ fn note_extra_rocks_offset_rows(
         let pending: Vec<PartitionChunkOffset> = keys
             .iter()
             .copied()
-            .filter(|key| written.covers(key.0) && !accepted.contains(&key.0))
+            .filter(|key| written.covers(key.0) && !accepted.contains(key.0))
             .collect();
         let pending_rows = v1_uncompared_hash_rows(env, &pending)?;
         for key in &keys {
@@ -3878,7 +3937,7 @@ fn note_extra_rocks_offset_rows(
             // v1 hash row has no data path. That offset is not a compared
             // path. A rocks proof or checksum there is extra.
             if written.covers(key.0) {
-                if accepted.contains(&key.0) {
+                if accepted.contains(key.0) {
                     continue;
                 }
                 let has_data_path = pending_rows
@@ -4217,10 +4276,11 @@ mod tests {
         SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
     };
     use super::{
-        ConvertOptions, ConvertStats, convert_mdbx_to_rocks, convert_rocks_to_mdbx,
-        reset_v1_data_path_reads, reset_v1_hash_point_reads, reset_v1_range_copy_batches,
-        reset_verify_views, v1_data_path_reads, v1_hash_point_reads, v1_range_copy_batches,
-        verify_mdbx_and_rocks, verify_rocks_records, verify_views,
+        ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
+        convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_data_path_reads,
+        reset_v1_hash_point_reads, reset_v1_range_copy_batches, reset_verify_views,
+        v1_data_path_reads, v1_hash_point_reads, v1_range_copy_batches, verify_mdbx_and_rocks,
+        verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -6041,6 +6101,68 @@ mod tests {
             "accepted hash rows are already compared"
         );
         assert_eq!(verify_views(), 2);
+        Ok(())
+    }
+
+    /// Compared offsets merge only when they are adjacent. A hole stays out,
+    /// and a dense run is one range.
+    #[test]
+    fn verify_v1_stores_accepted_offsets_as_merged_ranges() -> eyre::Result<()> {
+        const N: u64 = 4;
+        let root = temp("convert-verify-v1-accepted-ranges");
+        let consensus = write_v1_one_tx_partition(root.path(), N)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        reset_accepted_offset_ranges();
+        reset_v1_hash_point_reads();
+        let dense = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!dense.has_mismatch(), "{dense}");
+        assert_eq!(v1_hash_point_reads(), 0);
+        assert_eq!(
+            accepted_offset_ranges(),
+            1,
+            "a dense run of {N} offsets is one range"
+        );
+
+        let hole_root = temp("convert-verify-v1-accepted-hole");
+        let hole = 1_u64;
+        let consensus = write_v1_one_tx_with_hole(hole_root.path(), N, hole)?;
+        let mdbx = hole_root.path().join("db");
+        let rocks = hole_root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        reset_accepted_offset_ranges();
+        reset_v1_hash_point_reads();
+        let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!clean.has_mismatch(), "{clean}");
+        assert_eq!(v1_hash_point_reads(), 0);
+        assert_eq!(
+            accepted_offset_ranges(),
+            2,
+            "the hole at {hole} splits the compared offsets"
+        );
+
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                    offset: PartitionChunkOffset(hole as u32),
+                    crc: Some(0x0102_0304),
+                    proof: None,
+                }])?;
+                Ok(())
+            })?;
+        }
+        reset_accepted_offset_ranges();
+        let crc = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(crc.mismatch_chunk_crc >= 1, "{crc}");
+        assert_eq!(accepted_offset_ranges(), 2, "{crc}");
         Ok(())
     }
 
