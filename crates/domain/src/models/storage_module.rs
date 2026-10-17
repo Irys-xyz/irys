@@ -506,6 +506,8 @@ enum SyncPausePoint {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegistrationPausePoint {
     AfterRowsComputed,
+    /// The assignment read lock is held. The index transaction has not started.
+    DuringCommit,
 }
 
 /// One armed pause. `wait_if` clears the point before it waits, so a second
@@ -762,6 +764,10 @@ pub struct StorageModule {
     pub id: usize,
     /// The (Optional) info about a partition assigned to this storage module
     pub partition_assignment: RwLock<Option<PartitionAssignment>>,
+    /// Bumped when [`Self::rollback_unassigned_range`] clears the index.
+    /// The assignment itself does not change. A registration captured at
+    /// the previous value does not commit.
+    rollback_generation: AtomicU64,
     /// In-memory chunk buffer awaiting disk write. Occupancy (index ops in
     /// flight) lives under this same lock.
     pending_writes: RwLock<PendingWrites>,
@@ -2071,6 +2077,7 @@ impl StorageModule {
         Ok(Self {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
+            rollback_generation: AtomicU64::new(0),
             pending_writes: RwLock::new(PendingWrites::default()),
             entropy_cache: Mutex::new(disk_lane::EntropyPadCache::default()),
             #[cfg(any(test, feature = "test-utils"))]
@@ -6065,6 +6072,14 @@ impl StorageModule {
     /// rewrite. The clear does hold it: an in-flight durable point keeps the
     /// lock through its label update, and must not publish `Data` after the
     /// index is gone.
+    ///
+    /// Lock order, outer to inner: `partition_assignment` write, then
+    /// `sync_in_progress`. The write lock covers the generation bump and the
+    /// index clear, and it is released before the interval rewrite. The
+    /// assignment value stays. A registration that already holds the read
+    /// lock finishes its commit, and this clear then removes those rows. A
+    /// registration that has not taken the lock sees the new generation and
+    /// does not commit.
     pub fn rollback_unassigned_range(
         &self,
         start: PartitionChunkOffset,
@@ -6072,6 +6087,8 @@ impl StorageModule {
         data_roots: &[H256],
     ) -> eyre::Result<()> {
         {
+            let _assignment = self.partition_assignment.write().unwrap();
+            let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
             let _sync = self.lock_sync();
             self.drop_pending_writes_in_range(start, end);
             self.clear_offset_index_in_range(start, end)?;
@@ -6312,10 +6329,11 @@ impl StorageModule {
     /// covers this placement. Publish uses the promotion block, not the Submit
     /// inclusion. `None` leaves those fields unset. Schema v2 ignores them.
     ///
-    /// The rows are computed for the assignment captured at the start. The
-    /// commit holds the assignment read lock and writes only when that
-    /// assignment is still current. A mismatch, including `None`, drops the
-    /// rows and returns `Ok`. This path does not take `sync_in_progress`.
+    /// The rows are computed for the assignment and rollback generation
+    /// captured at the start. The commit holds the assignment read lock and
+    /// writes only when both are still current. A mismatch, including
+    /// `None`, drops the rows and returns `Ok`. This path does not take
+    /// `sync_in_progress`.
     pub fn index_transaction_data_in(
         &self,
         data_tx: &DataTransactionHeader,
@@ -6325,12 +6343,13 @@ impl StorageModule {
         ledger: Option<DataLedger>,
         tx_index: Option<u32>,
     ) -> eyre::Result<()> {
-        let captured = {
+        let (captured, captured_generation) = {
             let assignment = self.partition_assignment.read().unwrap();
             let Some(assignment) = *assignment else {
                 return Err(eyre::eyre!("Partition not assigned!"));
             };
-            assignment
+            let generation = self.rollback_generation.load(Ordering::SeqCst);
+            (assignment, generation)
         };
         // Use the captured slot. A later read could see a different slot and
         // back, and the equality check would then commit the wrong rows.
@@ -6346,12 +6365,18 @@ impl StorageModule {
         self.wait_if_registration_paused(RegistrationPausePoint::AfterRowsComputed);
 
         let assignment = self.partition_assignment.read().unwrap();
-        if *assignment != Some(captured) {
+        let generation = self.rollback_generation.load(Ordering::SeqCst);
+        if *assignment != Some(captured) || generation != captured_generation {
             let current = *assignment;
             drop(assignment);
             self.note_registration_dropped(captured, current);
             return Ok(());
         }
+
+        // The read lock is still held. A rollback that needs the write lock
+        // waits here, then clears whatever this commit wrote.
+        #[cfg(test)]
+        self.wait_if_registration_paused(RegistrationPausePoint::DuringCommit);
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
             submodule.db.update_registration(|tx| -> eyre::Result<()> {
@@ -10238,6 +10263,229 @@ mod tests {
         }
         eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
         Ok(())
+    }
+
+    /// Rollback does not change the assignment. An in-flight registration
+    /// must not write the rows rollback just cleared. A registration that
+    /// starts after rollback, and one paused across a same-slot reset, still
+    /// commit. Both index engines.
+    #[test]
+    fn registration_after_rollback_does_not_restore_rows() -> eyre::Result<()> {
+        let mut errors = Vec::new();
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let prefix = format!("registration_rollback_{engine:?}");
+            let outcome = (|| -> eyre::Result<()> {
+                let (tmp, storage, original) = open_publish_module(&prefix, engine)?;
+                let _tmp = tmp;
+                index_one(&storage, 2)?;
+                eyre::ensure!(
+                    registration_rows(&storage)?.is_present(),
+                    "seed registration did not commit"
+                );
+
+                storage.pause_next_registration_at(RegistrationPausePoint::AfterRowsComputed);
+                let (result_tx, result_rx) = std::sync::mpsc::channel();
+                std::thread::scope(|scope| -> eyre::Result<()> {
+                    struct Release<'a>(&'a StorageModule);
+                    impl Drop for Release<'_> {
+                        fn drop(&mut self) {
+                            self.0.release_registration_pause();
+                        }
+                    }
+                    let _release = Release(&storage);
+                    scope.spawn(|| {
+                        let _ = result_tx.send(index_one(&storage, 1));
+                    });
+                    eyre::ensure!(
+                        storage.wait_for_registration_pause(Duration::from_secs(5)),
+                        "registration did not pause after computing its rows"
+                    );
+                    storage.rollback_unassigned_range(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(7),
+                        &[H256::repeat_byte(4)],
+                    )?;
+                    let cleared = registration_rows(&storage)?;
+                    eyre::ensure!(
+                        cleared.is_empty(),
+                        "rollback left rows while the registration was paused: {cleared:?}"
+                    );
+                    eyre::ensure!(
+                        storage.partition_assignment() == Some(original),
+                        "rollback changed the assignment"
+                    );
+                    storage.release_registration_pause();
+                    result_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| eyre::eyre!("registration did not finish after release"))??;
+                    Ok(())
+                })?;
+                let restored = registration_rows(&storage)?;
+                eyre::ensure!(
+                    restored.is_empty(),
+                    "in-flight registration restored rows after rollback: {restored:?}"
+                );
+                eyre::ensure!(
+                    storage.registration_drops.load(Ordering::SeqCst) == 1,
+                    "drops={}",
+                    storage.registration_drops.load(Ordering::SeqCst)
+                );
+
+                index_one(&storage, 3)?;
+                let after = registration_rows(&storage)?;
+                eyre::ensure!(
+                    after.is_present(),
+                    "registration that started after rollback did not commit: {after:?}"
+                );
+                eyre::ensure!(
+                    storage.registration_drops.load(Ordering::SeqCst) == 1,
+                    "post-rollback registration was dropped"
+                );
+
+                let kept = race_registration(&storage, Some(original), 9, "same-slot")?;
+                eyre::ensure!(
+                    kept.reset_finished_while_paused
+                        && kept.rows.is_present()
+                        && storage.partition_assignment() == Some(original)
+                        && kept.registration_drops == 1,
+                    "same-slot reset dropped a registration: {kept:?}"
+                );
+                Ok(())
+            })();
+            if let Err(err) = outcome {
+                errors.push(format!("{engine:?}: {err}"));
+            }
+        }
+        eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
+        Ok(())
+    }
+
+    /// The registration holds the assignment read lock across its commit.
+    /// Rollback takes that lock's write side, so it cannot clear the index
+    /// between the check and the commit. It clears the committed rows after.
+    #[test]
+    fn rollback_waits_for_the_registration_commit_then_clears() -> eyre::Result<()> {
+        let mut errors = Vec::new();
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let prefix = format!("registration_rollback_held_{engine:?}");
+            let outcome = (|| -> eyre::Result<()> {
+                let (tmp, storage, original) = open_publish_module(&prefix, engine)?;
+                let _tmp = tmp;
+                let storage = Arc::new(storage);
+                storage.pause_next_registration_at(RegistrationPausePoint::DuringCommit);
+                let (result_tx, result_rx) = std::sync::mpsc::channel();
+                std::thread::scope(|scope| -> eyre::Result<()> {
+                    struct Release<'a>(&'a StorageModule);
+                    impl Drop for Release<'_> {
+                        fn drop(&mut self) {
+                            self.0.release_registration_pause();
+                        }
+                    }
+                    let _release = Release(&storage);
+                    let registering = Arc::clone(&storage);
+                    scope.spawn(move || {
+                        let _ = result_tx.send(index_one(&registering, 1));
+                    });
+                    eyre::ensure!(
+                        storage.wait_for_registration_pause(Duration::from_secs(5)),
+                        "registration did not pause while holding the assignment lock"
+                    );
+                    let (roll_tx, roll_rx) = std::sync::mpsc::channel();
+                    let rolling = Arc::clone(&storage);
+                    scope.spawn(move || {
+                        let result = rolling.rollback_unassigned_range(
+                            PartitionChunkOffset::from(0),
+                            PartitionChunkOffset::from(7),
+                            &[H256::repeat_byte(4)],
+                        );
+                        let _ = roll_tx.send(result);
+                    });
+                    let finished = roll_rx.recv_timeout(Duration::from_millis(400));
+                    eyre::ensure!(
+                        finished.is_err(),
+                        "rollback cleared the index while the registration still held the assignment lock"
+                    );
+                    storage.release_registration_pause();
+                    result_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| eyre::eyre!("registration did not finish after release"))??;
+                    roll_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .map_err(|_| {
+                            eyre::eyre!("rollback did not finish after the registration")
+                        })??;
+                    Ok(())
+                })?;
+                let rows = registration_rows(&storage)?;
+                eyre::ensure!(
+                    rows.is_empty(),
+                    "rollback did not clear the rows the registration committed: {rows:?}"
+                );
+                eyre::ensure!(
+                    storage.partition_assignment() == Some(original),
+                    "rollback changed the assignment"
+                );
+                eyre::ensure!(
+                    storage.registration_drops.load(Ordering::SeqCst) == 0,
+                    "the registration that held the lock was dropped"
+                );
+                index_one(&storage, 4)?;
+                let after = registration_rows(&storage)?;
+                eyre::ensure!(
+                    after.is_present(),
+                    "registration after the waited rollback did not commit: {after:?}"
+                );
+                Ok(())
+            })();
+            if let Err(err) = outcome {
+                errors.push(format!("{engine:?}: {err}"));
+            }
+        }
+        eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
+        Ok(())
+    }
+
+    fn open_publish_module(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        StorageModule,
+        PartitionAssignment,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 8,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 0,
+                ..StorageSyncConfig::default()
+            },
+            base_directory: tmp.path().to_path_buf(),
+            database: index_database(engine),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let original = PartitionAssignment {
+            partition_hash: H256::repeat_byte(0x44),
+            miner_address: config.node_config.miner_address(),
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+        };
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(original),
+                submodules: vec![(partition_chunk_offset_ii!(0, 7), tmp.path().join("sub"))],
+            },
+            &config,
+        )?;
+        Ok((tmp, storage, original))
     }
 
     struct RegistrationRows {
