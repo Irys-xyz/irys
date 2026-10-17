@@ -3273,6 +3273,69 @@ fn note_accepted_offset_ranges(count: usize) {
 
 #[cfg(test)]
 thread_local! {
+    static V1_PLACEMENT_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static V1_PLACEMENT_VIEW_COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static V1_PLACEMENT_BATCH_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct CountV1PlacementViews;
+
+#[cfg(test)]
+impl CountV1PlacementViews {
+    fn enter() -> Self {
+        V1_PLACEMENT_VIEW_COUNTING.with(|cell| cell.set(true));
+        V1_PLACEMENT_VIEWS.with(|cell| cell.set(0));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for CountV1PlacementViews {
+    fn drop(&mut self) {
+        V1_PLACEMENT_VIEW_COUNTING.with(|cell| cell.set(false));
+    }
+}
+
+#[cfg(test)]
+fn v1_placement_views() -> usize {
+    V1_PLACEMENT_VIEWS.with(std::cell::Cell::get)
+}
+
+fn note_v1_placement_view() {
+    #[cfg(test)]
+    if V1_PLACEMENT_VIEW_COUNTING.with(std::cell::Cell::get) {
+        V1_PLACEMENT_VIEWS.with(|cell| cell.set(cell.get().saturating_add(1)));
+    }
+}
+
+#[cfg(test)]
+struct V1PlacementBatchGuard;
+
+#[cfg(test)]
+impl Drop for V1PlacementBatchGuard {
+    fn drop(&mut self) {
+        V1_PLACEMENT_BATCH_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+fn set_v1_placement_batch(batch: usize) -> V1PlacementBatchGuard {
+    V1_PLACEMENT_BATCH_OVERRIDE.with(|cell| cell.set(Some(batch.max(1))));
+    V1PlacementBatchGuard
+}
+
+fn placement_verify_batch() -> usize {
+    #[cfg(test)]
+    if let Some(batch) = V1_PLACEMENT_BATCH_OVERRIDE.with(std::cell::Cell::get) {
+        return batch.max(1);
+    }
+    VERIFY_KEYS
+}
+
+#[cfg(test)]
+thread_local! {
     static V1_RANGE_COPY_BATCHES: std::cell::RefCell<Vec<usize>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -3338,6 +3401,7 @@ where
     T: reth_db::table::Table,
     T::Key: Copy,
 {
+    note_v1_placement_view();
     env.view_eyre(|tx| match tx.get::<T>(key) {
         Ok(row) => Ok(row),
         Err(err) if table_missing(&err) => Ok(None),
@@ -3526,15 +3590,82 @@ fn read_v1_pending_batch(
     })
 }
 
-fn v1_hashes_at(
-    env: &DatabaseEnv,
+fn cached_tx_path_hash(
+    tx: &impl reth_db::transaction::DbTx,
     offset: PartitionChunkOffset,
-) -> eyre::Result<Option<ChunkPathHashes>> {
-    #[cfg(test)]
-    if V1_HASH_POINT_COUNTING.with(std::cell::Cell::get) {
-        V1_HASH_POINT_READS.with(|cell| cell.set(cell.get().saturating_add(1)));
+    cached: &mut Option<(PartitionChunkOffset, Option<H256>)>,
+) -> eyre::Result<Option<H256>> {
+    if let Some((at, hash)) = *cached
+        && at == offset
+    {
+        return Ok(hash);
     }
-    read_v1_row::<ChunkPathHashesByOffset>(env, offset)
+    let hash = match tx.get::<ChunkPathHashesByOffset>(offset) {
+        Ok(row) => row.and_then(|row| row.tx_path_hash),
+        Err(err) if table_missing(&err) => None,
+        Err(err) => return Err(err.into()),
+    };
+    *cached = Some((offset, hash));
+    Ok(hash)
+}
+
+/// A rocks placement start is a v1 run start, or an info cut inside that same run.
+///
+/// The last hash kept is the one at `start`. The next placement's previous
+/// offset is often that start, so the following check does not read it again.
+fn placement_start_ok_in_tx(
+    tx: &impl reth_db::transaction::DbTx,
+    start: PartitionChunkOffset,
+    data_root: H256,
+    cached: &mut Option<(PartitionChunkOffset, Option<H256>)>,
+) -> eyre::Result<bool> {
+    let hash = cached_tx_path_hash(tx, start, cached)?;
+    let prev = if start.0 == 0 {
+        None
+    } else {
+        cached_tx_path_hash(tx, PartitionChunkOffset(start.0 - 1), cached)?
+    };
+    *cached = Some((start, hash));
+    let starts = match hash {
+        Some(hash) if start.0 == 0 || prev != Some(hash) => true,
+        _ => false,
+    };
+    if starts {
+        return Ok(true);
+    }
+    if start.0 == 0 || hash.is_none() || prev != hash {
+        return Ok(false);
+    }
+    let Ok(at) = i32::try_from(start.0) else {
+        return Ok(false);
+    };
+    let infos = match tx.get::<DataRootInfosByDataRoot>(data_root) {
+        Ok(Some(DataRootInfos(infos))) => infos,
+        Ok(None) => return Ok(false),
+        Err(err) if table_missing(&err) => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(infos.iter().any(|info| info.start_offset.0 == at))
+}
+
+fn v1_placement_starts_ok(
+    env: &DatabaseEnv,
+    batch: &[super::tables::Placement],
+    cached: &mut Option<(PartitionChunkOffset, Option<H256>)>,
+) -> eyre::Result<Vec<bool>> {
+    note_v1_placement_view();
+    env.view_eyre(|tx| {
+        let mut out = Vec::with_capacity(batch.len());
+        for place in batch {
+            out.push(placement_start_ok_in_tx(
+                tx,
+                place.start,
+                place.data_root,
+                cached,
+            )?);
+        }
+        Ok(out)
+    })
 }
 
 /// Hash rows for covered offsets that `compare_v1_paths` did not already read.
@@ -3557,43 +3688,6 @@ fn v1_uncompared_hash_rows(
             .collect::<eyre::Result<Vec<_>>>()
     })?;
     Ok(keys.iter().copied().zip(rows).collect())
-}
-
-fn v1_interval_starts_at(env: &DatabaseEnv, offset: PartitionChunkOffset) -> eyre::Result<bool> {
-    let Some(hash) = v1_hashes_at(env, offset)?.and_then(|row| row.tx_path_hash) else {
-        return Ok(false);
-    };
-    if offset.0 == 0 {
-        return Ok(true);
-    }
-    let prev = v1_hashes_at(env, PartitionChunkOffset(offset.0 - 1))?;
-    Ok(prev.and_then(|row| row.tx_path_hash) != Some(hash))
-}
-
-/// A rocks placement start is a v1 run start, or an info cut inside that same run.
-fn v1_placement_start_ok(
-    env: &DatabaseEnv,
-    start: PartitionChunkOffset,
-    data_root: H256,
-) -> eyre::Result<bool> {
-    if v1_interval_starts_at(env, start)? {
-        return Ok(true);
-    }
-    if start.0 == 0 {
-        return Ok(false);
-    }
-    let hash = v1_hashes_at(env, start)?.and_then(|row| row.tx_path_hash);
-    let prev =
-        v1_hashes_at(env, PartitionChunkOffset(start.0 - 1))?.and_then(|row| row.tx_path_hash);
-    if hash.is_none() || hash != prev {
-        return Ok(false);
-    }
-    let Ok(at) = i32::try_from(start.0) else {
-        return Ok(false);
-    };
-    Ok(v1_infos(env, data_root)?
-        .iter()
-        .any(|info| info.start_offset.0 == at))
 }
 
 fn verify_mdbx_v1_against_rocks(
@@ -3887,22 +3981,27 @@ fn note_rocks_placements_absent_from_v1(
     v3: &RocksSubmoduleStore,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
+    #[cfg(test)]
+    let _placement_views = CountV1PlacementViews::enter();
     let mut after = None;
+    let mut cached = None;
     loop {
-        let batch = v3.read_placements(after, VERIFY_KEYS)?;
+        let batch = v3.read_placements(after, placement_verify_batch())?;
         if batch.is_empty() {
             break;
         }
-        for place in &batch {
-            if !v1_placement_start_ok(env, place.start, place.data_root)? {
-                report.intervals_checked = report.intervals_checked.saturating_add(1);
-                report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
-                note(
-                    report,
-                    "interval",
-                    format!("offset {} is only in v3", place.start.0),
-                );
+        let starts = v1_placement_starts_ok(env, &batch, &mut cached)?;
+        for (place, ok) in batch.iter().zip(starts) {
+            if ok {
+                continue;
             }
+            report.intervals_checked = report.intervals_checked.saturating_add(1);
+            report.intervals_mismatches = report.intervals_mismatches.saturating_add(1);
+            note(
+                report,
+                "interval",
+                format!("offset {} is only in v3", place.start.0),
+            );
         }
         after = batch.last().map(|row| row.start);
     }
@@ -4279,8 +4378,8 @@ mod tests {
         ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
         convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_data_path_reads,
         reset_v1_hash_point_reads, reset_v1_range_copy_batches, reset_verify_views,
-        v1_data_path_reads, v1_hash_point_reads, v1_range_copy_batches, verify_mdbx_and_rocks,
-        verify_rocks_records, verify_views,
+        set_v1_placement_batch, v1_data_path_reads, v1_hash_point_reads, v1_placement_views,
+        v1_range_copy_batches, verify_mdbx_and_rocks, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -6163,6 +6262,42 @@ mod tests {
         let crc = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(crc.mismatch_chunk_crc >= 1, "{crc}");
         assert_eq!(accepted_offset_ranges(), 2, "{crc}");
+        Ok(())
+    }
+
+    /// Placement-start checks share one source view per batch. A batch of one
+    /// still reads the start and the previous offset together.
+    #[test]
+    fn verify_v1_checks_placement_starts_in_one_view() -> eyre::Result<()> {
+        const N: u64 = 3;
+        let root = temp("convert-verify-v1-placement-views");
+        let consensus = write_v1_one_chunk_partition(root.path(), N)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        reset_v1_hash_point_reads();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(v1_hash_point_reads(), 0, "{report}");
+        assert_eq!(
+            v1_placement_views(),
+            1,
+            "three placement starts share one view"
+        );
+
+        let _batch = set_v1_placement_batch(1);
+        reset_v1_hash_point_reads();
+        let again = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!again.has_mismatch(), "{again}");
+        assert_eq!(v1_hash_point_reads(), 0, "{again}");
+        assert_eq!(
+            v1_placement_views(),
+            usize::try_from(N).unwrap_or(usize::MAX),
+            "a batch of one is one view per placement"
+        );
         Ok(())
     }
 
