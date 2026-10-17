@@ -157,6 +157,10 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
     pub(crate) ingress_proof_generation_state: IngressProofGenerationState,
     http_ingress_open: Arc<Mutex<bool>>,
+    /// Runs after a storage-module scan finds no data size, before the second
+    /// cached-data-root read. Tests commit the header in that window.
+    #[cfg(test)]
+    pub(crate) after_missing_data_size_scan: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ChunkIngressServiceInner {
@@ -237,18 +241,24 @@ impl ChunkIngressServiceInner {
     /// Invoked by the `ProcessPendingChunks` control-plane message (from TX
     /// postprocess, and from post-park CDR re-check rescue).
     ///
-    /// The root is marked draining before the write lock drops. Park paths
-    /// reject until `finish_pending_drain` restores the popped set and clears
-    /// the flag under one write lock. The ticket also clears the flag if this
-    /// task is cancelled before that restore.
+    /// The root is marked draining before the write lock drops. This re-ingest
+    /// does not put chunks back; `finish_pending_drain` restores the popped set
+    /// and clears the flag under one write lock. An external chunk may park
+    /// during the drain when it still fits under the cap. The ticket clears the
+    /// flag if this task is cancelled, and schedules one follow-up when that
+    /// cancel drops a drain that accepted a new chunk.
     async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
         let (chunks, _drain_ticket) = {
             let mut pending = self.pending_chunks.write().await;
             let Some(chunks_map) = pending.pop(&data_root) else {
                 return;
             };
-            let drain_ticket = pending.begin_drain(data_root);
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
+            let mut drain_ticket = pending.begin_drain(data_root, chunks.len());
+            let senders = self.service_senders.clone();
+            drain_ticket.set_gained_follow_up(move || {
+                chunks::schedule_pending_drain_retry(senders, data_root);
+            });
             (chunks, drain_ticket)
         };
         self.finish_pending_drain(data_root, chunks).await;
@@ -399,6 +409,8 @@ impl ChunkIngressService {
                         chunk_data_writer,
                         ingress_proof_generation_state,
                         http_ingress_open,
+                        #[cfg(test)]
+                        after_missing_data_size_scan: None,
                     }),
                 };
                 let retry_inner = Arc::clone(&service.inner);

@@ -4,34 +4,84 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug)]
+struct ActiveDrain {
+    token: u64,
+    /// Chunks this drain popped and still has to put back. They count toward
+    /// the per-root cap even though they are not in the map.
+    reserved: usize,
+    /// An external chunk parked while this drain was the active one.
+    gained: bool,
+}
+
 #[derive(Debug, Default)]
 struct DrainFlags {
     next_token: u64,
-    active: HashMap<DataRoot, u64>,
+    active: HashMap<DataRoot, ActiveDrain>,
+}
+
+/// How a park interacts with an active drain. Decided under the drain lock so
+/// a cancel cannot clear the flag between the check and the gained bit.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DrainAdmission {
+    /// The root is not draining. The caller applies the normal cap.
+    Idle,
+    /// This drain is re-ingesting a chunk it already holds.
+    RejectOwn,
+    /// The popped set plus chunks already parked fill the cap.
+    RejectCap { occupied: usize },
+    /// An external chunk fits. The gained bit is set. The caller must put it.
+    Accept,
 }
 
 /// Ends one `begin_drain` when dropped, including when the drain task is cancelled.
 ///
 /// `end` removes the flag only when this ticket is still the active drain. A later
-/// drain of the same root keeps its own token.
+/// drain of the same root keeps its own token. If this ticket ends a drain that
+/// accepted a new chunk, it runs the follow-up once.
 #[must_use = "dropping the ticket ends the drain"]
-#[derive(Debug)]
 pub(crate) struct DrainTicket {
     flags: Arc<Mutex<DrainFlags>>,
     data_root: DataRoot,
     token: u64,
     armed: bool,
+    on_gained: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl std::fmt::Debug for DrainTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DrainTicket")
+            .field("data_root", &self.data_root)
+            .field("token", &self.token)
+            .field("armed", &self.armed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DrainTicket {
+    pub(crate) fn set_gained_follow_up(&mut self, follow_up: impl FnOnce() + Send + 'static) {
+        self.on_gained = Some(Box::new(follow_up));
+    }
+
     pub(crate) fn end(&mut self) {
         if !self.armed {
             return;
         }
         self.armed = false;
-        let mut flags = lock_drain_flags(&self.flags);
-        if flags.active.get(&self.data_root) == Some(&self.token) {
-            flags.active.remove(&self.data_root);
+        let schedule = {
+            let mut flags = lock_drain_flags(&self.flags);
+            match flags.active.get(&self.data_root) {
+                Some(state) if state.token == self.token => {
+                    let gained = state.gained;
+                    flags.active.remove(&self.data_root);
+                    gained
+                }
+                _ => false,
+            }
+        };
+        if schedule && let Some(follow_up) = self.on_gained.take() {
+            follow_up();
         }
     }
 }
@@ -69,27 +119,67 @@ impl PriorityPendingChunks {
         lock_drain_flags(&self.draining)
     }
 
-    /// Mark `data_root` so park paths reject new chunks until the popped set is restored.
-    pub(crate) fn begin_drain(&self, data_root: DataRoot) -> DrainTicket {
+    /// Mark `data_root` draining. `reserved` is the popped set this drain still holds.
+    pub(crate) fn begin_drain(&self, data_root: DataRoot, reserved: usize) -> DrainTicket {
         let mut flags = self.lock_drains();
         let token = flags.next_token;
         flags.next_token = flags.next_token.wrapping_add(1);
-        flags.active.insert(data_root, token);
+        flags.active.insert(
+            data_root,
+            ActiveDrain {
+                token,
+                reserved,
+                gained: false,
+            },
+        );
         DrainTicket {
             flags: Arc::clone(&self.draining),
             data_root,
             token,
             armed: true,
+            on_gained: None,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_draining(&self, data_root: &DataRoot) -> bool {
         self.lock_drains().active.contains_key(data_root)
     }
 
-    /// Clear the active drain for `data_root`, if any.
-    pub(crate) fn clear_drain(&self, data_root: &DataRoot) {
-        self.lock_drains().active.remove(data_root);
+    /// Decide whether a chunk may park while `data_root` is draining.
+    ///
+    /// An external chunk that fits sets the gained bit under this lock. The
+    /// caller puts the chunk and must not start another drain: the active
+    /// drain schedules one follow-up. The drain's own chunks are rejected so
+    /// the restore can put them back without evicting a sibling.
+    pub(crate) fn drain_admission(
+        &self,
+        data_root: &DataRoot,
+        current: usize,
+        cap: usize,
+        own_reingest: bool,
+    ) -> DrainAdmission {
+        let mut flags = self.lock_drains();
+        let Some(state) = flags.active.get_mut(data_root) else {
+            return DrainAdmission::Idle;
+        };
+        let occupied = current.saturating_add(state.reserved);
+        if own_reingest {
+            return DrainAdmission::RejectOwn;
+        }
+        if occupied >= cap {
+            return DrainAdmission::RejectCap { occupied };
+        }
+        state.gained = true;
+        DrainAdmission::Accept
+    }
+
+    /// Clear the drain flag. True when an external chunk parked during it.
+    pub(crate) fn take_arrived_and_clear_drain(&self, data_root: &DataRoot) -> bool {
+        self.lock_drains()
+            .active
+            .remove(data_root)
+            .is_some_and(|state| state.gained)
     }
 
     pub fn len(&self) -> usize {
@@ -277,7 +367,7 @@ mod tests {
         let cache = PriorityPendingChunks::new(4, 4);
         let root = DataRoot::from([0xD1; 32]);
 
-        let ticket = cache.begin_drain(root);
+        let ticket = cache.begin_drain(root, 0);
         assert!(cache.is_draining(&root));
         drop(ticket);
         assert!(
@@ -285,10 +375,10 @@ mod tests {
             "dropping the drain ticket must clear the flag"
         );
 
-        let mut ended = cache.begin_drain(root);
+        let mut ended = cache.begin_drain(root, 0);
         ended.end();
         assert!(!cache.is_draining(&root));
-        let next = cache.begin_drain(root);
+        let next = cache.begin_drain(root, 0);
         drop(ended);
         assert!(
             cache.is_draining(&root),
@@ -296,5 +386,72 @@ mod tests {
         );
         drop(next);
         assert!(!cache.is_draining(&root));
+    }
+
+    /// Cancel ends the drain. A chunk that parked during it still needs one follow-up.
+    #[test]
+    fn cancel_schedules_follow_up_when_a_chunk_arrived_during_the_drain() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cache = PriorityPendingChunks::new(4, 4);
+        let root = DataRoot::from([0xD2; 32]);
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&fired);
+        let mut ticket = cache.begin_drain(root, 1);
+        ticket.set_gained_follow_up(move || flag.store(true, Ordering::SeqCst));
+        assert_eq!(
+            cache.drain_admission(&root, 0, 4, false),
+            DrainAdmission::Accept
+        );
+        drop(ticket);
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "dropping the drain must schedule the chunk that arrived"
+        );
+        assert!(!cache.is_draining(&root));
+    }
+
+    /// The drain already observed the arrived chunk and cleared itself.
+    /// The ticket must not schedule a second follow-up.
+    #[test]
+    fn ticket_drop_does_not_follow_up_after_the_drain_clears_the_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cache = PriorityPendingChunks::new(4, 4);
+        let root = DataRoot::from([0xD3; 32]);
+        let fired = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&fired);
+        let mut ticket = cache.begin_drain(root, 1);
+        ticket.set_gained_follow_up(move || flag.store(true, Ordering::SeqCst));
+        assert_eq!(
+            cache.drain_admission(&root, 0, 4, false),
+            DrainAdmission::Accept
+        );
+        assert!(cache.take_arrived_and_clear_drain(&root));
+        drop(ticket);
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "the drain already scheduled the follow-up"
+        );
+    }
+
+    /// The popped set counts toward the cap. The drain's own chunk is not parked here.
+    #[test]
+    fn drain_admission_reserves_the_popped_set_and_rejects_its_own_chunk() {
+        let cache = PriorityPendingChunks::new(4, 4);
+        let root = DataRoot::from([0xD4; 32]);
+        let _ticket = cache.begin_drain(root, 2);
+        assert_eq!(
+            cache.drain_admission(&root, 0, 2, false),
+            DrainAdmission::RejectCap { occupied: 2 }
+        );
+        assert_eq!(
+            cache.drain_admission(&root, 0, 4, true),
+            DrainAdmission::RejectOwn
+        );
+        assert_eq!(
+            cache.drain_admission(&root, 1, 4, false),
+            DrainAdmission::Accept
+        );
     }
 }
