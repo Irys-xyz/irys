@@ -1915,6 +1915,7 @@ fn compare_one_placement<S: SubmoduleStore>(
     let stored = if is_first {
         let Some(stored) = v2.view(|tx| tx.get_full_tx_path(interval.tx_path_hash))? else {
             report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+            report.mismatch_tx_path = report.mismatch_tx_path.saturating_add(1);
             note(report, "tx_path", format!("offset {}", key.0));
             return Ok(());
         };
@@ -1949,6 +1950,7 @@ fn compare_one_placement<S: SubmoduleStore>(
     let header = db.view_eyre(|tx| tx_header_by_txid(tx, &derived.tx_id))?;
     let Some(header) = header else {
         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+        report.mismatch_tx_path = report.mismatch_tx_path.saturating_add(1);
         note(
             report,
             "tx_path",
@@ -1960,6 +1962,7 @@ fn compare_one_placement<S: SubmoduleStore>(
         && derived.proof.proof != *stored
     {
         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+        report.mismatch_tx_path = report.mismatch_tx_path.saturating_add(1);
         note(report, "tx_path", format!("offset {}", key.0));
         return Ok(());
     }
@@ -3803,6 +3806,7 @@ fn compare_v1_interval(
     report.tx_paths_checked = report.tx_paths_checked.saturating_add(1);
     let Some(stored) = read_v1_tx_path(env, run.tx_hash)? else {
         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+        report.mismatch_tx_path = report.mismatch_tx_path.saturating_add(1);
         note(report, "tx_path", format!("offset {}", start.0));
         return Ok(());
     };
@@ -3829,6 +3833,7 @@ fn compare_v1_interval(
     let header = db.view_eyre(|tx| tx_header_by_txid(tx, &derived.tx_id))?;
     let Some(header) = header else {
         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+        report.mismatch_tx_path = report.mismatch_tx_path.saturating_add(1);
         note(
             report,
             "tx_path",
@@ -3838,6 +3843,7 @@ fn compare_v1_interval(
     };
     if derived.proof.proof != stored {
         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+        report.mismatch_tx_path = report.mismatch_tx_path.saturating_add(1);
         note(report, "tx_path", format!("offset {}", start.0));
         return Ok(());
     }
@@ -3869,6 +3875,7 @@ fn compare_v1_interval(
                         db.view_eyre(|tx| tx_header_by_txid(tx, &next.tx_id))?
                     else {
                         report.tx_paths_mismatches = report.tx_paths_mismatches.saturating_add(1);
+                        report.mismatch_tx_path = report.mismatch_tx_path.saturating_add(1);
                         note(
                             report,
                             "tx_path",
@@ -5080,6 +5087,7 @@ mod tests {
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(report.has_mismatch(), "{report}");
         assert!(report.tx_paths_mismatches >= 1, "{report}");
+        assert!(report.mismatch_tx_path >= 1, "{report}");
         assert!(report.mismatch_tx_path_hash >= 1, "{report}");
         Ok(())
     }
