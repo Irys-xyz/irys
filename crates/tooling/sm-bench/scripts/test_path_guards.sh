@@ -399,6 +399,52 @@ EOF
     rm -rf "$root"
 }
 
+# Same directory: the parent check allows the alias. The fill must zero the
+# target, and the log size must be the target length, not the symlink length.
+test_fill_zeroes_through_a_same_directory_symlink() {
+    local name=fill-symlink-same-dir root log target
+    root=$(tmpdir)
+    log=$root/loadtest/fill.log
+    target=$root/loadtest/region.dat
+    mkdir -p "$root/loadtest"
+    python3 -c 'import sys; sys.stdout.buffer.write(b"C"*4096)' >"$target"
+    ln -s region.dat "$root/loadtest/alias.dat"
+    if ! "$here/fill.sh" --file "$root/loadtest/alias.dat" --log "$log" \
+        --segment-bytes 4096 --block 4096 >"$root/err" 2>&1; then
+        bad "$name" "fill.sh refused a same-directory symlink: $(cat "$root/err")"
+    elif ! grep -q 'size=4096' "$log"; then
+        bad "$name" "log size is not the target length: $(head -n 1 "$log" 2>/dev/null)"
+    elif ! cmp -s <(python3 -c 'import sys; sys.stdout.buffer.write(b"\0"*4096)') "$target"; then
+        bad "$name" "target was not fully zeroed"
+    elif [ ! -L "$root/loadtest/alias.dat" ]; then
+        bad "$name" "alias is no longer a symlink"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A regular file has no symlink length. The whole file is still zeroed.
+test_fill_zeroes_a_regular_file() {
+    local name=fill-regular-file root log target
+    root=$(tmpdir)
+    log=$root/loadtest/fill.log
+    target=$root/loadtest/region.dat
+    mkdir -p "$root/loadtest"
+    python3 -c 'import sys; sys.stdout.buffer.write(b"C"*4096)' >"$target"
+    if ! "$here/fill.sh" --file "$target" --log "$log" \
+        --segment-bytes 4096 --block 4096 >"$root/err" 2>&1; then
+        bad "$name" "fill.sh refused a regular file: $(cat "$root/err")"
+    elif ! grep -q 'size=4096' "$log"; then
+        bad "$name" "log size: $(head -n 1 "$log" 2>/dev/null)"
+    elif ! cmp -s <(python3 -c 'import sys; sys.stdout.buffer.write(b"\0"*4096)') "$target"; then
+        bad "$name" "file was not fully zeroed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_fill_allows_a_loadtest_file_and_stops_before_write() {
     local name=fill-allow root file
     root=$(tmpdir)

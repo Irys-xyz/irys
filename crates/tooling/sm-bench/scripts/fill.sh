@@ -166,7 +166,8 @@ mono() {
     awk '{printf "%.6f\n", $1}' /proc/uptime
 }
 
-size=$(stat -c %s "$file")
+# -L follows a symlink. The path-string length is not the file dd opens.
+size=$(stat -Lc %s "$file")
 n=$(((size + segment_bytes - 1) / segment_bytes))
 mkdir -p "$(dirname "$log")"
 echo "# start $(date -Is) size=$size segments=$n from=$start_i segment_bytes=$segment_bytes" >>"$log"
