@@ -88,6 +88,8 @@ use crate::{CircularBuffer, StorageModulesReadGuard};
 
 #[path = "index_drain.rs"]
 mod index_drain;
+#[path = "partition_resize.rs"]
+mod partition_resize;
 
 type SubmodulePath = PathBuf;
 
@@ -288,6 +290,11 @@ pub struct StorageModule {
     recent_chunk_times: Arc<RwLock<CircularBuffer<ChunkTimeRecord>>>,
     /// Runtime configuration parameters
     pub config: Config,
+    /// Canonical logical extent; may revert with the branch before finality.
+    partition_chunks: AtomicU64,
+    /// Durable physical bound, also checked by late packing/index writers.
+    retained_chunks: AtomicU64,
+    resize_complete: Mutex<Option<partition_resize::ResizeJournal>>,
 }
 
 /// On-disk metadata for StorageModule persistence
@@ -466,6 +473,10 @@ fn advise_chunks_random(_file: &File, path: &Path) -> eyre::Result<()> {
 impl StorageModule {
     /// Initializes a new StorageModule
     pub fn new(storage_module_info: &StorageModuleInfo, config: &Config) -> eyre::Result<Self> {
+        let retained = Self::read_resize_journal(storage_module_info, config)?;
+        let retained_chunks = retained.map_or(config.consensus.num_chunks_in_partition, |r| {
+            r.retained_chunks
+        });
         let mut submodule_map = NoditMap::new();
         let mut global_intervals = StorageIntervals::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
@@ -636,19 +647,24 @@ impl StorageModule {
         }
 
         // Attempt to load a global set of intervals from the submodules
-        let loaded_intervals: NoditMap<
+        let mut loaded_intervals: NoditMap<
             PartitionChunkOffset,
             Interval<PartitionChunkOffset>,
             ChunkType,
         > = Self::load_intervals_from_submodules(&submodule_map, storage_module_info.id);
+
+        if retained.is_some() {
+            let _ = loaded_intervals
+                .cut(partition_chunk_offset_ii!(retained_chunks as u32, u32::MAX))
+                .collect::<Vec<_>>();
+        }
 
         // validate that the loaded intervals span the correct range
         let gaps = loaded_intervals
             .gaps_untrimmed(partition_chunk_offset_ii!(0, u32::MAX))
             .collect::<Vec<_>>();
         let expected = vec![partition_chunk_offset_ii!(
-            TryInto::<u32>::try_into(config.consensus.num_chunks_in_partition)
-                .expect("Value exceeds u32::MAX"),
+            TryInto::<u32>::try_into(retained_chunks).expect("Value exceeds u32::MAX"),
             u32::MAX
         )];
 
@@ -663,7 +679,7 @@ impl StorageModule {
         #[cfg(not(any(test, feature = "test-utils")))]
         drop(index_commit_fail_next);
 
-        Ok(Self {
+        let module = Self {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             pending_writes: RwLock::new(PendingWrites::default()),
@@ -683,7 +699,14 @@ impl StorageModule {
             submodules: submodule_map,
             recent_chunk_times: Arc::new(RwLock::new(CircularBuffer::new(8_000))), // sample window 10s = 10s x 800 chunks/s = capacity 8_000
             config: config.clone(),
-        })
+            partition_chunks: AtomicU64::new(retained_chunks),
+            retained_chunks: AtomicU64::new(retained_chunks),
+            resize_complete: Mutex::new(None),
+        };
+        if let Some(journal) = retained {
+            module.resume_partition_resize(journal)?;
+        }
+        Ok(module)
     }
 
     pub fn assign_partition(&self, partition_assignment: PartitionAssignment, update_height: u64) {
@@ -885,7 +908,7 @@ impl StorageModule {
         let chunk_byte_offset = u64::from(raw_tx_offset)
             .checked_mul(self.config.consensus.chunk_size)
             .ok_or_else(|| eyre::eyre!("chunk byte offset overflow"))?;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
+        let num_chunks_in_partition = self.partition_chunks();
         let mut offsets = Vec::new();
         for info in infos.0 {
             if chunk_byte_offset >= info.data_size {
@@ -944,7 +967,7 @@ impl StorageModule {
         }
 
         let chunk_size = self.config.consensus.chunk_size;
-        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
+        let num_chunks_in_partition = self.partition_chunks();
         for tx_offset in candidates {
             let raw_offset = u32::from(*tx_offset);
             let chunk_byte_offset = u64::from(raw_offset)
@@ -1001,7 +1024,14 @@ impl StorageModule {
             submodule.db.update_eyre(clear_submodule_database)?;
         }
 
-        Ok(storage_interval)
+        // Before finality the physical suffix remains available for a reorg,
+        // but a new packing job must use the current logical partition size.
+        Ok(ii(
+            storage_interval.start(),
+            storage_interval.end().min(PartitionChunkOffset::from(
+                self.partition_chunks() as u32 - 1,
+            )),
+        ))
     }
 
     /// Returns whether the given chunk offset falls within this StorageModules assigned range
@@ -1011,9 +1041,9 @@ impl StorageModule {
             .unwrap()
             .and_then(|part| part.slot_index)
             .map(|slot_index| {
-                let start_offset =
-                    slot_index as u64 * self.config.consensus.num_chunks_in_partition;
-                let end_offset = start_offset + self.config.consensus.num_chunks_in_partition;
+                let chunks = self.partition_chunks();
+                let start_offset = slot_index as u64 * chunks;
+                let end_offset = start_offset + chunks;
                 (start_offset..end_offset).contains(&*chunk_offset)
             })
             .unwrap_or(false)
@@ -1214,7 +1244,10 @@ impl StorageModule {
             // Write them to the submodules disk
             if let Ok(mut submodule_intervals) = NoditMap::from_iter_strict(cut_iter) {
                 // Make sure the there is at least one interval spanning the submodule range
-                if submodule_intervals.is_empty() {
+                if submodule_intervals.is_empty()
+                    && u64::from(*submodule_interval.start())
+                        < self.retained_chunks.load(Ordering::Acquire)
+                {
                     submodule_intervals
                         .insert_merge_touching_if_values_equal(
                             *submodule_interval,
@@ -1468,7 +1501,14 @@ impl StorageModule {
 
         // NoditSet is a BTreeMap underneath, meaning collecting them into a vec
         // is done in ascending key order.
-        set.into_iter().collect::<Vec<_>>()
+        let limit = self.partition_chunks() as u32;
+        set.into_iter()
+            .filter_map(|range| {
+                let start = *range.start();
+                (start < limit)
+                    .then(|| partition_chunk_offset_ii!(start, (*range.end()).min(limit - 1)))
+            })
+            .collect::<Vec<_>>()
     }
 
     /// Queues chunk data for later disk write. Chunks are batched for efficiency
@@ -1480,6 +1520,11 @@ impl StorageModule {
         chunk_type: ChunkType,
     ) -> bool {
         let mut pending = self.pending_writes.write().unwrap();
+        if u64::from(*chunk_offset) >= self.partition_chunks()
+            || u64::from(*chunk_offset) >= self.retained_chunks.load(Ordering::Acquire)
+        {
+            return false;
+        }
         // Checked under the same lock as the insert so a pause taken while a
         // writer is between its own pre-check and this point still wins.
         if chunk_type == ChunkType::Data && self.data_writes_paused() {
@@ -2100,6 +2145,8 @@ impl StorageModule {
         }
         pending.occupancy.remove(&write.offset);
         if self.data_writes_paused()
+            || u64::from(*write.offset) >= self.partition_chunks()
+            || u64::from(*write.offset) >= self.retained_chunks.load(Ordering::Acquire)
             || self.index_write_generation.load(Ordering::SeqCst) != write.generation
         {
             return false;
@@ -2643,8 +2690,9 @@ impl StorageModule {
         let pa = self.partition_assignment.read().unwrap();
         if let Some(part_assign) = *pa {
             if let Some(slot_index) = part_assign.slot_index {
-                let start = slot_index as u64 * self.config.consensus.num_chunks_in_partition;
-                let end = start + self.config.consensus.num_chunks_in_partition;
+                let chunks = self.partition_chunks();
+                let start = slot_index as u64 * chunks;
+                let end = start + chunks;
                 Ok(LedgerChunkRange(ledger_chunk_offset_ie!(start, end)))
             } else {
                 Err(eyre::eyre!("Ledger slot not assigned!"))
@@ -2713,7 +2761,7 @@ impl StorageModule {
     /// Test utility function to mark a StorageModule as packed
     pub fn pack_with_zeros(&self) {
         let entropy_bytes = vec![0_u8; self.config.consensus.chunk_size as usize];
-        for chunk_offset in 0..self.config.consensus.num_chunks_in_partition as u32 {
+        for chunk_offset in 0..self.partition_chunks() as u32 {
             self.write_chunk(
                 PartitionChunkOffset::from(chunk_offset),
                 entropy_bytes.clone(),

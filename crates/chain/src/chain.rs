@@ -1903,6 +1903,14 @@ impl IrysNode {
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
 
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        for module in storage_modules.read().unwrap().iter() {
+            module.set_partition_chunks(
+                epoch_snapshot
+                    .consensus_context()
+                    .geometry()
+                    .partition_chunks,
+            )?;
+        }
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
         let ingress_proof_generation_state =
             irys_actors::chunk_ingress_service::IngressProofGenerationState::default();
@@ -2127,6 +2135,7 @@ impl IrysNode {
         // counter through the VDF handle (current_step()).
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
             &config,
+            &block_tree_guard,
             &storage_modules_guard,
             &vdf_state_readonly,
             &service_senders,
@@ -2488,6 +2497,7 @@ impl IrysNode {
 
     fn init_partition_mining_services(
         config: &Config,
+        block_tree: &irys_domain::BlockTreeReadGuard,
         storage_modules_guard: &StorageModulesReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         service_senders: &ServiceSenders,
@@ -2504,7 +2514,8 @@ impl IrysNode {
                 false, // do not start mining automatically
                 vdf_steps_guard.clone(),
                 initial_difficulty,
-            );
+            )
+            .with_block_tree(block_tree.clone());
             let (controller, handle) =
                 PartitionMiningService::spawn_service(inner, runtime_handle.clone());
             controllers.push(controller);

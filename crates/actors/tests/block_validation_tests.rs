@@ -109,8 +109,8 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         },
     );
 
-    let poa = PoaData {
-        partition_chunk_offset: 10,
+    let mut poa = PoaData {
+        partition_chunk_offset: 5,
         partition_hash,
         chunk: Some(Base64(vec![0; config.chunk_size as usize])),
         ledger_id: Some(DataLedger::Publish as u32),
@@ -119,9 +119,10 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     };
 
     // The test indexes three blocks at heights 0/1/2 with Publish
-    // total_chunks of [0, 10, 20]. With offset=10, anchoring on the
-    // top block (height=2) keeps the offset in range (10 < 20) so the
-    // pre-check passes and the merkle proof is the failure source.
+    // total_chunks of [0, 10, 20]. With offset=5 (inside the 10-chunk
+    // testing partition), anchoring on the top block (height=2) keeps the
+    // ledger offset in range (5 < 20) so the pre-checks pass and the
+    // merkle proof is the failure source.
     //
     // The fast-path block_index lookup is exercised here; block_tree is
     // populated with a signed mock genesis solely to satisfy the
@@ -148,6 +149,25 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     assert!(matches!(
         res,
         Err(PreValidationError::MerkleProofInvalid(_))
+    ));
+
+    // An offset at or past the active partition size is rejected before any
+    // ledger or merkle work.
+    poa.partition_chunk_offset = config.num_chunks_in_partition as u32;
+    let res = poa_is_valid(
+        &poa,
+        &block_index_guard,
+        &block_tree_guard,
+        &db,
+        H256::zero(),
+        2,
+        &epoch_snapshot,
+        &config,
+        &IrysAddress::ZERO,
+    );
+    assert!(matches!(
+        res,
+        Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds)
     ));
 }
 

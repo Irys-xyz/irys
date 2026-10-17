@@ -60,6 +60,9 @@ impl RemotePackingStrategy {
         let notify = self.notify.clone();
 
         let mut process_chunk = |chunk_bytes: Bytes| {
+            if u64::from(range_start) >= storage_module.partition_chunks() {
+                return false;
+            }
             storage_module.write_chunk(
                 PartitionChunkOffset(range_start),
                 chunk_bytes.to_vec(),
@@ -86,6 +89,7 @@ impl RemotePackingStrategy {
             }
 
             range_start += 1;
+            true
         };
 
         // Process streaming chunks
@@ -96,7 +100,9 @@ impl RemotePackingStrategy {
             // Process complete chunks from buffer
             while buffer.len() >= chunk_size {
                 let chunk_to_process = buffer.split_to(chunk_size).freeze();
-                process_chunk(chunk_to_process);
+                if !process_chunk(chunk_to_process) {
+                    return Ok(storage_module.partition_chunks() as u32);
+                }
             }
         }
 
@@ -121,6 +127,11 @@ impl RemotePackingStrategy {
         storage_module_id: usize,
         short_writes_before_sync: u32,
     ) -> Result<u32, String> {
+        let partition_chunks = storage_module.partition_chunks();
+        if u64::from(range_start) >= partition_chunks {
+            return Ok(range_start);
+        }
+        let range_end = range_end.min(partition_chunks as u32 - 1);
         let current_chunk_range =
             PartitionChunkRange(partition_chunk_offset_ii!(range_start, range_end));
 
@@ -208,7 +219,9 @@ impl super::PackingStrategy for RemotePackingStrategy {
             {
                 Ok(new_start) => {
                     current_start = new_start;
-                    if current_start >= range_end {
+                    if current_start >= range_end
+                        || u64::from(current_start) >= storage_module.partition_chunks()
+                    {
                         return Ok(());
                     }
                 }

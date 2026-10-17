@@ -1270,6 +1270,16 @@ impl BlockTreeServiceInner {
                 .persist_metadata(old_fork, &blocks_to_confirm, stream)?
         };
 
+        if tip_changed {
+            let epoch = self
+                .cache
+                .read()
+                .expect("block tree lock")
+                .canonical_epoch_snapshot();
+            self.block_migration_service
+                .update_partition_geometry(&epoch)?;
+        }
+
         // Broadcast reorg event if applicable
         let reorg_occurred = reorg_event.is_some();
         if let Some(reorg_event) = reorg_event {
