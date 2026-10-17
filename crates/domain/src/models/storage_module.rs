@@ -885,6 +885,10 @@ pub struct StorageModule {
     /// Crash tests drop the module without the final fsync or interval rewrite.
     #[cfg(test)]
     abandon_on_drop: AtomicBool,
+    /// Interval-tree edits inside [`Self::rollback_unassigned_range`].
+    /// One span is one edit.
+    #[cfg(test)]
+    rollback_interval_edits: AtomicU64,
     /// The next lane `pwrite` panics once, before the kernel write.
     #[cfg(test)]
     pwrite_panic_once: AtomicBool,
@@ -2129,6 +2133,8 @@ impl StorageModule {
             crc_scan_done: AtomicBool::new(false),
             #[cfg(test)]
             abandon_on_drop: AtomicBool::new(false),
+            #[cfg(test)]
+            rollback_interval_edits: AtomicU64::new(0),
             #[cfg(test)]
             pwrite_panic_once: AtomicBool::new(false),
         })
@@ -6119,18 +6125,13 @@ impl StorageModule {
             self.clear_data_root_infos_in_range(start, end, data_roots)?;
             self.purge_pending_body_migrations_in_range(start, end)?;
             let mut intervals = self.intervals.write().unwrap();
-            let mut cursor = start.0;
-            loop {
-                Self::cut_then_insert_interval_if_touching(
-                    &mut intervals,
-                    PartitionChunkOffset::from(cursor),
-                    ChunkType::Uninitialized,
-                );
-                if cursor == end.0 {
-                    break;
-                }
-                cursor = cursor.saturating_add(1);
-            }
+            // One label covers the inclusive span. One cut splits the
+            // neighbors. The insert merges with touching `Uninitialized`.
+            let span = ii(start, end);
+            let _ = intervals.cut(span);
+            let _ = intervals.insert_merge_touching_if_values_equal(span, ChunkType::Uninitialized);
+            #[cfg(test)]
+            self.rollback_interval_edits.fetch_add(1, Ordering::SeqCst);
         }
         self.write_intervals_to_submodules()
     }
@@ -10510,6 +10511,231 @@ mod tests {
             &config,
         )?;
         Ok((tmp, storage, original))
+    }
+
+    fn paint_live_intervals(storage: &StorageModule, spans: &[(u32, u32, ChunkType)]) {
+        let mut map = StorageIntervals::new();
+        for &(start, end, kind) in spans {
+            map.insert_merge_touching_if_values_equal(partition_chunk_offset_ii!(start, end), kind)
+                .unwrap_or_else(|_| panic!("interval {start}..={end}"));
+        }
+        *storage.intervals.write().unwrap() = map;
+    }
+
+    fn stored_spans(storage: &StorageModule) -> Vec<(u32, u32, ChunkType)> {
+        storage
+            .intervals
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(interval, kind)| (interval.start().0, interval.end().0, *kind))
+            .collect()
+    }
+
+    fn file_spans(storage: &StorageModule, nth: usize) -> eyre::Result<Vec<(u32, u32, ChunkType)>> {
+        let map = read_intervals_file(&submodule_interval_path(storage, nth))?;
+        Ok(map
+            .iter()
+            .map(|(interval, kind)| (interval.start().0, interval.end().0, *kind))
+            .collect())
+    }
+
+    fn expect_one_span_edit(
+        storage: &StorageModule,
+        label: &str,
+        before: &[(u32, u32, ChunkType)],
+        start: u32,
+        end: u32,
+        expected_live: &[(u32, u32, ChunkType)],
+        expected_files: &[Vec<(u32, u32, ChunkType)>],
+    ) -> eyre::Result<()> {
+        paint_live_intervals(storage, before);
+        let edits_before = storage.rollback_interval_edits.load(Ordering::SeqCst);
+        storage.rollback_unassigned_range(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+            &[],
+        )?;
+        let edits = storage.rollback_interval_edits.load(Ordering::SeqCst) - edits_before;
+        let live = stored_spans(storage);
+        eyre::ensure!(
+            live == expected_live,
+            "{label}: live {live:?} want {expected_live:?}"
+        );
+        for (nth, expected) in expected_files.iter().enumerate() {
+            let file = file_spans(storage, nth)?;
+            eyre::ensure!(
+                file == *expected,
+                "{label}: file {nth} {file:?} want {expected:?}"
+            );
+        }
+        eyre::ensure!(edits == 1, "{label}: interval edits {edits}, want 1");
+        Ok(())
+    }
+
+    /// One inclusive rollback span is one interval-tree edit. The labels match
+    /// a per-offset walk: the cut splits the neighbors, and `Uninitialized`
+    /// merges with a touching run of the same label. A one-point span is still
+    /// one edit. A span that crosses two submodules is still one edit, and
+    /// each file receives its clipped slice.
+    #[test]
+    fn rollback_marks_a_span_in_one_interval_edit() -> eyre::Result<()> {
+        let (tmp, storage, _) = open_publish_module("rollback_span", SubmoduleIndexEngine::Mdbx)?;
+        let _tmp = tmp;
+        let mut errors = Vec::new();
+        let cases: Vec<(
+            &str,
+            Vec<(u32, u32, ChunkType)>,
+            u32,
+            u32,
+            Vec<(u32, u32, ChunkType)>,
+        )> = vec![
+            (
+                "one point",
+                vec![(0, 7, ChunkType::Data)],
+                3,
+                3,
+                vec![
+                    (0, 2, ChunkType::Data),
+                    (3, 3, ChunkType::Uninitialized),
+                    (4, 7, ChunkType::Data),
+                ],
+            ),
+            (
+                "split",
+                vec![(0, 7, ChunkType::Data)],
+                2,
+                4,
+                vec![
+                    (0, 1, ChunkType::Data),
+                    (2, 4, ChunkType::Uninitialized),
+                    (5, 7, ChunkType::Data),
+                ],
+            ),
+            (
+                "merge both sides",
+                vec![
+                    (0, 1, ChunkType::Uninitialized),
+                    (2, 4, ChunkType::Entropy),
+                    (5, 7, ChunkType::Uninitialized),
+                ],
+                2,
+                4,
+                vec![(0, 7, ChunkType::Uninitialized)],
+            ),
+            (
+                "merge one side",
+                vec![(0, 2, ChunkType::Entropy), (3, 7, ChunkType::Data)],
+                3,
+                5,
+                vec![
+                    (0, 2, ChunkType::Entropy),
+                    (3, 5, ChunkType::Uninitialized),
+                    (6, 7, ChunkType::Data),
+                ],
+            ),
+            (
+                "already uninitialized",
+                vec![
+                    (0, 1, ChunkType::Data),
+                    (2, 4, ChunkType::Uninitialized),
+                    (5, 7, ChunkType::Data),
+                ],
+                2,
+                4,
+                vec![
+                    (0, 1, ChunkType::Data),
+                    (2, 4, ChunkType::Uninitialized),
+                    (5, 7, ChunkType::Data),
+                ],
+            ),
+            (
+                "interrupted",
+                vec![(0, 7, ChunkType::Interrupted)],
+                1,
+                2,
+                vec![
+                    (0, 0, ChunkType::Interrupted),
+                    (1, 2, ChunkType::Uninitialized),
+                    (3, 7, ChunkType::Interrupted),
+                ],
+            ),
+            (
+                "whole module",
+                vec![
+                    (0, 2, ChunkType::Data),
+                    (3, 5, ChunkType::Entropy),
+                    (6, 7, ChunkType::Interrupted),
+                ],
+                0,
+                7,
+                vec![(0, 7, ChunkType::Uninitialized)],
+            ),
+        ];
+        for (label, before, start, end, expected) in cases {
+            let files = vec![expected.clone()];
+            if let Err(err) =
+                expect_one_span_edit(&storage, label, &before, start, end, &expected, &files)
+            {
+                errors.push(err.to_string());
+            }
+        }
+
+        let split = (|| -> eyre::Result<()> {
+            let split_tmp = TempDirBuilder::new().prefix("rollback_span_split").build();
+            let node_config = NodeConfig {
+                consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                    chunk_size: 32,
+                    num_chunks_in_partition: 8,
+                    ..ConsensusConfig::testing()
+                }),
+                storage: StorageSyncConfig {
+                    num_writes_before_sync: 1,
+                    intervals_persist_secs: 0,
+                    min_durable_interval_ms: 0,
+                    ..StorageSyncConfig::default()
+                },
+                base_directory: split_tmp.path().to_path_buf(),
+                database: index_database(SubmoduleIndexEngine::Mdbx),
+                ..NodeConfig::testing()
+            };
+            let config = Config::new_with_random_peer_id(node_config);
+            let storage = StorageModule::new(
+                &StorageModuleInfo {
+                    id: 0,
+                    partition_assignment: None,
+                    submodules: vec![
+                        (partition_chunk_offset_ii!(0, 3), split_tmp.path().join("a")),
+                        (partition_chunk_offset_ii!(4, 7), split_tmp.path().join("b")),
+                    ],
+                },
+                &config,
+            )?;
+            expect_one_span_edit(
+                &storage,
+                "crosses submodules",
+                &[(0, 7, ChunkType::Data)],
+                2,
+                5,
+                &[
+                    (0, 1, ChunkType::Data),
+                    (2, 5, ChunkType::Uninitialized),
+                    (6, 7, ChunkType::Data),
+                ],
+                &[
+                    vec![(0, 1, ChunkType::Data), (2, 3, ChunkType::Uninitialized)],
+                    vec![(4, 5, ChunkType::Uninitialized), (6, 7, ChunkType::Data)],
+                ],
+            )?;
+            drop(storage);
+            drop(split_tmp);
+            Ok(())
+        })();
+        if let Err(err) = split {
+            errors.push(err.to_string());
+        }
+        eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
+        Ok(())
     }
 
     struct RegistrationRows {
