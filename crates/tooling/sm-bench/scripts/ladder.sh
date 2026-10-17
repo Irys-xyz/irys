@@ -25,7 +25,11 @@
 #
 # State (db, rocks, intervals.json, packing_params.toml, bench-prepop.json)
 # is renamed into loadtest/state-<name>/ before the next run. Nothing is
-# deleted. An existing state directory is an error.
+# deleted. A directory left between renames is put back: a name that is
+# only there moves to the module root, and an empty directory is removed
+# so the rename can run. A name that is in both places is an error. The
+# error also names any index file that is only in the state directory.
+# Those files stay where they are.
 #
 # The loadtest path, the mount disk, pm2, and the free-space floor are checked
 # before that rename and before max_sectors_kb is written. A symlink ancestor
@@ -404,8 +408,33 @@ stash() {
         return 0
     fi
     if [ -e "$dest" ]; then
-        echo "state dir already exists: $dest" >&2
-        return 1
+        # A kill between renames leaves some names only in the state directory.
+        # Put those back. A name in both places is a second copy: do not move
+        # anything, and name the files that are only in the state directory.
+        local -a conflicts=()
+        local -a state_only=()
+        for item in "${state_names[@]}"; do
+            if [ -e "$dest/$item" ] && [ -e "$loadtest/$item" ]; then
+                conflicts+=("$item")
+            elif [ -e "$dest/$item" ]; then
+                state_only+=("$item")
+            fi
+        done
+        if [ "${#conflicts[@]}" -gt 0 ]; then
+            echo "state dir already exists: $dest" >&2
+            if [ "${#state_only[@]}" -gt 0 ]; then
+                echo "only in $dest: ${state_only[*]}" >&2
+            fi
+            return 1
+        fi
+        for item in "${state_only[@]}"; do
+            mv "$dest/$item" "$loadtest/" || return 1
+        done
+        if [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+            echo "state dir already exists: $dest" >&2
+            return 1
+        fi
+        rmdir "$dest" || return 1
     fi
     mkdir "$dest" || return 1
     # From here this run owns the directory. A later failure moves the files back.

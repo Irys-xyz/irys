@@ -2041,6 +2041,197 @@ test_ladder_stashes_before_a_run_that_starts() {
     rm -rf "$root"
 }
 
+# Kill after the first rename: db is only in state-prior, the other index
+# files are still live. The restart puts db back and the run stashes one
+# complete index. chunks.dat is not a stashed name.
+test_ladder_reunites_a_stash_that_stopped_between_renames() {
+    local name=ladder-partial-stash root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$module/state-prior"
+    mv "$module/db" "$module/state-prior/db"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if ! MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh refused a partial stash: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif [ -e "$module/db" ] || [ -e "$module/intervals.json" ]; then
+        bad "$name" "live index was not stashed after the repair"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "db was not kept: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-intervals.json\n') "$module/state-prior/intervals.json"; then
+        bad "$name" "intervals were not stashed with db"
+    elif ! cmp -s <(printf 'keep-chunks.dat\n') "$module/chunks.dat"; then
+        bad "$name" "chunks.dat changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# Kill after mkdir and before any rename. The empty directory is not an index.
+test_ladder_continues_when_the_state_dir_is_empty() {
+    local name=ladder-empty-state-dir root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$module/state-prior"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if ! MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh refused an empty state dir: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif [ -e "$module/db" ]; then
+        bad "$name" "db stayed in the module root"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "stashed db changed: $(cat "$module/state-prior/db" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A name in both places stays an error, and nothing is moved. The error names
+# a file that exists only in the state directory.
+test_ladder_names_files_left_only_in_an_existing_state_dir() {
+    local name=ladder-state-only-names root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$module/state-prior"
+    printf 'OLD\n' >"$module/state-prior/db"
+    mv "$module/rocks" "$module/state-prior/rocks"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! grep -q "already exists" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! grep -q "only in $module/state-prior: rocks" "$err"; then
+        bad "$name" "stderr did not name the stranded file: $(cat "$err")"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/db"; then
+        bad "$name" "live db changed: $(cat "$module/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'OLD\n') "$module/state-prior/db"; then
+        bad "$name" "state db changed: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-rocks\n') "$module/state-prior/rocks"; then
+        bad "$name" "stranded rocks changed or moved"
+    elif [ -e "$module/rocks" ]; then
+        bad "$name" "rocks was copied back beside the conflicting db"
+    elif ! cmp -s <(printf 'keep-intervals.json\n') "$module/intervals.json"; then
+        bad "$name" "live intervals changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# An unknown file stays in the state directory. The stranded index name is
+# put back, and the bench does not start while that file is still there.
+test_ladder_keeps_an_unknown_file_in_a_partial_state_dir() {
+    local name=ladder-partial-unknown-file root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$module/state-prior"
+    mv "$module/db" "$module/state-prior/db"
+    printf 'note\n' >"$module/state-prior/note"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran"
+    elif ! grep -q "already exists" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/db"; then
+        bad "$name" "db was not put back: $(cat "$module/db" 2>/dev/null)"
+    elif [ -e "$module/state-prior/db" ]; then
+        bad "$name" "db is still only in the state directory"
+    elif ! cmp -s <(printf 'note\n') "$module/state-prior/note"; then
+        bad "$name" "unknown file was removed"
+    elif ! cmp -s <(printf 'keep-intervals.json\n') "$module/intervals.json"; then
+        bad "$name" "live intervals changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A completed stash leaves no live index names. That restart still runs, and
+# it does not pull the stashed index back.
+test_ladder_starts_when_the_live_index_is_already_absent() {
+    local name=ladder-stashed-index-stays root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    mkdir -p "$module/state-prior"
+    local item
+    for item in db rocks intervals.json packing_params.toml bench-prepop.json; do
+        mv "$module/$item" "$module/state-prior/$item"
+    done
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    if ! MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh refused a completed stash: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif [ -e "$module/db" ]; then
+        bad "$name" "stashed db was moved back"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "stashed db changed"
+    elif ! cmp -s <(printf 'keep-chunks.dat\n') "$module/chunks.dat"; then
+        bad "$name" "chunks.dat changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_ladder_does_not_restore_a_state_dir_it_did_not_create() {
     local name=ladder-keep-existing-state root module sys err dev mnt
     root=$(tmpdir)
