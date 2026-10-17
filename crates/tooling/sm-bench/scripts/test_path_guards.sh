@@ -163,6 +163,30 @@ test_fill_refuses_symlink_that_leaves_loadtest() {
     rm -rf "$root"
 }
 
+# The target directory still contains loadtest, but it is not the named parent.
+# The shared guard refuses that pair before dd.
+test_fill_refuses_a_symlink_into_another_loadtest_directory() {
+    local name=fill-symlink-other-loadtest root err victim
+    root=$(tmpdir)
+    err=$root/err
+    victim=$root/other/loadtest/victim
+    mkdir -p "$root/bench/loadtest" "$root/other/loadtest"
+    python3 -c 'import sys; sys.stdout.buffer.write(b"A"*4096)' >"$victim"
+    ln -s "$victim" "$root/bench/loadtest/write-region.dat"
+    if "$here/fill.sh" --file "$root/bench/loadtest/write-region.dat" \
+        --log "$root/bench/loadtest/fill.log" --segment-bytes 4096 --block 4096 \
+        >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0"
+    elif ! grep -q "resolves under" "$err"; then
+        bad "$name" "stderr did not refuse the parent: $(cat "$err")"
+    elif ! cmp -s <(python3 -c 'import sys; sys.stdout.buffer.write(b"A"*4096)') "$victim"; then
+        bad "$name" "victim bytes changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_fill_refuses_a_symlink_pid_and_log() {
     local name=fill-pid-symlink root err
     root=$(tmpdir)

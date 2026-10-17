@@ -14,11 +14,12 @@
 # Creating --stop-file makes the filler exit 0 after the current segment.
 # Default stop file is ./STOP. Default segment is 64 GiB. Default block is 64M.
 # The file must already exist. This script does not allocate it.
-# The path must contain a `loadtest` component, and so must `readlink -f`
-# of the file. A symlink out of `loadtest` is refused before any write.
-# --pid-file must pass that check too. It is created with O_EXCL, and an
-# existing symlink is not removed. TERM and INT stop the dd process group.
-# A --log symlink is refused unless the target stays under loadtest.
+# The file, a symlink log, and --pid-file use the shared loadtest guard:
+# the given path and the resolved path each contain a loadtest component,
+# and the named parent is the parent after resolution. A symlink into
+# another directory is refused before any write, including when that
+# directory also contains loadtest. --pid-file is created with O_EXCL, and
+# an existing symlink is not removed. TERM and INT stop the dd process group.
 # The log parent is resolved the same way. mkdir and append follow a
 # symlink ancestor, so a parent outside loadtest is refused first.
 
@@ -95,24 +96,6 @@ if [ "$segment_bytes" -le 0 ]; then
     echo "--segment-bytes must be greater than 0" >&2
     exit 1
 fi
-
-# Existing path only. A missing tail is not applied: mkdir is checked separately.
-require_loadtest() {
-    local label=$1
-    local path=$2
-    if ! has_loadtest "$path"; then
-        echo "$label $path has no loadtest path component; refusing" >&2
-        exit 1
-    fi
-    if [ -e "$path" ]; then
-        local canon
-        canon=$(readlink -f "$path")
-        if ! has_loadtest "$canon"; then
-            echo "$label resolves to $canon, which has no loadtest path component; refusing" >&2
-            exit 1
-        fi
-    fi
-}
 
 # Walk to the existing ancestor. mkdir -p would create the missing tail
 # there, including through a symlink above a directory that does not exist yet.
