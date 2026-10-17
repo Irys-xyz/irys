@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Per-step summary of an irys-sm-bench samples.jsonl.
 
-Recall percentiles are percentiles of the per-second maxima. The bench table
-uses every recall sample, so the two p99 numbers can differ.
+Recall percentiles are the floor rank (`int(n * fraction)`) of the
+per-second maxima. The bench table uses nearest-rank over every recall
+sample, so the two p99 numbers can differ.
 
 usage: ladder.py SAMPLES.jsonl [SAMPLES.jsonl ...]
 """

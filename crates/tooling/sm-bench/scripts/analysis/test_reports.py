@@ -49,6 +49,17 @@ class PercentileTests(unittest.TestCase):
         self.assertEqual(percentile([], 0.99), 0)
         self.assertEqual(percentile([10, 20, 30, 40], 0.5), 30)
         self.assertEqual(percentile([10, 20, 30], 0.99), 30)
+        # Floor rank, not nearest-rank. n=100 is index 99; nearest-rank is 98.
+        # n=600 is index 594; nearest-rank is 593.
+        self.assertEqual(percentile(list(range(100)), 0.99), 99)
+        self.assertEqual(percentile(list(range(600)), 0.99), 594)
+
+    def test_doc_states_floor_rank_of_the_per_second_maxima(self):
+        import analysis.ladder as ladder
+
+        doc = ladder.__doc__ or ""
+        self.assertIn("floor rank", doc)
+        self.assertIn("per-second maxima", doc)
 
 
 class LadderTests(unittest.TestCase):
