@@ -1366,10 +1366,9 @@ async fn publish_entropy_scan_bounds_non_entropy_fragments() {
         !orch.chunk_requests.contains_key(&entropy),
         "the first tick must not walk every non-entropy fragment to the entropy tail"
     );
-    assert!(
-        (1..23).contains(&orch.scan_cursor),
-        "the cursor must move into the map, got {}",
-        orch.scan_cursor
+    assert_eq!(
+        orch.scan_cursor, 4,
+        "the first tick spends an interval budget of 4"
     );
 
     let mut ticks = 0_u32;
@@ -1413,27 +1412,62 @@ async fn publish_entropy_scan_crosses_one_uninitialized_span() {
 }
 
 /// A chunk-budget clip inside one Entropy interval resumes at the next
-/// offset. The interval budget must not jump the cursor past that run.
+/// offset. The request budget and the probe budget both outlast the clip, so
+/// the scan reads `interval_budget_spent` instead of stopping on a slot.
 #[test_log::test(tokio::test)]
 async fn publish_entropy_scan_keeps_the_cursor_inside_a_clipped_entropy_run() {
     let tmp = TempDirBuilder::new().with_tracing().build();
     let config = test_config_with_pending_limit(tmp.path().to_path_buf(), 24, 1);
     let sm = packed_sm(&config, 24);
-    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 24);
-    orch.populate_request_queue();
+    let entropy = sm.get_intervals(ChunkType::Entropy);
+    assert_eq!(entropy.len(), 1, "a packed module is one entropy interval");
+    let far_end = entropy[0].end().0;
     assert!(
-        orch.chunk_requests
-            .contains_key(&PartitionChunkOffset::from(0_u32))
+        far_end > 4,
+        "the interval must be wider than the clip, got {far_end}"
+    );
+    let scan = entropy_scan_runs(&sm, 0, far_end, false, 4);
+    assert_eq!(scan.runs, vec![(0, 3)]);
+    assert_eq!(scan.visited_edge, Some(far_end));
+    assert!(
+        !scan.interval_budget_spent,
+        "a chunk clip must leave the interval flag clear"
+    );
+
+    let mut orch = make_orchestrator_with_ledger_chunks(sm, &config, 24);
+    let mut probes = 0_usize;
+    let mut requests_to_add = 100_usize;
+    let stop = orch.consume_entropy_scan(
+        0,
+        far_end,
+        false,
+        4,
+        far_end,
+        Instant::now(),
+        &mut probes,
+        100,
+        &mut requests_to_add,
+    );
+    assert!(
+        !stop,
+        "the clip must not stop the tick before the flag is read"
     );
     assert_eq!(
-        orch.scan_cursor, 1,
-        "a one-slot hot budget stops inside the entropy run"
+        orch.scan_cursor, 4,
+        "the cursor stays on the next offset inside the entropy run"
     );
+    for offset in 0..4 {
+        assert!(
+            orch.chunk_requests
+                .contains_key(&PartitionChunkOffset::from(offset)),
+            "offset {offset} is inside the clip"
+        );
+    }
     assert!(
         !orch
             .chunk_requests
-            .contains_key(&PartitionChunkOffset::from(1_u32)),
-        "the next entropy offset waits for the next tick"
+            .contains_key(&PartitionChunkOffset::from(4_u32)),
+        "the offset past the clip waits"
     );
 }
 
@@ -1467,10 +1501,9 @@ async fn term_ledger_entropy_scan_bounds_high_fragments() {
         !orch.chunk_requests.contains_key(&entropy),
         "the first reverse tick must not walk every high fragment down to offset 0"
     );
-    assert!(
-        orch.scan_cursor < 23,
-        "the reverse cursor must move down from the write head, got {}",
-        orch.scan_cursor
+    assert_eq!(
+        orch.scan_cursor, 19,
+        "the first reverse tick spends an interval budget of 4"
     );
 
     let mut ticks = 0_u32;
