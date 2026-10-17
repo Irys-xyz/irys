@@ -859,6 +859,7 @@ impl BlockTreeServiceInner {
             epoch_block,
             reorg_event,
             tip_changed,
+            old_tip_diff,
             state,
             new_canonical_markers,
             blocks_to_confirm,
@@ -1235,6 +1236,7 @@ impl BlockTreeServiceInner {
                 epoch_block,
                 reorg_event,
                 tip_changed,
+                old_tip_block.diff,
                 state,
                 fcu_markers,
                 blocks_to_confirm,
@@ -1353,33 +1355,12 @@ impl BlockTreeServiceInner {
             }
         }
 
-        // Broadcast difficulty update to miners if tip difficulty changed from parent.
-        // On either lock poisoning or missing parent (the latter is a strong invariant
-        // — the tip just changed so the parent must be present — but a panic here
-        // would take the node down for a non-critical broadcast), skip the diff check
-        // and log instead. The downstream miners will pick up the difficulty on the
-        // next canonical update.
-        let parent_diff_changed = tip_changed
-            && match self.cache.read() {
-                Ok(cache) => match cache.get_block(&arc_block.previous_block_hash) {
-                    Some(parent_block) => parent_block.diff != arc_block.diff,
-                    None => {
-                        error!(
-                            parent_hash = %arc_block.previous_block_hash,
-                            block.hash = %arc_block.block_hash,
-                            "parent block missing from cache while broadcasting difficulty update; skipping"
-                        );
-                        false
-                    }
-                },
-                Err(_) => {
-                    error!(
-                        "block tree cache read lock poisoned during difficulty broadcast; skipping"
-                    );
-                    false
-                }
-            };
-        if parent_diff_changed {
+        // Broadcast difficulty update to miners if the tip's difficulty differs
+        // from the previous tip's. Comparing against the parent instead misses a
+        // reorg onto a branch whose new tip did not itself adjust, leaving miners
+        // on the old target until the next adjustment.
+        let tip_diff_changed = tip_changed && old_tip_diff != arc_block.diff;
+        if tip_diff_changed {
             self.service_senders
                 .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
         }

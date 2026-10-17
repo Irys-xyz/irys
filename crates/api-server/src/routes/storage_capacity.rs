@@ -113,7 +113,7 @@ fn capacity_report(
                 })
                 .sum()
         };
-        let entropy = count(ChunkType::Entropy);
+        let entropy = count(ChunkType::Entropy).min(geometry.partition_chunks);
         let packed = (entropy + count(ChunkType::Data)).min(geometry.partition_chunks);
         let writable = if assignment.ledger_id.is_some() && !module.data_writes_paused() {
             entropy

@@ -219,7 +219,9 @@ impl super::PackingStrategy for RemotePackingStrategy {
             {
                 Ok(new_start) => {
                     current_start = new_start;
-                    if current_start >= range_end
+                    // `new_start` is the next unwritten offset and `range_end` is
+                    // inclusive, so the range is done only once we are past it.
+                    if current_start > range_end
                         || u64::from(current_start) >= storage_module.partition_chunks()
                     {
                         return Ok(());

@@ -203,7 +203,10 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
         )
     };
     validate(&parent)?;
-    assert!(validate(&epoch).is_err());
+    assert!(matches!(
+        validate(&epoch),
+        Err(irys_actors::block_validation::PreValidationError::PoAChunkOffsetOutOfBlockBounds)
+    ));
 
     // Cold sync reconstructs the activation baseline and validates old PoA
     // chunks from block storage, without the original partition tails.

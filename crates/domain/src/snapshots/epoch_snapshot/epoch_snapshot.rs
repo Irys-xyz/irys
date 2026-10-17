@@ -24,7 +24,7 @@ use tracing::{debug, error, trace, warn};
 /// Temporarily track all of the ledger definitions inside the epoch service actor
 #[derive(Debug, Clone)]
 pub struct EpochSnapshot {
-    /// Branch-local Delta activation, reconstructed during epoch replay.
+    /// Branch-local Estuary (partition-resize) activation, reconstructed during epoch replay.
     pub partition_resize: Option<irys_types::partition_resize::PartitionResizeState>,
     /// Protocol-managed data ledgers (one permanent, N term)
     pub ledgers: Ledgers,

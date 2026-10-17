@@ -103,7 +103,8 @@ impl Estuary {
             "partition resize cannot increase the recall size"
         );
         ensure!(
-            config.vdf.max_allowed_vdf_fork_steps >= self.partition_chunks / self.recall_chunks,
+            config.vdf.max_allowed_vdf_fork_steps
+                >= self.partition_chunks.div_ceil(self.recall_chunks),
             "VDF cache is too small for resized sampling"
         );
         ensure!(

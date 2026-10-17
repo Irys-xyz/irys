@@ -110,21 +110,36 @@ impl PartitionMiningServiceInner {
         self
     }
 
-    fn refresh_geometry(&mut self) {
+    /// Re-read geometry and difficulty from the validated tip before each step.
+    ///
+    /// The producer builds on the validated tip, so solutions are checked
+    /// against the tip's `diff` and the geometry of the tip's epoch snapshot.
+    /// Reading both from that block under one tree lock keeps them paired
+    /// across E and reorgs; the `update_difficulty` broadcast can arrive after
+    /// the seed for a step that already mines the resized geometry.
+    /// `update_difficulty` remains the only source for miners without a block
+    /// tree (Estuary unconfigured).
+    fn refresh_mining_context(&mut self) {
         let Some(tree) = &self.block_tree else {
             return;
         };
         let tree = tree.read();
-        let context = tree.canonical_epoch_snapshot().consensus_context();
+        // Both from the validated tip, not the longest-chain head, which can run
+        // ahead of validation and is not what the producer builds on.
+        let (Some(tip), Some(snapshot)) = (
+            tree.get_block(&tree.tip),
+            tree.get_epoch_snapshot(&tree.tip),
+        ) else {
+            return;
+        };
+        let context = snapshot.consensus_context();
         if self.resize != context.resize() {
             self.resize = context.resize();
             self.geometry = context.geometry();
             self.ranges = fresh_ranges(self.geometry);
             self.ranges.last_step_num = self.geometry.sampling_origin - 1;
         }
-        if let Some(tip) = tree.get_block(&tree.tip) {
-            self.difficulty = tip.diff;
-        }
+        self.difficulty = tip.diff;
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -271,7 +286,7 @@ impl PartitionMiningServiceInner {
         vdf_step: u64,
         checkpoints: &H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
-        self.refresh_geometry();
+        self.refresh_mining_context();
         if self.resize.is_some_and(|r| vdf_step < r.sampling_origin) {
             return Ok(None);
         }
@@ -1139,6 +1154,31 @@ mod tests {
             "only an all-0xff hash meets U256::MAX"
         );
         assert_eq!(inner.data_path_lookup_count(), 0);
+    }
+
+    /// With a block tree attached, the validated tip's difficulty wins over a
+    /// stale broadcast value: a reorg onto a tip whose diff equals its parent's
+    /// sends no broadcast, yet the miner must still mine the tip's target.
+    #[test]
+    fn tip_difficulty_overrides_stale_broadcast() {
+        let (_tmp, _storage, mut inner) = open_data_miner(U256::zero(), true);
+        inner.update_difficulty(U256::MAX);
+        assert!(
+            mine_once(&mut inner).is_none(),
+            "without a tree the broadcast difficulty is used"
+        );
+
+        let mut tip = irys_types::IrysBlockHeader::new_mock_header();
+        tip.diff = U256::zero();
+        irys_testing_utils::IrysBlockHeaderTestExt::test_sign(&mut tip);
+        inner.block_tree = Some(irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(
+            irys_domain::BlockTree::new(&tip, ConsensusConfig::testing()),
+        ))));
+        assert!(
+            mine_once(&mut inner).is_some(),
+            "difficulty 0 from the tip finds the first chunk"
+        );
+        assert_eq!(inner.difficulty, U256::zero());
     }
 
     #[test]

@@ -120,8 +120,14 @@ impl EpochConsensusContext {
     /// Height within the difficulty window: from genesis before activation,
     /// from E after it.
     fn adjustment_height(&self, height: u64) -> u64 {
-        self.resize
-            .map_or(height, |state| height - state.activation_height)
+        self.resize.map_or(height, |state| {
+            debug_assert!(
+                height >= state.activation_height,
+                "height {height} precedes the resize activation at {}",
+                state.activation_height
+            );
+            height.saturating_sub(state.activation_height)
+        })
     }
 }
 
