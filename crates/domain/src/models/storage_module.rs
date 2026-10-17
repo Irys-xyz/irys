@@ -6058,12 +6058,6 @@ impl StorageModule {
         true
     }
 
-    /// Test utility function
-    pub fn print_pending_writes(&self) {
-        let pending = self.pending_writes.read().unwrap();
-        debug!("pending_writes: {:?}", pending);
-    }
-
     /// Clear an orphaned partition range and publish `Uninitialized`.
     ///
     /// The interval rewrite is last. It waits on the disk lane, and the lane
