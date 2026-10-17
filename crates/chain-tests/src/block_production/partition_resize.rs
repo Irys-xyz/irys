@@ -1,11 +1,11 @@
 //! Scaled partition-resize transition on actual node services. No data transaction spans slots.
 use crate::utils::IrysNodeTest;
-use irys_types::{NodeConfig, UnixTimestamp, partition_resize::PartitionResize};
+use irys_types::{NodeConfig, UnixTimestamp, hardfork_config::Estuary};
 use std::time::Duration;
 
 #[test_log::test(tokio::test)]
 async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
-    let resize = PartitionResize {
+    let resize = Estuary {
         activation_timestamp: UnixTimestamp::from_secs(0),
         partition_chunks: 8,
         recall_chunks: 2,
@@ -20,7 +20,7 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
     c.block_migration_depth = 2;
     c.block_tree_depth = 6;
     c.epoch.submit_ledger_epoch_length = 100;
-    c.hardforks.partition_resize = Some(resize);
+    c.hardforks.estuary = Some(resize);
     let node = IrysNodeTest::new_genesis(config)
         .start_and_wait_for_packing("RESIZE", 30)
         .await;
@@ -257,14 +257,14 @@ async fn heavy_partition_resize_reorg_selects_branch_activation() -> eyre::Resul
     c.block_migration_depth = 10;
     c.block_tree_depth = 20;
     c.epoch.submit_ledger_epoch_length = 100;
-    c.hardforks.partition_resize = Some(PartitionResize {
+    c.hardforks.estuary = Some(Estuary {
         activation_timestamp: UnixTimestamp::from_secs(0),
         partition_chunks: 8,
         recall_chunks: 2,
         target_ingress_bytes_per_second: 32,
         minimum_partition_ids: 0,
     });
-    let resize = c.hardforks.partition_resize.take().unwrap();
+    let resize = c.hardforks.estuary.take().unwrap();
     let genesis = IrysNodeTest::new_genesis(config)
         .start_and_wait_for_packing("RESIZE_FORK", 30)
         .await;
@@ -284,7 +284,7 @@ async fn heavy_partition_resize_reorg_selects_branch_activation() -> eyre::Resul
     let mut stopped_peer = peer.stop().await;
     let mut stopped_genesis = genesis.stop().await;
     for config in [&mut stopped_genesis.cfg, &mut stopped_peer.cfg] {
-        config.consensus.get_mut().hardforks.partition_resize = Some(PartitionResize {
+        config.consensus.get_mut().hardforks.estuary = Some(Estuary {
             activation_timestamp,
             ..resize
         });

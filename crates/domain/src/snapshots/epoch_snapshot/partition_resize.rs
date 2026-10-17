@@ -29,7 +29,7 @@ impl EpochSnapshot {
             .config
             .consensus
             .hardforks
-            .partition_resize
+            .estuary
             .expect("activation requires resize parameters");
         let state = PartitionResizeState::activate(
             params,
@@ -110,7 +110,7 @@ mod tests {
     use eyre::Result;
     use irys_types::{
         Config, DataLedger, H256, NodeConfig, UnixTimestamp, UnixTimestampMs,
-        partition_resize::PartitionResize,
+        hardfork_config::Estuary,
     };
 
     fn parent() -> EpochSnapshot {
@@ -122,7 +122,7 @@ mod tests {
         c.difficulty_adjustment.difficulty_adjustment_interval = 4;
         c.difficulty_adjustment.block_time = 1;
         c.epoch.capacity_scalar = 0; // Isolate the one-time baseline from the reserve policy.
-        c.hardforks.partition_resize = Some(PartitionResize {
+        c.hardforks.estuary = Some(Estuary {
             activation_timestamp: UnixTimestamp::from_secs(10),
             partition_chunks: 40,
             recall_chunks: 2,
@@ -229,7 +229,7 @@ mod tests {
                 .config
                 .consensus
                 .hardforks
-                .partition_resize
+                .estuary
                 .unwrap()
                 .activation_difficulty(previous.diff, 10)
         );

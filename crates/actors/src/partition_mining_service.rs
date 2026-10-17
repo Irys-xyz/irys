@@ -104,7 +104,7 @@ impl PartitionMiningServiceInner {
     }
 
     pub fn with_block_tree(mut self, tree: irys_domain::BlockTreeReadGuard) -> Self {
-        if self.config.consensus.hardforks.partition_resize.is_some() {
+        if self.config.consensus.hardforks.estuary.is_some() {
             self.block_tree = Some(tree);
         }
         self

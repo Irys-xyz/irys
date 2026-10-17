@@ -64,7 +64,7 @@ New IDs follow the existing pledge-assignment rules. Peers provision additional 
 
 ## Hardfork boundary
 
-Following Cascade's convention, activation block **E** is the first positive-height epoch block whose timestamp meets or exceeds the partition-resize fork's activation timestamp. Require empty data ledgers at activation; mainnet's separate data-transaction prohibition outside master protects this rollout assumption.
+Following Cascade's convention, activation block **E** is the first positive-height epoch block whose timestamp meets or exceeds the activation timestamp of the Estuary hardfork. Require empty data ledgers at activation; mainnet's separate data-transaction prohibition outside master protects this rollout assumption.
 
 1. **E is mined under the old proof rules.** Its epoch tasks establish the new geometry, target-based allocation, and expanded ID supply.
 2. **E publishes the difficulty for its children.** Apply the normal old-regime adjustment if due, then increase the winning-hash count by a factor of five, capped at the full hash space, to account for recalls falling from 400 to 80. Reset the adjustment timestamp and window origin to E, with subsequent adjustments at E + n × interval. Producer, validator, and cumulative-weight accounting must agree on this transition.

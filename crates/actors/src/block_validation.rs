@@ -3740,7 +3740,7 @@ pub async fn recall_recall_range_is_valid(
     let epoch = block_tree_guard
         .read()
         .get_epoch_snapshot(&block.previous_block_hash);
-    if epoch.is_none() && config.hardforks.partition_resize.is_some() {
+    if epoch.is_none() && config.hardforks.estuary.is_some() {
         return Err(RecallRangeError::StepsUnavailable(eyre::eyre!(
             "parent epoch unavailable for partition geometry"
         )));
@@ -7698,7 +7698,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                partition_resize: None,
+                estuary: None,
             };
 
             let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
@@ -9413,7 +9413,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                partition_resize: None,
+                estuary: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -9431,7 +9431,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
-                partition_resize: None,
+                estuary: None,
             },
             ..ConsensusConfig::testing()
         }

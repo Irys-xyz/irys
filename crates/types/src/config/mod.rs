@@ -176,7 +176,7 @@ impl Config {
             self.consensus.num_chunks_in_recall_range > 0,
             "num_chunks_in_recall_range must be > 0"
         );
-        if let Some(resize) = self.consensus.hardforks.partition_resize {
+        if let Some(resize) = self.consensus.hardforks.estuary {
             resize.validate(&self.consensus)?;
         }
         // Zero → genesis capacity math hits log10(0) / NaN during epoch-snapshot build.

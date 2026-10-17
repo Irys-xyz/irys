@@ -53,7 +53,7 @@ impl ResizeJournal {
             config
                 .consensus
                 .hardforks
-                .partition_resize
+                .estuary
                 .is_some_and(|r| r.partition_chunks == self.retained_chunks),
             "storage resize journal does not match the configured partition-resize geometry"
         );
@@ -205,7 +205,7 @@ impl StorageModule {
 mod tests {
     use super::*;
     use irys_testing_utils::TempDirBuilder;
-    use irys_types::{NodeConfig, UnixTimestamp, partition_resize::PartitionResize};
+    use irys_types::{NodeConfig, UnixTimestamp, hardfork_config::Estuary};
 
     #[test]
     fn partition_resize_preserves_prefix_and_resumes_interrupted_shrink() -> Result<()> {
@@ -216,7 +216,7 @@ mod tests {
             let c = node.consensus.get_mut();
             c.chunk_size = 32;
             c.num_chunks_in_partition = 10;
-            c.hardforks.partition_resize = Some(PartitionResize {
+            c.hardforks.estuary = Some(Estuary {
                 activation_timestamp: UnixTimestamp::from_secs(0),
                 partition_chunks: 4,
                 recall_chunks: 1,
@@ -225,7 +225,7 @@ mod tests {
             });
             let config = Config::new_with_random_peer_id(node);
             let state = PartitionResizeState {
-                params: config.consensus.hardforks.partition_resize.unwrap(),
+                params: config.consensus.hardforks.estuary.unwrap(),
                 activation_height: config.consensus.epoch.num_blocks_in_epoch,
                 activation_hash: H256::repeat_byte(7),
                 sampling_origin: 2,

@@ -1,4 +1,4 @@
-//! Partition-resize hardfork geometry and deterministic capacity arithmetic.
+//! Estuary hardfork: partition-resize geometry and deterministic capacity arithmetic.
 //! These rules are resolved from the parent epoch snapshot, never wall-clock time.
 use crate::{
     ConsensusConfig, H256, IrysBlockHeader, U256, UnixTimestamp,
@@ -52,7 +52,7 @@ impl PartitionGeometry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PartitionResize {
+pub struct Estuary {
     /// Timestamp (seconds since epoch) at which this hardfork activates. Like
     /// Cascade, activation block E is the first positive-height epoch block
     /// whose timestamp meets or exceeds it.
@@ -65,7 +65,7 @@ pub struct PartitionResize {
     pub minimum_partition_ids: u64,
 }
 
-impl PartitionResize {
+impl Estuary {
     /// The proposed mainnet parameters, activating at `activation_timestamp`.
     /// There is deliberately no `Default`: an implicit activation time would be
     /// a consensus footgun.
@@ -119,10 +119,10 @@ impl PartitionResize {
         Ok(())
     }
 
-    /// Like Cascade: the first epoch block at or after the fork's timestamp
+    /// Like Cascade: the first epoch block at or after Estuary's timestamp
     /// establishes the rules used by its children.
     pub fn activation_due(config: &ConsensusConfig, height: u64, timestamp: UnixTimestamp) -> bool {
-        config.hardforks.partition_resize.is_some_and(|r| {
+        config.hardforks.estuary.is_some_and(|r| {
             r.is_activation_block(config.epoch.num_blocks_in_epoch, height, timestamp)
         })
     }
@@ -195,7 +195,7 @@ impl PartitionResize {
 /// Keeping the original inventory floor prevents repeated expansion on later epochs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartitionResizeState {
-    pub params: PartitionResize,
+    pub params: Estuary,
     pub activation_height: u64,
     pub activation_hash: H256,
     pub sampling_origin: u64,
@@ -205,7 +205,7 @@ pub struct PartitionResizeState {
 
 impl PartitionResizeState {
     pub fn activate(
-        params: PartitionResize,
+        params: Estuary,
         config: &ConsensusConfig,
         block: &IrysBlockHeader,
         inventory: u64,
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn mainnet_partition_resize_arithmetic() -> Result<()> {
         let config = ConsensusConfig::mainnet();
-        let resize = PartitionResize::proposed(UnixTimestamp::from_secs(0));
+        let resize = Estuary::proposed(UnixTimestamp::from_secs(0));
         resize.validate(&config)?;
         assert_eq!(
             resize.partition_chunks * config.chunk_size,
@@ -270,44 +270,43 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.epoch.num_blocks_in_epoch = 6;
         config.difficulty_adjustment.difficulty_adjustment_interval = 4;
-        config.hardforks.partition_resize =
-            Some(PartitionResize::proposed(UnixTimestamp::from_secs(10)));
+        config.hardforks.estuary = Some(Estuary::proposed(UnixTimestamp::from_secs(10)));
         for height in [0, 4, 8, 13] {
-            assert!(!PartitionResize::activation_due(
+            assert!(!Estuary::activation_due(
                 &config,
                 height,
                 UnixTimestamp::from_secs(10)
             ));
         }
-        assert!(!PartitionResize::activation_due(
+        assert!(!Estuary::activation_due(
             &config,
             12,
             UnixTimestamp::from_secs(9)
         ));
-        assert!(PartitionResize::activation_due(
+        assert!(Estuary::activation_due(
             &config,
             12,
             UnixTimestamp::from_secs(10)
         ));
         // Height 6 is an epoch but not an old difficulty boundary (interval 4).
-        assert!(PartitionResize::activation_due(
+        assert!(Estuary::activation_due(
             &config,
             6,
             UnixTimestamp::from_secs(10)
         ));
-        assert!(PartitionResize::activation_due(
+        assert!(Estuary::activation_due(
             &config,
             18,
             UnixTimestamp::from_secs(11)
         ));
         // Scheduled independently of Delta: Delta alone never activates it.
-        config.hardforks.partition_resize = None;
+        config.hardforks.estuary = None;
         config.hardforks.delta = Some(crate::hardfork_config::Delta {
             activation_timestamp: UnixTimestamp::from_secs(0),
             initial_slots_per_new_ledger:
                 crate::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
         });
-        assert!(!PartitionResize::activation_due(
+        assert!(!Estuary::activation_due(
             &config,
             12,
             UnixTimestamp::from_secs(100)
@@ -316,7 +315,7 @@ mod tests {
 
     #[test]
     fn partition_resize_difficulty_scales_inclusive_winners() {
-        let resize = PartitionResize::proposed(UnixTimestamp::from_secs(0));
+        let resize = Estuary::proposed(UnixTimestamp::from_secs(0));
         for winners in [1_u64, 2, 100, 1_000_000] {
             let diff = U256::MAX - U256::from(winners - 1);
             let new = resize.activation_difficulty(diff, 400);
@@ -331,17 +330,17 @@ mod tests {
     fn partition_resize_rejects_invalid_geometry_and_overflow() {
         let config = ConsensusConfig::mainnet();
         for resize in [
-            PartitionResize {
+            Estuary {
                 recall_chunks: 0,
-                ..PartitionResize::proposed(UnixTimestamp::from_secs(0))
+                ..Estuary::proposed(UnixTimestamp::from_secs(0))
             },
-            PartitionResize {
+            Estuary {
                 partition_chunks: 1,
-                ..PartitionResize::proposed(UnixTimestamp::from_secs(0))
+                ..Estuary::proposed(UnixTimestamp::from_secs(0))
             },
-            PartitionResize {
+            Estuary {
                 target_ingress_bytes_per_second: 0,
-                ..PartitionResize::proposed(UnixTimestamp::from_secs(0))
+                ..Estuary::proposed(UnixTimestamp::from_secs(0))
             },
         ] {
             assert!(resize.validate(&config).is_err());
@@ -350,7 +349,7 @@ mod tests {
         huge.epoch.num_blocks_in_epoch = u64::MAX;
         huge.difficulty_adjustment.block_time = u64::MAX;
         assert!(
-            PartitionResize::proposed(UnixTimestamp::from_secs(0))
+            Estuary::proposed(UnixTimestamp::from_secs(0))
                 .reserve_chunks(&huge)
                 .is_err()
         );
