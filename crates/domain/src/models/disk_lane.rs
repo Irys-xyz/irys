@@ -464,6 +464,15 @@ pub(super) struct DiskGate {
     /// One armed pause in the entropy-copy windows. Production builds omit it.
     #[cfg(test)]
     entropy_pack_pause: super::PauseGate<EntropyPackPause>,
+    /// Instants `finish_span_read` uses as the pread return, one per span.
+    #[cfg(test)]
+    span_read_done: Mutex<Vec<(u32, Instant)>>,
+    /// Ingress stages recorded for this module. The histogram has no test reader.
+    #[cfg(test)]
+    ingest_stages: Mutex<Vec<(&'static str, Duration)>>,
+    /// Holds each inflight pread after `read_exact_at` returns.
+    #[cfg(test)]
+    inflight_pread_hold: InflightPreadHold,
 }
 
 /// Test barrier around a copied entropy pad. The slot is not in the sweep
@@ -638,6 +647,69 @@ struct SpanLoad {
     buf: Vec<u8>,
     /// `entropy_write_epoch` captured before this pread.
     entropy_epoch: u64,
+    /// When `read_exact_at` returned. Later spans must not inherit this.
+    read_done: Instant,
+}
+
+/// Test hold after an inflight entropy pread returns. Production builds omit it.
+#[cfg(test)]
+struct InflightPreadHold {
+    armed: Mutex<bool>,
+    arrived: Mutex<usize>,
+    arrived_cv: Condvar,
+    release: Mutex<bool>,
+    release_cv: Condvar,
+}
+
+#[cfg(test)]
+impl InflightPreadHold {
+    fn new() -> Self {
+        Self {
+            armed: Mutex::new(false),
+            arrived: Mutex::new(0),
+            arrived_cv: Condvar::new(),
+            release: Mutex::new(false),
+            release_cv: Condvar::new(),
+        }
+    }
+
+    fn arm(&self) {
+        *self.release.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        *self.arrived.lock().unwrap_or_else(PoisonError::into_inner) = 0;
+        *self.armed.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    fn wait_after_pread(&self) {
+        if !*self.armed.lock().unwrap_or_else(PoisonError::into_inner) {
+            return;
+        }
+        {
+            let mut arrived = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
+            *arrived = arrived.saturating_add(1);
+            self.arrived_cv.notify_all();
+        }
+        let mut release = self.release.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*release {
+            release = self
+                .release_cv
+                .wait(release)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn wait_arrived(&self, count: usize, timeout: Duration) -> bool {
+        let guard = self.arrived.lock().unwrap_or_else(PoisonError::into_inner);
+        let (guard, _) = self
+            .arrived_cv
+            .wait_timeout_while(guard, timeout, |arrived| *arrived < count)
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard >= count
+    }
+
+    fn release(&self) {
+        *self.release.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.release_cv.notify_all();
+    }
 }
 
 pub(super) struct WriteHold<'a> {
@@ -724,6 +796,12 @@ impl DiskGate {
             span_walk_slots: AtomicU64::new(0),
             #[cfg(test)]
             entropy_pack_pause: super::PauseGate::new(),
+            #[cfg(test)]
+            span_read_done: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            ingest_stages: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            inflight_pread_hold: InflightPreadHold::new(),
         }
     }
 
@@ -1924,13 +2002,16 @@ impl StorageModule {
             self.fail_span(span, &error);
             return true;
         }
+        // The pread has returned. A pause or a later span's XOR is not part
+        // of this span's queue time.
+        let read_done = Instant::now();
         // Captured before the file lock drops. A later entropy pwrite needs
         // that lock, so it cannot land and then hide behind this value.
         let entropy_epoch = self.entropy_write_epoch.load(Ordering::SeqCst);
         drop(file);
         #[cfg(test)]
         self.wait_if_sync_paused(super::SyncPausePoint::AfterEntropyPread);
-        self.finish_span_read(span, start, &buf, entropy_epoch);
+        self.finish_span_read(span, start, &buf, entropy_epoch, read_done);
         true
     }
 
@@ -1995,7 +2076,13 @@ impl StorageModule {
         });
         for (span, result) in spans.into_iter().zip(results) {
             match result {
-                Ok(load) => self.finish_span_read(span, load.start, &load.buf, load.entropy_epoch),
+                Ok(load) => self.finish_span_read(
+                    span,
+                    load.start,
+                    &load.buf,
+                    load.entropy_epoch,
+                    load.read_done,
+                ),
                 Err(error) => self.fail_span(span, &error),
             }
         }
@@ -2034,10 +2121,16 @@ impl StorageModule {
                     "entropy sweep at offset {start} count {span_chunks}: {error}"
                 ))
             })?;
+        // Before the test hold. The hold is after the pread, and the join
+        // waits for every span, so a stamp here is this span's return.
+        let read_done = Instant::now();
+        #[cfg(test)]
+        self.disk.inflight_pread_hold.wait_after_pread();
         Ok(SpanLoad {
             start,
             buf,
             entropy_epoch,
+            read_done,
         })
     }
 
@@ -2047,8 +2140,14 @@ impl StorageModule {
         start: PartitionChunkOffset,
         buf: &[u8],
         entropy_epoch: u64,
+        read_done: Instant,
     ) {
-        let read_done = Instant::now();
+        #[cfg(test)]
+        self.disk
+            .span_read_done
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((start.0, read_done));
         let chunk_len = self.config.consensus.chunk_size.max(1) as usize;
         let mut failed_groups = std::collections::HashSet::new();
         let mut accepted = Vec::new();
@@ -2537,7 +2636,7 @@ impl StorageModule {
         if priority == WritePriority::Ingress
             && let Some(read_done) = read_done
         {
-            super::super::index_read_metrics::note_ingest_stage(
+            self.note_ingress_stage(
                 "queue_to_entropy",
                 read_done.saturating_duration_since(enqueued_at),
             );
@@ -2613,11 +2712,8 @@ impl StorageModule {
                 .entropy_readahead_hits
                 .fetch_add(1, Ordering::SeqCst);
         }
-        if inserted.is_ok() && priority == WritePriority::Ingress && read_done.is_some() {
-            super::super::index_read_metrics::note_ingest_stage(
-                "entropy_to_packed",
-                pack_started.elapsed(),
-            );
+        if inserted.is_ok() && priority == WritePriority::Ingress {
+            self.note_ingress_stage("entropy_to_packed", pack_started.elapsed());
         }
         if let Err(error) = inserted {
             if matches!(error, WriteDataChunkError::Backpressure) {
@@ -2628,6 +2724,16 @@ impl StorageModule {
             return;
         }
         self.mark_group_slot_done(group, None);
+    }
+
+    fn note_ingress_stage(&self, stage: &'static str, elapsed: Duration) {
+        super::super::index_read_metrics::note_ingest_stage(stage, elapsed);
+        #[cfg(test)]
+        self.disk
+            .ingest_stages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((stage, elapsed));
     }
 
     fn slot_still_valid(
@@ -5331,6 +5437,93 @@ mod tests {
         assert!(module.has_ready_disk_span());
         assert_eq!(module.read_grace_remaining(), Some(Duration::ZERO));
         assert_eq!(taken_offsets(&module).expect("the write landed"), vec![0]);
+        Ok(())
+    }
+
+    fn ingress_stage_names(module: &super::super::StorageModule) -> Vec<&'static str> {
+        module
+            .disk
+            .ingest_stages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect()
+    }
+
+    fn assert_memory_pack_staged(module: &super::super::StorageModule) {
+        let stages = ingress_stage_names(module);
+        assert!(
+            stages.contains(&"entropy_to_packed"),
+            "memory pack did not record entropy_to_packed: {stages:?}"
+        );
+        assert!(
+            !stages.contains(&"queue_to_entropy"),
+            "memory pack recorded queue_to_entropy: {stages:?}"
+        );
+    }
+
+    /// A cache hit does the XOR and the packed insert. It did not pread.
+    #[test]
+    fn cached_pack_records_entropy_to_packed_only() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_stage")?;
+        cache_durable_entropy(&module, 0x11)?;
+        module.write_data_chunk(&chunk)?;
+        assert_fresh_pad_packed(&module);
+        assert_memory_pack_staged(&module);
+        Ok(())
+    }
+
+    /// Pending entropy takes the same fold. It did not pread.
+    #[test]
+    fn pending_pack_records_entropy_to_packed_only() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("pending_stage")?;
+        queue_entropy(&module, 0x11);
+        module.write_data_chunk(&chunk)?;
+        assert_fresh_pad_packed(&module);
+        assert_memory_pack_staged(&module);
+        Ok(())
+    }
+
+    /// Each inflight span's queue stage ends when that pread returns.
+    /// The join, and the XOR of an earlier span, are not part of it.
+    #[test]
+    fn each_inflight_span_stamps_its_pread_return() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("span_stamp", 8, 1, 0)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(2),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        insert_slots(&module, &[0, 2], Instant::now());
+        module.disk.inflight_pread_hold.arm();
+        std::thread::scope(|scope| {
+            let sweep = scope.spawn(|| module.sweep_inflight());
+            assert!(
+                module
+                    .disk
+                    .inflight_pread_hold
+                    .wait_arrived(2, Duration::from_secs(5)),
+                "the inflight preads did not both return"
+            );
+            let release_at = Instant::now();
+            module.disk.inflight_pread_hold.release();
+            sweep.join().expect("inflight sweep");
+            let stamps = module.disk.span_read_done.lock().unwrap().clone();
+            assert_eq!(stamps.len(), 2, "{stamps:?}");
+            for (offset, at) in stamps {
+                assert!(
+                    at < release_at,
+                    "offset {offset} was stamped at {at:?}, after the preads were released at {release_at:?}"
+                );
+            }
+        });
         Ok(())
     }
 }
