@@ -10,9 +10,10 @@ use crate::{
 };
 use eyre::WrapErr as _;
 use irys_domain::{ChunkType, StorageModule};
-use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
+use irys_efficient_sampling::Ranges;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_storage::ii;
+use irys_types::partition_resize::PartitionGeometry;
 use irys_types::{
     Base64, ChunkDataPath, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
     PartitionChunkRange, ProofDeserialize as _, SendTraced as _, TokioServiceHandle, TxPath, U256,
@@ -51,6 +52,9 @@ impl PartitionMiningController {
 #[derive(Debug)]
 pub struct PartitionMiningServiceInner {
     config: Config,
+    geometry: PartitionGeometry,
+    block_tree: Option<irys_domain::BlockTreeReadGuard>,
+    resize: Option<irys_types::partition_resize::PartitionResizeState>,
     service_senders: ServiceSenders,
     storage_module: Arc<StorageModule>,
     should_mine: bool,
@@ -64,9 +68,10 @@ pub struct PartitionMiningServiceInner {
 }
 
 /// Fresh recall-range rotation state sized for the partition.
-fn fresh_ranges(config: &irys_types::ConsensusConfig) -> Ranges {
+fn fresh_ranges(geometry: PartitionGeometry) -> Ranges {
     Ranges::new(
-        num_recall_ranges_in_partition(config)
+        geometry
+            .recall_ranges()
             .try_into()
             .expect("Recall ranges number exceeds usize representation"),
     )
@@ -84,15 +89,57 @@ impl PartitionMiningServiceInner {
     ) -> Self {
         Self {
             config: config.clone(),
+            geometry: PartitionGeometry::legacy(&config.consensus),
+            block_tree: None,
+            resize: None,
             service_senders,
             storage_module,
             should_mine: start_mining,
             difficulty: initial_difficulty,
-            ranges: fresh_ranges(&config.consensus),
+            ranges: fresh_ranges(PartitionGeometry::legacy(&config.consensus)),
             steps_guard,
             #[cfg(test)]
             data_path_lookups: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    pub fn with_block_tree(mut self, tree: irys_domain::BlockTreeReadGuard) -> Self {
+        if self.config.consensus.hardforks.estuary.is_some() {
+            self.block_tree = Some(tree);
+        }
+        self
+    }
+
+    /// Re-read geometry and difficulty from the validated tip before each step.
+    ///
+    /// The producer builds on the validated tip, so solutions are checked
+    /// against the tip's `diff` and the geometry of the tip's epoch snapshot.
+    /// Reading both from that block under one tree lock keeps them paired
+    /// across E and reorgs; the `update_difficulty` broadcast can arrive after
+    /// the seed for a step that already mines the resized geometry.
+    /// `update_difficulty` remains the only source for miners without a block
+    /// tree (Estuary unconfigured).
+    fn refresh_mining_context(&mut self) {
+        let Some(tree) = &self.block_tree else {
+            return;
+        };
+        let tree = tree.read();
+        // Both from the validated tip, not the longest-chain head, which can run
+        // ahead of validation and is not what the producer builds on.
+        let (Some(tip), Some(snapshot)) = (
+            tree.get_block(&tree.tip),
+            tree.get_epoch_snapshot(&tree.tip),
+        ) else {
+            return;
+        };
+        let context = snapshot.consensus_context();
+        if self.resize != context.resize() {
+            self.resize = context.resize();
+            self.geometry = context.geometry();
+            self.ranges = fresh_ranges(self.geometry);
+            self.ranges.last_step_num = self.geometry.sampling_origin - 1;
+        }
+        self.difficulty = tip.diff;
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -168,7 +215,8 @@ impl PartitionMiningServiceInner {
     /// next seed to reconstruct it from the healed buffer.
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_reanchored(&mut self) {
-        self.ranges = fresh_ranges(&self.config.consensus);
+        self.ranges = fresh_ranges(self.geometry);
+        self.ranges.last_step_num = self.geometry.sampling_origin - 1;
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -194,7 +242,11 @@ impl PartitionMiningServiceInner {
                 step, self.ranges.last_step_num
             );
             // calculate the nearest step lower or equal to step where recall ranges are reinitialized, as this is the step from where ranges will be recalculated
-            let reset_step = self.ranges.reset_step(step);
+            let reset_step = irys_efficient_sampling::reset_step_from_origin(
+                step,
+                self.ranges.num_recall_ranges_in_partition as u64,
+                self.geometry.sampling_origin,
+            )?;
             debug!(
                 "Near reset step is {} num recall ranges in partition {}",
                 reset_step, self.ranges.num_recall_ranges_in_partition
@@ -234,6 +286,10 @@ impl PartitionMiningServiceInner {
         vdf_step: u64,
         checkpoints: &H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
+        self.refresh_mining_context();
+        if self.resize.is_some_and(|r| vdf_step < r.sampling_origin) {
+            return Ok(None);
+        }
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
             None => {
@@ -246,12 +302,12 @@ impl PartitionMiningServiceInner {
         let recall_range_index = self.get_recall_range(vdf_step, &mining_seed, &partition_hash)?;
 
         // Starting chunk index within partition
-        let start_chunk_offset = (recall_range_index as u32)
-            .saturating_mul(self.config.consensus.num_chunks_in_recall_range as u32);
+        let start_chunk_offset =
+            (recall_range_index as u32).saturating_mul(self.geometry.recall_chunks as u32);
 
         let read_range = partition_chunk_offset_ie!(
             start_chunk_offset,
-            start_chunk_offset + self.config.consensus.num_chunks_in_recall_range as u32
+            start_chunk_offset + self.geometry.recall_chunks as u32
         );
 
         let chunks = self.storage_module.read_chunks(read_range)?;
@@ -305,9 +361,9 @@ impl PartitionMiningServiceInner {
                 "Solution Found - partition_id: {}, ledger_offset: {}/{}, range_offset: {}/{} difficulty {}",
                 self.storage_module.id,
                 partition_chunk_offset,
-                self.config.consensus.num_chunks_in_partition,
+                self.geometry.partition_chunks,
                 *partition_chunk_offset - start_chunk_offset,
-                self.config.consensus.num_chunks_in_recall_range,
+                self.geometry.recall_chunks,
                 self.difficulty
             );
             metrics::record_mining_solution_found();
@@ -1098,6 +1154,31 @@ mod tests {
             "only an all-0xff hash meets U256::MAX"
         );
         assert_eq!(inner.data_path_lookup_count(), 0);
+    }
+
+    /// With a block tree attached, the validated tip's difficulty wins over a
+    /// stale broadcast value: a reorg onto a tip whose diff equals its parent's
+    /// sends no broadcast, yet the miner must still mine the tip's target.
+    #[test]
+    fn tip_difficulty_overrides_stale_broadcast() {
+        let (_tmp, _storage, mut inner) = open_data_miner(U256::zero(), true);
+        inner.update_difficulty(U256::MAX);
+        assert!(
+            mine_once(&mut inner).is_none(),
+            "without a tree the broadcast difficulty is used"
+        );
+
+        let mut tip = irys_types::IrysBlockHeader::new_mock_header();
+        tip.diff = U256::zero();
+        irys_testing_utils::IrysBlockHeaderTestExt::test_sign(&mut tip);
+        inner.block_tree = Some(irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(
+            irys_domain::BlockTree::new(&tip, ConsensusConfig::testing()),
+        ))));
+        assert!(
+            mine_once(&mut inner).is_some(),
+            "difficulty 0 from the tip finds the first chunk"
+        );
+        assert_eq!(inner.difficulty, U256::zero());
     }
 
     #[test]

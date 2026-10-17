@@ -56,6 +56,9 @@ impl super::PackingStrategy for CpuPackingStrategy {
         let mut handles = Vec::new();
 
         for i in range_start..=range_end {
+            if u64::from(i) >= storage_module.partition_chunks() {
+                break;
+            }
             // Periodic sync to avoid memory buildup
             if i % short_writes_before_sync == 0 {
                 crate::packing_service::sync_with_warning(storage_module, "CPU packing (periodic)");
@@ -80,6 +83,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
             let handle = self.runtime_handle
                 .clone()
                 .spawn_blocking(move || {
+                    if u64::from(i) >= storage_module_clone.partition_chunks() { return; }
                     let mut out = Vec::with_capacity(chunk_size);
                     compute_entropy_chunk(
                         mining_address,

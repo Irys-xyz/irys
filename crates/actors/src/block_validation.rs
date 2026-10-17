@@ -1729,18 +1729,25 @@ pub async fn prevalidate_block(
     )?;
 
     // Check the difficulty
-    difficulty_is_valid(
-        block,
-        previous_block,
-        &config.consensus.difficulty_adjustment,
-    )?;
+    let consensus_context = parent_epoch_snapshot.consensus_context();
+    let (expected_diff, _) =
+        consensus_context.child_difficulty(block.height, block.timestamp, previous_block);
+    if block.diff != expected_diff {
+        return Err(PreValidationError::DifficultyMismatch {
+            expected: expected_diff,
+            got: block.diff,
+        });
+    }
 
     // Validate the last_diff_timestamp field
-    last_diff_timestamp_is_valid(
-        block,
-        previous_block,
-        &config.consensus.difficulty_adjustment,
-    )?;
+    let expected_timestamp =
+        consensus_context.child_last_diff_timestamp(block.height, block.timestamp, previous_block);
+    if block.last_diff_timestamp != expected_timestamp {
+        return Err(PreValidationError::LastDiffTimestampMismatch {
+            expected: expected_timestamp,
+            got: block.last_diff_timestamp,
+        });
+    }
 
     debug!(
         block.hash = ?block.block_hash,
@@ -3730,20 +3737,42 @@ pub async fn recall_recall_range_is_valid(
     buffer_suspect: bool,
 ) -> Result<(), RecallRangeError> {
     let global_step_number = block.vdf_limiter_info.global_step_number;
-    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step_number, config);
+    let epoch = block_tree_guard
+        .read()
+        .get_epoch_snapshot(&block.previous_block_hash);
+    if epoch.is_none() && config.hardforks.estuary.is_some() {
+        return Err(RecallRangeError::StepsUnavailable(eyre::eyre!(
+            "parent epoch unavailable for partition geometry"
+        )));
+    }
+    let geometry = epoch.as_ref().map_or_else(
+        || irys_types::partition_resize::PartitionGeometry::legacy(config),
+        |e| e.consensus_context().geometry(),
+    );
+    if u64::from(block.poa.partition_chunk_offset) >= geometry.partition_chunks {
+        return Err(RecallRangeError::Mismatch(eyre::eyre!(
+            "partition offset exceeds active geometry"
+        )));
+    }
+    let reset_step_number = irys_efficient_sampling::reset_step_from_origin(
+        global_step_number,
+        geometry.recall_ranges(),
+        geometry.sampling_origin,
+    )
+    .map_err(RecallRangeError::Mismatch)?;
     info!(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, global_step_number
     );
 
-    let recall_offset = usize::try_from(
-        u64::from(block.poa.partition_chunk_offset) / config.num_chunks_in_recall_range,
-    )
-    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall offset too large")))?;
-    let num_ranges = usize::try_from(irys_efficient_sampling::num_recall_ranges_in_partition(
-        config,
-    ))
-    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large")))?;
+    let recall_offset =
+        usize::try_from(u64::from(block.poa.partition_chunk_offset) / geometry.recall_chunks)
+            .map_err(|_| {
+                RecallRangeError::StepsUnavailable(eyre::eyre!("recall offset too large"))
+            })?;
+    let num_ranges = usize::try_from(geometry.recall_ranges()).map_err(|_| {
+        RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large"))
+    })?;
 
     // Ancestry rebuild when the local buffer cannot be trusted.
     let fork_local_check = |cause: String| -> Result<(), RecallRangeError> {
@@ -4616,6 +4645,10 @@ pub fn poa_is_valid(
     config: &ConsensusConfig,
     miner_address: &IrysAddress,
 ) -> Result<(), PreValidationError> {
+    let geometry = epoch_snapshot.consensus_context().geometry();
+    if u64::from(poa.partition_chunk_offset) >= geometry.partition_chunks {
+        return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+    }
     debug!("PoA validating");
     let poa_chunk_bytes: &[u8] = match &poa.chunk {
         Some(chunk) => chunk.as_ref(),
@@ -4646,7 +4679,7 @@ pub fn poa_is_valid(
             }
         })?;
         let ledger_chunk_offset =
-            slot_index_u64 * config.num_chunks_in_partition + u64::from(poa.partition_chunk_offset);
+            slot_index_u64 * geometry.partition_chunks + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)
@@ -7417,7 +7450,10 @@ pub fn get_assigned_ingress_proofs(
         let slot_ranges: BTreeMap<usize, LedgerChunkRange> = slot_indexes
             .iter()
             .map(|index| {
-                let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
+                let num_chunks_in_partition = epoch_snapshot
+                    .consensus_context()
+                    .geometry()
+                    .partition_chunks;
                 let start = *index as u64 * num_chunks_in_partition;
                 let end = start + num_chunks_in_partition;
                 let range = LedgerChunkRange(ie(
@@ -7662,6 +7698,7 @@ mod tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                estuary: None,
             };
 
             let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
@@ -9376,6 +9413,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                estuary: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -9393,6 +9431,7 @@ mod commitment_version_tests {
                 borealis: None,
                 cascade: None,
                 delta: None,
+                estuary: None,
             },
             ..ConsensusConfig::testing()
         }

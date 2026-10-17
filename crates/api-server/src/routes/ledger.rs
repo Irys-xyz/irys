@@ -5,6 +5,7 @@ use actix_web::web::{Data, Json, Path, Query};
 use awc::http::StatusCode;
 use irys_database::{block_header_by_hash, database, db::IrysDatabaseExt as _};
 use irys_domain::{BlockBounds, BlockBoundsError, BlockIndex};
+use irys_types::partition_resize::PartitionGeometry;
 use irys_types::{
     DataLedger, DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, IrysBlockHeader,
     LedgerChunkOffset,
@@ -496,7 +497,10 @@ pub async fn get_epoch_ledger_summary(
         ledger,
         chain_height,
         tip_total_chunks,
-        app_state.config.consensus.num_chunks_in_partition,
+        epoch_snapshot
+            .consensus_context()
+            .geometry()
+            .partition_chunks,
     )?;
     Ok(Json(response))
 }
@@ -656,8 +660,12 @@ pub async fn get_tx_by_ledger_offset(
     path: Path<LedgerOffsetPath>,
 ) -> Result<Json<LedgerOffsetTxResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
+    let geometry = get_canonical_epoch_snapshot(&state)
+        .consensus_context()
+        .geometry();
     Ok(Json(resolve_tx_by_ledger_offset(
         &state,
+        geometry,
         ledger,
         path.ledger_offset,
     )?))
@@ -675,13 +683,13 @@ pub async fn get_tx_by_slot_offset(
     path: Path<SlotOffsetPath>,
 ) -> Result<Json<LedgerOffsetTxResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
-    let ledger_offset = slot_to_ledger_offset(
-        path.slot_index,
-        path.slot_offset,
-        state.config.consensus.num_chunks_in_partition,
-    )
-    .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;
-    resolve_tx_by_ledger_offset(&state, ledger, ledger_offset)
+    let geometry = get_canonical_epoch_snapshot(&state)
+        .consensus_context()
+        .geometry();
+    let ledger_offset =
+        slot_to_ledger_offset(path.slot_index, path.slot_offset, geometry.partition_chunks)
+            .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;
+    resolve_tx_by_ledger_offset(&state, geometry, ledger, ledger_offset)
         .map(Json)
         .map_err(|err| match err {
             // Restate not-found errors in the client's slot coordinates — the
@@ -721,8 +729,11 @@ pub async fn get_txs_by_ledger_offset_range(
     query: Query<LedgerTxRangeQuery>,
 ) -> Result<Json<LedgerOffsetTxsResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
+    let geometry = get_canonical_epoch_snapshot(&state)
+        .consensus_context()
+        .geometry();
     Ok(Json(resolve_txs_by_ledger_range(
-        &state, ledger, query.from, query.to,
+        &state, geometry, ledger, query.from, query.to,
     )?))
 }
 
@@ -732,14 +743,17 @@ pub async fn get_txs_by_slot_offset_range(
     query: Query<LedgerTxRangeQuery>,
 ) -> Result<Json<LedgerOffsetTxsResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
+    let geometry = get_canonical_epoch_snapshot(&state)
+        .consensus_context()
+        .geometry();
     let (from, to) = slot_range_to_ledger_range(
         path.slot_index,
         query.from,
         query.to,
-        state.config.consensus.num_chunks_in_partition,
+        geometry.partition_chunks,
     )
     .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;
-    resolve_txs_by_ledger_range(&state, ledger, from, to)
+    resolve_txs_by_ledger_range(&state, geometry, ledger, from, to)
         .map(Json)
         .map_err(|err| match err {
             ApiError::CustomWithStatus(msg, StatusCode::NOT_FOUND) => ApiError::CustomWithStatus(
@@ -841,12 +855,13 @@ fn validate_ledger_tx_range(from: u64, to: u64, max_window: u64) -> Result<(), S
 /// lookups below can't miss for in-snapshot index entries.)
 fn resolve_tx_by_ledger_offset(
     state: &ApiState,
+    geometry: PartitionGeometry,
     ledger: DataLedger,
     ledger_offset: u64,
 ) -> Result<LedgerOffsetTxResponse, ApiError> {
     let consensus = &state.config.consensus;
     let chunk_size = consensus.chunk_size;
-    let num_chunks_in_partition = consensus.num_chunks_in_partition;
+    let num_chunks_in_partition = geometry.partition_chunks;
 
     state
         .db
@@ -922,13 +937,14 @@ fn resolve_tx_by_ledger_offset(
 /// the frontier is clamped. Empty `[from, from)` is 200 with no rows.
 fn resolve_txs_by_ledger_range(
     state: &ApiState,
+    geometry: PartitionGeometry,
     ledger: DataLedger,
     from: u64,
     to: u64,
 ) -> Result<LedgerOffsetTxsResponse, ApiError> {
     let consensus = &state.config.consensus;
     let chunk_size = consensus.chunk_size;
-    let num_chunks_in_partition = consensus.num_chunks_in_partition;
+    let num_chunks_in_partition = geometry.partition_chunks;
 
     validate_ledger_tx_range(from, to, num_chunks_in_partition)
         .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;

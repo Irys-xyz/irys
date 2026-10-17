@@ -29,7 +29,7 @@ impl PackingRequest {
             })?;
 
         // Validate chunk range is within partition bounds
-        let max_chunks = storage_module.config.consensus.num_chunks_in_partition;
+        let max_chunks = storage_module.partition_chunks();
         if *chunk_range.0.end() >= max_chunks as u32 {
             return Err(PackingError::InvalidRange {
                 requested: chunk_range,

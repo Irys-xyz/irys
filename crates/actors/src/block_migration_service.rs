@@ -298,6 +298,21 @@ impl BlockMigrationService {
         Ok(())
     }
 
+    /// Update logical ledger geometry on canonical adoption, including reorgs.
+    /// Destructive truncation is separately gated on finality by the storage service.
+    pub fn update_partition_geometry(
+        &self,
+        epoch: &irys_domain::EpochSnapshot,
+    ) -> eyre::Result<()> {
+        if let Some(modules) = &self.storage_modules_guard {
+            for module in modules.read().iter() {
+                module
+                    .set_partition_chunks(epoch.consensus_context().geometry().partition_chunks)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
         self.storage_modules_guard = Some(guard);
     }

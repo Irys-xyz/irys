@@ -61,6 +61,7 @@ pub struct StorageModuleServiceInner {
     shutdown: Shutdown,
     /// Last heal pass left unrepaired work — run periodic heal until clear.
     index_heal_needs_retry: bool,
+    resize_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for StorageModuleServiceInner {
@@ -97,6 +98,7 @@ impl StorageModuleServiceInner {
             service_senders,
             config,
             shutdown,
+            resize_task: None,
             index_heal_needs_retry: true, // force heal until first pass reports clean
         }
     }
@@ -130,8 +132,66 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
+    fn start_partition_resize(&mut self) -> eyre::Result<()> {
+        if self.resize_task.is_some() {
+            return Ok(());
+        }
+        let epoch = self.block_tree.read().canonical_epoch_snapshot();
+        let Some(resize) = epoch.partition_resize else {
+            return Ok(());
+        };
+        let index = self.block_index.read();
+        let finalized = irys_domain::forkchoice_markers::finalized_height(
+            index.latest_height(),
+            self.config.consensus.block_tree_depth,
+            u64::from(self.config.consensus.block_migration_depth),
+        );
+        if finalized < resize.activation_height {
+            return Ok(());
+        }
+        eyre::ensure!(
+            index
+                .get_item(resize.activation_height)
+                .is_some_and(|b| b.block_hash == resize.activation_hash),
+            "finalized partition resize activation differs from canonical branch"
+        );
+        // Finality is irreversible. The block index is a shared read handle;
+        // clone modules out of the registry lock before any disk IO and run
+        // migration on the blocking pool rather than on this service's tick.
+        let modules = self.storage_modules.read().unwrap().clone();
+        self.resize_task = Some(tokio::task::spawn_blocking(move || {
+            for module in modules {
+                match module.finalize_partition_resize(&resize) {
+                    Ok(true) => tracing::info!(
+                        storage_module.id = module.id,
+                        activation.height = resize.activation_height,
+                        retained_chunks = resize.params.partition_chunks,
+                        "Completed finalized partition resize"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => error!(
+                        storage_module.id = module.id,
+                        "partition resize failed; will retry: {e:?}"
+                    ),
+                }
+            }
+        }));
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
-    fn tick(&self) {
+    async fn tick(&mut self) {
+        if self
+            .resize_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+            && let Err(e) = self.resize_task.take().expect("finished task").await
+        {
+            error!("partition resize worker failed; will retry: {e:?}");
+        }
+        if let Err(e) = self.start_partition_resize() {
+            error!("finalized partition resize failed; will retry: {e:?}");
+        }
         let storage_modules = {
             let guard = self.storage_modules.read().unwrap();
             guard.clone()
@@ -584,7 +644,7 @@ impl StorageModuleService {
                     }
                 }
                 _ = interval.tick() => {
-                     self.inner.tick();
+                     self.inner.tick().await;
                 }
             }
         }
@@ -596,6 +656,11 @@ impl StorageModuleService {
             self.inner.handle_message(msg).instrument(span).await?
         }
 
+        if let Some(task) = self.inner.resize_task.take()
+            && let Err(e) = task.await
+        {
+            error!("partition resize worker failed during shutdown: {e:?}");
+        }
         tracing::info!("shutting down StorageModule Service gracefully");
         Ok(())
     }
