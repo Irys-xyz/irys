@@ -1900,6 +1900,21 @@ impl IrysNode {
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        // Estuary can only activate on a chain whose data ledgers are empty;
+        // fail here instead of at the first epoch block past its timestamp.
+        if config.consensus.hardforks.estuary.is_some()
+            && epoch_snapshot.partition_resize.is_none()
+            && let Some(ledger) = latest_block
+                .data_ledgers
+                .iter()
+                .find(|l| l.total_chunks != 0)
+        {
+            eyre::bail!(
+                "Estuary is scheduled but ledger {} already holds {} chunks, so its activation block could never be valid; remove [hardforks.estuary] or start from an empty chain",
+                ledger.ledger_id,
+                ledger.total_chunks
+            );
+        }
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
 
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
@@ -2542,9 +2557,18 @@ impl IrysNode {
             // note: once we support submodules, this will probably need to change
             runtime_handle.spawn(async move {
                 for interval in uninitialized {
-                    if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval))
-                        && let Err(e) = sender.send(req).await
-                    {
+                    let req = match PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
+                        Ok(req) => req,
+                        Err(e) => {
+                            tracing::warn!(
+                                storage_module.id = %sm.id,
+                                packing.interval = ?interval,
+                                "Skipping repacking request: {e:?}"
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(e) = sender.send(req).await {
                         tracing::event!(
                             target: "irys::packing",
                             tracing::Level::ERROR,

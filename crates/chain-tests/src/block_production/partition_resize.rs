@@ -55,6 +55,12 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
         .expect("partition resize activates at height 4");
     assert_eq!(state.activation_height, 4);
     assert_eq!(state.activation_hash, activation.block_hash);
+    // E is credited per partition-step: the weight its legacy sibling would get.
+    let legacy_weight = irys_types::U256::MAX / (irys_types::U256::MAX - previous.diff);
+    assert_eq!(
+        activation.cumulative_diff - previous.cumulative_diff,
+        legacy_weight
+    );
     assert_eq!(
         state.sampling_origin,
         activation.vdf_limiter_info.global_step_number + 1
@@ -112,6 +118,10 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
     let child = node.mine_block().await?;
     assert!(u64::from(child.poa.partition_chunk_offset) < 8);
     assert_eq!(child.diff, activation.diff);
+    assert_eq!(
+        child.cumulative_diff - activation.cumulative_diff,
+        legacy_weight
+    );
     let initial_floor = state.preserved_id_floor;
     node.mine_blocks(7).await?; // E is finalized and later epoch tasks have run.
     let at_six = node.get_block_by_height_from_index(6, false)?;
@@ -389,5 +399,62 @@ async fn heavy_partition_resize_reorg_selects_branch_activation() -> eyre::Resul
     assert!(u64::from(child.poa.partition_chunk_offset) < 8);
     peer.stop().await;
     genesis.stop().await;
+    Ok(())
+}
+
+/// While activation is pending, data transactions wait in the mempool: the
+/// producer leaves them out (validators reject a block carrying them), so E
+/// always has empty ledgers and its first child includes the backlog.
+#[test_log::test(tokio::test)]
+async fn heavy_partition_resize_pending_blocks_keep_ledgers_empty() -> eyre::Result<()> {
+    let mut config = NodeConfig::testing_with_epochs(4);
+    let c = config.consensus.get_mut();
+    c.num_chunks_in_partition = 20;
+    c.num_chunks_in_recall_range = 10;
+    c.epoch.submit_ledger_epoch_length = 100;
+    c.hardforks.estuary = Some(Estuary {
+        activation_timestamp: UnixTimestamp::from_secs(0),
+        partition_chunks: 8,
+        recall_chunks: 2,
+        target_ingress_bytes_per_second: 32,
+        minimum_partition_ids: 0,
+    });
+    let node = IrysNodeTest::new_genesis(config)
+        .start_and_wait_for_packing("RESIZE_PENDING", 30)
+        .await;
+    let signer = node.cfg.signer();
+    let tx = node.post_publish_data_tx(&signer, vec![7; 64]).await?;
+    node.mine_blocks(3).await?;
+    for height in 1..=3 {
+        let block = node.get_block_by_height(height).await?;
+        assert_eq!(
+            block.ledger_total_chunks(irys_types::DataLedger::Submit),
+            0,
+            "height {height} is mined while activation is pending"
+        );
+    }
+    let activation = node.mine_block().await?;
+    assert_eq!(activation.height, 4);
+    assert!(
+        node.node_ctx
+            .block_tree_guard
+            .read()
+            .canonical_epoch_snapshot()
+            .partition_resize
+            .is_some()
+    );
+    assert_eq!(
+        activation.ledger_total_chunks(irys_types::DataLedger::Submit),
+        0
+    );
+    let child = node.mine_block().await?;
+    assert_eq!(child.ledger_total_chunks(irys_types::DataLedger::Submit), 2);
+    assert!(
+        child.data_ledgers[irys_types::DataLedger::Submit]
+            .tx_ids
+            .0
+            .contains(&tx.header.id)
+    );
+    node.stop().await;
     Ok(())
 }

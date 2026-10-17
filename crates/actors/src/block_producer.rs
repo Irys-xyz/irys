@@ -37,7 +37,7 @@ use irys_types::{
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
     VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
-    next_cumulative_diff, storage_pricing::Amount, u256_from_le_bytes as hash_to_number,
+    storage_pricing::Amount, u256_from_le_bytes as hash_to_number,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -1159,7 +1159,12 @@ pub trait BlockProdStrategy {
             prev_block_header,
         );
 
-        let cumulative_difficulty = next_cumulative_diff(prev_block_header.cumulative_diff, diff);
+        let cumulative_difficulty = consensus_context.child_cumulative_diff(
+            block_height,
+            current_timestamp,
+            prev_block_header,
+            diff,
+        );
 
         // Use the partition hash to figure out what ledger it belongs to
         if consensus_context.resize_configured() {
@@ -1174,9 +1179,23 @@ pub trait BlockProdStrategy {
             let start =
                 irys_efficient_sampling::reset_step_from_origin(solution.vdf_step, count, origin)?;
             let mut seeds = if start < solution.vdf_step {
-                self.inner()
+                match self
+                    .inner()
                     .vdf_steps_guard
-                    .get_steps(ii(start, solution.vdf_step - 1))?
+                    .get_steps(ii(start, solution.vdf_step - 1))
+                {
+                    Ok(seeds) => seeds,
+                    // A gap in the local seed buffer says nothing about the
+                    // solution; drop it rather than abort production.
+                    Err(err) => {
+                        warn!(
+                            solution.vdf_step = solution.vdf_step,
+                            window.start = start,
+                            "recall-range window unavailable; dropping solution: {err:?}"
+                        );
+                        return Ok(None);
+                    }
+                }
             } else {
                 H256List::new()
             };
@@ -1626,6 +1645,20 @@ pub trait BlockProdStrategy {
         // Fetch epoch snapshot (needed for reward address resolution)
         let (parent_epoch_snapshot, parent_commitment_snapshot) =
             self.fetch_parent_snapshots(prev_block_header)?;
+
+        // While Estuary is scheduled but not yet active on this branch, blocks
+        // must keep the data ledgers empty (validators enforce the same rule),
+        // so activation block E can never fail `NonEmptyLedgers`. The
+        // transactions stay in the mempool until activation.
+        if parent_epoch_snapshot
+            .consensus_context()
+            .pending_activation()
+        {
+            mempool_txs.submit_tx.clear();
+            mempool_txs.one_year_tx.clear();
+            mempool_txs.thirty_day_tx.clear();
+            mempool_txs.publish_tx = PublishLedgerWithTxs::default();
+        }
 
         if !is_epoch {
             // Filter commitments by version using block timestamp

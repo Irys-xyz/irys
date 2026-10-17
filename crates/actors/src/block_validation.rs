@@ -35,8 +35,8 @@ use irys_types::{
     SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
     app_state::DatabaseProvider,
     calculate_difficulty,
+    consensus_context::EpochConsensusContext,
     hardfork_config::{Cascade, ForEpoch},
-    next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path,
 };
@@ -135,6 +135,10 @@ pub enum PreValidationError {
     CascadeNotConfigured { tx_id: H256 },
     #[error("Invalid cumulative_difficulty (expected {expected} got {got})")]
     CumulativeDifficultyMismatch { expected: U256, got: U256 },
+    #[error(
+        "data ledgers must stay empty while the Estuary activation is pending: ledger {ledger_id} holds {total_chunks} chunks"
+    )]
+    DataLedgersNotEmptyWhilePendingResize { ledger_id: u32, total_chunks: u64 },
     #[error("Invalid difficulty (expected {expected} got {got})")]
     DifficultyMismatch { expected: U256, got: U256 },
     #[error("Ema mismatch: recomputed EMA does not match Ema in block header")]
@@ -605,6 +609,7 @@ impl PreValidationError {
             | Self::CascadeNotConfigured { .. }
             | Self::CommitmentVersionInvalid { .. }
             | Self::CumulativeDifficultyMismatch { .. }
+            | Self::DataLedgersNotEmptyWhilePendingResize { .. }
             | Self::DataLedgerExtractionFailed(_)
             | Self::DifficultyMismatch { .. }
             | Self::DuplicateIngressProofSigner { .. }
@@ -780,6 +785,9 @@ impl PreValidationError {
             Self::TooManyDataTxs { .. } => "too_many_data_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::TotalChunksMismatch { .. } => "total_chunks_mismatch",
+            Self::DataLedgersNotEmptyWhilePendingResize { .. } => {
+                "data_ledgers_not_empty_while_pending_resize"
+            }
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
             Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
             Self::PrefixSizeExceedsDataSize { .. } => "prefix_size_exceeds_data_size",
@@ -1755,6 +1763,18 @@ pub async fn prevalidate_block(
         "difficulty_is_valid",
     );
 
+    // While the Estuary activation is pending on this branch the data ledgers
+    // must stay empty: E is validated under this same pending context, so
+    // `PartitionResizeState::activate` can then never fail `NonEmptyLedgers`.
+    if consensus_context.pending_activation()
+        && let Some(ledger) = block.data_ledgers.iter().find(|l| l.total_chunks != 0)
+    {
+        return Err(PreValidationError::DataLedgersNotEmptyWhilePendingResize {
+            ledger_id: ledger.ledger_id,
+            total_chunks: ledger.total_chunks,
+        });
+    }
+
     // Validate previous_cumulative_diff points to parent's cumulative_diff
     previous_cumulative_difficulty_is_valid(block, previous_block)?;
     debug!(
@@ -1764,7 +1784,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(block, previous_block)?;
+    cumulative_difficulty_is_valid(block, previous_block, &consensus_context)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -2382,11 +2402,14 @@ pub fn check_poa_data_expiration(
 pub fn cumulative_difficulty_is_valid(
     block: &IrysBlockHeader,
     previous_block: &IrysBlockHeader,
+    consensus_context: &EpochConsensusContext,
 ) -> Result<(), PreValidationError> {
-    let previous_cumulative_diff = previous_block.cumulative_diff;
-    let new_diff = block.diff;
-
-    let cumulative_diff = next_cumulative_diff(previous_cumulative_diff, new_diff);
+    let cumulative_diff = consensus_context.child_cumulative_diff(
+        block.height,
+        block.timestamp,
+        previous_block,
+        block.diff,
+    );
     if cumulative_diff == block.cumulative_diff {
         Ok(())
     } else {
