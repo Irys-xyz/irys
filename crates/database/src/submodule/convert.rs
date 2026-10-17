@@ -2375,15 +2375,23 @@ fn same_path(left: &Path, right: &Path) -> bool {
 /// past the root, or that leaves a relative path empty, is refused.
 fn lexical_target(path: &Path) -> eyre::Result<PathBuf> {
     let mut out = PathBuf::new();
+    let unanchored = |collapsed: &Path| {
+        let form = if collapsed.as_os_str().is_empty() {
+            "\"\"".to_owned()
+        } else {
+            collapsed.display().to_string()
+        };
+        eyre::eyre!(
+            "target {} is not anchored. The collapsed form is {form}.",
+            path.display()
+        )
+    };
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
                 if !pop_normal(&mut out) {
-                    eyre::bail!(
-                        "target {} walks above its start. Refusing to read and write the same tree.",
-                        path.display()
-                    );
+                    return Err(unanchored(&out));
                 }
             }
             Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
@@ -2392,10 +2400,7 @@ fn lexical_target(path: &Path) -> eyre::Result<PathBuf> {
         }
     }
     if out.as_os_str().is_empty() {
-        eyre::bail!(
-            "target {} walks above its start. Refusing to read and write the same tree.",
-            path.display()
-        );
+        return Err(unanchored(&out));
     }
     Ok(out)
 }
@@ -5465,6 +5470,29 @@ mod tests {
         assert!(format!("{err:#}").contains("same path"), "{err:#}");
         assert!(!module.join("other").exists());
         Ok(())
+    }
+
+    /// A path that collapses off its own start is refused, and the error
+    /// names that collapsed form. A path that stays inside its start is kept.
+    #[test]
+    fn unanchored_target_names_the_collapsed_form() {
+        for path in [".", "../rocks", "db/../.."] {
+            let err = super::lexical_target(Path::new(path)).unwrap_err();
+            let text = err.to_string();
+            assert!(text.contains("not anchored"), "{path}: {text}");
+            assert!(
+                text.contains("collapsed form") && text.contains("\"\""),
+                "{path}: {text}"
+            );
+        }
+        assert_eq!(
+            super::lexical_target(Path::new("sub/../rocks")).unwrap(),
+            PathBuf::from("rocks")
+        );
+        assert_eq!(
+            super::lexical_target(Path::new("/tmp/rocks")).unwrap(),
+            PathBuf::from("/tmp/rocks")
+        );
     }
 
     /// A finished RocksDB index can still hold `CONVERTING` when the process
