@@ -1834,6 +1834,8 @@ where
         rows: VERIFY_KEYS,
         value_bytes: usize::MAX,
     };
+    note_verify_placement_cache();
+    let mut cache = TxPathBlockCache::new();
     merge_keys(
         &mut |after| {
             Ok(v2
@@ -1850,7 +1852,6 @@ where
                 .collect())
         },
         |keys| {
-            let mut cache = TxPathBlockCache::new();
             for key in keys {
                 report.intervals_checked = report.intervals_checked.saturating_add(1);
                 report.tx_paths_checked = report.tx_paths_checked.saturating_add(1);
@@ -2239,7 +2240,7 @@ where
             }
         };
         pending.push(key);
-        if pending.len() == VERIFY_KEYS {
+        if pending.len() == merge_batch_limit() {
             on_batch(&pending)?;
             pending.clear();
         }
@@ -3336,6 +3337,51 @@ fn placement_verify_batch() -> usize {
 
 #[cfg(test)]
 thread_local! {
+    static VERIFY_PLACEMENT_CACHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MERGE_BATCH_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn reset_verify_placement_caches() {
+    VERIFY_PLACEMENT_CACHES.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn verify_placement_caches() -> usize {
+    VERIFY_PLACEMENT_CACHES.with(std::cell::Cell::get)
+}
+
+fn note_verify_placement_cache() {
+    #[cfg(test)]
+    VERIFY_PLACEMENT_CACHES.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+struct MergeBatchGuard;
+
+#[cfg(test)]
+impl Drop for MergeBatchGuard {
+    fn drop(&mut self) {
+        MERGE_BATCH_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+fn set_merge_batch(batch: usize) -> MergeBatchGuard {
+    MERGE_BATCH_OVERRIDE.with(|cell| cell.set(Some(batch.max(1))));
+    MergeBatchGuard
+}
+
+fn merge_batch_limit() -> usize {
+    #[cfg(test)]
+    if let Some(batch) = MERGE_BATCH_OVERRIDE.with(std::cell::Cell::get) {
+        return batch.max(1);
+    }
+    VERIFY_KEYS
+}
+
+#[cfg(test)]
+thread_local! {
     static V1_RANGE_COPY_BATCHES: std::cell::RefCell<Vec<usize>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -4377,9 +4423,10 @@ mod tests {
     use super::{
         ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
         convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_data_path_reads,
-        reset_v1_hash_point_reads, reset_v1_range_copy_batches, reset_verify_views,
-        set_v1_placement_batch, v1_data_path_reads, v1_hash_point_reads, v1_placement_views,
-        v1_range_copy_batches, verify_mdbx_and_rocks, verify_rocks_records, verify_views,
+        reset_v1_hash_point_reads, reset_v1_range_copy_batches, reset_verify_placement_caches,
+        reset_verify_views, set_merge_batch, set_v1_placement_batch, v1_data_path_reads,
+        v1_hash_point_reads, v1_placement_views, v1_range_copy_batches, verify_mdbx_and_rocks,
+        verify_placement_caches, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -6297,6 +6344,29 @@ mod tests {
             v1_placement_views(),
             usize::try_from(N).unwrap_or(usize::MAX),
             "a batch of one is one view per placement"
+        );
+        Ok(())
+    }
+
+    /// Two placement starts in separate merge batches still share one tx-path cache.
+    #[test]
+    fn verify_keeps_one_tx_path_cache_across_placement_batches() -> eyre::Result<()> {
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-verify-placement-cache")?;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let _batch = set_merge_batch(1);
+        reset_verify_placement_caches();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(
+            verify_placement_caches(),
+            1,
+            "placement batches must share one tx-path cache"
         );
         Ok(())
     }
