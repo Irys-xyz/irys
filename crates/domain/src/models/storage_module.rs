@@ -5553,7 +5553,10 @@ impl StorageModule {
     /// data sync refills the bytes. The bytes were already checksum-bad.
     ///
     /// The caller holds `sync_in_progress`, so a durable point is not between
-    /// its map clone and its file replace.
+    /// its map clone and its file replace. A failed replace puts the previous
+    /// live label back and leaves the checksum-cut epoch unchanged. The next
+    /// settled read can confirm the offset again. The repair is queued only
+    /// after the replace commits.
     fn note_crc_mismatch(
         &self,
         offset: PartitionChunkOffset,
@@ -5564,6 +5567,10 @@ impl StorageModule {
         self.wait_if_sync_paused(SyncPausePoint::AfterCrcConfirm);
         chunk_crc::note_mismatch(caller, kind);
         chunk_crc::warn_mismatch(self.id, offset.0);
+        let previous = {
+            let intervals = self.intervals.read().unwrap();
+            intervals.get_at_point(offset).copied()
+        };
         {
             let mut intervals = self.intervals.write().unwrap();
             Self::cut_then_insert_interval_if_touching(
@@ -5574,7 +5581,19 @@ impl StorageModule {
         }
         // The file replace follows the live cut. A crash after the replace
         // reloads the cut even if this process dies before the repair is queued.
-        self.publish_crc_cut(offset)?;
+        if let Err(err) = self.publish_crc_cut(offset) {
+            // The replace did not commit. Restore the label this cut replaced
+            // when it is still the cut, so a writer that landed another label
+            // is left alone. The caller holds `sync_in_progress`, which a
+            // label update also needs.
+            if let Some(previous) = previous {
+                let mut intervals = self.intervals.write().unwrap();
+                if intervals.get_at_point(offset).copied() == Some(ChunkType::Uninitialized) {
+                    Self::cut_then_insert_interval_if_touching(&mut intervals, offset, previous);
+                }
+            }
+            return Err(err);
+        }
         recover_mutex(&self.crc_repairs).insert(offset);
         self.entropy_cache.lock().unwrap().invalidate(offset);
         Ok(())
@@ -5598,14 +5617,19 @@ impl StorageModule {
         let _publish = self.lock_interval_publish();
         // The bump is under the same lock as the replace. A completion that
         // cloned before this point fails its epoch check and does not commit.
+        // A failed replace rolls the bump back before this lock is released,
+        // so that completion does not observe a cut the file does not have.
         let crc_epoch = self.crc_cut_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        self.write_interval_image_locked(
+        if let Err(err) = self.write_interval_image_locked(
             &projection,
             Some(&touched),
             snapshot_epoch,
             crc_epoch,
             false,
-        )?;
+        ) {
+            let _ = self.crc_cut_epoch.fetch_sub(1, Ordering::SeqCst);
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -16088,6 +16112,180 @@ mod tests {
             "open kept the placement"
         );
         drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A failed `intervals.json` replace must not leave the live label
+    /// `Uninitialized` with an empty repair set. The next note publishes the
+    /// cut and queues the repair. The file stays on the previous label until
+    /// that publish commits.
+    #[rstest]
+    #[case::period_0(0_u64)]
+    #[case::period_30(30_u64)]
+    fn failed_crc_publish_keeps_the_previous_label(#[case] persist_secs: u64) -> eyre::Result<()> {
+        let prefix = format!("crc_publish_fail_{persist_secs}");
+        let (tmp, _config, storage, ..) = settle_data_offset(&prefix, persist_secs)?;
+        let offset = PartitionChunkOffset::from(0);
+        let epoch_before = storage.crc_cut_epoch.load(Ordering::SeqCst);
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalImageCommit);
+        let failed = storage
+            .note_crc_mismatch(offset, ChunkType::Data, "test")
+            .expect_err("the interval replace was injected to fail");
+        assert!(
+            format!("{failed:#}").contains("BeforeIntervalImageCommit"),
+            "{failed:#}"
+        );
+        assert_eq!(
+            live_label(&storage, 0),
+            Some(ChunkType::Data),
+            "a failed replace left the live label cut"
+        );
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Data),
+            "a failed replace committed the cut"
+        );
+        assert!(
+            storage.take_crc_repair_ranges().is_empty(),
+            "a failed replace queued a repair"
+        );
+        assert_eq!(
+            storage.crc_cut_epoch.load(Ordering::SeqCst),
+            epoch_before,
+            "a failed replace left the checksum-cut epoch bumped"
+        );
+
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Uninitialized));
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Uninitialized),
+            "the retry did not publish the cut"
+        );
+        assert_eq!(
+            storage.take_crc_repair_ranges(),
+            vec![partition_chunk_offset_ii!(0, 0)]
+        );
+        assert_eq!(
+            storage.crc_cut_epoch.load(Ordering::SeqCst),
+            epoch_before + 1,
+            "the committed cut did not bump the checksum-cut epoch"
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Entropy uses the same publish. A failed replace restores Entropy, and
+    /// the following note still cuts it.
+    #[test]
+    fn failed_crc_publish_keeps_an_entropy_label() -> eyre::Result<()> {
+        let (tmp, _config, storage) = crc_hold_module("crc_publish_fail_entropy", 0)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![0xEE; 32], ChunkType::Entropy));
+        storage.force_sync_pending_chunks()?;
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Entropy));
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Entropy));
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalImageCommit);
+        let failed = storage
+            .note_crc_mismatch(offset, ChunkType::Entropy, "test")
+            .expect_err("the interval replace was injected to fail");
+        assert!(
+            format!("{failed:#}").contains("BeforeIntervalImageCommit"),
+            "{failed:#}"
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Entropy));
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Entropy));
+        assert!(storage.take_crc_repair_ranges().is_empty());
+        assert_eq!(storage.crc_cut_epoch.load(Ordering::SeqCst), 0);
+
+        storage.note_crc_mismatch(offset, ChunkType::Entropy, "test")?;
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Uninitialized));
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Uninitialized));
+        assert_eq!(
+            storage.take_crc_repair_ranges(),
+            vec![partition_chunk_offset_ii!(0, 0)]
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A completion cloned before a failed cut still has the pre-cut epoch.
+    /// The failed replace must not make that completion skip. A later
+    /// successful cut still wins over a completion cloned before it.
+    #[test]
+    fn failed_crc_publish_does_not_invalidate_a_cloned_completion() -> eyre::Result<()> {
+        let (tmp, _config, storage, ..) = settle_data_offset("crc_publish_fail_completion", 30)?;
+        let storage = Arc::new(storage);
+        let offset = PartitionChunkOffset::from(0);
+        {
+            let mut disk = storage.lock_interval_disk();
+            disk.dirty.insert(PartitionChunkOffset::from(0));
+            disk.last_completion.clear();
+        }
+        storage.pause_next_completion_clone();
+        let flush_mod = Arc::clone(&storage);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(flush_mod.flush_interval_completions_locked(true));
+        });
+        assert!(
+            storage.wait_for_interval_image_pause(Duration::from_secs(5)),
+            "the completion did not clone"
+        );
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalImageCommit);
+        let failed = storage
+            .note_crc_mismatch(offset, ChunkType::Data, "test")
+            .expect_err("the interval replace was injected to fail");
+        assert!(
+            format!("{failed:#}").contains("BeforeIntervalImageCommit"),
+            "{failed:#}"
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
+        assert_eq!(storage.crc_cut_epoch.load(Ordering::SeqCst), 0);
+        storage.release_interval_image_pause();
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|err| eyre!("completion flush did not finish: {err}"))??;
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Data),
+            "the completion skipped after a failed cut"
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
+        assert!(storage.take_crc_repair_ranges().is_empty());
+
+        {
+            let mut disk = storage.lock_interval_disk();
+            disk.dirty.insert(PartitionChunkOffset::from(0));
+            disk.last_completion.clear();
+        }
+        storage.pause_next_completion_clone();
+        let flush_mod = Arc::clone(&storage);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(flush_mod.flush_interval_completions_locked(true));
+        });
+        assert!(
+            storage.wait_for_interval_image_pause(Duration::from_secs(5)),
+            "the second completion did not clone"
+        );
+        storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
+        storage.release_interval_image_pause();
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|err| eyre!("second completion flush did not finish: {err}"))??;
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Uninitialized),
+            "a stale completion published Data over the committed cut"
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Uninitialized));
+        assert_eq!(
+            storage.take_crc_repair_ranges(),
+            vec![partition_chunk_offset_ii!(0, 0)]
+        );
+        drop(storage);
         drop(tmp);
         Ok(())
     }
