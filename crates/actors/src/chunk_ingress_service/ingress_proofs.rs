@@ -16,11 +16,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
-/// Shared, process-local exclusion for proof generation by data root.
+/// Shared, process-local exclusion so one task generates a data root's proof.
 ///
-/// Cache eviction no longer depends on this state. It belongs to proof
-/// generation itself and is acquired atomically, avoiding the former
-/// check-then-notify race through the cache-service channel.
+/// Cache eviction does not take this lock.
 #[derive(Clone, Debug, Default)]
 pub struct IngressProofGenerationState {
     inner: Arc<RwLock<IngressProofGenerationStateInner>>,
