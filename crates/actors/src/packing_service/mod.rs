@@ -824,6 +824,7 @@ mod tests {
         let pause = Arc::new(PackPause {
             started: Notify::new(),
             release: Notify::new(),
+            fail_with: std::sync::Mutex::new(None),
         });
         let started = pause.started.notified();
         tokio::pin!(started);
@@ -908,6 +909,7 @@ mod tests {
         let pause = Arc::new(PackPause {
             started: Notify::new(),
             release: Notify::new(),
+            fail_with: std::sync::Mutex::new(None),
         });
         let started = pause.started.notified();
         tokio::pin!(started);
@@ -957,13 +959,17 @@ mod tests {
         Ok(())
     }
 
-    /// A pack that fails after Data has replaced the prefix must put back only
-    /// the offsets that are still uninitialized. The Data prefix is not packed
-    /// again.
+    /// The first filter includes a whole uninitialized range. Data written
+    /// while that pack is paused, and an offset marked `Interrupted` in the
+    /// same window, must not be treated as the original range: the failure
+    /// puts back only the labels that are still pack targets.
     #[cfg(not(feature = "nvidia"))]
     #[test_log::test(tokio::test)]
     async fn failed_pack_requeues_only_uninitialized_offsets() -> eyre::Result<()> {
-        use irys_types::ii;
+        use std::collections::BTreeSet;
+
+        use super::strategies::cpu::PackPause;
+        use tokio::sync::Notify;
 
         let tmp_dir = TempDirBuilder::new()
             .prefix("requeue_uninitialized_only")
@@ -974,11 +980,12 @@ mod tests {
         node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
             entropy_packing_iterations: 1,
             num_chunks_in_partition: 4,
-            chunk_size: 16,
+            chunk_size: 32,
             ..consensus
         });
         let config = Config::new_with_random_peer_id(node_config);
         let partition_hash = PartitionHash::zero();
+        let submodule_dir = tmp_dir.path().join("hdd0");
         let info = StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment {
@@ -987,19 +994,149 @@ mod tests {
                 ledger_id: None,
                 slot_index: None,
             }),
-            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), "hdd0".into())],
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), submodule_dir)],
         };
         let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        let request = PackingRequest::new(
+            storage_module.clone(),
+            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 3)),
+        )?;
+
+        let packing = PackingService::new(Arc::new(config));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = packing.spawn_packing_controllers(runtime_handle.clone());
+        let handle = packing.spawn_tokio_service(runtime_handle);
+        let pause = Arc::new(PackPause {
+            started: Notify::new(),
+            release: Notify::new(),
+            fail_with: std::sync::Mutex::new(None),
+        });
+        let started = pause.started.notified();
+        tokio::pin!(started);
+        assert!(
+            !started.as_mut().enable(),
+            "the pause must not already be notified"
+        );
+        packing.set_pack_pause_for_test(Some(Arc::clone(&pause)));
+        handle.send(request)?;
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .expect("pack starts on the range the first filter accepted");
+
         assert!(storage_module.write_chunk(
             PartitionChunkOffset(0),
-            vec![0xD4_u8; 16],
+            vec![0xD4_u8; 32],
             ChunkType::Data,
         ));
         storage_module.force_sync_pending_chunks()?;
+        {
+            let mut intervals = storage_module.intervals().write().expect("intervals");
+            StorageModule::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                PartitionChunkOffset(1),
+                ChunkType::Interrupted,
+            );
+        }
         assert_eq!(
             storage_module.get_chunk_type(&PartitionChunkOffset(0)),
             Some(ChunkType::Data)
         );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(1)),
+            Some(ChunkType::Interrupted)
+        );
+
+        *pause.fail_with.lock().expect("fail flag") =
+            Some("stopped after the prefix changed".to_string());
+        pause.release.notify_one();
+
+        let start = std::time::Instant::now();
+        let mut queued = BTreeSet::new();
+        loop {
+            for range in storage_module.take_crc_repair_ranges() {
+                let mut offset = range.start().0;
+                loop {
+                    queued.insert(offset);
+                    if offset == range.end().0 {
+                        break;
+                    }
+                    offset = offset.saturating_add(1);
+                }
+            }
+            if queued == BTreeSet::from([1, 2, 3]) {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                eyre::bail!("requeued offsets were {queued:?}, want 1, 2, and 3");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Data),
+            "the data prefix stays data"
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(1)),
+            Some(ChunkType::Interrupted),
+            "the failed pack must not consume the interrupted offset"
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(2)),
+            Some(ChunkType::Uninitialized)
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(3)),
+            Some(ChunkType::Uninitialized)
+        );
+        Ok(())
+    }
+
+    /// A crash-recovery `Interrupted` label is still a pack target. A normal
+    /// pack writes entropy there and leaves a neighboring `Data` chunk alone.
+    #[cfg(not(feature = "nvidia"))]
+    #[test_log::test(tokio::test)]
+    async fn interrupted_label_is_packed() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("interrupted_label_packed")
+            .build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 32,
+            ..consensus
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = PartitionHash::zero();
+        let submodule_dir = tmp_dir.path().join("hdd0");
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), submodule_dir)],
+        };
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        assert!(storage_module.write_chunk(
+            PartitionChunkOffset(1),
+            vec![0xD4_u8; 32],
+            ChunkType::Data,
+        ));
+        storage_module.force_sync_pending_chunks()?;
+        {
+            let mut intervals = storage_module.intervals().write().expect("intervals");
+            StorageModule::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                PartitionChunkOffset(0),
+                ChunkType::Interrupted,
+            );
+        }
         let request = PackingRequest::new(
             storage_module.clone(),
             PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 1)),
@@ -1012,25 +1149,27 @@ mod tests {
         handle.send(request)?;
 
         let start = std::time::Instant::now();
-        let queued = loop {
-            let ranges = storage_module.take_crc_repair_ranges();
-            if !ranges.is_empty() {
-                break ranges;
+        loop {
+            if storage_module.get_chunk_type(&PartitionChunkOffset(0)) == Some(ChunkType::Entropy) {
+                break;
             }
             if start.elapsed() > Duration::from_secs(5) {
-                eyre::bail!("a failed pack must put the uninitialized suffix back");
+                eyre::bail!(
+                    "interrupted offset stayed {:?}",
+                    storage_module.get_chunk_type(&PartitionChunkOffset(0))
+                );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
-        };
+        }
         assert_eq!(
-            queued,
-            vec![ii(PartitionChunkOffset(1), PartitionChunkOffset(1))],
-            "the data prefix must not be queued again"
-        );
-        assert_eq!(
-            storage_module.get_chunk_type(&PartitionChunkOffset(0)),
+            storage_module.get_chunk_type(&PartitionChunkOffset(1)),
             Some(ChunkType::Data),
-            "the failed pack must leave the data prefix in place"
+            "a successful pack must not overwrite data"
+        );
+        let ranges = storage_module.take_crc_repair_ranges();
+        assert!(
+            ranges.is_empty(),
+            "a successful pack must not requeue, still queued: {ranges:?}"
         );
         Ok(())
     }

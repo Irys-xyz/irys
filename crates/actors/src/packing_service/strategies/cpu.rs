@@ -17,10 +17,12 @@ use tracing::{debug, trace, warn};
 
 /// Test gate. `pack` notifies `started`, then waits until `release` is
 /// notified. `notify_one` stores a permit, so the release can land first.
+/// `fail_with` is read after the wait and before any chunk is hashed.
 #[cfg(test)]
 pub(crate) struct PackPause {
     pub started: Notify,
     pub release: Notify,
+    pub fail_with: Mutex<Option<String>>,
 }
 
 /// CPU-based packing strategy
@@ -129,6 +131,9 @@ impl super::PackingStrategy for CpuPackingStrategy {
             if let Some(pause) = pause {
                 pause.started.notify_one();
                 pause.release.notified().await;
+                if let Some(reason) = pause.fail_with.lock().expect("pack pause fail").clone() {
+                    return Err(reason);
+                }
             }
         }
 
