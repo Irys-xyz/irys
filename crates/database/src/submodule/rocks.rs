@@ -3619,6 +3619,22 @@ fn exclusive_end_key(end: PartitionChunkOffset) -> Vec<u8> {
     }
 }
 
+/// `true` when `key` is past the inclusive span `[_, end]`.
+///
+/// A key that is not 4 bytes still belongs to the span when it sorts before
+/// the exclusive end. That is not the end of the scan: `DeleteRange` would
+/// remove later offset rows, and a read would return a short vector.
+fn offset_key_ends_span(key: &[u8], end: PartitionChunkOffset) -> eyre::Result<bool> {
+    match PartitionChunkOffset::decode(key) {
+        Ok(offset) => Ok(offset > end),
+        Err(_) if key >= exclusive_end_key(end).as_slice() => Ok(true),
+        Err(err) => Err(eyre::eyre!(
+            "ChunkMetaByOffset key of {} bytes is inside the span and is not an offset: {err}",
+            key.len()
+        )),
+    }
+}
+
 /// Exclusive end of every key in `cf`.
 ///
 /// Offset families use a 4-byte big-endian key. Data-root and content keys
@@ -4371,11 +4387,11 @@ impl<'a> Batch<'a> {
                 let mut resume = None;
                 note_clear_content_pass();
                 while let Some((key, value)) = cursor.next_kv()? {
-                    let offset = match PartitionChunkOffset::decode(&key) {
-                        Ok(offset) if offset > end => break,
-                        Ok(offset) => offset,
-                        Err(_) => break,
-                    };
+                    if offset_key_ends_span(&key, end)? {
+                        break;
+                    }
+                    let offset = PartitionChunkOffset::decode(&key)
+                        .expect("a key inside the span is a 4-byte offset");
                     // The value dies with this iteration. The cursor holds one
                     // lookahead key, not the rest of the span.
                     note_clear_offset_values(1);
@@ -5071,7 +5087,7 @@ impl Rows<'_> {
     ) -> eyre::Result<Vec<(u32, records::DataRootPlacement)>> {
         let prefix = data_root.0;
         let raw = self.collect_raw(Cf::DataRoots, Some(&prefix), |key| {
-            key.len() < 32 || key[..32] != prefix
+            Ok(key.len() < 32 || key[..32] != prefix)
         })?;
         let mut rows = Vec::new();
         for (key, value) in raw {
@@ -5088,12 +5104,12 @@ impl Rows<'_> {
         &self,
         cf: Cf,
         start: Option<&[u8]>,
-        mut stop: impl FnMut(&[u8]) -> bool,
+        mut stop: impl FnMut(&[u8]) -> eyre::Result<bool>,
     ) -> eyre::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut cursor = self.cursor(cf, start)?;
         let mut rows = Vec::new();
         while let Some((key, value)) = cursor.next_kv()? {
-            if stop(&key) {
+            if stop(&key)? {
                 break;
             }
             rows.push((key, value));
@@ -5215,9 +5231,7 @@ impl Rows<'_> {
         let intervals = self.intervals_touching(start, end)?;
         let start_key = encode_key(start);
         let stored = self.collect_raw(Cf::OffsetMeta, Some(&start_key), |key| {
-            PartitionChunkOffset::decode(key)
-                .map(|offset| offset > end)
-                .unwrap_or(true)
+            offset_key_ends_span(key, end)
         })?;
         let mut index = 0;
         let mut rows = Vec::new();
@@ -5255,10 +5269,10 @@ impl Rows<'_> {
         let mut remaining = limit.unwrap_or(usize::MAX);
         let raw = self.collect_raw(Cf::Pending, start_key.as_deref(), |_| {
             if remaining == 0 {
-                return true;
+                return Ok(true);
             }
             remaining -= 1;
-            false
+            Ok(false)
         })?;
         let mut rows = Vec::new();
         for (key, value) in raw {
@@ -5271,7 +5285,7 @@ impl Rows<'_> {
     }
 
     fn all_data_root_rows(&self) -> eyre::Result<Vec<(DataRoot, DataRootInfos)>> {
-        let raw = self.collect_raw(Cf::DataRoots, None, |_| false)?;
+        let raw = self.collect_raw(Cf::DataRoots, None, |_| Ok(false))?;
         let mut grouped: BTreeMap<H256, Vec<DataRootInfo>> = BTreeMap::new();
         for (key, value) in raw {
             let (root, _) = records::decode_data_root_key(&key)?;
@@ -5442,9 +5456,7 @@ impl SubmoduleRead for Rows<'_> {
         }
         let start_key = encode_key(start);
         let stored = self.collect_raw(Cf::OffsetMeta, Some(&start_key), |key| {
-            PartitionChunkOffset::decode(key)
-                .map(|offset| offset > end)
-                .unwrap_or(true)
+            offset_key_ends_span(key, end)
         })?;
         let mut rows = Vec::with_capacity(stored.len());
         for (key, bytes) in stored {
@@ -7067,6 +7079,178 @@ mod tests {
                 .is_some()
         );
         assert_content_index(&store)?;
+        Ok(())
+    }
+
+    /// A key that is not a 4-byte offset is inside the span, not its end.
+    ///
+    /// The clear must fail before `DeleteRange` removes later offset rows
+    /// whose content keys were not visited. A span that ends before that key,
+    /// or starts after it, still clears.
+    #[test]
+    fn short_offset_key_fails_the_clear_and_the_span_reads() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_short_offset_key");
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        place_span(&store, 0, 20, H256::repeat_byte(4), 0, 1, 0, &[2, 10], None)?;
+        let checksum = PartitionChunkOffset::from(12_u32);
+        store.update(|tx| {
+            tx.write_packed_offset_rows(vec![PackedOffsetRow {
+                offset: checksum,
+                crc: Some(12),
+                proof: None,
+            }])
+        })?;
+        // Sorts after offset 5 and before offset 6, inside `[0, 20]`.
+        let short_key = [0_u8, 0, 0, 5, 0];
+        let handle = cf_handle(&store.db, Cf::OffsetMeta)?;
+        store.db.put_cf(&handle, short_key, [])?;
+        store.db.flush_cf(&handle)?;
+
+        let clear_wide = store.update(|tx| {
+            tx.clear_paths_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(20),
+            )
+        });
+        let content_10 = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?;
+        let path_10 = store
+            .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(10)))?
+            .is_some();
+        let placed_10 = store
+            .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
+            .is_some();
+        let checksum_kept = store.view(|tx| tx.get_offset_meta(checksum))?.is_some();
+        let Err(clear_err) = clear_wide else {
+            panic!(
+                "clear={clear_wide:?} content {content_10:?} path {path_10} placed {placed_10} checksum {checksum_kept}"
+            );
+        };
+        assert!(
+            clear_err.to_string().contains("not an offset"),
+            "{clear_err}"
+        );
+        assert!(
+            path_10
+                && placed_10
+                && checksum_kept
+                && content_10 == vec![PartitionChunkOffset::from(10)],
+            "content {content_10:?} path {path_10} placed {placed_10} checksum {checksum_kept}"
+        );
+        let content_2 = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(2)))?;
+        assert_eq!(content_2, vec![PartitionChunkOffset::from(2)]);
+
+        let hashes_wide = store.view(|tx| {
+            tx.path_hashes_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(20),
+            )
+        });
+        assert!(
+            hashes_wide
+                .as_ref()
+                .is_err_and(|err| err.to_string().contains("not an offset")),
+            "{hashes_wide:?}"
+        );
+        let metas_wide = store.view(|tx| {
+            tx.offset_metas_in_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(20),
+            )
+        });
+        assert!(
+            metas_wide
+                .as_ref()
+                .is_err_and(|err| err.to_string().contains("not an offset")),
+            "{metas_wide:?}"
+        );
+
+        let before = store.view(|tx| {
+            tx.path_hashes_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(4),
+            )
+        })?;
+        assert_eq!(
+            before
+                .iter()
+                .map(|(offset, _)| offset.0)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        let after_key = store.view(|tx| {
+            tx.offset_metas_in_range(
+                PartitionChunkOffset::from(6),
+                PartitionChunkOffset::from(20),
+            )
+        })?;
+        assert_eq!(
+            after_key
+                .iter()
+                .map(|(offset, _)| offset.0)
+                .collect::<Vec<_>>(),
+            vec![10, 12]
+        );
+
+        store.update(|tx| {
+            tx.clear_paths_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(4),
+            )
+        })?;
+        assert!(
+            store
+                .view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(2)))?
+                .is_empty()
+        );
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?,
+            vec![PartitionChunkOffset::from(10)]
+        );
+        assert!(
+            store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(2)))?
+                .is_none()
+        );
+        assert!(
+            store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
+                .is_some()
+        );
+        let still_hashes = store.view(|tx| {
+            tx.path_hashes_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(20),
+            )
+        });
+        assert!(still_hashes.is_err(), "{still_hashes:?}");
+
+        store.update(|tx| {
+            tx.clear_paths_in_inclusive_range(
+                PartitionChunkOffset::from(6),
+                PartitionChunkOffset::from(20),
+            )
+        })?;
+        assert!(
+            store
+                .view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?
+                .is_empty()
+        );
+        assert!(store.view(|tx| tx.get_offset_meta(checksum))?.is_none());
+        assert!(
+            store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
+                .is_none()
+        );
+        let still_short = store.view(|tx| {
+            tx.offset_metas_in_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(20),
+            )
+        });
+        assert!(
+            still_short.is_err(),
+            "the short key stays after clears that do not cover it: {still_short:?}"
+        );
         Ok(())
     }
 
