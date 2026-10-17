@@ -6064,13 +6064,6 @@ impl StorageModule {
         debug!("pending_writes: {:?}", pending);
     }
 
-    /// Drops any queued (not-yet-synced) chunk writes whose partition offset
-    /// falls in the inclusive range `[start, end]`.
-    ///
-    /// Used by network-partition rollback: after orphaned offsets are cleared
-    /// and re-marked `Uninitialized`, a stale pending write left in the queue
-    /// would be replayed by `sync_pending_chunks` and flip the interval back to
-    /// `Data` with a now-empty offset index.
     /// Clear an orphaned partition range and publish `Uninitialized`.
     ///
     /// The interval rewrite is last. It waits on the disk lane, and the lane
@@ -6107,6 +6100,13 @@ impl StorageModule {
         self.write_intervals_to_submodules()
     }
 
+    /// Drops any queued (not-yet-synced) chunk writes whose partition offset
+    /// falls in the inclusive range `[start, end]`.
+    ///
+    /// Used by network-partition rollback: after orphaned offsets are cleared
+    /// and re-marked `Uninitialized`, a stale pending write left in the queue
+    /// would be replayed by `sync_pending_chunks` and flip the interval back to
+    /// `Data` with a now-empty offset index.
     pub fn drop_pending_writes_in_range(
         &self,
         start: PartitionChunkOffset,
