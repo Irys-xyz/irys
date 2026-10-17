@@ -1496,6 +1496,29 @@ pub fn delete_reclaimable_cached_chunks_older_than<T: DbTx + DbTxMut>(
     Ok(chunks_pruned)
 }
 
+/// Capacity-prunes bodies of `tx_offsets` older than `older_than`, with no
+/// durability or ingress-hash gate. Only for chunks this node is neither
+/// assigned to store nor proving: their only copy is not here.
+pub fn delete_unprotected_cached_chunks_older_than<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    tx_offsets: &BTreeSet<TxChunkOffset>,
+    older_than: UnixTimestamp,
+) -> eyre::Result<u64> {
+    let mut chunks_pruned = 0;
+    let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut walker = cursor.walk_dup(Some(data_root), None)?;
+    while let Some((_key, entry)) = walker.next().transpose()? {
+        if entry.meta.updated_at >= older_than || !tx_offsets.contains(&entry.index) {
+            continue;
+        }
+        tx.delete::<CachedChunks>(entry.meta.chunk_path_hash, None)?;
+        tx.delete::<CachedChunksIndex>(data_root, Some(entry))?;
+        chunks_pruned += 1;
+    }
+    Ok(chunks_pruned)
+}
+
 pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
     let chunk_count: usize = tx.entries::<T>()?;
     let chunk_count_u64 = u64::try_from(chunk_count)

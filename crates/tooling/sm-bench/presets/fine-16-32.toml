@@ -1,0 +1,59 @@
+# Recall 1/s, ingest 16 to 32 MiB/s. Finds the ceiling between a clean 16
+# and a saturated 32. stop_on_fail is false so every step is recorded.
+stop_on_fail = false
+
+[[step]]
+name = "idle"
+secs = 600
+recall_num = 1
+recall_den = 1
+
+[[step]]
+name = "ingest-16"
+secs = 600
+recall_num = 1
+recall_den = 1
+ingest_mib_s = 16
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-20"
+secs = 600
+recall_num = 1
+recall_den = 1
+ingest_mib_s = 20
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-24"
+secs = 600
+recall_num = 1
+recall_den = 1
+ingest_mib_s = 24
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-28"
+secs = 600
+recall_num = 1
+recall_den = 1
+ingest_mib_s = 28
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-32"
+secs = 600
+recall_num = 1
+recall_den = 1
+ingest_mib_s = 32
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50

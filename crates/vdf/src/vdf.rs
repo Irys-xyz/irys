@@ -23,6 +23,14 @@ const BOUNDARY_GATE_WARN_INTERVAL: Duration = Duration::from_secs(30);
 /// pause branch must not restore the spam. A genuinely new pause episode still
 /// logs at once, because by then the interval has elapsed.
 const PAUSED_LOG_INTERVAL: Duration = Duration::from_secs(30);
+/// Wall-clock floor for one locally computed step. The hash count stays the
+/// consensus difficulty. A core that finishes early waits out the rest of this
+/// interval, so local steps are at most one per second. Fast-forward steps do
+/// not use this floor.
+const MIN_LOCAL_STEP_DURATION: Duration = Duration::from_secs(1);
+/// Floor used when `throttle` is set. Those configs run a tiny hash count and
+/// still need more than one step per second.
+const THROTTLED_STEP_DURATION: Duration = Duration::from_millis(25);
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
@@ -345,14 +353,14 @@ pub fn run_vdf<B: BlockProvider>(
         let elapsed = now.elapsed();
         debug!("Vdf step duration: {:.2?}", elapsed);
 
-        // Enforce a minimum step duration to prevent VDF from outrunning block
-        // production when sha_1s_difficulty is low for tests.
-        // With production difficulty (13M+), steps always exceed this floor.
-        if config.throttle {
-            const MIN_STEP_DURATION: Duration = Duration::from_millis(25);
-            if elapsed < MIN_STEP_DURATION {
-                std::thread::sleep(MIN_STEP_DURATION.checked_sub(elapsed).unwrap());
-            }
+        // Pad a fast core out to the floor. The hash count is unchanged.
+        let min_step = if config.throttle {
+            THROTTLED_STEP_DURATION
+        } else {
+            MIN_LOCAL_STEP_DURATION
+        };
+        if let Some(rest) = min_step.checked_sub(elapsed) {
+            std::thread::sleep(rest);
         }
 
         let Some(returned) = store_step(

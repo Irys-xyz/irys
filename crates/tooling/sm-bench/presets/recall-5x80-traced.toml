@@ -1,0 +1,39 @@
+# Traced 5 x 80-chunk ladder. Idle is 180 s. Ingest stops at 16 MiB/s.
+# Pass --recall-chunks 80. Pair with ladder.sh --trace.
+stop_on_fail = false
+
+[[step]]
+name = "idle"
+secs = 180
+recall_num = 5
+recall_den = 1
+
+[[step]]
+name = "ingest-8"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 8
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-12"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 12
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50
+
+[[step]]
+name = "ingest-16"
+secs = 600
+recall_num = 5
+recall_den = 1
+ingest_mib_s = 16
+migration_mib_s = 0
+serve_per_sec = 0
+serve_seq_pct = 50

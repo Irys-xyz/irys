@@ -342,8 +342,21 @@ async fn test_bandwidth_rating_initialization() {
     let low_realistic = PeerStats::new(20, REALISTIC_CHUNK_SIZE, DEFAULT_TIMEOUT);
     let high_realistic = PeerStats::new(100, REALISTIC_CHUNK_SIZE, DEFAULT_TIMEOUT);
 
-    // With realistic chunk sizes, high bandwidth should definitely have higher concurrency
-    assert!(high_realistic.max_concurrency > low_realistic.max_concurrency);
+    // The 10 MiB sweep is the ceiling. The baseline stays the bandwidth half.
+    assert!(low_realistic.max_concurrency >= 40);
+    assert!(high_realistic.max_concurrency >= 40);
+    assert!(high_realistic.max_concurrency >= low_realistic.max_concurrency);
+    assert_eq!(high_realistic.baseline_concurrency, 10);
+    assert!(low_realistic.baseline_concurrency < high_realistic.baseline_concurrency);
+    assert!(low_realistic.baseline_concurrency < 40);
+    assert_eq!(
+        low_realistic.available_concurrency(),
+        low_realistic.baseline_concurrency
+    );
+    assert_eq!(
+        high_realistic.available_concurrency(),
+        high_realistic.baseline_concurrency
+    );
 }
 
 #[test]
@@ -439,4 +452,56 @@ async fn test_multi_window_bandwidth_tracking() {
     assert!(short_term > 0);
     assert!(medium_term > 0);
     assert!(long_term > 0);
+}
+
+#[test]
+async fn delivered_bytes_ramp_a_256kib_peer_to_the_sweep_ceiling() {
+    const CHUNK: u64 = 256 * 1024;
+    let mut stats = PeerStats::new(100, CHUNK, DEFAULT_TIMEOUT);
+    // Enough bytes that a few seconds of scheduling still clears the ramp.
+    for _ in 0..800 {
+        stats.record_request_started();
+        stats.record_request_completed(create_chunk_time_record(100));
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(stats.short_term_bandwidth_bps() > 0);
+    assert!(
+        stats.available_concurrency() >= 40,
+        "available {}, max {}",
+        stats.available_concurrency(),
+        stats.max_concurrency
+    );
+}
+
+/// Each timeout halves the in-flight allowance from the 10-slot baseline.
+/// One failure is 5 and two failures are 2, both above the floor, so a shift
+/// that is short or long by one fails. The third failure is the floor of 1.
+/// A completed request clears the streak.
+#[test]
+async fn consecutive_timeouts_shrink_inflight_before_any_bytes_and_a_success_recovers() {
+    const CHUNK: u64 = 256 * 1024;
+    let mut stats = PeerStats::new(100, CHUNK, DEFAULT_TIMEOUT);
+    assert_eq!(stats.available_concurrency(), 10);
+
+    stats.record_request_started();
+    stats.record_request_failed();
+    assert_eq!(stats.available_concurrency(), 5);
+
+    stats.record_request_started();
+    stats.record_request_failed();
+    assert_eq!(stats.available_concurrency(), 2);
+
+    stats.record_request_started();
+    stats.record_request_failed();
+    let shrunk = stats.available_concurrency();
+    assert_eq!(shrunk, 1);
+
+    stats.record_request_started();
+    stats.record_request_completed(create_chunk_time_record(100));
+    assert_eq!(stats.consecutive_failures, 0);
+    assert!(
+        stats.available_concurrency() > shrunk,
+        "success left the allowance at {}",
+        stats.available_concurrency()
+    );
 }

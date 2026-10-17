@@ -236,20 +236,22 @@ impl ChunkIngressServiceInner {
     ///
     /// Invoked by the `ProcessPendingChunks` control-plane message (from TX
     /// postprocess, and from post-park CDR re-check rescue).
+    ///
+    /// The root is marked draining before the write lock drops. Park paths
+    /// reject until `finish_pending_drain` restores the popped set and clears
+    /// the flag under one write lock. The ticket also clears the flag if this
+    /// task is cancelled before that restore.
     async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
-        let option_chunks_map = self.pending_chunks.write().await.pop(&data_root);
-        if let Some(chunks_map) = option_chunks_map {
+        let (chunks, _drain_ticket) = {
+            let mut pending = self.pending_chunks.write().await;
+            let Some(chunks_map) = pending.pop(&data_root) else {
+                return;
+            };
+            let drain_ticket = pending.begin_drain(data_root);
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
-            for chunk in chunks {
-                if let Err(err) = self.handle_chunk_ingress_message(chunk).await {
-                    metrics::record_chunk_error(err.error_type(), err.is_advisory());
-                    error!(
-                        "Failed to handle pending chunk ingress for data_root {:?}: {:?}",
-                        data_root, err
-                    );
-                }
-            }
-        }
+            (chunks, drain_ticket)
+        };
+        self.finish_pending_drain(data_root, chunks).await;
     }
 }
 

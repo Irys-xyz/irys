@@ -30,15 +30,17 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_CHUNK_WRITE_FAILED("irys.data_sync.chunk_write_failed_total", "Data sync local write failures after a successful fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_BLOCKED("irys.data_sync.chunk_blocked_total", "Data sync offsets blocked from hot re-fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync Blocked offsets re-queued after local index-ready probe (MissingDataRootIndex → Pending)");
-    gauge BODY_MIGRATION_PENDING_JOBS("irys.chunk_migration.body_pending_jobs", "Outstanding chunk-body migration jobs across all storage modules after the last worker pass");
-    gauge BODY_MIGRATION_OLDEST_PENDING_HEIGHT("irys.chunk_migration.body_oldest_pending_height", "Lowest block height with an outstanding chunk-body migration job before the last pass (0 when none); its distance to the tip is the worker's lag");
+    gauge BODY_MIGRATION_PENDING_JOBS("irys.chunk_migration.body_pending_jobs", "Body-migration jobs the last pass left open. A pass that stops on the write budget has not read every job, so this is a lower bound until a pass reaches the last key");
+    gauge BODY_MIGRATION_OLDEST_PENDING_HEIGHT("irys.chunk_migration.body_oldest_pending_height", "Lowest block height among body-migration jobs the last pass read (0 when it read none). A pass that stops early has not seen later keys");
     counter BODY_MIGRATION_CHUNKS_WRITTEN("irys.chunk_migration.body_chunks_written_total", "Chunk bodies the body worker enqueued to storage modules");
     counter BODY_MIGRATION_JOBS_SETTLED("irys.chunk_migration.body_jobs_settled_total", "Body-migration jobs completed with every offset durable");
     counter BODY_MIGRATION_JOBS_RETIRED("irys.chunk_migration.body_jobs_retired_total", "Body-migration jobs abandoned to data sync after repeated passes with no local source");
     counter BODY_MIGRATION_THROTTLED("irys.chunk_migration.body_throttled_total", "Body-migration jobs cut short by a storage module's pending-write ceiling");
     counter DATA_SYNC_DURABILITY_STALLED("irys.data_sync.durability_stalled_total", "Data sync writes that did not become durable before the monotonic durability deadline");
     counter DATA_INDEX_HEAL_UNREPAIRED("irys.storage.index_heal_unrepaired_total", "Ledger SMs still gapped/uncertain after a heal pass (labelled by reason)");
-    counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync peer fetches by source and classified outcome");
+    counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync chunk fetches by source (assigned, ingress_proof, local_cache) and classified outcome");
+    counter DATA_SYNC_PENDING_BODY_SKIPPED("irys.data_sync.pending_body_skipped_total", "Data sync offsets left to a live body-migration job, counted once when the hold starts");
+    counter DATA_SYNC_PENDING_BODY_HOLD_EXPIRED("irys.data_sync.pending_body_hold_expired_total", "Data sync offsets released from a body-worker hold after the hold timed out without the row key moving");
     counter DATA_SYNC_FETCH_FAILURES("irys.data_sync.fetch_failures_total", "Data sync fetch failures by ledger, peer, and failure class");
     counter DATA_SYNC_ATTEMPTS("irys.data_sync.attempts_total", "Data sync scheduling attempts by ledger and fresh/retry class");
     counter DATA_SYNC_UNIQUE_OFFSETS_ATTEMPTED("irys.data_sync.unique_offsets_attempted_total", "Offsets attempted for the first time in the current in-memory scheduler lifecycle");
@@ -51,6 +53,10 @@ irys_utils::define_metrics! {
     gauge DATA_SYNC_SCAN_CURSOR("irys.data_sync.scan_cursor", "Partition-relative data sync discovery cursor by ledger and storage module");
     gauge DATA_SYNC_ACTIVE_PEERS("irys.data_sync.active_peers", "Number of active data sync peers");
     counter MINING_SOLUTIONS_FOUND("irys.mining.solutions_found_total", "Mining solutions found");
+    counter TX_PATH_DERIVE_FAILED(
+        "irys.mining.tx_path_derive_failed_total",
+        "Tx path derive failures. Reason `startup` is a startup check: the service still mines and no solution was dropped. A dropped solution uses the derive error's reason."
+    );
     gauge PACKING_ACTIVE_WORKERS("irys.packing.active_workers", "Number of active packing workers");
     gauge PACKING_SEMAPHORE_AVAILABLE("irys.packing.semaphore_available", "Available packing semaphore permits");
     counter DATA_TX_INGESTED("irys.mempool.data_tx_ingested_total", "Data transactions ingested into mempool");
@@ -351,8 +357,9 @@ pub(crate) fn record_data_sync_active_peers(count: u64) {
     DATA_SYNC_ACTIVE_PEERS.record(count, &[]);
 }
 
-/// `source`: `assigned` | `ingress_proof`. `outcome`: `success` or a
-/// [`crate::chunk_fetcher::ChunkFetchFailureKind`] metric label.
+/// `source`: `assigned` | `ingress_proof` | `local_cache`.
+/// `outcome`: `success`, a [`crate::chunk_fetcher::ChunkFetchFailureKind`] label,
+/// or a local-cache label (`not_found`, `invalid`, `error`, `write_failed`).
 pub(crate) fn record_data_sync_fetch_by_source(source: &'static str, outcome: &'static str) {
     DATA_SYNC_FETCH_BY_SOURCE.add(
         1,
@@ -361,6 +368,41 @@ pub(crate) fn record_data_sync_fetch_by_source(source: &'static str, outcome: &'
             KeyValue::new("outcome", outcome),
         ],
     );
+    #[cfg(test)]
+    {
+        let mut counts = FETCH_BY_SOURCE_TEST
+            .lock()
+            .expect("fetch-by-source test log");
+        *counts.entry((source, outcome)).or_insert(0) += 1;
+    }
+}
+
+/// Process-wide count of [`record_data_sync_fetch_by_source`] calls.
+///
+/// Crate tests share one process. Compare a delta, not an absolute total.
+#[cfg(test)]
+pub(crate) fn test_fetch_by_source_count(source: &'static str, outcome: &'static str) -> u64 {
+    FETCH_BY_SOURCE_TEST
+        .lock()
+        .expect("fetch-by-source test log")
+        .get(&(source, outcome))
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+static FETCH_BY_SOURCE_TEST: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(&'static str, &'static str), u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// An offset moved to `HeldByBodyWorker`. Counted once per transition, not per tick.
+pub(crate) fn record_data_sync_pending_body_skipped() {
+    DATA_SYNC_PENDING_BODY_SKIPPED.add(1, &[]);
+}
+
+/// An offset left a body-worker hold because the hold timed out.
+pub(crate) fn record_data_sync_pending_body_hold_expired() {
+    DATA_SYNC_PENDING_BODY_HOLD_EXPIRED.add(1, &[]);
 }
 
 pub(crate) fn record_data_sync_fetch_failure(
@@ -423,6 +465,26 @@ pub(crate) fn record_data_sync_scheduler_state(
 pub(crate) fn record_mining_solution_found() {
     MINING_SOLUTIONS_FOUND.add(1, &[]);
 }
+
+pub(crate) fn record_tx_path_derive_failed(reason: &'static str) {
+    TX_PATH_DERIVE_FAILED.add(1, &[KeyValue::new("reason", reason)]);
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        use std::sync::atomic::Ordering;
+        TX_PATH_DERIVE_FAILED_FOR_TEST.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Count of `irys.mining.tx_path_derive_failed_total` in this process.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn tx_path_derive_failed_for_test() -> u64 {
+    use std::sync::atomic::Ordering;
+    TX_PATH_DERIVE_FAILED_FOR_TEST.load(Ordering::Relaxed)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+static TX_PATH_DERIVE_FAILED_FOR_TEST: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn record_packing_workers(active: u64, semaphore_available: u64) {
     PACKING_ACTIVE_WORKERS.record(active, &[]);

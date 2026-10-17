@@ -2,6 +2,45 @@ use irys_types::{DataRoot, TxChunkOffset, UnpackedChunk};
 use lru::LruCache;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Default)]
+struct DrainFlags {
+    next_token: u64,
+    active: HashMap<DataRoot, u64>,
+}
+
+/// Ends one `begin_drain` when dropped, including when the drain task is cancelled.
+///
+/// `end` removes the flag only when this ticket is still the active drain. A later
+/// drain of the same root keeps its own token.
+#[must_use = "dropping the ticket ends the drain"]
+#[derive(Debug)]
+pub(crate) struct DrainTicket {
+    flags: Arc<Mutex<DrainFlags>>,
+    data_root: DataRoot,
+    token: u64,
+    armed: bool,
+}
+
+impl DrainTicket {
+    pub(crate) fn end(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let mut flags = lock_drain_flags(&self.flags);
+        if flags.active.get(&self.data_root) == Some(&self.token) {
+            flags.active.remove(&self.data_root);
+        }
+    }
+}
+
+impl Drop for DrainTicket {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
 
 /// A pending chunks cache that prioritizes entries with more chunks.
 ///
@@ -13,6 +52,7 @@ pub struct PriorityPendingChunks {
     entries: HashMap<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     max_entries: usize,
     max_chunks_per_entry: usize,
+    draining: Arc<Mutex<DrainFlags>>,
 }
 
 impl PriorityPendingChunks {
@@ -21,7 +61,35 @@ impl PriorityPendingChunks {
             entries: HashMap::with_capacity(max_entries),
             max_entries,
             max_chunks_per_entry,
+            draining: Arc::new(Mutex::new(DrainFlags::default())),
         }
+    }
+
+    fn lock_drains(&self) -> std::sync::MutexGuard<'_, DrainFlags> {
+        lock_drain_flags(&self.draining)
+    }
+
+    /// Mark `data_root` so park paths reject new chunks until the popped set is restored.
+    pub(crate) fn begin_drain(&self, data_root: DataRoot) -> DrainTicket {
+        let mut flags = self.lock_drains();
+        let token = flags.next_token;
+        flags.next_token = flags.next_token.wrapping_add(1);
+        flags.active.insert(data_root, token);
+        DrainTicket {
+            flags: Arc::clone(&self.draining),
+            data_root,
+            token,
+            armed: true,
+        }
+    }
+
+    pub(crate) fn is_draining(&self, data_root: &DataRoot) -> bool {
+        self.lock_drains().active.contains_key(data_root)
+    }
+
+    /// Clear the active drain for `data_root`, if any.
+    pub(crate) fn clear_drain(&self, data_root: &DataRoot) {
+        self.lock_drains().active.remove(data_root);
     }
 
     pub fn len(&self) -> usize {
@@ -91,6 +159,12 @@ impl PriorityPendingChunks {
             self.entries.remove(&data_root);
         }
     }
+}
+
+fn lock_drain_flags(flags: &Mutex<DrainFlags>) -> std::sync::MutexGuard<'_, DrainFlags> {
+    flags
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -194,5 +268,33 @@ mod tests {
             .pop(&root)
             .expect("second drain recovers parked chunk");
         assert_eq!(recovered.len(), 1);
+    }
+
+    /// Cancel drops the ticket. The root must accept parks again. A ticket that
+    /// already ended must not clear a drain that started after it.
+    #[test]
+    fn drain_ticket_clears_only_its_own_token() {
+        let cache = PriorityPendingChunks::new(4, 4);
+        let root = DataRoot::from([0xD1; 32]);
+
+        let ticket = cache.begin_drain(root);
+        assert!(cache.is_draining(&root));
+        drop(ticket);
+        assert!(
+            !cache.is_draining(&root),
+            "dropping the drain ticket must clear the flag"
+        );
+
+        let mut ended = cache.begin_drain(root);
+        ended.end();
+        assert!(!cache.is_draining(&root));
+        let next = cache.begin_drain(root);
+        drop(ended);
+        assert!(
+            cache.is_draining(&root),
+            "an ended ticket must not clear the next drain"
+        );
+        drop(next);
+        assert!(!cache.is_draining(&root));
     }
 }

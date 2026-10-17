@@ -6,10 +6,9 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    BlockIndex, StorageModule, StorageModulesReadGuard, WriteDataChunkError,
+    BatchEnqueueItem, BlockIndex, StorageModule, StorageModulesReadGuard, WriteDataChunkError,
     get_overlapped_storage_modules,
 };
-use irys_packing::unpack;
 use irys_storage::{InclusiveInterval as _, ie, ii};
 use irys_types::{
     Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
@@ -18,7 +17,10 @@ use irys_types::{
     hash_sha256, validate_path,
 };
 use reth::tasks::shutdown::Shutdown;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::{Notify, mpsc::UnboundedReceiver, oneshot};
 use tracing::{error, instrument};
 
@@ -55,8 +57,33 @@ pub struct ChunkMigrationServiceInner {
     pub db: DatabaseProvider,
     /// Service sender channels
     pub service_senders: ServiceSenders,
-    /// Wakes the body-migration worker once a block's indexes have committed.
+    /// Wakes the body-migration worker once a block's indexes are durable.
     pub body_wakeup: Arc<Notify>,
+    /// Test-only. Runs after the per-block WAL sync and before side effects.
+    #[cfg(test)]
+    index_durable_hook: Option<IndexDurableHook>,
+}
+
+/// Observes the moment a block's index registrations are durable.
+#[cfg(test)]
+struct IndexDurableHook(Arc<dyn Fn() + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for IndexDurableHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IndexDurableHook(..)")
+    }
+}
+
+#[cfg(test)]
+impl IndexDurableHook {
+    fn new(hook: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(hook))
+    }
+
+    fn call(&self) {
+        (self.0)();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -76,7 +103,7 @@ pub enum MigrationError {
     #[error("Missing block or tx data for migration: {0}")]
     MissingData(String),
     /// Catch-all variant for other errors.
-    #[error("Ingress proof error: {0}")]
+    #[error("Chunk migration error: {0}")]
     Other(String),
 }
 
@@ -109,7 +136,14 @@ impl ChunkMigrationServiceInner {
             db,
             service_senders,
             body_wakeup,
+            #[cfg(test)]
+            index_durable_hook: None,
         }
+    }
+
+    #[cfg(test)]
+    fn set_index_durable_hook(&mut self, hook: impl Fn() + Send + Sync + 'static) {
+        self.index_durable_hook = Some(IndexDurableHook::new(hook));
     }
 
     /// Infallible by design: one block whose migration fails must not take the
@@ -223,16 +257,10 @@ impl ChunkMigrationServiceInner {
             }
         }
 
-        // Process transactions in the order the block encodes them
-        // (`block.data_ledgers: Vec<…>`), not HashMap iteration order. The
-        // block producer encodes the Vec as Publish → Submit → [OneYear,
-        // ThirtyDay] (see `block_producer.rs::data_ledgers`), and that order
-        // is part of the consensus-signed payload — every node sees the same
-        // sequence. Iterating the HashMap instead would give non-deterministic
-        // ordering across nodes and runs, which doesn't affect final storage
-        // state (each ledger writes into its own storage modules) but does
-        // produce divergent log/trace output and divergent intermediate
-        // crash-recovery state.
+        // Follow `block.data_ledgers` order. HashMap iteration would make the
+        // crash-recovery intermediate state depend on hash order. Final
+        // storage does not: each ledger writes its own modules.
+        let mut touched = Vec::new();
         for ledger_entry in block.data_ledgers.iter() {
             let Ok(ledger) = DataLedger::try_from(ledger_entry.ledger_id) else {
                 tracing::warn!(
@@ -251,12 +279,22 @@ impl ChunkMigrationServiceInner {
                 &block_index,
                 &config,
                 &storage_modules,
+                &mut touched,
             )?;
         }
 
-        // This block's indexes are committed; the bodies they describe are now
-        // owed as `PendingBodyMigrationsByOffset` rows. Wake the worker — it
-        // also polls, so a lost wake-up only costs latency, never progress.
+        // One SyncWAL per submodule this block wrote. Per-tx registrations
+        // stay unsynced. The wake and `OnBlockMigrated` below treat the rows
+        // as durable, so a failed sync must not publish them.
+        self.sync_block_indexes(&touched)?;
+        #[cfg(test)]
+        if let Some(hook) = &self.index_durable_hook {
+            hook.call();
+        }
+
+        // The bodies are now owed as `PendingBodyMigrationsByOffset` rows.
+        // Wake the worker — it also polls, so a lost wake-up only costs
+        // latency, never progress.
         self.body_wakeup.notify_one();
 
         // forward the finalization message to the cache service for cleanup
@@ -271,6 +309,30 @@ impl ChunkMigrationServiceInner {
             );
         }
 
+        Ok(())
+    }
+
+    /// One synced WAL write per dirty submodule of each storage module this
+    /// block indexed. A module touched by several txs is synced once.
+    ///
+    /// `sync_group` is a no-op on a clean submodule and on an MDBX index
+    /// whose group commit is off. A failure is the same error a synced
+    /// registration used to return.
+    fn sync_block_indexes(&self, touched: &[Arc<StorageModule>]) -> Result<(), MigrationError> {
+        let mut seen = HashSet::new();
+        for module in touched {
+            if !seen.insert(module.id) {
+                continue;
+            }
+            if let Err(err) = module.sync_index_registrations() {
+                error!(
+                    storage_module.id = module.id,
+                    %err,
+                    "failed to sync block index registrations"
+                );
+                return Err(MigrationError::ChunkIndexWrite);
+            }
+        }
         Ok(())
     }
 }
@@ -288,6 +350,7 @@ pub fn process_ledger_transactions(
     block_index: &BlockIndex,
     config: &Config,
     storage_modules_guard: &StorageModulesReadGuard,
+    touched: &mut Vec<Arc<StorageModule>>,
 ) -> Result<(), MigrationError> {
     let path_pairs = get_tx_path_pairs(block, ledger, txs).map_err(|e| {
         MigrationError::Other(format!("tx path merklization failed for {ledger:?}: {e}"))
@@ -295,7 +358,9 @@ pub fn process_ledger_transactions(
     let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index);
     let mut prev_chunk_offset = block_offsets.start();
 
-    for ((_txid, tx_path), tx) in path_pairs {
+    for (tx_index, ((_txid, tx_path), tx)) in path_pairs.into_iter().enumerate() {
+        let tx_index = u32::try_from(tx_index)
+            .map_err(|_| MigrationError::Other(format!("tx index {tx_index} does not fit u32")))?;
         let num_chunks_in_tx: u32 = tx
             .data_size
             .div_ceil(config.consensus.chunk_size)
@@ -319,6 +384,8 @@ pub fn process_ledger_transactions(
             ledger,
             storage_modules_guard,
             block.height,
+            tx_index,
+            touched,
         )?;
 
         prev_chunk_offset += num_chunks_in_tx as u64;
@@ -327,61 +394,100 @@ pub fn process_ledger_transactions(
     Ok(())
 }
 
-/// Source the body for `tx_offset` of `data_root`: the chunk cache first, then
-/// (Publish only) the durable Submit replica. `None` means data sync's problem.
-fn load_chunk_for_migration(
+/// Source `count` contiguous transaction offsets starting at `tx_start`.
+/// Cache hits stay per chunk. A run of cache misses on Publish is one
+/// [`StorageModule::read_durable_bodies`] per Submit replica that still has a
+/// hole. Term ledgers do not fall back across ledgers. `None` is a hole.
+fn load_chunks_for_migration(
     storage_modules_guard: &StorageModulesReadGuard,
     db: &DatabaseProvider,
     target_ledger: DataLedger,
     data_root: DataRoot,
     data_size: u64,
-    tx_offset: TxChunkOffset,
+    tx_start: TxChunkOffset,
+    count: usize,
     config: &Config,
-) -> Result<Option<UnpackedChunk>, MigrationError> {
+) -> Result<Vec<Option<UnpackedChunk>>, MigrationError> {
     let chunk_size = usize::try_from(config.consensus.chunk_size).map_err(|_| {
         MigrationError::Other(format!(
             "configured chunk size {} does not fit usize",
             config.consensus.chunk_size
         ))
     })?;
-    match get_cached_chunk(db, data_root, tx_offset) {
-        Ok(Some((_metadata, cached))) if cached.chunk.is_some() => {
-            match validate_chunk_for_migration(cached, data_root, data_size, tx_offset, chunk_size)
-            {
-                Ok(chunk) => return Ok(Some(chunk)),
-                Err(error) => {
-                    tracing::warn!(
-                        data_root = %data_root,
-                        %tx_offset,
-                        ?error,
-                        "Cached chunk failed migration validation; checking durable fallback"
-                    );
+    let mut bodies = vec![None; count];
+    let mut misses = Vec::new();
+    for step in 0..count {
+        let tx_offset = tx_offset_at(tx_start, step)?;
+        match get_cached_chunk(db, data_root, tx_offset) {
+            Ok(Some((_metadata, cached))) if cached.chunk.is_some() => {
+                match validate_chunk_for_migration(
+                    cached, data_root, data_size, tx_offset, chunk_size,
+                ) {
+                    Ok(chunk) => bodies[step] = Some(chunk),
+                    Err(error) => {
+                        tracing::warn!(
+                            data_root = %data_root,
+                            %tx_offset,
+                            ?error,
+                            "Cached chunk failed migration validation; checking durable fallback"
+                        );
+                        misses.push(step);
+                    }
                 }
             }
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(
-                data_root = %data_root,
-                %tx_offset,
-                ?error,
-                "Failed to read cached chunk during migration; checking durable fallback"
-            );
+            Ok(_) => misses.push(step),
+            Err(error) => {
+                tracing::warn!(
+                    data_root = %data_root,
+                    %tx_offset,
+                    ?error,
+                    "Failed to read cached chunk during migration; checking durable fallback"
+                );
+                misses.push(step);
+            }
         }
     }
-
-    // Submit is the only ledger whose transaction is later copied into a
-    // second ledger. Its cached body may be reclaimed after the Submit fsync,
-    // so Publish migration sources that normal cache-miss path from the durable
-    // Submit replica. Term-ledger transactions are written only once and do not
-    // need a cross-ledger fallback. If the Submit replica was reassigned or
-    // reset, the caller leaves a visible hole for data sync instead.
-    if target_ledger != DataLedger::Publish {
-        return Ok(None);
+    if target_ledger == DataLedger::Publish && !misses.is_empty() {
+        fill_submit_misses(
+            storage_modules_guard,
+            data_root,
+            data_size,
+            tx_start,
+            &misses,
+            &mut bodies,
+            chunk_size,
+        )?;
     }
+    Ok(bodies)
+}
 
+fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, MigrationError> {
+    let start = *tx_start;
+    let step = u32::try_from(step)
+        .map_err(|_| MigrationError::Other(format!("tx offset step {step} exceeds u32")))?;
+    let raw = start
+        .checked_add(step)
+        .ok_or_else(|| MigrationError::Other(format!("tx offset {start} + {step} exceeds u32")))?;
+    Ok(TxChunkOffset::from(raw))
+}
+
+/// One range read per remaining hole span. The next Submit replica is asked
+/// only for the offsets the previous replica left empty.
+fn fill_submit_misses(
+    storage_modules_guard: &StorageModulesReadGuard,
+    data_root: DataRoot,
+    data_size: u64,
+    tx_start: TxChunkOffset,
+    misses: &[usize],
+    bodies: &mut [Option<UnpackedChunk>],
+    chunk_size: usize,
+) -> Result<(), MigrationError> {
     let storage_modules = storage_modules_guard.read().clone();
+    let mut pending = misses.to_vec();
     for module in &storage_modules {
+        if pending.is_empty() {
+            break;
+        }
         let is_submit = module
             .partition_assignment()
             .and_then(|assignment| assignment.ledger_id)
@@ -389,65 +495,122 @@ fn load_chunk_for_migration(
         if !is_submit {
             continue;
         }
-        let Some(partition_offsets) = module
-            .partition_offsets_for_data_root_chunk(data_root, tx_offset)
+        let mut still = Vec::new();
+        for (start_step, len) in contiguous_index_runs(&pending) {
+            let tx0 = tx_offset_at(tx_start, start_step)?;
+            let placements = irys_domain::trace_index_read(irys_domain::MIGRATION, || {
+                module.partition_offsets_for_data_root_chunk(data_root, tx0)
+            })
             .map_err(|error| {
                 MigrationError::Other(format!("resolving Submit fallback: {error}"))
-            })?
-        else {
-            continue;
-        };
-        for partition_offset in partition_offsets {
-            if !module.is_data_chunk_durable_at(partition_offset) {
-                continue;
-            }
-            let Some(packed) = module
-                .generate_full_chunk(partition_offset)
-                .map_err(|error| {
-                    MigrationError::Other(format!("reading durable Submit fallback: {error}"))
-                })?
-            else {
+            })?;
+            let Some(placements) = placements else {
+                still.extend(start_step..start_step + len);
                 continue;
             };
-            let unpacked = unpack(
-                &packed,
-                config.consensus.entropy_packing_iterations,
-                chunk_size,
-                config.consensus.chain_id,
-            );
-            if unpacked.data_root != data_root || unpacked.tx_offset != tx_offset {
-                tracing::warn!(
-                    data_root = %data_root,
-                    %tx_offset,
-                    storage_module.id = module.id,
-                    partition.offset = %partition_offset,
-                    "Durable Submit chunk identity mismatch; checking another replica"
-                );
+            if placements.is_empty() {
+                still.extend(start_step..start_step + len);
                 continue;
             }
-            match validate_chunk_parts_for_migration(
-                unpacked.data_path,
-                unpacked.bytes,
-                data_root,
-                data_size,
-                tx_offset,
-                chunk_size,
-            ) {
-                Ok(chunk) => return Ok(Some(chunk)),
-                Err(error) => {
-                    tracing::warn!(
-                        data_root = %data_root,
-                        %tx_offset,
-                        storage_module.id = module.id,
-                        partition.offset = %partition_offset,
-                        ?error,
-                        "Durable Submit chunk failed migration validation; checking another replica"
-                    );
+            let mut filled = vec![false; len];
+            for place in placements {
+                let mut index = 0;
+                while index < len {
+                    if filled[index] {
+                        index += 1;
+                        continue;
+                    }
+                    let mut end = index;
+                    while end < len && !filled[end] {
+                        end += 1;
+                    }
+                    let start_offset = place
+                        .0
+                        .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
+                        .map(irys_types::PartitionChunkOffset::from);
+                    let end_offset = place
+                        .0
+                        .checked_add(u32::try_from(end - 1).unwrap_or(u32::MAX))
+                        .map(irys_types::PartitionChunkOffset::from);
+                    let (Some(start_offset), Some(end_offset)) = (start_offset, end_offset) else {
+                        index = end;
+                        continue;
+                    };
+                    let read = module
+                        .read_durable_bodies(start_offset, end_offset)
+                        .map_err(|error| {
+                            MigrationError::Other(format!(
+                                "reading durable Submit fallback: {error}"
+                            ))
+                        })?;
+                    for (step, body) in read.into_iter().enumerate() {
+                        let Some(body) = body else {
+                            continue;
+                        };
+                        let at = start_step + index + step;
+                        let tx_offset = tx_offset_at(tx_start, at)?;
+                        if body.data_root != data_root || body.tx_offset != tx_offset {
+                            tracing::warn!(
+                                data_root = %data_root,
+                                %tx_offset,
+                                storage_module.id = module.id,
+                                partition.offset = %(start_offset.0 + step as u32),
+                                "Durable Submit chunk identity mismatch; checking another replica"
+                            );
+                            continue;
+                        }
+                        match validate_chunk_parts_for_migration(
+                            body.data_path,
+                            body.bytes,
+                            data_root,
+                            data_size,
+                            tx_offset,
+                            chunk_size,
+                        ) {
+                            Ok(chunk) => {
+                                bodies[at] = Some(chunk);
+                                filled[index + step] = true;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    data_root = %data_root,
+                                    %tx_offset,
+                                    storage_module.id = module.id,
+                                    partition.offset = %(start_offset.0 + step as u32),
+                                    ?error,
+                                    "Durable Submit chunk failed migration validation; checking another replica"
+                                );
+                            }
+                        }
+                    }
+                    index = end;
+                }
+            }
+            for (step, was_filled) in filled.iter().enumerate() {
+                if !was_filled {
+                    still.push(start_step + step);
                 }
             }
         }
+        pending = still;
     }
-    Ok(None)
+    Ok(())
+}
+
+fn contiguous_index_runs(indexes: &[usize]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut index = 0;
+    while index < indexes.len() {
+        let start = indexes[index];
+        let mut end = start;
+        index += 1;
+        while index < indexes.len() && indexes[index] == end + 1 {
+            end = indexes[index];
+            index += 1;
+        }
+        runs.push((start, end - start + 1));
+    }
+    runs
 }
 
 /// Computes the range of chunks added to a ledger by the transactions in a block,
@@ -545,17 +708,21 @@ fn update_storage_module_indexes(
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
     block_height: u64,
+    tx_index: u32,
+    touched: &mut Vec<Arc<StorageModule>>,
 ) -> Result<(), MigrationError> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules_guard, ledger, &tx_chunk_range);
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(
+            .index_transaction_data_in(
                 data_tx,
                 &tx_path_proof.to_vec(),
                 tx_chunk_range,
                 block_height,
+                Some(ledger),
+                Some(tx_index),
             )
             .map_err(|e| {
                 error!(
@@ -564,6 +731,7 @@ fn update_storage_module_indexes(
                 );
                 MigrationError::ChunkIndexWrite
             })?;
+        touched.push(storage_module);
     }
     Ok(())
 }
@@ -576,26 +744,44 @@ fn get_cached_chunk(
     db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
 
+#[cfg(test)]
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,
     chunk: &UnpackedChunk,
 ) -> Result<(), MigrationError> {
-    storage_module.write_data_chunk(chunk).map_err(|e| match e {
-        // Recovery holds the module's data writes; the worker defers, so this
-        // is expected and not an error worth an error-level log.
-        WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,
-        e => {
-            error!(
-                "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
-                chunk.data_root, chunk.tx_offset, chunk.data_size, e
-            );
-            MigrationError::ChunkDataWrite
-        }
-    })
+    storage_module
+        .deposit_data_chunk(chunk)
+        .map_err(|e| match e {
+            // Recovery holds the module's data writes; the worker defers, so this
+            // is expected and not an error worth an error-level log.
+            WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,
+            e => {
+                error!(
+                    "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
+                    chunk.data_root, chunk.tx_offset, chunk.data_size, e
+                );
+                MigrationError::ChunkDataWrite
+            }
+        })
 }
 
-fn validate_chunk_for_migration(
+fn write_chunks_to_module(
+    storage_module: &Arc<StorageModule>,
+    chunks: &[UnpackedChunk],
+) -> Result<Vec<BatchEnqueueItem>, MigrationError> {
+    storage_module
+        .deposit_data_chunks(chunks)
+        .map_err(|e| match e {
+            WriteDataChunkError::WritesPaused => MigrationError::WritesPaused,
+            e => {
+                error!("Failed to write {} chunk bodies: {:?}", chunks.len(), e);
+                MigrationError::ChunkDataWrite
+            }
+        })
+}
+
+pub(crate) fn validate_chunk_for_migration(
     cached: CachedChunk,
     data_root: DataRoot,
     data_size: u64,
@@ -618,7 +804,7 @@ fn validate_chunk_for_migration(
     )
 }
 
-fn validate_chunk_parts_for_migration(
+pub(crate) fn validate_chunk_parts_for_migration(
     data_path: Base64,
     bytes: Base64,
     data_root: DataRoot,
@@ -689,7 +875,6 @@ impl ChunkMigrationService {
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         let config = config.clone();
-        // let block_index = block_index.clone();
         let storage_modules_guard = storage_modules_guard.clone();
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
@@ -703,12 +888,13 @@ impl ChunkMigrationService {
                 config.clone(),
                 body_wakeup.clone(),
                 shutdown_rx.clone(),
+                service_senders.data_sync.clone(),
             )
             .run(),
         );
 
         let handle = runtime_handle.spawn(async move {
-            let data_sync_service = Self {
+            let chunk_migration_service = Self {
                 shutdown: shutdown_rx,
                 msg_rx: rx,
                 inner: ChunkMigrationServiceInner::new(
@@ -720,14 +906,14 @@ impl ChunkMigrationService {
                     body_wakeup,
                 ),
             };
-            data_sync_service
+            chunk_migration_service
                 .start()
                 .await
-                .expect("DataSync Service encountered an irrecoverable error")
+                .expect("Chunk migration service encountered an irrecoverable error")
         });
 
         TokioServiceHandle {
-            name: "data_sync_service".to_string(),
+            name: "chunk_migration_service".to_string(),
             handle,
             shutdown_signal: shutdown_tx,
         }
@@ -735,14 +921,14 @@ impl ChunkMigrationService {
 
     #[tracing::instrument(name = "chunk_migration_service_start", level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
-        tracing::info!("starting DataSync Service");
+        tracing::info!("starting chunk migration service");
 
         loop {
             tokio::select! {
                 biased;
 
                 _ = &mut self.shutdown => {
-                    tracing::info!("Shutdown signal received for DataSync Service");
+                    tracing::info!("Shutdown signal received for chunk migration service");
                     break;
                 }
 
@@ -767,7 +953,7 @@ impl ChunkMigrationService {
             self.inner.handle_message(msg);
         }
 
-        tracing::info!("shutting down DataSync Service gracefully");
+        tracing::info!("shutting down chunk migration service gracefully");
         Ok(())
     }
 }
@@ -776,7 +962,7 @@ impl ChunkMigrationService {
 mod tests {
     use super::body_worker::{
         BodyMigrationWorker, MAX_BODY_MIGRATION_ATTEMPTS, PENDING_WRITE_CEILING_BATCHES,
-        PENDING_WRITE_CEILING_MIN_CHUNKS, PassStats, pending_write_ceiling_bytes,
+        PENDING_WRITE_CEILING_MIN_CHUNKS, pending_write_ceiling_bytes,
     };
     use super::*;
     use irys_database::{
@@ -784,13 +970,23 @@ mod tests {
         open_or_create_db, submodule::tables::PendingBodyMigration, tables::IrysTables,
     };
     use irys_domain::{ChunkType, StorageModuleInfo};
+    use irys_storage::ie;
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
-        BlockIndexItem, ConsensusConfig, DataTransaction, H256List, IrysAddress, LedgerIndexItem,
-        NodeConfig, PartitionChunkOffset, irys::IrysSigner, partition::PartitionAssignment,
+        BlockIndexItem, ConsensusConfig, DataTransaction, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
+        LedgerChunkOffset, LedgerChunkRange, LedgerIndexItem, NodeConfig, PartitionChunkOffset,
+        SubmoduleIndexEngine, irys::IrysSigner, partition::PartitionAssignment,
         partition_chunk_offset_ie,
     };
-    use std::{sync::RwLock, time::Duration};
+    use std::{
+        sync::{
+            Mutex, RwLock,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
 
     struct Fixture {
         _tmp: irys_testing_utils::utils::tempfile::TempDir,
@@ -811,6 +1007,18 @@ mod tests {
     /// no cached bodies; `seed_cache` adds them. `max_pending_write_bytes` is
     /// the module's pending-write ceiling (`None` = derived default).
     fn fixture(num_chunks: u64, max_pending_write_bytes: Option<u64>) -> eyre::Result<Fixture> {
+        fixture_with(
+            num_chunks,
+            max_pending_write_bytes,
+            SubmoduleIndexEngine::Mdbx,
+        )
+    }
+
+    fn fixture_with(
+        num_chunks: u64,
+        max_pending_write_bytes: Option<u64>,
+        engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<Fixture> {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let chunk_size = 32_u64;
         let mut node_config = NodeConfig {
@@ -827,6 +1035,11 @@ mod tests {
             ..NodeConfig::testing()
         };
         node_config.storage.max_pending_write_bytes = max_pending_write_bytes;
+        node_config.database.submodule_index = engine;
+        if engine == SubmoduleIndexEngine::Rocksdb {
+            // The ordering test must observe the block sync, not the backstop.
+            node_config.storage.index_wal_backstop_ms = 60_000;
+        }
         let config = Config::new_with_random_peer_id(node_config);
 
         let sm = Arc::new(StorageModule::new(
@@ -892,6 +1105,7 @@ mod tests {
                 &self.block_index,
                 &self.config,
                 &self.guard,
+                &mut Vec::new(),
             )
         }
 
@@ -915,12 +1129,21 @@ mod tests {
 
         /// A fresh worker over the same modules and DB — also what a restart looks like.
         fn worker(&self) -> BodyMigrationWorker {
+            let (senders, _receivers) = crate::services::ServiceSenders::new();
+            self.worker_sending_to(senders)
+        }
+
+        fn worker_sending_to(
+            &self,
+            senders: crate::services::ServiceSenders,
+        ) -> BodyMigrationWorker {
             BodyMigrationWorker::new(
                 self.guard.clone(),
                 self.db.clone(),
                 self.config.clone(),
                 Arc::new(Notify::new()),
                 self.shutdown.clone(),
+                senders.data_sync.clone(),
             )
         }
 
@@ -1080,8 +1303,18 @@ mod tests {
             assert_eq!(f.chunk_type(offset), Some(ChunkType::Data));
         }
 
-        // Idle pass is a no-op.
-        assert_eq!(worker.drain_pass().await, PassStats::default());
+        // Idle pass reads an empty backlog and publishes that zero.
+        let idle = worker.drain_pass().await;
+        assert_eq!(
+            (
+                idle.rows,
+                idle.written,
+                idle.settled,
+                idle.retired,
+                idle.recorded_gauges
+            ),
+            (0, 0, 0, 0, true)
+        );
         Ok(())
     }
 
@@ -1115,6 +1348,52 @@ mod tests {
         Ok(())
     }
 
+    /// Retirement hands the entropy holes to data sync. A stall that has not
+    /// reached the limit sends nothing.
+    #[tokio::test]
+    async fn worker_retirement_hands_entropy_holes_to_data_sync() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.index()?;
+        let (senders, mut receivers) = crate::services::ServiceSenders::new();
+        let worker = f.worker_sending_to(senders);
+
+        let pass = worker.drain_pass().await;
+        assert_eq!(pass.retired, 0);
+        assert!(receivers.data_sync.try_recv().is_err());
+
+        for _ in 2..MAX_BODY_MIGRATION_ATTEMPTS {
+            assert_eq!(worker.drain_pass().await.retired, 0);
+        }
+        let pass = worker.drain_pass().await;
+        assert_eq!(pass.retired, 1);
+        assert!(f.rows()?.is_empty());
+
+        let traced = receivers
+            .data_sync
+            .try_recv()
+            .expect("retired holes are handed to data sync");
+        match traced.inner {
+            crate::DataSyncServiceMessage::BodyMigrationHoles {
+                storage_module_id,
+                chunk_offsets,
+            } => {
+                assert_eq!(storage_module_id, f.sm.id);
+                assert_eq!(
+                    chunk_offsets,
+                    vec![
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(1),
+                        PartitionChunkOffset::from(2),
+                    ]
+                );
+            }
+            _ => panic!("expected body migration holes"),
+        }
+        assert!(receivers.data_sync.try_recv().is_err());
+        Ok(())
+    }
+
     /// The per-pass write budget paces, it does not abandon: the row survives a
     /// partial pass and a *fresh* worker (a restart) continues from the first
     /// non-durable offset.
@@ -1141,6 +1420,120 @@ mod tests {
         f.sm.force_sync_pending_chunks()?;
         assert_eq!(f.worker().drain_pass().await.settled, 1);
         assert!(f.rows()?.is_empty());
+        Ok(())
+    }
+
+    /// A flush of the written prefix moves the pending key to the first offset
+    /// that is not durable. The value stays the same. A fresh worker starts at
+    /// that key, so the durable prefix is not walked again. Offsets still in
+    /// `pending_writes` stay under the old key until they are durable.
+    #[tokio::test]
+    async fn worker_advances_the_pending_key_after_a_durable_prefix() -> eyre::Result<()> {
+        let f = fixture(6, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+        let original = f.rows()?[0].1.clone();
+
+        let pass = f.worker().with_writes_per_pass(2).drain_pass().await;
+        assert_eq!((pass.written, pass.settled), (2, 0));
+        assert_eq!(
+            f.rows()?[0].0,
+            PartitionChunkOffset::from(0),
+            "in-flight writes are not durable, so the key stays"
+        );
+
+        f.sm.force_sync_pending_chunks()?;
+        let pass = f.worker().with_writes_per_pass(2).drain_pass().await;
+        assert_eq!((pass.written, pass.settled), (2, 0));
+        let rows = f.rows()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, PartitionChunkOffset::from(2));
+        assert_eq!(rows[0].1, original);
+        assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(2)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+
+        // Restart. The key is 2, so this pass does not enqueue 0 or 1 again.
+        let pass = f.worker().with_writes_per_pass(2).drain_pass().await;
+        assert_eq!((pass.written, pass.settled), (2, 0));
+        assert_eq!(f.rows()?[0].0, PartitionChunkOffset::from(2));
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(4)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+
+        f.sm.force_sync_pending_chunks()?;
+        assert_eq!(f.worker().drain_pass().await.settled, 1);
+        assert!(f.rows()?.is_empty());
+        for offset in 0..6 {
+            assert_eq!(f.chunk_type(offset), Some(ChunkType::Data));
+        }
+        Ok(())
+    }
+
+    /// One page per read, and a spent write budget stops the pass. Later jobs
+    /// still drain on later passes. The full list API keeps every row.
+    #[tokio::test]
+    async fn worker_pages_pending_jobs_and_drains_them_all() -> eyre::Result<()> {
+        let f = fixture(1, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        let chunk_size = f.config.consensus.chunk_size as usize;
+        for at in 0_u64..3 {
+            let data = vec![9_u8.wrapping_add(at as u8); chunk_size];
+            let signer = IrysSigner::random_signer(&f.config.consensus);
+            let tx =
+                signer.sign_transaction(signer.create_transaction(data.clone(), H256::zero())?)?;
+            f.db.update_eyre(|wtx| {
+                cache_data_root(wtx, &tx.header, None)?;
+                let node = &tx.chunks[0];
+                cache_chunk(
+                    wtx,
+                    &UnpackedChunk {
+                        data_root: tx.header.data_root,
+                        data_size: tx.header.data_size,
+                        data_path: Base64(tx.proofs[0].proof.clone()),
+                        bytes: Base64(data[node.min_byte_range..node.max_byte_range].to_vec()),
+                        tx_offset: TxChunkOffset::from(0),
+                    },
+                )?;
+                Ok(())
+            })?;
+            f.sm.index_transaction_data(
+                &tx.header,
+                &vec![at as u8, 1, 2, 3],
+                LedgerChunkRange(ie(
+                    LedgerChunkOffset::from(at),
+                    LedgerChunkOffset::from(at + 1),
+                )),
+                1,
+            )?;
+        }
+        assert_eq!(f.rows()?.len(), 3, "the full list still returns every job");
+
+        let worker = || f.worker().with_writes_per_pass(1).with_rows_per_pass(1);
+        let pass = worker().drain_pass().await;
+        assert_eq!((pass.rows, pass.written, pass.settled), (1, 1, 0));
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+        assert_eq!(f.rows()?.len(), 3);
+
+        f.sm.force_sync_pending_chunks()?;
+        let pass = worker().drain_pass().await;
+        assert_eq!((pass.settled, pass.written), (1, 1));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(2)));
+        assert_eq!(f.rows()?.len(), 2);
+
+        f.sm.force_sync_pending_chunks()?;
+        let pass = worker().drain_pass().await;
+        assert_eq!((pass.settled, pass.written), (1, 1));
+        assert_eq!(f.rows()?.len(), 1);
+
+        f.sm.force_sync_pending_chunks()?;
+        assert_eq!(worker().drain_pass().await.settled, 1);
+        assert!(f.rows()?.is_empty());
+        for offset in 0..3 {
+            assert_eq!(f.chunk_type(offset), Some(ChunkType::Data));
+        }
         Ok(())
     }
 
@@ -1246,6 +1639,192 @@ mod tests {
         Ok(())
     }
 
+    /// One uninitialized interval over a large span must be classified in one
+    /// interval read. A per-offset `get_chunk_type` walk is what a crashed
+    /// node repeats every tick until packing finishes.
+    #[tokio::test]
+    async fn worker_classifies_large_uninitialized_span_without_per_chunk_scan() -> eyre::Result<()>
+    {
+        const SPAN: u64 = 1_000_000;
+        let chunk_size = 8_u64;
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: SPAN,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        node_config.storage.max_pending_write_bytes = Some(u64::MAX);
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, SPAN), "hdd0".into())],
+            },
+            &config,
+        )?);
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: SPAN * chunk_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let last = u32::try_from(SPAN - 1)?;
+        sm.index_transaction_data(
+            &data_tx,
+            &vec![1, 2, 3, 4],
+            LedgerChunkRange(irys_types::ledger_chunk_offset_ii!(0_u32, last)),
+            1,
+        )?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
+        let db = DatabaseProvider(Arc::new(open_or_create_db(
+            tmp.path().join("irys_db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing()?,
+        )?));
+        let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
+        let (senders, _receivers) = ServiceSenders::new();
+        let worker = BodyMigrationWorker::new(
+            guard,
+            db,
+            config,
+            Arc::new(Notify::new()),
+            shutdown,
+            senders.data_sync.clone(),
+        );
+
+        let drain_started = std::time::Instant::now();
+        let pass = worker.drain_pass().await;
+        let drain = drain_started.elapsed();
+        eprintln!(
+            "large uninitialized span: drain_pass={drain:?} unwritable={} written={} chunk_type_reads={}",
+            pass.unwritable, pass.written, pass.chunk_type_reads
+        );
+        assert_eq!(pass.written, 0);
+        assert_eq!(pass.unwritable, SPAN as usize);
+        assert_eq!(sm.pending_body_migrations()?[0].1.attempts, 0);
+        assert_eq!(
+            pass.chunk_type_reads, 0,
+            "an uninitialized span is one interval jump; a per-offset scan calls get_chunk_type once per chunk"
+        );
+        Ok(())
+    }
+
+    /// A crash leaves the span as many short runs, not one. Jumping each run
+    /// by scanning the run list from the start is quadratic in the fragment
+    /// count and still misses the tick. The cursor must advance through the
+    /// runs once.
+    #[tokio::test]
+    async fn worker_jumps_fragmented_uninitialized_span_in_one_pass() -> eyre::Result<()> {
+        const SPAN: u64 = 40_000;
+        let chunk_size = 8_u64;
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: SPAN,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        node_config.storage.max_pending_write_bytes = Some(u64::MAX);
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: IrysAddress::from([0xAA; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, SPAN), "hdd0".into())],
+            },
+            &config,
+        )?);
+        {
+            let mut intervals = sm.intervals().write().unwrap();
+            for offset in (0..SPAN).step_by(2) {
+                StorageModule::cut_then_insert_interval_if_touching(
+                    &mut intervals,
+                    PartitionChunkOffset::from(offset),
+                    ChunkType::Interrupted,
+                );
+            }
+        }
+        let data_root = H256::random();
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: SPAN * chunk_size,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let last = u32::try_from(SPAN - 1)?;
+        sm.index_transaction_data(
+            &data_tx,
+            &vec![1, 2, 3, 4],
+            LedgerChunkRange(irys_types::ledger_chunk_offset_ii!(0_u32, last)),
+            1,
+        )?;
+
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
+        let db = DatabaseProvider(Arc::new(open_or_create_db(
+            tmp.path().join("irys_db"),
+            IrysTables::ALL,
+            reth_db::mdbx::DatabaseArguments::irys_testing()?,
+        )?));
+        let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
+        let (senders, _receivers) = ServiceSenders::new();
+        let worker = BodyMigrationWorker::new(
+            guard,
+            db,
+            config,
+            Arc::new(Notify::new()),
+            shutdown,
+            senders.data_sync.clone(),
+        );
+
+        let drain_started = std::time::Instant::now();
+        let pass = worker.drain_pass().await;
+        let drain = drain_started.elapsed();
+        eprintln!(
+            "fragmented uninitialized span: drain_pass={drain:?} unwritable={} written={}",
+            pass.unwritable, pass.written
+        );
+        assert_eq!(pass.written, 0);
+        assert_eq!(pass.unwritable, SPAN as usize);
+        assert_eq!(sm.pending_body_migrations()?[0].1.attempts, 0);
+        assert!(
+            drain < Duration::from_secs(1),
+            "drain_pass took {drain:?} for {SPAN} alternating runs"
+        );
+        Ok(())
+    }
+
     /// A paused write is `WritesPaused`, not `Other`. The worker matches that
     /// variant so a resume before a later state read cannot turn a pause into
     /// a stall.
@@ -1315,6 +1894,167 @@ mod tests {
         Ok(())
     }
 
+    /// Submit module on `slot`. Slot 0 overlaps the fixture tx. A later slot
+    /// does not, so indexing leaves its pending table empty.
+    fn submit_module(config: &Config, id: usize, slot: usize) -> eyre::Result<Arc<StorageModule>> {
+        Ok(Arc::new(StorageModule::new(
+            &StorageModuleInfo {
+                id,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(slot),
+                    miner_address: IrysAddress::from([0xBB; 20]),
+                    partition_hash: H256::random(),
+                }),
+                submodules: vec![(partition_chunk_offset_ie!(0, 20), format!("hdd{id}").into())],
+            },
+            config,
+        )?))
+    }
+
+    fn index_on(f: &Fixture, guard: &StorageModulesReadGuard) -> Result<(), MigrationError> {
+        process_ledger_transactions(
+            &f.block,
+            DataLedger::Submit,
+            std::slice::from_ref(&f.tx.header),
+            &f.block_index,
+            &f.config,
+            guard,
+            &mut Vec::new(),
+        )
+    }
+
+    fn worker_for(f: &Fixture, guard: StorageModulesReadGuard) -> BodyMigrationWorker {
+        let (senders, _receivers) = crate::services::ServiceSenders::new();
+        BodyMigrationWorker::new(
+            guard,
+            f.db.clone(),
+            f.config.clone(),
+            Arc::new(Notify::new()),
+            f.shutdown.clone(),
+            senders.data_sync.clone(),
+        )
+    }
+
+    /// No pending rows: the pass did sample the backlog, and the sample is 0.
+    #[tokio::test]
+    async fn empty_pass_records_a_zero_pending_gauge() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        let pass = f.worker().drain_pass().await;
+        assert!(pass.recorded_gauges);
+        assert_eq!(pass.rows, 0);
+        assert!(f.rows()?.is_empty());
+        Ok(())
+    }
+
+    /// A pause with nothing queued is not a skipped backlog.
+    #[tokio::test]
+    async fn paused_module_with_no_pending_rows_still_records_zero() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pause_data_writes();
+        let pass = f.worker().drain_pass().await;
+        assert!(
+            pass.recorded_gauges,
+            "a paused module with an empty pending table is not a skipped backlog"
+        );
+        assert_eq!(pass.rows, 0);
+        assert!(f.rows()?.is_empty());
+        Ok(())
+    }
+
+    /// A pass that reads jobs publishes that sample.
+    #[tokio::test]
+    async fn unpaused_pass_records_the_jobs_it_read() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+        let pass = f.worker().drain_pass().await;
+        assert!(pass.recorded_gauges);
+        assert_eq!((pass.rows, pass.written), (1, 3));
+        Ok(())
+    }
+
+    /// Rollback holds every module that still has a pending row. The pass
+    /// reads none of them, so it must not publish 0 over the last sample.
+    #[tokio::test]
+    async fn paused_nonempty_pass_does_not_replace_pending_gauges() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+        f.sm.pause_data_writes();
+        let pass = f.worker().drain_pass().await;
+        assert!(
+            !pass.recorded_gauges,
+            "every nonempty pending table was paused; gauges must stay at the last sample"
+        );
+        assert_eq!(
+            (pass.rows, pass.written, pass.settled, pass.retired),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(f.rows()?.len(), 1);
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(!f.sm.has_pending_writes());
+        Ok(())
+    }
+
+    /// An unpaused sibling with an empty table is not a sample of the paused
+    /// backlog. The gauges stay.
+    #[tokio::test]
+    async fn paused_nonempty_stays_unsampled_when_siblings_have_no_pending() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.seed_cache()?;
+        let sibling = submit_module(&f.config, 1, 1)?;
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            f.sm.clone(),
+            sibling.clone(),
+        ])));
+        index_on(&f, &guard)?;
+        assert_eq!(f.rows()?.len(), 1);
+        assert!(sibling.pending_body_migrations()?.is_empty());
+        f.sm.pause_data_writes();
+        let pass = worker_for(&f, guard).drain_pass().await;
+        assert!(
+            !pass.recorded_gauges,
+            "the only nonempty pending table was paused"
+        );
+        assert_eq!(pass.rows, 0);
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(sibling.pending_body_migrations()?.is_empty());
+        Ok(())
+    }
+
+    /// One module is paused with rows. Another is read. Record that sample.
+    /// The paused module is absent from it, and its row is untouched.
+    #[tokio::test]
+    async fn pass_records_modules_it_read_while_a_sibling_is_paused() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        let sibling = submit_module(&f.config, 1, 0)?;
+        f.sm.pack_with_zeros();
+        sibling.pack_with_zeros();
+        f.seed_cache()?;
+        let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            f.sm.clone(),
+            sibling.clone(),
+        ])));
+        index_on(&f, &guard)?;
+        assert_eq!(f.rows()?.len(), 1);
+        assert_eq!(sibling.pending_body_migrations()?.len(), 1);
+        f.sm.pause_data_writes();
+        let pass = worker_for(&f, guard).drain_pass().await;
+        assert!(
+            pass.recorded_gauges,
+            "a pass that read an unpaused module records that sample"
+        );
+        assert_eq!((pass.rows, pass.written), (1, 3));
+        assert_eq!(f.rows()?.len(), 1);
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(!f.sm.has_pending_writes());
+        assert_eq!(sibling.pending_body_migrations()?.len(), 1);
+        Ok(())
+    }
+
     /// A job whose index was cleared under it fails on every offset
     /// (`DataRootNotFound`). Failures count as no-progress passes, so the row
     /// is retired after the limit instead of erroring every tick forever.
@@ -1371,6 +2111,140 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), handle)
             .await
             .expect("worker did not stop on shutdown")?;
+        Ok(())
+    }
+
+    fn notify_pending(notify: &Notify) -> bool {
+        let mut waiting = std::pin::pin!(notify.notified());
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        matches!(waiting.as_mut().poll(&mut cx), Poll::Pending)
+    }
+
+    fn submit_txs(f: &Fixture) -> Arc<HashMap<DataLedger, Vec<DataTransactionHeader>>> {
+        let mut txs = HashMap::new();
+        txs.insert(DataLedger::Submit, vec![f.tx.header.clone()]);
+        Arc::new(txs)
+    }
+
+    /// Registrations in one block stay unsynced until one WAL sync. The body
+    /// wake and `OnBlockMigrated` run only after that sync.
+    #[test]
+    fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
+        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb)?;
+        f.persist_block()?;
+        let db = {
+            let (_, sub) =
+                f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            sub.db.clone()
+        };
+        let syncs_before = db.wal_sync_count();
+        let backstop_before = db.wal_backstop_sync_count();
+        f.sm.index_transaction_data(
+            &f.tx.header,
+            &vec![1, 2, 3],
+            LedgerChunkRange(ie(LedgerChunkOffset::from(0), LedgerChunkOffset::from(1))),
+            f.block.height,
+        )?;
+        assert_eq!(
+            db.wal_sync_count(),
+            syncs_before,
+            "a registration inside the block does not sync"
+        );
+        assert!(db.published_generation() > db.durable_generation());
+
+        let (service_senders, receivers) = ServiceSenders::new();
+        let cache_rx = Arc::new(Mutex::new(receivers.chunk_cache));
+        let body_wakeup = Arc::new(Notify::new());
+        let mut inner = ChunkMigrationServiceInner::new(
+            f.block_index.clone(),
+            &f.guard,
+            f.db.clone(),
+            service_senders,
+            f.config.clone(),
+            Arc::clone(&body_wakeup),
+        );
+        let hook_cache = Arc::clone(&cache_rx);
+        let hook_wake = Arc::clone(&body_wakeup);
+        let hook_db = db.clone();
+        let saw = Arc::new(AtomicBool::new(false));
+        let hook_saw = Arc::clone(&saw);
+        inner.set_index_durable_hook(move || {
+            assert!(hook_db.wal_sync_count() > syncs_before);
+            assert!(hook_db.durable_generation() >= hook_db.published_generation());
+            assert!(
+                hook_cache.lock().expect("cache rx").try_recv().is_err(),
+                "OnBlockMigrated sent before the sync"
+            );
+            assert!(
+                notify_pending(&hook_wake),
+                "body worker woken before the sync"
+            );
+            hook_saw.store(true, Ordering::SeqCst);
+        });
+
+        inner.on_block_migrated(Arc::clone(&f.block), submit_txs(&f))?;
+        assert!(saw.load(Ordering::SeqCst), "sync hook did not run");
+        assert_eq!(db.wal_sync_count(), syncs_before + 1);
+        assert_eq!(db.wal_backstop_sync_count(), backstop_before + 1);
+        let traced = cache_rx
+            .lock()
+            .expect("cache rx")
+            .try_recv()
+            .expect("OnBlockMigrated");
+        match traced.inner {
+            CacheServiceAction::OnBlockMigrated(height, None) => {
+                assert_eq!(height, f.block.height);
+            }
+            other => panic!("unexpected cache message: {other:?}"),
+        }
+        assert!(cache_rx.lock().expect("cache rx").try_recv().is_err());
+        assert!(!notify_pending(&body_wakeup));
+        Ok(())
+    }
+
+    /// A failed per-block sync is the old registration-sync error, and it
+    /// does not wake the body worker or send `OnBlockMigrated`.
+    #[test]
+    fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
+        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb)?;
+        f.persist_block()?;
+        let db = {
+            let (_, sub) =
+                f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            sub.db.clone()
+        };
+        db.fail_next_wal_sync();
+        let (service_senders, receivers) = ServiceSenders::new();
+        let mut cache_rx = receivers.chunk_cache;
+        let body_wakeup = Arc::new(Notify::new());
+        let mut inner = ChunkMigrationServiceInner::new(
+            f.block_index.clone(),
+            &f.guard,
+            f.db.clone(),
+            service_senders,
+            f.config.clone(),
+            Arc::clone(&body_wakeup),
+        );
+        let saw = Arc::new(AtomicBool::new(false));
+        let hook_saw = Arc::clone(&saw);
+        inner.set_index_durable_hook(move || {
+            hook_saw.store(true, Ordering::SeqCst);
+        });
+
+        let err = inner
+            .on_block_migrated(Arc::clone(&f.block), submit_txs(&f))
+            .expect_err("sync failure");
+        assert!(matches!(err, MigrationError::ChunkIndexWrite));
+        assert!(
+            !saw.load(Ordering::SeqCst),
+            "side effects ran after a failed sync"
+        );
+        assert!(cache_rx.try_recv().is_err());
+        assert!(notify_pending(&body_wakeup));
+        assert!(db.wal_sync_failed());
+        assert!(db.published_generation() > db.durable_generation());
+        assert_eq!(f.rows()?.len(), 1);
         Ok(())
     }
 }

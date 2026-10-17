@@ -86,6 +86,16 @@ impl Config {
              a zero ceiling stops chunk-body migration from ever writing"
         );
         ensure!(
+            self.node_config.storage.entropy_sweep_max_bytes > 0,
+            "storage.entropy_sweep_max_bytes must be > 0: a hold is at least one chunk"
+        );
+        // Packing takes this value modulo each chunk offset (`div_ceil(2)` of
+        // it). Zero panics on the first packed chunk.
+        ensure!(
+            self.node_config.storage.num_writes_before_sync > 0,
+            "storage.num_writes_before_sync must be > 0: packing sync uses it as a divisor"
+        );
+        ensure!(
             self.node_config.max_peer_response_bytes > 0,
             "max_peer_response_bytes must be > 0: a zero ceiling rejects every peer response body"
         );
@@ -730,8 +740,8 @@ pub struct VdfConfig {
     /// Target number of SHA-1 operations per second for VDF calibration
     pub sha_1s_difficulty: u64,
 
-    /// When true, enforce a minimum step duration to prevent VDF from
-    /// outrunning block production when sha_1s_difficulty is low.
+    /// When true, the local step uses a 25ms floor instead of one second.
+    /// See `VdfNodeConfig::throttle`.
     pub throttle: bool,
 
     /// See `VdfNodeConfig::progress_timeout_secs`.
@@ -1371,6 +1381,24 @@ mod tests {
         // single-lane mode) so a single-permit operator config remains valid
         // on upgrade.
         expected_config.mempool.max_control_plane_concurrent_tasks = 0;
+        // An omitted key takes the production default.
+        expected_config.storage.entropy_sweep_interval_millis = 1000;
+        expected_config.storage.entropy_sweep_max_bytes = node::DEFAULT_ENTROPY_SWEEP_MAX_BYTES;
+        expected_config.storage.entropy_coalesce_hole_bytes =
+            node::DEFAULT_ENTROPY_COALESCE_HOLE_BYTES;
+        expected_config.storage.entropy_read_grace_ms = node::DEFAULT_ENTROPY_READ_GRACE_MS;
+        expected_config.storage.entropy_read_batch_bytes = node::DEFAULT_ENTROPY_READ_BATCH_BYTES;
+        expected_config.storage.entropy_readahead_bytes = node::DEFAULT_ENTROPY_READAHEAD_BYTES;
+        expected_config.storage.entropy_readahead_cache_bytes =
+            node::DEFAULT_ENTROPY_READAHEAD_CACHE_BYTES;
+        expected_config.storage.intervals_persist_secs = node::DEFAULT_INTERVALS_PERSIST_SECS;
+        // Omitted `min_durable_interval_ms` takes the production default (250).
+        // `NodeConfig::testing()` pins 0 and must not be the expectation here.
+        expected_config.storage.min_durable_interval_ms = node::DEFAULT_MIN_DURABLE_INTERVAL_MS;
+        // Omitted headroom stays at two fifths of the pending-byte ceiling.
+        expected_config.storage.durable_headroom_permille = node::DEFAULT_DURABLE_HEADROOM_PERMILLE;
+        // Omitted `recall_direct_io` is the production default (true); `testing()` pins false.
+        expected_config.storage.recall_direct_io = node::default_recall_direct_io();
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
@@ -1677,6 +1705,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_writes_before_sync() {
+        let mut zero = NodeConfig::testing();
+        zero.storage.num_writes_before_sync = 0;
+        let err = Config::new_with_random_peer_id(zero)
+            .validate()
+            .expect_err("num_writes_before_sync = 0 divides packing sync")
+            .to_string();
+        assert!(
+            err.contains("num_writes_before_sync"),
+            "expected the sync divisor guard, got: {err}"
+        );
+
+        let mut one = NodeConfig::testing();
+        one.storage.num_writes_before_sync = 1;
+        Config::new_with_random_peer_id(one)
+            .validate()
+            .expect("a sync interval of 1 is the testing value");
+    }
+
+    #[test]
     fn validate_rejects_zero_pending_write_ceiling() {
         let mut node_config = NodeConfig::testing();
         node_config.storage.max_pending_write_bytes = Some(0);
@@ -1691,6 +1739,20 @@ mod tests {
         Config::new_with_random_peer_id(node_config)
             .validate()
             .expect("any positive ceiling is accepted; the worker floors it");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.entropy_sweep_max_bytes = 0;
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a zero entropy sweep cap is not a valid pread or pwrite")
+            .to_string();
+        assert!(err.contains("entropy_sweep_max_bytes"), "got: {err}");
+
+        let mut node_config = NodeConfig::testing();
+        node_config.storage.entropy_sweep_max_bytes = 1;
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("any positive entropy sweep cap is accepted");
     }
 
     #[test]

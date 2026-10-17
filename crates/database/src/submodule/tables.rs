@@ -1,7 +1,6 @@
 use crate::metadata::MetadataKey;
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, H256, PartitionChunkOffset, RelativeChunkOffset,
-    TxPath, TxPathHash,
+    ChunkDataPath, DataRoot, H256, PartitionChunkOffset, RelativeChunkOffset, TxPath, TxPathHash,
 };
 use paste::paste;
 use reth_codecs::Compact;
@@ -12,23 +11,73 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
+/// Bytes stored in the submodule `Metadata` schema row after open succeeds.
+///
+/// A schema v1 directory has no row. Open migrates it and writes this value
+/// only when the new rows are complete. Any other row is refused.
+pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
+
+/// Schema file and metadata row for a RocksDB v1 index.
+///
+/// The layout stores placements, inline data proofs, chunk checksums in the
+/// offset row, and `ChunkOffsetsByContentHash`. MDBX stays on
+/// [`SUBMODULE_SCHEMA`]. Any other `rocks/SCHEMA` text is refused.
+pub const SUBMODULE_SCHEMA_ROCKS_V1: &str = "irys-submodule-index rocksdb 1\n";
+
+/// RocksDB column family for a RocksDB v1 offset record.
+///
+/// The value is the versioned proof and checksum. MDBX uses
+/// `ChunkDataPathByOffset` and stores only the proof.
+pub const CHUNK_META_BY_OFFSET_CF: &str = "ChunkMetaByOffset";
+
+/// One message for every `rocks/` marker this build does not read.
+///
+/// The text names RocksDB v1 and the recovery (move the directory aside and
+/// convert from MDBX, or reset the storage module). It does not name any
+/// other layout.
+pub fn unrecognised_rocks_layout(marker: &str) -> String {
+    format!(
+        "unrecognised RocksDB index layout {marker:?}; this build reads RocksDB v1 only. If this directory came from a pre-release build, move it aside and convert from MDBX or reset the storage module"
+    )
+}
+
+/// Metadata row written while a conversion into MDBX is still copying.
+///
+/// Open refuses this value. The converter replaces it with
+/// [`SUBMODULE_SCHEMA`] only after every row is durable. A crash leaves
+/// this row, so the directory is incomplete and must be deleted and redone.
+pub const SUBMODULE_CONVERT_INCOMPLETE: &str = "irys-submodule-index convert-incomplete\n";
+
 // Per-submodule database tables
 tables! {
     SubmoduleTables;
-    /// Maps a partition relative offset to a chunk's path hashes
-    /// note: mdbx keys are always sorted, so range queries work :)
-    /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
-    /// Also change/split this to leverage key-sorting to only store a single tx_path_hash entry/data_root
+    /// Maps a partition offset to that chunk's data-path hash.
+    ///
+    /// The tx hash lives in [`TxPathIntervalByStart`], one row per placement.
+    /// `tx_path_hash` on the value stays so an older row still decodes. New
+    /// writes store `None` there.
     table ChunkPathHashesByOffset {
         type Key = PartitionChunkOffset;
         type Value = ChunkPathHashes;
     }
 
-    /// Maps a chunk's data path hash to the full data path
-    /// TODO: change how we store these to reduce duplication (use dupsort + tree traversal indices)
-    table ChunkDataPathByPathHash {
-        type Key = ChunkPathHash;
+    /// One data proof at a partition offset.
+    ///
+    /// MDBX uses this name. The value is the raw proof. RocksDB v1 stores the
+    /// versioned offset record in [`CHUNK_META_BY_OFFSET_CF`]. Offset order
+    /// keeps compaction on sequential keys.
+    table ChunkDataPathByOffset {
+        type Key = PartitionChunkOffset;
         type Value = ChunkDataPath;
+    }
+
+    /// One inclusive placement: key is `start`, value is `(end, tx_path_hash)`.
+    ///
+    /// Intervals in one submodule do not overlap. A floor seek finds the tx
+    /// hash for an offset. A covered offset with no data-path row is indexed.
+    table TxPathIntervalByStart {
+        type Key = PartitionChunkOffset;
+        type Value = TxPathInterval;
     }
 
     /// Maps a tx path hash to the full tx path
@@ -76,6 +125,54 @@ tables! {
         type Value = Vec<u8>;
     }
 
+}
+
+/// Decoded [`CHUNK_META_BY_OFFSET_CF`] value on RocksDB v1.
+///
+/// `crc` is `None` when the row does not carry a checksum. That is unknown,
+/// not a stored zero. `proof` is `None` on an entropy checksum row. A data
+/// chunk has both. Callers that ask "is a data chunk stored here" read
+/// `proof`, not the key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OffsetMeta {
+    pub crc: Option<u32>,
+    pub proof: Option<ChunkDataPath>,
+}
+
+/// One packed-chunk index write. `proof` of `None` is an entropy checksum.
+///
+/// Both fields `None` deletes the row. A proof with no covering interval is
+/// not stored, and its checksum is not stored either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedOffsetRow {
+    pub offset: PartitionChunkOffset,
+    pub crc: Option<u32>,
+    pub proof: Option<ChunkDataPath>,
+}
+
+/// One tx placement as a reader sees it.
+///
+/// MDBX leaves `ledger`, `block_height`, and `tx_index` empty. The data
+/// root comes from the tx-path leaf binding, and the unclipped start and
+/// `data_size` come from [`DataRootInfo`]. `start` and `end` are the clipped
+/// interval stored for this submodule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub data_root: DataRoot,
+    pub tx_start_offset: RelativeChunkOffset,
+    pub data_size: u64,
+    pub ledger: Option<u32>,
+    pub start: PartitionChunkOffset,
+    pub end: PartitionChunkOffset,
+    pub block_height: Option<u64>,
+    pub tx_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
+/// Inclusive end offset and the tx-path hash for the placement that starts at the key.
+pub struct TxPathInterval {
+    pub end: PartitionChunkOffset,
+    pub tx_path_hash: H256,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
@@ -137,6 +234,26 @@ impl PartialOrd for DataRootInfo {
 impl Ord for DataRootInfo {
     fn cmp(&self, other: &Self) -> Ordering {
         self.start_offset.cmp(&other.start_offset)
+    }
+}
+
+/// Schema v1 table kept so migration can read hash-keyed data paths.
+///
+/// Not part of [`SubmoduleTables`]. A new database does not create it.
+pub mod v1 {
+    use irys_types::{ChunkDataPath, ChunkPathHash};
+    use paste::paste;
+    use reth_db::table::TableInfo;
+    use reth_db::{TableSet, TableType, TableViewer, tables};
+    use std::fmt;
+
+    tables! {
+        V1DataPathTables;
+        /// Data paths written by schema v1, keyed by the data-path hash.
+        table ChunkDataPathByPathHash {
+            type Key = ChunkPathHash;
+            type Value = ChunkDataPath;
+        }
     }
 }
 
@@ -204,5 +321,98 @@ mod tests {
         );
 
         Ok(())
+    }
+}
+
+/// Table sets that match schema v1. Test writers use these to build a `db/`
+/// the way master and the release binaries do: same names, same encodings,
+/// no schema row.
+#[cfg(test)]
+pub mod v1_fixture {
+    pub mod master {
+        use crate::metadata::MetadataKey;
+        use irys_types::{
+            ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+        };
+        use paste::paste;
+        use reth_db::table::TableInfo;
+        use reth_db::{TableSet, TableType, TableViewer, tables};
+        use std::fmt;
+
+        use super::super::{ChunkPathHashes, DataRootInfos, PendingBodyMigration, TxLeafBinding};
+
+        tables! {
+            MasterV1Tables;
+            table ChunkPathHashesByOffset {
+                type Key = PartitionChunkOffset;
+                type Value = ChunkPathHashes;
+            }
+            table ChunkDataPathByPathHash {
+                type Key = ChunkPathHash;
+                type Value = ChunkDataPath;
+            }
+            table TxPathByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxPath;
+            }
+            table DataRootInfosByDataRoot {
+                type Key = DataRoot;
+                type Value = DataRootInfos;
+            }
+            table TxLeafBindingByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxLeafBinding;
+            }
+            table PendingBodyMigrationsByOffset {
+                type Key = PartitionChunkOffset;
+                type Value = PendingBodyMigration;
+            }
+            table Metadata {
+                type Key = MetadataKey;
+                type Value = Vec<u8>;
+            }
+        }
+    }
+
+    /// Release mainnet 4.x has no `PendingBodyMigrationsByOffset` table.
+    pub mod mainnet {
+        use crate::metadata::MetadataKey;
+        use irys_types::{
+            ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+        };
+        use paste::paste;
+        use reth_db::table::TableInfo;
+        use reth_db::{TableSet, TableType, TableViewer, tables};
+        use std::fmt;
+
+        use super::super::{ChunkPathHashes, DataRootInfos, TxLeafBinding};
+
+        tables! {
+            MainnetV1Tables;
+            table ChunkPathHashesByOffset {
+                type Key = PartitionChunkOffset;
+                type Value = ChunkPathHashes;
+            }
+            table ChunkDataPathByPathHash {
+                type Key = ChunkPathHash;
+                type Value = ChunkDataPath;
+            }
+            table TxPathByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxPath;
+            }
+            table DataRootInfosByDataRoot {
+                type Key = DataRoot;
+                type Value = DataRootInfos;
+            }
+            table TxLeafBindingByTxPathHash {
+                type Key = TxPathHash;
+                type Value = TxLeafBinding;
+            }
+            table Metadata {
+                type Key = MetadataKey;
+                type Value = Vec<u8>;
+            }
+        }
     }
 }

@@ -4,6 +4,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Halve `capacity` once per consecutive failure. A zero capacity stays zero.
+/// Any positive capacity stays at least 1, so one timed-out peer is retried.
+fn penalized_allowance(capacity: u32, consecutive_failures: u32) -> u32 {
+    if capacity == 0 || consecutive_failures == 0 {
+        return capacity;
+    }
+    (capacity >> consecutive_failures.min(31)).max(1)
+}
+
 #[derive(Debug, PartialEq)]
 pub enum BandwidthRating {
     Low,    // 0-40 MB/s of throughput
@@ -17,6 +26,11 @@ pub struct PeerStats {
     pub baseline_concurrency: u32,
     pub current_max_concurrency: u32,
     pub max_concurrency: u32,
+    /// Ceiling for [`Self::max_concurrency`]. This is the value computed in
+    /// [`Self::new`]: the bandwidth-scaled count, or the 10 MiB sweep span
+    /// when that is larger. `baseline_concurrency` can be 1 while the sweep
+    /// span is 64, so a small multiple of the baseline would cut that span.
+    pub concurrency_ceiling: u32,
     pub bandwidth_rating: BandwidthRating,
     pub timeout: Duration,
 
@@ -49,16 +63,28 @@ impl PeerStats {
         // (chunks smaller than 245KiB only used in testing)
         let chunk_multiplier = if chunk_size < 1024 { 1.5 } else { 1.0 };
 
-        let max_concurrency =
-            ((base_concurrency as f64 * chunk_multiplier).round() as u32).clamp(1, 32);
+        // One 10 MiB sweep is the disk-lane packed-run cap, so it is the
+        // concurrency ceiling. A fresh peer starts at half the bandwidth-scaled
+        // count and ramps toward that ceiling only as bytes arrive. Tiny test
+        // chunks keep the bandwidth-scaled count.
+        const SWEEP_SPAN_BYTES: u64 = 10 * 1024 * 1024;
+        let span_floor = if chunk_size >= 1024 {
+            u32::try_from((SWEEP_SPAN_BYTES / chunk_size.max(1)).clamp(1, 64)).unwrap_or(64)
+        } else {
+            0
+        };
 
-        let baseline_concurrency = (max_concurrency / 2).max(1);
+        let bandwidth_max =
+            ((base_concurrency as f64 * chunk_multiplier).round() as u32).clamp(1, 32);
+        let max_concurrency = bandwidth_max.max(span_floor);
+        let baseline_concurrency = (bandwidth_max / 2).max(1);
 
         Self {
             chunk_size,
             baseline_concurrency,
             current_max_concurrency: baseline_concurrency,
             max_concurrency,
+            concurrency_ceiling: max_concurrency,
             bandwidth_rating: BandwidthRating::Medium,
             timeout,
             consecutive_failures: 0,
@@ -70,8 +96,14 @@ impl PeerStats {
         }
     }
 
-    /// Calculate the amount of concurrency that can be safely added beyond the
-    /// current_max_concurrency based on recent bandwidth measurements
+    /// Slots this peer can still accept.
+    ///
+    /// With no delivered bytes the allowance is [`Self::baseline_concurrency`].
+    /// Delivered bytes scale it toward [`Self::max_concurrency`]. Each
+    /// consecutive failure recorded by [`Self::record_request_failed`] halves
+    /// that allowance, down to 1, including before any bytes are recorded. A
+    /// completed request clears the streak. A 404 does not: it is not a
+    /// transport failure.
     pub fn available_concurrency(&self) -> u32 {
         let expected_bytes_per_sec = self.expected_bandwidth_bps();
         let observed_bytes_per_sec = self.short_term_bandwidth_bps() as f64;
@@ -85,9 +117,10 @@ impl PeerStats {
             // No observed data yet, use baseline capacity
             self.baseline_concurrency
         };
+        let allowance = penalized_allowance(total_capacity, self.consecutive_failures);
 
-        // Available = Total capacity - Currently active requests
-        total_capacity.saturating_sub(self.active_requests as u32)
+        // Available = allowance - currently active requests
+        allowance.saturating_sub(self.active_requests as u32)
     }
 
     pub fn expected_bandwidth_bps(&self) -> f64 {
@@ -267,13 +300,17 @@ impl BandwidthWindow {
         }
 
         let now = Instant::now();
-        let cutoff_time = now.checked_sub(window.min(self.window_duration)).unwrap();
+        // `checked_sub` is `None` when the window reaches past the monotonic
+        // origin (the machine has been up for less than the window). Every
+        // bucket is then inside the window. Elapsed time starts at the oldest.
+        let cutoff_time = now.checked_sub(window.min(self.window_duration));
+        let in_window = |timestamp: Instant| cutoff_time.is_none_or(|cutoff| timestamp >= cutoff);
 
         // Sum bytes from buckets within the specified window
         let total_bytes: u64 = self
             .buckets
             .iter()
-            .filter(|(timestamp, _)| *timestamp >= cutoff_time)
+            .filter(|(timestamp, _)| in_window(*timestamp))
             .map(|(_, bytes)| bytes)
             .sum();
 
@@ -281,7 +318,7 @@ impl BandwidthWindow {
         if let Some((oldest_timestamp, _)) = self
             .buckets
             .iter()
-            .find(|(timestamp, _)| *timestamp >= cutoff_time)
+            .find(|(timestamp, _)| in_window(*timestamp))
         {
             let elapsed = now.duration_since(*oldest_timestamp);
             let elapsed_secs = elapsed.as_secs_f64();
@@ -292,5 +329,48 @@ impl BandwidthWindow {
         }
 
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BandwidthWindow;
+    use std::time::{Duration, Instant};
+
+    /// A window longer than monotonic uptime must still count every bucket.
+    /// `Instant::checked_sub` is `None` until the machine has been up for the
+    /// whole window; unwrapping that is a panic on the data-sync task.
+    #[test]
+    fn bandwidth_window_counts_buckets_when_the_window_predates_boot() {
+        let now = Instant::now();
+        let mut span = Duration::from_secs(1);
+        while now.checked_sub(span).is_some() {
+            let Some(next) = span.checked_mul(2) else {
+                span = Duration::MAX;
+                break;
+            };
+            span = next;
+        }
+        assert!(
+            now.checked_sub(span).is_none(),
+            "the window must not fit before the monotonic origin"
+        );
+
+        let mut window = BandwidthWindow::new(Duration::from_secs(10));
+        window.window_duration = span;
+        window.add_bytes(4_096);
+        let oldest = now
+            .checked_sub(Duration::from_millis(100))
+            .expect("host uptime covers 100ms");
+        window.buckets.front_mut().expect("bucket").0 = oldest;
+
+        let bps = window.bytes_per_second_in_window(span);
+        // 4096 bytes over ~100ms is 40960 B/s. A few tens of milliseconds of
+        // scheduling slack stays inside this range; dropping the bucket or
+        // dividing by the whole pre-boot span does not.
+        assert!(
+            (20_000..100_000).contains(&bps),
+            "expected the single bucket over ~100ms, got {bps}"
+        );
     }
 }

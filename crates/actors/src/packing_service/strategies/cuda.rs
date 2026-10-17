@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use irys_domain::{ChunkType, StorageModule};
+use irys_domain::StorageModule;
 use irys_packing::{CUDAConfig, capacity_pack_range_cuda_c};
 use irys_types::{
-    Config, IrysAddress, PartitionChunkRange, partition::PartitionHash, split_interval,
+    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, partition::PartitionHash,
+    split_interval,
 };
 use tokio::sync::Semaphore;
 use tokio::task::yield_now;
@@ -54,12 +56,18 @@ impl super::PackingStrategy for CudaPackingStrategy {
         );
 
         let mut handles = Vec::new();
+        // A refused write fails the whole range. Batches already running
+        // finish, but the loop does not start another one.
+        let stop = Arc::new(AtomicBool::new(false));
 
         // Split range into batches
         for chunk_range_split in split_interval(&chunk_range, self.packing_config.max_chunks)
             .unwrap()
             .iter()
         {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             let start: u32 = *(*chunk_range_split).start();
             let end: u32 = *(*chunk_range_split).end();
             let num_chunks = end - start + 1;
@@ -76,15 +84,20 @@ impl super::PackingStrategy for CudaPackingStrategy {
                 .acquire_owned()
                 .await
                 .expect("Failure acquiring a CUDA packing semaphore");
+            if stop.load(Ordering::Relaxed) {
+                drop(permit);
+                break;
+            }
 
             let storage_module_clone = storage_module.clone();
+            let stop_flag = Arc::clone(&stop);
             let chain_id = self.packing_config.chain_id;
             let entropy_iterations = storage_module.config.consensus.entropy_packing_iterations;
             let runtime_handle = self.runtime_handle.clone();
 
             // Pack batch on GPU
             let handle = runtime_handle.clone().spawn(async move {
-                let out = runtime_handle
+                let packed = runtime_handle
                     .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
                         let mut out: Vec<u8> = Vec::with_capacity(
                             (num_chunks * chunk_size as u32).try_into().unwrap(),
@@ -101,30 +114,75 @@ impl super::PackingStrategy for CudaPackingStrategy {
                         )?;
                         eyre::Result::Ok(out)
                     })
-                    .await
-                    .unwrap() // TODO: error handling
-                    .unwrap();
+                    .await;
+                let out = match packed {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(err)) => {
+                        stop_flag.store(true, Ordering::Relaxed);
+                        return Err(format!(
+                            "CUDA packing failed for SM {storage_module_id}: {err:?}"
+                        ));
+                    }
+                    Err(err) => {
+                        stop_flag.store(true, Ordering::Relaxed);
+                        return Err(format!(
+                            "CUDA packing task panicked for SM {storage_module_id}: {err:?}"
+                        ));
+                    }
+                };
 
-                // Write packed chunks
+                // Write packed chunks. Re-check each offset: a retry must not
+                // replace Data, and a hash change is not this assignment.
                 for i in 0..num_chunks {
-                    storage_module_clone.write_chunk(
-                        (start + i).into(),
+                    let offset = PartitionChunkOffset::from(start + i);
+                    match crate::packing_service::classify_entropy_offset(
+                        &storage_module_clone,
+                        offset,
+                        partition_hash,
+                    ) {
+                        crate::packing_service::EntropyOffset::Skip => continue,
+                        crate::packing_service::EntropyOffset::Refused => {
+                            stop_flag.store(true, Ordering::Relaxed);
+                            return Err(format!(
+                                "entropy write refused at offset {} during CUDA packing for SM {}",
+                                start + i,
+                                storage_module_id
+                            ));
+                        }
+                        crate::packing_service::EntropyOffset::Pack => {}
+                    }
+                    let wrote = storage_module_clone.write_entropy_chunk(
+                        offset,
                         out[(i * chunk_size as u32) as usize
                             ..((i + 1) * chunk_size as u32) as usize]
                             .to_vec(),
-                        ChunkType::Entropy,
+                        partition_hash,
                     );
+                    if !wrote {
+                        stop_flag.store(true, Ordering::Relaxed);
+                        return Err(format!(
+                            "entropy write refused at offset {} during CUDA packing for SM {}",
+                            start + i,
+                            storage_module_id
+                        ));
+                    }
 
-                    // Periodic sync
+                    // Wait for the disk before queueing more entropy.
                     if i % short_writes_before_sync == 0 {
                         yield_now().await;
-                        crate::packing_service::sync_with_warning(
+                        if let Err(err) = crate::packing_service::wait_for_pending_room(
                             &storage_module_clone,
                             "CUDA packing (periodic)",
-                        );
+                        )
+                        .await
+                        {
+                            stop_flag.store(true, Ordering::Relaxed);
+                            return Err(err);
+                        }
                     }
                 }
                 drop(permit);
+                Ok(())
             });
 
             handles.push(handle);
@@ -141,14 +199,32 @@ impl super::PackingStrategy for CudaPackingStrategy {
             );
         }
 
-        // Wait for all packing tasks to complete
+        // Wait for all packing tasks to complete. A refused write or a
+        // panicked worker must fail the range so the caller can requeue it.
+        let mut failed = None;
         for handle in handles {
-            if let Err(e) = handle.await {
-                warn!(
-                    target: "irys::packing",
-                    "CUDA packing task failed for SM {}: {:?}", storage_module_id, e
-                );
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    warn!(
+                        target: "irys::packing",
+                        "CUDA packing task failed for SM {}: {}", storage_module_id, err
+                    );
+                    failed.get_or_insert(err);
+                }
+                Err(err) => {
+                    warn!(
+                        target: "irys::packing",
+                        "CUDA packing task failed for SM {}: {:?}", storage_module_id, err
+                    );
+                    failed.get_or_insert(format!(
+                        "CUDA packing task failed for SM {storage_module_id}: {err:?}"
+                    ));
+                }
             }
+        }
+        if let Some(err) = failed {
+            return Err(err);
         }
 
         Ok(())

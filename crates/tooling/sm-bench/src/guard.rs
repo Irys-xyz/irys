@@ -1,0 +1,738 @@
+//! Path guard and write-region extent check.
+//!
+//! The bench refuses any path whose canonical form lacks a `loadtest` component.
+//! That keeps a bad `--dir` off the node's real submodule files.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::io::AsRawFd as _;
+use std::path::{Component, Path, PathBuf};
+
+use eyre::{WrapErr as _, eyre};
+
+pub(crate) const CHUNK_SIZE: u64 = 262_144;
+
+const FIEMAP_EXTENT_LAST: u32 = 0x1;
+const FIEMAP_EXTENT_UNKNOWN: u32 = 0x2;
+const FIEMAP_EXTENT_DELALLOC: u32 = 0x4;
+const FIEMAP_EXTENT_UNWRITTEN: u32 = 0x800;
+const FIEMAP_BAD: u32 = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_UNWRITTEN;
+/// `_IOWR('f', 11, struct fiemap)` with a 32-byte header.
+const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
+
+#[derive(Debug)]
+pub(crate) enum ExtentCheck {
+    Written,
+    /// The filesystem has no FIEMAP. Allowed only when this process just wrote the bytes.
+    Unsupported,
+}
+
+pub(crate) fn has_loadtest_component(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(name) => name == "loadtest",
+        _ => false,
+    })
+}
+
+enum MissingPart {
+    Normal(std::ffi::OsString),
+    CurDir,
+    ParentDir,
+}
+
+/// Canonicalize the deepest existing ancestor, then apply the missing tail.
+/// `..` in that tail is applied, so `loadtest/../../outside` does not keep the component.
+fn resolve_with_ancestor(path: &Path) -> eyre::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        if cursor.as_os_str().is_empty() {
+            cursor = std::env::current_dir()?;
+        }
+        if cursor.exists() || is_symlink(&cursor) {
+            let mut resolved = cursor
+                .canonicalize()
+                .wrap_err_with(|| format!("{} could not be canonicalized", cursor.display()))?;
+            apply_missing(&mut resolved, &missing)?;
+            return Ok(resolved);
+        }
+        let popped = match cursor.components().next_back() {
+            Some(Component::Normal(name)) => MissingPart::Normal(name.to_os_string()),
+            Some(Component::CurDir) => MissingPart::CurDir,
+            Some(Component::ParentDir) => MissingPart::ParentDir,
+            _ => return Err(eyre!("{} has no existing ancestor", path.display())),
+        };
+        let Some(parent) = cursor.parent() else {
+            return Err(eyre!("{} has no existing ancestor", path.display()));
+        };
+        if parent == cursor {
+            return Err(eyre!("{} has no existing ancestor", path.display()));
+        }
+        missing.push(popped);
+        if parent.as_os_str().is_empty() {
+            cursor = std::env::current_dir()?;
+            continue;
+        }
+        cursor = parent.to_path_buf();
+    }
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+fn apply_missing(base: &mut PathBuf, missing: &[MissingPart]) -> eyre::Result<()> {
+    for part in missing.iter().rev() {
+        match part {
+            MissingPart::Normal(name) => base.push(name),
+            MissingPart::CurDir => {}
+            MissingPart::ParentDir => {
+                if !base.pop() {
+                    return Err(eyre!("path escapes the filesystem root"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Absolute path with `.` and `..` collapsed and symlinks left in place.
+/// That is the directory the operator named, not the one a symlink reaches.
+fn lexical_absolute(path: &Path) -> eyre::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    Ok(out)
+}
+
+fn lexical_parent(path: &Path) -> eyre::Result<PathBuf> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    lexical_absolute(parent)
+}
+
+/// Refuse unless the path keeps a `loadtest` component after the deepest
+/// existing ancestor is canonicalized, and that parent is the directory named
+/// on the command line. A missing final component makes `create_dir_all`
+/// follow a symlink ancestor. Checked before any file is created.
+pub(crate) fn require_loadtest_ancestor(label: &str, path: &Path) -> eyre::Result<PathBuf> {
+    if !has_loadtest_component(path) {
+        return Err(eyre!(
+            "{label} {} has no `loadtest` path component; refusing to run",
+            path.display()
+        ));
+    }
+    let resolved = resolve_with_ancestor(path)?;
+    if !has_loadtest_component(&resolved) {
+        return Err(eyre!(
+            "{label} resolves to {}, which has no `loadtest` path component; refusing to run",
+            resolved.display()
+        ));
+    }
+    let named_parent = lexical_parent(path)?;
+    let resolved_parent = match resolved.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("/"),
+    };
+    if named_parent != resolved_parent {
+        return Err(eyre!(
+            "refusing {label} {}: it resolves under {}, not {}",
+            path.display(),
+            resolved_parent.display(),
+            named_parent.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Refuse unless every path has a `loadtest` component. Checked on the caller's
+/// path and again after canonicalize, so a symlink cannot leave `loadtest`.
+pub(crate) fn require_loadtest(label: &str, path: &Path) -> eyre::Result<PathBuf> {
+    if !has_loadtest_component(path) {
+        return Err(eyre!(
+            "{label} {} has no `loadtest` path component; refusing to run",
+            path.display()
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .wrap_err_with(|| format!("{label} {} could not be canonicalized", path.display()))?;
+    if !has_loadtest_component(&canonical) {
+        return Err(eyre!(
+            "{label} canonical path {} has no `loadtest` path component; refusing to run",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Create `path` at exactly `bytes` by writing zeros. Does not truncate or resize
+/// an existing file. A new recall file is mode `0444`.
+pub(crate) fn create_small(path: &Path, bytes: u64, recall: bool) -> eyre::Result<bool> {
+    if bytes == 0 || !bytes.is_multiple_of(CHUNK_SIZE) {
+        return Err(eyre!(
+            "--create-small must be a positive multiple of {CHUNK_SIZE} bytes"
+        ));
+    }
+    require_loadtest_ancestor("path", path)?;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        let len = path.metadata()?.len();
+        if len != bytes {
+            return Err(eyre!(
+                "{} exists at {len} bytes, not {bytes}; refusing to resize it",
+                path.display()
+            ));
+        }
+        if recall {
+            chmod_readonly(path)?;
+        }
+        return Ok(false);
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(path)
+        .wrap_err_with(|| format!("failed to create {}", path.display()))?;
+    let buf = vec![0_u8; 8 * 1024 * 1024];
+    let mut left = bytes;
+    let mut wrote = 0_u64;
+    let mut next_report = 1024 * 1024 * 1024;
+    while left > 0 {
+        let n = std::cmp::min(left, buf.len() as u64) as usize;
+        file.write_all(&buf[..n])?;
+        left -= n as u64;
+        wrote += n as u64;
+        if wrote >= next_report {
+            eprintln!(
+                "irys-sm-bench: wrote {wrote} / {bytes} bytes of {}",
+                path.display()
+            );
+            next_report = next_report.saturating_add(1024 * 1024 * 1024);
+        }
+    }
+    file.sync_all()?;
+    drop(file);
+    if recall {
+        chmod_readonly(path)?;
+    }
+    Ok(true)
+}
+
+fn chmod_readonly(path: &Path) -> eyre::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(0o444);
+    fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+/// FIEMAP check for the recall file and the write file.
+///
+/// A hole or an unwritten extent reads back as zeros, so the timed read is a
+/// memory copy. `recall_created` and `write_created` are the `--create-small`
+/// results for each file. A filesystem with no FIEMAP is allowed only for a
+/// file this process just wrote.
+pub(crate) fn check_region_extents(
+    recall_file: &Path,
+    recall_created: bool,
+    write_file: &Path,
+    write_created: bool,
+) -> eyre::Result<()> {
+    check_written_extents(write_file, write_created)?;
+    check_written_extents(recall_file, recall_created)?;
+    Ok(())
+}
+
+pub(crate) fn check_written_extents(path: &Path, created_this_run: bool) -> eyre::Result<()> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Err(eyre!("{} is empty; refusing to bench it", path.display()));
+    }
+    match extents_are_written(&file, len) {
+        Ok(ExtentCheck::Written) => Ok(()),
+        Ok(ExtentCheck::Unsupported) if created_this_run => {
+            eprintln!(
+                "irys-sm-bench: {} has no FIEMAP; this process wrote the bytes, continuing",
+                path.display()
+            );
+            Ok(())
+        }
+        Ok(ExtentCheck::Unsupported) => Err(eyre!(
+            "{} does not support FIEMAP; refusing to bench a file whose extents were not checked",
+            path.display()
+        )),
+        Err(error) => {
+            Err(error).wrap_err_with(|| format!("extent check failed for {}", path.display()))
+        }
+    }
+}
+
+fn extents_are_written(file: &File, len: u64) -> eyre::Result<ExtentCheck> {
+    let mut cursor = 0_u64;
+    while cursor < len {
+        let mut buf = vec![0_u8; 32 + 64 * 56];
+        buf[0..8].copy_from_slice(&cursor.to_ne_bytes());
+        buf[8..16].copy_from_slice(&(len - cursor).to_ne_bytes());
+        buf[24..28].copy_from_slice(&64_u32.to_ne_bytes());
+        let rc = unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP, buf.as_mut_ptr()) };
+        if rc < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EOPNOTSUPP)
+                || err.raw_os_error() == Some(libc::ENOTTY)
+            {
+                return Ok(ExtentCheck::Unsupported);
+            }
+            return Err(eyre!("FIEMAP: {err}"));
+        }
+        let mapped = u32::from_ne_bytes(buf[20..24].try_into().expect("4 bytes"));
+        if mapped == 0 {
+            return Err(eyre!("hole or unmapped range at byte {cursor}"));
+        }
+        let mut advanced = false;
+        for index in 0..mapped as usize {
+            let at = 32 + index * 56;
+            let logical = u64::from_ne_bytes(buf[at..at + 8].try_into().expect("8 bytes"));
+            let length = u64::from_ne_bytes(buf[at + 16..at + 24].try_into().expect("8 bytes"));
+            let flags = u32::from_ne_bytes(buf[at + 40..at + 44].try_into().expect("4 bytes"));
+            if logical > cursor {
+                return Err(eyre!("hole at byte {cursor} before extent {logical}"));
+            }
+            if flags & FIEMAP_BAD != 0 {
+                return Err(eyre!(
+                    "extent at byte {logical} is unwritten, delayed, or unknown (flags {flags:#x})"
+                ));
+            }
+            let next = logical.saturating_add(length);
+            if next > cursor {
+                cursor = next;
+                advanced = true;
+            }
+            if flags & FIEMAP_EXTENT_LAST != 0 {
+                if cursor < len {
+                    return Err(eyre!("hole at byte {cursor} after the last extent"));
+                }
+                return Ok(ExtentCheck::Written);
+            }
+        }
+        if !advanced {
+            return Err(eyre!("FIEMAP made no progress at byte {cursor}"));
+        }
+    }
+    Ok(ExtentCheck::Written)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::io::AsRawFd as _;
+
+    use irys_testing_utils::TempDirBuilder;
+
+    use super::*;
+
+    #[test]
+    fn loadtest_component_is_exact() {
+        assert!(has_loadtest_component(Path::new("/mnt/sm-2/loadtest/db")));
+        assert!(has_loadtest_component(Path::new("loadtest")));
+        assert!(!has_loadtest_component(Path::new("/mnt/sm-2/db")));
+        assert!(!has_loadtest_component(Path::new("/tmp/loadtest-extra/db")));
+        assert!(!has_loadtest_component(Path::new("/tmp/not-loadtest/db")));
+    }
+
+    #[test]
+    fn create_small_does_not_write_through_dotdot() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-escape-").build();
+        let safe = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&safe).unwrap();
+        let escaped = tmp.path().join("escaped-recall.dat");
+        let via = safe.join("../../escaped-recall.dat");
+        let err = create_small(&via, CHUNK_SIZE, true).unwrap_err();
+        assert!(
+            !escaped.exists(),
+            "created {} before the canonical check",
+            escaped.display()
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("loadtest"), "{text}");
+    }
+
+    #[test]
+    fn create_small_does_not_chmod_an_existing_file_outside_loadtest() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-chmod-").build();
+        let safe = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&safe).unwrap();
+        let escaped = tmp.path().join("escaped-recall.dat");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&escaped)
+            .unwrap();
+        file.write_all(&[0xAB]).unwrap();
+        file.set_len(CHUNK_SIZE).unwrap();
+        drop(file);
+        let via = safe.join("../../escaped-recall.dat");
+        let err = create_small(&via, CHUNK_SIZE, true).unwrap_err();
+        let mode = fs::metadata(&escaped).unwrap().permissions().mode() & 0o777;
+        assert_ne!(mode, 0o444, "chmod ran before the canonical check");
+        let mut byte = [0_u8; 1];
+        File::open(&escaped).unwrap().read_exact(&mut byte).unwrap();
+        assert_eq!(byte[0], 0xAB);
+        let text = format!("{err:#}");
+        assert!(text.contains("loadtest"), "{text}");
+    }
+
+    #[test]
+    fn create_small_does_not_follow_a_loadtest_symlink_outside() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-link-").build();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let safe = tmp.path().join("safe");
+        fs::create_dir_all(&safe).unwrap();
+        symlink(&outside, safe.join("loadtest")).unwrap();
+        let path = safe.join("loadtest/recall.dat");
+        let err = create_small(&path, CHUNK_SIZE, true).unwrap_err();
+        assert!(
+            !outside.join("recall.dat").exists(),
+            "wrote through the loadtest symlink"
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("loadtest"), "{text}");
+    }
+
+    #[test]
+    fn dotdot_through_a_missing_directory_is_outside_loadtest() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-missing-").build();
+        let safe = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&safe).unwrap();
+        let via = safe.join("nope/../../../escaped-recall.dat");
+        let escaped = tmp.path().join("escaped-recall.dat");
+        let err = require_loadtest_ancestor("recall-file", &via).unwrap_err();
+        assert!(!escaped.exists());
+        assert!(!safe.join("nope").exists());
+        let text = format!("{err:#}");
+        assert!(text.contains("loadtest"), "{text}");
+    }
+
+    #[test]
+    fn create_small_refuses_a_missing_loadtest_through_a_symlink_ancestor() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-link-ancestor-")
+            .build();
+        let live = tmp.path().join("live");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live.join("LIVE"), b"live").unwrap();
+        let link = tmp.path().join("link");
+        symlink(&live, &link).unwrap();
+        let path = link.join("loadtest/recall.dat");
+        let err = create_small(&path, CHUNK_SIZE, true).unwrap_err();
+        assert!(
+            !live.join("loadtest").exists(),
+            "created loadtest through the symlink"
+        );
+        assert!(!live.join("loadtest").join("recall.dat").exists());
+        assert_eq!(fs::read(live.join("LIVE")).unwrap(), b"live");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("resolves under"),
+            "missing loadtest through a symlink was accepted: {text}"
+        );
+    }
+
+    #[test]
+    fn require_loadtest_ancestor_refuses_a_missing_dir_through_a_symlink() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-link-dir-").build();
+        let live = tmp.path().join("live");
+        fs::create_dir_all(&live).unwrap();
+        let link = tmp.path().join("link");
+        symlink(&live, &link).unwrap();
+        let path = link.join("loadtest");
+        let err = require_loadtest_ancestor("dir", &path).unwrap_err();
+        assert!(!live.join("loadtest").exists());
+        let text = format!("{err:#}");
+        assert!(text.contains("resolves under"), "{text}");
+    }
+
+    #[test]
+    fn create_small_refuses_a_symlink_parent_that_stays_under_loadtest() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-link-inside-")
+            .build();
+        let real = tmp.path().join("safe/loadtest/real");
+        fs::create_dir_all(&real).unwrap();
+        symlink(&real, tmp.path().join("safe/loadtest/link")).unwrap();
+        let path = tmp.path().join("safe/loadtest/link/recall.dat");
+        let err = create_small(&path, CHUNK_SIZE, true).unwrap_err();
+        assert!(
+            !real.join("recall.dat").exists(),
+            "created the file through a symlink parent"
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("resolves under"), "{text}");
+    }
+
+    #[test]
+    fn create_small_creates_a_missing_loadtest_directory() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-missing-dir-")
+            .build();
+        let safe = tmp.path().join("safe");
+        fs::create_dir_all(&safe).unwrap();
+        let path = safe.join("loadtest/recall.dat");
+        assert!(create_small(&path, CHUNK_SIZE, true).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().len(), CHUNK_SIZE);
+        assert!(!safe.join("recall.dat").exists());
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444);
+    }
+
+    #[test]
+    fn require_loadtest_ancestor_allows_a_missing_child_of_the_named_directory() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-named-child-")
+            .build();
+        let dir = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recall.dat");
+        let resolved = require_loadtest_ancestor("recall-file", &path).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&dir).unwrap().join("recall.dat"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn create_small_writes_a_new_file_under_loadtest() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-create-").build();
+        let dir = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recall.dat");
+        assert!(create_small(&path, CHUNK_SIZE, true).unwrap());
+        assert_eq!(fs::metadata(&path).unwrap().len(), CHUNK_SIZE);
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444);
+    }
+
+    fn synced_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&vec![0_u8; CHUNK_SIZE as usize]).unwrap();
+        file.sync_all().unwrap();
+        path
+    }
+
+    fn sparse_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(CHUNK_SIZE).unwrap();
+        file.sync_all().unwrap();
+        path
+    }
+
+    fn trailing_hole_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&vec![0_u8; CHUNK_SIZE as usize]).unwrap();
+        file.sync_all().unwrap();
+        file.set_len(CHUNK_SIZE * 2).unwrap();
+        file.sync_all().unwrap();
+        path
+    }
+
+    fn unwritten_region(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let rc = unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, CHUNK_SIZE as libc::off_t) };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        file.sync_all().unwrap();
+        path
+    }
+
+    /// CI temp dirs can sit on a filesystem with no FIEMAP. The extent
+    /// tests only check something where the ioctl answers.
+    fn fiemap_supported(dir: &Path) -> bool {
+        let probe = synced_region(dir, "fiemap-probe.dat");
+        let file = File::open(&probe).unwrap();
+        let supported = !matches!(
+            extents_are_written(&file, CHUNK_SIZE),
+            Ok(ExtentCheck::Unsupported)
+        );
+        fs::remove_file(&probe).unwrap();
+        supported
+    }
+
+    fn region_error(
+        recall: &Path,
+        recall_created: bool,
+        write: &Path,
+        write_created: bool,
+    ) -> String {
+        match check_region_extents(recall, recall_created, write, write_created) {
+            Ok(()) => "accepted a region file that is not fully written".to_string(),
+            Err(err) => format!("{err:#}"),
+        }
+    }
+
+    #[test]
+    fn sparse_recall_file_is_a_startup_error() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-hole-")
+            .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = sparse_region(tmp.path(), "entropy-chunks.dat");
+        for recall_created in [false, true] {
+            let text = region_error(&recall, recall_created, &write, false);
+            assert!(
+                text.contains("entropy-chunks.dat"),
+                "created={recall_created}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn unwritten_recall_extent_is_a_startup_error() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-unwritten-")
+            .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = unwritten_region(tmp.path(), "entropy-chunks.dat");
+        let text = region_error(&recall, false, &write, false);
+        assert!(text.contains("entropy-chunks.dat"), "{text}");
+        assert!(
+            text.contains("unwritten") || text.contains("hole") || text.contains("unmapped"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn trailing_hole_in_the_recall_file_is_a_startup_error() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-tail-hole-")
+            .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = trailing_hole_region(tmp.path(), "entropy-chunks.dat");
+        let text = region_error(&recall, false, &write, false);
+        assert!(text.contains("entropy-chunks.dat"), "{text}");
+    }
+
+    #[test]
+    fn written_region_files_are_allowed() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-regions-written-")
+            .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
+        let write = synced_region(tmp.path(), "write-region.dat");
+        let recall = synced_region(tmp.path(), "entropy-chunks.dat");
+        check_region_extents(&recall, false, &write, false).unwrap();
+    }
+
+    #[test]
+    fn files_created_this_run_are_allowed() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-regions-new-")
+            .build();
+        let dir = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&dir).unwrap();
+        let recall = dir.join("entropy-chunks.dat");
+        let write = dir.join("write-region.dat");
+        let recall_created = create_small(&recall, CHUNK_SIZE, true).unwrap();
+        let write_created = create_small(&write, CHUNK_SIZE, false).unwrap();
+        assert!(recall_created);
+        assert!(write_created);
+        check_region_extents(&recall, recall_created, &write, write_created).unwrap();
+    }
+
+    #[test]
+    fn existing_sparse_recall_is_refused_when_the_write_file_was_created() {
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-bench-recall-kept-hole-")
+            .build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
+        let dir = tmp.path().join("safe/loadtest");
+        fs::create_dir_all(&dir).unwrap();
+        let recall = sparse_region(&dir, "entropy-chunks.dat");
+        let write = dir.join("write-region.dat");
+        let recall_created = create_small(&recall, CHUNK_SIZE, true).unwrap();
+        let write_created = create_small(&write, CHUNK_SIZE, false).unwrap();
+        assert!(!recall_created);
+        assert!(write_created);
+        let text = region_error(&recall, recall_created, &write, write_created);
+        assert!(text.contains("entropy-chunks.dat"), "{text}");
+    }
+
+    #[test]
+    fn sparse_write_file_is_a_startup_error() {
+        let tmp = TempDirBuilder::new().prefix("sm-bench-write-hole-").build();
+        if !fiemap_supported(tmp.path()) {
+            eprintln!("skipped: {} has no FIEMAP", tmp.path().display());
+            return;
+        }
+        let write = sparse_region(tmp.path(), "write-region.dat");
+        let recall = synced_region(tmp.path(), "entropy-chunks.dat");
+        let text = region_error(&recall, false, &write, false);
+        assert!(text.contains("write-region.dat"), "{text}");
+    }
+}

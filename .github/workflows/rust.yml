@@ -188,6 +188,12 @@ jobs:
       - name: cargo test
         run: RUST_LOG=info cargo xtask test
 
+      # irys-sm-bench is a workspace member, so the step above already runs
+      # its Rust tests. This step is the stdlib Python tests only.
+      # The load bench itself does not run here.
+      - name: sm-bench python tests
+        run: python3 -m unittest discover crates/tooling/sm-bench/scripts
+
       - name: sccache stats
         if: always()
         continue-on-error: true
