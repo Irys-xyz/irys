@@ -2269,6 +2269,32 @@ test_run_exits_0_when_the_bench_exits_2() {
     rm -rf "$root"
 }
 
+# 101 is a panic. 0 and 2 stay success. Every other status is a failure.
+test_run_exits_nonzero_when_the_bench_exits_101() {
+    local name=run-bench-exit-101 root err dev mnt rc
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 101\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        bad "$name" "run.sh exited 0: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$err")"
+    elif ! grep -q '^exit=101$' "$root/out/t/bench.out"; then
+        bad "$name" "bench.out: $(cat "$root/out/t/bench.out" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_ladder_restores_the_index_when_the_bench_exits_1() {
     local name=ladder-bench-exit-1 root module sys err dev mnt
     root=$(tmpdir)
@@ -2336,6 +2362,100 @@ EOF
         bad "$name" "new db was replaced: $(cat "$module/db" 2>/dev/null)"
     elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
         bad "$name" "prior db changed: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker says success: $(cat "$root/out/ladder.done")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# Exit 0 still continues. The next step runs and the first index stays stashed.
+test_ladder_runs_the_next_step_when_the_bench_exits_0() {
+    local name=ladder-bench-exit-0-continues root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    cat >"$root/bench" <<EOF
+#!/bin/bash
+n=\$(cat "$root/calls" 2>/dev/null || echo 0)
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$root/calls"
+if [ "\$n" -eq 2 ]; then
+    printf 'second-db\n' > "$module/db"
+fi
+exit 0
+EOF
+    chmod +x "$root/bench"
+    if ! MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --run first-step --run later-step \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh stopped after exit 0: $(cat "$err")"
+    elif [ "$(cat "$root/calls" 2>/dev/null)" != 2 ]; then
+        bad "$name" "second step did not run: calls=$(cat "$root/calls" 2>/dev/null)"
+    elif ! cmp -s <(printf 'second-db\n') "$module/db"; then
+        bad "$name" "live db: $(cat "$module/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "prior db: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif ! grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker: $(cat "$root/out/ladder.done" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A panic must not look like success. The next step does not start, and the
+# index moved aside for the first step comes back.
+test_ladder_restores_the_index_when_the_bench_exits_101() {
+    local name=ladder-bench-exit-101 root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    cat >"$root/bench" <<EOF
+#!/bin/bash
+n=\$(cat "$root/calls" 2>/dev/null || echo 0)
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$root/calls"
+if [ "\$n" -eq 1 ]; then
+    exit 101
+fi
+printf 'second-db\n' > "$module/db"
+exit 0
+EOF
+    chmod +x "$root/bench"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --run panic-step --run later-step \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ "$(cat "$root/calls" 2>/dev/null)" != 1 ]; then
+        bad "$name" "second step ran: calls=$(cat "$root/calls" 2>/dev/null)"
+    elif [ -e "$module/state-prior" ]; then
+        bad "$name" "state-prior still exists"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/db"; then
+        bad "$name" "live db: $(cat "$module/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-intervals.json\n') "$module/intervals.json"; then
+        bad "$name" "intervals were not restored"
+    elif [ ! -f "$module/chunks.dat" ]; then
+        bad "$name" "chunks.dat was moved"
+    elif ! grep -q 'run panic-step failed' "$root/out/ladder.done"; then
+        bad "$name" "done marker: $(cat "$root/out/ladder.done" 2>/dev/null)"
     elif grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
         bad "$name" "done marker says success: $(cat "$root/out/ladder.done")"
     else

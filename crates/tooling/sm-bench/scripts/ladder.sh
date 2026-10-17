@@ -31,12 +31,13 @@
 # before that rename and before max_sectors_kb is written. A symlink ancestor
 # fails the path check: the named parent must equal the parent after resolution.
 # The floor is MIN_FREE_GIB (default 500), the same value run.sh uses. A
-# refusal leaves the index files and the queue alone. If the run then exits 1
-# (a run.sh guard, or the bench exits 1), those files move back and that state
-# directory is removed when the run has not created one of them. A file the
-# run already created stays, and the previous copy stays in the state
-# directory. A state directory this run did not create stays where it is.
-# Bench exit 0 and bench exit 2 leave the new index where it is.
+# refusal leaves the index files and the queue alone. If the run then exits
+# non-zero (a run.sh guard, or the bench exits with any status other than 0
+# or 2), those files move back and that state directory is removed when the
+# run has not created one of them. A file the run already created stays, and
+# the previous copy stays in the state directory. A state directory this run
+# did not create stays where it is. Bench exit 0 and bench exit 2 leave the
+# new index where it is.
 #
 # max_sectors_kb is restored on EXIT, INT, and TERM. The current run and the
 # tracer are stopped before that restore. A foreground wait would defer the
@@ -44,9 +45,10 @@
 # The done marker is written when the script exits, including after a failure.
 # Run under setsid and nohup so the ladder does not need a terminal.
 #
-# Bench exit 1 stops the ladder and restores the previous index. A scored miss
-# is bench exit 2; the ladder continues and the new index stays. A guard
-# failure stops the ladder. sudo must not prompt. --trace needs bpftrace.
+# Any bench status other than 0 or 2 stops the ladder and restores the
+# previous index. A scored miss is bench exit 2; the ladder continues and the
+# new index stays. A guard failure stops the ladder. sudo must not prompt.
+# --trace needs bpftrace.
 
 set -euo pipefail
 

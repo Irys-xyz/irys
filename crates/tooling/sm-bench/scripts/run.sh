@@ -27,11 +27,12 @@
 # reused pid. <out>/sample.pid is the sampler, written before the bench
 # starts. The EXIT trap removes it after the sampler is gone.
 #
-# The bench's exit code is appended to <out>/bench.out. Bench exit 1 (a startup
-# refusal, or an interrupt with no scored failure) makes this script exit 1 so
-# the ladder puts the previous index back. Bench exit 0 and bench exit 2 (a
-# scored miss) make this script exit 0, so the new index stays. Any other bench
-# status also exits 0. A guard failure exits 1 before the bench starts.
+# The bench's exit code is appended to <out>/bench.out. This script exits 0
+# only when the bench exits 0 or 2 (a scored miss), so the new index stays.
+# Bench exit 1 (a startup refusal, or an interrupt with no scored failure)
+# and every other status, including a panic, make this script exit with that
+# status so the ladder puts the previous index back. A guard failure exits 1
+# before the bench starts.
 
 set -euo pipefail
 
@@ -231,9 +232,10 @@ set -e
 bp=
 echo "exit=$rc" >>"$out/bench.out"
 echo "# done $(date -Is)" >>"$out/bench.out"
-# Exit 1 is a startup refusal. The ladder moves the previous index back.
-# Exit 2 is a scored miss. The new index stays.
-if [ "$rc" -eq 1 ]; then
-    exit 1
+# Exit 0 and exit 2 keep the new index. Every other status is a failure,
+# including a panic (101) or a signal (137, 143). The ladder moves the
+# previous index back.
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; then
+    exit 0
 fi
-exit 0
+exit "$rc"
