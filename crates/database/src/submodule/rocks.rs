@@ -7001,7 +7001,7 @@ mod tests {
                 .collect();
             tx.write_packed_offset_rows(rows)
         })?;
-        let span_rows = usize::try_from(checksums.len())? + 3;
+        let span_rows = checksums.len() + 3;
         assert!(span_rows > 1);
 
         reset_clear_offset_value_peak();

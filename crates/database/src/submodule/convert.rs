@@ -3680,10 +3680,7 @@ fn placement_start_ok_in_tx(
         cached_tx_path_hash(tx, PartitionChunkOffset(start.0 - 1), cached)?
     };
     *cached = Some((start, hash));
-    let starts = match hash {
-        Some(hash) if start.0 == 0 || prev != Some(hash) => true,
-        _ => false,
-    };
+    let starts = matches!(hash, Some(hash) if start.0 == 0 || prev != Some(hash));
     if starts {
         return Ok(true);
     }
