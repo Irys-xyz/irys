@@ -60,11 +60,13 @@ impl super::PackingStrategy for CudaPackingStrategy {
         // finish, but the loop does not start another one.
         let stop = Arc::new(AtomicBool::new(false));
 
-        // Split range into batches
-        for chunk_range_split in split_interval(&chunk_range, self.packing_config.max_chunks)
-            .unwrap()
-            .iter()
-        {
+        // A zero step is an error. Returning it keeps the controller alive;
+        // the caller requeues the range instead of unwinding this task.
+        let batches =
+            split_interval(&chunk_range, self.packing_config.max_chunks).map_err(|err| {
+                format!("CUDA packing batch split failed for SM {storage_module_id}: {err}")
+            })?;
+        for chunk_range_split in batches.iter() {
             if stop.load(Ordering::Relaxed) {
                 break;
             }

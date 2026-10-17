@@ -271,13 +271,30 @@ impl PackingService {
             }
             #[cfg(feature = "nvidia")]
             PackingType::CUDA => {
-                info!("Initializing CUDA packing strategy");
-                Arc::new(CudaPackingStrategy::new(
-                    config.clone(),
-                    packing_config.clone(),
-                    semaphore.clone(),
-                    runtime_handle,
-                ))
+                // A zero batch cannot be split into ranges. The config default
+                // is 0, and `split_interval` rejects that step. Pack on the CPU
+                // so the first range does not panic the controller.
+                if packing_config.max_chunks == 0 {
+                    info!("GPU packing batch size is 0; packing on the CPU");
+                    Arc::new(CpuPackingStrategy::new(
+                        config.clone(),
+                        semaphore.clone(),
+                        notify.clone(),
+                        runtime_handle,
+                        packing_config.chain_id,
+                        packing_config.concurrency,
+                        #[cfg(test)]
+                        Arc::new(Mutex::new(None)),
+                    ))
+                } else {
+                    info!("Initializing CUDA packing strategy");
+                    Arc::new(CudaPackingStrategy::new(
+                        config.clone(),
+                        packing_config.clone(),
+                        semaphore.clone(),
+                        runtime_handle,
+                    ))
+                }
             }
             #[cfg(not(feature = "nvidia"))]
             PackingType::CUDA => {
@@ -692,6 +709,67 @@ mod tests {
         assert_eq!(
             queued,
             vec![ii(PartitionChunkOffset(0), PartitionChunkOffset(0))]
+        );
+        Ok(())
+    }
+
+    /// The CUDA build's default GPU batch size is 0. That step cannot be
+    /// split. The controller must still pack the range on the CPU.
+    #[cfg(feature = "nvidia")]
+    #[test_log::test(tokio::test)]
+    async fn zero_gpu_batch_packs_on_cpu() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new().prefix("zero_gpu_batch").build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp_dir.path().to_path_buf();
+        node_config.packing.local.gpu_packing_batch_size = 0;
+        let consensus = node_config.consensus_config();
+        node_config.consensus = irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            entropy_packing_iterations: 1,
+            num_chunks_in_partition: 4,
+            chunk_size: 32,
+            ..consensus
+        });
+        let config = Config::new_with_random_peer_id(node_config);
+        let partition_hash = PartitionHash::zero();
+        let submodule_dir = tmp_dir.path().join("hdd0");
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(irys_types::partition_chunk_offset_ie!(0, 4), submodule_dir)],
+        };
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        let request = PackingRequest::new(
+            storage_module.clone(),
+            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 0)),
+        )?;
+
+        let packing = PackingService::new(Arc::new(config));
+        let runtime_handle = tokio::runtime::Handle::current();
+        let _controllers = packing.spawn_packing_controllers(runtime_handle.clone());
+        let handle = packing.spawn_tokio_service(runtime_handle);
+        handle.send(request)?;
+
+        let start = std::time::Instant::now();
+        loop {
+            if !storage_module.get_intervals(ChunkType::Entropy).is_empty() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                eyre::bail!("a zero GPU batch must still pack the range");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            storage_module.get_intervals(ChunkType::Entropy),
+            vec![ie(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(0)
+            )]
         );
         Ok(())
     }
