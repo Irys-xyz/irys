@@ -2541,3 +2541,186 @@ async fn cleared_assignment_does_not_panic_orchestrator_construction() {
         "a live ledger that differs from the fetcher ledger aborts the build"
     );
 }
+
+fn peer_accounting(orch: &ChunkOrchestrator, peer: IrysAddress) -> (usize, u32, u32, u64) {
+    let managers = orch.active_sync_peers.read().unwrap();
+    let manager = managers.get(&peer).expect("peer manager");
+    (
+        manager.active_requests(),
+        manager.available_concurrency(),
+        manager.consecutive_failures(),
+        manager.total_failures(),
+    )
+}
+
+fn start_request(orch: &ChunkOrchestrator, peer: IrysAddress) {
+    orch.active_sync_peers
+        .write()
+        .unwrap()
+        .get_mut(&peer)
+        .unwrap()
+        .on_chunk_request_started();
+}
+
+/// Releasing `Requested` slots makes the peer selectable again. Rows that do
+/// not hold a slot stay put. A slot count of zero does not underflow. A
+/// delivered chunk still clears the failure streak and is not released again.
+#[test_log::test(tokio::test)]
+async fn release_in_flight_slots_restores_peer_selection() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let config = test_config(tmp.path().to_path_buf(), 64);
+    let sm = packed_sm(&config, 64);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = add_assigned_peer(&mut orch, &config, 0xA8, 19080);
+    let unknown = IrysAddress::from([0xA9; 20]);
+
+    let (_, allowance, _, _) = peer_accounting(&orch, peer);
+    assert!(allowance > 1, "baseline allowance, got {allowance}");
+    for offset in 0..allowance {
+        insert_requested(&mut orch, PartitionChunkOffset::from(offset), peer);
+        start_request(&orch, peer);
+    }
+    assert_eq!(peer_accounting(&orch, peer).1, 0, "the peer is saturated");
+    assert!(
+        orch.find_best_peer(None).is_none(),
+        "a saturated peer is not selected"
+    );
+
+    insert_pending(&mut orch, PartitionChunkOffset::from(1_000));
+    orch.chunk_requests.insert(
+        PartitionChunkOffset::from(1_001),
+        ChunkRequest {
+            excluded: HashSet::new(),
+            local_cache_miss: false,
+            request_state: ChunkRequestState::Completed,
+            attempt_count: 1,
+            retry_round: 0,
+            ready_since: Instant::now(),
+        },
+    );
+    orch.chunk_requests.insert(
+        PartitionChunkOffset::from(1_002),
+        ChunkRequest {
+            excluded: HashSet::new(),
+            local_cache_miss: false,
+            request_state: ChunkRequestState::AwaitingDurability(Instant::now()),
+            attempt_count: 1,
+            retry_round: 0,
+            ready_since: Instant::now(),
+        },
+    );
+    orch.chunk_requests.insert(
+        PartitionChunkOffset::from(1_003),
+        ChunkRequest {
+            excluded: HashSet::new(),
+            local_cache_miss: false,
+            request_state: ChunkRequestState::Delayed {
+                retry_at: Instant::now(),
+            },
+            attempt_count: 1,
+            retry_round: 0,
+            ready_since: Instant::now(),
+        },
+    );
+    orch.chunk_requests.insert(
+        PartitionChunkOffset::from(1_004),
+        ChunkRequest {
+            excluded: HashSet::new(),
+            local_cache_miss: false,
+            request_state: ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex),
+            attempt_count: 1,
+            retry_round: 0,
+            ready_since: Instant::now(),
+        },
+    );
+    orch.chunk_requests.insert(
+        PartitionChunkOffset::from(1_005),
+        ChunkRequest {
+            excluded: HashSet::new(),
+            local_cache_miss: false,
+            request_state: ChunkRequestState::HeldByBodyWorker,
+            attempt_count: 1,
+            retry_round: 0,
+            ready_since: Instant::now(),
+        },
+    );
+    // No manager for this address. The release must skip it.
+    insert_requested(&mut orch, PartitionChunkOffset::from(1_006), unknown);
+    // One extra start has no row. It belongs to another module.
+    start_request(&orch, peer);
+
+    orch.release_in_flight_peer_slots();
+    assert_eq!(
+        peer_accounting(&orch, peer),
+        (1, allowance - 1, 0, 0),
+        "only Requested rows release, and the sibling slot stays"
+    );
+    assert_eq!(
+        orch.find_best_peer(None),
+        Some(peer),
+        "the peer is selectable after the slots are released"
+    );
+    assert!(
+        matches!(
+            orch.chunk_requests[&PartitionChunkOffset::from(0)].request_state,
+            ChunkRequestState::Requested(_, _)
+        ),
+        "the release does not rewrite request state"
+    );
+
+    // A Requested row with no matching start must not underflow.
+    let fresh_tmp = TempDirBuilder::new().build();
+    let fresh_config = test_config(fresh_tmp.path().to_path_buf(), 64);
+    let mut fresh = make_orchestrator(packed_sm(&fresh_config, 64), &fresh_config);
+    let fresh_peer = add_assigned_peer(&mut fresh, &fresh_config, 0xAA, 19081);
+    insert_requested(&mut fresh, PartitionChunkOffset::from(0), fresh_peer);
+    fresh.release_in_flight_peer_slots();
+    assert_eq!(
+        peer_accounting(&fresh, fresh_peer).0,
+        0,
+        "releasing with no active request stays at zero"
+    );
+    assert_eq!(fresh.find_best_peer(None), Some(fresh_peer));
+
+    // A live failure penalizes. A later delivery clears that streak and
+    // releases once. The drop then ignores the row that left Requested.
+    let lived_tmp = TempDirBuilder::new().build();
+    let lived_config = test_config(lived_tmp.path().to_path_buf(), 64);
+    let mut lived = make_orchestrator(packed_sm(&lived_config, 64), &lived_config);
+    let lived_peer = add_assigned_peer(&mut lived, &lived_config, 0xAB, 19082);
+    insert_requested(&mut lived, PartitionChunkOffset::from(0), lived_peer);
+    start_request(&lived, lived_peer);
+    lived
+        .on_chunk_failed(
+            PartitionChunkOffset::from(0),
+            lived_peer,
+            ChunkFetchFailureKind::Timeout,
+        )
+        .expect("live failure");
+    assert_eq!(peer_accounting(&lived, lived_peer).2, 1);
+    insert_requested(&mut lived, PartitionChunkOffset::from(1), lived_peer);
+    start_request(&lived, lived_peer);
+    lived
+        .on_chunk_fetched(PartitionChunkOffset::from(1), lived_peer)
+        .expect("live delivery");
+    assert_eq!(
+        peer_accounting(&lived, lived_peer).0,
+        0,
+        "a delivery releases its slot once"
+    );
+    assert_eq!(
+        peer_accounting(&lived, lived_peer).2,
+        0,
+        "a delivery clears the failure streak"
+    );
+    lived
+        .mark_chunk_awaiting_durability(PartitionChunkOffset::from(1))
+        .expect("leave Requested");
+    let after_delivery = peer_accounting(&lived, lived_peer);
+    lived.release_in_flight_peer_slots();
+    assert_eq!(
+        peer_accounting(&lived, lived_peer),
+        after_delivery,
+        "a row that already left Requested is not released again"
+    );
+}

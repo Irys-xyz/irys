@@ -66,6 +66,11 @@ impl PeerBandwidthManager {
         self.peer_stats.record_request_not_found();
     }
 
+    /// The request will never complete. Release its slot without a health penalty.
+    pub fn release_abandoned_request(&mut self) {
+        self.peer_stats.release_abandoned_request();
+    }
+
     /// Get max concurrency (upper bound)
     pub fn max_concurrency(&self) -> usize {
         self.peer_stats.max_concurrency as usize

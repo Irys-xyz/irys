@@ -2259,6 +2259,36 @@ impl ChunkOrchestrator {
         }
     }
 
+    /// Release every peer slot this orchestrator still holds. Call once,
+    /// immediately before the orchestrator is removed. Rows that already left
+    /// `Requested` are skipped: their completion released the slot. A missing
+    /// manager is skipped. The request map is left unchanged because the
+    /// orchestrator is dropped next. A second call while those rows stay
+    /// `Requested` would release the same slots again.
+    pub(super) fn release_in_flight_peer_slots(&mut self) {
+        let peers: Vec<IrysAddress> = self
+            .chunk_requests
+            .values()
+            .filter_map(|request| match request.request_state {
+                ChunkRequestState::Requested(addr, _) => Some(addr),
+                ChunkRequestState::Pending
+                | ChunkRequestState::AwaitingDurability(..)
+                | ChunkRequestState::Completed
+                | ChunkRequestState::Delayed { .. }
+                | ChunkRequestState::Blocked(_)
+                | ChunkRequestState::HeldByBodyWorker => None,
+            })
+            .collect();
+        let Ok(mut managers) = self.active_sync_peers.write() else {
+            return;
+        };
+        for addr in peers {
+            if let Some(manager) = managers.get_mut(&addr) {
+                manager.release_abandoned_request();
+            }
+        }
+    }
+
     pub fn remove_peer(&mut self, peer_addr: IrysAddress) {
         self.current_peers.retain(|&addr| addr != peer_addr);
 

@@ -160,6 +160,13 @@ impl PeerStats {
         self.active_requests = self.active_requests.saturating_sub(1);
     }
 
+    /// The orchestrator that started this request is gone, so no completion
+    /// will arrive. Release the slot. Do not change health: the peer did not
+    /// fail, and a completion that already ran released its own slot.
+    pub fn release_abandoned_request(&mut self) {
+        self.active_requests = self.active_requests.saturating_sub(1);
+    }
+
     pub fn average_completion_time(&self) -> Duration {
         if self.completion_time_samples.is_empty() {
             return Duration::from_millis(100); // Default to 100ms as a baseline

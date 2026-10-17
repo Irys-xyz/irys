@@ -1415,11 +1415,20 @@ impl DataSyncServiceInner {
         // below builds a new one with a fetcher for the live ledger. A
         // same-ledger slot change stays: the slot and the ledger range are
         // read from the module on each request.
+        //
+        // `Requested` rows still hold a peer slot. The dropped orchestrator
+        // will not see their completion, so release those slots here. A row
+        // that already left `Requested` released its own slot. Do not penalize
+        // the peer: the ledger changed, the peer did not fail.
         self.chunk_orchestrators.retain(|sm_id, orchestrator| {
-            storage_module_by_id(&storage_modules, *sm_id)
+            let keep = storage_module_by_id(&storage_modules, *sm_id)
                 .and_then(|sm| sm.partition_assignment())
                 .and_then(|pa| pa.ledger_id)
-                == Some(orchestrator.ledger_id())
+                == Some(orchestrator.ledger_id());
+            if !keep {
+                orchestrator.release_in_flight_peer_slots();
+            }
+            keep
         });
 
         for sm in storage_modules {
@@ -3379,5 +3388,328 @@ mod assignment_follow_tests {
             manager.partition_assignments
         );
         assert_eq!(manager.partition_assignments.len(), 1);
+    }
+
+    fn peer_slot_counts(inner: &DataSyncServiceInner, peer: IrysAddress) -> (usize, u32, u32, u64) {
+        let managers = inner.active_peer_bandwidth_managers.read().unwrap();
+        let manager = managers
+            .get(&peer)
+            .expect("the connected peer keeps its bandwidth manager");
+        (
+            manager.active_requests(),
+            manager.available_concurrency(),
+            manager.consecutive_failures(),
+            manager.total_failures(),
+        )
+    }
+
+    fn insert_request(
+        inner: &mut DataSyncServiceInner,
+        sm_id: usize,
+        offset: u32,
+        state: ChunkRequestState,
+    ) {
+        inner
+            .chunk_orchestrators
+            .get_mut(&sm_id)
+            .expect("orchestrator")
+            .chunk_requests
+            .insert(
+                PartitionChunkOffset::from(offset),
+                ChunkRequest {
+                    excluded: Default::default(),
+                    request_state: state,
+                    attempt_count: 1,
+                    retry_round: 0,
+                    ready_since: Instant::now(),
+                    local_cache_miss: false,
+                },
+            );
+    }
+
+    /// A ledger change drops the orchestrator. In-flight `Requested` rows still
+    /// hold peer slots. Releasing those slots must not penalize the peer, must
+    /// leave a slot another module still holds, and must not release a row
+    /// whose completion already left `Requested`. A same-ledger slot change
+    /// keeps the orchestrator and the slots. A later completion against the
+    /// replacement orchestrator must not release the slot again.
+    #[tokio::test]
+    async fn ledger_change_releases_in_flight_peer_slots() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let config = test_config(tmp.path());
+        let assignee = IrysAddress::from([0xA6; 20]);
+        let unknown = IrysAddress::from([0xA7; 20]);
+        let submit = u32::from(DataLedger::Submit);
+        let publish = u32::from(DataLedger::Publish);
+        let slot0 = PartitionAssignment {
+            ledger_id: Some(submit),
+            slot_index: Some(0),
+            miner_address: assignee,
+            partition_hash: H256::repeat_byte(0x31),
+        };
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 5,
+                    partition_assignment: Some(slot0),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 4), tmp.path().join("chunks"))],
+                },
+                &config,
+            )
+            .expect("storage module"),
+        );
+        sm.pack_with_zeros();
+
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let peer_list = PeerList::from_peers(
+            vec![peer_item(assignee, 19192)],
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+        let genesis = signed_genesis();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        install_epoch(&block_tree_guard, &[slot0]);
+
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard.clone(),
+            Arc::new(RwLock::new(vec![Arc::clone(&sm)])),
+            peer_list,
+            open_db(tmp.path()),
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize))),
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+        let sm_id = sm.id;
+        assert!(inner.chunk_orchestrators.contains_key(&sm_id));
+
+        // A live failure still releases its own slot and still penalizes the peer.
+        insert_request(
+            &mut inner,
+            sm_id,
+            0,
+            ChunkRequestState::Requested(assignee, Instant::now()),
+        );
+        inner
+            .active_peer_bandwidth_managers
+            .write()
+            .unwrap()
+            .get_mut(&assignee)
+            .unwrap()
+            .on_chunk_request_started();
+        inner
+            .chunk_orchestrators
+            .get_mut(&sm_id)
+            .unwrap()
+            .on_chunk_failed(
+                PartitionChunkOffset::from(0),
+                assignee,
+                super::chunk_fetcher::ChunkFetchFailureKind::Timeout,
+            )
+            .expect("a live failure still completes");
+        assert!(
+            matches!(
+                inner.chunk_orchestrators[&sm_id].chunk_requests[&PartitionChunkOffset::from(0)]
+                    .request_state,
+                ChunkRequestState::Delayed { .. }
+            ),
+            "the only peer failed, so the offset waits instead of staying Requested"
+        );
+        let (active, allowance, failures, total_failures) = peer_slot_counts(&inner, assignee);
+        assert_eq!(active, 0, "a live failure releases its slot");
+        assert_eq!(
+            failures, 1,
+            "a live transport failure still penalizes the peer"
+        );
+        assert_eq!(total_failures, 1);
+        assert!(
+            allowance > 1,
+            "the penalized allowance must still leave a sibling slot, got {allowance}"
+        );
+
+        for offset in 1..=allowance {
+            insert_request(
+                &mut inner,
+                sm_id,
+                offset,
+                ChunkRequestState::Requested(assignee, Instant::now()),
+            );
+            inner
+                .active_peer_bandwidth_managers
+                .write()
+                .unwrap()
+                .get_mut(&assignee)
+                .unwrap()
+                .on_chunk_request_started();
+        }
+        // Another module on this node holds one slot. This orchestrator must
+        // not release it.
+        inner
+            .active_peer_bandwidth_managers
+            .write()
+            .unwrap()
+            .get_mut(&assignee)
+            .unwrap()
+            .on_chunk_request_started();
+        let saturated = usize::try_from(allowance).expect("allowance fits usize") + 1;
+        assert_eq!(
+            peer_slot_counts(&inner, assignee),
+            (saturated, 0, 1, 1),
+            "the in-flight set fills the allowance"
+        );
+
+        set_live_assignment(&sm, Some(submit), Some(1));
+        inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
+            .expect("same-ledger sync");
+        assert!(
+            inner.chunk_orchestrators[&sm_id]
+                .chunk_requests
+                .contains_key(&PartitionChunkOffset::from(1)),
+            "a same-ledger slot change keeps the in-flight requests"
+        );
+        assert_eq!(
+            peer_slot_counts(&inner, assignee),
+            (saturated, 0, 1, 1),
+            "a same-ledger slot change keeps the peer slots"
+        );
+
+        // These rows do not hold a slot. A delivery that already ran has left
+        // `Requested`. The drop must not release them.
+        insert_request(
+            &mut inner,
+            sm_id,
+            1_000,
+            ChunkRequestState::AwaitingDurability(Instant::now()),
+        );
+        insert_request(
+            &mut inner,
+            sm_id,
+            1_005,
+            ChunkRequestState::Requested(unknown, Instant::now()),
+        );
+        insert_request(&mut inner, sm_id, 1_001, ChunkRequestState::Completed);
+        insert_request(
+            &mut inner,
+            sm_id,
+            1_002,
+            ChunkRequestState::Delayed {
+                retry_at: Instant::now(),
+            },
+        );
+        insert_request(
+            &mut inner,
+            sm_id,
+            1_003,
+            ChunkRequestState::Blocked(crate::data_sync_service::chunk_orchestrator::ChunkBlockReason::MissingDataRootIndex),
+        );
+        insert_request(
+            &mut inner,
+            sm_id,
+            1_004,
+            ChunkRequestState::HeldByBodyWorker,
+        );
+
+        let publish_slot = PartitionAssignment {
+            ledger_id: Some(publish),
+            slot_index: Some(1),
+            miner_address: assignee,
+            partition_hash: H256::repeat_byte(0x32),
+        };
+        install_epoch(&block_tree_guard, &[publish_slot]);
+        set_live_assignment(&sm, Some(publish), Some(1));
+        inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
+            .expect("ledger change");
+        assert!(
+            inner.chunk_orchestrators[&sm_id].chunk_requests.is_empty(),
+            "the replacement orchestrator does not keep the old requests"
+        );
+        assert_eq!(
+            peer_slot_counts(&inner, assignee),
+            (1, allowance - 1, 1, 1),
+            "the dropped orchestrator releases only the slots it still held"
+        );
+
+        let late = PartitionChunkOffset::from(2);
+        let fetched = inner
+            .chunk_orchestrators
+            .get_mut(&sm_id)
+            .unwrap()
+            .on_chunk_fetched(late, assignee);
+        assert!(
+            fetched.is_err(),
+            "a late delivery does not find the dropped request"
+        );
+        let failed = inner
+            .chunk_orchestrators
+            .get_mut(&sm_id)
+            .unwrap()
+            .on_chunk_failed(
+                late,
+                assignee,
+                super::chunk_fetcher::ChunkFetchFailureKind::Timeout,
+            );
+        assert!(
+            failed.is_err(),
+            "a late failure does not find the dropped request"
+        );
+        assert_eq!(
+            peer_slot_counts(&inner, assignee),
+            (1, allowance - 1, 1, 1),
+            "a late completion must not release the sibling slot or add a failure"
+        );
+
+        // Capacity removes the orchestrator. The slot this replacement still
+        // holds is released. A completion with no orchestrator does not
+        // release anything else.
+        insert_request(
+            &mut inner,
+            sm_id,
+            7,
+            ChunkRequestState::Requested(assignee, Instant::now()),
+        );
+        inner
+            .active_peer_bandwidth_managers
+            .write()
+            .unwrap()
+            .get_mut(&assignee)
+            .unwrap()
+            .on_chunk_request_started();
+        assert_eq!(peer_slot_counts(&inner, assignee).0, 2);
+        set_live_assignment(&sm, None, None);
+        inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions)
+            .await
+            .expect("capacity sync");
+        assert!(
+            !inner.chunk_orchestrators.contains_key(&sm_id),
+            "capacity drops the orchestrator"
+        );
+        assert_eq!(
+            peer_slot_counts(&inner, assignee),
+            (1, allowance - 1, 1, 1),
+            "capacity releases the in-flight slot and leaves the sibling slot"
+        );
+        inner
+            .handle_message(DataSyncServiceMessage::ChunkFailed {
+                storage_module_id: sm_id,
+                chunk_offset: PartitionChunkOffset::from(7),
+                peer_addr: assignee,
+                failure_kind: super::chunk_fetcher::ChunkFetchFailureKind::Timeout,
+            })
+            .await
+            .expect("a completion with no orchestrator is ignored");
+        assert_eq!(
+            peer_slot_counts(&inner, assignee),
+            (1, allowance - 1, 1, 1),
+            "a late failure with no orchestrator must not change the peer"
+        );
     }
 }
