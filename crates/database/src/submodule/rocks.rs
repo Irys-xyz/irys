@@ -467,7 +467,7 @@ impl RocksResourceLimits {
 /// The manager charges memtables to the cache and does not stall writers: a
 /// stall waits for every writer that shares it. Each family keeps about 1 MiB
 /// of arena that a flush replaces, so a stall cannot reclaim that floor.
-/// Forty databases and nine families are about 360 MiB of the 512 MiB budget.
+/// Forty databases and seven families are about 280 MiB of the 512 MiB budget.
 /// Path bytes sit in that arena until flush whether blob files are on.
 pub struct RocksResources {
     limits: RocksResourceLimits,
@@ -2573,7 +2573,7 @@ impl RocksSubmoduleStore {
         })
     }
 
-    /// Caller holds the write lock, except [`Self::write_metadata_batch`].
+    /// Every caller holds the write lock, including [`Self::write_metadata_batch`].
     fn write_synced_batch(&self, batch: WriteBatch, action: &'static str) -> eyre::Result<()> {
         let disable_wal = self.bulk_load;
         // Taken only when this batch syncs the WAL. A bulk-load copy does not.
@@ -8148,7 +8148,7 @@ mod tests {
     /// Forty databases on one explicit set stay inside that set.
     ///
     /// The column write buffer stays 64 MiB, so each empty family reserves
-    /// about 1 MiB. Forty databases and nine families are about 360 MiB.
+    /// about 1 MiB. Forty databases and seven families are about 280 MiB.
     /// That fits in the 512 MiB manager and in the 1 GiB cache. A smaller
     /// manager cannot hold the idle arenas.
     #[test]
