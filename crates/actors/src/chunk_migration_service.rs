@@ -316,8 +316,7 @@ impl ChunkMigrationServiceInner {
     /// block indexed. A module touched by several txs is synced once.
     ///
     /// `sync_group` is a no-op on a clean submodule and on an MDBX index
-    /// whose group commit is off. A failure is the same error a synced
-    /// registration used to return.
+    /// whose group commit is off. A failure returns [`MigrationError::ChunkIndexWrite`].
     fn sync_block_indexes(&self, touched: &[Arc<StorageModule>]) -> Result<(), MigrationError> {
         let mut seen = HashSet::new();
         for module in touched {
