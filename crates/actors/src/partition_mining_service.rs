@@ -498,7 +498,6 @@ impl PartitionMiningServiceInner {
         // the paths into the PoA and does not check them, and a packed write
         // between this read and the lookup can pair them with a new path.
         for (&partition_chunk_offset, (chunk_bytes, chunk_type)) in chunks.iter() {
-            // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
             match *chunk_type {
                 ChunkType::Uninitialized => {
                     return Err(eyre::eyre!("Cannot mine uninitialized chunks"));
