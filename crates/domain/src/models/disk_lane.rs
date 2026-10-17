@@ -1463,13 +1463,8 @@ impl StorageModule {
                 };
                 let entropy_epoch = taken.as_ref().map(|(_, epoch)| *epoch).unwrap_or(0);
                 let cached_entropy = taken.map(|(bytes, _)| bytes);
-                if cached_entropy.is_some() {
-                    super::super::index_read_metrics::note_readahead_hit();
-                    #[cfg(any(test, feature = "bench"))]
-                    self.disk
-                        .entropy_readahead_hits
-                        .fetch_add(1, Ordering::SeqCst);
-                }
+                // The hit is counted when this pad is packed. A rejected pad
+                // reads `chunks.dat` on the retry, so the take is not a hit.
                 selected.push((
                     partition_offset,
                     generation,
@@ -1689,6 +1684,12 @@ impl StorageModule {
                 idle_deadline = None;
                 continue;
             }
+            // A reread is waiting on entropy that is still queued. The write
+            // has to land before the pread. Waiting out the sweep give-up
+            // holds shutdown on a slot this pass cannot finish.
+            if self.only_pending_blocked_disk_slots() {
+                return;
+            }
             let seen = self.disk.wake.epoch();
             if self.entropy_idle() {
                 return;
@@ -1741,10 +1742,13 @@ impl StorageModule {
             let mut queue = self.disk.queue();
             queue.remove_slot(offset)
         };
-        if let Some(slot) = removed {
-            self.release_queued_offset(slot.offset, slot.generation, slot.byte_len);
-            self.mark_group_slot_done(slot.group, Some(WriteDataChunkError::Backpressure));
-        }
+        let Some(slot) = removed else {
+            return;
+        };
+        // The pad was copied before this write. A waiter retries. A batch
+        // caller already returned, so the slot is read from disk after the
+        // write lands instead of dropping the chunk.
+        let _ = self.reject_backpressure(slot, true);
     }
 
     pub(super) fn cancel_sweep_range(
@@ -1876,6 +1880,10 @@ impl StorageModule {
         let Some(span) = self.take_ready_span() else {
             return false;
         };
+        if self.span_blocked_on_pending(&span) {
+            self.restore_span(span);
+            return false;
+        }
         if self.disk.recall_pending() || self.disk.writes_active() {
             self.restore_span(span);
             return false;
@@ -1946,6 +1954,10 @@ impl StorageModule {
             let Some(span) = self.take_ready_span() else {
                 break;
             };
+            if self.span_blocked_on_pending(&span) {
+                self.restore_span(span);
+                break;
+            }
             // Only the first span of a pass may read ahead. A later span
             // means other chunk work was already queued.
             let read_end = if spans.is_empty() {
@@ -2053,14 +2065,20 @@ impl StorageModule {
                 self.fail_queued_group(group);
                 continue;
             }
-            if let Err(error) = self.slot_still_valid(&slot) {
-                failed_groups.insert(group);
-                self.fail_slot(slot, error);
-                self.fail_queued_group(group);
-                continue;
-            }
             let start_index = (slot.offset.0 - start.0) as usize * chunk_len;
             let entropy = buf[start_index..start_index + chunk_len].to_vec();
+            if let Err(error) = self.slot_still_valid(&slot, Some(&entropy)) {
+                if matches!(error, WriteDataChunkError::Backpressure) {
+                    if !self.reject_backpressure(slot, true) {
+                        failed_groups.insert(group);
+                    }
+                } else {
+                    failed_groups.insert(group);
+                    self.fail_slot(slot, error);
+                    self.fail_queued_group(group);
+                }
+                continue;
+            }
             accepted.push((slot, entropy));
         }
         let mut pending_submit = Vec::with_capacity(accepted.len());
@@ -2362,18 +2380,23 @@ impl StorageModule {
         if queue.disk_len() == 0 {
             return false;
         }
-        if self.entropy_read_grace().is_zero() {
-            return true;
-        }
         self.first_ready_span(&queue).is_some()
     }
 
     /// Offsets of the lowest-offset ready disk span. `None` when every disk
-    /// span is still inside the read grace.
+    /// span is still inside the read grace, or is waiting on a queued write
+    /// at one of its offsets. A reread stays queued until that write lands.
+    /// Counting it as ready would spin the lane: the sweep puts it back and
+    /// the next pass takes it again.
     fn first_ready_span(&self, queue: &SweepQueue) -> Option<Vec<PartitionChunkOffset>> {
         let chunk = self.config.consensus.chunk_size.max(1);
+        // `queue` is already held. `pending_writes` is the later lock.
+        let pending = self.pending_writes.read().unwrap();
         let mut found = None;
         self.for_each_disk_span(&queue.slots, |span| {
+            if disk_span_waits_on_write(&pending, span) {
+                return false;
+            }
             if self.span_slots_ready(span, chunk) {
                 found = Some(span.iter().map(|slot| slot.offset).collect());
                 return true;
@@ -2483,9 +2506,13 @@ impl StorageModule {
 
     fn pack_one(&self, slot: SweepSlot) {
         let group = slot.group;
-        if let Err(error) = self.slot_still_valid(&slot) {
-            self.fail_slot(slot, error);
-            self.fail_queued_group(group);
+        if let Err(error) = self.slot_still_valid(&slot, None) {
+            if matches!(error, WriteDataChunkError::Backpressure) {
+                let _ = self.reject_backpressure(slot, true);
+            } else {
+                self.fail_slot(slot, error);
+                self.fail_queued_group(group);
+            }
             return;
         }
         let Some(entropy) = slot
@@ -2527,9 +2554,13 @@ impl StorageModule {
         }
         // Recheck immediately before the chunk is queued. A pause or reset
         // that landed after the read must not publish this offset.
-        if let Err(error) = self.slot_still_valid(&slot) {
-            self.fail_slot(slot, error);
-            self.fail_queued_group(group);
+        if let Err(error) = self.slot_still_valid(&slot, Some(&entropy)) {
+            if matches!(error, WriteDataChunkError::Backpressure) {
+                let _ = self.reject_backpressure(slot, true);
+            } else {
+                self.fail_slot(slot, error);
+                self.fail_queued_group(group);
+            }
             return;
         }
         // Off the queue. A newer entropy write can land during the XOR.
@@ -2561,6 +2592,7 @@ impl StorageModule {
             return;
         }
         let pack_started = Instant::now();
+        let cache_hit = slot.cached_entropy.is_some();
         let packed = packing_xor_vec_u8(entropy, &slot.unpacked);
         let inserted = self.commit_packed(
             slot.offset,
@@ -2572,17 +2604,37 @@ impl StorageModule {
             copied_pad,
             slot.entropy_epoch,
             slot.pending_entropy.as_deref(),
+            &slot.unpacked,
         );
+        if inserted.is_ok() && cache_hit {
+            super::super::index_read_metrics::note_readahead_hit();
+            #[cfg(any(test, feature = "bench"))]
+            self.disk
+                .entropy_readahead_hits
+                .fetch_add(1, Ordering::SeqCst);
+        }
         if inserted.is_ok() && priority == WritePriority::Ingress && read_done.is_some() {
             super::super::index_read_metrics::note_ingest_stage(
                 "entropy_to_packed",
                 pack_started.elapsed(),
             );
         }
-        self.mark_group_slot_done(group, inserted.err());
+        if let Err(error) = inserted {
+            if matches!(error, WriteDataChunkError::Backpressure) {
+                let _ = self.reject_backpressure(slot, false);
+                return;
+            }
+            self.mark_group_slot_done(group, Some(error));
+            return;
+        }
+        self.mark_group_slot_done(group, None);
     }
 
-    fn slot_still_valid(&self, slot: &SweepSlot) -> Result<(), WriteDataChunkError> {
+    fn slot_still_valid(
+        &self,
+        slot: &SweepSlot,
+        pread: Option<&[u8]>,
+    ) -> Result<(), WriteDataChunkError> {
         if self.data_writes_paused()
             || self.index_write_generation.load(Ordering::SeqCst) != slot.generation
         {
@@ -2617,9 +2669,16 @@ impl StorageModule {
             }
         }
         // The bytes were copied earlier: a disk pread or a cache pad. An
-        // entropy pwrite since that copy bumps the epoch, then clears
-        // `pending` and `written_ahead`. Retry instead of packing the old pad.
-        if self.entropy_write_epoch.load(Ordering::SeqCst) != slot.entropy_epoch {
+        // entropy pwrite bumps the module epoch for every offset, then
+        // clears `pending` and `written_ahead` only for the offsets it
+        // wrote. A pad at another offset is still the file bytes. Compare
+        // this offset when the epoch moved. A mismatch is a rewrite here.
+        let copied = pread.or(slot.cached_entropy.as_deref());
+        let current = match copied {
+            Some(bytes) => self.copied_bytes_current(slot.offset, bytes, slot.entropy_epoch)?,
+            None => self.entropy_write_epoch.load(Ordering::SeqCst) == slot.entropy_epoch,
+        };
+        if !current {
             return Err(WriteDataChunkError::Backpressure);
         }
         let intervals = self.intervals.read().unwrap();
@@ -2727,52 +2786,233 @@ impl StorageModule {
         copied_pad: bool,
         entropy_epoch: u64,
         pending_entropy: Option<&[u8]>,
+        unpacked: &[u8],
+    ) -> Result<(), WriteDataChunkError> {
+        // The compare preads. It must not run under `pending_writes`: a
+        // pwrite takes the file lock and then that map.
+        for _ in 0..8 {
+            let live = self.entropy_write_epoch.load(Ordering::SeqCst);
+            let confirmed = if copied_pad && live != entropy_epoch {
+                let entropy = packing_xor_vec_u8(packed.clone(), unpacked);
+                match self.stable_disk_matches(offset, &entropy) {
+                    Ok(true) => self.entropy_write_epoch.load(Ordering::SeqCst),
+                    Ok(false) => {
+                        return self.abandon_copied_commit(offset, generation, unpacked_len);
+                    }
+                    Err(error) => {
+                        let _ = self.abandon_copied_commit(offset, generation, unpacked_len);
+                        return Err(error);
+                    }
+                }
+            } else {
+                live
+            };
+            let mut pending = self.pending_writes.write().unwrap();
+            pending.queued_unpacked_bytes =
+                pending.queued_unpacked_bytes.saturating_sub(unpacked_len);
+            if pending.occupancy.get(&offset).copied() != Some(generation) {
+                return Err(WriteDataChunkError::WritesPaused);
+            }
+            // `written_ahead` is a pwrite this commit did not do. Leave it.
+            // A copied pad must not replace entropy that landed after the
+            // copy. A module epoch bump from another offset leaves this
+            // pad's bytes on disk; `confirmed` is that check. A pending
+            // clone is packed only while the map still holds those bytes:
+            // the XOR does not hold `pending_writes`, and a newer enqueue
+            // does not bump the epoch.
+            let pending_clone_stale = match pending_entropy {
+                Some(cloned) => !pending.get(&offset).is_some_and(|(bytes, ty)| {
+                    *ty == ChunkType::Entropy && bytes.as_slice() == cloned
+                }),
+                None => false,
+            };
+            if pending.written_ahead.contains_key(&offset)
+                || (copied_pad && pending.contains_key(&offset))
+                || pending_clone_stale
+            {
+                pending.occupancy.remove(&offset);
+                return Err(WriteDataChunkError::Backpressure);
+            }
+            if copied_pad && self.entropy_write_epoch.load(Ordering::SeqCst) != confirmed {
+                pending.queued_unpacked_bytes =
+                    pending.queued_unpacked_bytes.saturating_add(unpacked_len);
+                drop(pending);
+                continue;
+            }
+            pending.occupancy.remove(&offset);
+            if self.data_writes_paused()
+                || self.index_write_generation.load(Ordering::SeqCst) != generation
+            {
+                return Err(WriteDataChunkError::WritesPaused);
+            }
+            pending.insert(offset, (packed, ChunkType::Data));
+            pending.priorities.insert(offset, priority);
+            self.entropy_cache
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .invalidate(offset);
+            pending.queued_at.insert(offset, Instant::now());
+            pending.proofs.insert(offset, proof);
+            *self.last_pending_write.write().unwrap() = Instant::now();
+            drop(pending);
+            self.disk.notify();
+            return Ok(());
+        }
+        self.abandon_copied_commit(offset, generation, unpacked_len)
+    }
+
+    /// Release the reserved offset after a copied pad failed the disk check.
+    fn abandon_copied_commit(
+        &self,
+        offset: PartitionChunkOffset,
+        generation: u64,
+        unpacked_len: u64,
     ) -> Result<(), WriteDataChunkError> {
         let mut pending = self.pending_writes.write().unwrap();
         pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_sub(unpacked_len);
         if pending.occupancy.get(&offset).copied() != Some(generation) {
             return Err(WriteDataChunkError::WritesPaused);
         }
-        // `written_ahead` is a pwrite this commit did not do. Leave it.
-        // A copied pad must not replace entropy that landed after the copy.
-        // The epoch covers the same pad after that write has been synced
-        // and both maps are empty. A pending clone is packed only while the
-        // map still holds those bytes: the XOR does not hold `pending_writes`,
-        // and a newer enqueue does not bump the epoch.
-        let pending_clone_stale = match pending_entropy {
-            Some(cloned) => !pending
-                .get(&offset)
-                .is_some_and(|(bytes, ty)| *ty == ChunkType::Entropy && bytes.as_slice() == cloned),
-            None => false,
-        };
-        let epoch_moved =
-            copied_pad && self.entropy_write_epoch.load(Ordering::SeqCst) != entropy_epoch;
-        if pending.written_ahead.contains_key(&offset)
-            || (copied_pad && pending.contains_key(&offset))
-            || epoch_moved
-            || pending_clone_stale
-        {
-            pending.occupancy.remove(&offset);
-            return Err(WriteDataChunkError::Backpressure);
-        }
         pending.occupancy.remove(&offset);
-        if self.data_writes_paused()
-            || self.index_write_generation.load(Ordering::SeqCst) != generation
-        {
-            return Err(WriteDataChunkError::WritesPaused);
+        Err(WriteDataChunkError::Backpressure)
+    }
+
+    /// `bytes` were copied at `stored_epoch`. True when they are still the
+    /// entropy at `offset`. An epoch bump from a different offset keeps
+    /// these bytes. A rewrite of `offset` changes them.
+    fn copied_bytes_current(
+        &self,
+        offset: PartitionChunkOffset,
+        bytes: &[u8],
+        stored_epoch: u64,
+    ) -> Result<bool, WriteDataChunkError> {
+        if self.entropy_write_epoch.load(Ordering::SeqCst) == stored_epoch {
+            return Ok(true);
         }
-        pending.insert(offset, (packed, ChunkType::Data));
-        pending.priorities.insert(offset, priority);
-        self.entropy_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .invalidate(offset);
-        pending.queued_at.insert(offset, Instant::now());
-        pending.proofs.insert(offset, proof);
-        *self.last_pending_write.write().unwrap() = Instant::now();
-        drop(pending);
-        self.disk.notify();
+        self.stable_disk_matches(offset, bytes)
+    }
+
+    /// True when a pread of `offset` equals `bytes` and the epoch does not
+    /// move across that pread. A move can be this offset or another, so the
+    /// pread is repeated. A mismatch is a rewrite of this offset.
+    fn stable_disk_matches(
+        &self,
+        offset: PartitionChunkOffset,
+        bytes: &[u8],
+    ) -> Result<bool, WriteDataChunkError> {
+        for _ in 0..8 {
+            let before = self.entropy_write_epoch.load(Ordering::SeqCst);
+            let disk = self
+                .pread_entropy_chunk(offset)
+                .map_err(WriteDataChunkError::Other)?;
+            let after = self.entropy_write_epoch.load(Ordering::SeqCst);
+            if disk.as_slice() != bytes {
+                return Ok(false);
+            }
+            if before == after {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn pread_entropy_chunk(&self, offset: PartitionChunkOffset) -> eyre::Result<Vec<u8>> {
+        let chunk_len = self.config.consensus.chunk_size.max(1) as usize;
+        let (file_arc, file_offset, _) = self.locate_io(offset, true)?;
+        let mut buf = vec![0_u8; chunk_len];
+        let file = self.disk.lock_chunks(&file_arc);
+        file.read_exact_at(&mut buf, file_offset)
+            .map_err(|error| eyre::eyre!("entropy pad check at offset {offset}: {error}"))?;
+        Ok(buf)
+    }
+
+    /// Queue `slot` for a disk read when nobody is waiting on its group.
+    /// `true` when the slot was queued. Otherwise the caller still owns the
+    /// failure: a waiter gets backpressure, and the batch path has no waiter
+    /// only when the offset was taken by another body.
+    fn reject_backpressure(&self, slot: SweepSlot, occupancy_held: bool) -> bool {
+        let group = slot.group;
+        match self.try_reread(slot, occupancy_held) {
+            Ok(()) => true,
+            Err(slot) => {
+                if occupancy_held {
+                    self.fail_slot(slot, WriteDataChunkError::Backpressure);
+                    self.fail_queued_group(group);
+                } else {
+                    self.mark_group_slot_done(group, Some(WriteDataChunkError::Backpressure));
+                }
+                false
+            }
+        }
+    }
+
+    fn try_reread(&self, mut slot: SweepSlot, occupancy_held: bool) -> Result<(), SweepSlot> {
+        if !self.group_is_unwaited(slot.group) {
+            return Err(slot);
+        }
+        if !occupancy_held && !self.reclaim_occupancy(slot.offset, slot.generation, slot.byte_len) {
+            return Err(slot);
+        }
+        slot.cached_entropy = None;
+        slot.pending_entropy = None;
+        slot.entropy_epoch = 0;
+        self.restore_span(vec![slot]);
         Ok(())
+    }
+
+    fn group_is_unwaited(&self, group: u64) -> bool {
+        let queue = self.disk.queue();
+        queue
+            .groups
+            .get(&group)
+            .is_some_and(|entry| !entry.waited && entry.notify.is_none())
+    }
+
+    fn reclaim_occupancy(
+        &self,
+        offset: PartitionChunkOffset,
+        generation: u64,
+        byte_len: u64,
+    ) -> bool {
+        let mut pending = self.pending_writes.write().unwrap();
+        if pending.occupancy.contains_key(&offset) {
+            return false;
+        }
+        pending.occupancy.insert(offset, generation);
+        pending.queued_unpacked_bytes = pending.queued_unpacked_bytes.saturating_add(byte_len);
+        true
+    }
+
+    /// A disk slot whose offset still has a queued write. Reading it now
+    /// would pack the bytes from before that write.
+    fn span_blocked_on_pending(&self, span: &[SweepSlot]) -> bool {
+        let pending = self.pending_writes.read().unwrap();
+        span.iter().any(|slot| {
+            !memory_entropy(slot)
+                && (pending.contains_key(&slot.offset)
+                    || pending.written_ahead.contains_key(&slot.offset))
+        })
+    }
+
+    fn only_pending_blocked_disk_slots(&self) -> bool {
+        let disk_offsets = {
+            let queue = self.disk.queue();
+            if queue.slots.is_empty() {
+                return false;
+            }
+            let mut disk_offsets = Vec::new();
+            for slot in queue.slots.values() {
+                if memory_entropy(slot) {
+                    return false;
+                }
+                disk_offsets.push(slot.offset);
+            }
+            disk_offsets
+        };
+        let pending = self.pending_writes.read().unwrap();
+        disk_offsets.into_iter().all(|offset| {
+            pending.contains_key(&offset) || pending.written_ahead.contains_key(&offset)
+        })
     }
 
     fn hold_cap_bytes(&self) -> u64 {
@@ -3090,14 +3330,18 @@ impl StorageModule {
             return None;
         }
         let grace = self.entropy_read_grace();
-        if grace.is_zero() {
-            return Some(Duration::ZERO);
-        }
         let chunk = self.config.consensus.chunk_size.max(1);
+        // Same lock order as `first_ready_span`: the queue, then this map.
+        // A span waiting on a queued write is not due. A zero grace would
+        // otherwise hide the durable-point timer and busy-loop the lane.
+        let pending = self.pending_writes.read().unwrap();
         let mut seen = false;
         let mut ready = false;
         let mut soonest = grace;
         self.for_each_disk_span(&queue.slots, |span| {
+            if disk_span_waits_on_write(&pending, span) {
+                return false;
+            }
             seen = true;
             if self.span_slots_ready(span, chunk) {
                 ready = true;
@@ -3338,6 +3582,14 @@ fn span_command_bytes(start: u32, end: u32, chunk_size: u64) -> u64 {
 
 fn memory_entropy(slot: &SweepSlot) -> bool {
     slot.pending_entropy.is_some() || slot.cached_entropy.is_some()
+}
+
+/// True when a queued write still owns an offset in `span`. The pread would
+/// pack bytes from before that write.
+fn disk_span_waits_on_write(pending: &super::PendingWrites, span: &[QueuedOffset]) -> bool {
+    span.iter().any(|slot| {
+        pending.contains_key(&slot.offset) || pending.written_ahead.contains_key(&slot.offset)
+    })
 }
 
 /// Pread bytes of one formed span, holes included. `span` is in offset order.
@@ -4020,6 +4272,7 @@ mod tests {
             true,
             module.entropy_write_epoch.load(Ordering::SeqCst),
             None,
+            &[],
         );
         assert!(
             matches!(
@@ -4461,13 +4714,14 @@ mod tests {
         );
     }
 
-    /// The cache still holds the pread pad after the epoch moves. Occupy must
-    /// not pack that pad. Sampling the epoch at the take would see the new
-    /// value and accept the old bytes.
+    /// The cache still holds the pread pad after the epoch moves. The file
+    /// already has the replacement bytes: the bump is published before the
+    /// cache invalidate. Occupy must not pack the old pad.
     #[test]
     fn cached_pad_is_not_packed_after_the_epoch_moves() -> eyre::Result<()> {
         let (_tmp, module, chunk) = cache_module("cache_epoch_gap")?;
         cache_durable_entropy(&module, 0x11)?;
+        overwrite_chunk_file(&module, PartitionChunkOffset::from(0), 0x22)?;
         let stored = module.entropy_write_epoch.load(Ordering::SeqCst);
         module.entropy_write_epoch.fetch_add(1, Ordering::SeqCst);
         assert_eq!(
@@ -4806,6 +5060,277 @@ mod tests {
         }
         assert_fresh_pad_packed(&module);
         drop(lane);
+        Ok(())
+    }
+
+    fn overwrite_chunk_file(
+        module: &super::super::StorageModule,
+        offset: PartitionChunkOffset,
+        byte: u8,
+    ) -> eyre::Result<()> {
+        use std::os::unix::fs::FileExt as _;
+        let len = module.config.consensus.chunk_size.max(1) as usize;
+        let (file, at, _) = module.locate_io(offset, true)?;
+        let file = module.disk.lock_chunks(&file);
+        file.write_all_at(&vec![byte; len], at)?;
+        Ok(())
+    }
+
+    /// The epoch moved and the cached bytes are still the bytes on disk.
+    /// A write at another offset bumps the same counter. This pad still packs.
+    #[test]
+    fn cached_pad_still_packs_when_only_the_epoch_changes() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_epoch_same_bytes")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let hits = module.disk.entropy_readahead_hits.load(Ordering::SeqCst);
+        module.entropy_write_epoch.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(module.entropy_cache_offsets_for_test(), vec![0]);
+        module.write_data_chunk(&chunk)?;
+        assert_fresh_pad_packed(&module);
+        assert!(
+            module.disk.entropy_readahead_hits.load(Ordering::SeqCst) > hits,
+            "a packed cache pad was not counted"
+        );
+        Ok(())
+    }
+
+    /// Entropy at offset 1 reaches a durable point. The pad at offset 0 is
+    /// still the file bytes and must pack. The hit is counted at the pack.
+    #[test]
+    fn unrelated_entropy_write_still_packs_the_cached_pad() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_unrelated")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let epoch = module.entropy_write_epoch.load(Ordering::SeqCst);
+        let hits = module.disk.entropy_readahead_hits.load(Ordering::SeqCst);
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        assert!(module.entropy_write_epoch.load(Ordering::SeqCst) > epoch);
+        assert_eq!(
+            module.entropy_cache_offsets_for_test(),
+            vec![0],
+            "the other offset's write dropped this pad"
+        );
+        module.write_data_chunk(&chunk)?;
+        assert_fresh_pad_packed(&module);
+        assert!(
+            module.disk.entropy_readahead_hits.load(Ordering::SeqCst) > hits,
+            "a packed cache pad was not counted"
+        );
+        Ok(())
+    }
+
+    /// The pre-XOR check passed. An entropy durable point at another offset
+    /// lands during the XOR. The pad bytes are still on disk and must pack.
+    #[test]
+    fn unrelated_entropy_write_during_xor_still_packs_the_cached_pad() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_xor_unrelated")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let module = Arc::new(module);
+        let wrote = ingress_during_pause(
+            &module,
+            &chunk,
+            super::EntropyPackPause::BeforePackXor,
+            || {
+                assert!(module.write_chunk(
+                    PartitionChunkOffset::from(1),
+                    vec![0x22; 32],
+                    super::super::ChunkType::Entropy
+                ));
+                module
+                    .sync_pending_chunks_inner(true)
+                    .expect("unrelated sync during xor");
+            },
+        );
+        wrote.expect("unrelated epoch move during xor rejected the pad");
+        assert_fresh_pad_packed(&module);
+        Ok(())
+    }
+
+    /// One lane pass pwrites the unrelated entropy, then folds the pad.
+    /// The fold runs after that bump and must still pack the pad.
+    #[test]
+    fn lane_pass_packs_a_cached_pad_after_an_unrelated_entropy_write() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("cache_lane_pass")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let epoch = module.entropy_write_epoch.load(Ordering::SeqCst);
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&chunk))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        module.disk_lane_pass();
+        assert!(
+            module.entropy_write_epoch.load(Ordering::SeqCst) > epoch,
+            "the lane pass did not durable-point the unrelated entropy"
+        );
+        assert_fresh_pad_packed(&module);
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        Ok(())
+    }
+
+    /// The sweep already read offset 0. A durable point at offset 1 bumps
+    /// the epoch before the XOR. Offset 0's bytes did not change.
+    #[test]
+    fn pread_packs_when_another_offset_is_rewritten() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("pread_unrelated", 4, 4, 0)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x11; 32], super::super::ChunkType::Entropy));
+        module.sync_pending_chunks_inner(true)?;
+        module.pause_next_sync_at(super::super::SyncPausePoint::AfterEntropyPread);
+        let mut slot = sweep_slot(0);
+        slot.unpacked = Arc::new(vec![0x01; 32]);
+        slot.byte_len = 32;
+        let mut rx = arm_slot_group(&module, slot);
+        std::thread::scope(|scope| {
+            let sweep = scope.spawn(|| module.sweep_one());
+            assert!(
+                module.wait_for_sync_pause(Duration::from_secs(5)),
+                "sweep did not pause after the entropy pread"
+            );
+            assert!(module.write_chunk(
+                PartitionChunkOffset::from(1),
+                vec![0x22; 32],
+                super::super::ChunkType::Entropy
+            ));
+            module
+                .sync_pending_chunks_inner(true)
+                .expect("unrelated sync");
+            module.release_sync_pause();
+            assert!(sweep.join().expect("sweep thread"), "sweep did not read");
+        });
+        rx.try_recv()
+            .expect("slot finished")
+            .expect("unrelated epoch move rejected the pread");
+        let pending = module.pending_writes.read().unwrap();
+        let (bytes, kind) = pending.get(&offset).expect("packed data");
+        assert_eq!(*kind, super::super::ChunkType::Data);
+        assert_eq!(bytes.first().copied(), Some(0x10));
+        Ok(())
+    }
+
+    /// The batch caller has already returned. A same-offset rewrite must not
+    /// drop the body. The slot is read again and packs the new entropy.
+    #[test]
+    fn ingress_batch_rereads_a_pad_after_the_same_offset_is_rewritten() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("batch_reread")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let hits = module.disk.entropy_readahead_hits.load(Ordering::SeqCst);
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&chunk))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x22; 32], super::super::ChunkType::Entropy));
+        module.sync_pending_chunks_inner(true)?;
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            1,
+            "the rejected pad was dropped instead of queued for a read"
+        );
+        module.drive_entropy_queue_for_test();
+        assert_eq!(
+            pending_head(&module),
+            Some((super::super::ChunkType::Data, Some(0x23))),
+            "the reread did not pack the replacement entropy"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        assert_eq!(
+            module.disk.entropy_readahead_hits.load(Ordering::SeqCst),
+            hits,
+            "a pad that was read from disk was counted as a cache hit"
+        );
+        Ok(())
+    }
+
+    /// A disk slot waiting on a newer pending write must not hold the drain
+    /// open. The write lands on a later pass, and this call returns.
+    #[test]
+    fn drain_returns_while_a_reread_waits_on_pending_entropy() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("drain_blocked")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&chunk))?;
+        assert!(matches!(
+            queued.first(),
+            Some(super::super::BatchEnqueueItem::Queued(_))
+        ));
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        assert_eq!(module.sweep_slot_count_for_test(), 1);
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain waited {elapsed:?} on a slot blocked by pending entropy"
+        );
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            1,
+            "the blocked reread was dropped"
+        );
+        assert_ne!(
+            pending_head(&module),
+            Some((super::super::ChunkType::Data, Some(0x10))),
+            "packed the pad while the replacement entropy was still pending"
+        );
+        Ok(())
+    }
+
+    /// A reread waiting on a queued write is not due. Another span still is.
+    /// After that write leaves the map, the waiting span is due again.
+    #[test]
+    fn blocked_reread_does_not_hide_another_span() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("blocked_ready", 8, 1, 0)?;
+        insert_slots(&module, &[0, 1], Instant::now());
+        assert_eq!(module.read_grace_remaining(), Some(Duration::ZERO));
+        {
+            let mut pending = module.pending_writes.write().unwrap();
+            pending.insert(
+                PartitionChunkOffset::from(0),
+                (vec![0x22; 32], super::super::ChunkType::Entropy),
+            );
+        }
+        assert!(
+            module.has_ready_disk_span(),
+            "a blocked offset hid the other span"
+        );
+        assert_eq!(taken_offsets(&module).expect("the unblocked span"), vec![1]);
+        assert_eq!(module.sweep_slot_count_for_test(), 1);
+        assert!(
+            module.read_grace_remaining().is_none(),
+            "the blocked span is still due"
+        );
+        assert!(
+            !module.has_ready_disk_span(),
+            "the blocked span kept the lane ready"
+        );
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .remove(&PartitionChunkOffset::from(0));
+        assert!(module.has_ready_disk_span());
+        assert_eq!(module.read_grace_remaining(), Some(Duration::ZERO));
+        assert_eq!(taken_offsets(&module).expect("the write landed"), vec![0]);
         Ok(())
     }
 }
