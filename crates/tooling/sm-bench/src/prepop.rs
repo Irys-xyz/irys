@@ -77,12 +77,12 @@ pub(crate) fn prepopulate(
         // A crash can commit the short tail before the counter rename. The
         // counter then names this tx start, or is missing. A stored short
         // size is terminal unless this count ends on that same size.
-        if let Some(short_end) = stored_short_end(module, done, batch_end)? {
-            if target != short_end {
-                return Err(eyre!(
-                    "refusing to grow --prepopulate-index from {done} to {target}: a stored short data size ends at {short_end}, and a larger count would store a second data size for that data root"
-                ));
-            }
+        if let Some(short_end) = stored_short_end(module, done, batch_end)?
+            && target != short_end
+        {
+            return Err(eyre!(
+                "refusing to grow --prepopulate-index from {done} to {target}: a stored short data size ends at {short_end}, and a larger count would store a second data size for that data root"
+            ));
         }
         let from = done - (done % TX_CHUNKS);
         submodule.db.update(|tx| write_batch(tx, from, batch_end))?;
