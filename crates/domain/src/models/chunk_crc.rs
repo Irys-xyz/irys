@@ -1173,12 +1173,18 @@ mod tests {
             1,
             "a gap keeps the checksum unknown, so the proof is served"
         );
+        let scans_before_empty = module.crc_span_scan_count();
         module.force_sync_pending_chunks()?;
+        assert_eq!(
+            module.crc_span_scan_count(),
+            scans_before_empty,
+            "a durable point that writes nothing must not scan again"
+        );
         assert!(
             module
                 .crc_scan_done
                 .load(std::sync::atomic::Ordering::SeqCst),
-            "a durable point that writes nothing must not scan again"
+            "an empty durable point leaves the scan latch set"
         );
         assert!(
             !module.chunk_crc_complete_for_test(),
