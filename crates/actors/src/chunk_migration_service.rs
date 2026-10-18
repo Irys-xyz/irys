@@ -376,6 +376,29 @@ pub fn process_ledger_transactions(
             prev_chunk_offset + num_chunks_in_tx as u64,
         ));
 
+        // Recovery holds the exclusive gate from its first clear through the
+        // block-index truncate. Take the shared gates before the re-check so
+        // the truncate cannot land between the check and this commit.
+        let mut modules: Vec<Arc<StorageModule>> =
+            storage_modules_guard.read().iter().cloned().collect();
+        modules.sort_by_key(|module| module.id);
+        let _index_recovery: Vec<_> = modules
+            .iter()
+            .map(|module| module.lock_index_recovery_shared())
+            .collect();
+        let still_canonical = match block_index.get_item(block.height) {
+            Some(item) if item.block_hash == block.block_hash => true,
+            _ => false,
+        };
+        if !still_canonical {
+            tracing::warn!(
+                block_height = block.height,
+                block_hash = %block.block_hash,
+                "skipping chunk migration for block no longer in block index (likely orphaned by reorg)"
+            );
+            return Ok(());
+        }
+
         update_storage_module_indexes(
             tx,
             &tx_path.proof,
@@ -1096,15 +1119,35 @@ mod tests {
 
     impl Fixture {
         /// The ordered index path, exactly as `on_block_migrated` runs it.
+        ///
+        /// The block must already be the index item at this height. Production
+        /// migration checks that. Tests that call this helper do not.
         fn index(&self) -> Result<(), MigrationError> {
-            process_ledger_transactions(
-                &self.block,
-                DataLedger::Submit,
-                std::slice::from_ref(&self.tx.header),
-                &self.block_index,
-                &self.config,
-                &self.guard,
-                &mut Vec::new(),
+            self.ensure_block_indexed()
+                .map_err(|err| MigrationError::Other(err.to_string()))?;
+            index_fixture_block(self)
+        }
+
+        fn ensure_block_indexed(&self) -> eyre::Result<()> {
+            if self
+                .block_index
+                .get_item(self.block.height)
+                .is_some_and(|item| item.block_hash == self.block.block_hash)
+            {
+                return Ok(());
+            }
+            let submit = &self.block.data_ledgers[DataLedger::Submit];
+            self.block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: self.block.block_hash,
+                    num_ledgers: 1,
+                    ledgers: vec![LedgerIndexItem {
+                        total_chunks: submit.total_chunks,
+                        tx_root: submit.tx_root,
+                        ledger: DataLedger::Submit,
+                    }],
+                },
+                self.block.height,
             )
         }
 
@@ -1264,6 +1307,104 @@ mod tests {
                 TxChunkOffset::from(2)
             )?,
             Some(vec![PartitionChunkOffset::from(2)])
+        );
+        Ok(())
+    }
+
+    fn poll_index(
+        done_rx: &std::sync::mpsc::Receiver<Result<(), MigrationError>>,
+    ) -> Option<Result<(), MigrationError>> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        while std::time::Instant::now() < deadline {
+            match done_rx.try_recv() {
+                Ok(result) => return Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("index thread dropped the result");
+                }
+            }
+        }
+        None
+    }
+
+    /// Recovery holds the gate, then this height's hash changes, then the gate
+    /// opens. A registration that started during the hold must not commit.
+    #[test]
+    fn registration_started_under_recovery_does_not_commit_a_replaced_block() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.persist_block()?;
+        let gate = f.sm.lock_index_recovery_exclusive();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = done_tx.send(index_fixture_block(&f));
+            });
+            assert!(
+                poll_index(&done_rx).is_none(),
+                "indexing must wait while recovery holds the gate"
+            );
+            let submit = &f.block.data_ledgers[DataLedger::Submit];
+            f.block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: H256::repeat_byte(9),
+                    num_ledgers: 1,
+                    ledgers: vec![LedgerIndexItem {
+                        total_chunks: submit.total_chunks,
+                        tx_root: submit.tx_root,
+                        ledger: DataLedger::Submit,
+                    }],
+                },
+                f.block.height,
+            )?;
+            drop(gate);
+            let result = done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("index finishes after the gate opens");
+            result?;
+            assert!(
+                f.rows()?.is_empty(),
+                "a block replaced during recovery must not commit"
+            );
+            Ok(())
+        })
+    }
+
+    /// The same hold still lets the registration commit when the hash is
+    /// unchanged after the gate opens.
+    #[test]
+    fn registration_after_recovery_commits_when_the_block_remains() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        f.persist_block()?;
+        let gate = f.sm.lock_index_recovery_exclusive();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _ = done_tx.send(index_fixture_block(&f));
+            });
+            assert!(
+                poll_index(&done_rx).is_none(),
+                "indexing must wait while recovery holds the gate"
+            );
+            drop(gate);
+            let result = done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("index finishes after the gate opens");
+            result?;
+            assert_eq!(f.rows()?.len(), 1);
+            Ok(())
+        })
+    }
+
+    /// The block is not in the index. Indexing writes nothing.
+    #[test]
+    fn registration_skips_a_block_already_absent_from_the_index() -> eyre::Result<()> {
+        let f = fixture(3, Some(u64::MAX))?;
+        index_fixture_block(&f)?;
+        assert!(
+            f.rows()?.is_empty(),
+            "a block that is not at this height must not commit"
         );
         Ok(())
     }
@@ -1911,7 +2052,21 @@ mod tests {
         )?))
     }
 
+    fn index_fixture_block(f: &Fixture) -> Result<(), MigrationError> {
+        process_ledger_transactions(
+            &f.block,
+            DataLedger::Submit,
+            std::slice::from_ref(&f.tx.header),
+            &f.block_index,
+            &f.config,
+            &f.guard,
+            &mut Vec::new(),
+        )
+    }
+
     fn index_on(f: &Fixture, guard: &StorageModulesReadGuard) -> Result<(), MigrationError> {
+        f.ensure_block_indexed()
+            .map_err(|err| MigrationError::Other(err.to_string()))?;
         process_ledger_transactions(
             &f.block,
             DataLedger::Submit,

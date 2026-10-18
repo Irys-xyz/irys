@@ -743,8 +743,20 @@ impl BlockMigrationService {
             // `write_data_chunk`; any of them landing a write between
             // `drop_pending_writes_in_range` and the interval re-mark below
             // would flush orphaned bytes as `Data` over a cleared index.
-            let _writes_paused =
-                PausedDataWrites::pause(storage_modules_guard.read().iter().cloned().collect());
+            let modules: Vec<Arc<StorageModule>> =
+                storage_modules_guard.read().iter().cloned().collect();
+            let _writes_paused = PausedDataWrites::pause(modules.clone());
+            // Hold every module's index gate until the block index truncate
+            // returns. A registration that starts during recovery blocks on
+            // the shared gate, then re-reads the index and writes nothing
+            // when this block is no longer at its height. Lock order matches
+            // the shared side: module id, then the gate, then assignment.
+            let mut ordered = modules;
+            ordered.sort_by_key(|module| module.id);
+            let _index_recovery: Vec<_> = ordered
+                .iter()
+                .map(|module| module.lock_index_recovery_exclusive())
+                .collect();
             // Phase 2: Unassign storage module offsets and clear orphaned index entries
             for info in &rollback_infos {
                 for (ledger, range) in &info.ledger_ranges {

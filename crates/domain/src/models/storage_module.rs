@@ -768,6 +768,10 @@ pub struct StorageModule {
     /// The assignment itself does not change. A registration captured at
     /// the previous value does not commit.
     rollback_generation: AtomicU64,
+    /// Shared across one index commit. Exclusive from the start of partition
+    /// recovery until the block-index truncate returns. Lock order: this
+    /// gate, then `partition_assignment`.
+    index_recovery: RwLock<()>,
     /// In-memory chunk buffer awaiting disk write. Occupancy (index ops in
     /// flight) lives under this same lock.
     pending_writes: RwLock<PendingWrites>,
@@ -2082,6 +2086,7 @@ impl StorageModule {
             id: storage_module_info.id,
             partition_assignment: RwLock::new(storage_module_info.partition_assignment),
             rollback_generation: AtomicU64::new(0),
+            index_recovery: RwLock::new(()),
             pending_writes: RwLock::new(PendingWrites::default()),
             entropy_cache: Mutex::new(disk_lane::EntropyPadCache::default()),
             #[cfg(any(test, feature = "test-utils"))]
@@ -2383,6 +2388,21 @@ impl StorageModule {
     pub fn partition_assignment(&self) -> Option<PartitionAssignment> {
         let pa = self.partition_assignment.read().unwrap();
         *pa
+    }
+
+    /// Shared gate for one index commit. A poisoned lock is recovered.
+    pub fn lock_index_recovery_shared(&self) -> std::sync::RwLockReadGuard<'_, ()> {
+        self.index_recovery
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Exclusive gate for partition recovery, held through the block-index
+    /// truncate. A poisoned lock is recovered.
+    pub fn lock_index_recovery_exclusive(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
+        self.index_recovery
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
     }
 
     /// The assignment and the height it was stored at. The height is read
@@ -6177,8 +6197,10 @@ impl StorageModule {
     /// index clear, and it is released before the interval rewrite. The
     /// assignment value stays. A registration that already holds the read
     /// lock finishes its commit, and this clear then removes those rows. A
-    /// registration that has not taken the lock sees the new generation and
-    /// does not commit.
+    /// registration that has not entered captures the new generation. The
+    /// assignment is unchanged, so that storage commit still proceeds.
+    /// Chunk migration holds `index_recovery` across the commit and writes
+    /// only when the block is still at this height.
     pub fn rollback_unassigned_range(
         &self,
         start: PartitionChunkOffset,
