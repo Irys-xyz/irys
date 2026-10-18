@@ -570,8 +570,11 @@ impl OracleConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StorageSyncConfig {
-    /// Number of write operations before forcing a sync to disk
-    /// Higher values improve performance but increase data loss risk on crashes
+    /// Pending chunk count that lets a non-force flush write one submodule.
+    ///
+    /// This count does not set the `fdatasync` gap. That gap is
+    /// [`Self::min_durable_interval_ms`]. The value also sizes the pending-byte
+    /// ceiling and the packing sync stride. `0` is rejected.
     pub num_writes_before_sync: u64,
     /// Ceiling, in bytes, on chunk bodies one storage module may hold in memory
     /// awaiting flush before background body migration pauses writing to it.
