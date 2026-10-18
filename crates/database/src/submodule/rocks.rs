@@ -3716,9 +3716,12 @@ fn cf_has_key(db: &DB, snap: &rocksdb::Snapshot<'_>, cf: Cf) -> eyre::Result<boo
 
 /// Content-hash keys held from one pass of a clear scan.
 ///
-/// The scan then drops that batch into the commit overlay and resumes after
-/// the last offset it read. Checksum rows are not keys. The commit is still
-/// one batch: a failed sync does not publish a prefix of the deletes.
+/// The scan then drops that batch into the commit overlay and resumes at the
+/// first key strictly after the batch-filling key. A seek to the next 4-byte
+/// offset would skip a longer key that sorts between the two encodings, and
+/// the following `DeleteRange` would remove it. Checksum rows are not keys.
+/// The commit is still one batch: a failed sync does not publish a prefix of
+/// the deletes.
 const CLEAR_CONTENT_KEY_BATCH: usize = 1024;
 
 #[cfg(test)]
@@ -4401,10 +4404,12 @@ impl<'a> Batch<'a> {
                         content_keys.push(records::content_key(&hash, offset));
                     }
                     if content_keys.len() == clear_content_key_batch() {
-                        resume = offset
-                            .0
-                            .checked_add(1)
-                            .map(|next_offset| encode_key(PartitionChunkOffset(next_offset)));
+                        // `encode(n + 1)` is the next 4-byte offset. A longer
+                        // key sorts after `encode(n)` and before that offset.
+                        // The trailing 0 is the first key strictly after `n`.
+                        let mut resume_key = key;
+                        resume_key.push(0);
+                        resume = Some(resume_key);
                         break;
                     }
                 }
@@ -7079,6 +7084,142 @@ mod tests {
                 .is_some()
         );
         assert_content_index(&store)?;
+        Ok(())
+    }
+
+    /// A resume that seeks the next 4-byte offset skips a longer key that sorts
+    /// between those encodings. `DeleteRange` would then remove it. The clear
+    /// must fail and leave the span. A later clear that starts after the key
+    /// still drops the proofs and checksums in its own span.
+    #[test]
+    fn clear_resume_keeps_a_key_that_sorts_between_offsets() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_clear_resume_gap");
+        let _batch = set_clear_content_key_batch(1);
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        let kept = 50_u32;
+        place_span(
+            &store,
+            0,
+            kept,
+            H256::repeat_byte(4),
+            0,
+            1,
+            0,
+            &[1, 10, 14, kept],
+            None,
+        )?;
+        let checksums = [3_u32, 8, 12];
+        store.update(|tx| {
+            let rows = checksums
+                .into_iter()
+                .map(|offset| PackedOffsetRow {
+                    offset: PartitionChunkOffset::from(offset),
+                    crc: Some(offset),
+                    proof: None,
+                })
+                .collect();
+            tx.write_packed_offset_rows(rows)
+        })?;
+        // Sorts after offset 1 and before offset 2. Batch size 1 fills on the
+        // proof at 1, so the next seek is the one that can skip this key.
+        let gap_key = [0_u8, 0, 0, 1, 0];
+        let handle = cf_handle(&store.db, Cf::OffsetMeta)?;
+        store.db.put_cf(&handle, gap_key, [])?;
+        store.db.flush_cf(&handle)?;
+
+        let wide = store.update(|tx| {
+            tx.clear_paths_in_inclusive_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(20),
+            )
+        });
+        let gap_still = store.db.get_cf(&handle, gap_key)?.is_some();
+        let content_10 = store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(10)))?;
+        let path_1 = store
+            .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(1)))?
+            .is_some();
+        let path_10 = store
+            .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(10)))?
+            .is_some();
+        let Err(wide_err) = wide else {
+            panic!(
+                "clear succeeded; gap_still={gap_still} content_10={content_10:?} path_1={path_1} path_10={path_10}"
+            );
+        };
+        assert!(
+            wide_err.to_string().contains("not an offset"),
+            "{wide_err}"
+        );
+        assert!(
+            gap_still && path_1 && path_10 && content_10 == vec![PartitionChunkOffset::from(10)],
+            "gap_still={gap_still} content_10={content_10:?} path_1={path_1} path_10={path_10}"
+        );
+        assert!(
+            store
+                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(3)))?
+                .is_some(),
+            "a rejected clear leaves the checksum row"
+        );
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(1)))?,
+            vec![PartitionChunkOffset::from(1)]
+        );
+
+        store.update(|tx| {
+            tx.clear_paths_in_inclusive_range(
+                PartitionChunkOffset::from(6),
+                PartitionChunkOffset::from(20),
+            )
+        })?;
+        assert!(
+            store.db.get_cf(&handle, gap_key)?.is_some(),
+            "the gap key is outside the cleared span"
+        );
+        for offset in [10_u32, 14] {
+            assert!(
+                store
+                    .view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(offset as u8)))?
+                    .is_empty(),
+                "offset {offset} content key remains"
+            );
+            assert!(
+                store
+                    .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset::from(offset)))?
+                    .is_none(),
+                "offset {offset} proof remains"
+            );
+        }
+        for offset in [8_u32, 12] {
+            assert!(
+                store
+                    .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(offset)))?
+                    .is_none(),
+                "checksum {offset} remains"
+            );
+        }
+        assert!(
+            store
+                .view(|tx| tx.get_offset_meta(PartitionChunkOffset::from(3)))?
+                .is_some()
+        );
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(1)))?,
+            vec![PartitionChunkOffset::from(1)]
+        );
+        assert_eq!(
+            store.view(|tx| tx.offsets_for_content_hash(H256::repeat_byte(kept as u8)))?,
+            vec![PartitionChunkOffset::from(kept)]
+        );
+        assert!(
+            store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(1)))?
+                .is_some()
+        );
+        assert!(
+            store
+                .view(|tx| tx.placement_at(PartitionChunkOffset::from(10)))?
+                .is_none()
+        );
         Ok(())
     }
 
