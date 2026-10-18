@@ -620,7 +620,7 @@ impl StorageModuleServiceInner {
                     target = "irys::packing",
                     storage_module.id = %module.id,
                     storage_module.packing_interval = ?range,
-                    "Dropping packing request due to a saturated channel"
+                    "Deferring packing request until the channel accepts it"
                 );
                 PackSend::Deferred
             }
@@ -2950,6 +2950,75 @@ mod assignment_reset_tests {
             );
         }
         assert!(saw, "the repair range is sent once the channel has room");
+    }
+
+    /// A full channel keeps the span and says it is waiting. An open channel
+    /// sends the same span at once and does not log that wait. After one slot
+    /// frees, the kept span is sent once.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn full_packing_channel_logs_the_kept_span_as_deferred() {
+        let mut harness = harness(None);
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        let accepted = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("an open channel accepts the repair");
+        assert_eq!(*accepted.chunk_range().0.start(), 1);
+        assert_eq!(*accepted.chunk_range().0.end(), 3);
+        assert!(harness.receivers.packing.try_recv().is_err());
+        assert!(
+            !logs_contain("Deferring packing request until the channel accepts it"),
+            "an accepted send is not a deferral"
+        );
+        assert!(
+            !logs_contain("Dropping packing request"),
+            "an accepted send is not a drop"
+        );
+
+        fill_packing_channel(&harness);
+        harness
+            .module
+            .requeue_crc_repair_range(repair_one_to_three().0);
+        harness.inner.tick();
+        let pending = harness
+            .inner
+            .pending_ranges
+            .get(&0)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(pending.len(), 1, "a full channel keeps the repair span");
+        assert_eq!(*pending[0].0.start(), 1);
+        assert_eq!(*pending[0].0.end(), 3);
+        assert!(
+            logs_contain("Deferring packing request until the channel accepts it"),
+            "a saturated channel must say the span waits for a free slot"
+        );
+        assert!(
+            !logs_contain("Dropping packing request"),
+            "a span that stays queued must not be logged as dropped"
+        );
+
+        assert!(
+            harness.receivers.packing.try_recv().is_ok(),
+            "one filler leaves so the kept span can be sent"
+        );
+        harness.inner.tick();
+        let mut repairs = 0_usize;
+        while let Ok(request) = harness.receivers.packing.try_recv() {
+            if *request.chunk_range().0.start() == 1 && *request.chunk_range().0.end() == 3 {
+                repairs += 1;
+            }
+        }
+        assert_eq!(
+            repairs, 1,
+            "the kept span is sent once the channel accepts it"
+        );
+        assert!(!harness.inner.pending_ranges.contains_key(&0));
     }
 
     /// The channel has room. Ledger to capacity sends the reset span now.
