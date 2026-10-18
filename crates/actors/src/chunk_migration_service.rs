@@ -216,7 +216,7 @@ impl ChunkMigrationServiceInner {
             block_tx_map.insert(ledger, txs);
         }
 
-        // Invoke on_block_migrated to sync the indexes, this will also migrate any available chunks on hand
+        // Index only. Chunk bytes stay pending rows for the body worker.
         self.on_block_migrated(Arc::new(block_header), Arc::new(block_tx_map))?;
 
         Ok(())
