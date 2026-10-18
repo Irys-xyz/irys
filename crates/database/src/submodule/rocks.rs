@@ -1364,7 +1364,12 @@ fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> 
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    write_close_scratch_marker(path, &scratch_name)?;
+    // A `?` here drops `store` while `path` is still the caller's directory.
+    // That close flushes SST files, a new manifest, and CURRENT into it.
+    if let Err(err) = write_close_scratch_marker(path, &scratch_name) {
+        abandon_open_database(store);
+        return Err(err);
+    }
     #[cfg(test)]
     if close_scratch_stopped(CloseScratchStop::Marker) {
         abandon_open_database(store);
@@ -9757,6 +9762,60 @@ mod tests {
         assert!(!root.path().join(".rocks.close-scratch-marker").exists());
         let copy = root.path().join("rocks-copy");
         copy_tree(&rocks, &copy)?;
+        assert_eq!(placement_row_count(&copy)?, 1);
+        Ok(())
+    }
+
+    /// The scratch marker cannot be created. The open database must not flush
+    /// into the directory that is still at the path.
+    #[test]
+    fn marker_write_failure_does_not_publish_into_the_replacement() -> eyre::Result<()> {
+        let root = temp_dir("refused-close-marker");
+        let rocks = root.path().join("rocks");
+        fs::create_dir(&rocks)?;
+        let store = RocksSubmoduleStore::open_converting(&rocks)?;
+        store.disable_auto_compaction()?;
+        put_offset(&store, 0, 1)?;
+        flush_every_family(&store)?;
+        let manifest = manifest_bytes(&rocks)?;
+        let names = dir_names(&rocks)?;
+        put_offset(&store, 2, 2)?;
+        let moved = root.path().join("rocks-moved");
+        fs::rename(&rocks, &moved)?;
+        fs::create_dir(&rocks)?;
+        fs::write(rocks.join("CURRENT"), b"MANIFEST-000099\n")?;
+        fs::write(rocks.join("000099.log"), b"replacement-log")?;
+        fs::write(rocks.join("LOCK"), b"")?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        // The rename of the marker tmp lands on this directory and fails.
+        fs::create_dir(root.path().join(".rocks.close-scratch-marker"))?;
+        let err = store.seal_and_stamp().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("close scratch marker"),
+            "marker failure must surface before a flush: {text}"
+        );
+        assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000099\n");
+        assert_eq!(fs::read(rocks.join("000099.log"))?, b"replacement-log");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(!rocks.join("SCHEMA").is_file());
+        assert_eq!(
+            dir_names(&rocks)?,
+            vec![
+                "000099.log".to_owned(),
+                "CURRENT".to_owned(),
+                "KEEP".to_owned(),
+                "LOCK".to_owned(),
+            ]
+        );
+        assert_eq!(
+            manifest_bytes(&moved)?,
+            manifest,
+            "marker failure recorded a flush in the moved manifest"
+        );
+        assert_eq!(dir_names(&moved)?, names);
+        let copy = root.path().join("rocks-copy");
+        copy_tree(&moved, &copy)?;
         assert_eq!(placement_row_count(&copy)?, 1);
         Ok(())
     }
