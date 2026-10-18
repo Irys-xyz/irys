@@ -467,6 +467,10 @@ pub(super) struct DiskGate {
     /// Instants `finish_span_read` uses as the pread return, one per span.
     #[cfg(test)]
     span_read_done: Mutex<Vec<(u32, Instant)>>,
+    /// Instant taken immediately before each inflight entropy pread.
+    /// A return stamp from before this instant omitted the read.
+    #[cfg(test)]
+    span_pread_started: Mutex<Vec<(u32, Instant)>>,
     /// Ingress stages recorded for this module. The histogram has no test reader.
     #[cfg(test)]
     ingest_stages: Mutex<Vec<(&'static str, Duration)>>,
@@ -798,6 +802,8 @@ impl DiskGate {
             entropy_pack_pause: super::PauseGate::new(),
             #[cfg(test)]
             span_read_done: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            span_pread_started: Mutex::new(Vec::new()),
             #[cfg(test)]
             ingest_stages: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -2130,6 +2136,12 @@ impl StorageModule {
         // The cloned fd does not hold the chunk-file lock. Capture the epoch
         // before the read so a pwrite that lands during it is visible.
         let entropy_epoch = self.entropy_write_epoch.load(Ordering::SeqCst);
+        #[cfg(test)]
+        self.disk
+            .span_pread_started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((start.0, Instant::now()));
         cloned
             .read_exact_at(&mut buf, file_offset)
             .map_err(|error| {
@@ -5572,7 +5584,8 @@ mod tests {
     }
 
     /// Each inflight span's queue stage ends when that pread returns.
-    /// The join, and the XOR of an earlier span, are not part of it.
+    /// A stamp taken before the pread fails. The join, and the XOR of an
+    /// earlier span, are not part of it.
     #[test]
     fn each_inflight_span_stamps_its_pread_return() -> eyre::Result<()> {
         let (_tmp, module) = span_fixture("span_stamp", 8, 1, 0)?;
@@ -5602,8 +5615,18 @@ mod tests {
             module.disk.inflight_pread_hold.release();
             sweep.join().expect("inflight sweep");
             let stamps = module.disk.span_read_done.lock().unwrap().clone();
+            let starts = module.disk.span_pread_started.lock().unwrap().clone();
             assert_eq!(stamps.len(), 2, "{stamps:?}");
             for (offset, at) in stamps {
+                let started = starts
+                    .iter()
+                    .find(|(start_offset, _)| *start_offset == offset)
+                    .map(|(_, started)| *started)
+                    .unwrap_or_else(|| panic!("offset {offset} has no pread start"));
+                assert!(
+                    at >= started,
+                    "offset {offset} was stamped at {at:?}, before its pread at {started:?}"
+                );
                 assert!(
                     at < release_at,
                     "offset {offset} was stamped at {at:?}, after the preads were released at {release_at:?}"
