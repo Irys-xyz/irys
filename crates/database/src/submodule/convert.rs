@@ -4214,6 +4214,62 @@ fn compare_v1_pending(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs while the exclusive env is still open, before the directory is removed.
+    static DURING_MDBX_INCOMPLETE_REPLACE: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Commits on the environment that still has the target open.
+    static DURING_MDBX_REPLACE_ENV: std::cell::RefCell<Option<Box<dyn FnOnce(&DatabaseEnv)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct MdbxReplaceHookGuard;
+
+#[cfg(test)]
+impl Drop for MdbxReplaceHookGuard {
+    fn drop(&mut self) {
+        DURING_MDBX_INCOMPLETE_REPLACE.with(|cell| {
+            cell.borrow_mut().take();
+        });
+        DURING_MDBX_REPLACE_ENV.with(|cell| {
+            cell.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn set_during_mdbx_incomplete_replace(hook: impl FnOnce(&Path) + 'static) -> MdbxReplaceHookGuard {
+    DURING_MDBX_INCOMPLETE_REPLACE.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hook));
+    });
+    MdbxReplaceHookGuard
+}
+
+#[cfg(test)]
+fn set_during_mdbx_replace_env(hook: impl FnOnce(&DatabaseEnv) + 'static) -> MdbxReplaceHookGuard {
+    DURING_MDBX_REPLACE_ENV.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hook));
+    });
+    MdbxReplaceHookGuard
+}
+
+/// Test hook for the gap between the schema read and the delete.
+///
+/// `held` is the exclusive environment that stays open through the delete.
+/// A schema hook commits on that environment. The caller reads the schema
+/// again after this returns.
+#[cfg(test)]
+fn run_mdbx_replace_hooks(path: &Path, held: &DatabaseEnv) {
+    if let Some(hook) = DURING_MDBX_INCOMPLETE_REPLACE.with(|cell| cell.borrow_mut().take()) {
+        hook(path);
+    }
+    if let Some(hook) = DURING_MDBX_REPLACE_ENV.with(|cell| cell.borrow_mut().take()) {
+        hook(held);
+    }
+}
+
 fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
     let path = lexical_target(path)?;
     let path = path.as_path();
@@ -4252,46 +4308,77 @@ fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> e
     refuse_existing_rocks_schema(path)?;
     refuse_forbidden(path)?;
     if path.join("mdbx.dat").is_file() {
+        // The sealer opens read-write and exclusive, and it keeps that env
+        // until `CONVERTING` is removed. Hold the same kind of env from this
+        // read through `remove_dir_all`, then read the schema again. A current
+        // row is not deleted. Drop the env before creating the new directory:
+        // close must not write into the directory this function is about to create.
         let args = args.with_exclusive(Some(true));
-        let env = match DatabaseEnv::open(path, DatabaseEnvKind::RO, args) {
+        let env = match DatabaseEnv::open(path, DatabaseEnvKind::RW, args) {
             Ok(env) => env,
             Err(err) if is_lock_error(&eyre::eyre!("{err}")) => {
                 return Err(map_lock(eyre::eyre!("{err}")));
             }
             Err(err) => {
                 eyre::bail!(
-                    "target {} could not be opened read-only ({err}). Refusing to delete it.",
+                    "target {} could not be opened ({err}). Refusing to delete it.",
                     path.display()
                 );
             }
         };
-        let schema = env.view_eyre(read_schema_bytes)?;
-        match schema.as_deref() {
-            Some(bytes) if bytes == SUBMODULE_SCHEMA.as_bytes() => {
-                eyre::bail!(
-                    "target {} is a completed MDBX index. Refusing to replace it.",
-                    path.display()
-                );
-            }
-            Some(bytes) if bytes == SUBMODULE_CONVERT_INCOMPLETE.as_bytes() => {}
-            Some(_) => {
-                eyre::bail!(
-                    "target {} schema row is not an incomplete submodule conversion. Refusing to delete a consensus database or other index.",
-                    path.display()
-                );
-            }
-            None if mdbx_has_v1_rows(&env)? => {
-                eyre::bail!(
-                    "target {} is a schema v1 index. Refusing to delete it.",
-                    path.display()
-                );
-            }
-            None => {}
+        refuse_mdbx_replace_schema(path, &env)?;
+        if !migrate::converting_sentinel_present(path)? {
+            eyre::bail!(
+                "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
+                path.display()
+            );
         }
+        if !replace {
+            eyre::bail!(
+                "target {} is an incomplete conversion. Pass --replace-incomplete to delete it and start over.",
+                path.display()
+            );
+        }
+        refuse_existing_rocks_schema(path)?;
+        refuse_forbidden(path)?;
+        #[cfg(test)]
+        run_mdbx_replace_hooks(path, &env);
+        refuse_mdbx_replace_schema(path, &env)?;
+        fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
         drop(env);
+        fs::create_dir_all(path)?;
+        write_converting_sentinel(path)?;
+        return Ok(());
     }
     replace_marked_incomplete(path, replace, false)?;
     Ok(())
+}
+
+/// Refuse a schema row that `--replace-incomplete` must not delete.
+fn refuse_mdbx_replace_schema(path: &Path, env: &DatabaseEnv) -> eyre::Result<()> {
+    let schema = env.view_eyre(read_schema_bytes)?;
+    match schema.as_deref() {
+        Some(bytes) if bytes == SUBMODULE_SCHEMA.as_bytes() => {
+            eyre::bail!(
+                "target {} is a completed MDBX index. Refusing to replace it.",
+                path.display()
+            );
+        }
+        Some(bytes) if bytes == SUBMODULE_CONVERT_INCOMPLETE.as_bytes() => Ok(()),
+        Some(_) => {
+            eyre::bail!(
+                "target {} schema row is not an incomplete submodule conversion. Refusing to delete a consensus database or other index.",
+                path.display()
+            );
+        }
+        None if mdbx_has_v1_rows(env)? => {
+            eyre::bail!(
+                "target {} is a schema v1 index. Refusing to delete it.",
+                path.display()
+            );
+        }
+        None => Ok(()),
+    }
 }
 
 fn replace_marked_incomplete(path: &Path, replace: bool, refuse_mdbx: bool) -> eyre::Result<()> {
@@ -5569,6 +5656,155 @@ mod tests {
             super::lexical_target(Path::new("/tmp/rocks")).unwrap(),
             PathBuf::from("/tmp/rocks")
         );
+    }
+
+    /// Incomplete MDBX directory: convert schema, `CONVERTING`, and a file the
+    /// delete must remove only when the replace is allowed to finish.
+    fn incomplete_mdbx(root: &Path, name: &str) -> eyre::Result<PathBuf> {
+        let path = root.join(name);
+        fs::create_dir_all(&path)?;
+        drop(MdbxSubmoduleStore::open_for_convert(
+            &path,
+            testing_args()?.with_exclusive(Some(true)),
+        )?);
+        fs::write(path.join("CONVERTING"), super::SUBMODULE_CONVERT_INCOMPLETE)?;
+        fs::write(path.join("KEEP"), b"keep")?;
+        Ok(path)
+    }
+
+    /// `--replace-incomplete` deletes an unfinished MDBX target and starts again.
+    #[test]
+    fn replace_incomplete_deletes_an_incomplete_mdbx_directory() -> eyre::Result<()> {
+        let root = temp("convert-mdbx-replace-incomplete");
+        let path = incomplete_mdbx(root.path(), "mdbx")?;
+        super::prepare_mdbx_target(&path, testing_args()?, true)?;
+        assert!(!path.join("KEEP").is_file());
+        assert!(!path.join("mdbx.dat").is_file());
+        assert!(!path.join("lock").is_file());
+        assert_eq!(
+            fs::read(path.join("CONVERTING"))?,
+            super::SUBMODULE_CONVERT_INCOMPLETE.as_bytes()
+        );
+        Ok(())
+    }
+
+    /// A finished schema row is not a partial conversion, even with `CONVERTING`.
+    #[test]
+    fn prepare_mdbx_target_refuses_a_completed_mdbx_schema() -> eyre::Result<()> {
+        let root = temp("convert-mdbx-completed");
+        let path = incomplete_mdbx(root.path(), "mdbx")?;
+        {
+            let store = MdbxSubmoduleStore::open_for_convert(
+                &path,
+                testing_args()?.with_exclusive(Some(true)),
+            )?;
+            store.put_schema_bytes(super::SUBMODULE_SCHEMA.as_bytes())?;
+        }
+        let before = fs::metadata(path.join("mdbx.dat"))?.len();
+        let err = super::prepare_mdbx_target(&path, testing_args()?, true).unwrap_err();
+        assert!(format!("{err:#}").contains("completed"), "{err:#}");
+        assert_eq!(fs::read(path.join("KEEP"))?, b"keep");
+        assert!(path.join("mdbx.dat").is_file());
+        assert_eq!(fs::metadata(path.join("mdbx.dat"))?.len(), before);
+        assert!(!path.join("lock").is_file());
+        assert!(path.join("CONVERTING").is_file());
+        Ok(())
+    }
+
+    /// A schema committed after the first read and before the delete is current.
+    /// The delete must leave that directory in place.
+    #[test]
+    fn replace_incomplete_keeps_an_mdbx_schema_committed_during_the_check_gap() -> eyre::Result<()>
+    {
+        let root = temp("convert-mdbx-schema-gap");
+        let path = incomplete_mdbx(root.path(), "mdbx")?;
+        let _guard = super::set_during_mdbx_replace_env(|env| {
+            let bytes = super::SUBMODULE_SCHEMA.as_bytes().to_vec();
+            env.update_eyre(|tx| crate::submodule::db::write_schema_bytes(tx, &bytes))
+                .expect("commit schema");
+        });
+        let err = super::prepare_mdbx_target(&path, testing_args()?, true).unwrap_err();
+        assert!(format!("{err:#}").contains("completed"), "{err:#}");
+        assert_eq!(fs::read(path.join("KEEP"))?, b"keep");
+        assert!(path.join("mdbx.dat").is_file());
+        let store = MdbxSubmoduleStore::open(&path, testing_args()?)?;
+        assert_eq!(
+            store.schema_bytes()?.as_deref(),
+            Some(super::SUBMODULE_SCHEMA.as_bytes())
+        );
+        assert!(path.join("CONVERTING").is_file());
+        Ok(())
+    }
+
+    /// Another process can seal in the gap after the schema read. The delete
+    /// must not remove a schema that process committed. An open that fails
+    /// because this process still holds the environment leaves an incomplete
+    /// directory, and that directory is still replaced.
+    #[test]
+    fn replace_incomplete_blocks_another_process_until_the_mdbx_directory_is_removed()
+    -> eyre::Result<()> {
+        if std::env::var_os("IRYS_MDBX_REPLACE_CHILD").is_some() {
+            return seal_incomplete_mdbx_child();
+        }
+        let root = temp("convert-mdbx-replace-race");
+        let path = incomplete_mdbx(root.path(), "mdbx")?;
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let flag = std::sync::Arc::clone(&recorded);
+        let _guard = super::set_during_mdbx_incomplete_replace(move |dir| {
+            let output = std::process::Command::new(std::env::current_exe().expect("test bin"))
+                .arg(
+                    "replace_incomplete_blocks_another_process_until_the_mdbx_directory_is_removed",
+                )
+                .env("IRYS_MDBX_REPLACE_CHILD", "1")
+                .env("IRYS_MDBX_REPLACE_DIR", dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .expect("spawn sealer");
+            *flag.lock().expect("sealer output") = Some(output);
+        });
+        let prepared = super::prepare_mdbx_target(&path, testing_args()?, true);
+        let output = recorded
+            .lock()
+            .expect("sealer output")
+            .take()
+            .expect("hook ran");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() {
+            let err = prepared.unwrap_err();
+            assert!(format!("{err:#}").contains("completed"), "{err:#}");
+            assert_eq!(fs::read(path.join("KEEP"))?, b"keep");
+            assert!(path.join("mdbx.dat").is_file());
+        } else {
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                lower.contains("busy")
+                    || lower.contains("another write transaction")
+                    || lower.contains("in use")
+                    || lower.contains("exclusive")
+                    || lower.contains("lock"),
+                "code={:?} text={text}",
+                output.status.code()
+            );
+            prepared?;
+            assert!(!path.join("KEEP").is_file());
+            assert!(path.join("CONVERTING").is_file());
+        }
+        Ok(())
+    }
+
+    fn seal_incomplete_mdbx_child() -> eyre::Result<()> {
+        let path = PathBuf::from(std::env::var("IRYS_MDBX_REPLACE_DIR")?);
+        let args = testing_args()?.with_exclusive(Some(true));
+        let store = MdbxSubmoduleStore::open_for_convert(&path, args)
+            .map_err(|err| eyre::eyre!("seal open failed: {err}"))?;
+        store.put_schema_bytes(super::SUBMODULE_SCHEMA.as_bytes())?;
+        Ok(())
     }
 
     /// A finished RocksDB index can still hold `CONVERTING` when the process
