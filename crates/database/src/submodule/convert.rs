@@ -6125,7 +6125,7 @@ mod tests {
         stop: crate::submodule::rocks::CloseScratchStop,
     ) -> eyre::Result<()> {
         use crate::submodule::rocks::CloseScratchStop::{
-            AfterClose, AfterEmptyCreate, AfterMarker, AfterRename, AfterRestore,
+            Close, EmptyCreate, Marker, Rename, Restore,
         };
         let (root, rocks, seal_err) = seal_with_lock_removed(label, Some(stop))?;
         assert!(
@@ -6142,7 +6142,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         match stop {
-            AfterMarker => {
+            Marker => {
                 assert!(
                     marker.is_file(),
                     "scratch {scratch_name} is not named by .rocks.close-scratch-marker"
@@ -6153,10 +6153,10 @@ mod tests {
                 );
                 assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
             }
-            AfterRename | AfterEmptyCreate | AfterClose => {
+            Rename | EmptyCreate | Close => {
                 assert_eq!(fs::read(scratch.join("KEEP"))?, b"keep");
             }
-            AfterRestore => {
+            Restore => {
                 assert!(
                     marker.is_file(),
                     "scratch {scratch_name} is not named by .rocks.close-scratch-marker"
@@ -6171,22 +6171,22 @@ mod tests {
             "scratch {scratch_name} is not named by .rocks.close-scratch-marker"
         );
         match stop {
-            AfterMarker | AfterRestore => {
+            Marker | Restore => {
                 assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
             }
-            AfterRename => {
+            Rename => {
                 assert!(
                     !rocks.exists(),
                     "replace must not create the missing directory"
                 );
                 assert_eq!(fs::read(scratch.join("KEEP"))?, b"keep");
             }
-            AfterEmptyCreate | AfterClose => {
+            EmptyCreate | Close => {
                 assert_eq!(fs::read(scratch.join("KEEP"))?, b"keep");
                 assert!(!rocks.join("SCHEMA").is_file());
             }
         }
-        if matches!(stop, AfterMarker | AfterRestore) {
+        if matches!(stop, Marker | Restore) {
             let err = super::replace_marked_incomplete(&rocks, true, true).unwrap_err();
             assert!(format!("{err:#}").contains(&scratch_name), "{err:#}");
             assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
@@ -6198,7 +6198,7 @@ mod tests {
     fn killed_close_after_the_marker_names_the_scratch() -> eyre::Result<()> {
         assert_killed_refused_close(
             "convert-close-after-marker",
-            crate::submodule::rocks::CloseScratchStop::AfterMarker,
+            crate::submodule::rocks::CloseScratchStop::Marker,
         )
     }
 
@@ -6206,7 +6206,7 @@ mod tests {
     fn killed_close_after_the_rename_names_the_scratch() -> eyre::Result<()> {
         assert_killed_refused_close(
             "convert-close-after-rename",
-            crate::submodule::rocks::CloseScratchStop::AfterRename,
+            crate::submodule::rocks::CloseScratchStop::Rename,
         )
     }
 
@@ -6214,7 +6214,7 @@ mod tests {
     fn killed_close_after_the_empty_directory_names_the_scratch() -> eyre::Result<()> {
         assert_killed_refused_close(
             "convert-close-after-empty",
-            crate::submodule::rocks::CloseScratchStop::AfterEmptyCreate,
+            crate::submodule::rocks::CloseScratchStop::EmptyCreate,
         )
     }
 
@@ -6222,7 +6222,7 @@ mod tests {
     fn killed_close_after_the_flush_names_the_scratch() -> eyre::Result<()> {
         assert_killed_refused_close(
             "convert-close-after-flush",
-            crate::submodule::rocks::CloseScratchStop::AfterClose,
+            crate::submodule::rocks::CloseScratchStop::Close,
         )
     }
 
@@ -6230,7 +6230,7 @@ mod tests {
     fn killed_close_after_restore_keeps_the_marker() -> eyre::Result<()> {
         assert_killed_refused_close(
             "convert-close-after-restore",
-            crate::submodule::rocks::CloseScratchStop::AfterRestore,
+            crate::submodule::rocks::CloseScratchStop::Restore,
         )
     }
 

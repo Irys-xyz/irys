@@ -1366,7 +1366,7 @@ fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> 
         .into_owned();
     write_close_scratch_marker(path, &scratch_name)?;
     #[cfg(test)]
-    if close_scratch_stopped(CloseScratchStop::AfterMarker) {
+    if close_scratch_stopped(CloseScratchStop::Marker) {
         abandon_open_database(store);
         eyre::bail!("stopped refused close");
     }
@@ -1378,7 +1378,7 @@ fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> 
         });
     }
     #[cfg(test)]
-    if close_scratch_stopped(CloseScratchStop::AfterRename) {
+    if close_scratch_stopped(CloseScratchStop::Rename) {
         abandon_open_database(store);
         eyre::bail!("stopped refused close");
     }
@@ -1398,13 +1398,13 @@ fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> 
         return Err(err).wrap_err("create directory for abandoned rocksdb close");
     }
     #[cfg(test)]
-    if close_scratch_stopped(CloseScratchStop::AfterEmptyCreate) {
+    if close_scratch_stopped(CloseScratchStop::EmptyCreate) {
         abandon_open_database(store);
         eyre::bail!("stopped refused close");
     }
     drop(store);
     #[cfg(test)]
-    if close_scratch_stopped(CloseScratchStop::AfterClose) {
+    if close_scratch_stopped(CloseScratchStop::Close) {
         eyre::bail!("stopped refused close");
     }
     let removed = fs::remove_dir_all(path);
@@ -1418,7 +1418,7 @@ fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> 
         });
     }
     #[cfg(test)]
-    if close_scratch_stopped(CloseScratchStop::AfterRestore) {
+    if close_scratch_stopped(CloseScratchStop::Restore) {
         removed?;
         eyre::bail!("stopped refused close");
     }
@@ -1543,11 +1543,11 @@ static CLOSE_SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CloseScratchStop {
-    AfterMarker,
-    AfterRename,
-    AfterEmptyCreate,
-    AfterClose,
-    AfterRestore,
+    Marker,
+    Rename,
+    EmptyCreate,
+    Close,
+    Restore,
 }
 
 #[cfg(test)]
