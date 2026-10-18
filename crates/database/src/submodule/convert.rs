@@ -3291,6 +3291,35 @@ fn uncompared_hash_group() -> usize {
 
 #[cfg(test)]
 thread_local! {
+    static V1_PATH_VIEW_GROUP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct V1PathViewGroupGuard;
+
+#[cfg(test)]
+impl Drop for V1PathViewGroupGuard {
+    fn drop(&mut self) {
+        V1_PATH_VIEW_GROUP.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+fn set_v1_path_view_group(group: usize) -> V1PathViewGroupGuard {
+    V1_PATH_VIEW_GROUP.with(|cell| cell.set(Some(group.max(1))));
+    V1PathViewGroupGuard
+}
+
+fn v1_path_view_group() -> usize {
+    #[cfg(test)]
+    if let Some(group) = V1_PATH_VIEW_GROUP.with(std::cell::Cell::get) {
+        return group.max(1);
+    }
+    usize::MAX
+}
+
+#[cfg(test)]
+thread_local! {
     static ACCEPTED_OFFSET_RANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -3453,12 +3482,26 @@ fn read_v1_data_path(
 fn read_v1_data_paths(
     env: &DatabaseEnv,
     rows: &[(PartitionChunkOffset, H256)],
+    count_view: bool,
 ) -> eyre::Result<Vec<ChunkDataPath>> {
-    env.view_eyre(|tx| {
-        rows.iter()
-            .map(|(offset, hash)| v1_data_path_in_tx(tx, *offset, *hash))
-            .collect()
-    })
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for chunk in rows.chunks(v1_path_view_group()) {
+        let paths = env.view_eyre(|tx| {
+            // The copy rescan shares this reader and is not a verify view.
+            if count_view {
+                note_verify_view();
+            }
+            chunk
+                .iter()
+                .map(|(offset, hash)| v1_data_path_in_tx(tx, *offset, *hash))
+                .collect::<eyre::Result<Vec<_>>>()
+        })?;
+        out.extend(paths);
+    }
+    Ok(out)
 }
 
 fn v1_data_path_in_tx(
@@ -3554,7 +3597,7 @@ fn copy_v1_range_paths(
     let mut copied = 0_u64;
     walk_v1_path_range(env, start, end, limits, |rows| {
         // One view for the hash page. The byte cap still splits the writes.
-        let paths = read_v1_data_paths(env, &rows)?;
+        let paths = read_v1_data_paths(env, &rows, false)?;
         let mut kept = Vec::new();
         let mut path_bytes = 0_usize;
         for ((offset, _), path) in rows.into_iter().zip(paths) {
@@ -4034,20 +4077,25 @@ fn compare_v1_paths(
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
     walk_v1_path_range(env, start, end, limits, |rows| {
-        note_verify_view();
-        let paths = read_v1_data_paths(env, &rows)?;
-        note_verify_view();
-        let (rights, metas) = v3.view(|tx| {
-            let rights = rows
-                .iter()
-                .map(|(offset, _)| tx.get_data_path_by_offset(*offset))
-                .collect::<eyre::Result<Vec<_>>>()?;
-            let metas = rows
-                .iter()
-                .map(|(offset, _)| tx.get_offset_meta(*offset))
-                .collect::<eyre::Result<Vec<_>>>()?;
-            Ok((rights, metas))
-        })?;
+        let paths = read_v1_data_paths(env, &rows, true)?;
+        let mut rights = Vec::with_capacity(rows.len());
+        let mut metas = Vec::with_capacity(rows.len());
+        for chunk in rows.chunks(v1_path_view_group()) {
+            let (chunk_rights, chunk_metas) = v3.view(|tx| {
+                note_verify_view();
+                let rights = chunk
+                    .iter()
+                    .map(|(offset, _)| tx.get_data_path_by_offset(*offset))
+                    .collect::<eyre::Result<Vec<_>>>()?;
+                let metas = chunk
+                    .iter()
+                    .map(|(offset, _)| tx.get_offset_meta(*offset))
+                    .collect::<eyre::Result<Vec<_>>>()?;
+                Ok((rights, metas))
+            })?;
+            rights.extend(chunk_rights);
+            metas.extend(chunk_metas);
+        }
         for (index, (offset, hash)) in rows.iter().enumerate() {
             accepted.insert(offset.0);
             let path = &paths[index];
@@ -4557,9 +4605,10 @@ mod tests {
         ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
         convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_data_path_reads,
         reset_v1_range_copy_batches, reset_v1_uncompared_hash_views, reset_verify_placement_caches,
-        reset_verify_views, set_merge_batch, set_v1_placement_batch, set_v1_uncompared_hash_group,
-        v1_data_path_reads, v1_placement_views, v1_range_copy_batches, v1_uncompared_hash_views,
-        verify_mdbx_and_rocks, verify_placement_caches, verify_rocks_records, verify_views,
+        reset_verify_views, set_merge_batch, set_v1_path_view_group, set_v1_placement_batch,
+        set_v1_uncompared_hash_group, v1_data_path_reads, v1_placement_views,
+        v1_range_copy_batches, v1_uncompared_hash_views, verify_mdbx_and_rocks,
+        verify_placement_caches, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -6615,6 +6664,26 @@ mod tests {
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!report.has_mismatch(), "{report}");
         assert_eq!(verify_views(), 2);
+        Ok(())
+    }
+
+    /// A view per path row counts once per view.
+    #[test]
+    fn verify_v1_counts_each_path_batch_view() -> eyre::Result<()> {
+        const N: u64 = 3;
+        let root = temp("convert-verify-v1-views-per-row");
+        let consensus = write_v1_one_tx_partition(root.path(), N)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        let _group = set_v1_path_view_group(1);
+        reset_verify_views();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!report.has_mismatch(), "{report}");
+        assert_eq!(verify_views(), 6, "{report}");
         Ok(())
     }
 
