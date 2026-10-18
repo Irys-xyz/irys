@@ -124,13 +124,9 @@ fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
     let point = PartitionChunkOffset::from(cursor);
     let (stored_data, inclusive_end) = {
         let guard = module.intervals().read().expect("intervals lock");
-        // One increment per point query. A walk inside the query is not counted.
-        #[cfg(test)]
-        note_span_intervals(1);
-        match guard.get_key_value_at_point(point) {
-            Ok((interval, kind)) => (*kind == ChunkType::Data, interval.end().0),
-            Err(gap) => (false, gap.end().0),
-        }
+        // The guard stays in this block. A walk of the map goes through
+        // `SpanView::iter`, which the seek test counts.
+        span_view::SpanView::new(&guard).read(point)
     };
     if stored_data {
         return (true, step_end(inclusive_end, cursor, end));
@@ -154,6 +150,52 @@ fn note_span_intervals(n: u64) {
 #[cfg(test)]
 fn span_interval_count() -> u64 {
     SPAN_INTERVALS.with(std::cell::Cell::get)
+}
+
+/// The interval map the span seek is allowed to touch.
+///
+/// `read` is one point query. `iter` is every stored run. The seek calls
+/// `read`. A test that walks calls `iter`, so the visit counter moves.
+mod span_view {
+    use super::{ChunkType, PartitionChunkOffset};
+
+    pub(super) struct SpanView<'a> {
+        inner: &'a nodit::NoditMap<
+            PartitionChunkOffset,
+            nodit::Interval<PartitionChunkOffset>,
+            ChunkType,
+        >,
+    }
+
+    impl<'a> SpanView<'a> {
+        pub(super) fn new(
+            inner: &'a nodit::NoditMap<
+                PartitionChunkOffset,
+                nodit::Interval<PartitionChunkOffset>,
+                ChunkType,
+            >,
+        ) -> Self {
+            Self { inner }
+        }
+
+        pub(super) fn read(&self, point: PartitionChunkOffset) -> (bool, u32) {
+            #[cfg(test)]
+            super::note_span_intervals(1);
+            match self.inner.get_key_value_at_point(point) {
+                Ok((interval, kind)) => (*kind == ChunkType::Data, interval.end().0),
+                Err(gap) => (false, gap.end().0),
+            }
+        }
+
+        /// Every stored run, in order. Noted so a seek that calls this no
+        /// longer reports a flat visit count.
+        #[cfg(test)]
+        pub(super) fn iter(&self) -> u64 {
+            let runs = u64::try_from(self.inner.iter().count()).unwrap_or(u64::MAX);
+            super::note_span_intervals(runs);
+            runs
+        }
+    }
 }
 
 fn step_end(inclusive_end: u32, cursor: u32, end: u32) -> u32 {
@@ -1585,6 +1627,11 @@ mod tests {
         format!("[{}]", parts.join(","))
     }
 
+    fn span_runs(module: &StorageModule) -> u64 {
+        let guard = module.intervals().read().expect("intervals lock");
+        super::span_view::SpanView::new(&guard).iter()
+    }
+
     fn visits_for(module: &StorageModule, start: u32, end: u32) -> (Option<(u32, u32)>, u64) {
         let before = super::span_interval_count();
         let open = next_open_span(module, start, end);
@@ -1638,6 +1685,11 @@ mod tests {
         let module = small.module.as_ref();
         let (open, small_visits) = visits_for(module, 0, small_n);
         assert_eq!(open, Some((0, 1)));
+        let small_runs = span_runs(module);
+        assert!(
+            small_runs > 1 && small_visits < small_runs,
+            "seek walked every fragment: {small_visits} visits, {small_runs} runs"
+        );
         drop(small);
 
         let big_n = 128_u32;
@@ -1645,11 +1697,16 @@ mod tests {
         let module = big.module.as_ref();
         let (open, big_visits) = visits_for(module, 0, big_n);
         assert_eq!(open, Some((0, 1)));
+        let big_runs = span_runs(module);
+        assert!(
+            big_runs > small_runs,
+            "a full walk stayed flat: {small_runs} then {big_runs} runs"
+        );
         // Data, then a one-chunk hole, then later Data. The hole length stays 1.
         assert_eq!(next_open_span(module, 1, big_n), Some((2, 1)));
         assert!(
-            small_visits >= 1 && small_visits == big_visits,
-            "interval visits grew with fragments: {small_visits} then {big_visits}"
+            small_visits >= 1 && small_visits == big_visits && big_visits < big_runs,
+            "interval visits grew with fragments: {small_visits} then {big_visits} (runs {small_runs} then {big_runs})"
         );
         let mid = 64_u32;
         let (open, mid_visits) = visits_for(module, mid, big_n);
