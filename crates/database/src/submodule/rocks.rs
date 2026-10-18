@@ -1154,6 +1154,11 @@ impl RocksSubmoduleStore {
         // Recovery flushes a non-empty memtable with the options of this
         // open. Default options drop a prefix extractor. Refuse before open.
         refuse_unknown_prefix_extractor(&path, &unknown)?;
+        // That flush retires the WAL before the feature flags and the schema
+        // row are checked, so a refusal keeps the new SST and manifest.
+        // Read both through a read-only open: it applies the log in memory
+        // and does not write it. A missing row is not stamped on that open.
+        refuse_unwritable_recovery(&path)?;
         let create_missing = !path.join("CURRENT").is_file();
         let (db, stats) = open_db(
             &path,
@@ -3393,6 +3398,44 @@ fn refuse_unknown_feature_bits(
     Ok(())
 }
 
+/// Refuse flags or a schema row this binary must not rewrite, before `DB::open`.
+///
+/// No `CURRENT` means a new directory: there is no log to flush. A present
+/// row is checked with writable rules (`ro_compat` refuses). An absent row
+/// stays absent until the writable open stamps it.
+fn refuse_unwritable_recovery(path: &Path) -> eyre::Result<()> {
+    if !path.join("CURRENT").is_file() {
+        return Ok(());
+    }
+    let db = open_db_read_only(path)?;
+    if let Some(flags) = read_feature_flags(&db)? {
+        refuse_unknown_feature_bits(path, &flags, true)?;
+    }
+    refuse_present_schema_row(&db)
+}
+
+fn read_feature_flags(db: &DB) -> eyre::Result<Option<FeatureBits>> {
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::FeatureFlags);
+    match db.get_cf(&handle, &key).wrap_err("read feature flags")? {
+        Some(bytes) => Ok(Some(parse_feature_flags(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+fn refuse_present_schema_row(db: &DB) -> eyre::Result<()> {
+    let handle = cf_handle(db, Cf::Metadata)?;
+    let key = encode_key(MetadataKey::DBSchemaVersion);
+    match db.get_cf(&handle, &key).wrap_err("read schema row")? {
+        Some(found) if found.as_slice() == SUBMODULE_SCHEMA_ROCKS_V1.as_bytes() => Ok(()),
+        Some(found) => eyre::bail!(
+            "{}",
+            unrecognised_rocks_layout(&String::from_utf8_lossy(&found))
+        ),
+        None => Ok(()),
+    }
+}
+
 /// Stamp 24 zero bytes when the row is absent on a writable open.
 ///
 /// A present row is checked and left as stored. Read-only open does not write.
@@ -3402,14 +3445,11 @@ fn ensure_feature_flags(
     writable: bool,
     disable_wal: bool,
 ) -> eyre::Result<()> {
-    let handle = cf_handle(db, Cf::Metadata)?;
-    let key = encode_key(MetadataKey::FeatureFlags);
-    match db.get_cf(&handle, &key).wrap_err("read feature flags")? {
-        Some(bytes) => {
-            let flags = parse_feature_flags(&bytes)?;
-            refuse_unknown_feature_bits(path, &flags, writable)
-        }
+    match read_feature_flags(db)? {
+        Some(flags) => refuse_unknown_feature_bits(path, &flags, writable),
         None if writable => {
+            let handle = cf_handle(db, Cf::Metadata)?;
+            let key = encode_key(MetadataKey::FeatureFlags);
             let mut batch = WriteBatch::new();
             batch.put_cf(&handle, key, [0_u8; FEATURE_FLAGS_LEN]);
             db.write_opt(batch, &write_opts(true, disable_wal))
@@ -6607,6 +6647,133 @@ mod tests {
         assert_eq!(
             read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
             Some(flags.to_vec())
+        );
+        Ok(())
+    }
+
+    /// SST, WAL, MANIFEST, and CURRENT bytes. A recovery flush replaces these.
+    fn recovery_snapshot(path: &Path) -> eyre::Result<Vec<(String, Vec<u8>)>> {
+        let mut rows = Vec::new();
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let keep = name == "CURRENT"
+                || name.starts_with("MANIFEST-")
+                || name.ends_with(".sst")
+                || name.ends_with(".log");
+            if !keep {
+                continue;
+            }
+            rows.push((name.into_owned(), fs::read(entry.path())?));
+        }
+        rows.sort();
+        Ok(rows)
+    }
+
+    fn assert_same_recovery_files(before: &[(String, Vec<u8>)], after: &[(String, Vec<u8>)]) {
+        let names = |rows: &[(String, Vec<u8>)]| -> Vec<(String, usize)> {
+            rows.iter()
+                .map(|(name, bytes)| (name.clone(), bytes.len()))
+                .collect()
+        };
+        assert_eq!(names(before), names(after), "recovery files changed");
+        for (left, right) in before.iter().zip(after.iter()) {
+            assert_eq!(left.1, right.1, "bytes changed in {}", left.0);
+        }
+    }
+
+    /// The refusal must leave the WAL tail in place. A flush would publish an
+    /// L0 SST under this binary's table options and retire that log.
+    fn assert_refused_open_keeps_recovery_files(
+        path: &Path,
+        open_err_contains: &str,
+    ) -> eyre::Result<()> {
+        let before = recovery_snapshot(path)?;
+        let wal_bytes: usize = before
+            .iter()
+            .filter(|(name, _)| name.ends_with(".log"))
+            .map(|(_, bytes)| bytes.len())
+            .sum();
+        assert!(
+            wal_bytes > 0,
+            "the refusal fixture must leave a non-empty WAL"
+        );
+        let err = RocksSubmoduleStore::open(path).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains(open_err_contains), "{text}");
+        assert_same_recovery_files(&before, &recovery_snapshot(path)?);
+        Ok(())
+    }
+
+    /// An unknown incompat bit sits in the WAL. The refused writable open must
+    /// not flush that tail or replace the manifest.
+    #[test]
+    fn refused_incompat_open_keeps_the_wal() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_incompat_wal");
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let flags = feature_flag_bytes(0, 0, 1 << 3);
+        put_metadata_bytes(&path, &FEATURE_FLAGS_KEY, &flags)?;
+        assert_refused_open_keeps_recovery_files(&path, "incompatible feature bits")?;
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(flags.to_vec())
+        );
+        Ok(())
+    }
+
+    /// An unknown ro_compat bit refuses a writable open the same way.
+    /// Read-only open stays allowed and also leaves the log in place.
+    #[test]
+    fn refused_ro_compat_open_keeps_the_wal() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_ro_compat_wal");
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let flags = feature_flag_bytes(0, 1, 0);
+        put_metadata_bytes(&path, &FEATURE_FLAGS_KEY, &flags)?;
+        assert_refused_open_keeps_recovery_files(&path, "read-only compatible feature bits")?;
+        let before = recovery_snapshot(&path)?;
+        drop(RocksSubmoduleStore::open_read_only(&path)?);
+        assert_same_recovery_files(&before, &recovery_snapshot(&path)?);
+        assert_eq!(
+            read_only_value(&path, "Metadata", &FEATURE_FLAGS_KEY)?,
+            Some(flags.to_vec())
+        );
+        Ok(())
+    }
+
+    /// A schema row this binary does not read is refused before recovery flush.
+    #[test]
+    fn refused_schema_row_open_keeps_the_wal() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_schema_row_wal");
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let key = 1_u32.to_le_bytes();
+        let foreign = b"irys-submodule-index rocksdb 99\n";
+        put_metadata_bytes(&path, &key, foreign)?;
+        assert_refused_open_keeps_recovery_files(&path, "unrecognised RocksDB index layout")?;
+        assert_eq!(
+            read_only_value(&path, "Metadata", &key)?,
+            Some(foreign.to_vec())
+        );
+        Ok(())
+    }
+
+    /// The check before a writable open must still let a normal reopen apply
+    /// a WAL-only row.
+    #[test]
+    fn successful_reopen_recovers_a_wal_only_metadata_row() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_wal_only_row");
+        let path = dir.path().join("index");
+        drop(RocksSubmoduleStore::open(&path)?);
+        let key = 9_u32.to_le_bytes();
+        let value = b"wal-only-row";
+        put_metadata_bytes(&path, &key, value)?;
+        drop(RocksSubmoduleStore::open(&path)?);
+        assert_eq!(
+            read_only_value(&path, "Metadata", &key)?,
+            Some(value.to_vec())
         );
         Ok(())
     }
