@@ -201,8 +201,8 @@ key.
 | 5 | checksum scan complete | Raw byte `01`. Absent means unset. Reset deletes this key. `clear` does not. |
 | 6 | feature flags | 24 bytes: `compat`, `ro_compat`, `incompat`, each a little-endian `u64`. Absent means all zeros. |
 
-Point gets only. An unknown discriminant is not decoded. No prefix
-extractor. Bloom is off unless every family has a bloom.
+Reads are point gets of a known key. An unknown key is not scanned. No
+prefix extractor. Bloom is off unless every family has a bloom.
 
 ### Feature flags
 
