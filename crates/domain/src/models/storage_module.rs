@@ -5446,12 +5446,13 @@ impl StorageModule {
         )))
     }
 
-    /// One `pread` of the buffered `chunks.dat` descriptor.
+    /// One `pread` of the bytes the offset checksum describes.
     ///
     /// The caller holds `sync_in_progress`, so no pwrite runs during this read.
+    /// Packed writes and the entropy they are checksummed against land in the
+    /// write file. A bench split keeps mining recall on the other descriptor.
     fn pread_settled_chunk(&self, offset: PartitionChunkOffset) -> eyre::Result<ChunkBytes> {
-        let mapped = self.get_chunk_type(&offset) == Some(ChunkType::Data);
-        let (file_arc, file_offset, _) = self.locate_io(offset, mapped)?;
+        let (file_arc, file_offset, _) = self.locate_io(offset, true)?;
         let mut buf = vec![0_u8; self.config.consensus.chunk_size as usize];
         let file = self.disk.lock_chunks(&file_arc);
         file.read_exact_at(&mut buf, file_offset)
@@ -9073,6 +9074,103 @@ mod tests {
         assert_eq!(fs::metadata(&write_path)?.len(), reserve_bytes());
         #[cfg(target_os = "linux")]
         assert_reserved(&write_path, reserve_bytes())?;
+        Ok(())
+    }
+
+    /// Recall bytes differ from the write file. A checksum confirm must read
+    /// the write file: that is the image the checksum was computed from.
+    #[cfg(feature = "bench")]
+    fn open_labeled_split(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        StorageModule,
+        PathBuf,
+        PathBuf,
+    )> {
+        let chunk = 32_u64;
+        let chunks = 4_u64;
+        let bytes = (chunk * chunks) as usize;
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let recall_path = tmp.path().join("recall");
+        let write_path = tmp.path().join("write");
+        {
+            let mut recall = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&recall_path)?;
+            recall.write_all(&vec![0x22_u8; bytes])?;
+            let mut write = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&write_path)?;
+            write.write_all(&vec![0x11_u8; bytes])?;
+        }
+        let recall = OpenOptions::new().read(true).open(&recall_path)?;
+        let write = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&write_path)?;
+        let split = Arc::new(SplitBacking::open(recall, write, 0, chunks)?);
+        let config = testing_config(tmp.path(), chunk, chunks);
+        let info = one_span(3, "sub", Some(submit_assignment(0)));
+        let storage = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)?;
+        Ok((tmp, storage, recall_path, write_path))
+    }
+
+    #[cfg(feature = "bench")]
+    #[test]
+    fn entropy_confirm_reads_the_split_write_file() -> eyre::Result<()> {
+        let (_tmp, storage, recall_path, write_path) = open_labeled_split("split_entropy_pread")?;
+        let offset = PartitionChunkOffset::from(0);
+        let packed_for = storage
+            .partition_hash()
+            .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
+        let entropy = vec![0xE1_u8; 32];
+        eyre::ensure!(
+            storage.write_entropy_chunk(offset, entropy.clone(), packed_for),
+            "entropy write was refused"
+        );
+        storage.sync_pending_chunks()?;
+        assert_eq!(storage.get_chunk_type(&offset), Some(ChunkType::Entropy));
+        let _sync = storage.lock_sync();
+        let read = storage.pread_settled_chunk(offset)?;
+        drop(_sync);
+        eyre::ensure!(
+            read == entropy,
+            "entropy confirm read the recall file, not the write file"
+        );
+        eyre::ensure!(
+            read_prefix(&recall_path, 32)? == vec![0x22_u8; 32],
+            "recall file changed"
+        );
+        eyre::ensure!(
+            read_prefix(&write_path, 32)? == entropy,
+            "write file does not hold the entropy"
+        );
+        Ok(())
+    }
+
+    /// Data already selects the write file. A confirm must keep doing that.
+    #[cfg(feature = "bench")]
+    #[test]
+    fn data_confirm_reads_the_split_write_file() -> eyre::Result<()> {
+        let (_tmp, storage, ..) = open_labeled_split("split_data_pread")?;
+        let offset = PartitionChunkOffset::from(0);
+        let data = vec![0xD4_u8; 32];
+        eyre::ensure!(
+            storage.write_chunk(offset, data.clone(), ChunkType::Data),
+            "data write was refused"
+        );
+        storage.sync_pending_chunks()?;
+        assert_eq!(storage.get_chunk_type(&offset), Some(ChunkType::Data));
+        let _sync = storage.lock_sync();
+        let read = storage.pread_settled_chunk(offset)?;
+        eyre::ensure!(read == data, "data confirm did not read the write file");
         Ok(())
     }
 
