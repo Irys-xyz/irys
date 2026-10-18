@@ -150,9 +150,10 @@ pub async fn calculate_expired_ledger_fees(
     }
 
     // Step 2: Find block ranges
+    let geometry = parent_epoch_snapshot.geometry();
     let block_range = match find_block_range(
         expired_slots,
-        parent_epoch_snapshot.consensus_context().geometry(),
+        geometry,
         &block_index,
         ledger_type,
         parent_block_header.ledger_total_chunks(ledger_type),
@@ -173,7 +174,7 @@ pub async fn calculate_expired_ledger_fees(
         block_range,
         ledger_type,
         config.consensus.chunk_size,
-        parent_epoch_snapshot.consensus_context().geometry(),
+        geometry,
         block_tree_guard,
         mempool_guard,
         db,
@@ -487,9 +488,10 @@ pub async fn expired_submit_tx_ids(
         .map(|i| (SlotIndex::new(i as u64), vec![IrysAddress::ZERO]))
         .collect();
 
+    let geometry = parent_epoch_snapshot.geometry();
     let block_range = match find_block_range(
         expired_slots,
-        parent_epoch_snapshot.consensus_context().geometry(),
+        geometry,
         &block_index,
         DataLedger::Submit,
         parent_block_header.ledger_total_chunks(DataLedger::Submit),
@@ -506,7 +508,7 @@ pub async fn expired_submit_tx_ids(
         block_range,
         DataLedger::Submit,
         config.consensus.chunk_size,
-        parent_epoch_snapshot.consensus_context().geometry(),
+        geometry,
         block_tree_guard,
         mempool_guard,
         db,
@@ -543,7 +545,6 @@ pub async fn is_submit_storage_expired(
         block_height,
         parent_epoch_snapshot,
         parent_block_header,
-        config,
         cascade_for_block,
     )?
     else {
@@ -593,7 +594,6 @@ pub fn expired_submit_range(
     block_height: u64,
     parent_epoch_snapshot: &EpochSnapshot,
     parent_block_header: &IrysBlockHeader,
-    _config: &Config,
     cascade_for_block: ForBlock<Cascade>,
 ) -> eyre::Result<Option<ExpiredSubmitRange>> {
     let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
@@ -631,10 +631,7 @@ pub fn expired_submit_range(
     // from slot 0, so the range is `[0, range_end)`. Bounding by the parent
     // header (not this node's block-index tip) is what makes the verdict
     // branch-deterministic.
-    let p = parent_epoch_snapshot
-        .consensus_context()
-        .geometry()
-        .partition_chunks;
+    let p = parent_epoch_snapshot.partition_chunks();
     // Fail loud on a zero partition size rather than silently disabling the
     // §4b/§4c filter: with `p == 0`, `range_end` would collapse to 0 and this
     // function would return `Ok(None)` (no candidate filtered), while the refund
@@ -3656,14 +3653,8 @@ mod tests {
         let tree = BlockTree::new(&inclusion_genesis, ConsensusConfig::testing());
         let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
 
-        let range = expired_submit_range(
-            probe_height,
-            &epoch,
-            &prev_epoch,
-            &config,
-            ForBlock::active(),
-        )?
-        .expect("expired Submit slots must produce a range");
+        let range = expired_submit_range(probe_height, &epoch, &prev_epoch, ForBlock::active())?
+            .expect("expired Submit slots must produce a range");
         assert!(
             submit_tx_expired(
                 tx_slot_0.id,
@@ -3847,7 +3838,7 @@ mod tests {
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 3 * chunks_per_slot;
 
-        let err = expired_submit_range(block_height, &epoch, &parent, &config, ForBlock::active())
+        let err = expired_submit_range(block_height, &epoch, &parent, ForBlock::active())
             .expect_err("a non-prefix expired set must fail loud, not over-approximate");
         assert!(
             err.to_string().contains("not a contiguous prefix"),
@@ -3916,9 +3907,8 @@ mod tests {
         // append (offset 18) lies outside it and stays promotable/settleable.
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 18;
-        let range =
-            expired_submit_range(probe_height, &epoch, &parent, &config, ForBlock::active())?
-                .expect("slot 0 expired, so a range must exist");
+        let range = expired_submit_range(probe_height, &epoch, &parent, ForBlock::active())?
+            .expect("slot 0 expired, so a range must exist");
         assert_eq!(
             range.range_end, 10,
             "expired range must end at the last full slot's boundary, not the frontier"
@@ -4242,13 +4232,7 @@ mod tests {
         // chunk range at all.
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 0;
-        let range = expired_submit_range(
-            expiry_epoch + 1,
-            &epoch,
-            &parent,
-            &config,
-            ForBlock::inactive(),
-        )?;
+        let range = expired_submit_range(expiry_epoch + 1, &epoch, &parent, ForBlock::inactive())?;
         assert!(
             range.is_none(),
             "an expired-but-never-written slot yields no expired chunk range"

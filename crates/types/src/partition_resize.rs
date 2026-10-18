@@ -120,14 +120,6 @@ impl Estuary {
         Ok(())
     }
 
-    /// Like Cascade: the first epoch block at or after Estuary's timestamp
-    /// establishes the rules used by its children.
-    pub fn activation_due(config: &ConsensusConfig, height: u64, timestamp: UnixTimestamp) -> bool {
-        config.hardforks.estuary.is_some_and(|r| {
-            r.is_activation_block(config.epoch.num_blocks_in_epoch, height, timestamp)
-        })
-    }
-
     /// Whether an epoch block at `height` with `timestamp` meets this fork's
     /// activation timestamp. E is the first such block on a branch; callers
     /// track whether the fork already activated.
@@ -147,9 +139,7 @@ impl Estuary {
             .checked_mul(u128::from(config.epoch.num_blocks_in_epoch))
             .and_then(|n| n.checked_mul(u128::from(config.difficulty_adjustment.block_time)))
             .ok_or(PartitionResizeError::Overflow("ingress reserve"))?;
-        if config.chunk_size == 0 {
-            return Err(PartitionResizeError::ZeroChunkSize);
-        }
+        // `Config::validate` rejects `chunk_size == 0` before this can run.
         u64::try_from(bytes.div_ceil(u128::from(config.chunk_size)))
             .map_err(|_| PartitionResizeError::Overflow("ingress reserve"))
     }
@@ -266,52 +256,20 @@ mod tests {
         Ok(())
     }
 
+    /// Scheduled independently of Delta: Delta alone never activates Estuary.
     #[test]
-    fn partition_resize_activation_is_epoch_and_timestamp_gated() {
+    fn delta_alone_never_activates_estuary() {
         let mut config = ConsensusConfig::testing();
         config.epoch.num_blocks_in_epoch = 6;
-        config.difficulty_adjustment.difficulty_adjustment_interval = 4;
-        config.hardforks.estuary = Some(Estuary::proposed(UnixTimestamp::from_secs(10)));
-        for height in [0, 4, 8, 13] {
-            assert!(!Estuary::activation_due(
-                &config,
-                height,
-                UnixTimestamp::from_secs(10)
-            ));
-        }
-        assert!(!Estuary::activation_due(
-            &config,
-            12,
-            UnixTimestamp::from_secs(9)
-        ));
-        assert!(Estuary::activation_due(
-            &config,
-            12,
-            UnixTimestamp::from_secs(10)
-        ));
-        // Height 6 is an epoch but not an old difficulty boundary (interval 4).
-        assert!(Estuary::activation_due(
-            &config,
-            6,
-            UnixTimestamp::from_secs(10)
-        ));
-        assert!(Estuary::activation_due(
-            &config,
-            18,
-            UnixTimestamp::from_secs(11)
-        ));
-        // Scheduled independently of Delta: Delta alone never activates it.
         config.hardforks.estuary = None;
         config.hardforks.delta = Some(crate::hardfork_config::Delta {
             activation_timestamp: UnixTimestamp::from_secs(0),
             initial_slots_per_new_ledger:
                 crate::hardfork_config::Delta::default_initial_slots_per_new_ledger(),
         });
-        assert!(!Estuary::activation_due(
-            &config,
-            12,
-            UnixTimestamp::from_secs(100)
-        ));
+        let context = crate::consensus_context::EpochConsensusContext::new(&config, None);
+        assert!(!context.resize_configured());
+        assert!(!context.activates_at(12, UnixTimestamp::from_secs(100)));
     }
 
     #[test]

@@ -141,11 +141,7 @@ impl InnerCacheTask {
             )
         })?;
 
-        let chunk_offset = first_unexpired_slot_index
-            * epoch_snapshot
-                .consensus_context()
-                .geometry()
-                .partition_chunks;
+        let chunk_offset = first_unexpired_slot_index * epoch_snapshot.partition_chunks();
 
         // Check to see if the first overlapping block in our first active submit ledger slot is in the block index
         let mut prune_height: Option<u64> = None;

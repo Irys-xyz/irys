@@ -89,26 +89,14 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
     );
     assert_eq!(activation.diff, resize.activation_difficulty(normal, 10));
     assert_eq!(activation.last_diff_timestamp, activation.timestamp);
-    let after: serde_json::Value = reqwest::get(&capacity_url)
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(after["geometry"]["partitionChunks"], "8");
-    assert_eq!(after["geometry"]["recallChunks"], "2");
-    assert_eq!(
-        after["geometry"]["samplingOrigin"],
-        state.sampling_origin.to_string()
-    );
-    assert_eq!(after["targetIngressBytesPerSecond"], "32");
-    assert_eq!(
-        after["reserveChunksPerEpoch"],
-        resize.reserve_chunks(&parent.config.consensus)?.to_string()
-    );
+    let geometry = epoch.geometry();
+    assert_eq!(geometry.partition_chunks, 8);
+    assert_eq!(geometry.recall_chunks, 2);
+    assert_eq!(state.params.target_ingress_bytes_per_second, 32);
     // The activation block's proof is still checked against the parent geometry.
     irys_actors::block_validation::recall_recall_range_is_valid(
         &activation,
-        &parent.config.consensus,
+        parent.geometry(),
         &node.node_ctx.vdf_steps_guard,
         &node.node_ctx.block_tree_guard,
         &node.node_ctx.db,

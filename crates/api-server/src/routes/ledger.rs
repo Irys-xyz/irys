@@ -497,10 +497,7 @@ pub async fn get_epoch_ledger_summary(
         ledger,
         chain_height,
         tip_total_chunks,
-        epoch_snapshot
-            .consensus_context()
-            .geometry()
-            .partition_chunks,
+        epoch_snapshot.partition_chunks(),
     )?;
     Ok(Json(response))
 }
@@ -660,9 +657,7 @@ pub async fn get_tx_by_ledger_offset(
     path: Path<LedgerOffsetPath>,
 ) -> Result<Json<LedgerOffsetTxResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
-    let geometry = get_canonical_epoch_snapshot(&state)
-        .consensus_context()
-        .geometry();
+    let geometry = get_canonical_epoch_snapshot(&state).geometry();
     Ok(Json(resolve_tx_by_ledger_offset(
         &state,
         geometry,
@@ -683,9 +678,7 @@ pub async fn get_tx_by_slot_offset(
     path: Path<SlotOffsetPath>,
 ) -> Result<Json<LedgerOffsetTxResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
-    let geometry = get_canonical_epoch_snapshot(&state)
-        .consensus_context()
-        .geometry();
+    let geometry = get_canonical_epoch_snapshot(&state).geometry();
     let ledger_offset =
         slot_to_ledger_offset(path.slot_index, path.slot_offset, geometry.partition_chunks)
             .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;
@@ -729,9 +722,7 @@ pub async fn get_txs_by_ledger_offset_range(
     query: Query<LedgerTxRangeQuery>,
 ) -> Result<Json<LedgerOffsetTxsResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
-    let geometry = get_canonical_epoch_snapshot(&state)
-        .consensus_context()
-        .geometry();
+    let geometry = get_canonical_epoch_snapshot(&state).geometry();
     Ok(Json(resolve_txs_by_ledger_range(
         &state, geometry, ledger, query.from, query.to,
     )?))
@@ -743,9 +734,7 @@ pub async fn get_txs_by_slot_offset_range(
     query: Query<LedgerTxRangeQuery>,
 ) -> Result<Json<LedgerOffsetTxsResponse>, ApiError> {
     let ledger = parse_ledger_id(path.ledger_id)?;
-    let geometry = get_canonical_epoch_snapshot(&state)
-        .consensus_context()
-        .geometry();
+    let geometry = get_canonical_epoch_snapshot(&state).geometry();
     let (from, to) = slot_range_to_ledger_range(
         path.slot_index,
         query.from,

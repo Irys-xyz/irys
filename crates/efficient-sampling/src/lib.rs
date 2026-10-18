@@ -147,12 +147,6 @@ impl Ranges {
             Ok(())
         })
     }
-
-    pub fn reset_step(&mut self, step_num: u64) -> u64 {
-        let num_ranges = u64::try_from(self.num_recall_ranges_in_partition)
-            .expect("num_recall_ranges_in_partition fits in u64 on all supported platforms");
-        reset_step(step_num, num_ranges)
-    }
 }
 
 /// Validates recall range index for a given step number, seed and partition hash

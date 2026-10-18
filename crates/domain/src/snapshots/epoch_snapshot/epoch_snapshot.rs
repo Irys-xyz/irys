@@ -548,7 +548,7 @@ impl EpochSnapshot {
             epoch_height,
             cascade,
             |ledger| new_epoch_block.ledger_total_chunks(ledger),
-            self.consensus_context().geometry().partition_chunks,
+            self.partition_chunks(),
         );
 
         // Return early if there's no more work to do
@@ -635,7 +635,7 @@ impl EpochSnapshot {
         new_epoch_block: &IrysBlockHeader,
         refresh_last_height: ForBlock<Cascade>,
     ) {
-        let chunks_per_slot = self.consensus_context().geometry().partition_chunks;
+        let chunks_per_slot = self.partition_chunks();
         for ledger in self.ledgers.active_ledgers() {
             let new_total = new_epoch_block.ledger_total_chunks(ledger);
             let prev_total = previous_epoch_block
@@ -788,14 +788,33 @@ impl EpochSnapshot {
         config: &ConsensusConfig,
         num_active_ledgers: u64,
     ) -> u64 {
-        use num_bigfloat::BigFloat;
-
         // Every active ledger needs at least one slot filled with data partitions
         let min_count = num_active_ledgers * config.num_partitions_per_slot;
-        let base_count = std::cmp::max(num_data_partitions, min_count);
+        Self::capacity_partitions_for_demand(
+            num_bigfloat::BigFloat::from_u64(num_data_partitions),
+            min_count,
+            config,
+        )
+        .expect("ceiled value must be in 0..=u64::MAX")
+    }
 
-        // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits)
-        let base_f = BigFloat::from_u64(base_count);
+    /// The capacity reserve rounding pipeline, shared by the legacy policy above
+    /// and the partition-resize reserve (`resize_capacity_reserve`), which feeds
+    /// it a fractional demand measured in original-size partitions. Floors
+    /// `demand` at `min_count`, then `ceil(trunc3(trunc3(log10(base)) * scalar))`.
+    /// Consensus-critical: every truncation happens here exactly once, in this
+    /// order. `None` only if the ceiled value does not fit a `u64`.
+    fn capacity_partitions_for_demand(
+        demand: num_bigfloat::BigFloat,
+        min_count: u64,
+        config: &ConsensusConfig,
+    ) -> Option<u64> {
+        use num_bigfloat::BigFloat;
+
+        // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits).
+        // Integers convert exactly, so this is the legacy integer `max` for whole demands.
+        let minimum = BigFloat::from_u64(min_count);
+        let base_f = if demand > minimum { demand } else { minimum };
         let log10 = base_f.log10();
         let trunc = bigfloat_truncate_to_3_decimals(&log10);
 
@@ -804,10 +823,7 @@ impl EpochSnapshot {
         let scaled_trunc = bigfloat_truncate_to_3_decimals(&scaled);
 
         // Deterministic ceil to integer, then convert to u64
-        scaled_trunc
-            .ceil()
-            .to_u64()
-            .expect("ceiled value must be in 0..=u64::MAX")
+        scaled_trunc.ceil().to_u64()
     }
 
     /// Adds new capacity partition hashes to the protocols pool of active partition hashes. This
@@ -906,7 +922,7 @@ impl EpochSnapshot {
         let data_ledger = &self.ledgers[ledger];
         let num_slots = data_ledger.slot_count() as u64;
 
-        let num_chunks_in_partition = self.consensus_context().geometry().partition_chunks;
+        let num_chunks_in_partition = self.partition_chunks();
 
         // Ledger Partitioning Model:
         //
@@ -1503,7 +1519,7 @@ impl EpochSnapshot {
         new_total_chunks: u64,
         cascade: ForBlock<Cascade>,
     ) -> Vec<(usize, Vec<PartitionHash>)> {
-        let chunks_per_slot = self.consensus_context().geometry().partition_chunks;
+        let chunks_per_slot = self.partition_chunks();
         let prev_total_chunks = self.epoch_block.ledger_total_chunks(ledger);
 
         // A slot that received data this epoch is rescued by the touch, not
@@ -1574,7 +1590,7 @@ impl EpochSnapshot {
             epoch_height,
             cascade,
             total_chunks,
-            self.consensus_context().geometry().partition_chunks,
+            self.partition_chunks(),
         )
     }
 

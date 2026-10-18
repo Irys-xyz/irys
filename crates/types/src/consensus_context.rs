@@ -199,9 +199,11 @@ mod tests {
         let ctx = EpochConsensusContext::new(&config, None);
         assert!(ctx.resize_configured());
         assert_eq!(ctx.geometry(), PartitionGeometry::legacy(&config));
+        assert!(!ctx.activates_at(0, UnixTimestamp::from_secs(10)));
         assert!(!ctx.activates_at(5, UnixTimestamp::from_secs(10)));
         assert!(!ctx.activates_at(6, UnixTimestamp::from_secs(9)));
         assert!(ctx.activates_at(6, UnixTimestamp::from_secs(10)));
+        assert!(ctx.activates_at(12, UnixTimestamp::from_secs(11)));
 
         let mut previous = IrysBlockHeader::default();
         previous.diff = U256::MAX - U256::from(999);

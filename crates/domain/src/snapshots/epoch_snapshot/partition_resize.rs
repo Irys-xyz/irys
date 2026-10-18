@@ -1,9 +1,9 @@
 //! Partition-resize transition kept beside the epoch allocation paths it replaces.
-use super::{EpochSnapshot, EpochSnapshotError, bigfloat_truncate_to_3_decimals};
+use super::{EpochSnapshot, EpochSnapshotError};
 use irys_types::{
     IrysBlockHeader,
     consensus_context::EpochConsensusContext,
-    partition_resize::{PartitionResizeError, PartitionResizeState},
+    partition_resize::{PartitionGeometry, PartitionResizeError, PartitionResizeState},
 };
 use num_bigfloat::BigFloat;
 
@@ -13,6 +13,16 @@ impl EpochSnapshot {
     /// takes the returned context rather than re-deriving any of them.
     pub fn consensus_context(&self) -> EpochConsensusContext {
         EpochConsensusContext::new(&self.config.consensus, self.partition_resize)
+    }
+
+    /// Partition geometry for blocks mined against this snapshot.
+    pub fn geometry(&self) -> PartitionGeometry {
+        self.consensus_context().geometry()
+    }
+
+    /// Partition size of the geometry above.
+    pub fn partition_chunks(&self) -> u64 {
+        self.geometry().partition_chunks
     }
 
     pub(super) fn activate_partition_resize(
@@ -71,19 +81,8 @@ impl EpochSnapshot {
         let min_count = (self.ledgers.active_ledgers().len() as u64)
             .checked_mul(config.num_partitions_per_slot)
             .ok_or(PartitionResizeError::Overflow("capacity minimum"))?;
-        let minimum = BigFloat::from_u64(min_count);
-        let base = if reference_demand > minimum {
-            reference_demand
-        } else {
-            minimum
-        };
-        let log = bigfloat_truncate_to_3_decimals(&base.log10());
-        let budget = bigfloat_truncate_to_3_decimals(
-            &(log * BigFloat::from_u64(config.epoch.capacity_scalar)),
-        )
-        .ceil()
-        .to_u64()
-        .ok_or(PartitionResizeError::Overflow("capacity reserve"))?;
+        let budget = Self::capacity_partitions_for_demand(reference_demand, min_count, config)
+            .ok_or(PartitionResizeError::Overflow("capacity reserve"))?;
         state
             .params
             .preserved_id_floor(budget, state.reference_partition_chunks)
