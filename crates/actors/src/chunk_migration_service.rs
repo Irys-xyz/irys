@@ -386,10 +386,10 @@ pub fn process_ledger_transactions(
             .iter()
             .map(|module| module.lock_index_recovery_shared())
             .collect();
-        let still_canonical = match block_index.get_item(block.height) {
-            Some(item) if item.block_hash == block.block_hash => true,
-            _ => false,
-        };
+        let still_canonical = matches!(
+            block_index.get_item(block.height),
+            Some(item) if item.block_hash == block.block_hash
+        );
         if !still_canonical {
             tracing::warn!(
                 block_height = block.height,

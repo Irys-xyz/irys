@@ -2439,7 +2439,7 @@ impl StorageModule {
     pub fn lock_index_recovery_shared(&self) -> std::sync::RwLockReadGuard<'_, ()> {
         self.index_recovery
             .read()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Exclusive gate for partition recovery, held through the block-index
@@ -2447,7 +2447,7 @@ impl StorageModule {
     pub fn lock_index_recovery_exclusive(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
         self.index_recovery
             .write()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The assignment and the height it was stored at. The height is read
