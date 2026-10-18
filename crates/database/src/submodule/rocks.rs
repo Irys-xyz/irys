@@ -4509,12 +4509,25 @@ impl Rows<'_> {
     }
 
     fn cursor(&self, cf: Cf, start: Option<&[u8]>) -> eyre::Result<MergeCursor<'_>> {
+        self.cursor_bounded(cf, start, None)
+    }
+
+    /// `upper` is an exclusive key bound. The iterator does not surface it.
+    fn cursor_bounded(
+        &self,
+        cf: Cf,
+        start: Option<&[u8]>,
+        upper: Option<&[u8]>,
+    ) -> eyre::Result<MergeCursor<'_>> {
         let handle = cf_handle(self.db, cf)?;
         // A prefix extractor stops `Next` at the first prefix unless the
         // iterator is total order. Prefix lookups do not use this cursor.
         // The block cache stays on: pending and data-root reads are hot.
         let mut opts = ReadOptions::default();
         opts.set_total_order_seek(true);
+        if let Some(upper) = upper {
+            opts.set_iterate_upper_bound(upper);
+        }
         let mode = match start {
             Some(key) => IteratorMode::From(key, Direction::Forward),
             None => IteratorMode::Start,
@@ -4536,7 +4549,7 @@ impl Rows<'_> {
             .is_some_and(|overlay| overlay.cleared[cf.index()]);
         let overlay = self
             .overlay
-            .map(|overlay| overlay_pairs(overlay, cf, start))
+            .map(|overlay| overlay_pairs(overlay, cf, start, upper))
             .unwrap_or_default();
         Ok(MergeCursor::new(Box::new(db), overlay, cleared))
     }
@@ -5315,18 +5328,27 @@ fn overlay_pairs(
     overlay: &Overlay,
     cf: Cf,
     start: Option<&[u8]>,
+    upper: Option<&[u8]>,
 ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     let map = &overlay.maps[cf.index()];
+    let mut out = Vec::new();
     if let Some(start) = start {
         let start = start.to_vec();
-        map.range(start..)
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+        for (key, value) in map.range(start..) {
+            if upper.is_some_and(|end| key.as_slice() >= end) {
+                break;
+            }
+            out.push((key.clone(), value.clone()));
+        }
     } else {
-        map.iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+        for (key, value) in map.iter() {
+            if upper.is_some_and(|end| key.as_slice() >= end) {
+                break;
+            }
+            out.push((key.clone(), value.clone()));
+        }
     }
+    out
 }
 
 struct MergeCursor<'a> {
@@ -5479,16 +5501,19 @@ impl SubmoduleRead for Rows<'_> {
         if start > end {
             return Ok(false);
         }
-        // Streams: a partition holds tens of millions of rows.
+        // Streams: a partition holds tens of millions of rows. The exclusive
+        // end keeps a key past the span out of the iterator. A key that is
+        // not 4 bytes and still sorts inside the span fails the scan.
         let start_key = encode_key(start);
-        let mut cursor = self.cursor(Cf::OffsetMeta, Some(&start_key))?;
+        let end_key = exclusive_end_key(end);
+        let mut cursor = self.cursor_bounded(Cf::OffsetMeta, Some(&start_key), Some(&end_key))?;
         let mut expect = u64::from(start.0);
         let last = u64::from(end.0);
         while let Some((key, bytes)) = cursor.next_kv()? {
-            let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
-            if offset > last {
+            if offset_key_ends_span(&key, end)? {
                 break;
             }
+            let offset = u64::from(PartitionChunkOffset::decode(&key)?.0);
             if offset != expect || stored_offset_meta(&bytes)?.crc.is_none() {
                 return Ok(true);
             }
@@ -7391,6 +7416,85 @@ mod tests {
         assert!(
             still_short.is_err(),
             "the short key stays after clears that do not cover it: {still_short:?}"
+        );
+        Ok(())
+    }
+
+    fn put_checksums(store: &RocksSubmoduleStore, offsets: &[u32]) -> eyre::Result<()> {
+        store.update(|tx| {
+            let rows = offsets
+                .iter()
+                .copied()
+                .map(|offset| PackedOffsetRow {
+                    offset: PartitionChunkOffset::from(offset),
+                    crc: Some(offset),
+                    proof: None,
+                })
+                .collect();
+            tx.write_packed_offset_rows(rows)?;
+            Ok(())
+        })
+    }
+
+    fn put_raw_offset_key(store: &RocksSubmoduleStore, key: &[u8]) -> eyre::Result<()> {
+        let handle = cf_handle(&store.db, Cf::OffsetMeta)?;
+        store.db.put_cf(&handle, key, [])?;
+        store.db.flush_cf(&handle)?;
+        Ok(())
+    }
+
+    /// A non-offset key at or past the exclusive end ends the checksum scan.
+    /// The same shape of key inside the span still fails it. A hole is still
+    /// missing when a key past the span follows the rows.
+    #[test]
+    fn offset_crc_missing_stops_at_a_key_past_the_span() -> eyre::Result<()> {
+        let dir = temp_dir("submodule_rocks_crc_past_span");
+        let store = RocksSubmoduleStore::open(dir.path().join("index"))?;
+        put_checksums(&store, &[0, 1, 2, 3, 4])?;
+        let complete = store.view(|tx| {
+            tx.offset_crc_missing(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4))
+        })?;
+        assert!(!complete, "a span with a checksum at every offset is complete");
+
+        // encode(5) is the exclusive end of [0, 4]. This key sorts after it.
+        put_raw_offset_key(&store, &[0, 0, 0, 5, 0])?;
+        let past = store.view(|tx| {
+            tx.offset_crc_missing(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4))
+        });
+        let Ok(false) = past else {
+            panic!("span is complete, got {past:?}");
+        };
+        let tail = store.view(|tx| {
+            tx.offset_crc_missing(PartitionChunkOffset::from(3), PartitionChunkOffset::from(4))
+        })?;
+        assert!(!tail, "the tail is complete; the key past it is not a hole");
+
+        let holed = temp_dir("submodule_rocks_crc_hole_then_past");
+        let store = RocksSubmoduleStore::open(holed.path().join("index"))?;
+        put_checksums(&store, &[0, 1, 3, 4])?;
+        put_raw_offset_key(&store, &[0, 0, 0, 5, 0])?;
+        let missing = store.view(|tx| {
+            tx.offset_crc_missing(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4))
+        })?;
+        assert!(missing, "offset 2 has no checksum");
+        let tail = store.view(|tx| {
+            tx.offset_crc_missing(PartitionChunkOffset::from(3), PartitionChunkOffset::from(4))
+        })?;
+        assert!(!tail, "offsets 3 and 4 are present");
+
+        let inside = temp_dir("submodule_rocks_crc_inside_span");
+        let store = RocksSubmoduleStore::open(inside.path().join("index"))?;
+        put_checksums(&store, &[0, 1, 2, 3, 4])?;
+        // After offset 4 and before encode(5), so it is still inside [0, 4].
+        put_raw_offset_key(&store, &[0, 0, 0, 4, 0])?;
+        let scanned = store.view(|tx| {
+            tx.offset_crc_missing(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4))
+        });
+        assert!(
+            scanned
+                .as_ref()
+                .is_err_and(|err| err.to_string().contains("not an offset")),
+            "{scanned:?}"
         );
         Ok(())
     }
