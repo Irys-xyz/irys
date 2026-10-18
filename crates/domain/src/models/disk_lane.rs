@@ -2647,14 +2647,6 @@ impl StorageModule {
         let group = slot.group;
         let priority = slot.priority;
         let enqueued_at = slot.enqueued_at;
-        if priority == WritePriority::Ingress
-            && let Some(read_done) = read_done
-        {
-            self.note_ingress_stage(
-                "queue_to_entropy",
-                read_done.saturating_duration_since(enqueued_at),
-            );
-        }
         let group_failed = self
             .disk
             .queue()
@@ -2707,6 +2699,7 @@ impl StorageModule {
         let pack_started = Instant::now();
         let cache_hit = slot.cached_entropy.is_some();
         let packed = packing_xor_vec_u8(entropy, &slot.unpacked);
+        let mut disk_compare = Duration::ZERO;
         let inserted = self.commit_packed(
             slot.offset,
             packed,
@@ -2718,6 +2711,7 @@ impl StorageModule {
             slot.entropy_epoch,
             slot.pending_entropy.as_deref(),
             &slot.unpacked,
+            &mut disk_compare,
         );
         if inserted.is_ok() && cache_hit {
             super::super::index_read_metrics::note_readahead_hit();
@@ -2727,7 +2721,21 @@ impl StorageModule {
                 .fetch_add(1, Ordering::SeqCst);
         }
         if inserted.is_ok() && priority == WritePriority::Ingress {
-            self.note_ingress_stage("entropy_to_packed", pack_started.elapsed());
+            // The pread already returned. Record that interval only when the
+            // body is queued. A rejected read is swept again and would
+            // record the same stage twice.
+            if let Some(read_done) = read_done {
+                self.note_ingress_stage(
+                    "queue_to_entropy",
+                    read_done.saturating_duration_since(enqueued_at),
+                );
+            }
+            // The copied-pad compare preads under the chunk-file lock. That
+            // wait is not the XOR or the packed insert.
+            self.note_ingress_stage(
+                "entropy_to_packed",
+                pack_started.elapsed().saturating_sub(disk_compare),
+            );
         }
         if let Err(error) = inserted {
             if matches!(error, WriteDataChunkError::Backpressure) {
@@ -2907,14 +2915,18 @@ impl StorageModule {
         entropy_epoch: u64,
         pending_entropy: Option<&[u8]>,
         unpacked: &[u8],
+        disk_compare: &mut Duration,
     ) -> Result<(), WriteDataChunkError> {
         // The compare preads. It must not run under `pending_writes`: a
         // pwrite takes the file lock and then that map.
         for _ in 0..8 {
             let live = self.entropy_write_epoch.load(Ordering::SeqCst);
             let confirmed = if copied_pad && live != entropy_epoch {
+                let compare_started = Instant::now();
                 let entropy = packing_xor_vec_u8(packed.clone(), unpacked);
-                match self.stable_disk_matches(offset, &entropy) {
+                let matched = self.stable_disk_matches(offset, &entropy);
+                *disk_compare = disk_compare.saturating_add(compare_started.elapsed());
+                match matched {
                     Ok(true) => self.entropy_write_epoch.load(Ordering::SeqCst),
                     Ok(false) => {
                         return self.abandon_copied_commit(offset, generation, unpacked_len);
@@ -4423,6 +4435,7 @@ mod tests {
             .unwrap()
             .occupancy
             .insert(offset, 0);
+        let mut disk_compare = Duration::ZERO;
         let refused = module.commit_packed(
             offset,
             vec![0x11; 32],
@@ -4434,6 +4447,7 @@ mod tests {
             module.entropy_write_epoch.load(Ordering::SeqCst),
             None,
             &[],
+            &mut disk_compare,
         );
         assert!(
             matches!(
@@ -5803,6 +5817,117 @@ mod tests {
         assert_eq!(module.read_grace_remaining(), Some(Duration::ZERO));
         assert_eq!(module.disk_idle_reason(), "read_grace");
         assert_eq!(module.lane_sleep_reason(), Some("read_grace"));
+        Ok(())
+    }
+
+    fn ingress_stage_elapsed(module: &super::super::StorageModule, stage: &str) -> Vec<Duration> {
+        module
+            .disk
+            .ingest_stages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| *name == stage)
+            .map(|(_, elapsed)| *elapsed)
+            .collect()
+    }
+
+    /// The disk compare runs after the XOR, under the chunk-file lock.
+    /// That wait is not part of `entropy_to_packed`.
+    #[test]
+    fn entropy_to_packed_excludes_the_disk_compare() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("stage_compare")?;
+        cache_durable_entropy(&module, 0x11)?;
+        module.entropy_write_epoch.fetch_add(1, Ordering::SeqCst);
+        let module = Arc::new(module);
+        module
+            .disk
+            .entropy_pack_pause
+            .arm(super::EntropyPackPause::BeforePackXor);
+        let hold = Duration::from_millis(200);
+        thread::scope(|scope| -> eyre::Result<()> {
+            let worker = scope.spawn(|| module.write_data_chunk(&chunk));
+            assert!(
+                module
+                    .disk
+                    .entropy_pack_pause
+                    .wait_arrived(Duration::from_secs(5)),
+                "the pack did not reach the pre-XOR pause"
+            );
+            let (file, _, _) = module.locate_io(PartitionChunkOffset::from(0), true)?;
+            let locked = module.disk.lock_chunks(&file);
+            module.disk.entropy_pack_pause.release();
+            thread::sleep(hold);
+            drop(locked);
+            worker.join().expect("pack thread")?;
+            Ok(())
+        })?;
+        assert_fresh_pad_packed(&module);
+        let samples = ingress_stage_elapsed(&module, "entropy_to_packed");
+        assert_eq!(samples.len(), 1, "{samples:?}");
+        assert!(
+            samples[0] < hold / 2,
+            "entropy_to_packed included the disk compare: {:?} hold {hold:?}",
+            samples[0]
+        );
+        Ok(())
+    }
+
+    /// A disk read that fails the byte check is queued again. Only the
+    /// read that packs records `queue_to_entropy`.
+    #[test]
+    fn rejected_disk_read_records_queue_to_entropy_once() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("stage_reject", 4, 4, 0)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x11; 32], super::super::ChunkType::Entropy));
+        module.sync_pending_chunks_inner(true)?;
+        let enqueued_at = Instant::now();
+        let mut slot = sweep_slot_at(0, enqueued_at);
+        slot.unpacked = Arc::new(vec![0x01; 32]);
+        slot.byte_len = 32;
+        slot.entropy_epoch = 0;
+        {
+            let mut queue = module.disk.queue();
+            queue.groups.insert(
+                slot.group,
+                super::SweepGroup {
+                    remaining: 1,
+                    failed: None,
+                    waited: false,
+                    notify: None,
+                },
+            );
+        }
+        module
+            .pending_writes
+            .write()
+            .unwrap()
+            .occupancy
+            .insert(offset, slot.generation);
+        module.disk.ingest_stages.lock().unwrap().clear();
+        module.submit_packed(slot, vec![0x99; 32], Some(enqueued_at));
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            1,
+            "the rejected read was not queued again"
+        );
+        let after_reject = ingress_stage_names(&module);
+        assert!(
+            !after_reject.contains(&"queue_to_entropy"),
+            "the rejected read recorded queue_to_entropy: {after_reject:?}"
+        );
+        assert!(module.sweep_one(), "the reread did not pack");
+        let stages = ingress_stage_names(&module);
+        let queue_samples = stages
+            .iter()
+            .filter(|stage| **stage == "queue_to_entropy")
+            .count();
+        let packed_samples = stages
+            .iter()
+            .filter(|stage| **stage == "entropy_to_packed")
+            .count();
+        assert_eq!(queue_samples, 1, "{stages:?}");
+        assert_eq!(packed_samples, 1, "{stages:?}");
         Ok(())
     }
 }
