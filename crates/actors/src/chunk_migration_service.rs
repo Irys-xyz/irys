@@ -946,12 +946,15 @@ impl ChunkMigrationService {
 
 /// Test gate between the shared recovery lock and the block-hash read.
 ///
-/// Inert unless a test arms it. The flag is set only after
-/// `lock_index_recovery_shared` returns.
+/// Inert unless the indexer thread installs a guard. The flag is set only
+/// after `lock_index_recovery_shared` returns on that thread. Another
+/// thread's index path does not see the guard, so it does not sleep here
+/// and does not set the flag.
 #[cfg(test)]
 mod recovery_lock_pause {
+    use std::cell::RefCell;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     struct State {
@@ -959,28 +962,27 @@ mod recovery_lock_pause {
         release: AtomicBool,
     }
 
-    static ARMED: Mutex<Option<Arc<State>>> = Mutex::new(None);
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<State>>> = const { RefCell::new(None) };
+    }
 
     pub(super) struct Guard(Arc<State>);
 
     impl Guard {
         pub(super) fn arm() -> Self {
-            let state = Arc::new(State {
+            Self(Arc::new(State {
                 reached: AtomicBool::new(false),
                 release: AtomicBool::new(false),
-            });
-            loop {
-                let mut armed = ARMED.lock().expect("recovery pause");
-                if armed.is_none() {
-                    *armed = Some(Arc::clone(&state));
-                    return Self(state);
-                }
-                drop(armed);
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            }))
         }
 
-        /// `true` once the indexer holds the shared lock and has not read the hash.
+        /// Install this gate on the current thread. The indexer thread calls
+        /// this before it indexes. Other threads keep an empty slot.
+        pub(super) fn enter_on_this_thread(&self) {
+            ACTIVE.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&self.0)));
+        }
+
+        /// `true` once this gate's indexer holds the shared lock and has not read the hash.
         pub(super) fn wait_until_reached(&self, bound: Duration) -> bool {
             let deadline = Instant::now() + bound;
             while Instant::now() < deadline {
@@ -1000,18 +1002,20 @@ mod recovery_lock_pause {
     impl Drop for Guard {
         fn drop(&mut self) {
             self.release();
-            let mut armed = ARMED.lock().expect("recovery pause");
-            if armed
-                .as_ref()
-                .is_some_and(|state| Arc::ptr_eq(state, &self.0))
-            {
-                *armed = None;
-            }
+            ACTIVE.with(|slot| {
+                let mut active = slot.borrow_mut();
+                if active
+                    .as_ref()
+                    .is_some_and(|state| Arc::ptr_eq(state, &self.0))
+                {
+                    *active = None;
+                }
+            });
         }
     }
 
     pub(super) fn pause_after_shared_lock() {
-        let Some(state) = ARMED.lock().expect("recovery pause").clone() else {
+        let Some(state) = ACTIVE.with(|slot| slot.borrow().clone()) else {
             return;
         };
         state.reached.store(true, Ordering::SeqCst);
@@ -1353,12 +1357,36 @@ mod tests {
     }
 
     /// The indexer has the shared recovery lock and has not read the hash.
-    /// 200ms is the failure bound: a thread that has not taken the lock yet
-    /// must not count as waiting.
+    /// Five seconds is the failure bound. The wait returns as soon as this
+    /// test's indexer reaches the gate. Another thread must not count.
     fn wait_for_recovery_lock(pause: &super::recovery_lock_pause::Guard) {
         assert!(
-            pause.wait_until_reached(Duration::from_millis(200)),
+            pause.wait_until_reached(Duration::from_secs(5)),
             "indexing must take the recovery lock before it reads the block hash"
+        );
+    }
+
+    /// A thread that did not install this gate must not sleep in it, and must
+    /// not make `wait_until_reached` succeed.
+    #[test]
+    fn recovery_pause_ignores_another_thread() {
+        let pause = super::recovery_lock_pause::Guard::arm();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            super::recovery_lock_pause::pause_after_shared_lock();
+            let _ = tx.send(start.elapsed());
+        });
+        let elapsed = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| {
+            panic!("another thread slept in this test's recovery pause");
+        });
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "another thread slept in this test's recovery pause for {elapsed:?}"
+        );
+        assert!(
+            !pause.wait_until_reached(Duration::from_millis(50)),
+            "another thread must not satisfy this test's recovery pause"
         );
     }
 
@@ -1372,6 +1400,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
+                pause.enter_on_this_thread();
                 let _ = done_tx.send(index_fixture_block(&f));
             });
             wait_for_recovery_lock(&pause);
@@ -1411,6 +1440,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
+                pause.enter_on_this_thread();
                 let _ = done_tx.send(index_fixture_block(&f));
             });
             wait_for_recovery_lock(&pause);
