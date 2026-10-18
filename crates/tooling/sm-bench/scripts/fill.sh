@@ -20,10 +20,14 @@
 # another directory is refused before any write, including when that
 # directory also contains loadtest. --pid-file is created with O_EXCL, and
 # an existing symlink is not removed. TERM and INT stop the dd process group.
-# The log's nearest loadtest directory must be the same directory as the
-# named path's loadtest directory. A link that stays under that directory is
-# allowed. A link into another loadtest directory is refused before mkdir
-# or append. Parent equality would also refuse the same-tree link.
+# The log's nearest loadtest directory must be the same path as the named
+# path's loadtest directory. The two roots are compared as path strings.
+# Canonicalizing them first would hide a symlink that is the loadtest
+# directory, or an ancestor of it, and mkdir and append would follow that
+# link into the other tree. A child link that stays under the named
+# directory still has the same root on both sides. A link into another
+# loadtest directory is refused before mkdir or append. Parent equality
+# would also refuse the same-tree link.
 
 set -euo pipefail
 
@@ -118,16 +122,19 @@ loadtest_ancestor() {
 }
 
 # mkdir and append follow a symlink ancestor. The named path and the resolved
-# path must share one loadtest directory. A link into a second loadtest tree
-# is refused before either write. A link that stays under the named tree is
-# allowed, including when the log file's parent is that link.
+# path must name one loadtest directory. Compare those roots as path strings.
+# readlink -f would make a symlink loadtest directory, or a symlink ancestor,
+# look like the victim tree, and the append would follow it. A link into a
+# second loadtest tree is refused before either write. A link that stays
+# under the named tree is allowed, including when the log file's parent is
+# that link.
 require_same_loadtest_dir() {
     local log_path=$1
     if ! has_loadtest "$log_path"; then
         echo "log $log_path has no loadtest path component; refusing" >&2
         exit 1
     fi
-    local resolved named_abs named_root resolved_root named_canon resolved_canon
+    local resolved named_abs named_root resolved_root
     resolved=$(resolve_path "$log_path") || exit 1
     if ! has_loadtest "$resolved"; then
         echo "log resolves to $resolved, which has no loadtest path component; refusing" >&2
@@ -142,10 +149,8 @@ require_same_loadtest_dir() {
         echo "log resolves to $resolved, which has no loadtest directory; refusing" >&2
         exit 1
     }
-    named_canon=$(readlink -f "$named_root") || exit 1
-    resolved_canon=$(readlink -f "$resolved_root") || exit 1
-    if [ "$named_canon" != "$resolved_canon" ]; then
-        echo "refusing log $log_path: its loadtest directory resolves to $resolved_canon, not $named_canon" >&2
+    if [ "$named_root" != "$resolved_root" ]; then
+        echo "refusing log $log_path: its loadtest directory resolves to $resolved_root, not $named_root" >&2
         exit 1
     fi
 }

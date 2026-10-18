@@ -311,6 +311,60 @@ test_fill_refuses_a_log_through_a_symlink_into_another_loadtest() {
     rm -rf "$root"
 }
 
+# /alias/loadtest -> /victim/loadtest. The file is a real file under another
+# loadtest directory. The log must not follow the loadtest symlink.
+test_fill_refuses_a_log_when_the_loadtest_directory_is_a_symlink() {
+    local name=fill-log-loadtest-symlink root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/bench/loadtest" "$root/victim/loadtest" "$root/alias"
+    printf 'SAFE-DATA' >"$root/bench/loadtest/data"
+    printf 'KEEP-INTERVALS\n' >"$root/victim/loadtest/intervals.json"
+    ln -s "$root/victim/loadtest" "$root/alias/loadtest"
+    touch "$root/STOP"
+    if "$here/fill.sh" --file "$root/bench/loadtest/data" \
+        --log "$root/alias/loadtest/intervals.json" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0: $(cat "$err")"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! cmp -s <(printf 'KEEP-INTERVALS\n') "$root/victim/loadtest/intervals.json"; then
+        bad "$name" "victim intervals changed: $(cat "$root/victim/loadtest/intervals.json")"
+    elif ! cmp -s <(printf 'SAFE-DATA') "$root/bench/loadtest/data"; then
+        bad "$name" "data file changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# /link/via -> /victim, and the log is /link/via/loadtest/intervals.json.
+# An ancestor symlink must not hide the other tree.
+test_fill_refuses_a_log_when_a_loadtest_ancestor_is_a_symlink() {
+    local name=fill-log-ancestor-symlink root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/bench/loadtest" "$root/victim/loadtest" "$root/link"
+    printf 'SAFE-DATA' >"$root/bench/loadtest/data"
+    printf 'KEEP-INTERVALS\n' >"$root/victim/loadtest/intervals.json"
+    ln -s "$root/victim" "$root/link/via"
+    touch "$root/STOP"
+    if "$here/fill.sh" --file "$root/bench/loadtest/data" \
+        --log "$root/link/via/loadtest/intervals.json" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0: $(cat "$err")"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! cmp -s <(printf 'KEEP-INTERVALS\n') "$root/victim/loadtest/intervals.json"; then
+        bad "$name" "victim intervals changed: $(cat "$root/victim/loadtest/intervals.json")"
+    elif ! cmp -s <(printf 'SAFE-DATA') "$root/bench/loadtest/data"; then
+        bad "$name" "data file changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_fill_appends_a_log_when_the_symlink_stays_under_loadtest() {
     local name=fill-log-parent-inside root
     root=$(tmpdir)
