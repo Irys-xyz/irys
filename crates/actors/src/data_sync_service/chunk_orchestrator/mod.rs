@@ -2510,6 +2510,8 @@ fn clip_entropy_run(
 /// in so a split that preserves a start/end xor still changes the value, and
 /// the low bit is forced on so a non-empty map cannot hash to zero.
 fn entropy_interval_fingerprint(storage_module: &StorageModule) -> u64 {
+    #[cfg(test)]
+    ENTROPY_FINGERPRINT_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     let intervals = storage_module.intervals().read().unwrap();
     let mut mixed = 0_u64;
     let mut count = 0_u64;
@@ -2533,6 +2535,23 @@ fn entropy_interval_fingerprint(storage_module: &StorageModule) -> u64 {
         .wrapping_mul(0x9E37_79B1_85EB_CA87)
         .wrapping_add(count)
         | 1
+}
+
+#[cfg(test)]
+thread_local! {
+    static ENTROPY_FINGERPRINT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Zero the entropy-walk counter. Tests that share a worker thread start here.
+#[cfg(test)]
+pub(crate) fn reset_entropy_fingerprint_calls() {
+    ENTROPY_FINGERPRINT_CALLS.with(|calls| calls.set(0));
+}
+
+/// Walks of the live interval map since the last reset on this thread.
+#[cfg(test)]
+pub(crate) fn entropy_fingerprint_calls() -> u64 {
+    ENTROPY_FINGERPRINT_CALLS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
