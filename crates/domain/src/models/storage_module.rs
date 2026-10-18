@@ -458,6 +458,8 @@ enum SyncFailurePoint {
     /// Authoritative interval replace has not committed. The ahead mask must
     /// still describe the previous file.
     BeforeIntervalImageCommit,
+    /// Reset marker write has not started. Pending is still the caller's.
+    ResetMarkerWrite,
     /// Reset marker is durable. The index clear has not run.
     AfterResetMarker,
     /// Index is cleared. The interval file is not rewritten yet.
@@ -822,8 +824,9 @@ pub struct StorageModule {
     /// so once it is set no body can be queued behind recovery's
     /// `drop_pending_writes_in_range`. Entropy (packing) writes are unaffected.
     data_writes_paused: AtomicBool,
+    /// Armed sync failure and how many hits of that point to ignore.
     #[cfg(test)]
-    sync_failure: Mutex<Option<SyncFailurePoint>>,
+    sync_failure: Mutex<Option<(SyncFailurePoint, u64)>>,
     /// Pauses one durable point so a test can call `reset` in the gap.
     #[cfg(test)]
     sync_pause: PauseGate<SyncPausePoint>,
@@ -2688,7 +2691,13 @@ impl StorageModule {
 
     #[cfg(test)]
     fn fail_next_sync_at(&self, point: SyncFailurePoint) {
-        *self.sync_failure.lock().unwrap() = Some(point);
+        *self.sync_failure.lock().unwrap() = Some((point, 0));
+    }
+
+    /// The `skip + 1`th hit of `point` fails. Earlier hits of that point run.
+    #[cfg(test)]
+    fn fail_sync_after(&self, point: SyncFailurePoint, skip: u64) {
+        *self.sync_failure.lock().unwrap() = Some((point, skip));
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -2787,7 +2796,13 @@ impl StorageModule {
     #[cfg(test)]
     fn inject_sync_failure(&self, point: SyncFailurePoint) -> eyre::Result<()> {
         let mut failure = self.sync_failure.lock().unwrap();
-        if *failure == Some(point) {
+        if let Some((armed, skip)) = *failure
+            && armed == point
+        {
+            if skip > 0 {
+                *failure = Some((armed, skip - 1));
+                return Ok(());
+            }
             *failure = None;
             eyre::bail!("injected storage-module sync failure at {point:?}");
         }
@@ -2964,18 +2979,44 @@ impl StorageModule {
     ///
     /// The live interval label flips to `Data` when `pwrite` returns
     /// (`note_write_run`). This stays false while the offset is still in
-    /// `pending.chunks` or `written_ahead`.
+    /// `pending.chunks` or `written_ahead`. A checksum index also requires a
+    /// stored offset row: a `Data` label with no presence commit is not durable.
     pub fn is_data_chunk_durable_at(&self, offset: PartitionChunkOffset) -> bool {
         let pending = self.pending_writes.read().unwrap();
         if pending.contains_key(&offset) || pending.written_ahead.contains_key(&offset) {
             return false;
         }
         drop(pending);
-        self.intervals
+        let labeled_data = self
+            .intervals
             .read()
             .unwrap()
             .get_at_point(offset)
-            .is_some_and(|chunk_type| *chunk_type == ChunkType::Data)
+            .is_some_and(|chunk_type| *chunk_type == ChunkType::Data);
+        if !labeled_data {
+            return false;
+        }
+        self.data_presence_committed(offset)
+    }
+
+    /// `true` when `offset` has a presence row, or the index does not store
+    /// checksums. A read error is not durable. MDBX does not store a row for
+    /// a proof-less write, so the label is enough there.
+    fn data_presence_committed(&self, offset: PartitionChunkOffset) -> bool {
+        let Ok((_, submodule)) = self.get_submodule_for_offset(offset) else {
+            return false;
+        };
+        if !submodule.db.stores_offset_crc() {
+            return true;
+        }
+        match submodule.db.view(|tx| tx.get_offset_meta(offset)) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                warn!("offset presence read failed: {err}");
+                false
+            }
+        }
     }
 
     /// [`Self::is_data_chunk_durable_at`], and `intervals.json` already stores
@@ -3147,6 +3188,15 @@ impl StorageModule {
         // finished by `finish_pending_resets`, which clears the flag again.
         self.clear_chunk_crc_complete()?;
         self.reset_incomplete.store(true, Ordering::SeqCst);
+        // The marker commits before pending is cleared. A failed marker
+        // write returns here, so `written_ahead` still fences parked bytes.
+        // The live label stays `Data`: a later presence commit must record
+        // the bytes that are still parked, not `Interrupted`.
+        for (_, submodule) in self.submodules.iter() {
+            #[cfg(test)]
+            self.inject_sync_failure(SyncFailurePoint::ResetMarkerWrite)?;
+            submodule.db.set_reset_in_progress()?;
+        }
         self.clear_pending_for_reset();
         // A recall may already have queued a suspect against the old bytes.
         // Confirming it after this clear would judge the wiped module.
@@ -3159,9 +3209,6 @@ impl StorageModule {
         #[cfg(test)]
         self.wait_if_sync_paused(SyncPausePoint::AfterResetPendingClear);
 
-        for (_, submodule) in self.submodules.iter() {
-            submodule.db.set_reset_in_progress()?;
-        }
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetMarker)?;
 
@@ -15000,6 +15047,279 @@ mod tests {
             .offset_meta_for_test(fresh_offset)?
             .expect("fresh checksum");
         assert_eq!(fresh_row.crc, Some(chunk_crc::checksum(&fresh_bytes)));
+        Ok(())
+    }
+
+    /// Park one data chunk inside the durable interval, on RocksDB.
+    /// Offset 0 is presence-committed. `parked` is pwritten, labeled `Data`,
+    /// and still in `written_ahead`, with no offset row.
+    fn park_one_rocks_chunk(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        StorageModule,
+        PartitionChunkOffset,
+    )> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let chunk_size = 32_u64;
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 4, |node| {
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 60_000,
+                ..StorageSyncConfig::default()
+            };
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
+        let storage = StorageModule::new(
+            &one_span(3, "chunks", Some(PartitionAssignment::default())),
+            &config,
+        )?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; chunk_size as usize],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        let parked = PartitionChunkOffset::from(1);
+        assert!(storage.write_chunk(parked, vec![0xA1_u8; chunk_size as usize], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        assert!(!storage.is_data_chunk_durable_at(parked));
+        assert!(
+            storage
+                .pending_writes
+                .read()
+                .unwrap()
+                .written_ahead
+                .contains_key(&parked)
+        );
+        assert!(storage.offset_meta_for_test(parked)?.is_none());
+        assert_eq!(live_label(&storage, parked.0), Some(ChunkType::Data));
+        Ok((tmp_dir, storage, parked))
+    }
+
+    /// The reset marker write fails after the chunk is parked. The parked
+    /// fence must still be there when `reset` returns, and a `Data` label
+    /// with no presence row must not look durable. No marker means a later
+    /// settle keeps the bytes. The interval file stays `Interrupted`.
+    #[test]
+    fn failed_reset_marker_keeps_the_parked_chunk_fence() -> eyre::Result<()> {
+        let (_tmp, storage, parked) = park_one_rocks_chunk("reset_marker_fence")?;
+        let (_, submodule) = storage.get_submodule_for_offset(parked)?;
+        storage.fail_next_sync_at(SyncFailurePoint::ResetMarkerWrite);
+        let err = storage.reset().unwrap_err();
+        assert!(err.to_string().contains("ResetMarkerWrite"), "{err}");
+        assert!(storage.reset_incomplete());
+        assert!(!submodule.db.reset_in_progress()?);
+        assert!(
+            storage.sync_in_progress.try_lock().is_ok(),
+            "reset released the sync lock"
+        );
+        assert!(
+            storage
+                .pending_writes
+                .read()
+                .unwrap()
+                .written_ahead
+                .contains_key(&parked),
+            "the parked fence must survive a failed marker write"
+        );
+        assert!(storage.has_pending_writes());
+        assert!(
+            !storage.is_data_chunk_durable_at(parked),
+            "a parked Data label with no presence row is not durable"
+        );
+        assert!(!storage.is_data_chunk_persisted_at(parked));
+        assert!(storage.offset_meta_for_test(parked)?.is_none());
+        assert_eq!(live_label(&storage, parked.0), Some(ChunkType::Data));
+        assert!(
+            storage.is_data_chunk_durable_at(PartitionChunkOffset::from(0)),
+            "a chunk that already has a presence row stays durable"
+        );
+
+        storage.write_intervals_to_submodules()?;
+        assert_eq!(
+            file_label(&storage, parked.0)?,
+            Some(ChunkType::Interrupted),
+            "shutdown must not publish Data for a chunk with no presence row"
+        );
+        assert!(!storage.is_data_chunk_persisted_at(parked));
+
+        assert!(
+            storage.clear_reset_incomplete_without_marker()?,
+            "no marker: settle keeps the bytes"
+        );
+        assert!(!storage.reset_incomplete());
+        assert!(
+            storage
+                .pending_writes
+                .read()
+                .unwrap()
+                .written_ahead
+                .contains_key(&parked)
+        );
+        assert!(!storage.is_data_chunk_durable_at(parked));
+
+        // The predicate does not trust the fence alone.
+        storage
+            .pending_writes
+            .write()
+            .unwrap()
+            .written_ahead
+            .clear();
+        assert!(
+            !storage.is_data_chunk_durable_at(parked),
+            "a Data label that never received a presence commit is not durable"
+        );
+        Ok(())
+    }
+
+    /// The second submodule's marker write fails. The first marker is
+    /// durable, so settle must not clear the flag, and the parked bytes
+    /// stay fenced.
+    #[test]
+    fn failed_reset_marker_on_later_submodule_keeps_the_fence() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("reset_marker_second")
+            .with_tracing()
+            .build();
+        let chunk_size = 32_u64;
+        let config = testing_config_tuned(tmp_dir.path(), chunk_size, 4, |node| {
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 60_000,
+                ..StorageSyncConfig::default()
+            };
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment::default()),
+            submodules: vec![
+                (partition_chunk_offset_ii!(0, 1), "a".into()),
+                (partition_chunk_offset_ii!(2, 3), "b".into()),
+            ],
+        };
+        let storage = StorageModule::new(&info, &config)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![1_u8; chunk_size as usize],
+            ChunkType::Data,
+        ));
+        storage.sync_pending_chunks()?;
+        let parked = PartitionChunkOffset::from(2);
+        assert!(storage.write_chunk(parked, vec![0xB2_u8; chunk_size as usize], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        let (_, first) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let (_, second) = storage.get_submodule_for_offset(parked)?;
+        storage.fail_sync_after(SyncFailurePoint::ResetMarkerWrite, 1);
+        let err = storage.reset().unwrap_err();
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert!(first.db.reset_in_progress()?);
+        assert!(!second.db.reset_in_progress()?);
+        assert!(
+            storage
+                .pending_writes
+                .read()
+                .unwrap()
+                .written_ahead
+                .contains_key(&parked)
+        );
+        assert!(!storage.is_data_chunk_durable_at(parked));
+        assert!(
+            !storage.clear_reset_incomplete_without_marker()?,
+            "a durable marker on any submodule must not be settled as keep-bytes"
+        );
+        assert!(storage.reset_incomplete());
+
+        storage.reset()?;
+        assert!(!storage.reset_incomplete());
+        assert!(!storage.has_pending_writes());
+        assert!(!first.db.reset_in_progress()?);
+        assert!(!second.db.reset_in_progress()?);
+        assert_eq!(
+            storage.get_intervals(ChunkType::Uninitialized),
+            vec![partition_chunk_offset_ii!(0, 3)]
+        );
+        assert!(storage.write_chunk(parked, vec![0xC3_u8; chunk_size as usize], ChunkType::Data));
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(parked));
+        assert!(storage.offset_meta_for_test(parked)?.is_some());
+        Ok(())
+    }
+
+    /// A reset that finishes drops the parked fence, wipes the span, and a
+    /// later write can commit again.
+    #[test]
+    fn reset_marker_success_wipes_a_parked_chunk_and_a_new_write_commits() -> eyre::Result<()> {
+        let (_tmp, storage, parked) = park_one_rocks_chunk("reset_parked_ok")?;
+        storage.reset()?;
+        assert!(!storage.reset_incomplete());
+        assert!(!storage.has_pending_writes());
+        let (_, submodule) = storage.get_submodule_for_offset(parked)?;
+        assert!(!submodule.db.reset_in_progress()?);
+        assert_eq!(
+            storage.get_intervals(ChunkType::Uninitialized),
+            vec![partition_chunk_offset_ii!(0, 3)]
+        );
+        assert!(storage.write_chunk(parked, vec![0xC3_u8; 32], ChunkType::Data));
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(parked));
+        assert!(storage.offset_meta_for_test(parked)?.is_some());
+        Ok(())
+    }
+
+    /// The reset error before any marker write keeps the parked bytes.
+    /// Settle sees no marker. A later sync commits the presence row.
+    #[test]
+    fn reset_marker_not_yet_written_keeps_the_parked_bytes() -> eyre::Result<()> {
+        let (_tmp, storage, parked) = park_one_rocks_chunk("reset_before_marker")?;
+        storage.fail_next_reset_for_test();
+        let err = storage.reset().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("injected storage module reset failure"),
+            "{err}"
+        );
+        assert!(storage.reset_incomplete());
+        let (_, submodule) = storage.get_submodule_for_offset(parked)?;
+        assert!(!submodule.db.reset_in_progress()?);
+        assert!(
+            storage
+                .pending_writes
+                .read()
+                .unwrap()
+                .written_ahead
+                .contains_key(&parked)
+        );
+        assert!(storage.clear_reset_incomplete_without_marker()?);
+        assert!(!storage.reset_incomplete());
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(parked));
+        assert!(storage.offset_meta_for_test(parked)?.is_some());
+        assert!(!storage.has_pending_writes());
+        Ok(())
+    }
+
+    /// After the marker write fails and settle keeps the bytes, a later sync
+    /// commits the parked chunk.
+    #[test]
+    fn parked_chunk_commits_after_reset_marker_failure() -> eyre::Result<()> {
+        let (_tmp, storage, parked) = park_one_rocks_chunk("reset_marker_then_sync")?;
+        storage.fail_next_sync_at(SyncFailurePoint::ResetMarkerWrite);
+        let err = storage.reset().unwrap_err();
+        assert!(err.to_string().contains("ResetMarkerWrite"), "{err}");
+        assert!(storage.clear_reset_incomplete_without_marker()?);
+        storage.force_sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(parked));
+        assert!(storage.offset_meta_for_test(parked)?.is_some());
+        assert!(!storage.has_pending_writes());
         Ok(())
     }
 
