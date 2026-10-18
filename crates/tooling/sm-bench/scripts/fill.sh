@@ -20,8 +20,10 @@
 # another directory is refused before any write, including when that
 # directory also contains loadtest. --pid-file is created with O_EXCL, and
 # an existing symlink is not removed. TERM and INT stop the dd process group.
-# The log parent is resolved the same way. mkdir and append follow a
-# symlink ancestor, so a parent outside loadtest is refused first.
+# The log's nearest loadtest directory must be the same directory as the
+# named path's loadtest directory. A link that stays under that directory is
+# allowed. A link into another loadtest directory is refused before mkdir
+# or append. Parent equality would also refuse the same-tree link.
 
 set -euo pipefail
 
@@ -97,24 +99,54 @@ if [ "$segment_bytes" -le 0 ]; then
     exit 1
 fi
 
-# Walk to the existing ancestor. mkdir -p would create the missing tail
-# there, including through a symlink above a directory that does not exist yet.
-require_log_parent() {
-    local parent=$1
-    local next canon
-    while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
-        next=$(dirname -- "$parent")
-        if [ "$next" = "$parent" ]; then
+# Nearest directory whose own name is loadtest. The path is absolute.
+loadtest_ancestor() {
+    local dir=$1
+    local next
+    while [ "$dir" != "/" ] && [ "$dir" != "." ]; do
+        if [ "$(basename -- "$dir")" = "loadtest" ]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+        next=$(dirname -- "$dir")
+        if [ "$next" = "$dir" ]; then
             break
         fi
-        parent=$next
+        dir=$next
     done
-    if [ -e "$parent" ] || [ -L "$parent" ]; then
-        canon=$(readlink -f "$parent") || exit 1
-        if ! has_loadtest "$canon"; then
-            echo "log parent resolves to $canon, which has no loadtest path component; refusing" >&2
-            exit 1
-        fi
+    return 1
+}
+
+# mkdir and append follow a symlink ancestor. The named path and the resolved
+# path must share one loadtest directory. A link into a second loadtest tree
+# is refused before either write. A link that stays under the named tree is
+# allowed, including when the log file's parent is that link.
+require_same_loadtest_dir() {
+    local log_path=$1
+    if ! has_loadtest "$log_path"; then
+        echo "log $log_path has no loadtest path component; refusing" >&2
+        exit 1
+    fi
+    local resolved named_abs named_root resolved_root named_canon resolved_canon
+    resolved=$(resolve_path "$log_path") || exit 1
+    if ! has_loadtest "$resolved"; then
+        echo "log resolves to $resolved, which has no loadtest path component; refusing" >&2
+        exit 1
+    fi
+    named_abs=$(lexical_absolute "$log_path") || exit 1
+    named_root=$(loadtest_ancestor "$named_abs") || {
+        echo "log $log_path has no loadtest directory; refusing" >&2
+        exit 1
+    }
+    resolved_root=$(loadtest_ancestor "$resolved") || {
+        echo "log resolves to $resolved, which has no loadtest directory; refusing" >&2
+        exit 1
+    }
+    named_canon=$(readlink -f "$named_root") || exit 1
+    resolved_canon=$(readlink -f "$resolved_root") || exit 1
+    if [ "$named_canon" != "$resolved_canon" ]; then
+        echo "refusing log $log_path: its loadtest directory resolves to $resolved_canon, not $named_canon" >&2
+        exit 1
     fi
 }
 
@@ -142,7 +174,7 @@ trap 'cleanup; exit 130' INT
 if [ -L "$log" ]; then
     require_loadtest "log" "$log"
 fi
-require_log_parent "$(dirname -- "$log")"
+require_same_loadtest_dir "$log"
 
 if [ -n "$pid_file" ]; then
     require_loadtest "pid-file" "$pid_file"

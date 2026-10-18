@@ -284,6 +284,33 @@ test_fill_refuses_a_log_under_a_missing_dir_through_a_symlink() {
     rm -rf "$root"
 }
 
+# bench/loadtest/link -> other/loadtest. The log path is not itself a
+# symlink. mkdir and append must not follow it into the other tree.
+test_fill_refuses_a_log_through_a_symlink_into_another_loadtest() {
+    local name=fill-log-other-loadtest root err
+    root=$(tmpdir)
+    err=$root/err
+    mkdir -p "$root/bench/loadtest" "$root/other/loadtest"
+    printf 'LIVE-NODE-BYTES' >"$root/bench/loadtest/data"
+    printf 'KEEP-INTERVALS\n' >"$root/other/loadtest/intervals.json"
+    ln -s "$root/other/loadtest" "$root/bench/loadtest/link"
+    touch "$root/STOP"
+    if "$here/fill.sh" --file "$root/bench/loadtest/data" \
+        --log "$root/bench/loadtest/link/intervals.json" \
+        --stop-file "$root/STOP" --segment-bytes 16 >"$err" 2>&1; then
+        bad "$name" "fill.sh exited 0: $(cat "$err")"
+    elif ! grep -q "loadtest" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    elif ! cmp -s <(printf 'KEEP-INTERVALS\n') "$root/other/loadtest/intervals.json"; then
+        bad "$name" "victim intervals changed: $(cat "$root/other/loadtest/intervals.json")"
+    elif ! cmp -s <(printf 'LIVE-NODE-BYTES') "$root/bench/loadtest/data"; then
+        bad "$name" "data file changed"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_fill_appends_a_log_when_the_symlink_stays_under_loadtest() {
     local name=fill-log-parent-inside root
     root=$(tmpdir)
