@@ -66,9 +66,8 @@ pub(super) fn fd_is_direct(file: &File) -> bool {
 /// Open `path` read-only with `O_DIRECT`.
 ///
 /// `Ok(None)` means the filesystem rejected `O_DIRECT` (`EINVAL` or
-/// `EOPNOTSUPP`, for example tmpfs). The caller keeps the buffered
-/// descriptor. One warning is logged for the process. Any other error is
-/// returned.
+/// `EOPNOTSUPP`). The caller keeps the buffered descriptor. One warning
+/// is logged for the process. Any other error is returned.
 pub fn open_recall_direct(path: &Path) -> eyre::Result<Option<File>> {
     match open_direct_file(path) {
         Ok(file) => Ok(Some(file)),
