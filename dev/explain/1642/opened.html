@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1642 — reject price quotes over the max data tx size</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-border: #272c38;
+    --text: #dfe3ea;
+    --muted: #8b93a7;
+    --accent: #5fb0ff;
+    --danger: #ff6b6b;
+    --danger-bg: #2a1518;
+    --danger-border: #5a2a2f;
+    --warn: #ffb454;
+    --warn-bg: #2a2212;
+    --warn-border: #5a4a1f;
+    --info-bg: #10202a;
+    --info-border: #1f4a5f;
+    --good: #58d68d;
+    --code-bg: #0b0d12;
+    --table-head: #1d212b;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+  header.page-header {
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  header.page-header h1 { font-size: 1.5rem; margin: 0 0 0.4rem; }
+  header.page-header .meta { color: var(--muted); font-size: 0.9rem; }
+  header.page-header .meta code { color: var(--text); }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 2rem;
+    position: sticky;
+    top: 0.75rem;
+    z-index: 10;
+  }
+  nav.toc h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 0.5rem; }
+  nav.toc ol { margin: 0; padding-left: 1.2rem; columns: 2; }
+  nav.toc li { margin-bottom: 0.25rem; font-size: 0.92rem; }
+  section { margin-bottom: 2.5rem; }
+  section h2 {
+    font-size: 1.15rem;
+    border-left: 4px solid var(--accent);
+    padding-left: 0.6rem;
+    margin: 0 0 1rem;
+  }
+  section h3 { font-size: 1rem; color: var(--text); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.6rem 0; }
+  code, pre, kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88rem;
+  }
+  code.cite {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+  }
+  a code.cite { color: var(--accent); }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin-bottom: 0.45rem; }
+  .callout {
+    border-radius: 8px;
+    border: 1px solid var(--panel-border);
+    padding: 0.9rem 1.1rem;
+    margin: 0.9rem 0;
+  }
+  .callout.info { background: var(--info-bg); border-color: var(--info-border); }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+  .callout.danger { background: var(--danger-bg); border-color: var(--danger-border); }
+  .callout .label {
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    display: block;
+    margin-bottom: 0.35rem;
+  }
+  .callout.info .label { color: var(--accent); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.danger .label { color: var(--danger); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75rem 0 1rem;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--panel-border);
+    padding: 0.55rem 0.7rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--table-head); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  td.unaccounted { color: var(--danger); font-weight: 700; }
+  td.reestablished { color: var(--good); }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    margin-left: 0.5rem;
+  }
+  .badge.sev-high { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger-border); }
+  .badge.sev-med { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); }
+  .badge.sev-low { background: var(--info-bg); color: var(--accent); border: 1px solid var(--info-border); }
+  .diagram {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+    margin: 1rem 0;
+    font-size: 0.85rem;
+  }
+  .diagram .box {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    flex: 1 1 200px;
+    min-width: 180px;
+  }
+  .diagram .box.hot { border-color: var(--danger-border); background: var(--danger-bg); }
+  .diagram .box.good { border-color: var(--info-border); background: var(--info-bg); }
+  .diagram .box h4 { margin: 0 0 0.4rem; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .diagram .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.6rem;
+    color: var(--muted);
+    font-size: 1.3rem;
+    flex: 0 0 auto;
+  }
+  .diagram .box .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; color: var(--text); }
+  footer { color: var(--muted); font-size: 0.82rem; border-top: 1px solid var(--panel-border); padding-top: 1rem; margin-top: 3rem; }
+  @media (max-width: 640px) {
+    nav.toc ol { columns: 1; }
+    .diagram { flex-direction: column; }
+    .diagram .arrow { transform: rotate(90deg); padding: 0.3rem 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page-header">
+  <h1>fix(api): reject price quotes over the max data tx size</h1>
+  <div class="meta">
+    PR #1642 · Irys-xyz/irys · expert mode · repo root: checkout at commit
+    <code>1f2bccb4</code> ·
+    citations link to
+    <code>github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9</code>
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#intent">Intent &amp; approach</a></li>
+    <li><a href="#delta">Delta semantics</a></li>
+    <li><a href="#cross-file">Cross-file impact</a></li>
+    <li><a href="#review-focus">Review-focus map</a></li>
+    <li><a href="#open-questions">Open questions</a></li>
+  </ol>
+</nav>
+
+<section id="intent">
+<h2>Intent &amp; approach</h2>
+
+<p>
+A crafted <code class="cite">GET /v1/price/{ledger}/{size}</code> request with <code>size</code>
+near <code>u64::MAX</code> panicked the node: the handler rounded the requested size up to a whole
+number of chunks via <code>bytes_to_store.div_ceil(chunk_size) * chunk_size</code>
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L55"><code class="cite">crates/api-server/src/routes/price.rs:55</code></a>),
+an unchecked multiply that overflows for large inputs. On mainnet's <code>debug-release</code>
+profile — which inherits <code>[profile.release]</code>'s
+<code>overflow-checks = true</code> (<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/Cargo.toml#L400"><code class="cite">Cargo.toml:400</code></a>,
+<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/Cargo.toml#L429"><code class="cite">Cargo.toml:429</code></a>)
+— the overflow triggers a panic, and the node's panic hook aborts the process rather than
+unwinding the single request. The PR description states this was observed as an unauthenticated
+client crash-looping mainnet nodes on 2026-10-18.
+</p>
+
+<p>
+The chosen fix is a <strong>pre-condition check, not a narrower arithmetic fix</strong>: compute
+the chunk count first, reject with <code>400</code> if it exceeds
+<code>consensus.mempool.max_data_tx_chunks</code>
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L60"><code class="cite">crates/api-server/src/routes/price.rs:60</code></a>),
+and only then perform <code>chunks * chunk_size</code>
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L71"><code class="cite">crates/api-server/src/routes/price.rs:71</code></a>).
+The road not taken: switch the multiply to <code>checked_mul</code>/<code>saturating_mul</code> and
+return a generic "size too large" error without reference to the tx-size cap. The PR picks the
+cap-based rejection instead because it is semantically correct, not just panic-safe — a size whose
+chunk count exceeds <code>max_data_tx_chunks</code> could never be accepted as a real data
+transaction by mempool ingress or consensus prevalidation either, so quoting a price for it was
+already a correctness bug (a client could get a quote for a transaction that would then be rejected
+on submission), independent of the crash.
+</p>
+
+<p>
+This is a cherry-picked port of mainnet hotfix #1640 onto <code>release/testnet/4.x</code>, stated
+as already hot-deployed to testnet peers 2–7 and 10 before this PR record was produced.
+</p>
+</section>
+
+<section id="delta">
+<h2>Delta semantics</h2>
+
+<p>
+<strong>API contract (new):</strong> <code>GET /v1/price/{ledger}/{size}</code> now returns
+<code>400 Bad Request</code> with body
+<code>{"error":"Data size exceeds the maximum transaction size of &lt;N&gt; bytes"}</code>
+for any <code>size</code> whose <code>div_ceil(chunk_size)</code> chunk count exceeds
+<code>max_data_tx_chunks</code> (5 TiB-equivalent chunk count on mainnet/testnet config). Previously
+every <code>size</code> up to the point of overflow returned <code>200</code> with a computed quote;
+there was no upper bound tied to transaction-size policy.
+</p>
+
+<p>
+<strong>Ordering:</strong> the cap check runs after ledger-type validation
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L50-L51"><code class="cite">crates/api-server/src/routes/price.rs:50-51</code></a>)
+and before any canonical-chain/EMA lookups, so an oversized request now short-circuits before taking
+the <code>block_tree</code> read lock — a minor, incidental improvement (one less lock acquisition
+on the crash-loop path), not a stated goal.
+</p>
+
+<p>
+<strong>Compatibility:</strong> no on-disk or wire format changes. Any existing client that was
+relying on getting a (meaningless, unsubmittable) quote for an over-cap size now gets a
+<code>400</code> instead — this is the intended behavior change, and matches what would happen if
+that client then tried to actually submit a transaction of that size.
+</p>
+
+<h3>Removed-behavior audit</h3>
+<table>
+<thead>
+<tr><th>Invariant / behavior removed</th><th>Old enforcement site</th><th>New enforcement / disposition</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td>"Any <code>u64</code> size gets a price quote, no upper bound" (implicit, not a deliberate invariant — the actual bug)</td>
+  <td><a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L55"><code class="cite">price.rs:55</code></a> (pre-fix: unchecked <code>div_ceil * chunk_size</code>)</td>
+  <td class="reestablished">Intentionally dropped — replaced by the <code>max_data_tx_chunks</code> cap at <a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L61"><code class="cite">price.rs:61</code></a>, matching the cap already enforced at mempool ingress and consensus prevalidation</td>
+</tr>
+<tr>
+  <td>"<code>bytes_to_store</code> is always rounded up to a chunk multiple" (pre-existing invariant, preserved by construction)</td>
+  <td><a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L13"><code class="cite">price.rs:13</code></a> (pre-fix)</td>
+  <td class="reestablished">Re-established — <code>chunks * chunk_size</code> at <a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L71"><code class="cite">price.rs:71</code></a> only runs for <code>chunks ≤ max_chunks</code>, so it cannot overflow for any config where <code>max_chunks * chunk_size</code> itself fits in <code>u64</code> (true for mainnet/testnet's ~20.97M-chunk, 256 KiB-chunk configuration)</td>
+</tr>
+<tr>
+  <td>"Request size is floored to at least one chunk" (pre-existing invariant via <code>max(chunk_size, bytes_to_store)</code>)</td>
+  <td><a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L10"><code class="cite">price.rs:10</code></a> (pre-fix)</td>
+  <td class="reestablished">Re-established — same <code>std::cmp::max(chunk_size, bytes_to_store)</code> folded into the new <code>chunks</code> computation at <a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L55"><code class="cite">price.rs:55</code></a></td>
+</tr>
+<tr>
+  <td>Panic-free arithmetic for the chunk round-up multiply</td>
+  <td class="unaccounted">None (bug, not a removed guard)</td>
+  <td class="reestablished">Re-established for the <em>request-controlled</em> operand by bounding <code>chunks</code> before the multiply (<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L61"><code class="cite">price.rs:61</code></a>, <a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L71"><code class="cite">price.rs:71</code></a>) — but a second, structurally identical unchecked multiply is introduced in the error-formatting branch, see review-focus below</td>
+</tr>
+</tbody>
+</table>
+</section>
+
+<section id="cross-file">
+<h2>Cross-file impact</h2>
+
+<p>
+The changed symbol is the HTTP handler <code>get_price</code>
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L42"><code class="cite">crates/api-server/src/routes/price.rs:42</code></a>),
+which has no in-repo Rust callers besides the Actix route table and tests — its only consumers are
+external HTTP clients, so there is no internal caller to audit for a mishandled new precondition.
+</p>
+
+<p>
+The response <strong>shape</strong> is unchanged (<code>PriceInfo</code> JSON on <code>200</code>);
+only the <strong>domain</strong> of accepted <code>size</code> values shrank, and the error path
+reuses the existing <code>(String, StatusCode) -&gt; ApiError</code> conversion
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/error.rs#L94-L98"><code class="cite">crates/api-server/src/error.rs:94-98</code></a>),
+so the error envelope (<code>{"error": "..."}</code>, correct status code) is consistent with every
+other rejection this handler already produces (e.g. the ledger-type check at
+<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L50-L51"><code class="cite">price.rs:50-51</code></a>).
+No caller needs updating for a changed return type or exception.
+</p>
+
+<p>
+The <code>max_data_tx_chunks</code> cap this PR reads is the same consensus constant already
+enforced independently in three other places:
+mempool ingress and consensus prevalidation share one structural check,
+<code>data_tx_structural_defect</code>
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/actors/src/data_tx_validation.rs#L40-L69"><code class="cite">crates/actors/src/data_tx_validation.rs:40-69</code></a>),
+and block-production tx selection filters on it directly
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/actors/src/tx_selector/mod.rs#L506-L542"><code class="cite">crates/actors/src/tx_selector/mod.rs:506-542</code></a>).
+This PR adds a <strong>fourth</strong>, independent inline reimplementation of "chunks &gt;
+max_chunks" in the API layer rather than calling into the shared helper — see the design-pressure
+note under review-focus.
+</p>
+</section>
+
+<section id="review-focus">
+<h2>Review-focus map</h2>
+
+<ol>
+<li>
+<strong><a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L65"><code class="cite">crates/api-server/src/routes/price.rs:65</code></a></strong>
+<span class="badge sev-low">low severity</span>
+— the error-message format string computes <code>max_chunks * chunk_size</code>, an unchecked
+multiply of two <em>config-derived</em> values, structurally identical to the multiply this PR just
+removed for request-derived values. <strong>Failure scenario:</strong> if an operator ever
+configures <code>mempool.max_data_tx_chunks</code> large enough that
+<code>max_chunks * chunk_size &gt; u64::MAX</code> (not possible with today's shipped configs —
+mainnet/testnet use ~20.97M chunks × 256 KiB ≈ 5.5 TiB, far below the limit — but nothing in
+<code class="cite"><a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/types/src/config/mod.rs#L163-L166">crates/types/src/config/mod.rs:163-166</a></code>
+enforces an upper bound, only "&gt; 0"), every oversized-size request would panic the node again,
+on the exact same overflow-checks-on/panic-hook-aborts path this PR exists to close. Low likelihood
+today because the input is operator config, not attacker-controlled, but it reintroduces the same
+bug shape inside the bug's own fix. Worth a dedicated code-review pass if config bounds aren't
+validated elsewhere.
+</li>
+<li>
+<strong><a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/api-server/src/routes/price.rs#L60-L70"><code class="cite">crates/api-server/src/routes/price.rs:60-70</code></a></strong>
+<span class="badge sev-low">design pressure</span>
+— this is the fourth independent inline reimplementation of the "<code>chunks &gt;
+max_data_tx_chunks</code>" check (alongside
+<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/actors/src/data_tx_validation.rs#L63"><code class="cite">data_tx_validation.rs:63</code></a>
+and its two call sites). The module comment at
+<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/actors/src/data_tx_validation.rs#L1-L11"><code class="cite">data_tx_validation.rs:1-11</code></a>
+states the shared helper exists specifically "to keep the two gates from drifting." A future change
+to the comparison (e.g. an off-by-one, or switching to <code>&gt;=</code>) made in
+<code>data_tx_structural_defect</code> would silently not apply to the price endpoint, and vice
+versa, since they are no longer the same code. This is a pattern/pressure observation, not a bug:
+the duplication is currently byte-identical in intent (<code>chunks &gt; max_chunks</code> in both
+places) and the API-layer check operates on a raw <code>size: u64</code> path parameter rather than
+a <code>DataTransactionHeader</code>, so reuse would need a signature-level refactor, not a
+copy-paste fix.
+</li>
+<li>
+<strong><a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/chain-tests/src/api/pricing_endpoint.rs#L184-L212"><code class="cite">crates/chain-tests/src/api/pricing_endpoint.rs:184-212</code></a></strong>
+<span class="badge sev-low">test coverage</span>
+— the new test exercises exactly-at-cap (200), one-chunk-over (400), <code>u64::MAX</code> (400),
+and post-crash liveness, which is the right boundary set for the panic this PR fixes. It does not
+exercise a size that is non-zero but smaller than one chunk (the pre-existing
+<code>max(chunk_size, bytes_to_store)</code> floor), though that path is unchanged by this PR and is
+covered by the pre-existing <code>heavy_pricing_endpoint_round_data_chunk_up</code> test at
+<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/chain-tests/src/api/pricing_endpoint.rs#L215"><code class="cite">pricing_endpoint.rs:215</code></a>. No gap specific to this change.
+</li>
+</ol>
+
+<div class="callout info">
+<span class="label">Suggested follow-up</span>
+These are attention pointers, not verified findings. If the config-derived multiply in the error
+message (item 1) is considered worth closing, a dedicated code-review pass (<code>/code-review</code>)
+would be the right way to confirm whether any code path allows
+<code>max_data_tx_chunks * chunk_size</code> to exceed <code>u64::MAX</code> and whether
+<code>crates/types/src/config/mod.rs</code>'s validation should bound that product directly.
+</div>
+</section>
+
+<section id="open-questions">
+<h2>Open questions</h2>
+
+<ul>
+<li>
+Should <code>Config::validate</code>
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/types/src/config/mod.rs#L163-L166"><code class="cite">crates/types/src/config/mod.rs:163-166</code></a>)
+assert that <code>max_data_tx_chunks * chunk_size</code> fits in <code>u64</code>, closing the
+config-derived multiply noted above at the source rather than relying on every call site
+(including the one this PR adds) to stay within safe bounds by convention?
+</li>
+<li>
+Was reusing <code>data_tx_structural_defect</code>
+(<a href="https://github.com/Irys-xyz/irys/blob/1f2bccb45e03d7db793ea3d1753b4a24228b63c9/crates/actors/src/data_tx_validation.rs#L40"><code class="cite">crates/actors/src/data_tx_validation.rs:40</code></a>)
+considered for the price endpoint, or is a fourth independent check intentional because the price
+endpoint validates a raw size rather than a constructed <code>DataTransactionHeader</code> and a
+shared abstraction wasn't judged worth the signature mismatch, especially under hotfix time
+pressure?
+</li>
+<li>
+The PR description says this is cherry-picked from mainnet hotfix #1640 and "already hot-deployed to
+testnet peers 2–7 and 10." Is there a tracked follow-up to land the equivalent fix on any remaining
+branches/environments (e.g. <code>master</code>, other long-lived release branches) so the fix
+doesn't only exist on this one branch and the already-patched peers?
+</li>
+</ul>
+</section>
+
+<footer>
+Generated by the explain-diff skill, expert mode, CI mode. Source diff: PR #1642 (base merge-base →
+head). Explored tree: commit <code>1f2bccb45e03d7db793ea3d1753b4a24228b63c9</code>.
+</footer>
+
+</div>
+</body>
+</html>
