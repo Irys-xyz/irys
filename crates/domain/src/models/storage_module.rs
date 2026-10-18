@@ -497,6 +497,9 @@ enum SyncPausePoint {
     /// Placements for one unpacked chunk are resolved. The occupy has not
     /// read the interval map or taken `pending_writes`.
     AfterOccupyResolved,
+    /// `generate_full_chunks` has copied the bodies. It has not classified
+    /// them against the checksum loaded before that read.
+    AfterServeBodyRead,
 }
 
 /// Test barrier in a registration, after the rows are computed and before
@@ -2756,6 +2759,12 @@ impl StorageModule {
     #[cfg(test)]
     fn wait_if_sync_paused(&self, point: SyncPausePoint) {
         self.sync_pause.wait_if(point);
+    }
+
+    /// The next `generate_full_chunks` waits after the body read.
+    #[cfg(test)]
+    fn pause_next_serve_after_body_read(&self) {
+        self.sync_pause.arm(SyncPausePoint::AfterServeBodyRead);
     }
 
     /// The next checksum check waits after its bytes are read.
@@ -7264,6 +7273,11 @@ impl StorageModule {
         self.disk.yield_to_writes();
         let (mut bodies, _) =
             self.read_chunks_inner(partition_chunk_offset_ii!(start, end), false, false)?;
+        // The checksum rows above were loaded before this read. A durable
+        // point can commit a new pair in the gap. The match arm re-reads the
+        // checksum under `sync_in_progress` before it serves the old bytes.
+        #[cfg(test)]
+        self.wait_if_sync_paused(SyncPausePoint::AfterServeBodyRead);
         let packing_address = self.config.node_config.miner_address();
         let partition_hash = self
             .partition_hash()
@@ -7329,7 +7343,53 @@ impl StorageModule {
                             None => continue,
                         }
                     }
-                    chunk_crc::CrcVerdict::Match | chunk_crc::CrcVerdict::Skip => {}
+                    chunk_crc::CrcVerdict::Skip => {}
+                    chunk_crc::CrcVerdict::Match => {
+                        // The body was copied before this checksum was
+                        // checked. A durable point can commit a new pair in
+                        // that gap. Serve these bytes only while the stored
+                        // checksum is still the one they matched. The lock
+                        // is held through the insert, then dropped: the next
+                        // offset may confirm or reload, and both take this
+                        // lock. A different checksum is loaded again after
+                        // the lock drops.
+                        let sync = self.lock_sync();
+                        let stored = submodule
+                            .db
+                            .view(|tx| tx.get_offset_meta(offset))?
+                            .and_then(|row| row.crc);
+                        if stored == crc {
+                            out.insert(
+                                offset,
+                                PackedChunk {
+                                    data_root,
+                                    data_size,
+                                    data_path,
+                                    bytes: Base64::from(bytes),
+                                    partition_offset: offset,
+                                    tx_offset,
+                                    packing_address,
+                                    partition_hash,
+                                },
+                            );
+                            continue;
+                        }
+                        drop(sync);
+                        match self.reload_unchecksummed_chunk(offset)? {
+                            Some((fresh, root, size, path, tx, fresh_crc)) => {
+                                if matches!(
+                                    chunk_crc::classify(fresh_crc, &fresh, complete),
+                                    chunk_crc::CrcVerdict::Mismatch
+                                ) {
+                                    continue;
+                                }
+                                (data_root, data_size, data_path, tx_offset) =
+                                    (root, size, path, tx);
+                                bytes = fresh;
+                            }
+                            None => continue,
+                        }
+                    }
                 }
             }
             out.insert(
@@ -16601,6 +16661,173 @@ mod tests {
             "settled proof"
         );
         Ok((tmp, config, storage, unpacked, header, tx_path))
+    }
+
+    /// Queue entropy, then a new proved body, and sync both. The offset's
+    /// checksum and data root change. A settled `Data` label is not a
+    /// `write_data_chunk` target, so the entropy write has to land first.
+    fn replace_settled_data(
+        storage: &StorageModule,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<DataRoot> {
+        let chunk_size = storage.config.consensus.chunk_size as usize;
+        let packed_for = storage
+            .partition_hash()
+            .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
+        eyre::ensure!(
+            storage.write_entropy_chunk(offset, vec![0xE1; chunk_size], packed_for),
+            "entropy replacement was refused"
+        );
+        let signer = IrysSigner::random_signer(&storage.config.consensus);
+        let tx = signer
+            .sign_transaction(signer.create_transaction(vec![0xAB; chunk_size], H256::zero())?)?;
+        let replacement = tx.data_chunks()?;
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        storage.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            1,
+        )?;
+        storage.write_data_chunk(&replacement[0])?;
+        storage.force_sync_pending_chunks()?;
+        Ok(tx.header.data_root)
+    }
+
+    /// A serve that already copied the old bytes must return the pair a
+    /// durable point commits afterwards. A serve with no later commit still
+    /// returns the copied bytes.
+    #[test]
+    fn serve_after_body_read_returns_the_committed_pair() -> eyre::Result<()> {
+        let (tmp, _config, storage, ..) = settle_data_offset("serve_replace", 0)?;
+        let _tmp = tmp;
+        let storage = Arc::new(storage);
+        let offset = PartitionChunkOffset::from(0);
+        let old_packed = storage
+            .read_chunks(partition_chunk_offset_ii!(0, 0))?
+            .remove(&offset)
+            .ok_or_else(|| eyre::eyre!("settled bytes missing"))?
+            .0;
+        let old_crc = storage
+            .offset_meta_for_test(offset)?
+            .and_then(|row| row.crc);
+        let stable = storage
+            .generate_full_chunk(offset)?
+            .ok_or_else(|| eyre::eyre!("settled serve omitted the offset"))?;
+        eyre::ensure!(
+            stable.bytes.0 == old_packed,
+            "a serve with no later commit did not return the copied bytes"
+        );
+
+        storage.pause_next_serve_after_body_read();
+        let reading = Arc::clone(&storage);
+        let (tx_serve, rx_serve) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| -> eyre::Result<()> {
+            let _release = SyncPauseRelease(&storage);
+            scope.spawn(move || {
+                let _ = tx_serve.send(reading.generate_full_chunk(offset));
+            });
+            eyre::ensure!(
+                storage.wait_for_sync_pause(Duration::from_secs(5)),
+                "serve did not pause after the body read"
+            );
+            let new_root = replace_settled_data(&storage, offset)?;
+            let new_crc = storage
+                .offset_meta_for_test(offset)?
+                .and_then(|row| row.crc);
+            eyre::ensure!(
+                new_crc != old_crc,
+                "replacement did not commit a new checksum"
+            );
+            let committed = storage
+                .read_chunks(partition_chunk_offset_ii!(0, 0))?
+                .remove(&offset)
+                .ok_or_else(|| eyre::eyre!("committed bytes missing"))?
+                .0;
+            eyre::ensure!(
+                committed != old_packed,
+                "replacement did not change the bytes on disk"
+            );
+            drop(_release);
+            let served = rx_serve
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| eyre::eyre!("serve did not finish"))??
+                .ok_or_else(|| eyre::eyre!("serve omitted the offset"))?;
+            eyre::ensure!(
+                served.bytes.0 == committed,
+                "served the pre-commit bytes after the new checksum committed"
+            );
+            eyre::ensure!(
+                served.data_root == new_root,
+                "served proof is not the committed data root"
+            );
+            Ok(())
+        })?;
+        let again = storage
+            .generate_full_chunk(offset)?
+            .ok_or_else(|| eyre::eyre!("stable serve omitted the offset"))?;
+        eyre::ensure!(
+            again.bytes.0
+                == storage
+                    .read_chunks(partition_chunk_offset_ii!(0, 0))?
+                    .remove(&offset)
+                    .ok_or_else(|| eyre::eyre!("stable bytes missing"))?
+                    .0,
+            "a later serve did not return the committed bytes"
+        );
+        Ok(())
+    }
+
+    /// A durable point for a different offset does not retire this offset's
+    /// copied bytes. The re-read still sees the checksum they matched.
+    #[test]
+    fn serve_after_body_read_keeps_bytes_when_its_checksum_stays() -> eyre::Result<()> {
+        let (tmp, _config, storage, unpacked, ..) = settle_data_offset("serve_neighbor", 0)?;
+        let _tmp = tmp;
+        let storage = Arc::new(storage);
+        let offset = PartitionChunkOffset::from(0);
+        let old_packed = storage
+            .read_chunks(partition_chunk_offset_ii!(0, 0))?
+            .remove(&offset)
+            .ok_or_else(|| eyre::eyre!("settled bytes missing"))?
+            .0;
+        let old_crc = storage
+            .offset_meta_for_test(offset)?
+            .and_then(|row| row.crc);
+
+        storage.pause_next_serve_after_body_read();
+        let reading = Arc::clone(&storage);
+        let (tx_serve, rx_serve) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| -> eyre::Result<()> {
+            let _release = SyncPauseRelease(&storage);
+            scope.spawn(move || {
+                let _ = tx_serve.send(reading.generate_full_chunk(offset));
+            });
+            eyre::ensure!(
+                storage.wait_for_sync_pause(Duration::from_secs(5)),
+                "serve did not pause after the body read"
+            );
+            storage.write_data_chunk(&unpacked[1])?;
+            storage.force_sync_pending_chunks()?;
+            let crc = storage
+                .offset_meta_for_test(offset)?
+                .and_then(|row| row.crc);
+            eyre::ensure!(
+                crc == old_crc,
+                "neighbor write changed this offset's checksum"
+            );
+            drop(_release);
+            let served = rx_serve
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| eyre::eyre!("serve did not finish"))??
+                .ok_or_else(|| eyre::eyre!("serve omitted the offset"))?;
+            eyre::ensure!(
+                served.bytes.0 == old_packed,
+                "serve dropped bytes whose checksum was still current"
+            );
+            Ok(())
+        })?;
+        Ok(())
     }
 
     fn reopen_crc_module(tmp: &std::path::Path, config: &Config) -> eyre::Result<StorageModule> {
