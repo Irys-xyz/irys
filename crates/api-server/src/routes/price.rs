@@ -50,11 +50,25 @@ pub async fn get_price(
     let data_ledger = DataLedger::try_from(ledger)
         .map_err(|_| ("Ledger type not supported", StatusCode::BAD_REQUEST))?;
 
-    // enforce that the requested size is at least equal to a single chunk
-    let bytes_to_store = std::cmp::max(chunk_size, bytes_to_store);
+    // enforce that the requested size is at least equal to a single chunk,
+    // rounded up to the next multiple of chunk_size
+    let chunks = std::cmp::max(chunk_size, bytes_to_store).div_ceil(chunk_size);
 
-    // round up to the next multiple of chunk_size
-    let bytes_to_store = bytes_to_store.div_ceil(chunk_size) * chunk_size;
+    // reject sizes no data tx can carry (the cap mempool ingress and consensus
+    // enforce). This also bounds the multiply below, which overflowed for
+    // sizes near u64::MAX and panicked the node.
+    let max_chunks = state.config.consensus.mempool.max_data_tx_chunks;
+    if chunks > max_chunks {
+        return Err((
+            format!(
+                "Data size exceeds the maximum transaction size of {} bytes",
+                max_chunks * chunk_size
+            ),
+            StatusCode::BAD_REQUEST,
+        )
+            .into());
+    }
+    let bytes_to_store = chunks * chunk_size;
 
     match data_ledger {
         DataLedger::Publish => {
