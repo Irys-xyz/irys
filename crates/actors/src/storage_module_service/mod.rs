@@ -382,14 +382,23 @@ impl StorageModuleServiceInner {
                             self.reset_and_install(existing, Some(info_pa), update_height)?;
                         self.enqueue_packing(existing, range);
                     } else {
-                        // Capacity→ledger does not reset. Entropy and Data stay.
-                        // A span the channel never accepted is still Uninitialized.
-                        // Send that part. Do not pack offsets that are already
-                        // Entropy or Data.
+                        // Capacity→ledger does not reset. Entropy and Data stay
+                        // unless a durable marker says the wipe already started.
+                        // Clear an in-memory flag that has no marker before the
+                        // assign. Otherwise the retry of this same update sees
+                        // a matching ledger and finishes a wipe this transition
+                        // must not do. A marker is finished first, so both
+                        // applies agree with open. A span the channel never
+                        // accepted is still Uninitialized. Send that part. Do
+                        // not pack offsets that are already Entropy or Data.
+                        if existing.reset_incomplete() {
+                            self.settle_incomplete_reset(existing)?;
+                        }
                         if let Err(err) = existing.assign_partition(info_pa, update_height) {
-                            // The packing-params write failed before memory changed.
-                            // Retry the same update. Do not stop the service.
-                            // The deferred span stays until this write succeeds.
+                            // The packing-params write failed. The in-memory
+                            // assignment is unchanged. Retry the same update.
+                            // Do not stop the service. The deferred span stays
+                            // until this write succeeds.
                             warn!(
                                 storage_module.id = existing.id,
                                 "capacity-to-ledger assignment was not stored; the update will be retried: {err:#}"
@@ -1832,6 +1841,235 @@ mod assignment_reset_tests {
         assert!(harness.inner.pending_assignment.is_none());
         assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
         assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    fn write_synced_entropy(module: &StorageModule) {
+        use irys_domain::storage_module::ChunkType;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x5A_u8; 32], ChunkType::Entropy));
+        module
+            .force_sync_pending_chunks()
+            .expect("entropy is durable");
+        assert_eq!(module.get_chunk_type(&offset), Some(ChunkType::Entropy));
+    }
+
+    fn close_for_reopen(
+        harness: Harness,
+    ) -> (
+        irys_testing_utils::tempfile::TempDir,
+        Config,
+        std::path::PathBuf,
+        PartitionAssignment,
+    ) {
+        let config = harness.inner.config.clone();
+        let assignment = harness.module.partition_assignment().expect("assigned");
+        let path = harness.path.clone();
+        drop(harness.inner);
+        drop(harness.module);
+        (harness._tmp, config, path, assignment)
+    }
+
+    fn reopen_module(
+        config: &Config,
+        path: &std::path::Path,
+        assignment: PartitionAssignment,
+    ) -> StorageModule {
+        StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(assignment),
+                submodules: vec![(partition_chunk_offset_ie!(0, 10), path.to_path_buf())],
+            },
+            config,
+        )
+        .expect("reopen storage module")
+    }
+
+    /// Failed unassign, no marker. Both applies of capacity→ledger keep entropy.
+    /// The flag does not stay set, so the second apply is not a wipe.
+    #[tokio::test]
+    async fn capacity_to_ledger_after_failed_unassign_keeps_entropy_on_both_applies() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(None);
+        write_synced_entropy(&harness.module);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        harness.module.fail_next_reset_for_test();
+        apply_update(&mut harness, explicit_unassign(&path), 4).await;
+        assert!(harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+
+        let update = publish_update(&path, hash, miner);
+        apply_update(&mut harness, Arc::clone(&update), 5).await;
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+        assert!(
+            !harness.module.reset_incomplete(),
+            "capacity to ledger must not leave the incomplete flag set"
+        );
+        assert!(harness.inner.pending_assignment.is_none());
+        assert!(!reset_marker(&harness.module));
+
+        apply_update(&mut harness, update, 5).await;
+        assert_eq!(
+            chunk_type(&harness.module),
+            Some(ChunkType::Entropy),
+            "the retry must keep the entropy the first apply kept"
+        );
+        assert!(!harness.module.reset_incomplete());
+        assert!(harness.inner.pending_assignment.is_none());
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// The marker is durable, so capacity→ledger finishes the clear before
+    /// the assign. The retry of that same update does not wipe again.
+    #[tokio::test]
+    async fn capacity_to_ledger_after_a_durable_marker_finishes_the_wipe() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(None);
+        write_synced_entropy(&harness.module);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        harness.module.fail_next_reset_for_test();
+        apply_update(&mut harness, explicit_unassign(&path), 4).await;
+        set_reset_marker(&harness.module);
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+
+        let update = publish_update(&path, hash, miner);
+        apply_update(&mut harness, Arc::clone(&update), 5).await;
+        assert_eq!(
+            chunk_type(&harness.module),
+            Some(ChunkType::Uninitialized),
+            "a durable marker means the wipe already started"
+        );
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert!(!harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert!(harness.inner.pending_assignment.is_none());
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "the ledger is not entropy-packed after the clear"
+        );
+
+        apply_update(&mut harness, update, 5).await;
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert!(!harness.module.reset_incomplete());
+        assert!(harness.inner.pending_assignment.is_none());
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// The packing-params write fails after the flag is settled. The retry
+    /// stores the ledger and still does not wipe.
+    #[tokio::test]
+    async fn capacity_to_ledger_write_error_after_failed_unassign_does_not_arm_a_wipe() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(None);
+        write_synced_entropy(&harness.module);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        harness.module.fail_next_reset_for_test();
+        apply_update(&mut harness, explicit_unassign(&path), 4).await;
+        assert!(harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+
+        let update = publish_update(&path, hash, miner);
+        let _restore = WritableDir(path.clone());
+        set_dir_mode(&path, 0o555);
+        apply_update(&mut harness, Arc::clone(&update), 5).await;
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert!(
+            !harness.module.reset_incomplete(),
+            "a failed ledger write must not leave a flag that a later retry wipes"
+        );
+        assert!(harness.inner.pending_assignment.is_some());
+
+        set_dir_mode(&path, 0o755);
+        apply_update(&mut harness, Arc::clone(&update), 5).await;
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert!(!harness.module.reset_incomplete());
+        assert!(harness.inner.pending_assignment.is_none());
+
+        apply_update(&mut harness, update, 5).await;
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// Open recovery keeps entropy when the reset never wrote its marker.
+    #[test]
+    fn reopen_keeps_entropy_when_no_reset_marker_was_written() {
+        use irys_domain::storage_module::ChunkType;
+
+        let harness = harness(None);
+        write_synced_entropy(&harness.module);
+        harness.module.fail_next_reset_for_test();
+        let err = harness.module.reset().expect_err("injected reset failure");
+        assert!(err.to_string().contains("injected"), "{err}");
+        assert!(harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+
+        let (_tmp, config, path, assignment) = close_for_reopen(harness);
+        let reopened = reopen_module(&config, &path, assignment);
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Entropy),
+            "open does not wipe when the marker is absent"
+        );
+        assert!(!reopened.reset_incomplete());
+        assert!(!reset_marker(&reopened));
+    }
+
+    /// Open recovery finishes a reset that wrote its marker.
+    #[test]
+    fn reopen_wipes_entropy_when_the_reset_marker_is_durable() {
+        use irys_domain::storage_module::ChunkType;
+
+        let harness = harness(None);
+        write_synced_entropy(&harness.module);
+        set_reset_marker(&harness.module);
+        assert!(reset_marker(&harness.module));
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Entropy));
+
+        let (_tmp, config, path, assignment) = close_for_reopen(harness);
+        let reopened = reopen_module(&config, &path, assignment);
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized),
+            "open finishes a reset that wrote its marker"
+        );
+        assert!(!reopened.reset_incomplete());
+        assert!(!reset_marker(&reopened));
+        assert_eq!(
+            reopened.partition_assignment().unwrap().ledger_id,
+            None,
+            "finishing the marker does not assign the ledger"
+        );
     }
 
     /// A queued checksum repair is handed to packing even when the disk lane
