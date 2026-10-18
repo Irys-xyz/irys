@@ -2136,6 +2136,13 @@ impl StorageModule {
             config.consensus.num_chunks_in_partition,
         )?;
 
+        // The file has no chain id. Compare the stored Rocks record before
+        // any wipe. `None` does not bind a partition: the reset clear would
+        // drop one bound here, and a different partition must refuse only
+        // after that clear. MDBX ignores this call.
+        for (index, _partition, packing) in &pack_binds {
+            index.bind_packing_identity(None, packing)?;
+        }
         // Marker first. A crash before it leaves `crc_complete` set on an
         // intact module. `finish_pending_resets` clears the flag again.
         for index in &reset_dbs {
@@ -17325,6 +17332,15 @@ mod tests {
             .copied())
     }
 
+    fn config_with_chain_id(config: &Config, chain_id: u64) -> Config {
+        let mut node = config.node_config.clone();
+        let irys_types::ConsensusOptions::Custom(consensus) = &mut node.consensus else {
+            panic!("test config uses a custom consensus");
+        };
+        consensus.chain_id = chain_id;
+        Config::new(node, config.peer_id())
+    }
+
     fn live_tx_rows(storage: &StorageModule) -> eyre::Result<usize> {
         let offset = PartitionChunkOffset::from(0);
         let (_, submodule) = storage.get_submodule_for_offset(offset)?;
@@ -17434,6 +17450,65 @@ mod tests {
                 "{engine:?}: a finished unassign kept the tx row"
             );
         }
+        Ok(())
+    }
+
+    /// The file has no chain id. A Rocks unassign must compare the stored
+    /// packing record before it wipes. The same chain id still unassigns.
+    #[test]
+    fn rocks_unassign_with_a_different_chain_id_does_not_wipe() -> eyre::Result<()> {
+        let hash = H256::repeat_byte(0x62);
+        let (_tmp, config, sub) =
+            seed_assigned_entropy("refuse_chain", SubmoduleIndexEngine::Rocksdb, hash)?;
+        let other = config_with_chain_id(&config, config.consensus.chain_id + 1);
+        let err = StorageModule::new(&module_info(&sub, None), &other)
+            .expect_err("stored chain id does not match this open");
+        let message = err.to_string();
+        assert!(message.contains("packing identity"), "{message}");
+        assert!(
+            message.contains(&config.consensus.chain_id.to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&other.consensus.chain_id.to_string()),
+            "{message}"
+        );
+        assert_eq!(
+            PackingParams::from_toml(&sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
+            Some(hash)
+        );
+        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Entropy));
+        {
+            let index = open_submodule_index(&sub, &config.node_config.database)?;
+            assert!(!index.reset_in_progress()?);
+            assert_eq!(
+                index
+                    .view(|tx| tx.tx_intervals_in_range(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(0),
+                    ))?
+                    .len(),
+                1
+            );
+        }
+
+        let reopened = StorageModule::new(
+            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
+            &config,
+        )?;
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Entropy),
+            "a bind refusal must not wipe before it returns"
+        );
+        drop(reopened);
+
+        let unassigned = StorageModule::new(&module_info(&sub, None), &config)?;
+        assert_eq!(
+            unassigned.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized),
+            "the same chain id still unassigns"
+        );
         Ok(())
     }
 
