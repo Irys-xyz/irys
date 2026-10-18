@@ -109,6 +109,15 @@ fn write_batch(tx: &mut dyn SubmoduleWrite, from: u64, to: u64) -> eyre::Result<
         )?;
         let start_i32 = i32::try_from(tx_start).map_err(|_| eyre!("prepop offset exceeds i32"))?;
         let chunk_count = tx_end - tx_start + 1;
+        let start = PartitionChunkOffset::from(
+            u32::try_from(tx_start).map_err(|_| eyre!("prepop offset exceeds u32"))?,
+        );
+        let end = PartitionChunkOffset::from(
+            u32::try_from(tx_end).map_err(|_| eyre!("prepop offset exceeds u32"))?,
+        );
+        // The interval creates the unfilled placement. Rocks fills that
+        // placement in this batch, so the data size follows the interval.
+        tx.add_tx_path_hash_to_offset_range(start, end, Some(tx_path_hash))?;
         tx.add_data_root_info(
             data_root,
             &DataRootInfo {
@@ -116,13 +125,6 @@ fn write_batch(tx: &mut dyn SubmoduleWrite, from: u64, to: u64) -> eyre::Result<
                 data_size: chunk_count.saturating_mul(crate::guard::CHUNK_SIZE),
             },
         )?;
-        let start = PartitionChunkOffset::from(
-            u32::try_from(tx_start).map_err(|_| eyre!("prepop offset exceeds u32"))?,
-        );
-        let end = PartitionChunkOffset::from(
-            u32::try_from(tx_end).map_err(|_| eyre!("prepop offset exceeds u32"))?,
-        );
-        tx.add_tx_path_hash_to_offset_range(start, end, Some(tx_path_hash))?;
         let mut chunk = tx_start.max(from);
         while chunk <= tx_end {
             let path_hash_bytes = keyed(b"chunk", chunk);
@@ -186,6 +188,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::Path;
 
+    use irys_database::submodule::RocksTuning;
     use irys_domain::{BenchIndex, StorageModule};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::H256;
@@ -204,6 +207,10 @@ mod tests {
     }
 
     fn open_at(dir: &Path, chunks: u32) -> crate::module::OpenedModule {
+        open_index(dir, chunks, BenchIndex::Mdbx)
+    }
+
+    fn open_index(dir: &Path, chunks: u32, index: BenchIndex) -> crate::module::OpenedModule {
         let root = dir.parent().expect("module dir has a parent");
         fs::create_dir_all(root).unwrap();
         let recall = root.join("recall.dat");
@@ -231,7 +238,7 @@ mod tests {
             durable_headroom_permille: 1000,
             recall_direct_io: false,
             recall_offset_chunks: 0,
-            index: BenchIndex::Mdbx,
+            index,
             index_group_commit: 0,
         })
         .unwrap_or_else(|error| panic!("open {}: {error:#}", dir.display()))
@@ -355,5 +362,31 @@ mod tests {
         assert_eq!(prepopulate(module, &dir, chunks, short).unwrap(), short);
         assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
         assert_eq!(sizes(module, 1), vec![(next, bytes(8))]);
+    }
+
+    #[test]
+    fn rocks_prepopulate_inserts_one_data_size() {
+        // Breaks if the data size is stored before the interval. Rocks fills
+        // one unfilled placement created in this batch, so the first put
+        // errors and the index stays empty. A second pass of the same count
+        // must keep that one size.
+        let tmp = TempDirBuilder::new().prefix("sm-prepop-rocks-").build();
+        let root = tmp.path().join("loadtest");
+        let chunks = u32::try_from(TX_CHUNKS).unwrap();
+        let tuning = RocksTuning::baseline().with_block_cache(64 * 1024 * 1024);
+        let opened = open_index(&root.join("mod"), chunks, BenchIndex::Rocks(tuning));
+        let module = opened.module.as_ref();
+        let dir = root.join("mod");
+        assert_eq!(
+            prepopulate(module, &dir, chunks, TX_CHUNKS)
+                .unwrap_or_else(|error| panic!("rocks prepopulate: {error:#}")),
+            TX_CHUNKS
+        );
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(
+            prepopulate(module, &dir, chunks, TX_CHUNKS).unwrap(),
+            TX_CHUNKS
+        );
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
     }
 }
