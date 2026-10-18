@@ -1789,6 +1789,20 @@ impl StorageModule {
         }
     }
 
+    /// Pack a reread that was blocked on rows a force flush just committed,
+    /// then make that body durable. One pass. A write that lands during the
+    /// pass can block the slot again. An empty queue does not sync again.
+    pub(super) fn sync_queued_after_force(&self) -> eyre::Result<()> {
+        if self.entropy_idle() {
+            return Ok(());
+        }
+        self.drain_entropy_queue();
+        if !self.has_pending_writes() {
+            return Ok(());
+        }
+        self.sync_pending_chunks_inner(true)
+    }
+
     /// Sleep until `epoch` moves past `seen`, or until `deadline`.
     /// Returns true when the deadline passes first. The check and the wait
     /// share the wake lock, so a completion cannot land between them.
@@ -3597,14 +3611,29 @@ impl StorageModule {
                 return;
             };
             let mut error = None;
-            if request.force
-                && let Err(cause) = self.commit_pending_runs(true, None, false)
-            {
-                tracing::error!(
-                    "Couldn't flush packed chunks for storage_module {}: {cause}",
-                    self.id
-                );
-                error = Some(cause.to_string());
+            if request.force {
+                match self.commit_pending_runs(true, None, false) {
+                    Ok(()) => {
+                        // The caller is still waiting. A reread blocked on
+                        // the rows just committed has to be durable before
+                        // this request is marked done. The lane's next pass
+                        // is too late: the caller already saw success.
+                        if let Err(cause) = self.sync_queued_after_force() {
+                            tracing::error!(
+                                "Couldn't flush a queued reread for storage_module {}: {cause}",
+                                self.id
+                            );
+                            error = Some(cause.to_string());
+                        }
+                    }
+                    Err(cause) => {
+                        tracing::error!(
+                            "Couldn't flush packed chunks for storage_module {}: {cause}",
+                            self.id
+                        );
+                        error = Some(cause.to_string());
+                    }
+                }
             }
             if request.persist
                 && let Err(cause) = self.persist_intervals_authoritative(false)
@@ -4157,6 +4186,29 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
         super::super::StorageModule,
     )> {
+        span_fixture_timed(
+            prefix,
+            chunks,
+            max_chunks,
+            hole_chunks,
+            grace_ms,
+            cache_bytes,
+            0,
+        )
+    }
+
+    fn span_fixture_timed(
+        prefix: &str,
+        chunks: u64,
+        max_chunks: u64,
+        hole_chunks: u64,
+        grace_ms: u64,
+        cache_bytes: u64,
+        durable_ms: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        super::super::StorageModule,
+    )> {
         let tmp_dir = irys_testing_utils::utils::TempDirBuilder::new()
             .prefix(prefix)
             .with_tracing()
@@ -4184,7 +4236,7 @@ mod tests {
                 intervals_persist_secs: 0,
                 index_wal_backstop_ms: irys_types::DEFAULT_INDEX_WAL_BACKSTOP_MS,
                 tx_path_derive_threads: irys_types::DEFAULT_TX_PATH_DERIVE_THREADS,
-                min_durable_interval_ms: 0,
+                min_durable_interval_ms: durable_ms,
                 durable_headroom_permille: irys_types::DEFAULT_DURABLE_HEADROOM_PERMILLE,
             },
             base_directory: tmp_dir.path().to_path_buf(),
@@ -5524,6 +5576,161 @@ mod tests {
                 );
             }
         });
+        Ok(())
+    }
+
+    fn chunk_file_byte(
+        module: &super::super::StorageModule,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<u8> {
+        use std::os::unix::fs::FileExt as _;
+        let (file, at, _) = module.locate_io(offset, true)?;
+        let file = module.disk.lock_chunks(&file);
+        let mut buf = [0_u8; 1];
+        file.read_exact_at(&mut buf, at)?;
+        Ok(buf[0])
+    }
+
+    /// Cached pad `0x11`, then an ingress body `0x01`, then entropy `0x22`
+    /// at the same offset. The batch has no waiter, so the slot stays queued
+    /// for a disk read and that read waits on the new entropy.
+    fn queue_blocked_reread(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        super::super::StorageModule,
+        UnpackedChunk,
+    )> {
+        let (tmp, module, chunk) = cache_module(prefix)?;
+        cache_durable_entropy(&module, 0x11)?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&chunk))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        assert_eq!(module.sweep_slot_count_for_test(), 1);
+        Ok((tmp, module, chunk))
+    }
+
+    fn assert_replacement_body_durable(module: &super::super::StorageModule) -> eyre::Result<()> {
+        let offset = PartitionChunkOffset::from(0);
+        let durable = module.is_data_chunk_durable_at(offset);
+        let persisted = module.is_data_chunk_persisted_at(offset);
+        let slots = module.sweep_slot_count_for_test();
+        let pending = pending_head(module);
+        let ahead = module
+            .pending_writes
+            .read()
+            .unwrap()
+            .written_ahead
+            .contains_key(&offset);
+        let byte = chunk_file_byte(module, offset)?;
+        assert!(
+            durable && persisted && slots == 0 && pending.is_none() && !ahead && byte == 0x23,
+            "flush durable={durable} persisted={persisted} slots={slots} pending={pending:?} ahead={ahead} file={byte:#x}"
+        );
+        Ok(())
+    }
+
+    /// The blocking entropy is still in `pending.chunks`. `force_sync` must
+    /// commit it, then read and flush the body, before it returns.
+    #[test]
+    fn force_sync_packs_a_reread_blocked_on_pending_entropy() -> eyre::Result<()> {
+        let (_tmp, module, _chunk) = queue_blocked_reread("force_blocked_pending")?;
+        module.force_sync_pending_chunks()?;
+        assert_replacement_body_durable(&module)
+    }
+
+    /// Same body, after the blocking entropy has been pwritten and parked.
+    /// The reread stays queued until that durable point.
+    #[test]
+    fn force_sync_packs_a_reread_blocked_on_written_ahead() -> eyre::Result<()> {
+        let (tmp, module) = span_fixture_timed("force_blocked_ahead", 4, 4, 0, 0, 32 * 4, 60_000)?;
+        let chunk = index_unpacked_byte(&module)?;
+        cache_durable_entropy(&module, 0x11)?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&chunk))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x22; 32], super::super::ChunkType::Entropy));
+        module.commit_pending_runs(false, Some(1), false)?;
+        assert!(
+            module
+                .pending_writes
+                .read()
+                .unwrap()
+                .written_ahead
+                .contains_key(&offset),
+            "the blocking entropy was not parked"
+        );
+        assert!(
+            pending_head(&module).is_none(),
+            "parked entropy is still in pending.chunks"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 1);
+        module.force_sync_pending_chunks()?;
+        assert_replacement_body_durable(&module)?;
+        drop(module);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// Lane shutdown's last flush is the crash window. The body has to be
+    /// on disk when the lane thread returns, before `StorageModule::drop`.
+    #[test]
+    fn finish_disk_lane_packs_a_blocked_reread() -> eyre::Result<()> {
+        let (_tmp, module, _chunk) = queue_blocked_reread("finish_blocked")?;
+        module.finish_disk_lane();
+        assert_replacement_body_durable(&module)
+    }
+
+    /// The lane signals the force caller when the handoff finishes. The
+    /// reread has to be durable at that return, not after a later pass.
+    #[test]
+    fn lane_force_sync_finishes_a_blocked_reread_before_return() -> eyre::Result<()> {
+        let (_tmp, module, _chunk) = queue_blocked_reread("lane_force_blocked")?;
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        module.force_sync_pending_chunks()?;
+        assert_replacement_body_durable(&module)?;
+        drop(lane);
+        Ok(())
+    }
+
+    /// A cached pad with no later write at its offset still packs and the
+    /// force flush still makes that body durable.
+    #[test]
+    fn force_sync_still_durably_packs_an_unblocked_cached_pad() -> eyre::Result<()> {
+        let (_tmp, module, chunk) = cache_module("force_unblocked")?;
+        cache_durable_entropy(&module, 0x11)?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&chunk))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        module.force_sync_pending_chunks()?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.is_data_chunk_durable_at(offset));
+        assert!(module.is_data_chunk_persisted_at(offset));
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        assert!(pending_head(&module).is_none());
+        assert_eq!(chunk_file_byte(&module, offset)?, 0x10);
         Ok(())
     }
 }

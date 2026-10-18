@@ -3337,7 +3337,12 @@ impl StorageModule {
         // Deposited bodies are not in the packed map yet. Pack them first so
         // the flush below persists the bytes the caller asked to finish.
         self.drain_entropy_queue();
-        self.sync_pending_chunks_inner(true)
+        self.sync_pending_chunks_inner(true)?;
+        // A reread blocked on the rows just committed is still only queued.
+        // The drain above returned without reading it. Pack that body and
+        // flush it before this call reports the module durable. One pass: a
+        // write that lands during the sync can block the slot again.
+        self.sync_queued_after_force()
     }
 
     fn sync_pending_chunks_inner(&self, force: bool) -> eyre::Result<()> {
