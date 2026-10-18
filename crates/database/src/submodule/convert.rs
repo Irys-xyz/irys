@@ -5840,10 +5840,10 @@ mod tests {
         Ok(())
     }
 
-    /// Another process can seal in the gap after the schema read. The delete
-    /// must not remove a schema that process committed. An open that fails
-    /// because this process still holds the environment leaves an incomplete
-    /// directory, and that directory is still replaced.
+    /// The environment stays open through the delete. Another process cannot
+    /// seal in that window. The child must fail to open, and the incomplete
+    /// directory is still replaced. A child that commits `SUBMODULE_SCHEMA`
+    /// is not a passing outcome: the schema re-read already covers that.
     #[test]
     fn replace_incomplete_blocks_another_process_until_the_mdbx_directory_is_removed()
     -> eyre::Result<()> {
@@ -5879,26 +5879,25 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        if output.status.success() {
-            let err = prepared.unwrap_err();
-            assert!(format!("{err:#}").contains("completed"), "{err:#}");
-            assert_eq!(fs::read(path.join("KEEP"))?, b"keep");
-            assert!(path.join("mdbx.dat").is_file());
-        } else {
-            let lower = text.to_ascii_lowercase();
-            assert!(
-                lower.contains("busy")
-                    || lower.contains("another write transaction")
-                    || lower.contains("in use")
-                    || lower.contains("exclusive")
-                    || lower.contains("lock"),
-                "code={:?} text={text}",
-                output.status.code()
-            );
-            prepared?;
-            assert!(!path.join("KEEP").is_file());
-            assert!(path.join("CONVERTING").is_file());
-        }
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !output.status.success(),
+            "sealer opened the index while replace held it: {text}"
+        );
+        assert!(
+            lower.contains("busy")
+                || lower.contains("another write transaction")
+                || lower.contains("in use")
+                || lower.contains("exclusive")
+                || lower.contains("lock"),
+            "code={:?} text={text}",
+            output.status.code()
+        );
+        prepared?;
+        assert!(!path.join("KEEP").is_file());
+        assert!(!path.join("mdbx.dat").is_file());
+        assert!(!path.join("lock").is_file());
+        assert!(path.join("CONVERTING").is_file());
         Ok(())
     }
 
