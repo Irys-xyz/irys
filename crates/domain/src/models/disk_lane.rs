@@ -3407,7 +3407,10 @@ impl StorageModule {
         if !self.disk.disk_available() {
             return "inflight_budget";
         }
-        if self.disk.queue().disk_len() > 0 {
+        // A queued disk slot that is waiting on a write is not a read.
+        // `None` means no span is inside the read grace. Parked bytes wait
+        // on the durable point, and that sleep is not read grace.
+        if self.read_grace_remaining().is_some() {
             return "read_grace";
         }
         if self.durable_point_remaining().is_some() {
@@ -5731,6 +5734,75 @@ mod tests {
         assert_eq!(module.sweep_slot_count_for_test(), 0);
         assert!(pending_head(&module).is_none());
         assert_eq!(chunk_file_byte(&module, offset)?, 0x10);
+        Ok(())
+    }
+
+    /// Parked entropy blocks the only disk slot. No read is due. The lane
+    /// sleeps until the durable point, so that wait is not read grace.
+    #[test]
+    fn blocked_slot_idle_reason_is_durable_point() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture_timed("idle_blocked", 4, 4, 0, 0, 0, 60_000)?;
+        let offset = PartitionChunkOffset::from(0);
+        {
+            let mut pending = module.pending_writes.write().unwrap();
+            pending.written_ahead.insert(
+                offset,
+                super::super::WrittenAhead {
+                    bytes: vec![0x22; 32],
+                    chunk_type: super::super::ChunkType::Entropy,
+                    priority: super::WritePriority::Packing,
+                    queued_at: Instant::now(),
+                    pwrite_at: Some(Instant::now()),
+                },
+            );
+        }
+        insert_slots(&module, &[0], Instant::now());
+        *module.last_durable_at.lock().unwrap() = Some(Instant::now());
+        assert!(
+            module.read_grace_remaining().is_none(),
+            "a blocked slot is not a due read"
+        );
+        let remain = module
+            .durable_point_remaining()
+            .expect("parked bytes wait on the durable point");
+        assert!(
+            !remain.is_zero(),
+            "the durable point is already due: {remain:?}"
+        );
+        assert_eq!(
+            module.disk_idle_reason(),
+            "durable_point",
+            "idle reason {} while read grace is None",
+            module.disk_idle_reason()
+        );
+        assert_eq!(module.lane_sleep_reason(), Some("durable_point"));
+        Ok(())
+    }
+
+    /// A young short span is a real read wait. The label stays `read_grace`.
+    #[test]
+    fn young_span_idle_reason_stays_read_grace() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture_grace("idle_young", 4, 4, 0, 1_000, 0)?;
+        insert_slots(&module, &[0], Instant::now());
+        let remain = module.read_grace_remaining().expect("the span is young");
+        assert!(!remain.is_zero(), "the young span is already due");
+        assert_eq!(module.disk_idle_reason(), "read_grace");
+        assert_eq!(module.lane_sleep_reason(), Some("read_grace"));
+        // Drop drains the queue. Leave it empty so that drain does not wait
+        // out this span's grace.
+        module.fail_queued_sweeps();
+        Ok(())
+    }
+
+    /// A span whose grace has elapsed is due. That is still a read, not a
+    /// durable-point wait.
+    #[test]
+    fn due_read_idle_reason_stays_read_grace() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture("idle_due", 4, 4, 0)?;
+        insert_slots(&module, &[0], Instant::now());
+        assert_eq!(module.read_grace_remaining(), Some(Duration::ZERO));
+        assert_eq!(module.disk_idle_reason(), "read_grace");
+        assert_eq!(module.lane_sleep_reason(), Some("read_grace"));
         Ok(())
     }
 }
