@@ -1713,6 +1713,31 @@ fn submodule_reserve_len(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static SUBMODULE_OPEN_ORDER: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn note_submodule_open(step: &'static str) {
+    #[cfg(test)]
+    SUBMODULE_OPEN_ORDER.with(|order| order.borrow_mut().push(step));
+    #[cfg(not(test))]
+    {
+        let _ = step;
+    }
+}
+
+#[cfg(test)]
+fn clear_submodule_open_order() {
+    SUBMODULE_OPEN_ORDER.with(|order| order.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn submodule_open_order() -> Vec<&'static str> {
+    SUBMODULE_OPEN_ORDER.with(|order| order.borrow().clone())
+}
+
 /// A leftover sidecar is not the checksum. RocksDB v1 stores it in the offset row.
 fn forget_chunks_crc(dir: &Path) {
     let path = dir.join("chunks.crc");
@@ -1861,14 +1886,10 @@ impl StorageModule {
                 #[cfg(feature = "bench")]
                 split.as_ref(),
             )?;
-            let opened = Self::open_submodule_file(
-                &sub_base_path,
-                full_len,
-                config.node_config.storage.recall_direct_io,
-                #[cfg(feature = "bench")]
-                split.as_ref(),
-            )?;
-            let chunks_file = opened.file;
+            // Migrate the index before reserving the partition. A v1 index
+            // keeps its rows until the v2 copy commits, and the reserve can
+            // take the free space that copy needs. The index does not read
+            // the chunks file.
             let submodule_db = Self::open_submodule_index(
                 &sub_base_path,
                 config,
@@ -1877,6 +1898,14 @@ impl StorageModule {
                 #[cfg(feature = "bench")]
                 index,
             )?;
+            let opened = Self::open_submodule_file(
+                &sub_base_path,
+                full_len,
+                config.node_config.storage.recall_direct_io,
+                #[cfg(feature = "bench")]
+                split.as_ref(),
+            )?;
+            let chunks_file = opened.file;
 
             let params_path = sub_base_path.join(PACKING_PARAMS_FILE_NAME);
             // if we don't have an existing packing params file, write it
@@ -2165,6 +2194,7 @@ impl StorageModule {
         #[cfg(feature = "bench")] split: bool,
         #[cfg(feature = "bench")] index: Option<BenchIndex>,
     ) -> eyre::Result<SubmoduleIndex> {
+        note_submodule_open("index");
         #[cfg(feature = "bench")]
         if split {
             let Some(index) = index else {
@@ -2216,6 +2246,7 @@ impl StorageModule {
         recall_direct_io: bool,
         #[cfg(feature = "bench")] split: Option<&Arc<SplitBacking>>,
     ) -> eyre::Result<OpenedChunkFile> {
+        note_submodule_open("file");
         #[cfg(feature = "bench")]
         if let Some(split) = split {
             let chunks_path = sub_base_path.join("chunks.dat");
@@ -9237,6 +9268,32 @@ mod tests {
         let _sync = storage.lock_sync();
         let read = storage.pread_settled_chunk(offset)?;
         eyre::ensure!(read == data, "data confirm did not read the write file");
+        Ok(())
+    }
+
+    /// The index migration needs a second copy of the index. Reserving the
+    /// partition first can fill the disk before that copy is written.
+    #[test]
+    fn index_opens_before_the_chunks_file_is_reserved() -> eyre::Result<()> {
+        clear_submodule_open_order();
+        let tmp = TempDirBuilder::new().prefix("open_order").build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let info = one_span(3, "sub", None);
+        let storage = StorageModule::new(&info, &config)?;
+        drop(storage);
+        let order = submodule_open_order();
+        let index_at = order
+            .iter()
+            .position(|step| *step == "index")
+            .ok_or_else(|| eyre::eyre!("index open was not recorded: {order:?}"))?;
+        let file_at = order
+            .iter()
+            .position(|step| *step == "file")
+            .ok_or_else(|| eyre::eyre!("chunks file open was not recorded: {order:?}"))?;
+        eyre::ensure!(
+            index_at < file_at,
+            "chunks file was reserved before the index opened: {order:?}"
+        );
         Ok(())
     }
 
