@@ -109,20 +109,11 @@ pub(crate) fn entropy_target_ranges(
     if assignment.partition_hash != packed_for {
         return Vec::new();
     }
-    let start = range.0.start().0;
-    let end = range.0.end().0;
-    let mut spans = Vec::new();
-    for interval in storage_module.get_intervals(irys_domain::ChunkType::Uninitialized) {
-        let span_start = interval.start().0.max(start);
-        let span_end = interval.end().0.min(end);
-        if span_start <= span_end {
-            spans.push(PartitionChunkRange(partition_chunk_offset_ii!(
-                span_start, span_end
-            )));
-        }
-    }
-    spans.sort_by_key(|span| span.0.start().0);
-    spans
+    storage_module
+        .uninitialized_spans_overlapping(range.0)
+        .into_iter()
+        .map(PartitionChunkRange)
+        .collect()
 }
 
 /// Wake the disk lane, then wait until the module has room for more pending
@@ -196,8 +187,7 @@ pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest};
 use dashmap::DashMap;
 use irys_packing::{PACKING_TYPE, PackingType};
 use irys_types::{
-    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle, ii,
-    partition_chunk_offset_ii,
+    Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange, TokioServiceHandle,
 };
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -646,15 +636,13 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
         Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
-        StorageSyncConfig,
+        StorageSyncConfig, ii,
         partition::{PartitionAssignment, PartitionHash},
     };
     use tokio::sync::Semaphore;
 
     #[test_log::test(tokio::test)]
     async fn panicked_pack_worker_requeues_the_range() -> eyre::Result<()> {
-        use irys_types::ii;
-
         // A chunk smaller than the entropy hash width makes the CPU worker
         // panic inside `spawn_blocking`. The join must fail the pack, and the
         // service must put the range back.
@@ -1609,6 +1597,67 @@ mod tests {
 
             prop_assert_eq!(is_idle, expected_idle);
         }
+    }
+
+    /// A one-offset retry must not walk every interval fragment. Pending
+    /// data inside that offset is not a pack target. A fresh module still
+    /// returns its uninitialized span.
+    #[test]
+    fn entropy_target_ranges_reads_only_the_overlapping_fragments() -> eyre::Result<()> {
+        const CHUNKS: u64 = 64;
+        let tmp_dir = TempDirBuilder::new().prefix("entropy_range_scan").build();
+        let config = create_test_config_with_chunks(&tmp_dir, 1, CHUNKS);
+        let module = create_test_storage_module(&config, &tmp_dir, 0)?;
+        let hash = module
+            .partition_assignment()
+            .expect("assigned")
+            .partition_hash;
+        let full = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 63));
+        let all = entropy_target_ranges(&module, hash, full);
+        assert_eq!(all.len(), 1, "a fresh module is one uninitialized span");
+        assert_eq!(all[0].0.start().0, 0);
+        assert_eq!(all[0].0.end().0, 63);
+
+        for offset in (0..CHUNKS as u32).filter(|offset| offset % 2 == 0) {
+            assert!(
+                module.write_chunk(
+                    PartitionChunkOffset(offset),
+                    vec![0xE1_u8; 32],
+                    ChunkType::Entropy,
+                ),
+                "entropy at {offset}"
+            );
+        }
+        module.force_sync_pending_chunks()?;
+        assert_eq!(
+            module.get_intervals(ChunkType::Entropy).len(),
+            32,
+            "even offsets did not become separate entropy spans"
+        );
+
+        let one = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(1, 1));
+        let before = module.interval_visit_count();
+        let targets = entropy_target_ranges(&module, hash, one);
+        let visits = module.interval_visit_count() - before;
+        assert_eq!(targets.len(), 1, "offset 1 stays uninitialized");
+        assert_eq!(targets[0].0.start().0, 1);
+        assert_eq!(targets[0].0.end().0, 1);
+        assert!(visits <= 2, "one-offset query visited {visits} intervals");
+
+        assert!(
+            module.write_chunk(PartitionChunkOffset(1), vec![0xD4_u8; 32], ChunkType::Data,),
+            "pending data"
+        );
+        let pending = entropy_target_ranges(&module, hash, one);
+        assert!(
+            pending.is_empty(),
+            "pending data inside the range is still a pack target"
+        );
+        let neighbor = PartitionChunkRange(irys_types::partition_chunk_offset_ii!(3, 3));
+        let neighbor_targets = entropy_target_ranges(&module, hash, neighbor);
+        assert_eq!(neighbor_targets.len(), 1);
+        assert_eq!(neighbor_targets[0].0.start().0, 3);
+        Ok(())
     }
 
     fn create_test_config(

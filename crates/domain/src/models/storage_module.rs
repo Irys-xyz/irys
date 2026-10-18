@@ -797,6 +797,10 @@ pub struct StorageModule {
     /// is one view, shared by every offset in that slice.
     #[cfg(any(test, feature = "test-utils"))]
     index_views: AtomicU64,
+    /// Intervals examined by a label scan. A range query must not walk the
+    /// fragments outside that range.
+    #[cfg(any(test, feature = "test-utils"))]
+    interval_visits: AtomicU64,
     /// Serializes flushes so two callers cannot claim and write the same
     /// pending batch concurrently. Pending entries remain present until the
     /// data fsync and interval commit both succeed, and therefore serve as the
@@ -2106,6 +2110,8 @@ impl StorageModule {
             entropy_read_seq: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-utils"))]
             index_views: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-utils"))]
+            interval_visits: AtomicU64::new(0),
             sync_in_progress: Mutex::new(()),
             last_durable_at: Mutex::new(None),
             headroom_open: AtomicBool::new(true),
@@ -2678,6 +2684,17 @@ impl StorageModule {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn index_view_count(&self) -> u64 {
         self.index_views.load(Ordering::SeqCst)
+    }
+
+    /// Intervals a label scan has examined.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn interval_visit_count(&self) -> u64 {
+        self.interval_visits.load(Ordering::SeqCst)
+    }
+
+    fn note_interval_visit(&self) {
+        #[cfg(any(test, feature = "test-utils"))]
+        self.interval_visits.fetch_add(1, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -5943,7 +5960,7 @@ impl StorageModule {
     /// this for every module.
     pub fn get_intervals(&self, chunk_type: ChunkType) -> Vec<Interval<PartitionChunkOffset>> {
         let intervals = self.intervals.read().unwrap();
-        let mut spans = Self::intervals_matching(&intervals, chunk_type);
+        let mut spans = self.intervals_matching(&intervals, chunk_type);
         drop(intervals);
         if chunk_type == ChunkType::Interrupted {
             return spans;
@@ -5989,13 +6006,62 @@ impl StorageModule {
         spans
     }
 
+    /// Uninitialized spans that overlap `range`, clipped to it.
+    ///
+    /// The stored map is walked only for that overlap. Pending is applied
+    /// after the interval lock drops: a queued body is not uninitialized.
+    pub fn uninitialized_spans_overlapping(
+        &self,
+        range: Interval<PartitionChunkOffset>,
+    ) -> Vec<Interval<PartitionChunkOffset>> {
+        let intervals = self.intervals.read().unwrap();
+        let mut spans: Vec<Interval<PartitionChunkOffset>> = Vec::new();
+        for (interval, stored) in intervals.overlapping(range) {
+            self.note_interval_visit();
+            if *stored != ChunkType::Uninitialized {
+                continue;
+            }
+            let start = PartitionChunkOffset(interval.start().0.max(range.start().0));
+            let end = PartitionChunkOffset(interval.end().0.min(range.end().0));
+            if start.0 > end.0 {
+                continue;
+            }
+            if let Some(last) = spans.last_mut()
+                && Self::spans_touch(last.end(), start)
+            {
+                let merged_start = last.start();
+                let merged_end = PartitionChunkOffset(last.end().0.max(end.0));
+                *last = ii(merged_start, merged_end);
+            } else {
+                spans.push(ii(start, end));
+            }
+        }
+        drop(intervals);
+
+        let pending = self
+            .pending_writes
+            .read()
+            .expect("to be able to read pending writes data");
+        let range_start = range.start().0;
+        let range_end = range.end().0;
+        for offset in pending.keys() {
+            if offset.0 < range_start || offset.0 > range_end {
+                continue;
+            }
+            Self::cut_interval_point(&mut spans, *offset);
+        }
+        spans
+    }
+
     /// Matching intervals, ascending. Touching equals become one span.
     fn intervals_matching(
+        &self,
         intervals: &StorageIntervals,
         chunk_type: ChunkType,
     ) -> Vec<Interval<PartitionChunkOffset>> {
         let mut spans: Vec<Interval<PartitionChunkOffset>> = Vec::new();
         for (interval, stored) in intervals.iter() {
+            self.note_interval_visit();
             if *stored != chunk_type {
                 continue;
             }
