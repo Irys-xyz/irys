@@ -124,19 +124,13 @@ fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
     let point = PartitionChunkOffset::from(cursor);
     let (stored_data, inclusive_end) = {
         let guard = module.intervals().read().expect("intervals lock");
-        // One stored run. `iter` counts every run, so a fragment walk shows
-        // up in the test counter.
-        let map = SpanMap {
-            inner: &*guard,
-            #[cfg(test)]
-            count_runs: |inner| inner.iter().count() as u64,
-        };
-        map.read(point, |inner, point| {
-            match inner.get_key_value_at_point(point) {
-                Ok((interval, kind)) => (*kind == ChunkType::Data, interval.end().0),
-                Err(gap) => (false, gap.end().0),
-            }
-        })
+        // One increment per point query. A walk inside the query is not counted.
+        #[cfg(test)]
+        note_span_intervals(1);
+        match guard.get_key_value_at_point(point) {
+            Ok((interval, kind)) => (*kind == ChunkType::Data, interval.end().0),
+            Err(gap) => (false, gap.end().0),
+        }
     };
     if stored_data {
         return (true, step_end(inclusive_end, cursor, end));
@@ -145,46 +139,6 @@ fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
         return (true, cursor.saturating_add(1).min(end));
     }
     (false, step_end(inclusive_end, cursor, end))
-}
-
-struct SpanMap<'a, T> {
-    inner: &'a T,
-    /// Full-run count. Read only by [`SpanMap::iter`].
-    #[cfg(test)]
-    #[expect(dead_code)]
-    count_runs: fn(&T) -> u64,
-}
-
-impl<'a, T> SpanMap<'a, T> {
-    fn read(
-        &self,
-        point: PartitionChunkOffset,
-        read_point: impl FnOnce(&T, PartitionChunkOffset) -> (bool, u32),
-    ) -> (bool, u32) {
-        #[cfg(test)]
-        note_span_intervals(1);
-        read_point(self.inner, point)
-    }
-
-    /// Every stored run. A seek that calls this grows with the fragment count.
-    #[cfg(test)]
-    #[expect(dead_code)]
-    fn iter(&self) -> SpanRunCount {
-        let n = (self.count_runs)(self.inner);
-        note_span_intervals(n);
-        SpanRunCount(n)
-    }
-}
-
-#[cfg(test)]
-struct SpanRunCount(u64);
-
-#[cfg(test)]
-impl SpanRunCount {
-    #[expect(dead_code)]
-    fn count(self) -> u64 {
-        self.0
-    }
 }
 
 #[cfg(test)]
