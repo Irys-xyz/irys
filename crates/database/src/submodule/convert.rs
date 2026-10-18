@@ -952,9 +952,16 @@ where
     copy_rows(
         &mut read,
         |batch| {
+            // One read transaction for the batch. A per-row view is one
+            // transaction per chunk on a full partition.
+            let covered = src.view(|tx| {
+                batch
+                    .iter()
+                    .map(|(offset, _)| Ok(tx.tx_interval_at(*offset)?.is_some()))
+                    .collect::<eyre::Result<Vec<_>>>()
+            })?;
             let mut kept = Vec::new();
-            for (offset, value) in batch {
-                let covered = src.view(|tx| tx.tx_interval_at(offset))?.is_some();
+            for ((offset, value), covered) in batch.into_iter().zip(covered) {
                 if !skip.keep(offset.0, covered) {
                     continue;
                 }
@@ -1291,10 +1298,21 @@ fn prepare_v2_placement<S: SubmoduleStore>(
     start: PartitionChunkOffset,
     interval: &TxPathInterval,
 ) -> eyre::Result<PreparedRun> {
-    let stored = src
-        .view(|tx| tx.get_full_tx_path(interval.tx_path_hash))?
+    // The binding names the data root the infos belong to. Derive checks that
+    // root before the infos are used, so the three reads share one view.
+    // A missing binding does not know the root until derive, and reads infos then.
+    let (stored, binding, mut infos) = src.view(|tx| {
+        let stored = tx.get_full_tx_path(interval.tx_path_hash)?;
+        let binding = tx.get_tx_leaf_binding(interval.tx_path_hash)?;
+        let infos = match &binding {
+            Some(binding) => tx.get_data_root_infos_for_data_root(binding.data_root)?,
+            None => None,
+        };
+        Ok((stored, binding, infos))
+    })?;
+    let stored = stored
         .ok_or_else(|| eyre::eyre!("partition offset {} has no stored tx path", start.0))?;
-    let binding = src.view(|tx| tx.get_tx_leaf_binding(interval.tx_path_hash))?;
+    let bound_root = binding.as_ref().map(|binding| binding.data_root);
     split_stored_interval(
         db,
         cache,
@@ -1307,6 +1325,9 @@ fn prepare_v2_placement<S: SubmoduleStore>(
             binding,
         },
         |root| {
+            if bound_root == Some(root) {
+                return Ok(infos.take().map(|infos| infos.0).unwrap_or_default());
+            }
             Ok(src
                 .view(|tx| tx.get_data_root_infos_for_data_root(root))?
                 .map(|infos| infos.0)
@@ -4423,7 +4444,9 @@ mod tests {
     use reth_db::mdbx::DatabaseArguments;
     use reth_db::{DatabaseEnv, DatabaseEnvKind};
 
-    use super::super::store::{MdbxSubmoduleStore, SubmoduleStore};
+    use super::super::store::{
+        MdbxSubmoduleStore, SubmoduleStore, mdbx_submodule_views, reset_mdbx_submodule_views,
+    };
     use super::super::tables::{
         ChunkPathHashes, DataRootInfo, DataRootInfos, PackedOffsetRow, PendingBodyMigration,
         SUBMODULE_SCHEMA_ROCKS_V1, TxLeafBinding,
@@ -4781,6 +4804,80 @@ mod tests {
         assert!(!stats.reset_marker);
         assert!(!stats.migrated_v1);
         assert!(!stats.source_v1);
+    }
+
+    /// Coverage of one row batch is one source view. One interval reads its tx
+    /// path, leaf binding, and data-root infos in one view. A one-row batch is
+    /// one coverage view per row, and the rows are still copied.
+    #[test]
+    fn mdbx_to_rocks_reads_coverage_and_placement_in_batch_views() -> eyre::Result<()> {
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            options,
+        } = populated("convert-v2-batch-views")?;
+        {
+            let store = MdbxSubmoduleStore::open(&mdbx, testing_args()?)?;
+            store.update(|tx| {
+                tx.add_full_data_path(PartitionChunkOffset(4), indexed_data_leaf(9))
+            })?;
+        }
+        let mut dry = options.clone();
+        dry.dry_run = true;
+        reset_mdbx_submodule_views();
+        let preview = convert_mdbx_to_rocks(&mdbx, &rocks, &dry)?;
+        assert_eq!(preview.intervals, 2, "{preview:?}");
+        assert_eq!(preview.data_paths, 2, "{preview:?}");
+        assert_eq!(preview.pending, 1, "{preview:?}");
+        assert_eq!(preview.skipped_orphans, 1, "{preview:?}");
+        assert_eq!(
+            mdbx_submodule_views(),
+            4,
+            "two intervals, one data-path batch, and one pending batch; got {}",
+            mdbx_submodule_views()
+        );
+
+        reset_mdbx_submodule_views();
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.data_paths, 2, "{stats:?}");
+        assert_eq!(stats.pending, 1, "{stats:?}");
+        assert_eq!(stats.skipped_orphans, 1, "{stats:?}");
+        assert_eq!(mdbx_submodule_views(), 4, "{stats:?}");
+        let opened = RocksSubmoduleStore::open(&rocks)?;
+        assert!(
+            opened
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset(0)))?
+                .is_some()
+        );
+        assert!(
+            opened
+                .view(|tx| tx.get_data_path_by_offset(PartitionChunkOffset(4)))?
+                .is_none(),
+            "an offset outside every interval is not copied"
+        );
+
+        let Populated {
+            root: _root,
+            consensus: _,
+            mdbx,
+            rocks,
+            mut options,
+        } = populated("convert-v2-batch-views-one")?;
+        options.batch_rows = 1;
+        reset_mdbx_submodule_views();
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.intervals, 2, "{stats:?}");
+        assert_eq!(stats.data_paths, 2, "{stats:?}");
+        assert_eq!(stats.pending, 1, "{stats:?}");
+        assert_eq!(stats.skipped_orphans, 0, "{stats:?}");
+        assert_eq!(
+            mdbx_submodule_views(),
+            5,
+            "a batch of one is one coverage view per row, and each interval is one view"
+        );
+        Ok(())
     }
 
     /// A sealed conversion may leave a header-sized log. It must not leave a

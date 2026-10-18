@@ -1012,6 +1012,28 @@ impl_mdbx_write! {
     clear() -> eyre::Result<()> = clear_submodule_database;
 }
 
+#[cfg(test)]
+thread_local! {
+    static MDBX_SUBMODULE_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_mdbx_submodule_view() {
+    #[cfg(test)]
+    MDBX_SUBMODULE_VIEWS.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
+/// Read transactions opened by [`MdbxSubmoduleStore::view`] since the reset.
+#[cfg(all(test, feature = "rocksdb"))]
+pub(super) fn reset_mdbx_submodule_views() {
+    MDBX_SUBMODULE_VIEWS.with(|cell| cell.set(0));
+}
+
+/// Read transactions opened by [`MdbxSubmoduleStore::view`] since the reset.
+#[cfg(all(test, feature = "rocksdb"))]
+pub(super) fn mdbx_submodule_views() -> usize {
+    MDBX_SUBMODULE_VIEWS.with(std::cell::Cell::get)
+}
+
 impl SubmoduleStore for MdbxSubmoduleStore {
     fn view<R>(
         &self,
@@ -1019,6 +1041,7 @@ impl SubmoduleStore for MdbxSubmoduleStore {
     ) -> eyre::Result<R> {
         // `Database::view` returns the closure value. The `?` turns an open
         // failure into `eyre` and leaves the closure's own `Result` in place.
+        note_mdbx_submodule_view();
         self.env.view(|tx| {
             let mut read = MdbxRead { tx };
             f(&mut read)
