@@ -3192,10 +3192,7 @@ impl StorageModule {
     /// store an assignment: the marker stays until that store succeeds, so a
     /// failed store leaves the wipe unfinished and a later matching assignment
     /// can pack it.
-    fn wipe_for_reset(
-        &self,
-        drop_marker: bool,
-    ) -> eyre::Result<Interval<PartitionChunkOffset>> {
+    fn wipe_for_reset(&self, drop_marker: bool) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let _sync_guard = self.lock_sync();
         #[cfg(any(test, feature = "test-utils"))]
         if self.reset_fail_next.swap(false, Ordering::SeqCst) {
@@ -15413,7 +15410,8 @@ mod tests {
             storage.sync_pending_chunks()?;
         }
         let signer = IrysSigner::random_signer(&storage.config.consensus);
-        let tx = signer.sign_transaction(signer.create_transaction(vec![0x5A; 32], H256::zero())?)?;
+        let tx =
+            signer.sign_transaction(signer.create_transaction(vec![0x5A; 32], H256::zero())?)?;
         let unpacked = tx.data_chunks()?;
         let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
         storage.index_transaction_data(
@@ -17103,10 +17101,7 @@ mod tests {
             &short,
         )
         .expect_err("the span does not cover the partition");
-        assert!(
-            err.to_string().contains("Invalid storage module"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("Invalid storage module"), "{err}");
         assert_eq!(
             fs::read(&params_path)?,
             before,
