@@ -2,10 +2,10 @@
 //!
 //! Keys are `sha256("irys-sm-bench-prepop-v1" || index)`. One tx path covers 32
 //! chunk rows. Puts are idempotent. The counter in `bench-prepop.json` advances
-//! only after a commit. A count that ends inside a tx is final: a later larger
-//! count is refused, so one data root keeps one data size. No
-//! `PendingBodyMigrationsByOffset` rows are written: those are a work backlog,
-//! not index bulk.
+//! only after a commit. One data root keeps one data size: a count that ends
+//! inside a tx is final, and a batch that would write a different size for a
+//! stored root is refused. No `PendingBodyMigrationsByOffset` rows are written:
+//! those are a work backlog, not index bulk.
 
 use std::fs::{self, File};
 use std::io::Write as _;
@@ -74,17 +74,16 @@ pub(crate) fn prepopulate(
                 ));
             }
         }
-        // A crash can commit the short tail before the counter rename. The
-        // counter then names this tx start, or is missing. A stored short
-        // size is terminal unless this count ends on that same size.
-        if let Some(short_end) = stored_short_end(module, done, batch_end)?
-            && target != short_end
-        {
+        // A crash can commit rows before the counter rename. The counter then
+        // names an earlier tx, or is missing. Replay a stored size only when
+        // this batch would write that same size. A prefix of a full tx, and
+        // a larger size on a short tx, both store a second size.
+        let from = done - (done % TX_CHUNKS);
+        if let Some(tx_start) = stored_size_conflict(module, from, batch_end)? {
             return Err(eyre!(
-                "refusing to grow --prepopulate-index from {done} to {target}: a stored short data size ends at {short_end}, and a larger count would store a second data size for that data root"
+                "refusing to write --prepopulate-index {from}..{batch_end} toward {target}: a stored data size for the tx at {tx_start} differs from the size this batch would write, and the put would store a second data size for that data root"
             ));
         }
-        let from = done - (done % TX_CHUNKS);
         submodule.db.update(|tx| write_batch(tx, from, batch_end))?;
         done = batch_end;
         write_state(&path, done)?;
@@ -200,34 +199,27 @@ fn write_state(path: &Path, done: u64) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Shortest stored data size in `[from, to)` that does not fill its tx.
+/// `Some(tx_start)` when a stored size at that tx differs from the size
+/// [`write_batch`] would write for `[from, to)`.
 ///
-/// `Some(end)` is the chunk count where that tx stops. A full tx is not
-/// terminal: replaying it writes the same size. The smallest short size wins
-/// when one root has more than one.
-fn stored_short_end(module: &StorageModule, from: u64, to: u64) -> eyre::Result<Option<u64>> {
-    let full = TX_CHUNKS.saturating_mul(crate::guard::CHUNK_SIZE);
-    let mut tx_at = from - (from % TX_CHUNKS);
-    while tx_at < to {
-        let root = H256::from(keyed(b"tx", tx_at / TX_CHUNKS));
+/// An equal size is a replay and is not a conflict. A missing root is not a
+/// conflict. Infos at another start belong to a different placement.
+fn stored_size_conflict(module: &StorageModule, from: u64, to: u64) -> eyre::Result<Option<u64>> {
+    let mut offset = from;
+    while offset < to {
+        let tx_index = offset / TX_CHUNKS;
+        let tx_start = tx_index * TX_CHUNKS;
+        let tx_end = tx_start.saturating_add(TX_CHUNKS - 1).min(to - 1);
+        let written = (tx_end - tx_start + 1).saturating_mul(crate::guard::CHUNK_SIZE);
+        let root = H256::from(keyed(b"tx", tx_index));
         let infos = module.collect_data_root_infos(root)?;
-        let start = i32::try_from(tx_at).map_err(|_| eyre!("prepop offset exceeds i32"))?;
-        let mut short_end: Option<u64> = None;
+        let start = i32::try_from(tx_start).map_err(|_| eyre!("prepop offset exceeds i32"))?;
         for info in &infos.0 {
-            if info.start_offset.0 != start {
-                continue;
+            if info.start_offset.0 == start && info.data_size != written {
+                return Ok(Some(tx_start));
             }
-            let size = info.data_size;
-            if size == 0 || size >= full || !size.is_multiple_of(crate::guard::CHUNK_SIZE) {
-                continue;
-            }
-            let end = tx_at.saturating_add(size / crate::guard::CHUNK_SIZE);
-            short_end = Some(short_end.map_or(end, |prev| prev.min(end)));
         }
-        if let Some(end) = short_end {
-            return Ok(Some(end));
-        }
-        tx_at += TX_CHUNKS;
+        offset = tx_end + 1;
     }
     Ok(None)
 }
@@ -558,5 +550,165 @@ mod tests {
         let text = fs::read_to_string(dir.join("bench-prepop.json")).unwrap();
         let state: super::State = serde_json::from_str(&text).unwrap();
         assert_eq!(state.done, short);
+    }
+
+    fn counter_done(dir: &Path) -> Option<u64> {
+        let path = dir.join("bench-prepop.json");
+        if !path.exists() {
+            return None;
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        let state: super::State = serde_json::from_str(&text).unwrap();
+        Some(state.done)
+    }
+
+    #[test]
+    fn lost_counter_then_a_shorter_count_keeps_one_size() {
+        // A committed full tx is one size. Losing the counter and asking for
+        // a count that ends inside that tx must not store a second size.
+        // The same full count still replays, and a longer aligned count still
+        // appends the next tx once.
+        let tmp = TempDirBuilder::new().prefix("sm-prepop-shorter-").build();
+        let root = tmp.path().join("loadtest");
+        let chunks = u32::try_from(TX_CHUNKS.saturating_mul(3)).unwrap();
+        let full = TX_CHUNKS * 2;
+        let next = i32::try_from(TX_CHUNKS).unwrap();
+
+        let allow = open_at(&root.join("allow"), chunks);
+        let module = allow.module.as_ref();
+        let dir = root.join("allow");
+        assert_eq!(prepopulate(module, &dir, chunks, full).unwrap(), full);
+        fs::remove_file(dir.join("bench-prepop.json")).unwrap();
+        assert_eq!(prepopulate(module, &dir, chunks, full).unwrap(), full);
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(sizes(module, 1), vec![(next, bytes(TX_CHUNKS))]);
+        let extended = TX_CHUNKS * 3;
+        assert_eq!(
+            prepopulate(module, &dir, chunks, extended).unwrap(),
+            extended
+        );
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(sizes(module, 1), vec![(next, bytes(TX_CHUNKS))]);
+        let third = i32::try_from(TX_CHUNKS * 2).unwrap();
+        assert_eq!(sizes(module, 2), vec![(third, bytes(TX_CHUNKS))]);
+        drop(allow);
+
+        let shorter = open_at(&root.join("shorter"), chunks);
+        let module = shorter.module.as_ref();
+        let dir = root.join("shorter");
+        assert_eq!(prepopulate(module, &dir, chunks, full).unwrap(), full);
+        fs::remove_file(dir.join("bench-prepop.json")).unwrap();
+        let inside = TX_CHUNKS + 8;
+        match prepopulate(module, &dir, chunks, inside) {
+            Ok(done) => panic!(
+                "accepted a shorter count (Ok({done})); tx0={:?} tx1={:?}",
+                sizes(module, 0),
+                sizes(module, 1)
+            ),
+            Err(error) => {
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("second data size"),
+                    "unexpected error: {message}"
+                );
+            }
+        }
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(sizes(module, 1), vec![(next, bytes(TX_CHUNKS))]);
+        assert!(sizes(module, 2).is_empty());
+        // The equal prefix may replay. The short tail must not commit.
+        assert_ne!(counter_done(&dir), Some(inside));
+        assert!(counter_done(&dir).unwrap_or(0) <= TX_CHUNKS);
+
+        assert_eq!(prepopulate(module, &dir, chunks, full).unwrap(), full);
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(sizes(module, 1), vec![(next, bytes(TX_CHUNKS))]);
+        assert_eq!(counter_done(&dir), Some(full));
+    }
+
+    #[test]
+    fn lost_counter_then_a_short_first_batch_keeps_one_size() {
+        // The first batch is the prefix. It must refuse before any put, so
+        // the counter stays absent and the stored full size stays the only size.
+        let tmp = TempDirBuilder::new().prefix("sm-prepop-eight-").build();
+        let root = tmp.path().join("loadtest");
+        let dir = root.join("mod");
+        let chunks = u32::try_from(TX_CHUNKS.saturating_mul(2)).unwrap();
+        let full = TX_CHUNKS * 2;
+        let opened = open_at(&dir, chunks);
+        let module = opened.module.as_ref();
+        assert_eq!(prepopulate(module, &dir, chunks, full).unwrap(), full);
+        fs::remove_file(dir.join("bench-prepop.json")).unwrap();
+
+        match prepopulate(module, &dir, chunks, 8) {
+            Ok(done) => panic!(
+                "accepted a short first batch (Ok({done})); tx0={:?}",
+                sizes(module, 0)
+            ),
+            Err(error) => {
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("second data size"),
+                    "unexpected error: {message}"
+                );
+            }
+        }
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(
+            sizes(module, 1),
+            vec![(i32::try_from(TX_CHUNKS).unwrap(), bytes(TX_CHUNKS))]
+        );
+        assert!(counter_done(&dir).is_none());
+
+        assert_eq!(prepopulate(module, &dir, chunks, full).unwrap(), full);
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(counter_done(&dir), Some(full));
+    }
+
+    #[test]
+    fn rocks_lost_counter_then_a_shorter_count_keeps_one_size() {
+        // Rocks keeps the tail of a full placement when a short size is
+        // written on its prefix. Refuse before that put. An equal replay
+        // still leaves one size.
+        let tmp = TempDirBuilder::new()
+            .prefix("sm-prepop-rocks-shorter-")
+            .build();
+        let root = tmp.path().join("loadtest");
+        let dir = root.join("mod");
+        let chunks = u32::try_from(TX_CHUNKS.saturating_mul(2)).unwrap();
+        let full = TX_CHUNKS * 2;
+        let tuning = RocksTuning::baseline().with_block_cache(64 * 1024 * 1024);
+        let opened = open_index(&dir, chunks, BenchIndex::Rocks(tuning));
+        let module = opened.module.as_ref();
+        let next = i32::try_from(TX_CHUNKS).unwrap();
+        assert_eq!(
+            prepopulate(module, &dir, chunks, full)
+                .unwrap_or_else(|error| panic!("rocks prepopulate: {error:#}")),
+            full
+        );
+        fs::remove_file(dir.join("bench-prepop.json")).unwrap();
+        assert_eq!(prepopulate(module, &dir, chunks, full).unwrap(), full);
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(sizes(module, 1), vec![(next, bytes(TX_CHUNKS))]);
+
+        fs::remove_file(dir.join("bench-prepop.json")).unwrap();
+        let inside = TX_CHUNKS + 8;
+        match prepopulate(module, &dir, chunks, inside) {
+            Ok(done) => panic!(
+                "rocks accepted a shorter count (Ok({done})); tx0={:?} tx1={:?}",
+                sizes(module, 0),
+                sizes(module, 1)
+            ),
+            Err(error) => {
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains("second data size"),
+                    "unexpected error: {message}"
+                );
+            }
+        }
+        assert_eq!(sizes(module, 0), vec![(0, bytes(TX_CHUNKS))]);
+        assert_eq!(sizes(module, 1), vec![(next, bytes(TX_CHUNKS))]);
+        assert_ne!(counter_done(&dir), Some(inside));
     }
 }
