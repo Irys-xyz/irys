@@ -124,8 +124,8 @@ fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
     let point = PartitionChunkOffset::from(cursor);
     let (stored_data, inclusive_end) = {
         let guard = module.intervals().read().expect("intervals lock");
-        // The guard stays in this block. A walk of the map goes through
-        // `SpanView::iter`, which the seek test counts.
+        // The guard stays in this block. The map iterator notes every run, so
+        // a walk inside the point query is not one visit.
         span_view::SpanView::new(&guard).read(point)
     };
     if stored_data {
@@ -140,6 +140,8 @@ fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
 #[cfg(test)]
 thread_local! {
     static SPAN_INTERVALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// When set, `SpanView::read` walks every run through the map iterator.
+    pub(super) static WALK_INSIDE_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -154,31 +156,67 @@ fn span_interval_count() -> u64 {
 
 /// The interval map the span seek is allowed to touch.
 ///
-/// `read` is one point query. `iter` is every stored run. The seek calls
-/// `read`. A test that walks calls `iter`, so the visit counter moves.
+/// `read` is one point query. The map's iterator notes every run, and it is
+/// the only iterator `read` can call. Production `read` does not iterate.
 mod span_view {
     use super::{ChunkType, PartitionChunkOffset};
 
+    type IntervalMap =
+        nodit::NoditMap<PartitionChunkOffset, nodit::Interval<PartitionChunkOffset>, ChunkType>;
+
+    /// Hides the interval map. `iter` notes each run. `read` cannot call the
+    /// map's own iterator.
+    mod noting {
+        use super::{ChunkType, IntervalMap, PartitionChunkOffset};
+
+        pub(super) struct NotingIntervals<'a> {
+            inner: &'a IntervalMap,
+        }
+
+        impl<'a> NotingIntervals<'a> {
+            pub(super) fn new(inner: &'a IntervalMap) -> Self {
+                Self { inner }
+            }
+
+            pub(super) fn get_key_value_at_point(
+                &self,
+                point: PartitionChunkOffset,
+            ) -> Result<
+                (&'a nodit::Interval<PartitionChunkOffset>, &'a ChunkType),
+                nodit::Interval<PartitionChunkOffset>,
+            > {
+                self.inner.get_key_value_at_point(point)
+            }
+
+            /// Every stored run. Each item is noted. This is the only iterator.
+            #[cfg(test)]
+            pub(super) fn iter(
+                &self,
+            ) -> impl Iterator<Item = (&'a nodit::Interval<PartitionChunkOffset>, &'a ChunkType)>
+            {
+                self.inner.iter().inspect(|_| {
+                    super::super::note_span_intervals(1);
+                })
+            }
+        }
+    }
+
     pub(super) struct SpanView<'a> {
-        inner: &'a nodit::NoditMap<
-            PartitionChunkOffset,
-            nodit::Interval<PartitionChunkOffset>,
-            ChunkType,
-        >,
+        inner: noting::NotingIntervals<'a>,
     }
 
     impl<'a> SpanView<'a> {
-        pub(super) fn new(
-            inner: &'a nodit::NoditMap<
-                PartitionChunkOffset,
-                nodit::Interval<PartitionChunkOffset>,
-                ChunkType,
-            >,
-        ) -> Self {
-            Self { inner }
+        pub(super) fn new(inner: &'a IntervalMap) -> Self {
+            Self {
+                inner: noting::NotingIntervals::new(inner),
+            }
         }
 
         pub(super) fn read(&self, point: PartitionChunkOffset) -> (bool, u32) {
+            #[cfg(test)]
+            if super::WALK_INSIDE_READ.with(std::cell::Cell::get) {
+                let _walked = self.inner.iter().count();
+            }
             #[cfg(test)]
             super::note_span_intervals(1);
             match self.inner.get_key_value_at_point(point) {
@@ -187,13 +225,10 @@ mod span_view {
             }
         }
 
-        /// Every stored run, in order. Noted so a seek that calls this no
-        /// longer reports a flat visit count.
+        /// Stored run count. Walking goes through the noting iterator.
         #[cfg(test)]
         pub(super) fn iter(&self) -> u64 {
-            let runs = u64::try_from(self.inner.iter().count()).unwrap_or(u64::MAX);
-            super::note_span_intervals(runs);
-            runs
+            u64::try_from(self.inner.iter().count()).unwrap_or(u64::MAX)
         }
     }
 }
@@ -1714,6 +1749,36 @@ mod tests {
         assert_eq!(
             mid_visits, small_visits,
             "a cursor in the middle still scanned {mid_visits} intervals"
+        );
+    }
+
+    /// A full walk inside the point query must move the visit total. The seek
+    /// test compares visits with a separate `iter` call, so the walk has to
+    /// go through the same iterator.
+    #[test]
+    fn probe_walk_inside_read_is_counted() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                super::WALK_INSIDE_READ.with(|cell| cell.set(false));
+            }
+        }
+        let _reset = Reset;
+        super::WALK_INSIDE_READ.with(|cell| cell.set(true));
+        let tmp = TempDirBuilder::new().prefix("sm-span-walk-probe-").build();
+        let n = 32_u32;
+        let opened = open_labeled(
+            &tmp.path().join("loadtest").join("mod"),
+            n,
+            &alternating_labels(n),
+        );
+        let module = opened.module.as_ref();
+        let (open, visits) = visits_for(module, 0, n);
+        assert_eq!(open, Some((0, 1)));
+        let runs = span_runs(module);
+        assert!(
+            visits >= runs,
+            "official seek check stays green: {visits} visits, {runs} runs"
         );
     }
 
