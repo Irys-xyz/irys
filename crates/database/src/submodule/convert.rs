@@ -4339,7 +4339,7 @@ thread_local! {
     /// Runs after `CONVERTING` was seen and before the replace lock is taken.
     static AFTER_CONVERTING_OBSERVED: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         const { std::cell::RefCell::new(None) };
-    /// Runs once the delete is decided and before `remove_dir_all`.
+    /// Runs after `remove_dir_all` and before the new directory is created.
     static AT_REPLACE_DELETE: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         const { std::cell::RefCell::new(None) };
     /// Runs after `CONVERTING` is durable. The flock is already held when
@@ -4485,6 +4485,11 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<Arc<File>> {
         eyre::bail!("target {} is not a directory", path.display());
     }
     if !path.exists() || dir_is_empty(path)? {
+        // A replace that just deleted this path still holds the parent lock.
+        // Creating the directory without that check would take the gap.
+        // Drop the flock before the sentinel write so a replace that sees
+        // CONVERTING contends on LOCK, not on this file.
+        drop(hold_parent_replace_lock(path)?);
         fs::create_dir_all(path)?;
         return lock_then_mark(path);
     }
@@ -4517,6 +4522,10 @@ fn prepare_mdbx_target(
         eyre::bail!("target {} is not a directory", path.display());
     }
     if !path.exists() || dir_is_empty(path)? {
+        // Same gap as the RocksDB prepare: the parent lock covers the
+        // directory that does not exist yet. Do not hold it across the
+        // sentinel write.
+        drop(hold_parent_replace_lock(path)?);
         fs::create_dir_all(path)?;
         return lock_then_mark(path);
     }
@@ -4720,10 +4729,12 @@ fn replace_marked_incomplete(
     // file with no LOCK is a dropped incomplete directory and is removed.
     // A close may have parked this directory while this process waited.
     rocks::refuse_unresolved_close_scratch(path)?;
-    #[cfg(test)]
-    run_at_replace_delete(path);
     fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
     drop(hold);
+    // The directory is gone. The parent lock is what stops another replace
+    // from creating it again before `lock_then_mark`.
+    #[cfg(test)]
+    run_at_replace_delete(path);
     fs::create_dir_all(path)?;
     Ok(ReplaceMarked::Ready(lock_then_mark(path)?))
 }
