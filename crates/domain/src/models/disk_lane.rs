@@ -1763,8 +1763,10 @@ impl StorageModule {
                 continue;
             }
             // A reread is waiting on entropy that is still queued. The write
-            // has to land before the pread. Waiting out the sweep give-up
-            // holds shutdown on a slot this pass cannot finish.
+            // has to land before the pread. A lower-priority memory slot
+            // cannot fold while that reread is the best priority, so it does
+            // not keep this pass in the sweep wait. The caller commits the
+            // parked write after this return.
             if self.only_pending_blocked_disk_slots() {
                 return;
             }
@@ -3126,18 +3128,33 @@ impl StorageModule {
         })
     }
 
+    /// True when every disk slot is waiting on `pending` or `written_ahead`
+    /// and no memory slot can fold. A lower-priority memory slot stays
+    /// queued: this pass cannot pack it ahead of the blocked reread, and
+    /// the sweep wait does not commit the write that blocks the pread.
+    /// A memory slot at the best priority can still fold. A queue with no
+    /// disk slot is not blocked.
     fn only_pending_blocked_disk_slots(&self) -> bool {
         let disk_offsets = {
             let queue = self.disk.queue();
             if queue.slots.is_empty() {
                 return false;
             }
+            if queue
+                .best_priority()
+                .is_some_and(|best| queue.memory_slots[priority_index(best)] > 0)
+            {
+                return false;
+            }
             let mut disk_offsets = Vec::new();
             for slot in queue.slots.values() {
                 if memory_entropy(slot) {
-                    return false;
+                    continue;
                 }
                 disk_offsets.push(slot.offset);
+            }
+            if disk_offsets.is_empty() {
+                return false;
             }
             disk_offsets
         };
@@ -5702,6 +5719,519 @@ mod tests {
         assert_replacement_body_durable(&module)?;
         drop(module);
         drop(tmp);
+        Ok(())
+    }
+
+    /// Clears a sweep queue the test left behind. `Drop` drains that queue,
+    /// and a blocked disk slot beside a lower memory slot would wait out
+    /// `SWEEP_WAIT` before the assertion failure is reported.
+    struct FailSweepOnDrop<'a> {
+        module: &'a super::super::StorageModule,
+        armed: bool,
+    }
+
+    impl Drop for FailSweepOnDrop<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                self.module.fail_queued_sweeps();
+            }
+        }
+    }
+
+    fn indexed_chunk(
+        module: &super::super::StorageModule,
+        ledger_offset: u64,
+        root_byte: u8,
+        body: u8,
+    ) -> eyre::Result<UnpackedChunk> {
+        let data_root = H256::repeat_byte(root_byte);
+        let path = vec![root_byte, 3, 2, 1];
+        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size: 32,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        module.index_transaction_data(
+            &header,
+            &path,
+            LedgerChunkRange(ledger_chunk_offset_ii!(ledger_offset, ledger_offset)),
+            0,
+        )?;
+        Ok(UnpackedChunk {
+            data_root,
+            data_size: 32,
+            data_path: path.into(),
+            bytes: vec![body; 32].into(),
+            tx_offset: TxChunkOffset::from(0),
+        })
+    }
+
+    fn assert_slot_shape(
+        module: &super::super::StorageModule,
+        offset: u32,
+        priority: super::WritePriority,
+        memory: bool,
+    ) {
+        let queue = module.disk.queue();
+        let slot = queue
+            .slots
+            .get(&PartitionChunkOffset::from(offset))
+            .unwrap_or_else(|| panic!("offset {offset} is not queued"));
+        assert_eq!(slot.priority, priority, "offset {offset}");
+        assert_eq!(
+            slot.pending_entropy.is_some() || slot.cached_entropy.is_some(),
+            memory,
+            "offset {offset} memory={memory} pending={:?} cached={}",
+            slot.pending_entropy
+                .as_ref()
+                .map(|bytes| bytes.first().copied()),
+            slot.cached_entropy.is_some()
+        );
+    }
+
+    fn assert_data_byte_durable(
+        module: &super::super::StorageModule,
+        offset: u32,
+        byte: u8,
+    ) -> eyre::Result<()> {
+        let offset = PartitionChunkOffset::from(offset);
+        let durable = module.is_data_chunk_durable_at(offset);
+        let persisted = module.is_data_chunk_persisted_at(offset);
+        let pending = module.pending_writes.read().unwrap();
+        let queued = pending
+            .get(&offset)
+            .map(|(bytes, kind)| (*kind, bytes.first().copied()));
+        let ahead = pending.written_ahead.contains_key(&offset);
+        drop(pending);
+        let file = chunk_file_byte(module, offset)?;
+        assert!(
+            durable && persisted && queued.is_none() && !ahead && file == byte,
+            "offset {offset} durable={durable} persisted={persisted} pending={queued:?} ahead={ahead} file={file:#x} want={byte:#x}"
+        );
+        Ok(())
+    }
+
+    /// Migration at offset 0 is a disk reread: its entropy is parked in
+    /// `written_ahead` and the interval is already `Entropy`, so occupy does
+    /// not copy a pad. Ingress at offset 1 still holds pending entropy.
+    /// Migration outranks ingress, so the memory pad cannot fold.
+    fn queue_written_ahead_reread_and_lower_memory(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        super::super::StorageModule,
+    )> {
+        let (tmp, module) = span_fixture_timed(prefix, 4, 4, 0, 0, 0, 60_000)?;
+        let migration = indexed_chunk(&module, 0, 0x42, 0x01)?;
+        let ingress = indexed_chunk(&module, 1, 0x43, 0x05)?;
+        // The first durable point always commits. A point just taken makes
+        // the next non-force window park instead.
+        *module.last_durable_at.lock().unwrap() = Some(Instant::now());
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.commit_pending_runs(false, Some(1), false)?;
+        {
+            let pending = module.pending_writes.read().unwrap();
+            assert!(
+                pending
+                    .written_ahead
+                    .contains_key(&PartitionChunkOffset::from(0)),
+                "the blocking entropy was not parked"
+            );
+            assert!(
+                pending.get(&PartitionChunkOffset::from(0)).is_none(),
+                "parked entropy is still in pending.chunks"
+            );
+        }
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(super::super::ChunkType::Entropy),
+            "the parked write did not label the interval"
+        );
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.deposit_data_chunk(&migration)?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&ingress))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 2);
+        assert_slot_shape(&module, 0, super::WritePriority::Migration, false);
+        assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
+        Ok((tmp, module))
+    }
+
+    /// Same shape, with the blocking entropy still in `pending.chunks`.
+    /// The migration slot is queued against durable entropy, then the rewrite
+    /// drops its pad and leaves a disk reread.
+    fn queue_pending_reread_and_lower_memory(
+        prefix: &str,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        super::super::StorageModule,
+    )> {
+        let (tmp, module) = span_fixture_timed(prefix, 4, 4, 0, 0, 0, 60_000)?;
+        let migration = indexed_chunk(&module, 0, 0x42, 0x01)?;
+        let ingress = indexed_chunk(&module, 1, 0x43, 0x05)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        module.deposit_data_chunk(&migration)?;
+        assert_eq!(module.sweep_slot_count_for_test(), 1);
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        assert!(
+            module
+                .pending_writes
+                .read()
+                .unwrap()
+                .contains_key(&PartitionChunkOffset::from(0)),
+            "the blocking entropy is not pending"
+        );
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&ingress))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 2);
+        assert_slot_shape(&module, 0, super::WritePriority::Migration, false);
+        assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
+        Ok((tmp, module))
+    }
+
+    fn assert_mixed_queue_cannot_pack(module: &super::super::StorageModule) {
+        assert!(
+            !module.memory_entropy_can_fold(),
+            "the lower memory pad can fold while the disk reread is best"
+        );
+        assert!(
+            module.read_grace_remaining().is_none(),
+            "a blocked disk span is inside the read grace"
+        );
+        assert!(
+            !module.fold_memory_entropy(),
+            "fold packed a slot this queue cannot fold"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 2);
+        assert!(
+            !module.sweep_one(),
+            "sweep read a span that is waiting on a write"
+        );
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            2,
+            "sweep dropped a slot it could not read"
+        );
+    }
+
+    /// The blocked disk reread and the lower memory pad stay queued. The
+    /// drain must return so the force flush can commit the parked entropy.
+    /// Both bodies are durable when that flush returns.
+    #[test]
+    fn mixed_written_ahead_reread_and_lower_memory_does_not_hold_the_drain() -> eyre::Result<()> {
+        let (_tmp, module) = queue_written_ahead_reread_and_lower_memory("mixed_ahead_drain")?;
+        let mut guard = FailSweepOnDrop {
+            module: &module,
+            armed: true,
+        };
+        assert_mixed_queue_cannot_pack(&module);
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain waited {elapsed:?} on a blocked disk reread beside a lower memory pad"
+        );
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            2,
+            "the drain dropped slots the parked write still blocks"
+        );
+        assert!(
+            module.only_pending_blocked_disk_slots(),
+            "the mixed queue is not an early drain"
+        );
+        guard.armed = false;
+        module.force_sync_pending_chunks()?;
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        // 0x01 XOR parked entropy 0x22. 0x05 XOR pending entropy 0x11.
+        assert_data_byte_durable(&module, 0, 0x23)?;
+        assert_data_byte_durable(&module, 1, 0x14)?;
+        Ok(())
+    }
+
+    /// The blocking bytes are still in `pending.chunks`. Same early return,
+    /// then the force flush commits them and packs both bodies.
+    #[test]
+    fn mixed_pending_reread_and_lower_memory_does_not_hold_the_drain() -> eyre::Result<()> {
+        let (_tmp, module) = queue_pending_reread_and_lower_memory("mixed_pending_drain")?;
+        let mut guard = FailSweepOnDrop {
+            module: &module,
+            armed: true,
+        };
+        assert_mixed_queue_cannot_pack(&module);
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain waited {elapsed:?} on a pending-blocked disk reread beside a lower memory pad"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 2);
+        assert!(module.only_pending_blocked_disk_slots());
+        guard.armed = false;
+        module.force_sync_pending_chunks()?;
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        assert_data_byte_durable(&module, 0, 0x23)?;
+        assert_data_byte_durable(&module, 1, 0x14)?;
+        Ok(())
+    }
+
+    /// The disk span is not blocked. It is only young. The lower memory pad
+    /// does not make this a blocked reread, so the drain waits out the grace
+    /// and packs both slots.
+    #[test]
+    fn young_disk_span_still_waits_beside_lower_memory() -> eyre::Result<()> {
+        let grace = Duration::from_millis(40);
+        let (_tmp, module) = span_fixture_timed(
+            "young_beside_memory",
+            4,
+            4,
+            0,
+            grace.as_millis() as u64,
+            0,
+            0,
+        )?;
+        let migration = indexed_chunk(&module, 0, 0x42, 0x01)?;
+        let ingress = indexed_chunk(&module, 1, 0x43, 0x05)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.deposit_data_chunk(&migration)?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&ingress))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        assert_slot_shape(&module, 0, super::WritePriority::Migration, false);
+        assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
+        assert!(!module.memory_entropy_can_fold());
+        assert!(!module.only_pending_blocked_disk_slots());
+        let remain = module
+            .read_grace_remaining()
+            .expect("the young disk span is a read wait");
+        assert!(!remain.is_zero(), "the young span is already due");
+        let _guard = FailSweepOnDrop {
+            module: &module,
+            armed: true,
+        };
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(20),
+            "drain took {elapsed:?}, before the grace"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain waited {elapsed:?} on a span that became eligible"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        let pending = module.pending_writes.read().unwrap();
+        let disk = pending
+            .get(&PartitionChunkOffset::from(0))
+            .map(|(bytes, kind)| (*kind, bytes.first().copied()));
+        let memory = pending
+            .get(&PartitionChunkOffset::from(1))
+            .map(|(bytes, kind)| (*kind, bytes.first().copied()));
+        assert_eq!(disk, Some((super::super::ChunkType::Data, Some(0x23))));
+        assert_eq!(memory, Some((super::super::ChunkType::Data, Some(0x14))));
+        Ok(())
+    }
+
+    /// One disk span can be read. Another is blocked, and a lower memory pad
+    /// cannot fold. The drain reads the ready span and returns. It does not
+    /// wait out the sweep give-up, and it does not drop the blocked reread.
+    #[test]
+    fn ready_span_drains_beside_a_blocked_slot_and_lower_memory() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture_timed("ready_beside_blocked", 4, 4, 0, 0, 0, 60_000)?;
+        let blocked = indexed_chunk(&module, 0, 0x42, 0x01)?;
+        let ingress = indexed_chunk(&module, 1, 0x43, 0x05)?;
+        let ready = indexed_chunk(&module, 2, 0x44, 0x07)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(2),
+            vec![0x33; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.commit_pending_runs(false, Some(1), false)?;
+        assert!(
+            module
+                .pending_writes
+                .read()
+                .unwrap()
+                .written_ahead
+                .contains_key(&PartitionChunkOffset::from(0)),
+            "the blocked offset was not parked"
+        );
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.deposit_data_chunks(&[blocked, ready])?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&ingress))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 3);
+        assert_slot_shape(&module, 0, super::WritePriority::Migration, false);
+        assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
+        assert_slot_shape(&module, 2, super::WritePriority::Migration, false);
+        assert!(!module.only_pending_blocked_disk_slots());
+        let mut guard = FailSweepOnDrop {
+            module: &module,
+            armed: true,
+        };
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain waited {elapsed:?} after the ready span was the only progress"
+        );
+        assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 1);
+        let pending = module.pending_writes.read().unwrap();
+        let packed = pending
+            .get(&PartitionChunkOffset::from(2))
+            .map(|(bytes, kind)| (*kind, bytes.first().copied()));
+        assert_eq!(
+            packed,
+            Some((super::super::ChunkType::Data, Some(0x34))),
+            "the ready span was not packed: {packed:?}"
+        );
+        drop(pending);
+        assert_slot_shape(&module, 0, super::WritePriority::Migration, false);
+        assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
+        assert_eq!(module.sweep_slot_count_for_test(), 2);
+        guard.armed = false;
+        module.force_sync_pending_chunks()?;
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        assert_data_byte_durable(&module, 0, 0x23)?;
+        assert_data_byte_durable(&module, 1, 0x14)?;
+        assert_data_byte_durable(&module, 2, 0x34)?;
+        Ok(())
+    }
+
+    /// Memory at the best priority still folds while a lower disk slot is
+    /// blocked. The drain packs that pad and returns without the sweep wait.
+    #[test]
+    fn higher_memory_still_folds_while_a_lower_disk_slot_is_blocked() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture_timed("higher_memory_fold", 4, 4, 0, 0, 0, 0)?;
+        let ingress = indexed_chunk(&module, 0, 0x42, 0x01)?;
+        let migration = indexed_chunk(&module, 1, 0x43, 0x05)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&ingress))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.deposit_data_chunk(&migration)?;
+        assert_eq!(module.sweep_slot_count_for_test(), 2);
+        assert_slot_shape(&module, 0, super::WritePriority::Ingress, false);
+        assert_slot_shape(&module, 1, super::WritePriority::Migration, true);
+        assert!(module.memory_entropy_can_fold());
+        assert!(!module.only_pending_blocked_disk_slots());
+        let _guard = FailSweepOnDrop {
+            module: &module,
+            armed: true,
+        };
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain waited {elapsed:?} on a memory pad it could fold"
+        );
+        let pending = module.pending_writes.read().unwrap();
+        let packed = pending
+            .get(&PartitionChunkOffset::from(1))
+            .map(|(bytes, kind)| (*kind, bytes.first().copied()));
+        assert_eq!(
+            packed,
+            Some((super::super::ChunkType::Data, Some(0x14))),
+            "the higher memory pad was not packed: {packed:?}"
+        );
+        drop(pending);
+        assert_eq!(module.sweep_slot_count_for_test(), 1);
+        assert_slot_shape(&module, 0, super::WritePriority::Ingress, false);
+        assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
         Ok(())
     }
 
