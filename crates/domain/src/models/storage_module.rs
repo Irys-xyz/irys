@@ -890,7 +890,7 @@ pub struct StorageModule {
     #[cfg(test)]
     abandon_on_drop: AtomicBool,
     /// Interval-tree edits inside [`Self::rollback_unassigned_range`].
-    /// One span is one edit.
+    /// One span is one cut and one insert.
     #[cfg(test)]
     rollback_interval_edits: AtomicU64,
     /// The next lane `pwrite` panics once, before the kernel write.
@@ -6220,6 +6220,8 @@ impl StorageModule {
             // neighbors. The insert merges with touching `Uninitialized`.
             let span = ii(start, end);
             let _ = intervals.cut(span);
+            #[cfg(test)]
+            self.rollback_interval_edits.fetch_add(1, Ordering::SeqCst);
             let _ = intervals.insert_merge_touching_if_values_equal(span, ChunkType::Uninitialized);
             #[cfg(test)]
             self.rollback_interval_edits.fetch_add(1, Ordering::SeqCst);
@@ -10888,15 +10890,16 @@ mod tests {
                 "{label}: file {nth} {file:?} want {expected:?}"
             );
         }
-        eyre::ensure!(edits == 1, "{label}: interval edits {edits}, want 1");
+        eyre::ensure!(edits == 2, "{label}: interval edits {edits}, want 2");
         Ok(())
     }
 
-    /// One inclusive rollback span is one interval-tree edit. The labels match
+    /// One inclusive rollback span is one cut and one insert. The labels match
     /// a per-offset walk: the cut splits the neighbors, and `Uninitialized`
     /// merges with a touching run of the same label. A one-point span is still
-    /// one edit. A span that crosses two submodules is still one edit, and
-    /// each file receives its clipped slice.
+    /// those two tree edits. A span that crosses two submodules is still those
+    /// two edits, and each file receives its clipped slice. A loop that cuts
+    /// once per offset counts more than two.
     #[test]
     fn rollback_marks_a_span_in_one_interval_edit() -> eyre::Result<()> {
         let (tmp, storage, _) = open_publish_module("rollback_span", SubmoduleIndexEngine::Mdbx)?;
