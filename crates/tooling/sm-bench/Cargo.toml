@@ -26,7 +26,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
-# Tests read `interval_visit_count`. The bench binary does not enable this.
+# Test builds can call domain test hooks. The bench binary does not enable this.
 irys-domain = { workspace = true, features = ["bench", "test-utils"] }
 
 [lints]

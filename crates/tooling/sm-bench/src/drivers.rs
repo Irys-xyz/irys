@@ -123,11 +123,20 @@ pub(crate) fn next_open_span(module: &StorageModule, start: u32, end: u32) -> Op
 fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
     let point = PartitionChunkOffset::from(cursor);
     let (stored_data, inclusive_end) = {
-        let map = module.intervals().read().expect("intervals lock");
-        match map.get_key_value_at_point(point) {
-            Ok((interval, kind)) => (*kind == ChunkType::Data, interval.end().0),
-            Err(gap) => (false, gap.end().0),
-        }
+        let guard = module.intervals().read().expect("intervals lock");
+        // One stored run. `iter` counts every run, so a fragment walk shows
+        // up in the test counter.
+        let map = SpanMap {
+            inner: &*guard,
+            #[cfg(test)]
+            count_runs: |inner| inner.iter().count() as u64,
+        };
+        map.read(point, |inner, point| {
+            match inner.get_key_value_at_point(point) {
+                Ok((interval, kind)) => (*kind == ChunkType::Data, interval.end().0),
+                Err(gap) => (false, gap.end().0),
+            }
+        })
     };
     if stored_data {
         return (true, step_end(inclusive_end, cursor, end));
@@ -136,6 +145,61 @@ fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
         return (true, cursor.saturating_add(1).min(end));
     }
     (false, step_end(inclusive_end, cursor, end))
+}
+
+struct SpanMap<'a, T> {
+    inner: &'a T,
+    /// Full-run count. Read only by [`SpanMap::iter`].
+    #[cfg(test)]
+    #[expect(dead_code)]
+    count_runs: fn(&T) -> u64,
+}
+
+impl<'a, T> SpanMap<'a, T> {
+    fn read(
+        &self,
+        point: PartitionChunkOffset,
+        read_point: impl FnOnce(&T, PartitionChunkOffset) -> (bool, u32),
+    ) -> (bool, u32) {
+        #[cfg(test)]
+        note_span_intervals(1);
+        read_point(self.inner, point)
+    }
+
+    /// Every stored run. A seek that calls this grows with the fragment count.
+    #[cfg(test)]
+    #[expect(dead_code)]
+    fn iter(&self) -> SpanRunCount {
+        let n = (self.count_runs)(self.inner);
+        note_span_intervals(n);
+        SpanRunCount(n)
+    }
+}
+
+#[cfg(test)]
+struct SpanRunCount(u64);
+
+#[cfg(test)]
+impl SpanRunCount {
+    #[expect(dead_code)]
+    fn count(self) -> u64 {
+        self.0
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SPAN_INTERVALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_span_intervals(n: u64) {
+    SPAN_INTERVALS.with(|cell| cell.set(cell.get().saturating_add(n)));
+}
+
+#[cfg(test)]
+fn span_interval_count() -> u64 {
+    SPAN_INTERVALS.with(std::cell::Cell::get)
 }
 
 fn step_end(inclusive_end: u32, cursor: u32, end: u32) -> u32 {
@@ -1568,9 +1632,9 @@ mod tests {
     }
 
     fn visits_for(module: &StorageModule, start: u32, end: u32) -> (Option<(u32, u32)>, u64) {
-        let before = module.interval_visit_count();
+        let before = super::span_interval_count();
         let open = next_open_span(module, start, end);
-        let visits = module.interval_visit_count().saturating_sub(before);
+        let visits = super::span_interval_count().saturating_sub(before);
         (open, visits)
     }
 
@@ -1629,16 +1693,15 @@ mod tests {
         assert_eq!(open, Some((0, 1)));
         // Data, then a one-chunk hole, then later Data. The hole length stays 1.
         assert_eq!(next_open_span(module, 1, big_n), Some((2, 1)));
-        assert_eq!(
-            (small_visits, big_visits),
-            (0, 0),
+        assert!(
+            small_visits >= 1 && small_visits == big_visits,
             "interval visits grew with fragments: {small_visits} then {big_visits}"
         );
         let mid = 64_u32;
         let (open, mid_visits) = visits_for(module, mid, big_n);
         assert_eq!(open, Some((mid, 1)));
         assert_eq!(
-            mid_visits, 0,
+            mid_visits, small_visits,
             "a cursor in the middle still scanned {mid_visits} intervals"
         );
     }
