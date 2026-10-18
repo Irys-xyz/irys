@@ -1902,8 +1902,7 @@ impl IrysNode {
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
         // Estuary can only activate on a chain whose data ledgers are empty;
         // fail here instead of at the first epoch block past its timestamp.
-        if config.consensus.hardforks.estuary.is_some()
-            && epoch_snapshot.partition_resize.is_none()
+        if epoch_snapshot.consensus_context().pending_activation()
             && let Some(ledger) = latest_block
                 .data_ledgers
                 .iter()
@@ -1918,13 +1917,20 @@ impl IrysNode {
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
 
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
+        let logical_chunks = epoch_snapshot.partition_chunks();
         for module in storage_modules.read().unwrap().iter() {
-            module.set_partition_chunks(
-                epoch_snapshot
-                    .consensus_context()
-                    .geometry()
-                    .partition_chunks,
-            )?;
+            module.set_partition_chunks(logical_chunks)?;
+            // Drives already carry a finalized resize the chain view has not
+            // reached (DB restored or wiped): mine and pack the retained prefix
+            // until the resync passes the activation.
+            if module.partition_chunks() < logical_chunks {
+                tracing::warn!(
+                    storage_module.id = module.id,
+                    retained = module.partition_chunks(),
+                    canonical = logical_chunks,
+                    "storage module is truncated beyond the canonical partition size; bounded to the retained prefix until the chain passes the activation"
+                );
+            }
         }
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
         let ingress_proof_generation_state =

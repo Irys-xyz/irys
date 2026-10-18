@@ -860,6 +860,7 @@ impl BlockTreeServiceInner {
             reorg_event,
             tip_changed,
             old_tip_diff,
+            tip_epoch_snapshot,
             state,
             new_canonical_markers,
             blocks_to_confirm,
@@ -1009,6 +1010,11 @@ impl BlockTreeServiceInner {
                 return Ok(());
             };
             let arc_block = block_entry.block.header().clone();
+            // Taken here, while `block_entry` still borrows `cache` immutably
+            // (`mark_tip` below needs it mutably): the new tip's own epoch
+            // snapshot, returned as `Option<Arc<EpochSnapshot>>` and `Some`
+            // only on a tip change, drives the storage-module geometry bound.
+            let block_epoch_snapshot = Arc::clone(&block_entry.epoch_snapshot);
 
             let tip_changed = {
                 let old_tip_block = cache
@@ -1237,6 +1243,7 @@ impl BlockTreeServiceInner {
                 reorg_event,
                 tip_changed,
                 old_tip_block.diff,
+                tip_changed.then_some(block_epoch_snapshot),
                 state,
                 fcu_markers,
                 blocks_to_confirm,
@@ -1272,12 +1279,10 @@ impl BlockTreeServiceInner {
                 .persist_metadata(old_fork, &blocks_to_confirm, stream)?
         };
 
-        if tip_changed {
-            let epoch = self
-                .cache
-                .read()
-                .expect("block tree lock")
-                .canonical_epoch_snapshot();
+        // The storage-module bound follows the validated tip, the same block the
+        // miner and block producer build on, not the longest-chain head, which
+        // can run ahead of the tip while its blocks are still being validated.
+        if let Some(epoch) = tip_epoch_snapshot {
             self.block_migration_service
                 .update_partition_geometry(&epoch)?;
         }

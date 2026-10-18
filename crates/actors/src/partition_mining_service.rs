@@ -15,7 +15,7 @@ use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_
 use irys_storage::ii;
 use irys_types::partition_resize::PartitionGeometry;
 use irys_types::{
-    Base64, ChunkDataPath, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
+    Base64, BlockHash, ChunkDataPath, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
     PartitionChunkRange, ProofDeserialize as _, SendTraced as _, TokioServiceHandle, TxPath, U256,
     block_production::{Seed, SolutionContext},
     get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
@@ -54,6 +54,8 @@ pub struct PartitionMiningServiceInner {
     config: Config,
     geometry: PartitionGeometry,
     block_tree: Option<irys_domain::BlockTreeReadGuard>,
+    /// Validated tip that `geometry` and `difficulty` were last read from.
+    last_tip: Option<BlockHash>,
     resize: Option<irys_types::partition_resize::PartitionResizeState>,
     service_senders: ServiceSenders,
     storage_module: Arc<StorageModule>,
@@ -67,15 +69,19 @@ pub struct PartitionMiningServiceInner {
     data_path_lookups: std::sync::atomic::AtomicU64,
 }
 
-/// Fresh recall-range rotation state sized for the partition.
+/// Fresh recall-range rotation state sized for the partition. A fresh rotation
+/// is anchored at the geometry's sampling origin: its next consecutive step is
+/// `sampling_origin`, so any later step rebuilds from the stored VDF steps.
 fn fresh_ranges(geometry: PartitionGeometry) -> Ranges {
-    Ranges::new(
+    let mut ranges = Ranges::new(
         geometry
             .recall_ranges()
             .try_into()
             .expect("Recall ranges number exceeds usize representation"),
     )
-    .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig")
+    .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig");
+    ranges.last_step_num = geometry.sampling_origin - 1;
+    ranges
 }
 
 impl PartitionMiningServiceInner {
@@ -87,16 +93,18 @@ impl PartitionMiningServiceInner {
         steps_guard: VdfStateReadonly,
         initial_difficulty: U256,
     ) -> Self {
+        let geometry = PartitionGeometry::legacy(&config.consensus);
         Self {
             config: config.clone(),
-            geometry: PartitionGeometry::legacy(&config.consensus),
+            geometry,
             block_tree: None,
+            last_tip: None,
             resize: None,
             service_senders,
             storage_module,
             should_mine: start_mining,
             difficulty: initial_difficulty,
-            ranges: fresh_ranges(PartitionGeometry::legacy(&config.consensus)),
+            ranges: fresh_ranges(geometry),
             steps_guard,
             #[cfg(test)]
             data_path_lookups: std::sync::atomic::AtomicU64::new(0),
@@ -110,7 +118,7 @@ impl PartitionMiningServiceInner {
         self
     }
 
-    /// Re-read geometry and difficulty from the validated tip before each step.
+    /// Re-read geometry and difficulty from the validated tip whenever it moves.
     ///
     /// The producer builds on the validated tip, so solutions are checked
     /// against the tip's `diff` and the geometry of the tip's epoch snapshot.
@@ -124,6 +132,11 @@ impl PartitionMiningServiceInner {
             return;
         };
         let tree = tree.read();
+        // Geometry and difficulty are both functions of the validated tip, so
+        // there is nothing to re-read until it moves (this runs every VDF step).
+        if self.last_tip == Some(tree.tip) {
+            return;
+        }
         // Both from the validated tip, not the longest-chain head, which can run
         // ahead of validation and is not what the producer builds on.
         let (Some(tip), Some(snapshot)) = (
@@ -137,9 +150,9 @@ impl PartitionMiningServiceInner {
             self.resize = context.resize();
             self.geometry = context.geometry();
             self.ranges = fresh_ranges(self.geometry);
-            self.ranges.last_step_num = self.geometry.sampling_origin - 1;
         }
         self.difficulty = tip.diff;
+        self.last_tip = Some(tree.tip);
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -161,6 +174,9 @@ impl PartitionMiningServiceInner {
             self.difficulty.abs_diff(new_diff)
         );
         self.difficulty = new_diff;
+        // A broadcast for a block other than the validated tip must not outlive
+        // the tip's own target: re-pair difficulty with the tip on the next step.
+        self.last_tip = None;
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -174,10 +190,11 @@ impl PartitionMiningServiceInner {
                     storage_module.packing_interval = ?interval,
                     "Expiring partition hash"
                 );
-                if let Ok(req) =
-                    PackingRequest::new(self.storage_module.clone(), PartitionChunkRange(interval))
-                {
-                    match self.service_senders.packing_sender.try_send(req) {
+                match PackingRequest::new(
+                    self.storage_module.clone(),
+                    PartitionChunkRange(interval),
+                ) {
+                    Ok(req) => match self.service_senders.packing_sender.try_send(req) {
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             warn!(
@@ -195,7 +212,14 @@ impl PartitionMiningServiceInner {
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
                         }
-                    }
+                    },
+                    Err(error) => warn!(
+                        storage_module.id = %self.storage_module.id,
+                        storage_module.partition_hash = ?partition_hash,
+                        storage_module.packing_interval = ?interval,
+                        %error,
+                        "Could not build the repacking request for an expired partition"
+                    ),
                 }
             } else {
                 error!(
@@ -216,7 +240,6 @@ impl PartitionMiningServiceInner {
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_reanchored(&mut self) {
         self.ranges = fresh_ranges(self.geometry);
-        self.ranges.last_step_num = self.geometry.sampling_origin - 1;
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1177,6 +1200,15 @@ mod tests {
         assert!(
             mine_once(&mut inner).is_some(),
             "difficulty 0 from the tip finds the first chunk"
+        );
+        assert_eq!(inner.difficulty, U256::zero());
+
+        // A broadcast received after the miner paired with the tip is re-paired
+        // on the next step: the tip's target still wins.
+        inner.update_difficulty(U256::MAX);
+        assert!(
+            mine_once(&mut inner).is_some(),
+            "a broadcast after the tip was paired must not outlive the tip's target"
         );
         assert_eq!(inner.difficulty, U256::zero());
     }

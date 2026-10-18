@@ -22,7 +22,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME, PackingParams,
     StorageModule, StorageModuleInfo,
 };
-use irys_types::{Config, PartitionChunkRange, TokioServiceHandle, Traced};
+use irys_types::{Config, H256, PartitionChunkRange, TokioServiceHandle, Traced};
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
@@ -61,7 +61,12 @@ pub struct StorageModuleServiceInner {
     shutdown: Shutdown,
     /// Last heal pass left unrepaired work — run periodic heal until clear.
     index_heal_needs_retry: bool,
-    resize_task: Option<tokio::task::JoinHandle<()>>,
+    /// Finalized-resize worker. Yields the activation hash once every module
+    /// completed, `None` when any module must be retried on a later tick.
+    resize_task: Option<tokio::task::JoinHandle<Option<H256>>>,
+    /// Activation whose finalized resize every module completed; stops the
+    /// per-tick worker spawn.
+    resize_done: Option<H256>,
 }
 
 impl std::fmt::Debug for StorageModuleServiceInner {
@@ -99,6 +104,7 @@ impl StorageModuleServiceInner {
             config,
             shutdown,
             resize_task: None,
+            resize_done: None,
             index_heal_needs_retry: true, // force heal until first pass reports clean
         }
     }
@@ -140,6 +146,9 @@ impl StorageModuleServiceInner {
         let Some(resize) = epoch.partition_resize else {
             return Ok(());
         };
+        if self.resize_done == Some(resize.activation_hash) {
+            return Ok(());
+        }
         let index = self.block_index.read();
         let finalized = irys_domain::forkchoice_markers::finalized_height(
             index.latest_height(),
@@ -160,6 +169,7 @@ impl StorageModuleServiceInner {
         // migration on the blocking pool rather than on this service's tick.
         let modules = self.storage_modules.read().unwrap().clone();
         self.resize_task = Some(tokio::task::spawn_blocking(move || {
+            let mut all_done = true;
             for module in modules {
                 match module.finalize_partition_resize(&resize) {
                     Ok(true) => tracing::info!(
@@ -169,12 +179,16 @@ impl StorageModuleServiceInner {
                         "Completed finalized partition resize"
                     ),
                     Ok(false) => {}
-                    Err(e) => error!(
-                        storage_module.id = module.id,
-                        "partition resize failed; will retry: {e:?}"
-                    ),
+                    Err(e) => {
+                        all_done = false;
+                        error!(
+                            storage_module.id = module.id,
+                            "partition resize failed; will retry: {e:?}"
+                        );
+                    }
                 }
             }
+            all_done.then_some(resize.activation_hash)
         }));
         Ok(())
     }
@@ -185,9 +199,12 @@ impl StorageModuleServiceInner {
             .resize_task
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished)
-            && let Err(e) = self.resize_task.take().expect("finished task").await
         {
-            error!("partition resize worker failed; will retry: {e:?}");
+            match self.resize_task.take().expect("finished task").await {
+                Ok(Some(activation_hash)) => self.resize_done = Some(activation_hash),
+                Ok(None) => {}
+                Err(e) => error!("partition resize worker failed; will retry: {e:?}"),
+            }
         }
         if let Err(e) = self.start_partition_resize() {
             error!("finalized partition resize failed; will retry: {e:?}");
@@ -372,10 +389,8 @@ impl StorageModuleServiceInner {
             if let Ok(interval) = packing_sm.reset() {
                 // Message packing service to fill up fresh entropy chunks on the drive
                 let sender = self.service_senders.packing_sender();
-                if let Ok(req) =
-                    PackingRequest::new(packing_sm.clone(), PartitionChunkRange(interval))
-                {
-                    match sender.try_send(req) {
+                match PackingRequest::new(packing_sm.clone(), PartitionChunkRange(interval)) {
+                    Ok(req) => match sender.try_send(req) {
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             tracing::warn!(
@@ -393,7 +408,14 @@ impl StorageModuleServiceInner {
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
                         }
-                    }
+                    },
+                    Err(error) => tracing::warn!(
+                        target = "irys::packing",
+                        storage_module.id = %packing_sm.id,
+                        storage_module.packing_interval = ?interval,
+                        %error,
+                        "Could not build the packing request for a newly assigned partition"
+                    ),
                 }
             }
         }

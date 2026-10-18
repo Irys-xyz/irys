@@ -66,17 +66,18 @@ impl StorageModule {
         self.partition_chunks.load(Ordering::Acquire)
     }
 
-    /// Logical geometry may roll back before finality; physical geometry may not.
+    /// Logical geometry may roll back before finality; physical geometry may
+    /// not, so after finality the physical bound clamps the logical one: a
+    /// chain view that predates the finalized activation must still be able
+    /// to start and resync.
     pub fn set_partition_chunks(&self, chunks: u64) -> Result<()> {
         ensure!(
             chunks > 0 && chunks <= self.config.consensus.num_chunks_in_partition,
             "invalid logical partition size"
         );
-        ensure!(
-            chunks <= self.retained_chunks.load(Ordering::Acquire),
-            "cannot restore a partition suffix after finality"
-        );
-        self.partition_chunks.store(chunks, Ordering::Release);
+        let retained = self.retained_chunks.load(Ordering::Acquire);
+        self.partition_chunks
+            .store(chunks.min(retained), Ordering::Release);
         Ok(())
     }
 
@@ -286,7 +287,9 @@ mod tests {
                     ChunkType::Entropy
                 ));
                 module.force_sync_pending_chunks()?;
-                assert!(module.set_partition_chunks(10).is_err());
+                // After finality the physical bound clamps a pre-activation view.
+                module.set_partition_chunks(10)?;
+                assert_eq!(module.partition_chunks(), 4);
             }
             drop(module);
             let reopened = StorageModule::new(&info, &config)?;
