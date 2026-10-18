@@ -3198,10 +3198,6 @@ impl StorageModule {
             self.reset_incomplete.store(true, Ordering::SeqCst);
             eyre::bail!("injected storage module reset failure");
         }
-        // Drop crc_complete before the index clear and the interval rewrite.
-        // Repack writes fresh entries. A crash after this flag clear is
-        // finished by `finish_pending_resets`, which clears the flag again.
-        self.clear_chunk_crc_complete()?;
         self.reset_incomplete.store(true, Ordering::SeqCst);
         // The marker commits before pending is cleared. A failed marker
         // write returns here, so `written_ahead` still fences parked bytes.
@@ -3226,6 +3222,12 @@ impl StorageModule {
 
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetMarker)?;
+
+        // The marker is durable before this flag clear. A crash before the
+        // marker leaves `crc_complete` set, so an intact module stays strict
+        // and open does not scan it. A crash after this clear is finished by
+        // `finish_pending_resets`, which clears the flag again and wipes.
+        self.clear_chunk_crc_complete()?;
 
         for (_, submodule) in self.submodules.iter() {
             submodule.db.update(|tx| tx.clear())?;
@@ -15351,6 +15353,239 @@ mod tests {
         assert!(storage.is_data_chunk_durable_at(parked));
         assert!(storage.offset_meta_for_test(parked)?.is_some());
         assert!(!storage.has_pending_writes());
+        Ok(())
+    }
+
+    /// RocksDB module, every offset a packed data chunk, `crc_complete` set.
+    fn settled_rocks_module(
+        prefix: &str,
+        split: bool,
+    ) -> eyre::Result<(
+        irys_testing_utils::tempfile::TempDir,
+        Config,
+        StorageModuleInfo,
+        StorageModule,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+            if let irys_types::ConsensusOptions::Custom(consensus) = &mut node.consensus {
+                consensus.entropy_packing_iterations = 1;
+            }
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                max_pending_write_bytes: None,
+                entropy_sweep_interval_millis: 0,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 0,
+                ..StorageSyncConfig::default()
+            };
+            node.database = index_database(SubmoduleIndexEngine::Rocksdb);
+        });
+        let assignment = PartitionAssignment {
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+            miner_address: config.node_config.miner_address(),
+            partition_hash: H256::repeat_byte(0x41),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(assignment),
+            submodules: if split {
+                vec![
+                    (partition_chunk_offset_ii!(0, 1), tmp.path().join("a")),
+                    (partition_chunk_offset_ii!(2, 3), tmp.path().join("b")),
+                ]
+            } else {
+                vec![(partition_chunk_offset_ii!(0, 3), tmp.path().join("chunks"))]
+            },
+        };
+        let storage = StorageModule::new(&info, &config)?;
+        for offset in 0..4_u32 {
+            assert!(storage.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0x21; 32],
+                ChunkType::Entropy,
+            ));
+            storage.sync_pending_chunks()?;
+        }
+        let signer = IrysSigner::random_signer(&storage.config.consensus);
+        let tx = signer.sign_transaction(signer.create_transaction(vec![0x5A; 32], H256::zero())?)?;
+        let unpacked = tx.data_chunks()?;
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        storage.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+            0,
+        )?;
+        storage
+            .write_data_chunk(&unpacked[0])
+            .expect("pack the indexed chunk");
+        storage.force_sync_pending_chunks()?;
+        assert!(
+            storage.chunk_crc_complete_for_test(),
+            "every settled offset has a checksum"
+        );
+        assert!(storage.crc_span_scan_count() >= 1);
+        Ok((tmp, config, info, storage))
+    }
+
+    /// The marker write fails before it commits. The bytes are unchanged and
+    /// there is no marker, so `crc_complete` must stay set. An empty sync and
+    /// a later open must not walk the span. A missing checksum stays omitted.
+    /// A reset that then finishes still clears the flag and does not scan.
+    #[test]
+    fn failed_reset_marker_keeps_crc_complete_on_an_intact_module() -> eyre::Result<()> {
+        let (tmp, config, info, storage) = settled_rocks_module("crc_marker_fail", false)?;
+        let scans = storage.crc_span_scan_count();
+        storage.fail_next_sync_at(SyncFailurePoint::ResetMarkerWrite);
+        let err = storage.reset().unwrap_err();
+        assert!(err.to_string().contains("ResetMarkerWrite"), "{err}");
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(!submodule.db.reset_in_progress()?);
+        assert_eq!(
+            storage.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(ChunkType::Entropy),
+            "a failed marker leaves the labels"
+        );
+        let row = storage
+            .offset_meta_for_test(PartitionChunkOffset::from(0))?
+            .expect("the data row stays");
+        assert!(row.crc.is_some());
+        assert!(row.proof.is_some());
+        assert!(
+            storage.chunk_crc_complete_for_test(),
+            "an intact module stays strict when the marker did not commit"
+        );
+        storage.force_sync_pending_chunks()?;
+        assert_eq!(
+            storage.crc_span_scan_count(),
+            scans,
+            "an empty sync must not walk OffsetMeta"
+        );
+        assert!(storage.chunk_crc_complete_for_test());
+        assert!(
+            storage.clear_reset_incomplete_without_marker()?,
+            "no marker: settle keeps the bytes"
+        );
+        assert!(storage.chunk_crc_complete_for_test());
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(&info, &config)?;
+        assert!(reopened.chunk_crc_complete_for_test());
+        assert_eq!(reopened.crc_span_scan_count(), 0);
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(ChunkType::Entropy)
+        );
+        assert!(
+            reopened
+                .offset_meta_for_test(PartitionChunkOffset::from(0))?
+                .and_then(|row| row.crc)
+                .is_some()
+        );
+        reopened.force_sync_pending_chunks()?;
+        assert_eq!(
+            reopened.crc_span_scan_count(),
+            0,
+            "open and an empty sync must not walk OffsetMeta"
+        );
+        reopened.set_offset_crc_for_test(PartitionChunkOffset::from(0), None)?;
+        assert!(
+            reopened
+                .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .is_empty(),
+            "a missing checksum on a strict module is omitted"
+        );
+
+        let scans = reopened.crc_span_scan_count();
+        reopened.reset()?;
+        assert!(!reopened.chunk_crc_complete_for_test());
+        assert_eq!(
+            reopened.crc_span_scan_count(),
+            scans,
+            "a finished reset clears the flag and does not scan"
+        );
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized)
+        );
+        let (_, submodule) = reopened.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(!submodule.db.reset_in_progress()?);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// The first marker commits and the second write fails. The bytes are
+    /// intact, so the flag stays set, and settle must not treat the module
+    /// as a wipe that never started.
+    #[test]
+    fn failed_later_reset_marker_keeps_crc_complete() -> eyre::Result<()> {
+        let (_tmp, _config, _info, storage) = settled_rocks_module("crc_marker_second", true)?;
+        storage.fail_sync_after(SyncFailurePoint::ResetMarkerWrite, 1);
+        let err = storage.reset().unwrap_err();
+        assert!(err.to_string().contains("ResetMarkerWrite"), "{err}");
+        let (_, first) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let (_, second) = storage.get_submodule_for_offset(PartitionChunkOffset::from(2))?;
+        assert!(first.db.reset_in_progress()?);
+        assert!(!second.db.reset_in_progress()?);
+        assert!(
+            storage.chunk_crc_complete_for_test(),
+            "a partial marker leaves the bytes, so the flag stays set"
+        );
+        assert!(
+            !storage.clear_reset_incomplete_without_marker()?,
+            "a durable marker on any submodule must not be settled as keep-bytes"
+        );
+        assert_eq!(
+            storage.get_chunk_type(&PartitionChunkOffset::from(2)),
+            Some(ChunkType::Entropy)
+        );
+        Ok(())
+    }
+
+    /// The marker is durable and the index clear has not run. The flag stays
+    /// set while the bytes are still there. Open finishes the wipe and does
+    /// not scan.
+    #[test]
+    fn reset_crash_after_marker_keeps_crc_until_reopen_wipes() -> eyre::Result<()> {
+        let (_tmp, config, info, storage) = settled_rocks_module("crc_after_marker", false)?;
+        let scans = storage.crc_span_scan_count();
+        storage.fail_next_sync_at(SyncFailurePoint::AfterResetMarker);
+        let err = storage.reset().unwrap_err();
+        assert!(err.to_string().contains("AfterResetMarker"), "{err}");
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(submodule.db.reset_in_progress()?);
+        assert!(
+            storage
+                .offset_meta_for_test(PartitionChunkOffset::from(0))?
+                .is_some(),
+            "the index clear has not run"
+        );
+        assert!(
+            storage.chunk_crc_complete_for_test(),
+            "the flag stays set until the wipe passes the durable marker"
+        );
+        assert_eq!(storage.crc_span_scan_count(), scans);
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(&info, &config)?;
+        assert_eq!(reopened.crc_span_scan_count(), 0);
+        assert!(!reopened.chunk_crc_complete_for_test());
+        assert_eq!(
+            reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized)
+        );
+        let (_, submodule) = reopened.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(!submodule.db.reset_in_progress()?);
+        reopened.force_sync_pending_chunks()?;
+        assert_eq!(
+            reopened.crc_span_scan_count(),
+            0,
+            "finishing the crashed reset must not scan"
+        );
         Ok(())
     }
 
