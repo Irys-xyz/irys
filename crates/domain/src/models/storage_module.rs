@@ -1747,6 +1747,10 @@ fn allocate_chunks_file(file: &File, path: &Path, full_len: u64) -> eyre::Result
     if !chunks_file_needs_reserve(len, allocated, full_len) {
         return Ok(());
     }
+    // The logical length is already set. This is the hole reserve, and it
+    // runs only after the index has migrated: the reserve can take the free
+    // space a copy of the old index still needs.
+    note_submodule_open("reserve");
     #[cfg(target_os = "linux")]
     {
         fallocate_chunks(file, path, full_len)
@@ -9855,7 +9859,19 @@ mod tests {
             .ok_or_else(|| eyre::eyre!("chunks file open was not recorded: {order:?}"))?;
         assert!(
             index_at < file_at,
-            "reserve still follows the migration: {order:?}"
+            "the chunks file opened before the index: {order:?}"
+        );
+        let reserve_at = order
+            .iter()
+            .position(|step| *step == "reserve")
+            .ok_or_else(|| eyre::eyre!("chunks reserve was not recorded: {order:?}"))?;
+        assert!(
+            index_at < reserve_at,
+            "the hole reserve must follow the index migration: {order:?}"
+        );
+        assert!(
+            !order[..index_at].contains(&"reserve"),
+            "reserve ran before the index returned: {order:?}"
         );
         assert_eq!(
             order.iter().filter(|step| **step == "index").count(),
