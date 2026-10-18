@@ -410,9 +410,10 @@ type StorageIntervals = NoditMap<PartitionChunkOffset, Interval<PartitionChunkOf
 /// stored, or until a clean shutdown writes the live map.
 type IntervalMask = NoditSet<PartitionChunkOffset, Interval<PartitionChunkOffset>>;
 
-/// Bytes of `Entropy` or `Uninitialized` marked `Interrupted` ahead of one
-/// write, per submodule. A crash reloads that span as `Uninitialized`. The
-/// node packs or syncs those chunks again. The run just written is extra.
+/// Bytes of `Uninitialized` marked `Interrupted` ahead of one write, per
+/// submodule. A crash reloads that span as `Uninitialized`. The node packs
+/// or syncs those chunks again. The run just written is extra. Following
+/// `Entropy` is not marked: a crash would drop its placements.
 const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Last `intervals.json` image (`written`, including `Interrupted`) and the
@@ -420,8 +421,8 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// An ahead mark lives only in `mask`, so the live map still says `Entropy`.
 ///
 /// Mark `Interrupted` before `pwrite` (skip a span already marked). The same
-/// rewrite may mark up to 512 MiB of following `Entropy` or `Uninitialized`
-/// in the submodule, stopping at live `Data`.
+/// rewrite may mark up to 512 MiB of following `Uninitialized` in the
+/// submodule, stopping at live `Data` or `Entropy`.
 /// Completions are stored after `fdatasync` and the presence commit, at most
 /// every `intervals_persist_secs`, or sooner on the next write-ahead,
 /// `force_sync`, or shutdown. A failed `pwrite` leaves the file
@@ -436,7 +437,7 @@ const INTERVAL_WRITE_AHEAD_BYTES: u64 = 512 * 1024 * 1024;
 /// Period 0 rewrites on every sync and does not mark ahead. Queued or parked
 /// offsets stay `Interrupted`. Shutdown force-syncs, writes the live map, and
 /// drops the mask. A crash leaves the mask, so open treats it as
-/// `Uninitialized`, including entropy only marked ahead. The checksum commits
+/// `Uninitialized`. The checksum commits
 /// with the presence row, after `fdatasync` and before the completion label,
 /// while that mark still covers the bytes.
 #[derive(Debug)]
@@ -4403,8 +4404,8 @@ impl StorageModule {
     /// Period `0` rewrites the live map, which is already `Interrupted` for
     /// the batch. Offsets parked by an earlier point are stored as
     /// `Interrupted` too. A positive period also marks up to
-    /// [`INTERVAL_WRITE_AHEAD_BYTES`] of following `Entropy` or
-    /// `Uninitialized` in the same submodule. That ahead range is not written
+    /// [`INTERVAL_WRITE_AHEAD_BYTES`] of following `Uninitialized` in the
+    /// same submodule. That ahead range is not written
     /// into the live map. The mask is updated only after the file replace
     /// succeeds, or immediately when the file already has those labels.
     fn persist_write_ahead(
@@ -4844,11 +4845,15 @@ impl StorageModule {
         Ok(projected)
     }
 
-    /// Insert `run`, then walk forward. Stop at `Data`, at the submodule
-    /// boundary, when the budget is spent, or when the next point is already
-    /// masked. Do not jump the mask: that would add another 512 MiB on every
-    /// later commit and rewrite every gap. The run itself is still inserted:
-    /// those bytes are about to change.
+    /// Insert `run`, then walk forward. Stop at `Data` or `Entropy`, at the
+    /// submodule boundary, when the budget is spent, or when the next point
+    /// is already masked. Do not jump the mask: that would add another
+    /// 512 MiB on every later commit and rewrite every gap. The run itself
+    /// is still inserted: those bytes are about to change. Following
+    /// `Entropy` is not marked. A crash reloads `Interrupted` as
+    /// `Uninitialized` and drops placements there, and this run did not write
+    /// those bytes. `Uninitialized` ahead is still marked: it has no packed
+    /// bytes, and one rewrite covers the next pack.
     fn extend_write_ahead(
         mask: &mut IntervalMask,
         memory: &StorageIntervals,
@@ -4869,9 +4874,11 @@ impl StorageModule {
             let Ok((interval, chunk_type)) = memory.get_key_value_at_point(cursor) else {
                 break;
             };
-            // Data not in this run stays labelled Data. Marking it Interrupted
-            // would make a crash reload durable bytes as Uninitialized.
-            if *chunk_type == ChunkType::Data {
+            // Data and Entropy stay labelled. Marking them Interrupted would
+            // make a crash reload them as Uninitialized. Data bytes are
+            // already stored. Entropy can hold a placement before its bytes
+            // are replaced. Uninitialized has no packed bytes.
+            if matches!(*chunk_type, ChunkType::Data | ChunkType::Entropy) {
                 break;
             }
             let mut span_end = interval.end().min(submodule.end());
@@ -14859,7 +14866,7 @@ mod tests {
         );
         assert_eq!(
             file.get_at_point(PartitionChunkOffset::from(1)).copied(),
-            Some(ChunkType::Interrupted)
+            Some(ChunkType::Entropy)
         );
         drop(storage);
 
@@ -14873,6 +14880,175 @@ mod tests {
             Some(ChunkType::Entropy)
         );
         drop(reloaded);
+        drop(tmp);
+        Ok(())
+    }
+
+    fn indexed_entropy_info(config: &Config) -> StorageModuleInfo {
+        one_span(
+            10,
+            "sub",
+            Some(submit_slot(config, H256::repeat_byte(0x5A), 0)),
+        )
+    }
+
+    /// Entropy across 0..=10, one tx at offset 5 only. The data write under
+    /// test is offset 0, so a crash fence on that run must not overlap the tx.
+    fn indexed_entropy_module(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+        H256,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).with_tracing().build();
+        let config = testing_config_tuned(tmp.path(), 32, 11, |node| {
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: 30,
+                min_durable_interval_ms: 0,
+                ..StorageSyncConfig::default()
+            };
+            node.database = index_database(engine);
+        });
+        let storage = StorageModule::new(&indexed_entropy_info(&config), &config)?;
+        {
+            let mut intervals = storage.intervals.write().unwrap();
+            *intervals = StorageIntervals::new();
+            intervals
+                .insert_merge_touching_if_values_equal(
+                    partition_chunk_offset_ii!(0, 10),
+                    ChunkType::Entropy,
+                )
+                .expect("entropy span");
+        }
+        storage.write_intervals_to_submodules()?;
+        let data_root = H256::repeat_byte(0x71);
+        storage.index_transaction_data(
+            &data_header(data_root, config.consensus.chunk_size),
+            &vec![9, 8, 7, 6],
+            LedgerChunkRange(ledger_chunk_offset_ii!(5, 5)),
+            40,
+        )?;
+        for (_, submodule) in storage.submodules.iter() {
+            submodule.db.sync_group()?;
+        }
+        assert_indexed_entropy(&storage, data_root)?;
+        Ok((tmp, config, storage, data_root))
+    }
+
+    fn assert_indexed_entropy(storage: &StorageModule, data_root: H256) -> eyre::Result<()> {
+        let offset = PartitionChunkOffset::from(5);
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        let rows = submodule
+            .db
+            .view(|tx| tx.tx_intervals_in_range(offset, offset))?;
+        assert!(!rows.is_empty(), "tx interval at offset 5 is missing");
+        let jobs = storage.pending_body_migrations()?;
+        assert_eq!(jobs.len(), 1, "pending body job count");
+        assert_eq!(jobs[0].0, offset);
+        let infos = storage.collect_data_root_infos(data_root)?;
+        assert!(!infos.0.is_empty(), "data-root info is missing");
+        Ok(())
+    }
+
+    /// After fdatasync and the presence commit, a kill must keep entropy the
+    /// run did not write. The run itself stays `Interrupted` until the
+    /// completion period, so reopen still treats that offset as unpacked.
+    #[rstest]
+    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
+    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
+    fn crash_reload_of_write_ahead_keeps_indexed_entropy(
+        #[case] engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<()> {
+        let prefix = format!("ahead_entropy_done_{engine:?}");
+        let (tmp, config, storage, data_root) = indexed_entropy_module(&prefix, engine)?;
+        let written = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(written, vec![7_u8; 32], ChunkType::Data));
+        storage.sync_pending_chunks()?;
+        assert!(storage.is_data_chunk_durable_at(written));
+        assert_eq!(live_label(&storage, 5), Some(ChunkType::Entropy));
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Interrupted),
+            "{engine:?}: the run fence was published before the completion period"
+        );
+        assert_eq!(
+            file_label(&storage, 5)?,
+            Some(ChunkType::Entropy),
+            "{engine:?}: the durable point marked entropy the run did not write"
+        );
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(&indexed_entropy_info(&config), &config)?;
+        assert_eq!(
+            live_label(&reopened, 0),
+            Some(ChunkType::Uninitialized),
+            "{engine:?}: reopen published the run before its completion"
+        );
+        assert_eq!(
+            live_label(&reopened, 5),
+            Some(ChunkType::Entropy),
+            "{engine:?}: reopen relabelled entropy the run did not write"
+        );
+        assert_indexed_entropy(&reopened, data_root)?;
+        drop(reopened);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A crash after the write-ahead and before fdatasync still reloads the
+    /// run as `Uninitialized`. Entropy after the run keeps its label and rows.
+    #[rstest]
+    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
+    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
+    fn crash_during_the_run_keeps_the_write_fence(
+        #[case] engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<()> {
+        let prefix = format!("ahead_entropy_inflight_{engine:?}");
+        let (tmp, config, storage, data_root) = indexed_entropy_module(&prefix, engine)?;
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeDataFsync);
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        let failed = storage
+            .sync_pending_chunks()
+            .expect_err("chunk fsync was injected to fail");
+        assert!(
+            format!("{failed:#}").contains("BeforeDataFsync"),
+            "{engine:?}: {failed:#}"
+        );
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Interrupted),
+            "{engine:?}: the in-flight run was not fenced"
+        );
+        assert_eq!(
+            file_label(&storage, 5)?,
+            Some(ChunkType::Entropy),
+            "{engine:?}: the in-flight run marked entropy it did not write"
+        );
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+
+        let reopened = StorageModule::new(&indexed_entropy_info(&config), &config)?;
+        assert_eq!(
+            live_label(&reopened, 0),
+            Some(ChunkType::Uninitialized),
+            "{engine:?}: a crash during the run published Data"
+        );
+        assert_eq!(
+            live_label(&reopened, 5),
+            Some(ChunkType::Entropy),
+            "{engine:?}: a crash during the run relabelled entropy"
+        );
+        assert_indexed_entropy(&reopened, data_root)?;
+        drop(reopened);
         drop(tmp);
         Ok(())
     }
