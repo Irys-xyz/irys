@@ -2561,6 +2561,143 @@ EOF
     rm -rf "$root"
 }
 
+# The bench wrote intervals.json and packing_params.toml, then exited 1.
+# db and rocks are only in the state directory. A restore must move nothing,
+# and it must name every name that is in both places. The next start still
+# moves nothing.
+test_ladder_does_not_move_a_restore_when_a_name_is_in_both_places() {
+    local name=ladder-restore-conflict root module sys err err2 dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    err2=$root/err2
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    cat >"$root/bench" <<EOF
+#!/bin/sh
+printf 'NEW-ENTROPY\n' > "$module/intervals.json"
+printf 'NEW-PARAMS\n' > "$module/packing_params.toml"
+printf ran > "$root/bench-ran"
+exit 1
+EOF
+    chmod +x "$root/bench"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+        rm -rf "$root"
+        return
+    fi
+    if [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not start: $(cat "$err")"
+    elif [ -e "$module/db" ] || [ -e "$module/rocks" ] || [ -e "$module/bench-prepop.json" ]; then
+        bad "$name" "a name that was only in the state directory was restored"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "state db: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-rocks\n') "$module/state-prior/rocks"; then
+        bad "$name" "state rocks changed or moved"
+    elif ! cmp -s <(printf 'keep-bench-prepop.json\n') "$module/state-prior/bench-prepop.json"; then
+        bad "$name" "state bench-prepop changed or moved"
+    elif ! cmp -s <(printf 'NEW-ENTROPY\n') "$module/intervals.json"; then
+        bad "$name" "live intervals: $(cat "$module/intervals.json" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-intervals.json\n') "$module/state-prior/intervals.json"; then
+        bad "$name" "state intervals changed or moved"
+    elif ! cmp -s <(printf 'NEW-PARAMS\n') "$module/packing_params.toml"; then
+        bad "$name" "live packing params: $(cat "$module/packing_params.toml" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-packing_params.toml\n') "$module/state-prior/packing_params.toml"; then
+        bad "$name" "state packing params changed or moved"
+    elif ! cmp -s <(printf 'keep-chunks.dat\n') "$module/chunks.dat"; then
+        bad "$name" "chunks.dat changed"
+    elif ! grep -q 'intervals.json' "$err" || ! grep -q 'packing_params.toml' "$err"; then
+        bad "$name" "stderr did not name both conflicts: $(cat "$err")"
+    else
+        rm -f "$root/bench-ran"
+        if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+            --device "$dev" --mount "$mnt" --loadtest "$module" \
+            --out-root "$root/out" --bench "$root/bench" --run only-run \
+            >"$err2" 2>&1; then
+            bad "$name" "retry exited 0: $(cat "$err2")"
+        elif [ -e "$root/bench-ran" ]; then
+            bad "$name" "retry ran the bench"
+        elif [ -e "$module/db" ]; then
+            bad "$name" "retry restored db"
+        elif ! cmp -s <(printf 'NEW-ENTROPY\n') "$module/intervals.json"; then
+            bad "$name" "retry changed live intervals"
+        elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+            bad "$name" "retry changed state db"
+        elif ! grep -q 'already exists' "$err2"; then
+            bad "$name" "retry stderr: $(cat "$err2")"
+        elif ! grep -q 'db' "$err2"; then
+            bad "$name" "retry did not name the stranded db: $(cat "$err2")"
+        else
+            ok "$name"
+        fi
+    fi
+    rm -rf "$root"
+}
+
+# db, rocks, and intervals.json move, then the next mv fails. Those three go
+# back to the state directory. The live module does not keep a partial index.
+test_ladder_puts_back_names_when_a_later_restore_move_fails() {
+    local name=ladder-restore-mv-fails root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue" "$root/bin"
+    queue_files "$sys/block/$dev/queue"
+    cat >"$root/bin/mv" <<EOF
+#!/bin/bash
+if [ "\${1-}" = "$module/state-prior/packing_params.toml" ]; then
+    echo "injected mv failure" >&2
+    exit 1
+fi
+exec /bin/mv "\$@"
+EOF
+    chmod +x "$root/bin/mv"
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 1\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    if PATH="$root/bin:$PATH" MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" --run only-run \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not start: $(cat "$err")"
+    elif ! grep -q 'injected mv failure' "$err"; then
+        bad "$name" "mv was not the failure: $(cat "$err")"
+    elif [ -e "$module/db" ] || [ -e "$module/rocks" ] || [ -e "$module/intervals.json" ]; then
+        bad "$name" "a restored name stayed in the module root"
+    elif [ -e "$module/packing_params.toml" ] || [ -e "$module/bench-prepop.json" ]; then
+        bad "$name" "a later name was restored after the failed move"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "state db: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-rocks\n') "$module/state-prior/rocks"; then
+        bad "$name" "state rocks: $(cat "$module/state-prior/rocks" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-intervals.json\n') "$module/state-prior/intervals.json"; then
+        bad "$name" "state intervals: $(cat "$module/state-prior/intervals.json" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-packing_params.toml\n') "$module/state-prior/packing_params.toml"; then
+        bad "$name" "state packing params moved"
+    elif ! cmp -s <(printf 'keep-bench-prepop.json\n') "$module/state-prior/bench-prepop.json"; then
+        bad "$name" "state bench-prepop moved"
+    elif ! cmp -s <(printf 'keep-chunks.dat\n') "$module/chunks.dat"; then
+        bad "$name" "chunks.dat changed"
+    elif [ ! -d "$module/state-prior" ]; then
+        bad "$name" "state directory was removed after a failed restore"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 # Exit 0 still continues. The next step runs and the first index stays stashed.
 test_ladder_runs_the_next_step_when_the_bench_exits_0() {
     local name=ladder-bench-exit-0-continues root module sys err dev mnt

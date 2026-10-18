@@ -37,11 +37,12 @@
 # The floor is MIN_FREE_GIB (default 500), the same value run.sh uses. A
 # refusal leaves the index files and the queue alone. If the run then exits
 # non-zero (a run.sh guard, or the bench exits with any status other than 0
-# or 2), those files move back and that state directory is removed when the
-# run has not created one of them. A file the run already created stays, and
-# the previous copy stays in the state directory. A state directory this run
-# did not create stays where it is. Bench exit 0 and bench exit 2 leave the
-# new index where it is.
+# or 2), those files move back and that state directory is removed when none
+# of them is already in the module root. A name that is in both places blocks
+# the whole restore: nothing moves, and the error names every such name. If a
+# move fails, the names this restore already put back are moved into the state
+# directory again. A state directory this run did not create stays where it
+# is. Bench exit 0 and bench exit 2 leave the new index where it is.
 #
 # max_sectors_kb is restored on EXIT, INT, and TERM. The current run and the
 # tracer are stopped before that restore. A foreground wait would defer the
@@ -447,8 +448,10 @@ stash() {
 }
 
 # Move state-<name> back to the module root and remove the directory.
-# A file that is in both places is left for the operator. An empty directory
-# is removed so the next stash is not blocked by it.
+# Scan first. A name that is in both places blocks the whole restore, and the
+# error names every such name. If a later move fails, the names this call
+# already restored go back into the state directory. An empty directory is
+# removed so the next stash is not blocked by it.
 unstash() {
     local name=$1
     local dest=$loadtest/state-$name
@@ -456,13 +459,29 @@ unstash() {
     if [ ! -e "$dest" ]; then
         return 0
     fi
+    local -a conflicts=()
+    for item in "${state_names[@]}"; do
+        if [ -e "$dest/$item" ] && [ -e "$loadtest/$item" ]; then
+            conflicts+=("$item")
+        fi
+    done
+    if [ "${#conflicts[@]}" -gt 0 ]; then
+        echo "cannot restore, already in both places: ${conflicts[*]}" >&2
+        return 1
+    fi
+    local -a restored=()
     for item in "${state_names[@]}"; do
         if [ -e "$dest/$item" ]; then
-            if [ -e "$loadtest/$item" ]; then
-                echo "cannot restore $item: $loadtest/$item already exists" >&2
+            if ! mv "$dest/$item" "$loadtest/"; then
+                local back
+                if [ "${#restored[@]}" -gt 0 ]; then
+                    for back in "${restored[@]}"; do
+                        mv "$loadtest/$back" "$dest/" || true
+                    done
+                fi
                 return 1
             fi
-            mv "$dest/$item" "$loadtest/" || return 1
+            restored+=("$item")
         fi
     done
     if [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then

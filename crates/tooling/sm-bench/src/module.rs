@@ -11,7 +11,8 @@ use std::thread::JoinHandle;
 
 use eyre::{WrapErr as _, eyre};
 use irys_domain::{
-    BenchIndex, SplitBacking, StorageModule, StorageModuleInfo, write_entropy_intervals,
+    BenchIndex, SplitBacking, StorageModule, StorageModuleInfo, read_intervals_file,
+    write_entropy_intervals,
 };
 use irys_types::{
     Config, ConsensusConfig, ConsensusOptions, DataLedger, H256, NodeConfig, PartitionChunkOffset,
@@ -67,7 +68,16 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
             chunks_dat.display()
         );
     }
-    write_entropy_intervals(&dir.join("intervals.json"), request.partition_chunks)?;
+    let intervals_path = dir.join("intervals.json");
+    // An existing file is normalized before open. A span that is only
+    // Uninitialized or Interrupted becomes Entropy, and open loads that span.
+    // Replacing it after open would let open reconcile those chunks as
+    // Uninitialized. A missing file is written only after open returns: a
+    // failure before the index exists must not leave a new intervals.json.
+    let intervals_missing = !intervals_path.exists();
+    if !intervals_missing {
+        write_entropy_intervals(&intervals_path, request.partition_chunks)?;
+    }
 
     let parent = dir
         .parent()
@@ -146,6 +156,17 @@ pub(crate) fn open_module(request: OpenRequest<'_>) -> eyre::Result<OpenedModule
         Arc::new(split),
         request.index,
     )?);
+    if intervals_missing {
+        write_entropy_intervals(&intervals_path, request.partition_chunks)?;
+        // Open stored the default Uninitialized span. The file is now Entropy.
+        // The live map must match, or the next rewrite puts Uninitialized back.
+        let loaded = read_intervals_file(&intervals_path)?;
+        let mut live = module
+            .intervals()
+            .write()
+            .map_err(|_| eyre!("intervals lock poisoned"))?;
+        *live = loaded;
+    }
     if request.index_group_commit > 0 {
         module.enable_index_group_commit(request.index_group_commit)?;
     }
@@ -396,5 +417,152 @@ mod tests {
             .expect("second bench did not open the recall file within 90s");
         assert_eq!(mark_a, 0xA2);
         assert_eq!(mark_b, 0xA2);
+    }
+
+    fn open_request<'a>(dir: &'a Path, recall: &'a Path, write: &'a Path) -> OpenRequest<'a> {
+        OpenRequest {
+            dir,
+            recall_file: recall,
+            write_file: write,
+            partition_chunks: 2,
+            recall_chunks: 1,
+            write_origin: 0,
+            write_chunks: 1,
+            num_writes_before_sync: 100,
+            entropy_sweep_max_bytes: CHUNK_SIZE,
+            entropy_read_grace_ms: 0,
+            entropy_read_batch_bytes: CHUNK_SIZE,
+            entropy_readahead_bytes: 0,
+            entropy_readahead_cache_bytes: 0,
+            intervals_persist_secs: 0,
+            min_durable_interval_ms: 0,
+            durable_headroom_permille: 1000,
+            recall_direct_io: false,
+            recall_offset_chunks: 0,
+            index: BenchIndex::Mdbx,
+            index_group_commit: 0,
+        }
+    }
+
+    #[test]
+    fn a_failed_write_open_does_not_create_intervals() {
+        // Breaks if intervals.json is written before the write file opens.
+        // The index is not created on this path, so a later restore must be
+        // able to put the previous intervals file back.
+        let tmp = TempDirBuilder::new().prefix("sm-intervals-fail-").build();
+        let root = tmp.path().join("loadtest");
+        fs::create_dir_all(&root).unwrap();
+        let recall = root.join("recall.dat");
+        write_uniform(&recall, 2, 0xA2);
+        let write = root.join("write.dat");
+        write_uniform(&write, 1, 0x11);
+        let mut perms = fs::metadata(&write).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&write, perms).unwrap();
+        let dir = root.join("mod");
+        let error = match open_module(open_request(&dir, &recall, &write)) {
+            Ok(_) => panic!("a read-only write file must not open"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("write file"),
+            "unexpected open error: {message}"
+        );
+        assert!(
+            !dir.join("intervals.json").exists(),
+            "intervals.json was created before the write file opened"
+        );
+        assert!(
+            !dir.join("db").exists(),
+            "index db exists after a failed open"
+        );
+        assert!(
+            !dir.join("rocks").exists(),
+            "index rocks exists after a failed open"
+        );
+    }
+
+    #[test]
+    fn a_missing_intervals_file_is_entropy_after_a_successful_open() {
+        // Breaks if a successful open leaves Uninitialized labels, or if the
+        // live map does not match the file the open published.
+        let tmp = TempDirBuilder::new().prefix("sm-intervals-ok-").build();
+        let root = tmp.path().join("loadtest");
+        let recall = root.join("recall.dat");
+        write_uniform(&recall, 2, 0xA2);
+        let write = root.join("write.dat");
+        write_uniform(&write, 1, 0x11);
+        let dir = root.join("mod");
+        let opened = open_module(open_request(&dir, &recall, &write))
+            .unwrap_or_else(|error| panic!("open: {error:#}"));
+        let text = fs::read_to_string(dir.join("intervals.json")).unwrap();
+        assert!(text.contains("\"Entropy\""), "{text}");
+        assert!(!text.contains("Uninitialized"), "{text}");
+        assert_eq!(mining_mark(&opened.module, 0), 0xA2);
+        assert!(
+            opened
+                .module
+                .get_intervals(ChunkType::Uninitialized)
+                .is_empty()
+        );
+        assert!(!opened.module.get_intervals(ChunkType::Entropy).is_empty());
+    }
+
+    #[test]
+    fn an_existing_data_intervals_file_is_kept() {
+        // Breaks if open replaces a Data span with Entropy.
+        let tmp = TempDirBuilder::new().prefix("sm-intervals-data-").build();
+        let root = tmp.path().join("loadtest");
+        fs::create_dir_all(root.join("mod")).unwrap();
+        let recall = root.join("recall.dat");
+        write_uniform(&recall, 2, 0xA2);
+        let write = root.join("write.dat");
+        write_uniform(&write, 1, 0x11);
+        let dir = root.join("mod");
+        fs::write(
+            dir.join("intervals.json"),
+            r#"[[{"start":0,"end":1},"Data"]]"#,
+        )
+        .unwrap();
+        let opened = open_module(open_request(&dir, &recall, &write))
+            .unwrap_or_else(|error| panic!("open: {error:#}"));
+        let text = fs::read_to_string(dir.join("intervals.json")).unwrap();
+        assert!(text.contains("\"Data\""), "{text}");
+        assert!(!text.contains("Entropy"), "{text}");
+        assert!(!opened.module.get_intervals(ChunkType::Data).is_empty());
+        assert!(opened.module.get_intervals(ChunkType::Entropy).is_empty());
+    }
+
+    #[test]
+    fn an_existing_uninitialized_intervals_file_becomes_entropy() {
+        // Breaks if a file that is only Uninitialized is left in place.
+        // That span is what a fresh open would reconcile, and the bench
+        // replaces it so recall reads the entropy file.
+        let tmp = TempDirBuilder::new().prefix("sm-intervals-uninit-").build();
+        let root = tmp.path().join("loadtest");
+        fs::create_dir_all(root.join("mod")).unwrap();
+        let recall = root.join("recall.dat");
+        write_uniform(&recall, 2, 0xA2);
+        let write = root.join("write.dat");
+        write_uniform(&write, 1, 0x11);
+        let dir = root.join("mod");
+        fs::write(
+            dir.join("intervals.json"),
+            r#"[[{"start":0,"end":1},"Uninitialized"]]"#,
+        )
+        .unwrap();
+        let opened = open_module(open_request(&dir, &recall, &write))
+            .unwrap_or_else(|error| panic!("open: {error:#}"));
+        let text = fs::read_to_string(dir.join("intervals.json")).unwrap();
+        assert!(text.contains("\"Entropy\""), "{text}");
+        assert!(!text.contains("Uninitialized"), "{text}");
+        assert_eq!(mining_mark(&opened.module, 0), 0xA2);
+        assert!(
+            opened
+                .module
+                .get_intervals(ChunkType::Uninitialized)
+                .is_empty()
+        );
     }
 }
