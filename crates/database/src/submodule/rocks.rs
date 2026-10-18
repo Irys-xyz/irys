@@ -9711,7 +9711,11 @@ mod tests {
             manifest,
             "refused close recorded a flush in the moved manifest"
         );
-        assert_eq!(dir_names(&moved)?, names, "moved directory gained or lost files");
+        assert_eq!(
+            dir_names(&moved)?,
+            names,
+            "moved directory gained or lost files"
+        );
         assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000099\n");
         assert_eq!(fs::read(rocks.join("000099.log"))?, b"replacement-log");
         assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
