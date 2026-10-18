@@ -417,9 +417,9 @@ pub fn process_ledger_transactions(
 }
 
 /// Source `count` contiguous transaction offsets starting at `tx_start`.
-/// Cache hits stay per chunk. A run of cache misses on Publish is one
-/// [`StorageModule::read_durable_bodies`] per Submit replica that still has a
-/// hole. Term ledgers do not fall back across ledgers. `None` is a hole.
+/// Cache hits stay per chunk. Each Publish cache miss is resolved on every
+/// Submit replica. A fallback error keeps the chunks already loaded. Term
+/// ledgers do not fall back across ledgers. `None` is a hole.
 fn load_chunks_for_migration(
     storage_modules_guard: &StorageModulesReadGuard,
     db: &DatabaseProvider,
@@ -469,8 +469,9 @@ fn load_chunks_for_migration(
             }
         }
     }
-    if target_ledger == DataLedger::Publish && !misses.is_empty() {
-        fill_submit_misses(
+    if target_ledger == DataLedger::Publish
+        && !misses.is_empty()
+        && let Err(error) = fill_submit_misses(
             storage_modules_guard,
             data_root,
             data_size,
@@ -478,7 +479,13 @@ fn load_chunks_for_migration(
             &misses,
             &mut bodies,
             chunk_size,
-        )?;
+        )
+    {
+        tracing::warn!(
+            data_root = %data_root,
+            ?error,
+            "Submit fallback failed; keeping chunks already loaded"
+        );
     }
     Ok(bodies)
 }
@@ -493,8 +500,10 @@ fn tx_offset_at(tx_start: TxChunkOffset, step: usize) -> Result<TxChunkOffset, M
     Ok(TxChunkOffset::from(raw))
 }
 
-/// One range read per remaining hole span. The next Submit replica is asked
-/// only for the offsets the previous replica left empty.
+/// Each still-empty index is resolved on every Submit replica. A tx offset
+/// this replica does not hold is a miss for the next replica. Adding later
+/// indexes to the first placement reads past the partition and fails the
+/// chunks that were in range.
 fn fill_submit_misses(
     storage_modules_guard: &StorageModulesReadGuard,
     data_root: DataRoot,
@@ -518,121 +527,72 @@ fn fill_submit_misses(
             continue;
         }
         let mut still = Vec::new();
-        for (start_step, len) in contiguous_index_runs(&pending) {
-            let tx0 = tx_offset_at(tx_start, start_step)?;
+        for step in pending {
+            let tx_offset = tx_offset_at(tx_start, step)?;
             let placements = irys_domain::trace_index_read(irys_domain::MIGRATION, || {
-                module.partition_offsets_for_data_root_chunk(data_root, tx0)
+                module.partition_offsets_for_data_root_chunk(data_root, tx_offset)
             })
             .map_err(|error| {
                 MigrationError::Other(format!("resolving Submit fallback: {error}"))
             })?;
             let Some(placements) = placements else {
-                still.extend(start_step..start_step + len);
+                still.push(step);
                 continue;
             };
             if placements.is_empty() {
-                still.extend(start_step..start_step + len);
+                still.push(step);
                 continue;
             }
-            let mut filled = vec![false; len];
+            let mut filled = false;
             for place in placements {
-                let mut index = 0;
-                while index < len {
-                    if filled[index] {
-                        index += 1;
-                        continue;
+                let read = module.read_durable_bodies(place, place).map_err(|error| {
+                    MigrationError::Other(format!("reading durable Submit fallback: {error}"))
+                })?;
+                let Some(body) = read.into_iter().next().flatten() else {
+                    continue;
+                };
+                if body.data_root != data_root || body.tx_offset != tx_offset {
+                    tracing::warn!(
+                        data_root = %data_root,
+                        %tx_offset,
+                        storage_module.id = module.id,
+                        partition.offset = %place,
+                        "Durable Submit chunk identity mismatch; checking another replica"
+                    );
+                    continue;
+                }
+                match validate_chunk_parts_for_migration(
+                    body.data_path,
+                    body.bytes,
+                    data_root,
+                    data_size,
+                    tx_offset,
+                    chunk_size,
+                ) {
+                    Ok(chunk) => {
+                        bodies[step] = Some(chunk);
+                        filled = true;
+                        break;
                     }
-                    let mut end = index;
-                    while end < len && !filled[end] {
-                        end += 1;
+                    Err(error) => {
+                        tracing::warn!(
+                            data_root = %data_root,
+                            %tx_offset,
+                            storage_module.id = module.id,
+                            partition.offset = %place,
+                            ?error,
+                            "Durable Submit chunk failed migration validation; checking another replica"
+                        );
                     }
-                    let start_offset = place
-                        .0
-                        .checked_add(u32::try_from(index).unwrap_or(u32::MAX))
-                        .map(irys_types::PartitionChunkOffset::from);
-                    let end_offset = place
-                        .0
-                        .checked_add(u32::try_from(end - 1).unwrap_or(u32::MAX))
-                        .map(irys_types::PartitionChunkOffset::from);
-                    let (Some(start_offset), Some(end_offset)) = (start_offset, end_offset) else {
-                        index = end;
-                        continue;
-                    };
-                    let read = module
-                        .read_durable_bodies(start_offset, end_offset)
-                        .map_err(|error| {
-                            MigrationError::Other(format!(
-                                "reading durable Submit fallback: {error}"
-                            ))
-                        })?;
-                    for (step, body) in read.into_iter().enumerate() {
-                        let Some(body) = body else {
-                            continue;
-                        };
-                        let at = start_step + index + step;
-                        let tx_offset = tx_offset_at(tx_start, at)?;
-                        if body.data_root != data_root || body.tx_offset != tx_offset {
-                            tracing::warn!(
-                                data_root = %data_root,
-                                %tx_offset,
-                                storage_module.id = module.id,
-                                partition.offset = %(start_offset.0 + step as u32),
-                                "Durable Submit chunk identity mismatch; checking another replica"
-                            );
-                            continue;
-                        }
-                        match validate_chunk_parts_for_migration(
-                            body.data_path,
-                            body.bytes,
-                            data_root,
-                            data_size,
-                            tx_offset,
-                            chunk_size,
-                        ) {
-                            Ok(chunk) => {
-                                bodies[at] = Some(chunk);
-                                filled[index + step] = true;
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    data_root = %data_root,
-                                    %tx_offset,
-                                    storage_module.id = module.id,
-                                    partition.offset = %(start_offset.0 + step as u32),
-                                    ?error,
-                                    "Durable Submit chunk failed migration validation; checking another replica"
-                                );
-                            }
-                        }
-                    }
-                    index = end;
                 }
             }
-            for (step, was_filled) in filled.iter().enumerate() {
-                if !was_filled {
-                    still.push(start_step + step);
-                }
+            if !filled {
+                still.push(step);
             }
         }
         pending = still;
     }
     Ok(())
-}
-
-fn contiguous_index_runs(indexes: &[usize]) -> Vec<(usize, usize)> {
-    let mut runs = Vec::new();
-    let mut index = 0;
-    while index < indexes.len() {
-        let start = indexes[index];
-        let mut end = start;
-        index += 1;
-        while index < indexes.len() && indexes[index] == end + 1 {
-            end = indexes[index];
-            index += 1;
-        }
-        runs.push((start, end - start + 1));
-    }
-    runs
 }
 
 /// Computes the range of chunks added to a ledger by the transactions in a block,
@@ -2076,6 +2036,162 @@ mod tests {
             guard,
             &mut Vec::new(),
         )
+    }
+
+    fn unpacked_at(f: &Fixture, index: usize) -> UnpackedChunk {
+        let node = &f.tx.chunks[index];
+        UnpackedChunk {
+            data_root: f.tx.header.data_root,
+            data_size: f.tx.header.data_size,
+            data_path: Base64(f.tx.proofs[index].proof.clone()),
+            bytes: Base64(f.data[node.min_byte_range..node.max_byte_range].to_vec()),
+            tx_offset: TxChunkOffset::from(u32::try_from(index).expect("chunk index fits u32")),
+        }
+    }
+
+    /// Real entropy, so a later data write unpacks to the original bytes.
+    /// Zero padding does not: the reader recomputes entropy and the proof check fails.
+    fn write_real_entropy(module: &StorageModule, config: &Config) -> eyre::Result<()> {
+        let chunk_size = usize::try_from(config.consensus.chunk_size)?;
+        let partition_hash = module
+            .partition_hash()
+            .ok_or_else(|| eyre::eyre!("module has no partition"))?;
+        let chunks = u32::try_from(config.consensus.num_chunks_in_partition)?;
+        for offset in 0..chunks {
+            let mut entropy = Vec::with_capacity(chunk_size);
+            irys_packing::capacity_single::compute_entropy_chunk(
+                config.node_config.miner_address(),
+                u64::from(offset),
+                partition_hash.0,
+                config.consensus.entropy_packing_iterations,
+                chunk_size,
+                &mut entropy,
+                config.consensus.chain_id,
+            );
+            assert!(
+                module.write_chunk(
+                    PartitionChunkOffset::from(offset),
+                    entropy,
+                    ChunkType::Entropy,
+                ),
+                "entropy write at {offset}"
+            );
+        }
+        module.force_sync_pending_chunks()?;
+        Ok(())
+    }
+
+    /// Publish asks Submit for tx offsets 18, 19, and 20. Offset 19 is the last
+    /// chunk of this partition and holds durable data. Offset 20 is the next
+    /// partition. The in-range chunk and an earlier cache hit stay. The tail
+    /// is a miss.
+    #[test]
+    fn submit_fallback_keeps_in_partition_chunk_when_run_crosses_boundary() -> eyre::Result<()> {
+        let f = fixture(20, Some(u64::MAX))?;
+        write_real_entropy(&f.sm, &f.config)?;
+        f.index()?;
+        f.sm.write_data_chunk(&unpacked_at(&f, 19))
+            .map_err(|err| eyre::eyre!("write chunk 19: {err:?}"))?;
+        f.sm.force_sync_pending_chunks()?;
+        f.db.update_eyre(|wtx| {
+            cache_data_root(wtx, &f.tx.header, None)?;
+            cache_chunk(wtx, &unpacked_at(&f, 18))?;
+            Ok(())
+        })?;
+
+        let bodies = load_chunks_for_migration(
+            &f.guard,
+            &f.db,
+            DataLedger::Publish,
+            f.tx.header.data_root,
+            f.tx.header.data_size,
+            TxChunkOffset::from(18),
+            3,
+            &f.config,
+        )?;
+        assert_eq!(
+            bodies[0].as_ref().map(|chunk| chunk.tx_offset),
+            Some(TxChunkOffset::from(18)),
+            "a cache hit loaded before the fallback must stay"
+        );
+        assert_eq!(
+            bodies[1].as_ref().map(|chunk| chunk.tx_offset),
+            Some(TxChunkOffset::from(19)),
+            "the last in-partition chunk must be read"
+        );
+        assert!(
+            bodies[2].is_none(),
+            "the next partition is a miss, not an error"
+        );
+        Ok(())
+    }
+
+    /// The first Submit module has no data for the prefix. The tail module,
+    /// already visited, holds the next tx offset. Each index is resolved on
+    /// every module, so the tail byte is read.
+    #[test]
+    fn submit_fallback_reads_tail_partition_when_prefix_has_no_data() -> eyre::Result<()> {
+        let f = fixture(21, Some(u64::MAX))?;
+        let tail = submit_module(&f.config, 1, 1)?;
+        let guard =
+            StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![tail.clone(), f.sm.clone()])));
+        write_real_entropy(&f.sm, &f.config)?;
+        write_real_entropy(&tail, &f.config)?;
+        index_on(&f, &guard)?;
+        tail.write_data_chunk(&unpacked_at(&f, 20))
+            .map_err(|err| eyre::eyre!("write tail chunk: {err:?}"))?;
+        tail.force_sync_pending_chunks()?;
+
+        let mut bodies = vec![None, None];
+        fill_submit_misses(
+            &guard,
+            f.tx.header.data_root,
+            f.tx.header.data_size,
+            TxChunkOffset::from(19),
+            &[0, 1],
+            &mut bodies,
+            usize::try_from(f.config.consensus.chunk_size)?,
+        )?;
+        assert!(bodies[0].is_none(), "the prefix partition is still entropy");
+        assert_eq!(
+            bodies[1].as_ref().map(|chunk| chunk.tx_offset),
+            Some(TxChunkOffset::from(20)),
+            "the tail partition holds this tx offset"
+        );
+        Ok(())
+    }
+
+    /// A run that stays inside one partition still fills every offset.
+    #[test]
+    fn submit_fallback_fills_a_run_inside_one_partition() -> eyre::Result<()> {
+        let f = fixture(4, Some(u64::MAX))?;
+        write_real_entropy(&f.sm, &f.config)?;
+        f.index()?;
+        for index in [0, 1] {
+            f.sm.write_data_chunk(&unpacked_at(&f, index))
+                .map_err(|err| eyre::eyre!("write chunk {index}: {err:?}"))?;
+        }
+        f.sm.force_sync_pending_chunks()?;
+
+        let mut bodies = vec![None, None];
+        fill_submit_misses(
+            &f.guard,
+            f.tx.header.data_root,
+            f.tx.header.data_size,
+            TxChunkOffset::from(0),
+            &[0, 1],
+            &mut bodies,
+            usize::try_from(f.config.consensus.chunk_size)?,
+        )?;
+        assert_eq!(
+            bodies[0].as_ref().map(|chunk| chunk.tx_offset),
+            Some(TxChunkOffset::from(0))
+        );
+        assert_eq!(
+            bodies[1].as_ref().map(|chunk| chunk.tx_offset),
+            Some(TxChunkOffset::from(1))
+        );
+        Ok(())
     }
 
     fn worker_for(f: &Fixture, guard: StorageModulesReadGuard) -> BodyMigrationWorker {
