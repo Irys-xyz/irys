@@ -4336,6 +4336,12 @@ thread_local! {
     /// Runs after the first lock check and before `remove_dir_all`.
     static BEFORE_REPLACE_DELETE: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         const { std::cell::RefCell::new(None) };
+    /// Runs after `CONVERTING` was seen and before the replace lock is taken.
+    static AFTER_CONVERTING_OBSERVED: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Runs once the delete is decided and before `remove_dir_all`.
+    static AT_REPLACE_DELETE: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -4351,6 +4357,12 @@ impl Drop for MdbxReplaceHookGuard {
             cell.borrow_mut().take();
         });
         BEFORE_REPLACE_DELETE.with(|cell| {
+            cell.borrow_mut().take();
+        });
+        AFTER_CONVERTING_OBSERVED.with(|cell| {
+            cell.borrow_mut().take();
+        });
+        AT_REPLACE_DELETE.with(|cell| {
             cell.borrow_mut().take();
         });
     }
@@ -4398,6 +4410,36 @@ fn set_before_replace_delete(hook: impl FnOnce(&Path) + 'static) -> MdbxReplaceH
 #[cfg(test)]
 fn run_before_replace_delete(path: &Path) {
     if let Some(hook) = BEFORE_REPLACE_DELETE.with(|cell| cell.borrow_mut().take()) {
+        hook(path);
+    }
+}
+
+#[cfg(test)]
+fn set_after_converting_observed(hook: impl FnOnce(&Path) + 'static) -> MdbxReplaceHookGuard {
+    AFTER_CONVERTING_OBSERVED.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hook));
+    });
+    MdbxReplaceHookGuard
+}
+
+#[cfg(test)]
+fn run_after_converting_observed(path: &Path) {
+    if let Some(hook) = AFTER_CONVERTING_OBSERVED.with(|cell| cell.borrow_mut().take()) {
+        hook(path);
+    }
+}
+
+#[cfg(test)]
+fn set_at_replace_delete(hook: impl FnOnce(&Path) + 'static) -> MdbxReplaceHookGuard {
+    AT_REPLACE_DELETE.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hook));
+    });
+    MdbxReplaceHookGuard
+}
+
+#[cfg(test)]
+fn run_at_replace_delete(path: &Path) {
+    if let Some(hook) = AT_REPLACE_DELETE.with(|cell| cell.borrow_mut().take()) {
         hook(path);
     }
 }
@@ -4550,16 +4592,50 @@ enum ReplaceMarked {
     MdbxDat,
 }
 
+/// Exclusive flock in the parent directory.
+///
+/// `remove_dir_all` of the target unlinks `LOCK`, so that flock does not
+/// cover the directory created afterwards. This file is not inside the
+/// target. It is held from the sentinel re-check through [`lock_then_mark`].
+fn hold_parent_replace_lock(path: &Path) -> eyre::Result<File> {
+    use std::os::fd::AsRawFd as _;
+
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let lock_path = parent.join(format!(".{name}.replace-lock"));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .wrap_err("open replace lock")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        eyre::bail!(
+            "refusing to run because another --replace-incomplete holds the directory, so a conversion may be running. Stop that process and retry. {err}"
+        );
+    }
+    Ok(file)
+}
+
+fn bail_no_converting_sentinel(path: &Path) -> eyre::Report {
+    eyre::eyre!(
+        "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
+        path.display()
+    )
+}
+
 fn replace_marked_incomplete(
     path: &Path,
     replace: bool,
     refuse_mdbx: bool,
 ) -> eyre::Result<ReplaceMarked> {
     if !migrate::converting_sentinel_present(path)? {
-        eyre::bail!(
-            "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
-            path.display()
-        );
+        return Err(bail_no_converting_sentinel(path));
     }
     if !replace {
         eyre::bail!(
@@ -4567,9 +4643,20 @@ fn replace_marked_incomplete(
             path.display()
         );
     }
+    // A second process can already be past the sentinel check above. It must
+    // not delete on that observation: `remove_dir_all` drops LOCK, and the
+    // directory created below is a different inode.
+    #[cfg(test)]
+    run_after_converting_observed(path);
+    let _parent_lock = hold_parent_replace_lock(path)?;
+    // The sentinel can disappear while this process waits for the parent lock.
+    // The directory now at `path` is not the one that check saw.
+    if !migrate::converting_sentinel_present(path)? {
+        return Err(bail_no_converting_sentinel(path));
+    }
     // Hold LOCK across the marker check and the delete. Seal writes SCHEMA
-    // before it drops that lock. `remove_dir_all` unlinks LOCK, so the flock
-    // does not cover the directory created below.
+    // before it drops that lock. `Ok(None)` means LOCK is absent. Do not
+    // delete on that result until it is read again under the parent lock.
     let mut hold = rocks::hold_rocks_lock(path)?;
     refuse_existing_rocks_schema(path)?;
     refuse_forbidden(path)?;
@@ -4591,7 +4678,7 @@ fn replace_marked_incomplete(
         }
         return Ok(ReplaceMarked::MdbxDat);
     }
-    if hold.is_none() && path.join("LOCK").is_file() {
+    if hold.is_none() {
         hold = rocks::hold_rocks_lock(path)?;
     }
     if path.join("CURRENT").is_file() && hold.is_none() {
@@ -4600,6 +4687,14 @@ fn replace_marked_incomplete(
             path.display()
         );
     }
+    if !migrate::converting_sentinel_present(path)? {
+        return Err(bail_no_converting_sentinel(path));
+    }
+    // The parent lock is held through `lock_then_mark`, so another replace
+    // cannot recreate this directory after `remove_dir_all`. A CONVERTING
+    // file with no LOCK is a dropped incomplete directory and is removed.
+    #[cfg(test)]
+    run_at_replace_delete(path);
     fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
     drop(hold);
     fs::create_dir_all(path)?;
@@ -5708,6 +5803,167 @@ mod tests {
         let err = super::prepare_rocks_target(&held, true).unwrap_err();
         assert!(format!("{err:#}").contains("may be running"), "{err:#}");
         assert!(held.join("CONVERTING").is_file());
+        Ok(())
+    }
+
+    /// The sentinel was observed, then another process removed that directory
+    /// and created a new one before this process took a lock. The new
+    /// directory has no `CONVERTING` and no `LOCK`. It must not be deleted.
+    #[test]
+    fn replace_after_the_sentinel_check_does_not_delete_a_recreated_directory() -> eyre::Result<()>
+    {
+        if std::env::var_os("IRYS_REPLACE_OBSERVED_CHILD").is_some() {
+            return replace_observed_child();
+        }
+        let root = temp("convert-replace-observed");
+        let rocks = root.path().join("rocks");
+        fs::create_dir_all(&rocks)?;
+        fs::write(
+            rocks.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(rocks.join("LOCK"), b"")?;
+        fs::write(rocks.join("KEEP"), b"old")?;
+        let mut child = Command::new(std::env::current_exe().expect("test bin"))
+            .arg("replace_after_the_sentinel_check_does_not_delete_a_recreated_directory")
+            .env("IRYS_REPLACE_OBSERVED_CHILD", "1")
+            .env("IRYS_REPLACE_DIR", &rocks)
+            .env("IRYS_REPLACE_ROOT", root.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .wrap_err("spawn replace child")?;
+        let paused = root.path().join("paused");
+        let start = Instant::now();
+        while !paused.exists() {
+            if start.elapsed() > Duration::from_secs(10) {
+                let _ = child.kill();
+                eyre::bail!("child did not reach the sentinel check");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        fs::remove_dir_all(&rocks)?;
+        fs::create_dir_all(&rocks)?;
+        fs::write(rocks.join("NEWKEEP"), b"new")?;
+        fs::write(root.path().join("go"), b"1")?;
+        let output = child.wait_with_output().wrap_err("wait replace child")?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            rocks.join("NEWKEEP").is_file(),
+            "recreated directory was deleted: {text}"
+        );
+        assert_eq!(fs::read(rocks.join("NEWKEEP"))?, b"new");
+        assert!(
+            output.status.success(),
+            "child did not stop on the recreated directory: {text}"
+        );
+        Ok(())
+    }
+
+    fn replace_observed_child() -> eyre::Result<()> {
+        let rocks = PathBuf::from(std::env::var("IRYS_REPLACE_DIR")?);
+        let root = PathBuf::from(std::env::var("IRYS_REPLACE_ROOT")?);
+        let paused = root.join("paused");
+        let go = root.join("go");
+        let _guard = super::set_after_converting_observed(move |_dir| {
+            fs::write(&paused, b"1").expect("pause file");
+            let start = Instant::now();
+            while !go.exists() {
+                if start.elapsed() > Duration::from_secs(10) {
+                    panic!("timed out waiting to resume replace");
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let err = super::prepare_rocks_target(&rocks, true).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("CONVERTING"),
+            "recreated directory was eligible for delete: {text}"
+        );
+        assert!(rocks.join("NEWKEEP").is_file(), "{text}");
+        Ok(())
+    }
+
+    /// One replace is past its checks and has not deleted yet. A second
+    /// `--replace-incomplete` must not remove that directory.
+    #[test]
+    fn second_replace_does_not_delete_while_the_first_holds_the_directory() -> eyre::Result<()> {
+        if std::env::var_os("IRYS_REPLACE_SECOND_CHILD").is_some() {
+            let path = PathBuf::from(std::env::var("IRYS_REPLACE_DIR")?);
+            super::prepare_rocks_target(&path, true)?;
+            return Ok(());
+        }
+        let root = temp("convert-replace-second");
+        let rocks = root.path().join("rocks");
+        fs::create_dir_all(&rocks)?;
+        fs::write(
+            rocks.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let flag = std::sync::Arc::clone(&recorded);
+        let _guard = super::set_at_replace_delete(move |dir| {
+            let output = Command::new(std::env::current_exe().expect("test bin"))
+                .arg("second_replace_does_not_delete_while_the_first_holds_the_directory")
+                .env("IRYS_REPLACE_SECOND_CHILD", "1")
+                .env("IRYS_REPLACE_DIR", dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("spawn second replace");
+            *flag.lock().expect("second replace") = Some(output);
+        });
+        let prepared = super::prepare_rocks_target(&rocks, true);
+        let output = recorded
+            .lock()
+            .expect("second replace")
+            .take()
+            .expect("hook ran");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "second replace deleted the directory the first process still owns: {text}"
+        );
+        assert!(
+            text.contains("may be running"),
+            "second replace did not stop on the held directory: {text}"
+        );
+        prepared?;
+        assert!(!rocks.join("KEEP").is_file());
+        assert!(rocks.join("CONVERTING").is_file());
+        assert!(rocks.join("LOCK").is_file());
+        Ok(())
+    }
+
+    /// `CONVERTING` without `LOCK` is a dropped incomplete directory.
+    /// `--replace-incomplete` still deletes it and starts again.
+    #[test]
+    fn replace_incomplete_deletes_converting_without_a_lock_file() -> eyre::Result<()> {
+        let root = temp("convert-replace-no-lock");
+        let rocks = root.path().join("rocks");
+        fs::create_dir_all(&rocks)?;
+        fs::write(
+            rocks.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        super::prepare_rocks_target(&rocks, true)?;
+        assert!(!rocks.join("KEEP").is_file());
+        assert!(rocks.join("CONVERTING").is_file());
+        assert!(rocks.join("LOCK").is_file());
+        assert!(!rocks.join("SCHEMA").is_file());
         Ok(())
     }
 
