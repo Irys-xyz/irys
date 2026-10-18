@@ -29,8 +29,10 @@ An omitted `database.submodule_index` stays `mdbx`. That first open is
 also when these storage defaults take effect. The open migrates the
 index, then reserves a short or holey `chunks.dat` to the full partition
 (`fallocate` mode 0). A v1 index keeps its rows until the v2 copy
-commits and the old table is dropped. The reserve runs after that drop,
-so it does not take the free space the copy used. Both sit on the
+commits and the old table is dropped. Dropped pages stay in `mdbx.dat`
+until a compact. The reserve can take the free space that copy still
+occupies. The first open needs filesystem free space for the grown
+index and for the hole reserve at the same time. Both sit on the
 submodule disk. A 4.0.8 file is sparse, so the reserve runs,
 and on a large file that reserve can dominate the first open.
 `EOPNOTSUPP` leaves the file sparse.
