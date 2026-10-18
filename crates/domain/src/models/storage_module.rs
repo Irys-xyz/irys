@@ -15677,7 +15677,7 @@ mod tests {
         current.miner_address = config.node_config.miner_address();
         current.ledger_id = Some(DataLedger::Publish.into());
         let sub = tmp.path().join("chunks");
-        let storage = StorageModule::new(&one_span(3, sub.clone(), Some(current)), &config)?;
+        let storage = StorageModule::new(&one_span(3, sub, Some(current)), &config)?;
         let offset = PartitionChunkOffset::from(0);
         assert!(storage.write_chunk(offset, vec![0x22; 32], ChunkType::Data));
         storage.force_sync_pending_chunks()?;
@@ -17109,7 +17109,7 @@ mod tests {
         );
 
         StorageModule::new(
-            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 1))),
+            &one_span(3, sub, Some(submit_slot(&config, hash, 1))),
             &config,
         )?;
         let loaded = PackingParams::from_toml(&params_path)?;
