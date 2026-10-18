@@ -1078,6 +1078,7 @@ mod tests {
             num_chunks,
             max_pending_write_bytes,
             SubmoduleIndexEngine::Mdbx,
+            20,
         )
     }
 
@@ -1085,13 +1086,14 @@ mod tests {
         num_chunks: u64,
         max_pending_write_bytes: Option<u64>,
         engine: SubmoduleIndexEngine,
+        partition_chunks: u64,
     ) -> eyre::Result<Fixture> {
         let tmp = TempDirBuilder::new().with_tracing().build();
         let chunk_size = 32_u64;
         let mut node_config = NodeConfig {
             consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
                 chunk_size,
-                num_chunks_in_partition: 20,
+                num_chunks_in_partition: partition_chunks,
                 num_chunks_in_recall_range: 2,
                 num_partitions_per_slot: 1,
                 entropy_packing_iterations: 1,
@@ -1118,7 +1120,10 @@ mod tests {
                     miner_address: IrysAddress::from([0xAA; 20]),
                     partition_hash: H256::random(),
                 }),
-                submodules: vec![(partition_chunk_offset_ie!(0, 20), "hdd0".into())],
+                submodules: vec![(
+                    partition_chunk_offset_ie!(0, partition_chunks as u32),
+                    "hdd0".into(),
+                )],
             },
             &config,
         )?);
@@ -1675,6 +1680,183 @@ mod tests {
         assert_eq!(pass.retired, 0);
         assert_eq!(f.rows()?[0].1.attempts, 0);
         assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        Ok(())
+    }
+
+    /// Replace the live label on the inclusive span. One cut, one insert.
+    fn label_span(sm: &StorageModule, start: u32, end: u32, kind: ChunkType) {
+        let mut intervals = sm.intervals().write().unwrap();
+        let span = ii(
+            PartitionChunkOffset::from(start),
+            PartitionChunkOffset::from(end),
+        );
+        let _ = intervals.cut(span);
+        intervals
+            .insert_merge_touching_if_values_equal(span, kind)
+            .unwrap_or_else(|_| panic!("interval {start}..={end} could not take {kind:?}"));
+    }
+
+    /// A reserved sibling sits outside the tx span. The tail is already Data.
+    /// Each pass while the sibling is held must keep the job and must not
+    /// read durability once per tail chunk. Releasing the sibling still
+    /// writes the free placement. The pass after that write, while the head
+    /// is queued, does not scan the tail either.
+    #[tokio::test]
+    async fn sibling_reserve_does_not_scan_a_durable_tail() -> eyre::Result<()> {
+        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
+        use irys_types::RelativeChunkOffset;
+
+        const TX_CHUNKS: u64 = 1024;
+        // A per-offset walk is one durability read per tail chunk. The head
+        // and one lookahead read stay under this. The tail does not.
+        const SCAN_BOUND: usize = 8;
+        let f = fixture_with(
+            TX_CHUNKS,
+            Some(u64::MAX),
+            SubmoduleIndexEngine::Mdbx,
+            TX_CHUNKS + 1,
+        )?;
+        f.seed_cache()?;
+        f.index()?;
+        let tx_last = u32::try_from(TX_CHUNKS - 1)?;
+        let sibling_at = u32::try_from(TX_CHUNKS)?;
+        label_span(&f.sm, 1, tx_last, ChunkType::Data);
+        label_span(&f.sm, 0, 0, ChunkType::Entropy);
+        label_span(&f.sm, sibling_at, sibling_at, ChunkType::Entropy);
+        assert_eq!(f.chunk_type(0), Some(ChunkType::Entropy));
+        assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(1)));
+        assert!(!f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+
+        let chunk_size = f.config.consensus.chunk_size;
+        let (_, submodule) = f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let sibling_root = H256::repeat_byte(0x42);
+        let sibling_start = i32::try_from(sibling_at)?;
+        submodule.db.update(|tx| {
+            tx.add_data_root_info(
+                f.tx.header.data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(sibling_start),
+                    data_size: chunk_size,
+                },
+            )?;
+            tx.add_data_root_info(
+                sibling_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(sibling_start),
+                    data_size: chunk_size,
+                },
+            )
+        })?;
+        let queued = f.sm.deposit_data_chunks(&[UnpackedChunk {
+            data_root: sibling_root,
+            data_size: chunk_size,
+            data_path: Base64(vec![1, 2, 3, 4]),
+            bytes: Base64(vec![9_u8; chunk_size as usize]),
+            tx_offset: TxChunkOffset::from(0),
+        }])?;
+        assert!(
+            matches!(
+                &queued[0],
+                BatchEnqueueItem::Queued(offsets)
+                    if offsets == &vec![PartitionChunkOffset::from(sibling_at)]
+            ),
+            "the sibling root must reserve only the outside offset, got {queued:?}"
+        );
+
+        let worker = f.worker();
+        for _ in 0..MAX_BODY_MIGRATION_ATTEMPTS {
+            let pass = worker.drain_pass().await;
+            assert!(
+                pass.durable_reads < SCAN_BOUND,
+                "a reserved sibling scanned the durable tail {} times",
+                pass.durable_reads
+            );
+            assert_eq!(pass.written, 0);
+            assert_eq!(pass.retired, 0);
+            assert_eq!(pass.settled, 0);
+        }
+        let rows = f.rows()?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, PartitionChunkOffset::from(0));
+        assert_eq!(rows[0].1.attempts, 0);
+        assert_eq!(f.chunk_type(1), Some(ChunkType::Data));
+
+        f.sm.drop_pending_writes_in_range(
+            PartitionChunkOffset::from(sibling_at),
+            PartitionChunkOffset::from(sibling_at),
+        );
+        let pass = worker.drain_pass().await;
+        assert_eq!(
+            pass.written, 1,
+            "the free placement takes the body once the sibling is free"
+        );
+        assert!(
+            pass.durable_reads < SCAN_BOUND,
+            "writing the free placement scanned the durable tail {} times",
+            pass.durable_reads
+        );
+        assert_eq!(pass.retired, 0);
+        assert_eq!(pass.settled, 0);
+        assert_eq!(f.rows()?[0].0, PartitionChunkOffset::from(0));
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+
+        // The head is queued and not durable. The tail is still one jump.
+        let pass = worker.drain_pass().await;
+        assert!(
+            pass.durable_reads < SCAN_BOUND,
+            "a queued head scanned the durable tail {} times",
+            pass.durable_reads
+        );
+        assert_eq!(pass.written, 0);
+        assert_eq!(pass.retired, 0);
+        assert_eq!(pass.settled, 0);
+        assert_eq!(f.rows()?[0].0, PartitionChunkOffset::from(0));
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        Ok(())
+    }
+
+    /// A queued body inside a Data span is not durable. The prefix is read
+    /// per offset up to that hole. The suffix after the hole is one jump,
+    /// not one durability read per chunk. The job stays on the hole.
+    #[tokio::test]
+    async fn pending_data_inside_a_run_does_not_scan_the_suffix() -> eyre::Result<()> {
+        const TX_CHUNKS: u64 = 256;
+        const HOLE: u32 = 4;
+        let f = fixture_with(
+            TX_CHUNKS,
+            Some(u64::MAX),
+            SubmoduleIndexEngine::Mdbx,
+            TX_CHUNKS,
+        )?;
+        f.index()?;
+        let last = u32::try_from(TX_CHUNKS - 1)?;
+        label_span(&f.sm, 0, last, ChunkType::Data);
+        let chunk_size = f.config.consensus.chunk_size as usize;
+        assert!(
+            f.sm.write_chunk(
+                PartitionChunkOffset::from(HOLE),
+                vec![1_u8; chunk_size],
+                ChunkType::Data,
+            ),
+            "the hole must stay queued"
+        );
+        assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
+        assert!(!f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(HOLE)));
+
+        let pass = f.worker().drain_pass().await;
+        assert_eq!(pass.settled, 0, "a queued hole is not durable");
+        assert_eq!(pass.retired, 0);
+        assert_eq!(pass.written, 0);
+        assert_eq!(f.rows()?[0].0, PartitionChunkOffset::from(HOLE));
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(
+            pass.durable_reads < 16,
+            "the suffix after the hole was scanned {} times",
+            pass.durable_reads
+        );
         Ok(())
     }
 
@@ -2631,7 +2813,7 @@ mod tests {
     /// wake and `OnBlockMigrated` run only after that sync.
     #[test]
     fn block_index_sync_precedes_migration_side_effects() -> eyre::Result<()> {
-        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb)?;
+        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
         f.persist_block()?;
         let db = {
             let (_, sub) =
@@ -2707,7 +2889,7 @@ mod tests {
     /// does not wake the body worker or send `OnBlockMigrated`.
     #[test]
     fn block_index_sync_failure_does_not_publish() -> eyre::Result<()> {
-        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb)?;
+        let f = fixture_with(1, Some(u64::MAX), SubmoduleIndexEngine::Rocksdb, 20)?;
         f.persist_block()?;
         let db = {
             let (_, sub) =

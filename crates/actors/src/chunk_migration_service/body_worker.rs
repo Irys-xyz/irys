@@ -119,6 +119,11 @@ pub(crate) struct PassStats {
     /// per chunk.
     #[cfg(test)]
     pub chunk_type_reads: usize,
+    /// `is_data_chunk_durable_at` calls this pass made. A uniform Data run
+    /// that does not overlap a queued write is one jump and stays near zero.
+    /// The per-offset arm is one call per chunk.
+    #[cfg(test)]
+    pub durable_reads: usize,
     /// Lowest block height among the jobs this pass read. `None` when it
     /// read none. A pass that stops early has not seen later keys.
     pub oldest_pending_height: Option<u64>,
@@ -139,6 +144,7 @@ impl std::ops::AddAssign for PassStats {
         #[cfg(test)]
         {
             self.chunk_type_reads += other.chunk_type_reads;
+            self.durable_reads += other.durable_reads;
         }
         self.oldest_pending_height = match (self.oldest_pending_height, other.oldest_pending_height)
         {
@@ -327,6 +333,8 @@ impl BodyMigrationWorker {
                     data_sync: self.data_sync.clone(),
                     #[cfg(test)]
                     chunk_type_reads: std::sync::atomic::AtomicUsize::new(0),
+                    #[cfg(test)]
+                    durable_reads: std::sync::atomic::AtomicUsize::new(0),
                 };
                 tasks.push(tokio::task::spawn_blocking(move || drain.run()));
             }
@@ -408,6 +416,9 @@ struct SubmoduleDrain {
     /// `get_chunk_type` calls this task made. Test builds only.
     #[cfg(test)]
     chunk_type_reads: std::sync::atomic::AtomicUsize,
+    /// `is_data_chunk_durable_at` calls this task made. Test builds only.
+    #[cfg(test)]
+    durable_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl SubmoduleDrain {
@@ -520,6 +531,9 @@ impl SubmoduleDrain {
             stats.chunk_type_reads = self
                 .chunk_type_reads
                 .load(std::sync::atomic::Ordering::Relaxed);
+            stats.durable_reads = self
+                .durable_reads
+                .load(std::sync::atomic::Ordering::Relaxed);
         }
         stats
     }
@@ -534,6 +548,18 @@ impl SubmoduleDrain {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         self.sm.get_chunk_type(offset)
+    }
+
+    /// Durability at `offset`, counted in test builds. A Data jump must not
+    /// call this once per chunk of the run.
+    fn data_chunk_is_durable(&self, offset: PartitionChunkOffset) -> bool {
+        #[cfg(test)]
+        {
+            let _ = self
+                .durable_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.sm.is_data_chunk_durable_at(offset)
     }
 
     /// Move the row to the first offset that is not durable, in one batch.
@@ -685,11 +711,12 @@ impl SubmoduleDrain {
     /// A run whose every offset has the same answer, or `None` when the
     /// per-offset loop must run.
     ///
-    /// Uninitialized and Interrupted cannot take a body. A Data run with
-    /// nothing queued is already durable: `pending_write_bytes() == 0` is
-    /// not enough on its own, because an empty-byte map entry still makes
-    /// `is_data_chunk_durable_at` false. Entropy, and Data while a write is
-    /// queued, stay on the per-offset path.
+    /// Uninitialized and Interrupted cannot take a body. A Data slice jumps
+    /// when no queued write overlaps `[cursor, run_end]`. The module byte
+    /// total is the wrong gate: an empty-byte map entry still makes that
+    /// offset not durable, and a queued write outside the slice must not
+    /// force a durability read of every chunk in it. Entropy stays on the
+    /// per-offset path.
     ///
     /// `runs` comes from `overlapping`, which yields ascending intervals.
     /// `run_idx` only moves forward. Searching from the start of `runs` on
@@ -711,13 +738,18 @@ impl SubmoduleDrain {
         if cursor < run_start {
             return Ok(Some(self.unwritable_jump(cursor, run_start - 1)?));
         }
+        // Overlap is the slice still ahead, not the whole interval. A hole
+        // already passed must not keep the suffix on the per-offset path.
+        let overlaps_pending = kind == ChunkType::Data
+            && self.sm.pending_overlaps_inclusive(
+                Self::partition_offset(cursor)?,
+                Self::partition_offset(run_end)?,
+            );
         match kind {
             ChunkType::Uninitialized | ChunkType::Interrupted => {
                 Ok(Some(self.unwritable_jump(cursor, run_end)?))
             }
-            ChunkType::Data
-                if self.sm.pending_write_bytes() == 0 && !self.sm.has_pending_writes() =>
-            {
+            ChunkType::Data if !overlaps_pending => {
                 let count = usize::try_from(run_end - cursor + 1).unwrap_or(usize::MAX);
                 Ok(Some(RunJump {
                     next: run_end + 1,
@@ -854,7 +886,7 @@ impl SubmoduleDrain {
                         "partition offset {partition_offset} exceeds u32"
                     ))
                 })?);
-            if self.sm.is_data_chunk_durable_at(offset) {
+            if self.data_chunk_is_durable(offset) {
                 if self.flush_run(&mut run, &mut progress)? {
                     cut_short = true;
                     break;
@@ -933,7 +965,7 @@ impl SubmoduleDrain {
                     PartitionChunkOffset::from(u32::try_from(look).map_err(|_| {
                         MigrationError::Other(format!("partition offset {look} exceeds u32"))
                     })?);
-                if self.sm.is_data_chunk_durable_at(look_offset)
+                if self.data_chunk_is_durable(look_offset)
                     || self.sm.is_data_write_pending_at(look_offset)
                     || !matches!(self.chunk_type(&look_offset), Some(ChunkType::Entropy))
                 {
@@ -1098,11 +1130,11 @@ impl SubmoduleDrain {
                 BatchEnqueueItem::Queued(offsets) => {
                     offsets.contains(&body.offset)
                         || self.sm.is_data_write_pending_at(body.offset)
-                        || self.sm.is_data_chunk_durable_at(body.offset)
+                        || self.data_chunk_is_durable(body.offset)
                 }
                 BatchEnqueueItem::NotQueued => {
                     self.sm.is_data_write_pending_at(body.offset)
-                        || self.sm.is_data_chunk_durable_at(body.offset)
+                        || self.data_chunk_is_durable(body.offset)
                 }
                 BatchEnqueueItem::DataRootNotFound => false,
             };

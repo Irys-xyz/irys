@@ -2659,6 +2659,26 @@ impl StorageModule {
             .saturating_add(pending.queued_unpacked_bytes)
     }
 
+    /// True when `chunks`, `written_ahead`, or `occupancy` holds an offset in
+    /// the inclusive span. An empty or inverted span is false. The scan is
+    /// the pending set, not the span. An empty-byte map entry still overlaps.
+    pub fn pending_overlaps_inclusive(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> bool {
+        if start > end {
+            return false;
+        }
+        let pending = self.pending_writes.read().unwrap();
+        pending.range(start..=end).next().is_some()
+            || pending.written_ahead.range(start..=end).next().is_some()
+            || pending
+                .occupancy
+                .keys()
+                .any(|offset| *offset >= start && *offset <= end)
+    }
+
     /// True while queued chunk bytes are under [`Self::pending_memory_ceiling_bytes`].
     /// Producers that can outrun the disk (packing) wait for this: the disk
     /// lane drains asynchronously, so `sync_pending_chunks` does not block.
