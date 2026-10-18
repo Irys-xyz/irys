@@ -2469,6 +2469,18 @@ impl StorageModule {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// `Some` when this thread took the exclusive recovery gate. `None` when
+    /// another guard still holds it. Drop the guard before the shared holder
+    /// continues, or that release cannot finish.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn try_lock_index_recovery_exclusive(&self) -> Option<std::sync::RwLockWriteGuard<'_, ()>> {
+        match self.index_recovery.try_write() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
     /// The assignment and the height it was stored at. The height is read
     /// from `packing_params.toml` under the assignment lock, so it belongs
     /// to this assignment. `None` when the file never recorded one.

@@ -1365,7 +1365,7 @@ mod tests {
     /// Five seconds is the failure bound. The wait returns as soon as this
     /// test's indexer reaches the gate. Another thread must not count.
     ///
-    /// Reaching the gate is not enough. The exclusive probe must block, so a
+    /// Reaching the gate is not enough. The exclusive try must fail, so a
     /// pause that runs without the shared lock fails this check.
     fn wait_for_recovery_lock(
         pause: &super::recovery_lock_pause::Guard,
@@ -1379,27 +1379,13 @@ mod tests {
     }
 
     /// The indexer is inside the pause, so the shared gate is already held.
-    /// The probe blocks on the exclusive gate until the indexer drops it.
+    /// A free exclusive try means this pause ran without that gate.
     fn assert_shared_recovery_lock_held(module: &Arc<StorageModule>) {
-        let module = Arc::clone(module);
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = started_tx.send(());
-            let _guard = module.lock_index_recovery_exclusive();
-            let _ = acquired_tx.send(());
-        });
-        started_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("recovery lock probe starts");
-        match acquired_rx.recv_timeout(Duration::from_millis(100)) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Ok(()) => {
-                panic!("indexing must hold the shared recovery lock before it reads the block hash")
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("recovery lock probe ended before it took the exclusive gate");
-            }
+        // The guard drops at the end of this statement. Holding it past the
+        // pause deadlocks the indexer.
+        let lock_is_held = module.try_lock_index_recovery_exclusive().is_none();
+        if !lock_is_held {
+            panic!("indexing must hold the shared recovery lock before it reads the block hash");
         }
     }
 
@@ -1728,7 +1714,8 @@ mod tests {
         assert!(!f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
 
         let chunk_size = f.config.consensus.chunk_size;
-        let (_, submodule) = f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let (_, submodule) =
+            f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         let sibling_root = H256::repeat_byte(0x42);
         let sibling_start = i32::try_from(sibling_at)?;
         submodule.db.update(|tx| {
@@ -1844,7 +1831,10 @@ mod tests {
             "the hole must stay queued"
         );
         assert!(f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(0)));
-        assert!(!f.sm.is_data_chunk_durable_at(PartitionChunkOffset::from(HOLE)));
+        assert!(
+            !f.sm
+                .is_data_chunk_durable_at(PartitionChunkOffset::from(HOLE))
+        );
 
         let pass = f.worker().drain_pass().await;
         assert_eq!(pass.settled, 0, "a queued hole is not durable");
