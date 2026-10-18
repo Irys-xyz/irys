@@ -4026,6 +4026,11 @@ impl StorageModule {
                 uncovered.extend(missed);
                 continue;
             }
+            // A written checksum can close a gap. The latch from that gap
+            // must not skip the scan at the end of this durable point.
+            if !rows.is_empty() {
+                self.crc_scan_done.store(false, Ordering::SeqCst);
+            }
             let missed = submodule
                 .db
                 .update(|tx| tx.write_packed_offset_rows(rows))?;

@@ -1129,6 +1129,93 @@ mod tests {
         Ok(())
     }
 
+    /// A gap latches the scan. Filling that offset writes a checksum, so the
+    /// same durable point scans again and sets `crc_complete`. A point that
+    /// writes nothing leaves the latch. Once the flag is set, a later missing
+    /// checksum is a mismatch and is not served.
+    #[test]
+    fn filled_crc_gap_clears_the_scan_latch_and_a_later_gap_is_a_mismatch() -> eyre::Result<()> {
+        let (_tmp, config, module) = open_assigned("crc_gap_filled")?;
+        for offset in 0..N as u32 {
+            write_synced(&module, offset, 0x21, ChunkType::Entropy);
+        }
+        let chunk = index_one_chunk(&module, &config, vec![0x5A_u8; CHUNK])?;
+        module
+            .write_data_chunk(&chunk)
+            .expect("pack the data chunk");
+        module.sync_pending_chunks()?;
+        assert!(
+            module.chunk_crc_complete_for_test(),
+            "every settled offset has a checksum"
+        );
+
+        module.set_offset_crc_for_test(PartitionChunkOffset::from(0), None)?;
+        module.clear_chunk_crc_complete()?;
+        write_synced(&module, 1, 0x23, ChunkType::Entropy);
+        assert!(
+            module
+                .crc_scan_done
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the scan ran and found the gap"
+        );
+        assert!(!module.chunk_crc_complete_for_test());
+        assert!(
+            module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )?,
+            "the cleared checksum is still a gap"
+        );
+        assert_eq!(
+            module
+                .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .len(),
+            1,
+            "a gap keeps the checksum unknown, so the proof is served"
+        );
+        module.force_sync_pending_chunks()?;
+        assert!(
+            module
+                .crc_scan_done
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a durable point that writes nothing must not scan again"
+        );
+        assert!(
+            !module.chunk_crc_complete_for_test(),
+            "the gap is still open"
+        );
+
+        write_synced(&module, 0, 0x24, ChunkType::Entropy);
+        eyre::ensure!(
+            !module.offset_crc_missing_for_test(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(7),
+            )?,
+            "the rewritten offset has a checksum"
+        );
+        eyre::ensure!(
+            module.chunk_crc_complete_for_test(),
+            "a checksum written after the gap must be scanned, and a scan with no gap sets crc_complete; scan_done={}",
+            module
+                .crc_scan_done
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+
+        module
+            .write_data_chunk(&chunk)
+            .expect("pack the data chunk again");
+        module.sync_pending_chunks()?;
+        assert!(module.chunk_crc_complete_for_test());
+        module.set_offset_crc_for_test(PartitionChunkOffset::from(0), None)?;
+        assert!(
+            module
+                .generate_full_chunks(PartitionChunkOffset::from(0), PartitionChunkOffset::from(0))?
+                .is_empty(),
+            "a missing checksum after crc_complete is a mismatch and is not served"
+        );
+        Ok(())
+    }
+
     /// Entropy, then one indexed data chunk, then the checksum cleared.
     /// Other offsets stay uninitialized, so a later rewrite cannot latch
     /// `crc_complete` and turn this read into a mismatch.
