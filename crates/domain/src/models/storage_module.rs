@@ -13,7 +13,7 @@ use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 use irys_database::submodule::RocksTuning;
 use irys_database::submodule::db::placement_overlaps_inclusive_span;
 #[cfg(test)]
-use irys_database::submodule::tables::SUBMODULE_SCHEMA_ROCKS_V1;
+use irys_database::submodule::tables::{SUBMODULE_SCHEMA, SUBMODULE_SCHEMA_ROCKS_V1};
 use irys_database::submodule::{
     PackingRecord, SubmoduleIndex, SubmoduleRead, SubmoduleStore as _,
     install_process_rocks_resources, packing_params_valid_for_module,
@@ -1660,6 +1660,64 @@ fn fallocate_chunks(file: &File, path: &Path, full_len: u64) -> eyre::Result<()>
     }
 }
 
+/// `EFBIG` from the logical-size check. The index has not been opened.
+fn chunks_file_too_big(path: &Path, full_len: u64) -> eyre::Report {
+    eyre!(
+        "EFBIG: chunks file {} cannot be {full_len} bytes on this filesystem. ext4's maximum file size is 16 TiB - 4 KiB. The submodule index was not migrated. Format the drive with XFS, or move the storage module to a filesystem that can hold the file",
+        path.display()
+    )
+}
+
+/// Logical size only. A test can force `EFBIG` without creating a large file.
+fn set_chunks_logical_len(file: &File, full_len: u64) -> std::io::Result<()> {
+    #[cfg(test)]
+    if CHUNKS_LEN_EFBIG.with(|flag| flag.get()) {
+        return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
+    }
+    file.set_len(full_len)
+}
+
+/// The filesystem must be able to name `full_len` before the index migrates.
+///
+/// `set_len` does not allocate blocks. On ext4 a mainnet partition
+/// (18.01 TiB) returns `EFBIG`: the maximum file is 16 TiB - 4 KiB. The
+/// schema row is unchanged. `EFBIG` is not reported as `ENOSPC`.
+fn ensure_chunks_len_fits(path: &Path, full_len: u64) -> eyre::Result<()> {
+    if full_len == 0 {
+        return Err(eyre!(
+            "refusing to allocate a zero-length chunks file at {}",
+            path.display()
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .wrap_err_with(|| format!("Failed to create or open chunks file: {}", path.display()))?;
+    let len = file
+        .metadata()
+        .wrap_err_with(|| format!("stat {}", path.display()))?
+        .len();
+    if len >= full_len {
+        return Ok(());
+    }
+    match set_chunks_logical_len(&file, full_len) {
+        Ok(()) => Ok(()),
+        Err(err) if err.raw_os_error() == Some(libc::EFBIG) => {
+            Err(chunks_file_too_big(path, full_len))
+        }
+        Err(err) if err.raw_os_error() == Some(libc::ENOSPC) => {
+            Err(no_space(&file, path, full_len))
+        }
+        Err(err) => Err(eyre!(
+            "set_len({full_len}) failed on {}: {err}",
+            path.display()
+        )),
+    }
+}
+
 /// Reserve `full_len` bytes for the submodule data file.
 ///
 /// Linux calls `fallocate` mode 0. A filesystem without `fallocate` gets
@@ -1728,6 +1786,9 @@ fn submodule_reserve_len(
 thread_local! {
     static SUBMODULE_OPEN_ORDER: std::cell::RefCell<Vec<&'static str>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Test open returns `EFBIG` from the logical-size check and does not
+    /// call `set_len`. Production still calls `set_len`.
+    static CHUNKS_LEN_EFBIG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn note_submodule_open(step: &'static str) {
@@ -1899,6 +1960,17 @@ impl StorageModule {
                 #[cfg(feature = "bench")]
                 split.as_ref(),
             )?;
+            // Name the file before the migration. `set_len` does not allocate,
+            // so a v1 copy still has the free space it needs. ext4 returns
+            // `EFBIG` above 16 TiB - 4 KiB and the schema row stays put.
+            // A bench split reserves its write file, not `chunks.dat`.
+            #[cfg(feature = "bench")]
+            let check_chunks_len = split.is_none();
+            #[cfg(not(feature = "bench"))]
+            let check_chunks_len = true;
+            if check_chunks_len {
+                ensure_chunks_len_fits(&sub_base_path.join("chunks.dat"), full_len)?;
+            }
             // Migrate the index before reserving the partition. A v1 index
             // keeps its rows until the v2 copy commits, and the reserve can
             // take the free space that copy needs. The index does not read
@@ -9522,6 +9594,110 @@ mod tests {
             index_at < file_at,
             "chunks file was reserved before the index opened: {order:?}"
         );
+        Ok(())
+    }
+
+    /// Arms the logical-size check to return `EFBIG` and clears it on drop.
+    struct ChunksLenEfbig;
+
+    impl ChunksLenEfbig {
+        fn arm() -> Self {
+            CHUNKS_LEN_EFBIG.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for ChunksLenEfbig {
+        fn drop(&mut self) {
+            CHUNKS_LEN_EFBIG.with(|flag| flag.set(false));
+        }
+    }
+
+    /// ext4 cannot name a mainnet partition. Open must refuse before the
+    /// schema row changes. A length the filesystem can name still migrates,
+    /// then reserves the file.
+    #[test]
+    fn efbig_refuses_open_before_the_index_is_migrated() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("chunks_efbig").build();
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let db_dir = write_unstamped_mdbx(&sub)?;
+        assert_eq!(mdbx_schema_row(&db_dir)?, None, "fixture has no schema row");
+        let before = directory_fingerprint(&db_dir)?;
+        clear_submodule_open_order();
+        let _efbig = ChunksLenEfbig::arm();
+        let config = testing_config(tmp.path(), 32, 4);
+        let err = StorageModule::new(&one_span(3, "sub", None), &config)
+            .expect_err("a file the filesystem cannot name must not open");
+        let message = err.to_string();
+        assert!(message.contains("EFBIG"), "{message}");
+        assert!(message.contains("16 TiB - 4 KiB"), "{message}");
+        assert!(message.contains("index was not migrated"), "{message}");
+        assert!(!message.contains("not enough free space"), "{message}");
+        assert!(!message.contains("ENOSPC"), "{message}");
+        assert_eq!(
+            mdbx_schema_row(&db_dir)?,
+            None,
+            "EFBIG must not migrate the index"
+        );
+        assert_eq!(
+            directory_fingerprint(&db_dir)?,
+            before,
+            "EFBIG must not rewrite the index"
+        );
+        let chunks = sub.join("chunks.dat");
+        let len = fs::metadata(&chunks)?.len();
+        assert_eq!(len, 0, "EFBIG must not extend chunks.dat, len {len}");
+        assert!(
+            !sub.join(PACKING_PARAMS_FILE_NAME).exists(),
+            "open continued past the length check"
+        );
+        let order = submodule_open_order();
+        let index_opens = order.iter().filter(|step| **step == "index").count();
+        assert_eq!(
+            index_opens, 0,
+            "the index must not open after EFBIG: {order:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fitting_chunks_len_still_migrates_the_index_then_reserves() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new().prefix("chunks_len_fits").build();
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub)?;
+        let db_dir = write_unstamped_mdbx(&sub)?;
+        assert_eq!(mdbx_schema_row(&db_dir)?, None);
+        clear_submodule_open_order();
+        let config = testing_config(tmp.path(), RESERVE_CHUNK, RESERVE_CHUNKS);
+        let last = u32::try_from(RESERVE_CHUNKS - 1).expect("chunk count");
+        let storage = StorageModule::new(&one_span(last, "sub", None), &config)?;
+        drop(storage);
+        assert_eq!(
+            mdbx_schema_row(&db_dir)?.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes()),
+            "a length the filesystem can name still migrates"
+        );
+        let order = submodule_open_order();
+        let index_at = order
+            .iter()
+            .position(|step| *step == "index")
+            .ok_or_else(|| eyre::eyre!("index open was not recorded: {order:?}"))?;
+        let file_at = order
+            .iter()
+            .position(|step| *step == "file")
+            .ok_or_else(|| eyre::eyre!("chunks file open was not recorded: {order:?}"))?;
+        assert!(
+            index_at < file_at,
+            "reserve still follows the migration: {order:?}"
+        );
+        assert_eq!(
+            order.iter().filter(|step| **step == "index").count(),
+            1,
+            "{order:?}"
+        );
+        #[cfg(target_os = "linux")]
+        assert_reserved(&sub.join("chunks.dat"), reserve_bytes())?;
         Ok(())
     }
 
