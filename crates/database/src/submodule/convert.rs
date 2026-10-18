@@ -3527,10 +3527,11 @@ fn copy_v1_range_paths(
 ) -> eyre::Result<u64> {
     let mut copied = 0_u64;
     walk_v1_path_range(env, start, end, limits, |rows| {
+        // One view for the hash page. The byte cap still splits the writes.
+        let paths = read_v1_data_paths(env, &rows)?;
         let mut kept = Vec::new();
         let mut path_bytes = 0_usize;
-        for (offset, hash) in rows {
-            let path = read_v1_data_path(env, offset, hash)?;
+        for ((offset, _), path) in rows.into_iter().zip(paths) {
             let len = path.len();
             // Same cap as `attach_v1_path`. An empty batch still takes the
             // next path, including one path that is already over the cap.
@@ -6421,8 +6422,9 @@ mod tests {
         assert_eq!(stats.path_hashes, N, "{stats}");
         assert_eq!(stats.skipped_frontier, 0, "{stats}");
         // First path is kept. The next path crosses the cap and is dropped.
-        // The other three wait for the range copy, which reads all five.
-        assert_eq!(v1_data_path_reads(), 7);
+        // The other three are not point-read. The range copy reads each hash
+        // page once, and that read is not a point read.
+        assert_eq!(v1_data_path_reads(), 2);
 
         options.batch_value_bytes = 8 * 1024 * 1024;
         options.dry_run = false;
@@ -6509,8 +6511,8 @@ mod tests {
         assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
         assert_eq!(run.stats.skipped_frontier, 0, "{:?}", run.stats);
         assert_eq!(
-            run.reads, 6,
-            "first pass reads two paths, range copy reads four"
+            run.reads, 2,
+            "first pass reads two paths; the rescan reads the hash page once"
         );
         assert_eq!(run.batches, vec![80, 80, 80, 80], "{:?}", run.batches);
         assert_v1_paths_stored(&run.rocks, N, 80)?;
@@ -6524,7 +6526,10 @@ mod tests {
         const N: u64 = 7;
         let run = run_v1_path_cap("convert-v1-range-fit", N, 30, 200)?;
         assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
-        assert_eq!(run.reads, 14, "{:?}", run.reads);
+        assert_eq!(
+            run.reads, 7,
+            "first pass only; the rescan reads each hash page once"
+        );
         assert_eq!(run.batches, vec![180, 30], "{:?}", run.batches);
         assert_v1_paths_stored(&run.rocks, N, 30)?;
         Ok(())
@@ -6536,7 +6541,10 @@ mod tests {
         const N: u64 = 2;
         let run = run_v1_path_cap("convert-v1-range-oversize", N, 120, 100)?;
         assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
-        assert_eq!(run.reads, 4, "{:?}", run.reads);
+        assert_eq!(
+            run.reads, 2,
+            "first pass only; the rescan reads the hash page once"
+        );
         assert_eq!(run.batches, vec![120, 120], "{:?}", run.batches);
         assert_v1_paths_stored(&run.rocks, N, 120)?;
         Ok(())
