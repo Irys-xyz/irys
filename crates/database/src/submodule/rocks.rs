@@ -7171,10 +7171,7 @@ mod tests {
                 "clear succeeded; gap_still={gap_still} content_10={content_10:?} path_1={path_1} path_10={path_10}"
             );
         };
-        assert!(
-            wide_err.to_string().contains("not an offset"),
-            "{wide_err}"
-        );
+        assert!(wide_err.to_string().contains("not an offset"), "{wide_err}");
         assert!(
             gap_still && path_1 && path_10 && content_10 == vec![PartitionChunkOffset::from(10)],
             "gap_still={gap_still} content_10={content_10:?} path_1={path_1} path_10={path_10}"
@@ -7454,7 +7451,10 @@ mod tests {
         let complete = store.view(|tx| {
             tx.offset_crc_missing(PartitionChunkOffset::from(0), PartitionChunkOffset::from(4))
         })?;
-        assert!(!complete, "a span with a checksum at every offset is complete");
+        assert!(
+            !complete,
+            "a span with a checksum at every offset is complete"
+        );
 
         // encode(5) is the exclusive end of [0, 4]. This key sorts after it.
         put_raw_offset_key(&store, &[0, 0, 0, 5, 0])?;
