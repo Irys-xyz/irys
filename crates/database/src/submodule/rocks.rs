@@ -1021,6 +1021,7 @@ impl RocksSubmoduleStore {
     /// A missing `LOCK` means nothing holds it; this function does not create one.
     pub(super) fn open_read_only(path: impl AsRef<Path>) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        refuse_unresolved_close_scratch(&path)?;
         if !path.join(SCHEMA_FILE).is_file() {
             eyre::bail!(
                 "rocks index {} has no SCHEMA marker. Refusing a read-only open of an incomplete directory.",
@@ -1165,6 +1166,7 @@ impl RocksSubmoduleStore {
         force: Option<IndexLayout>,
     ) -> eyre::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        refuse_unresolved_close_scratch(&path)?;
         let layout = if stamp_schema {
             // CURRENT without SCHEMA, or any other non-empty directory without
             // SCHEMA, is not a new database. Stamping it would hide a crash.
@@ -1332,31 +1334,59 @@ impl RocksSubmoduleStore {
 /// replaced, the flush would publish `CURRENT` and SST files into the new
 /// directory. Move that directory aside, close into an empty one, delete the
 /// empty one, and move the saved directory back.
+///
+/// A sibling marker names the parked directory before the rename. `remove_dir_all`
+/// of `path` does not remove that marker. Open and replace refuse while it exists.
+/// The marker is removed only after the parked directory is restored.
 fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> eyre::Result<()> {
     let Some(parent) = path.parent() else {
         abandon_open_database(store);
         return Ok(());
     };
+    if !path.exists() {
+        // Creating the path and closing into it publishes CURRENT into a
+        // directory this database does not own. A failed delete would leave
+        // that publish in place.
+        abandon_open_database(store);
+        eyre::bail!(
+            "rocksdb directory {} is missing. Refusing to create it for an abandoned close.",
+            path.display()
+        );
+    }
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let parked = parent.join(format!(
         ".{name}.close-scratch-{}-{}",
         std::process::id(),
         CLOSE_SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-        drop(store);
-        let _ = fs::remove_dir_all(path);
-        return Ok(());
+    let scratch_name = parked
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    write_close_scratch_marker(path, &scratch_name)?;
+    #[cfg(test)]
+    if close_scratch_stopped(CloseScratchStop::AfterMarker) {
+        abandon_open_database(store);
+        eyre::bail!("stopped refused close");
     }
     if let Err(err) = fs::rename(path, &parked) {
+        let _ = remove_close_scratch_marker(path);
         abandon_open_database(store);
         return Err(err).wrap_err_with(|| {
             format!("park {} before an abandoned rocksdb close", path.display())
         });
     }
+    #[cfg(test)]
+    if close_scratch_stopped(CloseScratchStop::AfterRename) {
+        abandon_open_database(store);
+        eyre::bail!("stopped refused close");
+    }
     if let Err(err) = fs::create_dir(path) {
         let restored = fs::rename(&parked, path);
+        if restored.is_ok() {
+            let _ = remove_close_scratch_marker(path);
+        }
         abandon_open_database(store);
         restored.wrap_err_with(|| {
             format!(
@@ -1367,16 +1397,121 @@ fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> 
         })?;
         return Err(err).wrap_err("create directory for abandoned rocksdb close");
     }
+    #[cfg(test)]
+    if close_scratch_stopped(CloseScratchStop::AfterEmptyCreate) {
+        abandon_open_database(store);
+        eyre::bail!("stopped refused close");
+    }
     drop(store);
+    #[cfg(test)]
+    if close_scratch_stopped(CloseScratchStop::AfterClose) {
+        eyre::bail!("stopped refused close");
+    }
     let removed = fs::remove_dir_all(path);
-    fs::rename(&parked, path).wrap_err_with(|| {
-        format!(
-            "restore {} after abandoned rocksdb close; the directory is at {}",
-            path.display(),
-            parked.display()
-        )
-    })?;
+    if let Err(err) = fs::rename(&parked, path) {
+        return Err(err).wrap_err_with(|| {
+            format!(
+                "restore {} after abandoned rocksdb close; the directory is at {}",
+                path.display(),
+                parked.display()
+            )
+        });
+    }
+    #[cfg(test)]
+    if close_scratch_stopped(CloseScratchStop::AfterRestore) {
+        removed?;
+        eyre::bail!("stopped refused close");
+    }
+    remove_close_scratch_marker(path)?;
     removed.wrap_err("remove abandoned rocksdb close directory")
+}
+
+fn close_scratch_parent(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+fn close_scratch_marker_path(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    close_scratch_parent(path).join(format!(".{name}.close-scratch-marker"))
+}
+
+/// Durable sibling that names the parked directory.
+///
+/// The file sits in the parent, so deleting or renaming `path` leaves it.
+fn write_close_scratch_marker(path: &Path, scratch_name: &str) -> eyre::Result<()> {
+    let marker = close_scratch_marker_path(path);
+    let tmp = PathBuf::from(format!("{}.tmp", marker.display()));
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .wrap_err("create close scratch marker")?;
+        file.write_all(scratch_name.as_bytes())
+            .wrap_err("write close scratch marker")?;
+        file.write_all(b"\n")
+            .wrap_err("write close scratch marker")?;
+        file.sync_all().wrap_err("sync close scratch marker")?;
+    }
+    fs::rename(&tmp, &marker).wrap_err("rename close scratch marker")?;
+    sync_dir(close_scratch_parent(path))
+}
+
+fn remove_close_scratch_marker(path: &Path) -> eyre::Result<()> {
+    let marker = close_scratch_marker_path(path);
+    match fs::remove_file(&marker) {
+        Ok(()) => sync_dir(close_scratch_parent(path)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).wrap_err("remove close scratch marker"),
+    }
+}
+
+/// Refuse open and replace while a refused close still has a parked directory.
+///
+/// The marker names the scratch. A directory whose name is that scratch is
+/// the parked index, so opening it is refused as well.
+pub(super) fn refuse_unresolved_close_scratch(path: &Path) -> eyre::Result<()> {
+    let parent = close_scratch_parent(path);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let marker = parent.join(format!(".{name}.close-scratch-marker"));
+    if marker.is_file() {
+        let named = fs::read_to_string(&marker).unwrap_or_default();
+        let named = named.trim();
+        let scratch = if named.is_empty() {
+            marker.display().to_string()
+        } else {
+            parent.join(named).display().to_string()
+        };
+        eyre::bail!(
+            "rocksdb directory {} has an unresolved close scratch {scratch}. The index bytes are in that sibling, or still in this directory when the sibling is absent. Refusing to open or replace this directory until the scratch is restored.",
+            path.display()
+        );
+    }
+    if !parent.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(parent).wrap_err("read parent for a close scratch marker")? {
+        let entry = entry.wrap_err("read parent for a close scratch marker")?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !file_name.ends_with(".close-scratch-marker") {
+            continue;
+        }
+        let text = fs::read_to_string(entry.path()).unwrap_or_default();
+        if text.trim() == name {
+            eyre::bail!(
+                "rocksdb directory {} is the close scratch {} named by {}. Refusing to open or replace it.",
+                path.display(),
+                path.display(),
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn abandon_open_database(store: RocksSubmoduleStore) {
@@ -1404,6 +1539,43 @@ fn abandon_open_database(store: RocksSubmoduleStore) {
 }
 
 static CLOSE_SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CloseScratchStop {
+    AfterMarker,
+    AfterRename,
+    AfterEmptyCreate,
+    AfterClose,
+    AfterRestore,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLOSE_SCRATCH_STOP: std::cell::Cell<Option<CloseScratchStop>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct CloseScratchStopGuard;
+
+#[cfg(test)]
+impl Drop for CloseScratchStopGuard {
+    fn drop(&mut self) {
+        CLOSE_SCRATCH_STOP.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn set_close_scratch_stop(stop: CloseScratchStop) -> CloseScratchStopGuard {
+    CLOSE_SCRATCH_STOP.with(|cell| cell.set(Some(stop)));
+    CloseScratchStopGuard
+}
+
+#[cfg(test)]
+fn close_scratch_stopped(stage: CloseScratchStop) -> bool {
+    CLOSE_SCRATCH_STOP.with(|cell| cell.get() == Some(stage))
+}
 
 impl RocksSubmoduleStore {
     fn flush_families_locked(&self) -> eyre::Result<()> {

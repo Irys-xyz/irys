@@ -4458,6 +4458,7 @@ fn lock_then_mark(path: &Path) -> eyre::Result<Arc<File>> {
 fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<Arc<File>> {
     let path = lexical_target(path)?;
     let path = path.as_path();
+    rocks::refuse_unresolved_close_scratch(path)?;
     if path.exists() && !path.is_dir() {
         eyre::bail!("target {} is not a directory", path.display());
     }
@@ -4489,6 +4490,7 @@ fn prepare_mdbx_target(
 ) -> eyre::Result<Arc<File>> {
     let path = lexical_target(path)?;
     let path = path.as_path();
+    rocks::refuse_unresolved_close_scratch(path)?;
     if path.exists() && !path.is_dir() {
         eyre::bail!("target {} is not a directory", path.display());
     }
@@ -4634,6 +4636,7 @@ fn replace_marked_incomplete(
     replace: bool,
     refuse_mdbx: bool,
 ) -> eyre::Result<ReplaceMarked> {
+    rocks::refuse_unresolved_close_scratch(path)?;
     if !migrate::converting_sentinel_present(path)? {
         return Err(bail_no_converting_sentinel(path));
     }
@@ -4693,6 +4696,8 @@ fn replace_marked_incomplete(
     // The parent lock is held through `lock_then_mark`, so another replace
     // cannot recreate this directory after `remove_dir_all`. A CONVERTING
     // file with no LOCK is a dropped incomplete directory and is removed.
+    // A close may have parked this directory while this process waited.
+    rocks::refuse_unresolved_close_scratch(path)?;
     #[cfg(test)]
     run_at_replace_delete(path);
     fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
@@ -6005,6 +6010,267 @@ mod tests {
         Ok(())
     }
 
+    fn seal_with_lock_removed(
+        label: &str,
+        stop: Option<crate::submodule::rocks::CloseScratchStop>,
+    ) -> eyre::Result<(tempfile::TempDir, PathBuf, String)> {
+        let root = temp(label);
+        let rocks = root.path().join("rocks");
+        super::prepare_rocks_target(&rocks, false)?;
+        let opened = RocksSubmoduleStore::open_converting(&rocks)?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        // The open fd still holds the LOCK inode. The path no longer matches
+        // it, so seal refuses and parks the directory.
+        fs::remove_file(rocks.join("LOCK"))?;
+        let _guard = stop.map(crate::submodule::rocks::set_close_scratch_stop);
+        let err = opened.seal_and_stamp().unwrap_err();
+        drop(_guard);
+        Ok((root, rocks, format!("{err:#}")))
+    }
+
+    /// Marker file, or the parked sibling a kill left with no marker.
+    fn close_scratch_location(root: &Path) -> Option<PathBuf> {
+        let marker = root.join(".rocks.close-scratch-marker");
+        if marker.is_file() {
+            let Ok(text) = fs::read_to_string(&marker) else {
+                return Some(marker);
+            };
+            let name = text.trim();
+            if !name.is_empty() && !name.contains('/') && !name.contains('\\') {
+                return Some(root.join(name));
+            }
+        }
+        let entries = fs::read_dir(root).ok()?;
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.contains(".close-scratch-") && entry.path().is_dir() {
+                return Some(entry.path());
+            }
+        }
+        None
+    }
+
+    fn assert_open_and_replace_name_the_scratch(rocks: &Path, scratch: &Path) -> eyre::Result<()> {
+        let scratch_name = scratch
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        match RocksSubmoduleStore::open(rocks) {
+            Ok(_) => {
+                panic!("open created an index while close scratch {scratch_name} holds the bytes")
+            }
+            Err(err) => {
+                let text = format!("{err:#}");
+                assert!(
+                    text.contains(&scratch_name),
+                    "open must name the scratch: {text}"
+                );
+            }
+        }
+        if scratch.is_dir() {
+            let err = RocksSubmoduleStore::open(scratch).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(&scratch_name),
+                "open of the scratch must name it: {text}"
+            );
+        }
+        let err = super::prepare_rocks_target(rocks, true).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(&scratch_name),
+            "replace must name the scratch: {text}"
+        );
+        let err = super::prepare_mdbx_target(rocks, testing_args()?, true).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(&scratch_name),
+            "mdbx replace must name the scratch: {text}"
+        );
+        Ok(())
+    }
+
+    /// A kill during a refused close must leave a sibling an operator can
+    /// find. Open and `--replace-incomplete` name that sibling and leave its
+    /// bytes in place.
+    fn assert_killed_refused_close(
+        label: &str,
+        stop: crate::submodule::rocks::CloseScratchStop,
+    ) -> eyre::Result<()> {
+        use crate::submodule::rocks::CloseScratchStop::{
+            AfterClose, AfterEmptyCreate, AfterMarker, AfterRename, AfterRestore,
+        };
+        let (root, rocks, seal_err) = seal_with_lock_removed(label, Some(stop))?;
+        assert!(
+            seal_err.contains("stopped refused close"),
+            "seal did not stop inside the refused close: {seal_err}"
+        );
+        let marker = root.path().join(".rocks.close-scratch-marker");
+        let Some(scratch) = close_scratch_location(root.path()) else {
+            panic!("refused close left no marker and no scratch sibling");
+        };
+        let scratch_name = scratch
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        match stop {
+            AfterMarker => {
+                assert!(
+                    marker.is_file(),
+                    "scratch {scratch_name} is not named by .rocks.close-scratch-marker"
+                );
+                assert!(
+                    !scratch.exists(),
+                    "scratch must not exist before the rename"
+                );
+                assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+            }
+            AfterRename | AfterEmptyCreate | AfterClose => {
+                assert_eq!(fs::read(scratch.join("KEEP"))?, b"keep");
+            }
+            AfterRestore => {
+                assert!(
+                    marker.is_file(),
+                    "scratch {scratch_name} is not named by .rocks.close-scratch-marker"
+                );
+                assert!(!scratch.exists(), "scratch was renamed back");
+                assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+            }
+        }
+        assert_open_and_replace_name_the_scratch(&rocks, &scratch)?;
+        assert!(
+            marker.is_file(),
+            "scratch {scratch_name} is not named by .rocks.close-scratch-marker"
+        );
+        match stop {
+            AfterMarker | AfterRestore => {
+                assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+            }
+            AfterRename => {
+                assert!(
+                    !rocks.exists(),
+                    "replace must not create the missing directory"
+                );
+                assert_eq!(fs::read(scratch.join("KEEP"))?, b"keep");
+            }
+            AfterEmptyCreate | AfterClose => {
+                assert_eq!(fs::read(scratch.join("KEEP"))?, b"keep");
+                assert!(!rocks.join("SCHEMA").is_file());
+            }
+        }
+        if matches!(stop, AfterMarker | AfterRestore) {
+            let err = super::replace_marked_incomplete(&rocks, true, true).unwrap_err();
+            assert!(format!("{err:#}").contains(&scratch_name), "{err:#}");
+            assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn killed_close_after_the_marker_names_the_scratch() -> eyre::Result<()> {
+        assert_killed_refused_close(
+            "convert-close-after-marker",
+            crate::submodule::rocks::CloseScratchStop::AfterMarker,
+        )
+    }
+
+    #[test]
+    fn killed_close_after_the_rename_names_the_scratch() -> eyre::Result<()> {
+        assert_killed_refused_close(
+            "convert-close-after-rename",
+            crate::submodule::rocks::CloseScratchStop::AfterRename,
+        )
+    }
+
+    #[test]
+    fn killed_close_after_the_empty_directory_names_the_scratch() -> eyre::Result<()> {
+        assert_killed_refused_close(
+            "convert-close-after-empty",
+            crate::submodule::rocks::CloseScratchStop::AfterEmptyCreate,
+        )
+    }
+
+    #[test]
+    fn killed_close_after_the_flush_names_the_scratch() -> eyre::Result<()> {
+        assert_killed_refused_close(
+            "convert-close-after-flush",
+            crate::submodule::rocks::CloseScratchStop::AfterClose,
+        )
+    }
+
+    #[test]
+    fn killed_close_after_restore_keeps_the_marker() -> eyre::Result<()> {
+        assert_killed_refused_close(
+            "convert-close-after-restore",
+            crate::submodule::rocks::CloseScratchStop::AfterRestore,
+        )
+    }
+
+    /// The path is already gone. Close must not create it and publish `CURRENT`.
+    #[test]
+    fn refused_close_of_a_missing_directory_does_not_publish() -> eyre::Result<()> {
+        let root = temp("convert-close-missing");
+        let rocks = root.path().join("rocks");
+        let moved = root.path().join("rocks-moved");
+        super::prepare_rocks_target(&rocks, false)?;
+        let opened = RocksSubmoduleStore::open_converting(&rocks)?;
+        fs::rename(&rocks, &moved)?;
+        fs::write(moved.join("KEEP"), b"keep")?;
+        let err = opened.seal_and_stamp().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("missing") && text.contains("Refusing to create"),
+            "{text}"
+        );
+        assert!(
+            !rocks.exists(),
+            "close must not create a directory and publish into it"
+        );
+        assert!(!root.path().join(".rocks.close-scratch-marker").exists());
+        assert_eq!(fs::read(moved.join("KEEP"))?, b"keep");
+        Ok(())
+    }
+
+    /// A refused close that runs to the end puts the directory back and
+    /// removes the scratch marker.
+    #[test]
+    fn completed_refused_close_restores_the_directory() -> eyre::Result<()> {
+        let (root, rocks, text) = seal_with_lock_removed("convert-close-complete", None)?;
+        assert!(text.contains("replaced"), "{text}");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(!rocks.join("SCHEMA").is_file());
+        assert!(!root.path().join(".rocks.close-scratch-marker").exists());
+        let left = fs::read_dir(root.path())?.any(|entry| {
+            entry.ok().is_some_and(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("close-scratch-")
+            })
+        });
+        assert!(!left, "completed close must not leave a scratch sibling");
+        Ok(())
+    }
+
+    /// A normal seal writes SCHEMA and does not park the directory.
+    #[test]
+    fn successful_seal_leaves_no_close_scratch() -> eyre::Result<()> {
+        let root = temp("convert-seal-clean");
+        let rocks = root.path().join("rocks");
+        super::prepare_rocks_target(&rocks, false)?;
+        let opened = RocksSubmoduleStore::open_converting(&rocks)?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        opened.seal_and_stamp()?;
+        assert!(rocks.join("SCHEMA").is_file());
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(!root.path().join(".rocks.close-scratch-marker").exists());
+        Ok(())
+    }
+
     /// The directory inode was replaced after this database opened. Seal must
     /// not write SCHEMA into the new directory or delete its log. `LOCK` on
     /// the new directory is a different file, so a flock of that path is not
@@ -6040,6 +6306,16 @@ mod tests {
         assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000099\n");
         assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
         assert!(!moved.join("SCHEMA").is_file());
+        assert!(!root.path().join(".rocks.close-scratch-marker").exists());
+        let left = fs::read_dir(root.path())?.any(|entry| {
+            entry.ok().is_some_and(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("close-scratch-")
+            })
+        });
+        assert!(!left, "completed close must not leave a scratch sibling");
         Ok(())
     }
 
