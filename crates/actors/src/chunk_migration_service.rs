@@ -1515,6 +1515,107 @@ mod tests {
         Ok(())
     }
 
+    /// Two placements of one chunk. A reserved sibling makes the free
+    /// placement refuse the enqueue. That pass is in flight: the row stays
+    /// and the attempt count stays at zero for every pass the sibling is
+    /// held. Releasing the sibling leaves both offsets entropy, and the next
+    /// pass writes the body.
+    #[tokio::test]
+    async fn sibling_occupancy_does_not_retire_the_body_job() -> eyre::Result<()> {
+        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
+        use irys_types::RelativeChunkOffset;
+
+        let f = fixture(1, Some(u64::MAX))?;
+        f.sm.pack_with_zeros();
+        f.seed_cache()?;
+        f.index()?;
+
+        let chunk_size = f.config.consensus.chunk_size;
+        let (_, submodule) =
+            f.sm.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        let sibling_root = H256::repeat_byte(0x42);
+        submodule.db.update(|tx| {
+            tx.add_data_root_info(
+                f.tx.header.data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(1),
+                    data_size: f.tx.header.data_size,
+                },
+            )?;
+            tx.add_data_root_info(
+                sibling_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(1),
+                    data_size: chunk_size,
+                },
+            )
+        })?;
+
+        let queued = f.sm.deposit_data_chunks(&[UnpackedChunk {
+            data_root: sibling_root,
+            data_size: chunk_size,
+            data_path: Base64(vec![1, 2, 3, 4]),
+            bytes: Base64(vec![9_u8; chunk_size as usize]),
+            tx_offset: TxChunkOffset::from(0),
+        }])?;
+        assert!(
+            matches!(
+                &queued[0],
+                BatchEnqueueItem::Queued(offsets)
+                    if offsets == &vec![PartitionChunkOffset::from(1)]
+            ),
+            "the sibling root must reserve only offset 1, got {queued:?}"
+        );
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        assert_eq!(
+            f.sm.partition_offsets_for_data_root_chunk(
+                f.tx.header.data_root,
+                TxChunkOffset::from(0)
+            )?,
+            Some(vec![
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(1),
+            ])
+        );
+
+        let worker = f.worker();
+        for _ in 0..MAX_BODY_MIGRATION_ATTEMPTS {
+            let pass = worker.drain_pass().await;
+            assert_eq!(
+                pass.written, 0,
+                "a reserved sibling must not enqueue this placement"
+            );
+            assert_eq!(
+                pass.retired, 0,
+                "a reserved sibling must not retire the job"
+            );
+        }
+        let rows = f.rows()?;
+        assert_eq!(rows.len(), 1, "the cache body is still owed");
+        assert_eq!(rows[0].1.attempts, 0, "a reserved sibling is not a stall");
+        assert_eq!(f.chunk_type(0), Some(ChunkType::Entropy));
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+
+        // The sibling sweep ends. Both placements are still entropy.
+        f.sm.drop_pending_writes_in_range(
+            PartitionChunkOffset::from(1),
+            PartitionChunkOffset::from(1),
+        );
+        assert!(!f.sm.is_data_write_pending_at(PartitionChunkOffset::from(1)));
+        assert_eq!(f.chunk_type(1), Some(ChunkType::Entropy));
+
+        let pass = worker.drain_pass().await;
+        assert_eq!(
+            pass.written, 1,
+            "the free placement takes the body once the sibling is free"
+        );
+        assert_eq!(pass.retired, 0);
+        assert_eq!(f.rows()?[0].1.attempts, 0);
+        assert!(f.sm.is_data_write_pending_at(PartitionChunkOffset::from(0)));
+        Ok(())
+    }
+
     /// Retirement hands the entropy holes to data sync. A stall that has not
     /// reached the limit sends nothing.
     #[tokio::test]

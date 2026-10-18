@@ -822,6 +822,7 @@ impl SubmoduleDrain {
             unavailable: 0,
             failed: 0,
             last_error: None,
+            in_flight: 0,
         };
         let mut cut_short = false;
         let span_limit = span_chunk_limit(
@@ -1044,6 +1045,9 @@ impl SubmoduleDrain {
         let unavailable = progress.unavailable;
         let failed = progress.failed;
         let last_error = progress.last_error;
+        // A sibling placement can be reserved while this offset is not.
+        // That enqueue returns nothing queued. It is still in flight.
+        let in_flight = in_flight + progress.in_flight;
         let total = usize::try_from(last - first + 1).unwrap_or(usize::MAX);
         let resume = first_incomplete.unwrap_or(key);
         // `first_incomplete` stays empty only when every offset in the span
@@ -1109,6 +1113,13 @@ impl SubmoduleDrain {
             } else if missing_root {
                 progress.failed += 1;
                 progress.last_error = Some(MigrationError::ChunkDataWrite);
+            } else if matches!(&item, BatchEnqueueItem::NotQueued)
+                && self.sm.has_in_flight_index_for(&body.chunk)
+            {
+                // Another placement of this chunk is reserved, so this one
+                // was not queued. Retry it. Counting a stall here retires the
+                // job while the cache still holds the body.
+                progress.in_flight += 1;
             } else {
                 progress.unavailable += 1;
             }
@@ -1135,6 +1146,8 @@ struct JobProgress {
     unavailable: usize,
     failed: usize,
     last_error: Option<MigrationError>,
+    /// Offsets not queued because another placement of the same chunk is reserved.
+    in_flight: usize,
 }
 
 fn span_chunk_limit(chunk_size: u64, sweep_max_bytes: u64) -> usize {
