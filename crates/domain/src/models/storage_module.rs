@@ -1875,8 +1875,10 @@ impl StorageModule {
         // Bind after a pending reset clears the old partition hash. Binding
         // first refuses a new partition, or the reset clear drops the new one.
         let mut pack_binds = Vec::new();
-        // Hash changes are written only after `bind_packing_identity` accepts.
-        // A refused bind must leave the previous identity on disk.
+        // Hash, ledger, and slot changes are written only after
+        // `bind_packing_identity` accepts. A refused open leaves the previous
+        // file in place. A hash change also sets the reset marker below. A
+        // same-hash ledger or slot change does not wipe the bytes.
         let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
             Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
@@ -1937,7 +1939,7 @@ impl StorageModule {
                 // Load the packing params and check to see if they match.
                 // A short or corrupt file is an open error. It must not abort
                 // the process before the address check.
-                let mut params = PackingParams::from_toml(&params_path)?;
+                let params = PackingParams::from_toml(&params_path)?;
 
                 ensure!(
                     params.packing_address == config.node_config.miner_address(),
@@ -1983,10 +1985,12 @@ impl StorageModule {
                         want_slot,
                     ));
                 } else if params.ledger != want_ledger || params.slot != want_slot {
-                    params.ledger = want_ledger;
-                    params.slot = want_slot;
-                    params.last_updated_height = Some(0);
-                    params.write_to_disk(&params_path)?;
+                    rebind_after_bind.push((
+                        params_path.clone(),
+                        want_hash,
+                        want_ledger,
+                        want_slot,
+                    ));
                 }
             }
 
@@ -2062,7 +2066,7 @@ impl StorageModule {
         for (index, partition, packing) in pack_binds {
             index.bind_packing_identity(partition, &packing)?;
         }
-        // Bind accepted. The file may now name the new partition.
+        // Bind accepted. The file may now name the new partition, ledger, and slot.
         for (path, hash, ledger, slot) in rebind_after_bind {
             let mut params = PackingParams::from_toml(&path)?;
             params.partition_hash = hash;
@@ -17030,6 +17034,96 @@ mod tests {
                 decision.headroom_open
             );
         }
+    }
+
+    fn submit_slot(config: &Config, hash: H256, slot: usize) -> PartitionAssignment {
+        PartitionAssignment {
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(slot),
+            miner_address: config.node_config.miner_address(),
+            partition_hash: hash,
+        }
+    }
+
+    /// Same hash, new slot. A packing refusal and a coverage refusal both
+    /// return before the file is replaced. A matching open still publishes
+    /// the slot and `last_updated_height`.
+    #[test]
+    fn refused_open_keeps_the_same_hash_slot() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("slot_refuse")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x51);
+        let sub = tmp.path().join("chunks");
+        let storage = StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
+            &config,
+        )?;
+        drop(storage);
+        let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+        let mut params = PackingParams::from_toml(&params_path)?;
+        assert_eq!(params.slot, Some(0));
+        assert_eq!(params.last_updated_height, None);
+        let recorded = params
+            .entropy_packing_iterations
+            .expect("open records iterations");
+        params.entropy_packing_iterations = Some(recorded + 1);
+        params.write_to_disk(&params_path)?;
+        let before = fs::read(&params_path)?;
+
+        let err = StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 1))),
+            &config,
+        )
+        .expect_err("iterations do not match this module");
+        assert!(err.to_string().contains("packing identity"), "{err}");
+        assert_eq!(
+            fs::read(&params_path)?,
+            before,
+            "a refused open must leave the packing file bytes"
+        );
+        let loaded = PackingParams::from_toml(&params_path)?;
+        assert_eq!(loaded.ledger, Some(DataLedger::Submit.into()));
+        assert_eq!(loaded.slot, Some(0));
+        assert_eq!(loaded.last_updated_height, None);
+
+        params.entropy_packing_iterations = Some(recorded);
+        params.write_to_disk(&params_path)?;
+        let before = fs::read(&params_path)?;
+        let mut node = config.node_config.clone();
+        let irys_types::ConsensusOptions::Custom(consensus) = &mut node.consensus else {
+            panic!("test config uses a custom consensus");
+        };
+        consensus.num_chunks_in_partition = 8;
+        let short = Config::new(node, config.peer_id());
+        let err = StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&short, hash, 1))),
+            &short,
+        )
+        .expect_err("the span does not cover the partition");
+        assert!(
+            err.to_string().contains("Invalid storage module"),
+            "{err}"
+        );
+        assert_eq!(
+            fs::read(&params_path)?,
+            before,
+            "a coverage refusal must leave the packing file bytes"
+        );
+
+        StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 1))),
+            &config,
+        )?;
+        let loaded = PackingParams::from_toml(&params_path)?;
+        assert_eq!(loaded.ledger, Some(DataLedger::Submit.into()));
+        assert_eq!(loaded.slot, Some(1));
+        assert_eq!(loaded.last_updated_height, Some(0));
+        assert_eq!(loaded.partition_hash, Some(hash));
+        assert_eq!(loaded.entropy_packing_iterations, Some(recorded));
+        Ok(())
     }
 
     #[test]
