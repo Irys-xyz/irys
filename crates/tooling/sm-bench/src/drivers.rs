@@ -78,18 +78,47 @@ pub(crate) struct BenchIo {
 }
 
 pub(crate) fn resume_frontier(module: &StorageModule, start: u32, end: u32) -> u32 {
-    let mut lo = start;
-    let mut hi = end;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let offset = PartitionChunkOffset::from(mid);
-        if module.get_chunk_type(&offset) == Some(ChunkType::Data) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
+    next_open_span(module, start, end)
+        .map(|(offset, _len)| offset)
+        .unwrap_or(end)
+}
+
+/// First non-Data run in `[start, end)`.
+///
+/// `None` when that range is all Data, or when `start >= end`. The length
+/// stops at the next Data offset or at `end`. Data intervals are coalesced
+/// and include pending Data, so one pass replaces a binary search that
+/// treats a later Data offset as proof the prefix is full.
+pub(crate) fn next_open_span(module: &StorageModule, start: u32, end: u32) -> Option<(u32, u32)> {
+    if start >= end {
+        return None;
     }
-    lo
+    let mut cursor = start;
+    for interval in module.get_intervals(ChunkType::Data) {
+        let data_start = interval.start().0;
+        let data_end = interval.end().0;
+        if data_end < cursor {
+            continue;
+        }
+        if data_start > cursor {
+            let hole_end = data_start.min(end);
+            return Some((cursor, hole_end - cursor));
+        }
+        let after = data_end.saturating_add(1);
+        if after >= end {
+            return None;
+        }
+        cursor = after;
+    }
+    Some((cursor, end - cursor))
+}
+
+fn ingest_tx_chunks(picked: u32, room: u32, open_len: u32) -> u32 {
+    picked.min(room).min(open_len)
+}
+
+fn migration_tx_chunks(span_limit: u32, room: u32, open_len: u32) -> u32 {
+    span_limit.max(32).min(room).min(open_len)
 }
 
 /// Drop leftover body-migration rows. A resumed run keeps the Data prefix and
@@ -258,6 +287,12 @@ fn record_durable(io: &BenchIo, kind: Kind, bytes: u64, latency: Duration) {
         bucket.add_op(bytes, us(latency));
         bucket.durable = bucket.durable.saturating_add(bytes);
     });
+}
+
+/// Bytes a write may add to the durable counter. An offset that was already
+/// Data is not new durable data.
+fn newly_durable_bytes(was_data: bool, chunk_bytes: u64) -> u64 {
+    if was_data { 0 } else { chunk_bytes }
 }
 
 /// `waited` is monotonic. The generator is one task, so the sum is wall time
@@ -859,6 +894,17 @@ pub(crate) async fn ingest_driver(
             pacer.reset();
             continue;
         }
+        let Some((span_start, span_len)) = next_open_span(&io.module, next, io.migrate_origin)
+        else {
+            if let Some(task) = ahead.take() {
+                undo_prefetch(&io, task).await;
+            }
+            note_fatal(&io, "ingest write window is full");
+            break;
+        };
+        // A Data run after a hole is not writable. The prefetch, if any,
+        // was armed at this same open offset.
+        next = span_start;
         let prepared = if let Some(task) = ahead.take() {
             let started = std::time::Instant::now();
             let prepared = match task.join().await {
@@ -876,7 +922,8 @@ pub(crate) async fn ingest_driver(
                 note_fatal(&io, "ingest write window is full");
                 break;
             }
-            let chunks = pick_chunks(&mut rng, &io.mix, io.mix_total).min(room);
+            let chunks =
+                ingest_tx_chunks(pick_chunks(&mut rng, &io.mix, io.mix_total), room, span_len);
             let started = std::time::Instant::now();
             let root = match index_tx_async(&io, Kind::Ingest, b"ingest", next, chunks).await {
                 Ok(root) => root,
@@ -904,10 +951,15 @@ pub(crate) async fn ingest_driver(
         }
         if overlap_index && io.accept_new.load(Ordering::Acquire) && !stopped(&stop) {
             let start = prepared.start.saturating_add(prepared.chunks);
-            let room = io.migrate_origin.saturating_sub(start);
-            if room > 0 {
-                let chunks = pick_chunks(&mut rng, &io.mix, io.mix_total).min(room);
-                ahead = Some(Prefetch::spawn(&io, start, chunks));
+            if let Some((span_start, span_len)) =
+                next_open_span(&io.module, start, io.migrate_origin)
+            {
+                let room = io.migrate_origin.saturating_sub(span_start);
+                let chunks =
+                    ingest_tx_chunks(pick_chunks(&mut rng, &io.mix, io.mix_total), room, span_len);
+                if chunks > 0 {
+                    ahead = Some(Prefetch::spawn(&io, span_start, chunks));
+                }
             }
         }
         let mib_s = rate.ingest_mib_s;
@@ -960,12 +1012,17 @@ pub(crate) async fn migration_driver(
             pacer.reset();
             continue;
         }
+        let Some((span_start, span_len)) = next_open_span(&io.module, next, io.write_end) else {
+            note_fatal(&io, "migration write window is full");
+            break;
+        };
+        next = span_start;
         let room = io.write_end.saturating_sub(next);
         if room == 0 {
             note_fatal(&io, "migration write window is full");
             break;
         }
-        let chunks = span.max(32).min(room);
+        let chunks = migration_tx_chunks(span, room, span_len);
         let mib_s = rate.migration_mib_s;
         if let Err(error) = write_tx(
             &io,
@@ -1056,6 +1113,12 @@ async fn write_tx(
         }
         record_gen(io, kind, gen_started.elapsed());
         if migration {
+            let mut was_data = Vec::with_capacity(usize::try_from(n).unwrap_or(1));
+            for step in 0..n {
+                let part =
+                    PartitionChunkOffset::from(start.saturating_add(cursor.saturating_add(step)));
+                was_data.push(io.module.get_chunk_type(&part) == Some(ChunkType::Data));
+            }
             let module = Arc::clone(&io.module);
             let enqueued_at = std::time::Instant::now();
             let items = tokio::task::spawn_blocking(move || module.deposit_data_chunks(&batch))
@@ -1063,7 +1126,7 @@ async fn write_tx(
                 .map_err(|error| eyre!("deposit task panicked: {error}"))?
                 .map_err(|error| eyre!("deposit failed: {error}"))?;
             record_phase(io, kind, PhaseName::Enqueue, enqueued_at.elapsed());
-            if !spawn_migration_waits(io, kind, &failed, &left, start, root, n, items)? {
+            if !spawn_migration_waits(io, kind, &failed, &left, start, root, n, was_data, items)? {
                 failed.store(true, Ordering::Release);
                 break;
             }
@@ -1110,6 +1173,7 @@ fn spawn_migration_waits(
     key: u32,
     root: H256,
     expected: u32,
+    was_data: Vec<bool>,
     items: Vec<BatchEnqueueItem>,
 ) -> eyre::Result<bool> {
     let mut offsets = Vec::new();
@@ -1144,7 +1208,7 @@ fn spawn_migration_waits(
         );
         return Ok(false);
     }
-    for offset in offsets {
+    for (offset, already) in std::iter::zip(offsets, was_data) {
         record_enqueued(io, kind, io.chunk_size);
         io.migration_inflight.fetch_add(1, Ordering::AcqRel);
         let io = Arc::clone(io);
@@ -1168,7 +1232,10 @@ fn spawn_migration_waits(
                 return;
             }
             record_phase(&io, Kind::Migration, PhaseName::Durable, started.elapsed());
-            record_durable(&io, Kind::Migration, io.chunk_size, started.elapsed());
+            let bytes = newly_durable_bytes(already, io.chunk_size);
+            if bytes > 0 {
+                record_durable(&io, Kind::Migration, bytes, started.elapsed());
+            }
             mark_written(&io, offset.0);
         });
     }
@@ -1201,6 +1268,9 @@ fn spawn_ingest_wait(
             root,
         };
         let started = std::time::Instant::now();
+        // Occupy returns success when the offset is already Data. Count the
+        // durable bytes only when this write is the one that fills it.
+        let was_data = io.module.get_chunk_type(&offset) == Some(ChunkType::Data);
         if let Err(error) = io.module.write_data_chunk_queued(&chunk).await {
             failed.store(true, Ordering::Release);
             note_fatal(&io, format!("ingest chunk {offset}: {error}"));
@@ -1214,7 +1284,10 @@ fn spawn_ingest_wait(
             return;
         }
         record_phase(&io, kind, PhaseName::Durable, durable_at.elapsed());
-        record_durable(&io, kind, io.chunk_size, started.elapsed());
+        let bytes = newly_durable_bytes(was_data, io.chunk_size);
+        if bytes > 0 {
+            record_durable(&io, kind, bytes, started.elapsed());
+        }
         mark_written(&io, offset.0);
     });
 }
@@ -1331,7 +1404,136 @@ pub(crate) fn driver_error(
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
+    use std::io::Write as _;
+    use std::path::Path;
+
+    use irys_testing_utils::TempDirBuilder;
+
     use super::*;
+    use crate::guard::CHUNK_SIZE;
+    use crate::module::{OpenRequest, open_module};
+
+    fn write_chunk_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut file = File::create(path).unwrap();
+        file.write_all(&vec![0xA5_u8; CHUNK_SIZE as usize]).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn open_labeled(dir: &Path, chunks: u32, intervals: &str) -> crate::module::OpenedModule {
+        let root = dir.parent().expect("module dir has a parent");
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("intervals.json"), intervals).unwrap();
+        let recall = root.join("recall.dat");
+        let write = root.join("write.dat");
+        if !recall.exists() {
+            write_chunk_file(&recall);
+            write_chunk_file(&write);
+        }
+        open_module(OpenRequest {
+            dir,
+            recall_file: &recall,
+            write_file: &write,
+            partition_chunks: chunks,
+            recall_chunks: 1,
+            write_origin: 0,
+            write_chunks: 1,
+            num_writes_before_sync: 100,
+            entropy_sweep_max_bytes: CHUNK_SIZE,
+            entropy_read_grace_ms: 0,
+            entropy_read_batch_bytes: CHUNK_SIZE,
+            entropy_readahead_bytes: 0,
+            entropy_readahead_cache_bytes: 0,
+            intervals_persist_secs: 0,
+            min_durable_interval_ms: 0,
+            durable_headroom_permille: 1000,
+            recall_direct_io: false,
+            recall_offset_chunks: 0,
+            index: irys_domain::BenchIndex::Mdbx,
+            index_group_commit: 0,
+        })
+        .unwrap_or_else(|error| panic!("open {}: {error:#}", dir.display()))
+    }
+
+    #[test]
+    fn resume_frontier_stops_at_a_hole_before_later_data() {
+        // Breaks if the frontier walks past Entropy once a later offset is Data.
+        // The open run is one chunk, so a 40-chunk pick must shrink to that run.
+        let tmp = TempDirBuilder::new().prefix("sm-frontier-hole-").build();
+        let opened = open_labeled(
+            &tmp.path().join("loadtest").join("mod"),
+            4,
+            r#"[[{"start":0,"end":0},"Data"],[{"start":1,"end":1},"Entropy"],[{"start":2,"end":3},"Data"]]"#,
+        );
+        let module = opened.module.as_ref();
+        assert_eq!(
+            module.get_chunk_type(&PartitionChunkOffset::from(1)),
+            Some(ChunkType::Entropy),
+            "interval file did not load the hole"
+        );
+        assert_eq!(resume_frontier(module, 0, 4), 1);
+        let open = next_open_span(module, 0, 4);
+        assert_eq!(open, Some((1, 1)));
+        assert_eq!(ingest_tx_chunks(40, 4, open.unwrap().1), 1);
+        assert_eq!(migration_tx_chunks(64, 4, open.unwrap().1), 1);
+    }
+
+    #[test]
+    fn resume_frontier_keeps_a_solid_prefix_and_an_all_data_end() {
+        // A Data prefix still starts at the first Entropy. All Data still
+        // returns the end. A three-chunk hole the old search already stops
+        // on stays at that hole.
+        let tmp = TempDirBuilder::new().prefix("sm-frontier-allow-").build();
+        let root = tmp.path().join("loadtest");
+        let prefix = open_labeled(
+            &root.join("prefix"),
+            4,
+            r#"[[{"start":0,"end":1},"Data"],[{"start":2,"end":3},"Entropy"]]"#,
+        );
+        let module = prefix.module.as_ref();
+        assert_eq!(resume_frontier(module, 0, 4), 2);
+        assert_eq!(next_open_span(module, 0, 4), Some((2, 2)));
+        drop(prefix);
+
+        let all = open_labeled(&root.join("all"), 4, r#"[[{"start":0,"end":3},"Data"]]"#);
+        let module = all.module.as_ref();
+        assert_eq!(resume_frontier(module, 0, 4), 4);
+        assert_eq!(next_open_span(module, 0, 4), None);
+        assert_eq!(resume_frontier(module, 4, 4), 4);
+        drop(all);
+
+        let three = open_labeled(
+            &root.join("three"),
+            3,
+            r#"[[{"start":0,"end":0},"Data"],[{"start":1,"end":1},"Entropy"],[{"start":2,"end":2},"Data"]]"#,
+        );
+        let module = three.module.as_ref();
+        assert_eq!(resume_frontier(module, 0, 3), 1);
+        assert_eq!(next_open_span(module, 0, 3), Some((1, 1)));
+    }
+
+    #[test]
+    fn resume_frontier_of_entropy_starts_at_the_range() {
+        let tmp = TempDirBuilder::new().prefix("sm-frontier-entropy-").build();
+        let opened = open_labeled(
+            &tmp.path().join("loadtest").join("mod"),
+            4,
+            r#"[[{"start":0,"end":3},"Entropy"]]"#,
+        );
+        let module = opened.module.as_ref();
+        assert_eq!(resume_frontier(module, 0, 4), 0);
+        assert_eq!(next_open_span(module, 0, 4), Some((0, 4)));
+    }
+
+    #[test]
+    fn an_already_data_chunk_adds_no_durable_bytes() {
+        // Breaks if a write onto Data still adds the chunk to the durable counter.
+        assert_eq!(newly_durable_bytes(true, CHUNK_SIZE), 0);
+        assert_eq!(newly_durable_bytes(false, CHUNK_SIZE), CHUNK_SIZE);
+    }
 
     #[test]
     fn a_late_release_keeps_the_deadline_in_the_past() {
