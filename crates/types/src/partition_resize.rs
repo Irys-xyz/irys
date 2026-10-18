@@ -19,20 +19,14 @@ pub enum PartitionResizeError {
     /// this means a misconfiguration.
     #[error("partition resize arithmetic overflow: {0}")]
     Overflow(&'static str),
-    #[error("chunk size must be nonzero")]
-    ZeroChunkSize,
 }
 
 /// The geometry for children of a particular epoch snapshot. Network/genesis
 /// configuration stays immutable; callers resolve this once from their ancestry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PartitionGeometry {
-    #[serde(with = "crate::serialization::string_u64")]
     pub partition_chunks: u64,
-    #[serde(with = "crate::serialization::string_u64")]
     pub recall_chunks: u64,
-    #[serde(with = "crate::serialization::string_u64")]
     pub sampling_origin: u64,
 }
 

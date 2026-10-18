@@ -24,17 +24,6 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
     let node = IrysNodeTest::new_genesis(config)
         .start_and_wait_for_packing("RESIZE", 30)
         .await;
-    let capacity_url = format!(
-        "{}/v1/storage/capacity",
-        node.node_ctx.config.node_config.local_api_url()
-    );
-    let before: serde_json::Value = reqwest::get(&capacity_url)
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    assert_eq!(before["geometry"]["partitionChunks"], "20");
-    assert!(before["targetIngressBytesPerSecond"].is_null());
     node.mine_blocks(3).await?;
     let parent = node
         .node_ctx
@@ -43,6 +32,7 @@ async fn heavy_partition_resize_activation_and_restart() -> eyre::Result<()> {
         .canonical_epoch_snapshot();
     let inventory = parent.all_active_partitions.clone();
     assert!(parent.partition_resize.is_none());
+    assert_eq!(parent.partition_chunks(), 20);
     let previous = node.get_block_by_height(3).await?;
     let activation = node.mine_block().await?;
     let epoch = node

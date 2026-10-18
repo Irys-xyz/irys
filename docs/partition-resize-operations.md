@@ -17,7 +17,7 @@ The table path above is relative to the consensus configuration. `minimum_partit
 
 ## Activation
 
-Like Cascade, E is the first positive-height epoch block whose timestamp meets or exceeds Estuary's `activation_timestamp`. Crossing the timestamp within an epoch does not change that epoch's geometry. All data ledgers must have zero reserved chunks at E. While Estuary is scheduled but not yet active on a branch, every block must carry empty data ledgers: validators reject blocks whose ledgers hold chunks, and the producer leaves data transactions and promotions in the mempool until activation, so E can always be built. A node refuses to start when Estuary is scheduled and its chain already holds ledger data, since activation could never succeed there.
+Like Cascade, E is the first positive-height epoch block whose timestamp meets or exceeds Estuary's `activation_timestamp`. Crossing the timestamp within an epoch does not change that epoch's geometry. All data ledgers must have zero reserved chunks at E. While Estuary is scheduled but not yet active on a branch, every block must carry empty data ledgers: validators reject blocks whose ledgers hold chunks, and the producer leaves data transactions and promotions out of its blocks, so E can always be built. Transactions anchored within `tx_anchor_expiry_depth` blocks of E are included from E + 1; older ones expire and must be re-posted. A node refuses to start when Estuary is scheduled and its chain already holds ledger data, since activation could never succeed there.
 
 E's proof uses the old 75,534,400-chunk partitions and 400-chunk recall ranges. Its difficulty applies the normal old-regime adjustment if due, then a fivefold increase in winning hashes, capped at the full hash space. E resets the difficulty timestamp and starts a new adjustment window. Subsequent adjustments occur at E + interval, E + 2 × interval, and so on; a partial old window is not treated as a full new window. Cumulative difficulty is credited per partition-step: E and its descendants add `old recall / new recall` times the hash-count increment, so a branch that keeps mining under the old recall range gains no fork-choice advantage over the activated branch at equal capacity. E's children use 14,500,000-chunk partitions and 80-chunk recall ranges, with a new sampling pass starting at E's VDF step plus one. Epoch length, chunk size, retention settings, packing iterations, and entropy inputs stay unchanged.
 
@@ -38,12 +38,6 @@ If interrupted, reopening the module validates the journal against the configure
 The ID pool preserves nominal capacity, not already-packed capacity. For example, 1,000 old IDs become at least 5,210 total IDs. Original IDs stay in place; the additional IDs are appended through the existing deterministic sequence.
 
 After disk space is released, append fresh directory paths to `.irys_submodules.toml` and restart through the existing storage provisioning workflow. Preserve existing path ordering and directories. Obtain the required additional pledges through the usual process; the resize does not create free pledges. Newly assigned IDs receive fresh packing. Six fully packed new partitions occupy 22.806528 decimal TB before filesystem and database overhead.
-
-## Capacity reporting
-
-`GET /v1/storage/capacity` reports the active `geometry` (partition chunks, recall chunks, sampling origin), chunk bytes, target ingress, epoch reserve, and total partition-ID supply. Network allocation is captured with the canonical tip and epoch snapshot.
-
-Each ledger reports reservations, cumulative allocated slots and headroom, required/assigned replicas for nonexpired slots, and fully assigned slots. The nested `local` counts and top-level `local` total describe only this node: packed chunks include observed entropy and data, while packed writable chunks count entropy on ledger-assigned modules accepting data writes. Packed capacity-pool entropy is not reported as writable ledger capacity. Local counters are observational, include pending writes, and may advance during a request; they are not a network-wide durability or throughput guarantee. Assignments that disagree with the captured epoch are excluded. Targets and epoch reserves are `null` before activation.
 
 ## Scope
 

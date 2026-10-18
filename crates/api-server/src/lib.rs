@@ -206,10 +206,6 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         // Storage endpoints
         .route(
-            "/storage/capacity",
-            web::get().to(storage::capacity::get_capacity),
-        )
-        .route(
             storage::INTERVALS_ROUTE,
             web::get().to(storage::get_intervals),
         )
