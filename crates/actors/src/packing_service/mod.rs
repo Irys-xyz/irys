@@ -57,9 +57,9 @@ const PENDING_ROOM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// What an entropy pack may do with one offset on this attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EntropyOffset {
-    /// Live label is `Uninitialized` or `Interrupted`, and the hash matches.
+    /// Live label is `Uninitialized`, and the hash matches.
     Pack,
-    /// Live label is `Data` or `Entropy`. Do not write.
+    /// Live label is `Data`, `Entropy`, or `Interrupted`. Do not write.
     Skip,
     /// The module is unassigned, or the hash is no longer `packed_for`.
     Refused,
@@ -67,8 +67,11 @@ pub(crate) enum EntropyOffset {
 
 /// Re-check the assignment and the live label immediately before an entropy write.
 ///
-/// `Data` is never a pack target. `Entropy` is already packed. A retry that
-/// starts again at the original offset must not replace either one.
+/// `Data` is never a pack target. `Entropy` is already packed. A live
+/// `Interrupted` label is the in-flight durable-point mark, so it is not a
+/// pack target either. Open reloads a file `Interrupted` span as
+/// `Uninitialized`, and that label is packed. A retry that starts again at
+/// the original offset must not replace `Data` or `Entropy`.
 pub(crate) fn classify_entropy_offset(
     storage_module: &irys_domain::StorageModule,
     offset: PartitionChunkOffset,
@@ -81,12 +84,13 @@ pub(crate) fn classify_entropy_offset(
         return EntropyOffset::Refused;
     }
     match storage_module.get_chunk_type(&offset) {
-        Some(irys_domain::ChunkType::Uninitialized | irys_domain::ChunkType::Interrupted) => {
-            EntropyOffset::Pack
-        }
-        Some(irys_domain::ChunkType::Data | irys_domain::ChunkType::Entropy) | None => {
-            EntropyOffset::Skip
-        }
+        Some(irys_domain::ChunkType::Uninitialized) => EntropyOffset::Pack,
+        Some(
+            irys_domain::ChunkType::Interrupted
+            | irys_domain::ChunkType::Data
+            | irys_domain::ChunkType::Entropy,
+        )
+        | None => EntropyOffset::Skip,
     }
 }
 
@@ -108,18 +112,13 @@ pub(crate) fn entropy_target_ranges(
     let start = range.0.start().0;
     let end = range.0.end().0;
     let mut spans = Vec::new();
-    for kind in [
-        irys_domain::ChunkType::Uninitialized,
-        irys_domain::ChunkType::Interrupted,
-    ] {
-        for interval in storage_module.get_intervals(kind) {
-            let span_start = interval.start().0.max(start);
-            let span_end = interval.end().0.min(end);
-            if span_start <= span_end {
-                spans.push(PartitionChunkRange(partition_chunk_offset_ii!(
-                    span_start, span_end
-                )));
-            }
+    for interval in storage_module.get_intervals(irys_domain::ChunkType::Uninitialized) {
+        let span_start = interval.start().0.max(start);
+        let span_end = interval.end().0.min(end);
+        if span_start <= span_end {
+            spans.push(PartitionChunkRange(partition_chunk_offset_ii!(
+                span_start, span_end
+            )));
         }
     }
     spans.sort_by_key(|span| span.0.start().0);
@@ -960,9 +959,9 @@ mod tests {
     }
 
     /// The first filter includes a whole uninitialized range. Data written
-    /// while that pack is paused, and an offset marked `Interrupted` in the
-    /// same window, must not be treated as the original range: the failure
-    /// puts back only the labels that are still pack targets.
+    /// while that pack is paused stays data. A live `Interrupted` offset is
+    /// not a pack target. The failure puts back only the offsets that are
+    /// still `Uninitialized`.
     #[cfg(not(feature = "nvidia"))]
     #[test_log::test(tokio::test)]
     async fn failed_pack_requeues_only_uninitialized_offsets() -> eyre::Result<()> {
@@ -1063,11 +1062,11 @@ mod tests {
                     offset = offset.saturating_add(1);
                 }
             }
-            if queued == BTreeSet::from([1, 2, 3]) {
+            if queued == BTreeSet::from([2, 3]) {
                 break;
             }
             if start.elapsed() > Duration::from_secs(5) {
-                eyre::bail!("requeued offsets were {queued:?}, want 1, 2, and 3");
+                eyre::bail!("requeued offsets were {queued:?}, want 2 and 3");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1092,8 +1091,9 @@ mod tests {
         Ok(())
     }
 
-    /// A crash-recovery `Interrupted` label is still a pack target. A normal
-    /// pack writes entropy there and leaves a neighboring `Data` chunk alone.
+    /// A file `Interrupted` reloads as `Uninitialized` and is packed.
+    /// `Uninitialized` is packed. A live `Interrupted` label is the in-flight
+    /// durable-point mark and is not packed. A neighboring `Data` chunk stays.
     #[cfg(not(feature = "nvidia"))]
     #[test_log::test(tokio::test)]
     async fn interrupted_label_is_packed() -> eyre::Result<()> {
@@ -1137,9 +1137,29 @@ mod tests {
                 ChunkType::Interrupted,
             );
         }
+        storage_module.write_intervals_to_submodules()?;
+        drop(storage_module);
+        let storage_module = Arc::new(StorageModule::new(&info, &config)?);
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(0)),
+            Some(ChunkType::Uninitialized),
+            "a reloaded Interrupted label is Uninitialized"
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(1)),
+            Some(ChunkType::Data)
+        );
+        {
+            let mut intervals = storage_module.intervals().write().expect("intervals");
+            StorageModule::cut_then_insert_interval_if_touching(
+                &mut intervals,
+                PartitionChunkOffset(2),
+                ChunkType::Interrupted,
+            );
+        }
         let request = PackingRequest::new(
             storage_module.clone(),
-            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 1)),
+            PartitionChunkRange(irys_types::partition_chunk_offset_ii!(0, 3)),
         )?;
 
         let packing = PackingService::new(Arc::new(config));
@@ -1150,14 +1170,13 @@ mod tests {
 
         let start = std::time::Instant::now();
         loop {
-            if storage_module.get_chunk_type(&PartitionChunkOffset(0)) == Some(ChunkType::Entropy) {
+            let reloaded = storage_module.get_chunk_type(&PartitionChunkOffset(0));
+            let fresh = storage_module.get_chunk_type(&PartitionChunkOffset(3));
+            if reloaded == Some(ChunkType::Entropy) && fresh == Some(ChunkType::Entropy) {
                 break;
             }
-            if start.elapsed() > Duration::from_secs(5) {
-                eyre::bail!(
-                    "interrupted offset stayed {:?}",
-                    storage_module.get_chunk_type(&PartitionChunkOffset(0))
-                );
+            if start.elapsed() > Duration::from_secs(10) {
+                eyre::bail!("reloaded={reloaded:?} fresh={fresh:?}");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1165,6 +1184,11 @@ mod tests {
             storage_module.get_chunk_type(&PartitionChunkOffset(1)),
             Some(ChunkType::Data),
             "a successful pack must not overwrite data"
+        );
+        assert_eq!(
+            storage_module.get_chunk_type(&PartitionChunkOffset(2)),
+            Some(ChunkType::Interrupted),
+            "a live Interrupted label is not a pack target"
         );
         let ranges = storage_module.take_crc_repair_ranges();
         assert!(

@@ -2989,6 +2989,25 @@ impl StorageModule {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// `true` only when another caller holds `sync_in_progress`.
+    ///
+    /// A free poisoned lock is not held: `lock_sync` clears that poison.
+    /// This does not wait, so it is safe while `pending_writes` is held.
+    /// The durable point takes `sync_in_progress` first.
+    fn sync_lock_is_held(&self) -> bool {
+        match self.sync_in_progress.try_lock() {
+            Ok(guard) => {
+                drop(guard);
+                false
+            }
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                drop(poisoned.into_inner());
+                false
+            }
+        }
+    }
+
     /// Bump the index generation, wait out ops that captured the old one, and
     /// drop queued bytes. Lock order: `pending_writes`, then `entropy_cache`.
     fn clear_pending_for_reset(&self) {
@@ -3821,9 +3840,13 @@ impl StorageModule {
     /// of the packed bytes. A data chunk with no queued proof keeps a proof
     /// already stored at that offset and replaces the checksum. An entropy
     /// chunk stores the checksum only and drops a proof. A proof with no
-    /// covering interval is not stored, and neither is its checksum. MDBX
-    /// stores proofs only. The returned offsets had a proof and no covering
-    /// interval.
+    /// covering interval is not stored, and neither is its checksum. A data
+    /// snapshot whose queued body no longer matches, and that has no proof,
+    /// is not stored either: the caller puts that offset back to
+    /// `Uninitialized` and leaves the new body queued. `write_chunk` of
+    /// `Data` does not queue a proof; when the queued body still matches,
+    /// that snapshot completes as `Data`. MDBX stores proofs only. The
+    /// returned offsets were not stored.
     fn commit_presence_rows(
         &self,
         write_batch: &[(
@@ -3833,6 +3856,7 @@ impl StorageModule {
         )],
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let mut by_start: BTreeMap<PartitionChunkOffset, Vec<PackedOffsetRow>> = BTreeMap::new();
+        let mut replaced = Vec::new();
         {
             let pending = self.pending_writes.read().unwrap();
             for (offset, (bytes, chunk_type), _) in write_batch {
@@ -3856,6 +3880,16 @@ impl StorageModule {
                         .view(|tx| tx.get_offset_meta(*offset))?
                         .and_then(|row| row.proof);
                 }
+                // The bytes on disk are this snapshot. A queued body that no
+                // longer matches them, with no proof left, must not complete
+                // as Data. The new body stays queued.
+                if *chunk_type == ChunkType::Data
+                    && proof.is_none()
+                    && !Self::queued_body_matches(&pending, *offset, bytes, *chunk_type)
+                {
+                    replaced.push(*offset);
+                    continue;
+                }
                 by_start
                     .entry(PartitionChunkOffset(*interval.start()))
                     .or_default()
@@ -3872,7 +3906,7 @@ impl StorageModule {
         if !by_start.is_empty() {
             self.wait_if_sync_paused(SyncPausePoint::AfterPresenceCopy);
         }
-        let mut uncovered = Vec::new();
+        let mut uncovered = replaced;
         for (start, rows) in by_start {
             let (_, submodule) = self.get_submodule_for_offset(start)?;
             // MDBX ignores checksums. An entropy-only batch must not commit
@@ -6072,6 +6106,13 @@ impl StorageModule {
         if chunk_type == ChunkType::Data && self.data_writes_paused() {
             return false;
         }
+        // The durable point holds `sync_in_progress` while the live label is
+        // still `Interrupted`. Replacing this offset's queued data body, or
+        // its proof, would publish Data for bytes the point no longer owns.
+        // Entropy that does not replace data still queues.
+        if Self::queued_data_or_proof(&pending, chunk_offset) && self.sync_lock_is_held() {
+            return false;
+        }
         let priority = match chunk_type {
             ChunkType::Entropy => disk_lane::WritePriority::Packing,
             _ => disk_lane::WritePriority::Ingress,
@@ -6093,6 +6134,34 @@ impl StorageModule {
         // The lane writes the next window when it is woken.
         self.disk.notify();
         true
+    }
+
+    /// Queued `Data` at `offset`, or a proof waiting for that offset.
+    fn queued_data_or_proof(pending: &PendingWrites, offset: PartitionChunkOffset) -> bool {
+        let data_body = pending
+            .get(&offset)
+            .is_some_and(|(_, kind)| *kind == ChunkType::Data)
+            || pending
+                .written_ahead
+                .get(&offset)
+                .is_some_and(|ahead| ahead.chunk_type == ChunkType::Data);
+        data_body || pending.proofs.contains_key(&offset)
+    }
+
+    /// The queued body is still the snapshot this durable point pwrote.
+    fn queued_body_matches(
+        pending: &PendingWrites,
+        offset: PartitionChunkOffset,
+        bytes: &[u8],
+        chunk_type: ChunkType,
+    ) -> bool {
+        if let Some((queued, kind)) = pending.get(&offset) {
+            return *kind == chunk_type && queued.as_slice() == bytes;
+        }
+        pending
+            .written_ahead
+            .get(&offset)
+            .is_some_and(|ahead| ahead.chunk_type == chunk_type && ahead.bytes.as_slice() == bytes)
     }
 
     /// Clear an orphaned partition range and publish `Uninitialized`.
@@ -10161,6 +10230,234 @@ mod tests {
         }
         eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
         Ok(())
+    }
+
+    fn seed_proof_coverage(storage: &StorageModule) -> eyre::Result<()> {
+        let tx_hash = H256::repeat_byte(9);
+        let data_root = H256::repeat_byte(4);
+        let leaf = TxLeafBinding {
+            data_root,
+            prefix_hash: H256::repeat_byte(1),
+        };
+        let folded = DataTransactionLedger::fold_tx_root_leaf(data_root, leaf.prefix_hash);
+        let mut tx_path = folded.0.to_vec();
+        tx_path.extend_from_slice(&[0_u8; 32]);
+        let (_, submodule) = storage.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.update(|tx| {
+            tx.add_full_tx_path(tx_hash, tx_path)?;
+            tx.add_tx_leaf_binding(tx_hash, &leaf)?;
+            tx.add_tx_path_hash_to_offset_range(
+                PartitionChunkOffset::from(1),
+                PartitionChunkOffset::from(6),
+                Some(tx_hash),
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Assigned module. `store_assignment` writes `submodule.path`, and a
+    /// relative name misses this temp dir, so the submodule path is absolute.
+    fn open_assigned_presence(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+        H256,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let config = testing_config_tuned(tmp.path(), 32, 8, |node| {
+            node.storage = StorageSyncConfig {
+                num_writes_before_sync: 1,
+                intervals_persist_secs: 0,
+                min_durable_interval_ms: 0,
+                ..StorageSyncConfig::default()
+            };
+            node.database = index_database(engine);
+        });
+        let hash = H256::repeat_byte(0x11);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash: hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ii!(0, 7), tmp.path().join("sub"))],
+        };
+        let storage = StorageModule::new(&info, &config)?;
+        Ok((tmp, config, storage, hash))
+    }
+
+    fn queue_proved_data(storage: &StorageModule, offset: PartitionChunkOffset, byte: u8) {
+        let mut pending = storage.pending_writes.write().unwrap();
+        pending.insert(offset, (vec![byte; 32], ChunkType::Data));
+        pending
+            .priorities
+            .insert(offset, disk_lane::WritePriority::Ingress);
+        pending.queued_at.insert(offset, Instant::now());
+        pending
+            .proofs
+            .insert(offset, (H256::repeat_byte(7), vec![7, 7, 7]));
+    }
+
+    /// A data durable point holds `sync_in_progress` across pwrite. The live
+    /// label is still `Interrupted`. Entropy for that offset must not replace
+    /// the queued body or its proof. Entropy for a different offset, including
+    /// a newer entropy body, still queues.
+    #[test]
+    fn entropy_write_during_interrupted_data_pwrite_drops_the_proof() -> eyre::Result<()> {
+        let mut errors = Vec::new();
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let prefix = format!("entropy_during_data_pwrite_{engine:?}");
+            let outcome = (|| -> eyre::Result<()> {
+                let (_tmp, _config, storage, hash) = open_assigned_presence(&prefix, engine)?;
+                seed_proof_coverage(&storage)?;
+                let offset = PartitionChunkOffset::from(2);
+                let other = PartitionChunkOffset::from(3);
+                queue_proved_data(&storage, offset, 0xD4);
+                storage.pause_next_sync_at(SyncPausePoint::AfterPwrite);
+                let storage_ref = &storage;
+                let sync_result = std::thread::scope(|scope| {
+                    let _release = SyncPauseRelease(storage_ref);
+                    let sync_thread = scope.spawn(move || storage_ref.force_sync_pending_chunks());
+                    assert!(
+                        storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                        "data sync did not pause after pwrite"
+                    );
+                    assert_eq!(
+                        live_label(storage_ref, offset.0),
+                        Some(ChunkType::Interrupted),
+                        "the in-flight label is still Interrupted"
+                    );
+                    assert!(
+                        storage_ref.write_entropy_chunk(other, vec![0xAB; 32], hash),
+                        "entropy for an offset with no queued data still queues"
+                    );
+                    assert!(
+                        storage_ref.write_entropy_chunk(other, vec![0xCD; 32], hash),
+                        "a newer entropy body replaces queued entropy while sync is held"
+                    );
+                    assert!(
+                        !storage_ref.write_entropy_chunk(offset, vec![0xEE; 32], hash),
+                        "entropy must not replace an in-flight data write"
+                    );
+                    storage_ref.release_sync_pause();
+                    sync_thread.join().expect("sync thread")
+                });
+                sync_result?;
+                assert_eq!(live_label(&storage, offset.0), Some(ChunkType::Data));
+                assert_eq!(file_label(&storage, offset.0)?, Some(ChunkType::Data));
+                let pending = storage.pending_writes.read().unwrap();
+                assert!(
+                    pending.get(&offset).is_none(),
+                    "the data body was durable and must leave the queue"
+                );
+                assert!(!pending.proofs.contains_key(&offset));
+                let other_queued = pending
+                    .get(&other)
+                    .map(|(bytes, kind)| (bytes.clone(), *kind));
+                drop(pending);
+                assert_eq!(
+                    other_queued,
+                    Some((vec![0xCD_u8; 32], ChunkType::Entropy)),
+                    "the newer entropy body stays queued"
+                );
+                assert_eq!(data_path_at(&storage, offset.0)?, Some(vec![7, 7, 7]));
+                let loaded = storage.read_chunks(partition_chunk_offset_ii!(offset, offset))?;
+                let (bytes, kind) = loaded.get(&offset).expect("data bytes on disk");
+                assert_eq!(*kind, ChunkType::Data);
+                assert_eq!(bytes.as_slice(), &[0xD4_u8; 32]);
+                Ok(())
+            })();
+            if let Err(err) = outcome {
+                errors.push(format!("{engine:?}: {err:#}"));
+            }
+        }
+        eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
+        Ok(())
+    }
+
+    /// Replacing the snapshotted data body and dropping its proof, while the
+    /// point still holds `sync_in_progress`, must not publish `Data`.
+    #[test]
+    fn replaced_data_bytes_without_a_proof_do_not_publish_data() -> eyre::Result<()> {
+        let mut errors = Vec::new();
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let prefix = format!("replaced_data_snapshot_{engine:?}");
+            let outcome = (|| -> eyre::Result<()> {
+                let (_tmp, _config, storage) = open_presence_module_with(&prefix, engine, 0)?;
+                seed_proof_coverage(&storage)?;
+                let offset = PartitionChunkOffset::from(2);
+                queue_proved_data(&storage, offset, 0xD4);
+                storage.pause_next_sync_at(SyncPausePoint::AfterPwrite);
+                let storage_ref = &storage;
+                let sync_result = std::thread::scope(|scope| {
+                    let _release = SyncPauseRelease(storage_ref);
+                    let sync_thread = scope.spawn(move || storage_ref.force_sync_pending_chunks());
+                    assert!(
+                        storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
+                        "data sync did not pause after pwrite"
+                    );
+                    {
+                        let mut pending = storage_ref.pending_writes.write().unwrap();
+                        pending.insert(offset, (vec![0xEE; 32], ChunkType::Entropy));
+                        pending
+                            .priorities
+                            .insert(offset, disk_lane::WritePriority::Packing);
+                        pending.proofs.remove(&offset);
+                    }
+                    storage_ref.release_sync_pause();
+                    sync_thread.join().expect("sync thread")
+                });
+                sync_result?;
+                assert_ne!(
+                    live_label(&storage, offset.0),
+                    Some(ChunkType::Data),
+                    "a proof-less replaced snapshot must not stay Data"
+                );
+                assert_ne!(
+                    file_label(&storage, offset.0)?,
+                    Some(ChunkType::Data),
+                    "the interval file must not publish Data"
+                );
+                assert!(data_path_at(&storage, offset.0)?.is_none());
+                let pending = storage.pending_writes.read().unwrap();
+                let queued = pending
+                    .get(&offset)
+                    .map(|(bytes, kind)| (bytes.clone(), *kind));
+                drop(pending);
+                assert_eq!(queued, Some((vec![0xEE_u8; 32], ChunkType::Entropy)));
+                Ok(())
+            })();
+            if let Err(err) = outcome {
+                errors.push(format!("{engine:?}: {err:#}"));
+            }
+        }
+        eyre::ensure!(errors.is_empty(), "{}", errors.join(" | "));
+        Ok(())
+    }
+
+    /// `write_chunk` of `Data` does not queue a proof. That write still
+    /// completes as `Data`.
+    #[test]
+    fn data_chunk_without_a_proof_still_becomes_data() -> eyre::Result<()> {
+        for_each_index_engine("data_without_proof", |_config, storage| {
+            let offset = PartitionChunkOffset::from(2);
+            assert!(storage.write_chunk(offset, vec![0xD4_u8; 32], ChunkType::Data));
+            storage.force_sync_pending_chunks()?;
+            assert_eq!(live_label(&storage, 2), Some(ChunkType::Data));
+            assert_eq!(file_label(&storage, 2)?, Some(ChunkType::Data));
+            let loaded = storage.read_chunks(partition_chunk_offset_ii!(2, 2))?;
+            assert_eq!(
+                loaded.get(&offset).map(|(bytes, _)| bytes.as_slice()),
+                Some([0xD4_u8; 32].as_slice())
+            );
+            Ok(())
+        })
     }
 
     /// A registration that has computed its rows must not commit them after
