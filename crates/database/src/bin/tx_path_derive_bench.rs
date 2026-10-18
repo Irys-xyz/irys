@@ -591,7 +591,7 @@ where
     }
     let counts = split_counts(samples, threads);
     let mut ok = Vec::new();
-    let mut failures = Vec::new();
+    let mut failures = FailureLog::default();
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for (index, count) in counts.iter().copied().enumerate() {
@@ -606,13 +606,17 @@ where
             match handle.join() {
                 Ok((samples, errors)) => {
                     ok.extend(samples);
-                    failures.extend(errors);
+                    failures.count += errors.count;
+                    failures.samples.extend(errors.samples);
                 }
-                Err(_) => failures.push("worker panicked".to_owned()),
+                Err(_) => {
+                    failures.count += 1;
+                    failures.samples.push("worker panicked".to_owned());
+                }
             }
         }
     });
-    let attempted = ok.len() + failures.len();
+    let attempted = ok.len() + failures.count;
     print_phase(name, kind, &ok, &failures, threads, disk, show_widths);
     PhaseStats {
         attempted,
@@ -627,13 +631,13 @@ fn worker<F>(
     evict_dir: Option<&Path>,
     disk: Option<&DiskId>,
     sample_one: &F,
-) -> (Vec<Sample>, Vec<String>)
+) -> (Vec<Sample>, FailureLog)
 where
     F: Fn(&mut XorShift) -> eyre::Result<SampleCore>,
 {
     let mut rng = XorShift::new(thread_seed(thread_index));
     let mut ok = Vec::with_capacity(count);
-    let mut failures = Vec::new();
+    let mut failures = FailureLog::default();
     for _ in 0..count {
         if cold
             && let Some(dir) = evict_dir
@@ -658,19 +662,31 @@ where
     (ok, failures)
 }
 
-fn push_fail(failures: &mut Vec<String>, err: &eyre::Report) {
-    if failures.len() < 5 {
-        let text = err.to_string();
-        let end = text.len().min(240);
-        failures.push(text[..end].to_owned());
+/// How many sample errors to keep for the log. Later errors still increment
+/// the failure count.
+const FAIL_SAMPLE_CAP: usize = 5;
+
+#[derive(Default)]
+struct FailureLog {
+    count: usize,
+    samples: Vec<String>,
+}
+
+fn push_fail(failures: &mut FailureLog, err: &eyre::Report) {
+    failures.count += 1;
+    if failures.samples.len() >= FAIL_SAMPLE_CAP {
+        return;
     }
+    let text = err.to_string();
+    let end = text.len().min(240);
+    failures.samples.push(text[..end].to_owned());
 }
 
 fn print_phase(
     name: &str,
     kind: &str,
     ok: &[Sample],
-    failures: &[String],
+    failures: &FailureLog,
     threads: usize,
     disk: Option<&DiskId>,
     show_widths: bool,
@@ -684,7 +700,7 @@ fn phase_lines(
     name: &str,
     kind: &str,
     ok: &[Sample],
-    failures: &[String],
+    failures: &FailureLog,
     threads: usize,
     disk: Option<&DiskId>,
     show_widths: bool,
@@ -692,7 +708,7 @@ fn phase_lines(
     let mut lines = vec![format!(
         "== {name} {kind} ok={} fail={} threads={threads}",
         ok.len(),
-        failures.len()
+        failures.count
     )];
     if ok.is_empty() {
         lines.push(format!("{name} {kind}: no successful samples"));
@@ -722,7 +738,7 @@ fn phase_lines(
         }
         lines.push(disk_line(ok, disk));
     }
-    for failure in failures {
+    for failure in &failures.samples {
         lines.push(format!("{name} {kind} failure: {failure}"));
     }
     lines
@@ -2137,7 +2153,15 @@ mod tests {
             sample(1_500, 2_500, 3, 1_500),
             sample(4_500, 500, 2_500, 9_000),
         ];
-        let lines = super::phase_lines("derive", "warm", &ok, &[], 1, None, true);
+        let lines = super::phase_lines(
+            "derive",
+            "warm",
+            &ok,
+            &super::FailureLog::default(),
+            1,
+            None,
+            true,
+        );
         let proof: Vec<_> = lines
             .iter()
             .filter(|line| line.contains("proof_len"))
@@ -2185,7 +2209,15 @@ mod tests {
                 && lines.iter().any(|line| line.starts_with("total_ns ")),
             "cpu or total left the duration format: {lines:?}"
         );
-        let baseline = super::phase_lines("baseline", "warm", &ok, &[], 1, None, false);
+        let baseline = super::phase_lines(
+            "baseline",
+            "warm",
+            &ok,
+            &super::FailureLog::default(),
+            1,
+            None,
+            false,
+        );
         let baseline_proof: Vec<_> = baseline
             .iter()
             .filter(|line| line.contains("proof_len"))
@@ -2200,5 +2232,134 @@ mod tests {
             !baseline.iter().any(|line| line.starts_with("tx_count")),
             "baseline printed tx widths: {baseline:?}"
         );
+    }
+
+    fn core_ok() -> super::SampleCore {
+        super::SampleCore {
+            total_ns: 1,
+            db_ns: 1,
+            cpu_ns: 0,
+            tx_count: 1,
+            proof_len: 4,
+        }
+    }
+
+    #[test]
+    fn worker_counts_every_failed_sample() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let (ok, failures) = super::worker(0, 8, false, None, None, &|_rng| {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(eyre::eyre!("boom-{i}"))
+        });
+        assert!(ok.is_empty());
+        assert_eq!(failures.count, 8);
+        assert_eq!(
+            failures.samples,
+            (0..5).map(|i| format!("boom-{i}")).collect::<Vec<_>>()
+        );
+        let lines = super::phase_lines("phase", "cold", &ok, &failures, 1, None, false);
+        assert!(
+            lines[0].contains("ok=0 fail=8 "),
+            "fail count used the sample cap: {lines:?}"
+        );
+        let printed: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("failure:"))
+            .collect();
+        assert_eq!(printed.len(), 5, "{printed:?}");
+        assert!(printed.iter().any(|line| line.contains("boom-4")));
+        assert!(!lines.iter().any(|line| line.contains("boom-7")));
+    }
+
+    #[test]
+    fn worker_keeps_every_message_under_the_cap() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let (_ok, failures) = super::worker(0, 3, false, None, None, &|_rng| {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(eyre::eyre!("boom-{i}"))
+        });
+        assert_eq!(failures.count, 3);
+        assert_eq!(
+            failures.samples,
+            vec![
+                "boom-0".to_owned(),
+                "boom-1".to_owned(),
+                "boom-2".to_owned()
+            ]
+        );
+        let lines = super::phase_lines("phase", "cold", &[], &failures, 1, None, false);
+        assert!(lines[0].contains("fail=3"), "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("failure:"))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn measure_counts_failures_past_the_sample_cap() {
+        for (threads, samples) in [(1_usize, 8_usize), (1, 40), (2, 20)] {
+            let stats = super::measure("phase", true, threads, samples, None, None, false, |_| {
+                Err(eyre::eyre!("boom"))
+            });
+            assert_eq!(
+                stats.attempted, samples,
+                "threads={threads} samples={samples}"
+            );
+            assert_eq!(stats.succeeded, 0, "threads={threads}");
+        }
+    }
+
+    #[test]
+    fn measure_counts_failures_when_some_samples_succeed() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let stats = super::measure("phase", true, 2, 20, None, None, true, |_| {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i.is_multiple_of(5) {
+                Ok(core_ok())
+            } else {
+                Err(eyre::eyre!("boom-{i}"))
+            }
+        });
+        assert_eq!(stats.succeeded, 4);
+        assert_eq!(stats.attempted, 20);
+    }
+
+    #[test]
+    fn measure_counts_a_clean_run_as_zero_failures() {
+        let stats = super::measure("phase", true, 2, 6, None, None, false, |_| Ok(core_ok()));
+        assert_eq!(stats.attempted, 6);
+        assert_eq!(stats.succeeded, 6);
+    }
+
+    #[test]
+    fn warmup_failure_is_not_a_sample_failure() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let stats = super::measure("phase", false, 1, 4, None, None, false, |_| {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i == 0 {
+                Err(eyre::eyre!("warmup"))
+            } else {
+                Ok(core_ok())
+            }
+        });
+        assert_eq!(stats.succeeded, 4);
+        assert_eq!(stats.attempted, 4);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn evict_failures_are_counted_past_the_sample_cap() {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let missing = std::path::Path::new("/no/such/tx-path-evict");
+        let stats = super::measure("phase", true, 1, 8, Some(missing), None, false, |_| {
+            next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(core_ok())
+        });
+        assert_eq!(next.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(stats.attempted, 8);
+        assert_eq!(stats.succeeded, 0);
     }
 }
