@@ -8943,7 +8943,7 @@ fn ensure_default_intervals(
 
 /// Operator steps when `intervals.json` cannot be read. The open error names
 /// the file. The same steps are in `docs/60-indexes/06-storage-module-indexes.md`.
-const INTERVALS_FILE_REMEDY: &str = "Stop the node, move this intervals.json aside, and reset that storage module so it can repack. See docs/60-indexes/06-storage-module-indexes.md.";
+const INTERVALS_FILE_REMEDY: &str = "Stop the node, move this intervals.json aside, and clear this submodule directory (index, intervals.json, chunks.dat) so it can repack. See docs/60-indexes/06-storage-module-indexes.md.";
 
 fn intervals_file_error(path: &Path, action: &str) -> String {
     format!(
@@ -14497,6 +14497,10 @@ mod tests {
         let err = opened.expect_err("a corrupt intervals.json must not panic");
         let message = format!("{err:#}");
         assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            message.contains("clear this submodule directory (index, intervals.json, chunks.dat)"),
+            "{message}"
+        );
         drop(tmp);
         Ok(())
     }

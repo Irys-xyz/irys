@@ -345,8 +345,8 @@ records which offsets are `Data`, `Entropy`, `Uninitialized`, or
 `Interrupted`. Open fails when that file cannot be parsed, and the error
 names the path.
 
-Move that `intervals.json` aside. Clear the contents of that storage
-module's submodule directory and start the node. The module packs again.
+Move that `intervals.json` aside. Clear this submodule directory
+(index, intervals.json, chunks.dat) and start the node. The module packs again.
 Do not write `Data` back by hand. A span the node cannot trust is
 `Uninitialized`, and open drops presence rows that are not under `Data`.
 
