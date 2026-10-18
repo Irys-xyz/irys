@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    EnvFilter, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+    EnvFilter, Layer as _, Registry, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
@@ -35,6 +35,9 @@ const METRICS_EXPORT_INTERVAL: std::time::Duration = std::time::Duration::from_s
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 const DEFAULT_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
 const DEFAULT_SERVICE_NAME: &str = "irys-node";
+/// `EnvFilter` directives for the events exported as OTLP logs. `RUST_LOG`
+/// still applies first, so this can only narrow it. Default: `info`.
+const OTLP_LOG_FILTER_ENV: &str = "IRYS_OTLP_LOG_FILTER";
 
 struct TelemetryConfig {
     service_name: String,
@@ -244,10 +247,20 @@ fn setup_tracing_subscriber(
 
     let tracer = tracer_provider.tracer(service_name.to_string());
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-    let otel_log_layer = OpenTelemetryTracingBridge::new(logger_provider);
+    // A node can log at debug locally without shipping debug to the log store.
+    let otel_log_layer = OpenTelemetryTracingBridge::new(logger_provider).with_filter(
+        otlp_log_filter(std::env::var(OTLP_LOG_FILTER_ENV).ok().as_deref()),
+    );
 
     let subscriber = subscriber.with(otel_trace_layer).with(otel_log_layer);
     subscriber.init();
+}
+
+/// Filter for the OTLP log layer. `None` or an empty value means `info`.
+fn otlp_log_filter(directives: Option<&str>) -> EnvFilter {
+    EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .parse_lossy(directives.unwrap_or_default().trim())
 }
 
 fn install_panic_hook() {
@@ -283,6 +296,8 @@ fn install_panic_hook() {
 /// - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: Override endpoint for traces (optional)
 /// - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: Override endpoint for logs (optional)
 /// - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Override endpoint for metrics (optional)
+/// - `IRYS_OTLP_LOG_FILTER`: `EnvFilter` directives for exported logs (default `info`).
+///   `RUST_LOG` still governs local output and caps what is exported.
 ///
 /// # Errors
 ///
@@ -414,6 +429,52 @@ mod tests {
                 "span ID must not be all zeros"
             );
         }
+    }
+
+    /// Count events that reach a layer behind `otlp_log_filter`, under a
+    /// permissive global filter like a node running `RUST_LOG=debug`.
+    fn exported_levels(directives: Option<&str>) -> Vec<tracing::Level> {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::Context;
+
+        struct Capture(Arc<Mutex<Vec<tracing::Level>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default()
+            .with(EnvFilter::new("debug"))
+            .with(Capture(Arc::clone(&seen)).with_filter(otlp_log_filter(directives)));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("debug event");
+            tracing::info!("info event");
+            tracing::warn!("warn event");
+        });
+        seen.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn otlp_logs_default_to_info_under_a_debug_rust_log() {
+        let want = vec![tracing::Level::INFO, tracing::Level::WARN];
+        assert_eq!(exported_levels(None), want);
+        assert_eq!(exported_levels(Some("")), want);
+        assert_eq!(exported_levels(Some("  ")), want);
+    }
+
+    #[test]
+    fn otlp_log_filter_can_widen_to_debug() {
+        assert_eq!(
+            exported_levels(Some("debug")),
+            vec![
+                tracing::Level::DEBUG,
+                tracing::Level::INFO,
+                tracing::Level::WARN
+            ]
+        );
+        assert_eq!(exported_levels(Some("warn")), vec![tracing::Level::WARN]);
     }
 
     #[test]
