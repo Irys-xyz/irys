@@ -3245,6 +3245,26 @@ fn v1_data_path_reads() -> usize {
 
 #[cfg(test)]
 thread_local! {
+    static V1_COPY_PATH_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_v1_copy_path_views() {
+    V1_COPY_PATH_VIEWS.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn v1_copy_path_views() -> usize {
+    V1_COPY_PATH_VIEWS.with(std::cell::Cell::get)
+}
+
+fn note_v1_copy_path_view() {
+    #[cfg(test)]
+    V1_COPY_PATH_VIEWS.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+thread_local! {
     static V1_UNCOMPARED_HASH_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static V1_UNCOMPARED_HASH_GROUP: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
@@ -3493,6 +3513,8 @@ fn read_v1_data_paths(
             // The copy rescan shares this reader and is not a verify view.
             if count_view {
                 note_verify_view();
+            } else {
+                note_v1_copy_path_view();
             }
             chunk
                 .iter()
@@ -4603,11 +4625,12 @@ mod tests {
     };
     use super::{
         ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
-        convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_data_path_reads,
-        reset_v1_range_copy_batches, reset_v1_uncompared_hash_views, reset_verify_placement_caches,
-        reset_verify_views, set_merge_batch, set_v1_path_view_group, set_v1_placement_batch,
-        set_v1_uncompared_hash_group, v1_data_path_reads, v1_placement_views,
-        v1_range_copy_batches, v1_uncompared_hash_views, verify_mdbx_and_rocks,
+        convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_copy_path_views,
+        reset_v1_data_path_reads, reset_v1_range_copy_batches, reset_v1_uncompared_hash_views,
+        reset_verify_placement_caches, reset_verify_views, set_merge_batch, set_v1_path_view_group,
+        set_v1_placement_batch, set_v1_uncompared_hash_group, v1_copy_path_views,
+        v1_data_path_reads, v1_placement_views, v1_range_copy_batches, v1_uncompared_hash_views,
+        verify_mdbx_and_rocks,
         verify_placement_caches, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
@@ -6536,6 +6559,8 @@ mod tests {
         stats: ConvertStats,
         batches: Vec<usize>,
         reads: usize,
+        /// Copy-rescan views. Point reads stay in `reads`.
+        copy_views: usize,
     }
 
     /// One v1 run copied under a path-byte cap. `batches` is the path bytes
@@ -6546,6 +6571,17 @@ mod tests {
         path_len: usize,
         value_bytes: usize,
     ) -> eyre::Result<V1CapRun> {
+        run_v1_path_cap_grouped(prefix, n, path_len, value_bytes, None)
+    }
+
+    /// `group` splits each hash page. `None` is the production page size.
+    fn run_v1_path_cap_grouped(
+        prefix: &str,
+        n: u64,
+        path_len: usize,
+        value_bytes: usize,
+        group: Option<usize>,
+    ) -> eyre::Result<V1CapRun> {
         let root = temp(prefix);
         let consensus = write_v1_one_tx_paths(root.path(), n, path_len)?;
         let mdbx = root.path().join("db");
@@ -6555,8 +6591,10 @@ mod tests {
         options.chunks_per_partition = n;
         options.batch_rows = 16;
         options.batch_value_bytes = value_bytes;
+        let _group = group.map(set_v1_path_view_group);
         reset_v1_data_path_reads();
         reset_v1_range_copy_batches();
+        reset_v1_copy_path_views();
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         Ok(V1CapRun {
             _root: root,
@@ -6564,6 +6602,7 @@ mod tests {
             stats,
             batches: v1_range_copy_batches(),
             reads: v1_data_path_reads(),
+            copy_views: v1_copy_path_views(),
         })
     }
 
@@ -6627,6 +6666,46 @@ mod tests {
         );
         assert_eq!(run.batches, vec![120, 120], "{:?}", run.batches);
         assert_v1_paths_stored(&run.rocks, N, 120)?;
+        Ok(())
+    }
+
+    /// Four 80-byte paths and a 100-byte cap. The hash rows are two pages.
+    /// The first pass point-reads two paths. The rescan is one view per page.
+    #[test]
+    fn v1_range_copy_counts_one_view_per_hash_page() -> eyre::Result<()> {
+        const N: u64 = 4;
+        let run = run_v1_path_cap("convert-v1-range-page-views", N, 80, 100)?;
+        assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
+        assert_eq!(run.reads, 2, "first pass only");
+        assert_eq!(
+            run.copy_views, 2,
+            "one view per hash page, not one per path; point reads {}",
+            run.reads
+        );
+        assert!(
+            run.copy_views < usize::try_from(N).unwrap_or(usize::MAX),
+            "copy views {} counted a path, not a page",
+            run.copy_views
+        );
+        assert_v1_paths_stored(&run.rocks, N, 80)?;
+        Ok(())
+    }
+
+    /// The same run with one row per view. The copy counter must move with
+    /// each view, and it must pass the first-pass point reads.
+    #[test]
+    fn v1_range_copy_counts_each_path_view_when_the_group_is_one() -> eyre::Result<()> {
+        const N: u64 = 4;
+        let run = run_v1_path_cap_grouped("convert-v1-range-path-views", N, 80, 100, Some(1))?;
+        assert_eq!(run.stats.data_paths, N, "{:?}", run.stats);
+        assert_eq!(run.reads, 2, "the group does not add point reads");
+        assert!(
+            run.copy_views > run.reads,
+            "group 1 copy views {} are not above first-pass point reads {}",
+            run.copy_views, run.reads
+        );
+        assert_eq!(run.copy_views, 4, "one view per path");
+        assert_v1_paths_stored(&run.rocks, N, 80)?;
         Ok(())
     }
 
