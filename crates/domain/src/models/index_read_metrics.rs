@@ -316,7 +316,7 @@ pub(super) fn note_readahead_store() {
     READAHEAD_STORES.add(1, &[]);
 }
 
-/// One sweep slot that took a cached pad.
+/// One sweep slot packed from a cached pad. A pad that was taken and then rejected is not counted.
 pub(super) fn note_readahead_hit() {
     READAHEAD_HITS.add(1, &[]);
 }
