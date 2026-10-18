@@ -86,31 +86,61 @@ pub(crate) fn resume_frontier(module: &StorageModule, start: u32, end: u32) -> u
 /// First non-Data run in `[start, end)`.
 ///
 /// `None` when that range is all Data, or when `start >= end`. The length
-/// stops at the next Data offset or at `end`. Data intervals are coalesced
-/// and include pending Data, so one pass replaces a binary search that
-/// treats a later Data offset as proof the prefix is full.
+/// stops at the next Data offset or at `end`. The map is coalesced, so the
+/// run that contains the cursor has one stored label. Seeking that run does
+/// not read intervals before the cursor, and a later Data interval is not
+/// proof that the prefix is Data. Pending Data at the cursor counts as Data.
+/// It does not hide a stored Data label. Two adjacent non-Data labels are
+/// one open run.
 pub(crate) fn next_open_span(module: &StorageModule, start: u32, end: u32) -> Option<(u32, u32)> {
     if start >= end {
         return None;
     }
     let mut cursor = start;
-    for interval in module.get_intervals(ChunkType::Data) {
-        let data_start = interval.start().0;
-        let data_end = interval.end().0;
-        if data_end < cursor {
+    let mut open_at = None;
+    while cursor < end {
+        let (data, next) = span_step(module, cursor, end);
+        if data {
+            if let Some(open_at) = open_at {
+                return Some((open_at, cursor - open_at));
+            }
+            cursor = next;
             continue;
         }
-        if data_start > cursor {
-            let hole_end = data_start.min(end);
-            return Some((cursor, hole_end - cursor));
+        if open_at.is_none() {
+            open_at = Some(cursor);
         }
-        let after = data_end.saturating_add(1);
-        if after >= end {
-            return None;
-        }
-        cursor = after;
+        cursor = next;
     }
-    Some((cursor, end - cursor))
+    let open_at = open_at?;
+    Some((open_at, end - open_at))
+}
+
+/// Stored label at `cursor`, and the next offset after that run.
+///
+/// The interval lock is dropped before `get_chunk_type`. That call takes
+/// pending first, then intervals. Holding intervals across it deadlocks.
+fn span_step(module: &StorageModule, cursor: u32, end: u32) -> (bool, u32) {
+    let point = PartitionChunkOffset::from(cursor);
+    let (stored_data, inclusive_end) = {
+        let map = module.intervals().read().expect("intervals lock");
+        match map.get_key_value_at_point(point) {
+            Ok((interval, kind)) => (*kind == ChunkType::Data, interval.end().0),
+            Err(gap) => (false, gap.end().0),
+        }
+    };
+    if stored_data {
+        return (true, step_end(inclusive_end, cursor, end));
+    }
+    if module.get_chunk_type(&point) == Some(ChunkType::Data) {
+        return (true, cursor.saturating_add(1).min(end));
+    }
+    (false, step_end(inclusive_end, cursor, end))
+}
+
+fn step_end(inclusive_end: u32, cursor: u32, end: u32) -> u32 {
+    let next = inclusive_end.saturating_add(1).min(end);
+    if next <= cursor { end } else { next }
 }
 
 fn ingest_tx_chunks(picked: u32, room: u32, open_len: u32) -> u32 {
@@ -1526,6 +1556,91 @@ mod tests {
         let module = opened.module.as_ref();
         assert_eq!(resume_frontier(module, 0, 4), 0);
         assert_eq!(next_open_span(module, 0, 4), Some((0, 4)));
+    }
+
+    fn alternating_labels(chunks: u32) -> String {
+        let mut parts = Vec::with_capacity(usize::try_from(chunks).unwrap_or(0));
+        for offset in 0..chunks {
+            let kind = if offset % 2 == 0 { "Entropy" } else { "Data" };
+            parts.push(format!(r#"[{{"start":{offset},"end":{offset}}},"{kind}"]"#));
+        }
+        format!("[{}]", parts.join(","))
+    }
+
+    fn visits_for(module: &StorageModule, start: u32, end: u32) -> (Option<(u32, u32)>, u64) {
+        let before = module.interval_visit_count();
+        let open = next_open_span(module, start, end);
+        let visits = module.interval_visit_count().saturating_sub(before);
+        (open, visits)
+    }
+
+    #[test]
+    fn next_open_span_probe_count_stays_flat_as_fragments_grow() {
+        // A one-chunk hole stays one chunk. Finding it must not walk every
+        // fragment in the module. A clean run still returns its full length,
+        // and two non-Data labels still form one open run.
+        let tmp = TempDirBuilder::new().prefix("sm-span-seek-").build();
+        let root = tmp.path().join("loadtest");
+
+        let clean_n = 16_u32;
+        let clean = open_labeled(
+            &root.join("clean"),
+            clean_n,
+            &format!(r#"[[{{"start":0,"end":{}}},"Entropy"]]"#, clean_n - 1),
+        );
+        let module = clean.module.as_ref();
+        assert_eq!(next_open_span(module, 0, clean_n), Some((0, clean_n)));
+        drop(clean);
+
+        let prefix = open_labeled(
+            &root.join("prefix"),
+            clean_n,
+            &format!(
+                r#"[[{{"start":0,"end":7}},"Data"],[{{"start":8,"end":{}}},"Entropy"]]"#,
+                clean_n - 1
+            ),
+        );
+        let module = prefix.module.as_ref();
+        assert_eq!(next_open_span(module, 0, clean_n), Some((8, clean_n - 8)));
+        // A cursor inside the Data prefix still opens on the Entropy tail.
+        assert_eq!(next_open_span(module, 4, clean_n), Some((8, clean_n - 8)));
+        drop(prefix);
+
+        let mixed = open_labeled(
+            &root.join("mixed"),
+            4,
+            r#"[[{"start":0,"end":1},"Uninitialized"],[{"start":2,"end":3},"Entropy"]]"#,
+        );
+        let module = mixed.module.as_ref();
+        assert_eq!(next_open_span(module, 0, 4), Some((0, 4)));
+        drop(mixed);
+
+        let small_n = 32_u32;
+        let small = open_labeled(&root.join("small"), small_n, &alternating_labels(small_n));
+        let module = small.module.as_ref();
+        let (open, small_visits) = visits_for(module, 0, small_n);
+        assert_eq!(open, Some((0, 1)));
+        drop(small);
+
+        let big_n = 128_u32;
+        let big = open_labeled(&root.join("big"), big_n, &alternating_labels(big_n));
+        let module = big.module.as_ref();
+        let (open, big_visits) = visits_for(module, 0, big_n);
+        assert_eq!(open, Some((0, 1)));
+        // Data, then a one-chunk hole, then later Data. The hole length stays 1.
+        assert_eq!(next_open_span(module, 1, big_n), Some((2, 1)));
+        assert_eq!(
+            (small_visits, big_visits),
+            (0, 0),
+            "interval visits grew with fragments: {small_visits} then {big_visits}"
+        );
+        let mid = 64_u32;
+        let (open, mid_visits) = visits_for(module, mid, big_n);
+        assert_eq!(open, Some((mid, 1)));
+        assert_eq!(
+            mid_visits, 0,
+            "a cursor in the middle still scanned {mid_visits} intervals"
+        );
     }
 
     #[test]
