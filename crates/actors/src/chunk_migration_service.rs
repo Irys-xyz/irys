@@ -1359,11 +1359,43 @@ mod tests {
     /// The indexer has the shared recovery lock and has not read the hash.
     /// Five seconds is the failure bound. The wait returns as soon as this
     /// test's indexer reaches the gate. Another thread must not count.
-    fn wait_for_recovery_lock(pause: &super::recovery_lock_pause::Guard) {
+    ///
+    /// Reaching the gate is not enough. The exclusive probe must block, so a
+    /// pause that runs without the shared lock fails this check.
+    fn wait_for_recovery_lock(
+        pause: &super::recovery_lock_pause::Guard,
+        module: &Arc<StorageModule>,
+    ) {
         assert!(
             pause.wait_until_reached(Duration::from_secs(5)),
             "indexing must take the recovery lock before it reads the block hash"
         );
+        assert_shared_recovery_lock_held(module);
+    }
+
+    /// The indexer is inside the pause, so the shared gate is already held.
+    /// The probe blocks on the exclusive gate until the indexer drops it.
+    fn assert_shared_recovery_lock_held(module: &Arc<StorageModule>) {
+        let module = Arc::clone(module);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = started_tx.send(());
+            let _guard = module.lock_index_recovery_exclusive();
+            let _ = acquired_tx.send(());
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("recovery lock probe starts");
+        match acquired_rx.recv_timeout(Duration::from_millis(100)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(()) => {
+                panic!("indexing must hold the shared recovery lock before it reads the block hash")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("recovery lock probe ended before it took the exclusive gate");
+            }
+        }
     }
 
     /// A thread that did not install this gate must not sleep in it, and must
@@ -1403,7 +1435,7 @@ mod tests {
                 pause.enter_on_this_thread();
                 let _ = done_tx.send(index_fixture_block(&f));
             });
-            wait_for_recovery_lock(&pause);
+            wait_for_recovery_lock(&pause, &f.sm);
             let submit = &f.block.data_ledgers[DataLedger::Submit];
             f.block_index.push_item(
                 &BlockIndexItem {
@@ -1443,7 +1475,7 @@ mod tests {
                 pause.enter_on_this_thread();
                 let _ = done_tx.send(index_fixture_block(&f));
             });
-            wait_for_recovery_lock(&pause);
+            wait_for_recovery_lock(&pause, &f.sm);
             pause.release();
             let result = done_rx
                 .recv_timeout(Duration::from_secs(5))
