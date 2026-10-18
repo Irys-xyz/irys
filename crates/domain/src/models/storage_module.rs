@@ -1938,10 +1938,12 @@ impl StorageModule {
         let mut pack_binds = Vec::new();
         // Hash, ledger, and slot changes are written only after
         // `bind_packing_identity` accepts. A refused open leaves the previous
-        // file in place. A hash change also sets the reset marker below. A
-        // same-hash ledger or slot change does not wipe the bytes.
+        // file in place. A hash change sets the reset marker only after every
+        // check that can refuse. A same-hash ledger or slot change does not
+        // wipe the bytes.
         let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
             Vec::new();
+        let mut reset_dbs: Vec<SubmoduleIndex> = Vec::new();
         let index_write_generation = Arc::new(AtomicU64::new(0));
         let index_commit_fail_next = Arc::new(AtomicBool::new(false));
         let index_gap = Arc::new(index_drain::IndexGap::new());
@@ -2044,12 +2046,12 @@ impl StorageModule {
                     };
 
                 // A different partition must not keep the old labels or the
-                // old Rocks partition key. Clear first, then bind, then publish
-                // the new identity. Ledger or slot drift with the same hash is
-                // the in-process assign path and does not wipe the bytes.
+                // old Rocks partition key. The marker is written after packing
+                // validation, interval repair, and coverage. A refusal before
+                // that leaves the bytes alone. Ledger or slot drift with the
+                // same hash does not wipe the bytes.
                 if params.partition_hash != want_hash {
-                    submodule_db.set_chunk_crc_complete(false)?;
-                    submodule_db.set_reset_in_progress()?;
+                    reset_dbs.push(submodule_db.clone());
                     rebind_after_bind.push((
                         params_path.clone(),
                         want_hash,
@@ -2129,6 +2131,13 @@ impl StorageModule {
             &global_intervals,
             config.consensus.num_chunks_in_partition,
         )?;
+
+        // Marker first. A crash before it leaves `crc_complete` set on an
+        // intact module. `finish_pending_resets` clears the flag again.
+        for index in &reset_dbs {
+            index.set_reset_in_progress()?;
+            index.set_chunk_crc_complete(false)?;
+        }
 
         // A crash during reset leaves the marker set. Finish the clear and
         // rewrite that submodule's intervals before the file is loaded.
@@ -17249,6 +17258,175 @@ mod tests {
             miner_address: config.node_config.miner_address(),
             partition_hash: hash,
         }
+    }
+
+    fn module_info(path: &Path, assignment: Option<PartitionAssignment>) -> StorageModuleInfo {
+        one_span(3, path, assignment)
+    }
+
+    /// One entropy chunk and one tx row. `sub` is the submodule directory.
+    fn seed_assigned_entropy(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+        hash: H256,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        PathBuf,
+    )> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+            node.database = index_database(engine);
+        });
+        let sub = tmp.path().join("sub");
+        let storage = StorageModule::new(
+            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
+            &config,
+        )?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![0xE1_u8; 32], ChunkType::Entropy));
+        storage.force_sync_pending_chunks()?;
+        assert_eq!(storage.get_chunk_type(&offset), Some(ChunkType::Entropy));
+        let root = H256::repeat_byte(0x44);
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        submodule.db.update(|tx| {
+            tx.add_tx_leaf_binding(
+                root,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))
+        })?;
+        let rows = submodule
+            .db
+            .view(|tx| tx.tx_intervals_in_range(offset, offset))?;
+        eyre::ensure!(!rows.is_empty(), "tx row was not stored");
+        if submodule.db.stores_offset_crc() {
+            submodule.db.set_chunk_crc_complete(true)?;
+        }
+        drop(storage);
+        Ok((tmp, config, sub))
+    }
+
+    fn interval_label(sub: &Path, offset: u32) -> eyre::Result<Option<ChunkType>> {
+        let intervals = read_intervals_file(&sub.join("intervals.json"))?;
+        Ok(intervals
+            .get_at_point(PartitionChunkOffset::from(offset))
+            .copied())
+    }
+
+    fn live_tx_rows(storage: &StorageModule) -> eyre::Result<usize> {
+        let offset = PartitionChunkOffset::from(0);
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        let rows = submodule
+            .db
+            .view(|tx| tx.tx_intervals_in_range(offset, offset))?;
+        Ok(rows.len())
+    }
+
+    /// A packing refusal on the unassign arm must not store the reset marker.
+    /// The next open that still assigns the old hash keeps the entropy. A
+    /// later unassign whose packing matches still wipes.
+    #[test]
+    fn refused_unassign_open_does_not_leave_a_reset_marker() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let hash = H256::repeat_byte(0x61);
+            let prefix = format!("refuse_unassign_{engine:?}");
+            let (_tmp, config, sub) = seed_assigned_entropy(&prefix, engine, hash)?;
+            let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+            let mut params = PackingParams::from_toml(&params_path)?;
+            let recorded = params
+                .entropy_packing_iterations
+                .expect("open records iterations");
+            params.entropy_packing_iterations = Some(recorded + 1);
+            params.write_to_disk(&params_path)?;
+
+            let err = StorageModule::new(&module_info(&sub, None), &config)
+                .expect_err("iterations do not match this module");
+            assert!(
+                err.to_string().contains("packing identity"),
+                "{engine:?}: {err}"
+            );
+            assert_eq!(
+                PackingParams::from_toml(&params_path)?.partition_hash,
+                Some(hash),
+                "{engine:?}: refused unassign rewrote the packing file"
+            );
+            assert_eq!(
+                interval_label(&sub, 0)?,
+                Some(ChunkType::Entropy),
+                "{engine:?}: refused unassign rewrote intervals"
+            );
+            {
+                let index = open_submodule_index(&sub, &config.node_config.database)?;
+                assert!(
+                    !index.reset_in_progress()?,
+                    "{engine:?}: refused unassign left a reset marker"
+                );
+                if index.stores_offset_crc() {
+                    assert!(
+                        index.chunk_crc_complete()?,
+                        "{engine:?}: refused unassign cleared crc_complete"
+                    );
+                }
+                let rows = index.view(|tx| {
+                    tx.tx_intervals_in_range(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(0),
+                    )
+                })?;
+                assert!(
+                    !rows.is_empty(),
+                    "{engine:?}: refused unassign cleared the tx row"
+                );
+            }
+
+            params.entropy_packing_iterations = Some(recorded);
+            params.write_to_disk(&params_path)?;
+            let reopened = StorageModule::new(
+                &module_info(&sub, Some(submit_slot(&config, hash, 0))),
+                &config,
+            )?;
+            assert_eq!(
+                reopened.get_chunk_type(&PartitionChunkOffset::from(0)),
+                Some(ChunkType::Entropy),
+                "{engine:?}: matching reopen wiped a module whose hash never changed"
+            );
+            {
+                let (_, submodule) =
+                    reopened.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+                if submodule.db.stores_offset_crc() {
+                    assert!(
+                        submodule.db.chunk_crc_complete()?,
+                        "{engine:?}: matching reopen lost crc_complete"
+                    );
+                }
+            }
+            drop(reopened);
+
+            let unassigned = StorageModule::new(&module_info(&sub, None), &config)?;
+            assert_eq!(
+                unassigned.get_chunk_type(&PartitionChunkOffset::from(0)),
+                Some(ChunkType::Uninitialized),
+                "{engine:?}: a matching unassign must still wipe"
+            );
+            assert!(
+                !unassigned
+                    .get_submodule_for_offset(PartitionChunkOffset::from(0))?
+                    .1
+                    .db
+                    .reset_in_progress()?,
+                "{engine:?}: a finished unassign left the marker"
+            );
+            assert_eq!(
+                live_tx_rows(&unassigned)?,
+                0,
+                "{engine:?}: a finished unassign kept the tx row"
+            );
+        }
+        Ok(())
     }
 
     /// Same hash, new slot. A packing refusal and a coverage refusal both
