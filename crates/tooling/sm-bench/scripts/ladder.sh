@@ -42,7 +42,9 @@
 # the whole restore: nothing moves, and the error names every such name. If a
 # move fails, the names this restore already put back are moved into the state
 # directory again. A state directory this run did not create stays where it
-# is. Bench exit 0 and bench exit 2 leave the new index where it is.
+# is. Bench exit 0 leaves the new index where it is. Bench exit 2 does too
+# when that run wrote header.json. A usage error is also exit 2 and does not
+# write that file, so the previous index moves back.
 #
 # max_sectors_kb is restored on EXIT, INT, and TERM. The current run and the
 # tracer are stopped before that restore. A foreground wait would defer the
@@ -50,9 +52,11 @@
 # The done marker is written when the script exits, including after a failure.
 # Run under setsid and nohup so the ladder does not need a terminal.
 #
-# Any bench status other than 0 or 2 stops the ladder and restores the
-# previous index. A scored miss is bench exit 2; the ladder continues and the
-# new index stays. A guard failure stops the ladder. sudo must not prompt.
+# Any bench status other than 0 or a scored 2 stops the ladder and restores
+# the previous index. A scored miss is bench exit 2 after header.json was
+# written; the ladder continues and the new index stays. Exit 2 without that
+# file is a usage error: the ladder stops and restores. A guard failure stops
+# the ladder. sudo must not prompt.
 # --trace needs bpftrace.
 
 set -euo pipefail

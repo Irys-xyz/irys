@@ -28,11 +28,15 @@
 # starts. The EXIT trap removes it after the sampler is gone.
 #
 # The bench's exit code is appended to <out>/bench.out. This script exits 0
-# only when the bench exits 0 or 2 (a scored miss), so the new index stays.
-# Bench exit 1 (a startup refusal, or an interrupt with no scored failure)
-# and every other status, including a panic, make this script exit with that
-# status so the ladder puts the previous index back. A guard failure exits 1
-# before the bench starts.
+# when the bench exits 0, and when the bench exits 2 after writing header.json.
+# That file is written after a successful open and before the judge, so a
+# scored miss has it and the new index stays. A usage error also exits 2, and
+# it does not write header.json. An old header.json from an earlier run does
+# not count: it is moved aside before the bench and put back when this run
+# does not write a new one. Bench exit 1 (a startup refusal, or an interrupt
+# with no scored failure) and every other status, including a panic, make this
+# script exit with that status so the ladder puts the previous index back. A
+# guard failure exits 1 before the bench starts.
 
 set -euo pipefail
 
@@ -187,6 +191,7 @@ fi
 
 sp=
 bp=
+header_prior=
 # A TERM trap does not run during a foreground command. Background the bench
 # and wait, so TERM stops it before this shell exits. Monitor mode gives the
 # bench its own process group; it is turned off again so job notices stay quiet.
@@ -205,6 +210,15 @@ cleanup() {
     if [ -n "${out:-}" ]; then
         rm -f "$out/run.pid" "$out/sample.pid"
     fi
+    # A scored miss writes a new header.json. A usage error does not, so the
+    # file moved aside before the bench goes back.
+    if [ -n "${header_prior:-}" ] && [ -e "$header_prior" ]; then
+        if [ -n "${out:-}" ] && [ -e "$out/header.json" ]; then
+            rm -f "$header_prior"
+        else
+            mv "$header_prior" "$out/header.json" || true
+        fi
+    fi
 }
 trap cleanup EXIT
 trap 'cleanup; exit 143' TERM
@@ -217,6 +231,11 @@ sp=$!
 # above, and teardown.sh uses this pid to stop sample.sh and iostat.
 printf '%s\n' "$sp" >"$out/sample.pid"
 set +e
+# header.json from an earlier run must not make this exit 2 look scored.
+if [ -f "$out/header.json" ]; then
+    header_prior=$out/header.json.prior
+    mv "$out/header.json" "$header_prior"
+fi
 "$bench" \
     --dir "$loadtest" \
     --recall-file "$recall_file" \
@@ -232,10 +251,14 @@ set -e
 bp=
 echo "exit=$rc" >>"$out/bench.out"
 echo "# done $(date -Is)" >>"$out/bench.out"
-# Exit 0 and exit 2 keep the new index. Every other status is a failure,
-# including a panic (101) or a signal (137, 143). The ladder moves the
-# previous index back.
-if [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; then
+# Exit 0 keeps the new index. Exit 2 keeps it only when this run wrote
+# header.json. A usage error exits 2 and does not write that file. Every
+# other status is a failure, including a panic (101) or a signal (137, 143).
+# The ladder moves the previous index back.
+if [ "$rc" -eq 0 ]; then
+    exit 0
+fi
+if [ "$rc" -eq 2 ] && [ -f "$out/header.json" ]; then
     exit 0
 fi
 exit "$rc"

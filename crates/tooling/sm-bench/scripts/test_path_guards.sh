@@ -2442,7 +2442,13 @@ test_run_exits_0_when_the_bench_exits_2() {
     root=$(tmpdir)
     err=$root/err
     loadtest_disk "$root" dev mnt
-    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 2\n' "$root" >"$root/bench"
+    cat >"$root/bench" <<EOF
+#!/bin/sh
+mkdir -p "$root/out/t"
+printf '{}\n' > "$root/out/t/header.json"
+printf ran > "$root/bench-ran"
+exit 2
+EOF
     chmod +x "$root/bench"
     if ! with_fake_sys "$root/sys" "$here/run.sh" \
         --name t --device "$dev" --mount "$mnt" \
@@ -2454,6 +2460,100 @@ test_run_exits_0_when_the_bench_exits_2() {
         bad "$name" "bench did not run"
     elif ! grep -q '^exit=2$' "$root/out/t/bench.out"; then
         bad "$name" "bench.out: $(cat "$root/out/t/bench.out" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A usage error is also exit 2. It does not write header.json. That is not a
+# scored miss, so run.sh must keep status 2.
+test_run_exits_2_when_exit_2_writes_no_header() {
+    local name=run-exit-2-no-header root err dev mnt rc
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 2\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        bad "$name" "run.sh treated a usage error as a scored miss: $(cat "$err")"
+    elif [ "$rc" -ne 2 ]; then
+        bad "$name" "run.sh exited $rc: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$err")"
+    elif [ -e "$root/out/t/header.json" ]; then
+        bad "$name" "header.json exists"
+    elif ! grep -q '^exit=2$' "$root/out/t/bench.out"; then
+        bad "$name" "bench.out: $(cat "$root/out/t/bench.out" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A previous run's header.json is not this run's scored miss. Exit 2 without
+# rewriting that file stays exit 2, and the old file stays.
+test_run_keeps_exit_2_when_an_old_header_is_not_rewritten() {
+    local name=run-exit-2-old-header root err dev mnt rc
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    mkdir -p "$root/out/t"
+    printf 'OLD-HEADER\n' >"$root/out/t/header.json"
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 2\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        bad "$name" "run.sh treated the old header as a scored miss: $(cat "$err")"
+    elif [ "$rc" -ne 2 ]; then
+        bad "$name" "run.sh exited $rc: $(cat "$err")"
+    elif ! cmp -s <(printf 'OLD-HEADER\n') "$root/out/t/header.json"; then
+        bad "$name" "header.json: $(cat "$root/out/t/header.json" 2>/dev/null)"
+    elif [ -e "$root/out/t/header.json.prior" ]; then
+        bad "$name" "header.json.prior was left behind"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A scored miss rewrites header.json. An older file in that path does not
+# replace the new one, and the run still counts as success.
+test_run_exits_0_when_exit_2_replaces_an_old_header() {
+    local name=run-exit-2-replaces-header root err dev mnt
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    mkdir -p "$root/out/t"
+    printf 'OLD-HEADER\n' >"$root/out/t/header.json"
+    cat >"$root/bench" <<EOF
+#!/bin/sh
+printf 'NEW-HEADER\n' > "$root/out/t/header.json"
+printf ran > "$root/bench-ran"
+exit 2
+EOF
+    chmod +x "$root/bench"
+    if ! with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1; then
+        bad "$name" "run.sh refused a scored miss that rewrote header.json: $(cat "$err")"
+    elif ! cmp -s <(printf 'NEW-HEADER\n') "$root/out/t/header.json"; then
+        bad "$name" "header.json: $(cat "$root/out/t/header.json" 2>/dev/null)"
+    elif [ -e "$root/out/t/header.json.prior" ]; then
+        bad "$name" "header.json.prior was left behind"
     else
         ok "$name"
     fi
@@ -2792,6 +2892,57 @@ EOF
     rm -rf "$root"
 }
 
+# Exit 2 with no header.json is a usage error. The ladder restores the index
+# and does not start the next step.
+test_ladder_restores_the_index_when_exit_2_writes_no_header() {
+    local name=ladder-exit-2-no-header root module sys err dev mnt
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    sys=$root/sys
+    err=$root/err
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    cat >"$root/bench" <<EOF
+#!/bin/bash
+n=\$(cat "$root/calls" 2>/dev/null || echo 0)
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$root/calls"
+if [ "\$n" -eq 1 ]; then
+    exit 2
+fi
+printf 'second-db\n' > "$module/db"
+exit 0
+EOF
+    chmod +x "$root/bench"
+    if MIN_FREE_GIB=0 with_fake_sys "$sys" "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --run typo-step --run later-step \
+        >"$err" 2>&1; then
+        bad "$name" "ladder.sh exited 0: $(cat "$err")"
+    elif [ "$(cat "$root/calls" 2>/dev/null)" != 1 ]; then
+        bad "$name" "second step ran: calls=$(cat "$root/calls" 2>/dev/null)"
+    elif [ -e "$module/state-prior" ]; then
+        bad "$name" "state-prior still exists"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/db"; then
+        bad "$name" "live db: $(cat "$module/db" 2>/dev/null)"
+    elif ! cmp -s <(printf 'keep-intervals.json\n') "$module/intervals.json"; then
+        bad "$name" "intervals were not restored"
+    elif [ -e "$root/out/typo-step/header.json" ]; then
+        bad "$name" "header.json was created"
+    elif ! grep -q 'run typo-step failed' "$root/out/ladder.done"; then
+        bad "$name" "done marker: $(cat "$root/out/ladder.done" 2>/dev/null)"
+    elif grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker says success: $(cat "$root/out/ladder.done")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 test_ladder_keeps_the_new_index_when_the_bench_exits_2() {
     local name=ladder-bench-exit-2 root module sys err dev mnt
     root=$(tmpdir)
@@ -2805,6 +2956,8 @@ test_ladder_keeps_the_new_index_when_the_bench_exits_2() {
     queue_files "$sys/block/$dev/queue"
     cat >"$root/bench" <<EOF
 #!/bin/sh
+mkdir -p "$root/out/only-run"
+printf '{}\n' > "$root/out/only-run/header.json"
 printf 'new-db\n' > "$module/db"
 printf ran > "$root/bench-ran"
 exit 2
