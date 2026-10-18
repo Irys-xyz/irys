@@ -6389,16 +6389,17 @@ impl StorageModule {
             self.clear_offset_index_in_range(start, end)?;
             self.clear_data_root_infos_in_range(start, end, data_roots)?;
             self.purge_pending_body_migrations_in_range(start, end)?;
-            let mut intervals = self.intervals.write().unwrap();
+            let mut guard = self.intervals.write().unwrap();
             // One label covers the inclusive span. One cut splits the
             // neighbors. The insert merges with touching `Uninitialized`.
             let span = ii(start, end);
-            let _ = intervals.cut(span);
-            #[cfg(test)]
-            self.rollback_interval_edits.fetch_add(1, Ordering::SeqCst);
-            let _ = intervals.insert_merge_touching_if_values_equal(span, ChunkType::Uninitialized);
-            #[cfg(test)]
-            self.rollback_interval_edits.fetch_add(1, Ordering::SeqCst);
+            let mut intervals = RollbackSpanEdits {
+                map: &mut guard,
+                #[cfg(test)]
+                edits: &self.rollback_interval_edits,
+            };
+            intervals.cut(span);
+            intervals.insert_merge_touching_if_values_equal(span, ChunkType::Uninitialized);
         }
         self.write_intervals_to_submodules()
     }
@@ -8516,6 +8517,32 @@ impl StorageModule {
             );
             self.sync_pending_chunks().unwrap();
         }
+    }
+}
+
+/// Counts each interval-tree call. One rollback span is one `cut` and one
+/// `insert`. A loop that cuts one offset at a time counts one edit per cut.
+struct RollbackSpanEdits<'a> {
+    map: &'a mut StorageIntervals,
+    #[cfg(test)]
+    edits: &'a AtomicU64,
+}
+
+impl RollbackSpanEdits<'_> {
+    fn cut(&mut self, span: Interval<PartitionChunkOffset>) {
+        let _ = self.map.cut(span);
+        #[cfg(test)]
+        self.edits.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn insert_merge_touching_if_values_equal(
+        &mut self,
+        span: Interval<PartitionChunkOffset>,
+        value: ChunkType,
+    ) {
+        let _ = self.map.insert_merge_touching_if_values_equal(span, value);
+        #[cfg(test)]
+        self.edits.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -11267,8 +11294,9 @@ mod tests {
     /// a per-offset walk: the cut splits the neighbors, and `Uninitialized`
     /// merges with a touching run of the same label. A one-point span is still
     /// those two tree edits. A span that crosses two submodules is still those
-    /// two edits, and each file receives its clipped slice. A loop that cuts
-    /// once per offset counts more than two.
+    /// two edits, and each file receives its clipped slice. The edit count is
+    /// the number of `cut` and `insert` calls. A loop that cuts once per
+    /// offset counts more than two.
     #[test]
     fn rollback_marks_a_span_in_one_interval_edit() -> eyre::Result<()> {
         let (tmp, storage, _) = open_publish_module("rollback_span", SubmoduleIndexEngine::Mdbx)?;
