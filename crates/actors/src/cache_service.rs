@@ -372,17 +372,19 @@ impl InnerCacheTask {
     /// Capacity-prunes cached bodies older than the migration age.
     ///
     /// A body stays when this node holds a local ingress proof, a placement
-    /// row, or a module assignment whose interval is not persisted `Data`.
+    /// row, or a module assignment that has not persisted this chunk.
     /// Open drops the placement row when the file is not `Data`. The assignment
     /// remains, and the cached body is what a replica reads back until the
-    /// file says `Data`.
+    /// file says `Data` for this chunk. A `Data` label whose index names
+    /// another chunk is that chunk's bytes.
     ///
     /// A placed or proven body is deleted only by
     /// `delete_reclaimable_cached_chunks_older_than`: the offset must be
     /// persisted `Data`, and the current signer's compact ingress hash must
     /// be present. A body with neither a proof, a placement, nor an
-    /// unpersisted assignment is deleted on age once every tx of its root is
-    /// migrated. That path does not require the ingress hash. Before migration
+    /// assignment that still owes this chunk is deleted on age once every tx
+    /// of its root is migrated. That path does not require the ingress hash.
+    /// Before migration
     /// no node has a placement yet, so "unassigned" cannot be told apart from
     /// "assigned, not migrated".
     #[tracing::instrument(level = "trace", skip_all)]
@@ -678,12 +680,13 @@ impl InnerCacheTask {
     }
 
     /// Offsets in `candidates` that a local module is still assigned to store
-    /// and whose interval is not persisted `Data`.
+    /// and that are not this chunk's persisted `Data`.
     ///
     /// Open drops the placement row when the file is not `Data`. The partition
     /// assignment and the canonical ledger range stay. Keep the cached body
-    /// until the file says `Data`. A missing block or tx header skips that
-    /// span. A database error fails the prune.
+    /// until the file says `Data` and the index does not name another chunk
+    /// there. A missing block or tx header skips that span. A database error
+    /// fails the prune.
     fn assigned_unpersisted_offsets(
         &self,
         data_root: DataRoot,
@@ -740,7 +743,19 @@ impl InnerCacheTask {
                     let Ok(partition_raw) = u32::try_from(partition_raw) else {
                         continue;
                     };
-                    if !sm.is_data_chunk_persisted_at(PartitionChunkOffset::from(partition_raw)) {
+                    let partition_offset = PartitionChunkOffset::from(partition_raw);
+                    // One placement point read. A span view would walk every
+                    // interval in the partition for a single candidate.
+                    let indexed = sm.data_root_and_tx_offset_at(partition_offset)?;
+                    let names_this_chunk = indexed
+                        .is_some_and(|(root, tx_off)| root == data_root && tx_off == *tx_offset);
+                    // A stored placement for a different chunk means the Data
+                    // label is that chunk's bytes, not this one's.
+                    if indexed.is_some() && !names_this_chunk {
+                        keep_offset = true;
+                        break 'spans;
+                    }
+                    if !sm.is_data_chunk_persisted_at(partition_offset) {
                         keep_offset = true;
                         break 'spans;
                     }
@@ -2709,6 +2724,295 @@ mod tests {
         Ok(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
             sm,
         ]))))
+    }
+
+    /// The slot that holds the cached body moved onto a partition whose file
+    /// still says `Data` for a previous root. Capacity prune must keep that
+    /// body. A `Data` label with no index row, a placement of this root, and
+    /// a module on another slot still release the body.
+    #[tokio::test]
+    async fn capacity_prune_keeps_body_when_data_label_names_another_root() -> eyre::Result<()> {
+        let (survived, views, visits) = shifted_slot_body_survives(SlotLabel::ForeignData)?;
+        assert!(
+            survived,
+            "a Data label that names another root is not this chunk; the cache stays"
+        );
+        assert_eq!(views, 0, "one candidate must not open a span index view");
+        assert_eq!(visits, 0, "one candidate must not walk the interval map");
+        assert!(
+            shifted_slot_body_survives(SlotLabel::ForeignUnpersisted)?.0,
+            "an assigned span that is not Data still keeps the cache"
+        );
+        assert!(
+            !shifted_slot_body_survives(SlotLabel::ClearedData)?.0,
+            "persisted Data with no index row still ends the crash window"
+        );
+        assert!(
+            !shifted_slot_body_survives(SlotLabel::OwnData)?.0,
+            "a placement of this root and persisted Data still delete the cache"
+        );
+        assert!(
+            !shifted_slot_body_survives(SlotLabel::OtherSlot)?.0,
+            "a module on another slot does not keep this chunk"
+        );
+        Ok(())
+    }
+
+    /// What the partition index says about the offset the new slot maps onto.
+    #[derive(Clone, Copy)]
+    enum SlotLabel {
+        /// Full placement of another root, and the file says `Data`.
+        ForeignData,
+        /// Full placement of another root, interval still uninitialized.
+        ForeignUnpersisted,
+        /// This root was written as `Data`, then its placement row was removed.
+        ClearedData,
+        /// This root's placement row is present and the file says `Data`.
+        OwnData,
+        /// The module's slot does not cover the cached span.
+        OtherSlot,
+    }
+
+    /// One old migrated body at the start of slot 1. `num_chunks` is 10, so
+    /// the span's ledger offset is 10 and slot 1 maps it to partition offset 0.
+    ///
+    /// Returns `(body still cached, index span views during prune, interval
+    /// visits during prune)`.
+    fn shifted_slot_body_survives(label: SlotLabel) -> eyre::Result<(bool, u64, u64)> {
+        use irys_database::insert_tx_header;
+        use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
+        use irys_database::tables::{IrysBlockHeaders, MigratedBlockHashes};
+        use irys_domain::ChunkType;
+        use irys_types::{
+            DataTransactionLedger, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
+            PartitionChunkOffset, RelativeChunkOffset, U256, irys::IrysSigner,
+        };
+        use nodit::interval::ii;
+
+        const NUM_CHUNKS: u64 = 10;
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let chunk_size = config.consensus.chunk_size;
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: chunk_size,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let data_root = tx_header.data_root;
+        let local_address = config.irys_signer().address();
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            insert_tx_header(wtx, &tx_header)?;
+            irys_database::set_data_tx_included_height(wtx, &tx_header.id, 1)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+            eyre::Ok(())
+        })??;
+        let chunk = UnpackedChunk {
+            data_root,
+            data_size: chunk_size,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![2_u8; 8]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_chunk(wtx, &chunk)?;
+            let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+            let mut walk = cur.walk_dup(Some(data_root), None)?;
+            while let Some((_k, entry)) = walk.next().transpose()? {
+                wtx.delete::<CachedChunksIndex>(data_root, Some(entry.clone()))?;
+                let mut updated = entry.clone();
+                updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                wtx.put::<CachedChunksIndex>(data_root, updated)?;
+            }
+            if matches!(label, SlotLabel::OwnData) {
+                irys_database::store_ingress_data_hash(
+                    wtx,
+                    data_root,
+                    local_address,
+                    chunk.tx_offset,
+                    irys_types::generate_ingress_data_hash(&chunk.bytes.0, local_address),
+                )?;
+            }
+            eyre::Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.data_ledgers[DataLedger::Submit].total_chunks = NUM_CHUNKS;
+        genesis.test_sign();
+        let mut included = IrysBlockHeader::new_mock_header();
+        included.height = 1;
+        included.previous_block_hash = genesis.block_hash;
+        included.cumulative_diff = U256::from(2_u64);
+        let submit = &mut included.data_ledgers[DataLedger::Submit];
+        submit.total_chunks = NUM_CHUNKS + 1;
+        submit.tx_ids = H256List(vec![tx_header.id]);
+        included.test_sign();
+        db.update(|wtx| {
+            wtx.put::<IrysBlockHeaders>(genesis.block_hash, genesis.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(0, genesis.block_hash)?;
+            wtx.put::<IrysBlockHeaders>(included.block_hash, included.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(1, included.block_hash)?;
+            eyre::Ok(())
+        })??;
+
+        let module_slot = match label {
+            SlotLabel::OtherSlot => 0,
+            _ => 1,
+        };
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let storage_modules_guard =
+            assigned_module_without_placement(sm_dir.path().to_path_buf(), module_slot)?;
+        let sm = storage_modules_guard.read()[0].clone();
+        let partition_zero = PartitionChunkOffset::from(0_u32);
+        match label {
+            SlotLabel::ForeignData | SlotLabel::ForeignUnpersisted | SlotLabel::OtherSlot => {
+                let ledger_at = if matches!(label, SlotLabel::OtherSlot) {
+                    0
+                } else {
+                    NUM_CHUNKS
+                };
+                let signer = IrysSigner::random_signer(&sm.config.consensus);
+                let bytes = vec![4_u8; sm.config.consensus.chunk_size as usize];
+                let old_tx = signer
+                    .create_transaction(bytes, H256::zero())
+                    .expect("old tx");
+                let old_tx = signer.sign_transaction(old_tx).expect("sign old tx");
+                eyre::ensure!(
+                    old_tx.header.data_root != data_root,
+                    "fixture old root collided with the cached root"
+                );
+                let (_tx_root, proofs) =
+                    DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&old_tx.header));
+                sm.index_transaction_data(
+                    &old_tx.header,
+                    &proofs[0].proof,
+                    LedgerChunkRange(ii(
+                        LedgerChunkOffset::from(ledger_at),
+                        LedgerChunkOffset::from(ledger_at),
+                    )),
+                    0,
+                )?;
+                let named = sm
+                    .data_root_and_tx_offset_at(partition_zero)?
+                    .map(|(root, _)| root);
+                eyre::ensure!(
+                    named == Some(old_tx.header.data_root),
+                    "fixture index does not name the old root at partition offset 0, got {named:?}"
+                );
+            }
+            SlotLabel::ClearedData | SlotLabel::OwnData => {
+                let (_, submodule) = sm.get_submodule_for_offset(partition_zero)?;
+                submodule.db.update(|tx| {
+                    tx.add_data_root_info(
+                        data_root,
+                        &DataRootInfo {
+                            start_offset: RelativeChunkOffset::from(0_i32),
+                            data_size: sm.config.consensus.chunk_size,
+                        },
+                    )
+                })?;
+            }
+        }
+        let write_data = !matches!(label, SlotLabel::ForeignUnpersisted);
+        if write_data {
+            let offsets: &[u32] = if matches!(label, SlotLabel::ForeignData) {
+                &[0, 2, 4]
+            } else {
+                &[0]
+            };
+            for offset in offsets {
+                eyre::ensure!(
+                    sm.write_chunk(
+                        PartitionChunkOffset::from(*offset),
+                        vec![9_u8; sm.config.consensus.chunk_size as usize],
+                        ChunkType::Data,
+                    ),
+                    "fixture failed to queue offset {offset}"
+                );
+            }
+            sm.force_sync_pending_chunks()?;
+            eyre::ensure!(
+                sm.is_data_chunk_persisted_at(partition_zero),
+                "fixture offset 0 is not persisted Data"
+            );
+        } else {
+            eyre::ensure!(
+                !sm.is_data_chunk_persisted_at(partition_zero),
+                "unpersisted fixture is already Data"
+            );
+        }
+        if matches!(label, SlotLabel::ForeignData) {
+            eyre::ensure!(
+                sm.get_chunk_type(&PartitionChunkOffset::from(1_u32)) != Some(ChunkType::Data),
+                "offsets 0 and 2 collapsed into one Data run"
+            );
+        }
+        if matches!(label, SlotLabel::ClearedData) {
+            sm.clear_data_root_infos_in_range(partition_zero, partition_zero, &[data_root])?;
+            eyre::ensure!(
+                sm.is_data_chunk_persisted_at(partition_zero),
+                "clearing the placement row cleared the Data label"
+            );
+        }
+        let placed = sm.placed_tx_offsets_for_data_root(
+            data_root,
+            &BTreeSet::from([TxChunkOffset::from(0)]),
+        )?;
+        match label {
+            SlotLabel::OwnData => {
+                eyre::ensure!(!placed.is_empty(), "own placement row is missing");
+            }
+            _ => {
+                eyre::ensure!(placed.is_empty(), "fixture still places the cached root");
+            }
+        }
+
+        let views_before = sm.index_view_count();
+        let visits_before = sm.interval_visit_count();
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+            storage_modules_guard,
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        service_task.prune_durably_migrated_chunk_bodies(10)?;
+        let views = sm.index_view_count().saturating_sub(views_before);
+        let visits = sm.interval_visit_count().saturating_sub(visits_before);
+        let survived = db.view(|rtx| -> eyre::Result<bool> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(data_root))?;
+            Ok(walk
+                .next()
+                .transpose()?
+                .is_some_and(|(root, _)| root == data_root))
+        })??;
+        Ok((survived, views, visits))
     }
 
     /// A body that was durable in the snapshot stays in the cache when that
