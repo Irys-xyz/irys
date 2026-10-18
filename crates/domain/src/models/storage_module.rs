@@ -3944,6 +3944,9 @@ impl StorageModule {
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
         let mut by_start: BTreeMap<PartitionChunkOffset, Vec<PackedOffsetRow>> = BTreeMap::new();
         let mut replaced = Vec::new();
+        // Entropy rows carry no proof. A data row from `write_chunk` also
+        // has no proof, and that row must keep the path already stored.
+        let mut entropy_offsets: BTreeSet<PartitionChunkOffset> = BTreeSet::new();
         {
             let pending = self.pending_writes.read().unwrap();
             for (offset, (bytes, chunk_type), _) in write_batch {
@@ -3977,6 +3980,9 @@ impl StorageModule {
                     replaced.push(*offset);
                     continue;
                 }
+                if *chunk_type == ChunkType::Entropy {
+                    entropy_offsets.insert(*offset);
+                }
                 by_start
                     .entry(PartitionChunkOffset(*interval.start()))
                     .or_default()
@@ -3996,9 +4002,28 @@ impl StorageModule {
         let mut uncovered = replaced;
         for (start, rows) in by_start {
             let (_, submodule) = self.get_submodule_for_offset(start)?;
-            // MDBX ignores checksums. An entropy-only batch must not commit
-            // an empty proof write.
-            if !submodule.db.stores_offset_crc() && rows.iter().all(|row| row.proof.is_none()) {
+            if !submodule.db.stores_offset_crc() {
+                // MDBX stores proofs only. An entropy row has no proof.
+                // Leaving the previous data path would serve those bytes
+                // under it. Drop that path. A data row with no proof is
+                // `write_chunk`: it does not replace the stored path. A data
+                // row that has a proof still commits it. The tx interval stays.
+                let drops: Vec<(PartitionChunkOffset, PartitionChunkOffset)> = rows
+                    .iter()
+                    .filter(|row| entropy_offsets.contains(&row.offset))
+                    .map(|row| (row.offset, row.offset))
+                    .collect();
+                if !drops.is_empty() {
+                    submodule.db.drop_presence_in_ranges(&drops)?;
+                }
+                let proved: Vec<_> = rows.into_iter().filter(|row| row.proof.is_some()).collect();
+                if proved.is_empty() {
+                    continue;
+                }
+                let missed = submodule
+                    .db
+                    .update(|tx| tx.write_packed_offset_rows(proved))?;
+                uncovered.extend(missed);
                 continue;
             }
             let missed = submodule
@@ -7493,6 +7518,18 @@ impl StorageModule {
                             None => continue,
                         }
                     }
+                }
+            } else {
+                // The path above was loaded before `yield_to_writes`. This
+                // engine stores no checksum, so a later commit can replace
+                // the path with no checksum change. Serve only the pair read
+                // while `sync_in_progress` is held.
+                match self.reload_unchecksummed_chunk(offset)? {
+                    Some((fresh, root, size, path, tx, _crc)) => {
+                        (data_root, data_size, data_path, tx_offset) = (root, size, path, tx);
+                        bytes = fresh;
+                    }
+                    None => continue,
                 }
             }
             out.insert(
@@ -17053,6 +17090,319 @@ mod tests {
             );
             Ok(())
         })?;
+        Ok(())
+    }
+
+    /// Assigned module with one-iteration packing. `engine` selects the index.
+    fn pair_module(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<(irys_testing_utils::utils::tempfile::TempDir, StorageModule)> {
+        let tmp = TempDirBuilder::new().prefix(prefix).build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                entropy_sweep_max_bytes: chunk_size * 4,
+                entropy_read_grace_ms: 0,
+                entropy_read_batch_bytes: chunk_size * 4,
+                min_durable_interval_ms: 0,
+                intervals_persist_secs: 0,
+                ..StorageSyncConfig::default()
+            },
+            database: index_database(engine),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(irys_types::partition::PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit.into()),
+                    slot_index: Some(0),
+                    miner_address: config.node_config.miner_address(),
+                    partition_hash: H256::repeat_byte(0x11),
+                }),
+                submodules: vec![(partition_chunk_offset_ii!(0, 3), tmp.path().join("hdd0"))],
+            },
+            &config,
+        )?;
+        Ok((tmp, storage))
+    }
+
+    /// Index `pattern` as one signed transaction. One byte is one chunk.
+    fn index_pattern(
+        storage: &StorageModule,
+        pattern: &[u8],
+        block_height: u64,
+    ) -> eyre::Result<(Vec<UnpackedChunk>, DataRoot)> {
+        let chunk_size = storage.config.consensus.chunk_size as usize;
+        let signer = IrysSigner::random_signer(&storage.config.consensus);
+        let data = pattern
+            .iter()
+            .flat_map(|byte| vec![*byte; chunk_size])
+            .collect::<Vec<_>>();
+        let tx = signer.sign_transaction(signer.create_transaction(data, H256::zero())?)?;
+        let unpacked = tx.data_chunks()?;
+        eyre::ensure!(
+            unpacked.len() == pattern.len(),
+            "pattern {}, chunks {}",
+            pattern.len(),
+            unpacked.len()
+        );
+        let (_, proofs) = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        let last = u32::try_from(pattern.len() - 1)?;
+        storage.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, last)),
+            block_height,
+        )?;
+        Ok((unpacked, tx.header.data_root))
+    }
+
+    fn packed_prefix(
+        storage: &StorageModule,
+        offset: PartitionChunkOffset,
+    ) -> eyre::Result<Vec<u8>> {
+        storage
+            .read_chunks(partition_chunk_offset_ii!(0, 0))?
+            .remove(&offset)
+            .map(|(bytes, _)| bytes)
+            .ok_or_else(|| eyre::eyre!("packed bytes missing at {}", offset.0))
+    }
+
+    /// A serve started while a queued body is paused after pwrite.
+    ///
+    /// `write_data_chunk` only queues the packed bytes. The pause is the
+    /// following sync. Returns that serve. The sync is released if the serve
+    /// is still blocked on the write hold, then the sync is joined.
+    fn serve_during_paused_pwrite(
+        storage: &Arc<StorageModule>,
+        offset: PartitionChunkOffset,
+        chunk: &UnpackedChunk,
+    ) -> eyre::Result<Option<PackedChunk>> {
+        storage
+            .write_data_chunk(chunk)
+            .map_err(|err| eyre::eyre!("body write failed: {err}"))?;
+        storage.pause_next_sync_at(SyncPausePoint::AfterPwrite);
+        let (tx_write, rx_write) = std::sync::mpsc::channel();
+        let (tx_serve, rx_serve) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| -> eyre::Result<Option<PackedChunk>> {
+            let mut release = Some(SyncPauseRelease(storage.as_ref()));
+            let writing = Arc::clone(storage);
+            scope.spawn(move || {
+                let _ = tx_write.send(writing.force_sync_pending_chunks());
+            });
+            eyre::ensure!(
+                storage.wait_for_sync_pause(Duration::from_secs(5)),
+                "body sync did not pause after pwrite"
+            );
+            let views = storage.index_view_count();
+            let reading = Arc::clone(storage);
+            scope.spawn(move || {
+                let _ = tx_serve.send(reading.generate_full_chunk(offset));
+            });
+            let started = Instant::now();
+            let mut saw_view: Option<Instant> = None;
+            let served = loop {
+                if let Ok(result) = rx_serve.try_recv() {
+                    break result;
+                }
+                if storage.index_view_count() > views && saw_view.is_none() {
+                    saw_view = Some(Instant::now());
+                }
+                // An empty index returns before the write hold. A loaded path
+                // waits in `yield_to_writes` until this pause ends.
+                if saw_view.is_some_and(|at| at.elapsed() >= Duration::from_secs(1)) {
+                    release.take();
+                    break rx_serve.recv_timeout(Duration::from_secs(5)).map_err(|_| {
+                        eyre::eyre!("serve did not finish after the write hold dropped")
+                    })?;
+                }
+                eyre::ensure!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "serve did not load the index during the paused body"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }?;
+            release.take();
+            rx_write
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| eyre::eyre!("body write did not finish"))?
+                .map_err(|err| eyre::eyre!("body write failed: {err}"))?;
+            Ok(served)
+        })
+    }
+
+    /// Entropy bytes are not served under the data path from the previous
+    /// commit. A placement update does not bring that path back. A body that
+    /// is durable only through pwrite is not paired with it either. After the
+    /// new body commits, the serve is that body's path and bytes.
+    #[rstest]
+    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
+    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
+    fn entropy_overwrite_is_not_served_under_the_previous_path(
+        #[case] engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<()> {
+        let prefix = format!("entropy_path_{engine:?}");
+        let (tmp, storage) = pair_module(&prefix, engine)?;
+        let _tmp = tmp;
+        let storage = Arc::new(storage);
+        storage.pack_with_zeros();
+        let offset = PartitionChunkOffset::from(0);
+        let (first, root1) = index_pattern(&storage, &[0x11], 0)?;
+        storage.write_data_chunk(&first[0])?;
+        storage.force_sync_pending_chunks()?;
+        let path1 =
+            data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("settled path missing"))?;
+        let stable = storage
+            .generate_full_chunk(offset)?
+            .ok_or_else(|| eyre::eyre!("settled serve omitted the offset"))?;
+        eyre::ensure!(
+            stable.data_root == root1 && stable.data_path.0 == path1,
+            "{engine:?} settled serve is not the committed pair"
+        );
+        eyre::ensure!(
+            stable.bytes.0 == packed_prefix(&storage, offset)?,
+            "{engine:?} settled serve bytes are not the committed body"
+        );
+
+        let hash = storage
+            .partition_hash()
+            .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
+        let chunk_size = storage.config.consensus.chunk_size as usize;
+        eyre::ensure!(
+            storage.write_entropy_chunk(offset, vec![0xE1; chunk_size], hash),
+            "entropy overwrite was refused"
+        );
+        storage.force_sync_pending_chunks()?;
+        let entropy = packed_prefix(&storage, offset)?;
+        eyre::ensure!(
+            entropy.first() == Some(&0xE1),
+            "{engine:?} entropy bytes did not land"
+        );
+        let after_entropy = storage.generate_full_chunk(offset)?;
+        let path_after_entropy = data_path_at(&storage, 0)?;
+        if let Some(chunk) = &after_entropy {
+            eyre::bail!(
+                "{engine:?} after entropy: root {root1:?} served {:?} b0 {:02x} path_is_old {}",
+                chunk.data_root,
+                chunk.bytes.0.first().copied().unwrap_or(0xff),
+                path_after_entropy
+                    .as_ref()
+                    .is_some_and(|bytes| bytes == &chunk.data_path.0)
+            );
+        }
+        eyre::ensure!(
+            path_after_entropy.is_none(),
+            "{engine:?} kept the data path after the entropy commit"
+        );
+
+        let (_second, root2) = index_pattern(&storage, &[0x22], 1)?;
+        let placed = storage.data_root_and_tx_offset_at(offset)?;
+        eyre::ensure!(
+            placed.as_ref().map(|(root, _)| *root) == Some(root2),
+            "{engine:?} placement did not move to the new root"
+        );
+        let after_index = storage.generate_full_chunk(offset)?;
+        if let Some(chunk) = &after_index {
+            eyre::bail!(
+                "{engine:?} after index, before the body: root {:?} b0 {:02x} path_len {}",
+                chunk.data_root,
+                chunk.bytes.0.first().copied().unwrap_or(0xff),
+                chunk.data_path.0.len()
+            );
+        }
+
+        let (replacement, _) = index_pattern(&storage, &[0x33], 2)?;
+        let during = serve_during_paused_pwrite(&storage, offset, &replacement[0])?;
+        if let Some(chunk) = &during {
+            eyre::bail!(
+                "{engine:?} uncommitted body paired with a stored path: root {:?} b0 {:02x} path_is_old {}",
+                chunk.data_root,
+                chunk.bytes.0.first().copied().unwrap_or(0xff),
+                chunk.data_path.0 == path1
+            );
+        }
+        let committed = storage
+            .generate_full_chunk(offset)?
+            .ok_or_else(|| eyre::eyre!("{engine:?} committed serve omitted the offset"))?;
+        let path_now = data_path_at(&storage, 0)?
+            .ok_or_else(|| eyre::eyre!("{engine:?} committed path missing"))?;
+        eyre::ensure!(
+            committed.data_root == replacement[0].data_root && committed.data_path.0 == path_now,
+            "{engine:?} committed serve is not the new pair"
+        );
+        eyre::ensure!(
+            committed.bytes.0 == packed_prefix(&storage, offset)?
+                && committed.bytes.0.first() != Some(&0xE1),
+            "{engine:?} committed serve is still the entropy body"
+        );
+        Ok(())
+    }
+
+    /// The path loaded before `yield_to_writes` is not the path committed
+    /// with the new body. The live label is `Entropy` so the write is legal,
+    /// and the previous path is still stored because no entropy commit ran.
+    #[test]
+    fn mdbx_serve_after_pwrite_uses_the_path_committed_with_the_bytes() -> eyre::Result<()> {
+        let (tmp, storage) = pair_module("mdbx_pwrite_path", SubmoduleIndexEngine::Mdbx)?;
+        let _tmp = tmp;
+        let storage = Arc::new(storage);
+        storage.pack_with_zeros();
+        let offset = PartitionChunkOffset::from(0);
+        let (first, _) = index_pattern(&storage, &[0x11], 0)?;
+        storage.write_data_chunk(&first[0])?;
+        storage.force_sync_pending_chunks()?;
+        let path_a = data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("path A missing"))?;
+        {
+            let mut intervals = storage.intervals.write().unwrap();
+            let span = ii(offset, offset);
+            let _ = intervals.cut(span);
+            let _ = intervals.insert_merge_touching_if_values_equal(span, ChunkType::Entropy);
+        }
+        eyre::ensure!(
+            live_label(&storage, 0) == Some(ChunkType::Entropy),
+            "offset 0 is not a data-write target"
+        );
+        eyre::ensure!(
+            data_path_at(&storage, 0)?.as_ref() == Some(&path_a),
+            "painting the live label dropped the stored path"
+        );
+        let (second, root2) = index_pattern(&storage, &[0x22], 1)?;
+        let during = serve_during_paused_pwrite(&storage, offset, &second[0])?;
+        let served = during.ok_or_else(|| eyre::eyre!("serve omitted the committed body"))?;
+        let path_now =
+            data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("committed path missing"))?;
+        eyre::ensure!(path_now != path_a, "the body commit kept path A");
+        eyre::ensure!(
+            served.data_path.0 == path_now,
+            "served a data path from before the body commit"
+        );
+        eyre::ensure!(
+            served.data_root == root2,
+            "served proof is not the committed data root"
+        );
+        let disk = packed_prefix(&storage, offset)?;
+        eyre::ensure!(
+            served.bytes.0 == disk,
+            "served bytes are not the bytes committed with the path"
+        );
+        let again = storage
+            .generate_full_chunk(offset)?
+            .ok_or_else(|| eyre::eyre!("later serve omitted the offset"))?;
+        eyre::ensure!(
+            again.data_path.0 == served.data_path.0 && again.bytes.0 == served.bytes.0,
+            "a later serve does not match the overlapped serve"
+        );
         Ok(())
     }
 
