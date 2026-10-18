@@ -675,27 +675,57 @@ fn print_phase(
     disk: Option<&DiskId>,
     show_widths: bool,
 ) {
-    println!(
+    for line in phase_lines(name, kind, ok, failures, threads, disk, show_widths) {
+        println!("{line}");
+    }
+}
+
+fn phase_lines(
+    name: &str,
+    kind: &str,
+    ok: &[Sample],
+    failures: &[String],
+    threads: usize,
+    disk: Option<&DiskId>,
+    show_widths: bool,
+) -> Vec<String> {
+    let mut lines = vec![format!(
         "== {name} {kind} ok={} fail={} threads={threads}",
         ok.len(),
         failures.len()
-    );
+    )];
     if ok.is_empty() {
-        println!("{name} {kind}: no successful samples");
+        lines.push(format!("{name} {kind}: no successful samples"));
     } else {
-        print_rank("db", &column(ok, |sample| sample.core.db_ns));
-        print_rank("cpu", &column(ok, |sample| sample.core.cpu_ns));
-        print_rank("total", &column(ok, |sample| sample.core.total_ns));
-        print_rank("proof_len", &column(ok, |sample| sample.core.proof_len));
+        lines.extend(duration_lines(
+            "db",
+            &column(ok, |sample| sample.core.db_ns),
+        ));
+        lines.extend(duration_lines(
+            "cpu",
+            &column(ok, |sample| sample.core.cpu_ns),
+        ));
+        lines.extend(duration_lines(
+            "total",
+            &column(ok, |sample| sample.core.total_ns),
+        ));
+        lines.push(count_line(
+            "proof_len_bytes",
+            &column(ok, |sample| sample.core.proof_len),
+        ));
         if show_widths {
-            print_rank("tx_count", &column(ok, |sample| sample.core.tx_count));
-            print_buckets(ok);
+            lines.push(count_line(
+                "tx_count",
+                &column(ok, |sample| sample.core.tx_count),
+            ));
+            lines.push(bucket_line(ok));
         }
-        print_disk(ok, disk);
+        lines.push(disk_line(ok, disk));
     }
     for failure in failures {
-        println!("{name} {kind} failure: {failure}");
+        lines.push(format!("{name} {kind} failure: {failure}"));
     }
+    lines
 }
 
 fn column(ok: &[Sample], pick: impl Fn(&Sample) -> u64) -> Vec<u64> {
@@ -704,33 +734,45 @@ fn column(ok: &[Sample], pick: impl Fn(&Sample) -> u64) -> Vec<u64> {
     values
 }
 
-fn print_rank(label: &str, sorted: &[u64]) {
-    println!(
-        "{label}_ns min={} p50={} p99={} max={}",
+fn duration_lines(label: &str, sorted: &[u64]) -> [String; 2] {
+    [
+        format!(
+            "{label}_ns min={} p50={} p99={} max={}",
+            rank_min(sorted),
+            percentile(sorted, 50),
+            percentile(sorted, 99),
+            rank_max(sorted)
+        ),
+        format!(
+            "{label}_us min={} p50={} p99={} max={}",
+            rank_min(sorted) / 1000,
+            percentile(sorted, 50) / 1000,
+            percentile(sorted, 99) / 1000,
+            rank_max(sorted) / 1000
+        ),
+    ]
+}
+
+fn count_line(label: &str, sorted: &[u64]) -> String {
+    format!(
+        "{label} min={} p50={} p99={} max={}",
         rank_min(sorted),
         percentile(sorted, 50),
         percentile(sorted, 99),
         rank_max(sorted)
-    );
-    println!(
-        "{label}_us min={} p50={} p99={} max={}",
-        rank_min(sorted) / 1000,
-        percentile(sorted, 50) / 1000,
-        percentile(sorted, 99) / 1000,
-        rank_max(sorted) / 1000
-    );
+    )
 }
 
-fn print_buckets(ok: &[Sample]) {
+fn bucket_line(ok: &[Sample]) -> String {
     let mut counts = [0_u64; 6];
     for sample in ok {
         counts[width_bucket(sample.core.tx_count)] += 1;
     }
-    print!("n");
+    let mut line = String::from("n");
     for (label, count) in BUCKETS.iter().zip(counts) {
-        print!(" {label}={count}");
+        line.push_str(&format!(" {label}={count}"));
     }
-    println!();
+    line
 }
 
 fn width_bucket(count: u64) -> usize {
@@ -744,19 +786,18 @@ fn width_bucket(count: u64) -> usize {
     }
 }
 
-fn print_disk(ok: &[Sample], disk: Option<&DiskId>) {
+fn disk_line(ok: &[Sample], disk: Option<&DiskId>) -> String {
     let Some(disk) = disk else {
-        println!("disk unavailable");
-        return;
+        return "disk unavailable".to_owned();
     };
     let reads = column(ok, |sample| sample.reads);
     let sectors: u64 = ok.iter().map(|sample| sample.sectors).sum();
     let read_sum: u64 = ok.iter().map(|sample| sample.reads).sum();
-    println!(
+    format!(
         "disk device={} reads_p50={} reads_sum={read_sum} sectors_sum={sectors}",
         disk.name,
         percentile(&reads, 50)
-    );
+    )
 }
 
 fn rank_min(sorted: &[u64]) -> u64 {
@@ -2074,5 +2115,90 @@ mod tests {
         assert_eq!(percentile(&sorted, 99), 40);
         assert_eq!(percentile(&sorted, 0), 10);
         assert_eq!(percentile(&[], 50), 0);
+    }
+
+    fn sample(db_ns: u64, cpu_ns: u64, tx_count: u64, proof_len: u64) -> super::Sample {
+        super::Sample {
+            core: super::SampleCore {
+                total_ns: db_ns.saturating_add(cpu_ns),
+                db_ns,
+                cpu_ns,
+                tx_count,
+                proof_len,
+            },
+            reads: 0,
+            sectors: 0,
+        }
+    }
+
+    #[test]
+    fn proof_len_and_tx_count_are_not_durations() {
+        let ok = vec![
+            sample(1_500, 2_500, 3, 1_500),
+            sample(4_500, 500, 2_500, 9_000),
+        ];
+        let lines = super::phase_lines("derive", "warm", &ok, &[], 1, None, true);
+        let proof: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("proof_len"))
+            .cloned()
+            .collect();
+        assert!(
+            proof
+                .iter()
+                .all(|line| !line.contains("_ns") && !line.contains("_us")),
+            "proof length printed as time: {proof:?}"
+        );
+        assert_eq!(proof.len(), 1, "proof length printed as time: {proof:?}");
+        assert!(
+            proof[0].contains("min=1500") && proof[0].contains("max=9000"),
+            "proof length bytes missing: {proof:?}"
+        );
+        let widths: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("tx_count"))
+            .cloned()
+            .collect();
+        assert_eq!(widths.len(), 1, "tx count printed as time: {widths:?}");
+        assert!(
+            widths[0].contains("min=3") && widths[0].contains("max=2500"),
+            "{widths:?}"
+        );
+        assert!(
+            !widths[0].contains("_ns") && !widths[0].contains("_us"),
+            "tx count printed as time: {widths:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("db_ns ") && line.contains("min=1500")),
+            "db time lost its nanosecond rank: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("db_us ") && line.contains("min=1")),
+            "db time lost its microsecond rank: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("cpu_ns "))
+                && lines.iter().any(|line| line.starts_with("total_ns ")),
+            "cpu or total left the duration format: {lines:?}"
+        );
+        let baseline = super::phase_lines("baseline", "warm", &ok, &[], 1, None, false);
+        let baseline_proof: Vec<_> = baseline
+            .iter()
+            .filter(|line| line.contains("proof_len"))
+            .cloned()
+            .collect();
+        assert_eq!(baseline_proof.len(), 1, "{baseline_proof:?}");
+        assert!(
+            baseline_proof[0].contains("min=1500") && !baseline_proof[0].contains("_ns"),
+            "stored proof length printed as time: {baseline_proof:?}"
+        );
+        assert!(
+            !baseline.iter().any(|line| line.starts_with("tx_count")),
+            "baseline printed tx widths: {baseline:?}"
+        );
     }
 }
