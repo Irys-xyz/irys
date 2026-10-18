@@ -1216,6 +1216,69 @@ mod tests {
         Ok(())
     }
 
+    /// After `crc_complete` is set, rewriting settled offsets must not walk
+    /// the span. A gap that is still recorded does: that write can close it.
+    /// An empty durable point does not walk.
+    #[test]
+    fn settled_checksum_writes_do_not_walk_the_offset_span() -> eyre::Result<()> {
+        let (_tmp, _config, module) = open_assigned("crc_settled_no_rescan")?;
+        for offset in 0..N as u32 {
+            write_synced(&module, offset, 0x21, ChunkType::Entropy);
+        }
+        assert!(
+            module.chunk_crc_complete_for_test(),
+            "the fill scan set crc_complete"
+        );
+        let scans_after_fill = module.crc_span_scan_count();
+        assert!(
+            scans_after_fill >= 1,
+            "the incomplete fill walked the span once it settled"
+        );
+
+        for (step, byte) in [0x31_u8, 0x32, 0x33].into_iter().enumerate() {
+            write_synced(
+                &module,
+                (step as u32) % (N as u32),
+                byte,
+                ChunkType::Entropy,
+            );
+            assert!(module.chunk_crc_complete_for_test());
+        }
+        assert_eq!(
+            module.crc_span_scan_count(),
+            scans_after_fill,
+            "a settled module walked OffsetMeta after crc_complete was set"
+        );
+
+        module.set_offset_crc_for_test(PartitionChunkOffset::from(0), None)?;
+        module.clear_chunk_crc_complete()?;
+        let before_gap_write = module.crc_span_scan_count();
+        write_synced(&module, 1, 0x41, ChunkType::Entropy);
+        assert!(
+            module.crc_span_scan_count() > before_gap_write,
+            "a write while a checksum submodule is incomplete must scan the open gap"
+        );
+        assert!(!module.chunk_crc_complete_for_test());
+        let before_fill = module.crc_span_scan_count();
+        write_synced(&module, 0, 0x42, ChunkType::Entropy);
+        assert!(
+            module.crc_span_scan_count() > before_fill,
+            "filling the gap must scan"
+        );
+        assert!(
+            module.chunk_crc_complete_for_test(),
+            "the fill scan sets crc_complete"
+        );
+        let after_fill = module.crc_span_scan_count();
+        module.force_sync_pending_chunks()?;
+        assert_eq!(
+            module.crc_span_scan_count(),
+            after_fill,
+            "a durable point that writes nothing must not scan"
+        );
+        Ok(())
+    }
+
     /// Entropy, then one indexed data chunk, then the checksum cleared.
     /// Other offsets stay uninitialized, so a later rewrite cannot latch
     /// `crc_complete` and turn this read into a mismatch.

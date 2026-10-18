@@ -892,7 +892,13 @@ pub struct StorageModule {
     crc_suspects: Mutex<BTreeSet<PartitionChunkOffset>>,
     /// Set after a fully settled module has been scanned for stored-zero
     /// entries. Reset clears it. The scan does not run on every durable point.
+    /// A complete module leaves this set: a later checksum write does not
+    /// open a gap, so it must not walk the offset span again.
     crc_scan_done: AtomicBool,
+    /// Calls to `offset_crc_missing` from the settled scan. One submodule
+    /// span is one call. Test code that reads a span does not count.
+    #[cfg(test)]
+    crc_span_scans: AtomicU64,
     /// Crash tests drop the module without the final fsync or interval rewrite.
     #[cfg(test)]
     abandon_on_drop: AtomicBool,
@@ -2177,6 +2183,8 @@ impl StorageModule {
             crc_repairs: Mutex::new(BTreeSet::new()),
             crc_suspects: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
+            #[cfg(test)]
+            crc_span_scans: AtomicU64::new(0),
             #[cfg(test)]
             abandon_on_drop: AtomicBool::new(false),
             #[cfg(test)]
@@ -4046,9 +4054,16 @@ impl StorageModule {
                 uncovered.extend(missed);
                 continue;
             }
-            // A written checksum can close a gap. The latch from that gap
-            // must not skip the scan at the end of this durable point.
-            if !rows.is_empty() {
+            // A written checksum can close a gap only while some checksum
+            // submodule is still incomplete. Clear the latch then, so this
+            // point scans. Once every such submodule is complete, a write
+            // stores `crc: Some` and does not open a gap, so the latch stays
+            // set and this point does not walk the span.
+            // `clear_chunk_crc_complete` arms the next scan.
+            let scan_still_open = self.submodules.iter().any(|(_, submodule)| {
+                submodule.db.stores_offset_crc() && !submodule.crc_complete.load(Ordering::SeqCst)
+            });
+            if !rows.is_empty() && scan_still_open {
                 self.crc_scan_done.store(false, Ordering::SeqCst);
             }
             let missed = submodule
@@ -5899,6 +5914,8 @@ impl StorageModule {
             if !submodule.db.stores_offset_crc() {
                 continue;
             }
+            #[cfg(test)]
+            self.crc_span_scans.fetch_add(1, Ordering::SeqCst);
             match submodule.db.view(|tx| {
                 tx.offset_crc_missing(
                     PartitionChunkOffset(*interval.start()),
@@ -5940,6 +5957,12 @@ impl StorageModule {
     #[cfg(test)]
     fn abandon_on_drop_for_test(&self) {
         self.abandon_on_drop.store(true, Ordering::SeqCst);
+    }
+
+    /// Settled scans that called `offset_crc_missing`. One span is one call.
+    #[cfg(test)]
+    fn crc_span_scan_count(&self) -> u64 {
+        self.crc_span_scans.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
