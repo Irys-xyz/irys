@@ -17605,8 +17605,8 @@ mod tests {
     }
 
     /// Same hash, new slot. A packing refusal and a coverage refusal both
-    /// return before the file is replaced. A matching open still publishes
-    /// the slot and `last_updated_height`.
+    /// return before the file is replaced. A matching open publishes the
+    /// slot and keeps the chunk, its label, and its index row.
     #[test]
     fn refused_open_keeps_the_same_hash_slot() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new()
@@ -17669,10 +17669,51 @@ mod tests {
             "a coverage refusal must leave the packing file bytes"
         );
 
-        StorageModule::new(
-            &one_span(3, sub, Some(submit_slot(&config, hash, 1))),
+        let bytes = vec![0xE1_u8; 32];
+        let offset = PartitionChunkOffset::from(0);
+        let seeded = StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
             &config,
         )?;
+        assert!(seeded.write_chunk(offset, bytes.clone(), ChunkType::Data));
+        seeded.force_sync_pending_chunks()?;
+        assert_eq!(seeded.get_chunk_type(&offset), Some(ChunkType::Data));
+        let root = H256::repeat_byte(0x44);
+        let (_, submodule) = seeded.get_submodule_for_offset(offset)?;
+        submodule.db.update(|tx| {
+            tx.add_tx_leaf_binding(
+                root,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))
+        })?;
+        assert_eq!(live_tx_rows(&seeded)?, 1, "tx row was not stored");
+        drop(seeded);
+
+        let opened = StorageModule::new(
+            &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 1))),
+            &config,
+        )?;
+        assert_eq!(opened.read_chunk_internal(offset)?, bytes);
+        assert_eq!(opened.get_chunk_type(&offset), Some(ChunkType::Data));
+        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Data));
+        assert_eq!(
+            live_tx_rows(&opened)?,
+            1,
+            "a slot change wiped the index row"
+        );
+        assert!(
+            !opened
+                .get_submodule_for_offset(offset)?
+                .1
+                .db
+                .reset_in_progress()?,
+            "a slot change left the reset marker set"
+        );
+        drop(opened);
         let loaded = PackingParams::from_toml(&params_path)?;
         assert_eq!(loaded.ledger, Some(DataLedger::Submit.into()));
         assert_eq!(loaded.slot, Some(1));
