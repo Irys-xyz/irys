@@ -583,6 +583,19 @@ with_binds() {
     ' bash "$sys" "$src" "$dst" "$@"
 }
 
+# Bind $2 onto $3 and $4 onto $5 inside the same mount namespace as /sys.
+with_two_binds() {
+    local sys=$1 src1=$2 dst1=$3 src2=$4 dst2=$5
+    shift 5
+    unshare --mount --user --map-root-user bash -c '
+        mount --bind "$1" /sys || exit 97
+        mount --bind "$2" "$3" || exit 97
+        mount --bind "$4" "$5" || exit 97
+        shift 5
+        exec "$@"
+    ' bash "$sys" "$src1" "$dst1" "$src2" "$dst2" "$@"
+}
+
 fake_sys() {
     local sys=$1
     mkdir -p "$sys/block/loop0/queue"
@@ -3302,6 +3315,88 @@ test_run_allows_a_dotdot_that_stays_in_loadtest() {
         bad "$name" "run.sh refused a collapsed .. that stays: $(cat "$err")"
     elif [ ! -e "$root/bench-ran" ]; then
         bad "$name" "bench did not run"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# One --trace ladder. $2 is the Python source bound over blk-report.py.
+# A sleeper stands in for blk-run.sh so the pause can finish without bpftrace.
+# The ladder status is this function's status.
+run_trace_ladder() {
+    local root=$1
+    local report_py=$2
+    local module=$root/safe/loadtest
+    local sys=$root/sys
+    local err=$root/err
+    local dev mnt
+    seed_module "$module"
+    dev=$(mount_dev_for "$module")
+    mnt=$(mount_of "$module")
+    mkdir -p "$sys/block/$dev/queue"
+    queue_files "$sys/block/$dev/queue"
+    stub_bench "$root"
+    printf '%s\n' "$report_py" >"$root/blk-report.py"
+    cat >"$root/blk-run.sh" <<'EOF'
+#!/bin/bash
+exec sleep 30
+EOF
+    chmod +x "$root/blk-run.sh"
+    MIN_FREE_GIB=0 with_two_binds "$sys" \
+        "$root/blk-run.sh" "$here/blk-run.sh" \
+        "$root/blk-report.py" "$here/blk-report.py" \
+        "$here/ladder.sh" \
+        --device "$dev" --mount "$mnt" --loadtest "$module" \
+        --out-root "$root/out" --bench "$root/bench" \
+        --trace --run only-run \
+        >"$err" 2>&1
+}
+
+# A non-zero blk-report.py is a failed run. The done marker must not say success,
+# and the index moved aside for the run comes back.
+test_ladder_trace_exits_nonzero_when_blk_report_fails() {
+    local name=ladder-trace-report-fails root
+    root=$(tmpdir)
+    if run_trace_ladder "$root" 'import sys; sys.exit(1)'; then
+        bad "$name" "ladder.sh exited 0: $(cat "$root/err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$root/err")"
+    elif ! grep -q 'blk-report failed' "$root/out/only-run/blk-report.out"; then
+        bad "$name" "report out: $(cat "$root/out/only-run/blk-report.out" 2>/dev/null) err=$(cat "$root/err")"
+    elif ! state_in_place "$root/safe/loadtest"; then
+        bad "$name" "index was not restored"
+    elif grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker says success: $(cat "$root/out/ladder.done")"
+    elif ! grep -q 'run only-run failed' "$root/out/ladder.done"; then
+        bad "$name" "done marker: $(cat "$root/out/ladder.done" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A report that exits 0 still finishes the ladder. Exit 0 leaves the index stashed.
+test_ladder_trace_exits_0_when_blk_report_succeeds() {
+    local name=ladder-trace-report-ok root module
+    root=$(tmpdir)
+    module=$root/safe/loadtest
+    if ! run_trace_ladder "$root" 'print("report ok")'; then
+        bad "$name" "ladder.sh stopped: $(cat "$root/err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run"
+    elif ! grep -qx 'report ok' "$root/out/only-run/blk-report.out"; then
+        bad "$name" "report out: $(cat "$root/out/only-run/blk-report.out" 2>/dev/null)"
+    elif grep -q 'blk-report failed' "$root/out/only-run/blk-report.out"; then
+        bad "$name" "report was marked failed"
+    elif ! cmp -s <(printf 'keep-db\n') "$module/state-prior/db"; then
+        bad "$name" "prior db: $(cat "$module/state-prior/db" 2>/dev/null)"
+    elif [ -e "$module/db" ]; then
+        bad "$name" "exit 0 restored the index"
+    elif ! cmp -s <(printf 'keep-chunks.dat\n') "$module/chunks.dat"; then
+        bad "$name" "chunks.dat changed"
+    elif ! grep -q '^restored max_sectors_kb=' "$root/out/ladder.done"; then
+        bad "$name" "done marker: $(cat "$root/out/ladder.done" 2>/dev/null)"
     else
         ok "$name"
     fi

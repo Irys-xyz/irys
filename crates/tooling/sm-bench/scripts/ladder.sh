@@ -575,6 +575,9 @@ run_one() {
         trace_pid=
         if ! python3 "$here/blk-report.py" "$out" >"$out/blk-report.out" 2>"$out/blk-report.err"; then
             echo "blk-report failed" >>"$out/blk-report.out"
+            # The bench score is already recorded. The run still fails when
+            # the requested report does not.
+            return 1
         fi
     else
         "${cmd[@]}" &
