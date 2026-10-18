@@ -1768,12 +1768,16 @@ impl StorageModule {
                 idle_deadline = None;
                 continue;
             }
-            // A reread is waiting on entropy that is still queued. The write
-            // has to land before the pread. A lower-priority memory slot
-            // cannot fold while that reread is the best priority, so it does
-            // not keep this pass in the sweep wait. The caller commits the
-            // parked write after this return.
-            if self.only_pending_blocked_disk_slots() {
+            // Every disk span is waiting on a write, including one that
+            // joins a parked offset to a readable neighbor. `None` is that
+            // wait. `Some(0)` is eligible and `sweep_one` issues it.
+            // A memory slot at the best priority can still fold. The caller
+            // commits the parked write after this return.
+            let spans_wait_on_writes = self.read_grace_remaining().is_none() && {
+                let queue = self.disk.queue();
+                queue.disk_len() > 0
+            };
+            if spans_wait_on_writes && !self.memory_entropy_can_fold() {
                 return;
             }
             let seen = self.disk.wake.epoch();
@@ -3145,7 +3149,10 @@ impl StorageModule {
     /// queued: this pass cannot pack it ahead of the blocked reread, and
     /// the sweep wait does not commit the write that blocks the pread.
     /// A memory slot at the best priority can still fold. A queue with no
-    /// disk slot is not blocked.
+    /// disk slot is not blocked. A neighbor outside those maps can still
+    /// join a parked offset into one span. The drain uses the span walk
+    /// for that case.
+    #[cfg(test)]
     fn only_pending_blocked_disk_slots(&self) -> bool {
         let disk_offsets = {
             let queue = self.disk.queue();
@@ -6185,6 +6192,123 @@ mod tests {
         assert_slot_shape(&module, 0, super::WritePriority::Migration, false);
         assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
         assert_eq!(module.sweep_slot_count_for_test(), 2);
+        guard.armed = false;
+        module.force_sync_pending_chunks()?;
+        assert_eq!(module.sweep_slot_count_for_test(), 0);
+        assert_data_byte_durable(&module, 0, 0x23)?;
+        assert_data_byte_durable(&module, 1, 0x14)?;
+        assert_data_byte_durable(&module, 2, 0x34)?;
+        Ok(())
+    }
+
+    /// A one-chunk hole joins a parked offset to a durable neighbor. The
+    /// memory slot between them does not split the span. The per-slot check
+    /// stays false because the neighbor is not in `pending` or
+    /// `written_ahead`. The whole span still waits on the parked write, so
+    /// the drain must return. The force flush then commits that write and
+    /// packs every body.
+    #[test]
+    fn coalesced_blocked_neighbor_does_not_hold_the_drain() -> eyre::Result<()> {
+        let (_tmp, module) =
+            span_fixture_timed("coalesced_blocked_neighbor", 4, 4, 1, 0, 0, 60_000)?;
+        let parked = indexed_chunk(&module, 0, 0x42, 0x01)?;
+        let ingress = indexed_chunk(&module, 1, 0x43, 0x05)?;
+        let neighbor = indexed_chunk(&module, 2, 0x44, 0x07)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(2),
+            vec![0x33; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.sync_pending_chunks_inner(true)?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![0x22; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.commit_pending_runs(false, Some(1), false)?;
+        {
+            let pending = module.pending_writes.read().unwrap();
+            assert!(
+                pending
+                    .written_ahead
+                    .contains_key(&PartitionChunkOffset::from(0)),
+                "the parked offset was not parked"
+            );
+            assert!(
+                !pending
+                    .written_ahead
+                    .contains_key(&PartitionChunkOffset::from(2)),
+                "the neighbor is parked"
+            );
+            assert!(
+                pending.get(&PartitionChunkOffset::from(2)).is_none(),
+                "the neighbor is still in pending.chunks"
+            );
+        }
+        let durable_left = module
+            .durable_point_remaining()
+            .expect("parked bytes wait on the durable point");
+        assert!(
+            !durable_left.is_zero(),
+            "the durable point is already due: {durable_left:?}"
+        );
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![0x11; 32],
+            super::super::ChunkType::Entropy
+        ));
+        module.deposit_data_chunks(&[parked, neighbor])?;
+        let queued = module.enqueue_ingress_batch(std::slice::from_ref(&ingress))?;
+        assert!(
+            matches!(
+                queued.first(),
+                Some(super::super::BatchEnqueueItem::Queued(_))
+            ),
+            "{queued:?}"
+        );
+        assert_eq!(module.sweep_slot_count_for_test(), 3);
+        assert_slot_shape(&module, 0, super::WritePriority::Migration, false);
+        assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
+        assert_slot_shape(&module, 2, super::WritePriority::Migration, false);
+        assert!(
+            !module.only_pending_blocked_disk_slots(),
+            "the per-slot check saw the coalesced neighbor"
+        );
+        assert!(
+            module.read_grace_remaining().is_none(),
+            "a coalesced span that waits on a write is inside the read grace"
+        );
+        assert!(
+            !module.memory_entropy_can_fold(),
+            "the lower memory pad can fold ahead of the disk span"
+        );
+        assert!(
+            !module.has_ready_disk_span(),
+            "the coalesced span is ready to read"
+        );
+        assert!(
+            !module.sweep_one(),
+            "sweep read a span that waits on a write"
+        );
+        assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
+        assert_eq!(module.sweep_slot_count_for_test(), 3);
+        let mut guard = FailSweepOnDrop {
+            module: &module,
+            armed: true,
+        };
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "drain waited {elapsed:?} on a coalesced span that waits on a write"
+        );
+        assert_eq!(module.disk.entropy_preads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            3,
+            "the drain dropped a slot the parked write still blocks"
+        );
         guard.armed = false;
         module.force_sync_pending_chunks()?;
         assert_eq!(module.sweep_slot_count_for_test(), 0);
