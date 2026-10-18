@@ -2913,8 +2913,7 @@ fn copy_mdbx_v1_into_rocks(
                         orphans = orphans.saturating_add(1);
                     }
                 } else if let Some(hash) = hashes.data_path_hash {
-                    // The range copy reads this run once `rescan` is set.
-                    // Another read here is discarded.
+                    // Once `rescan` is set, `copy_v1_range_paths` reads this run.
                     if rescan {
                         continue;
                     }
