@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -852,12 +853,14 @@ pub struct RocksSubmoduleStore {
     /// Conversion open. Writes skip the WAL. [`Self::seal_and_stamp`] flushes
     /// the memtables, drops the log files, and writes the SCHEMA file last.
     bulk_load: bool,
-    /// Exclusive lock of the RocksDB `LOCK` file. Drop releases it.
+    /// Exclusive `flock` of the RocksDB `LOCK` file. Drop releases it.
     ///
-    /// Read-only open does not take that lock itself. The converter holds it
-    /// so a node cannot open the same directory for write during the read.
-    /// The field is read by drop. Nothing else inspects it.
-    #[expect(dead_code, reason = "held only so drop releases the lock")]
+    /// Read-only open flocks `LOCK` when that file already exists. Conversion
+    /// keeps the fd from before `CONVERTING` is visible, or flocks `LOCK`
+    /// after `DB::open` when the caller did not pass one. Seal compares that
+    /// fd with the path. Closing the fd releases this process's `fcntl` locks
+    /// on `LOCK`, including RocksDB's, so the fd stays open until the database
+    /// has closed.
     lock_file: Option<Arc<File>>,
     /// Runs after this database is closed and before the SCHEMA file.
     #[cfg(any(test, feature = "test-utils"))]
@@ -964,11 +967,39 @@ impl RocksSubmoduleStore {
     /// rejects `disableWAL`). [`Self::seal_and_stamp`] makes the rows durable
     /// and writes the RocksDB v1 marker last. A crash before that leaves
     /// `CURRENT` and no SCHEMA file.
+    ///
+    /// Flocks `LOCK` after `DB::open` and holds that fd until seal.
+    ///
+    /// Tests use this after dropping the flock returned by prepare. Production
+    /// passes that flock to [`Self::open_converting_with_lock`].
+    #[cfg(test)]
     pub(super) fn open_converting(path: impl AsRef<Path>) -> eyre::Result<Self> {
+        Self::open_converting_with_lock(path, None)
+    }
+
+    /// Opens a conversion target, optionally with a flock already held on `LOCK`.
+    ///
+    /// `lock` must be the `LOCK` file at `path`. `None` flocks `LOCK` after
+    /// `DB::open`. A different inode means the directory was replaced. This
+    /// function does not flock a second time: a second `flock` in this process
+    /// fails, and closing either fd would drop RocksDB's `fcntl` lock.
+    pub(super) fn open_converting_with_lock(
+        path: impl AsRef<Path>,
+        lock: Option<Arc<File>>,
+    ) -> eyre::Result<Self> {
+        let path_buf = path.as_ref().to_path_buf();
+        if let Some(file) = &lock
+            && !conversion_lock_protects(file, &path_buf)
+        {
+            eyre::bail!(
+                "rocksdb directory {} was replaced. Refusing to open it.",
+                path_buf.display()
+            );
+        }
         let mut tuning = RocksTuning::baseline();
         tuning.recycle_log_file_num = 0;
         let mut opened = Self::open_inner(
-            path,
+            &path_buf,
             tuning,
             true,
             false,
@@ -977,6 +1008,10 @@ impl RocksSubmoduleStore {
             Some(IndexLayout::RocksV1),
         )?;
         opened.bulk_load = true;
+        opened.lock_file = Some(match lock {
+            Some(file) => file,
+            None => acquire_conversion_lock(&path_buf)?,
+        });
         Ok(opened)
     }
 
@@ -1218,10 +1253,39 @@ impl RocksSubmoduleStore {
     /// the file leaves no completion marker, and the flock dies with the
     /// process, so the run is redone. A family with more than one SST is
     /// compacted so the finished directory is not a pile of flushes.
-    pub(super) fn seal_and_stamp(self) -> eyre::Result<()> {
+    ///
+    /// SCHEMA is written only when the held `LOCK` fd is still the file at
+    /// this path. A missing file, or a different inode, means the directory
+    /// was replaced. `LOCK` on the new directory is not this database.
+    pub(super) fn seal_and_stamp(mut self) -> eyre::Result<()> {
         let path = self.path.clone();
         #[cfg(any(test, feature = "test-utils"))]
         let before_schema = self.before_schema.clone();
+        // Held across flush, close, WAL removal, and the SCHEMA write. A
+        // second process takes this flock before it deletes a CONVERTING
+        // directory. Prefer the fd captured at open. A new flock would attach
+        // to whatever `LOCK` is at the path now. Flush and the schema row
+        // write files by that path, so a replaced directory is refused first.
+        let flock = match self.lock_file.take() {
+            Some(file) => file,
+            None => match hold_rocks_flock(&path)? {
+                Some(file) => Arc::new(file),
+                None => {
+                    close_without_touching_directory(self, &path)?;
+                    eyre::bail!(
+                        "rocksdb LOCK is missing in {}. Refusing to write SCHEMA.",
+                        path.display()
+                    );
+                }
+            },
+        };
+        if !conversion_lock_protects(&flock, &path) {
+            close_without_touching_directory(self, &path)?;
+            eyre::bail!(
+                "rocksdb directory {} was replaced. Refusing to write SCHEMA.",
+                path.display()
+            );
+        }
         {
             self.ensure_writable()?;
             let _guard = self.lock_write();
@@ -1232,19 +1296,116 @@ impl RocksSubmoduleStore {
             self.flush_families_locked()?;
             self.compact_split_families_locked();
         }
-        // Held across close, WAL removal, and the SCHEMA write. A second
-        // process takes this flock before it deletes a CONVERTING directory.
-        let _flock = hold_rocks_flock(&path)?;
+        if !conversion_lock_protects(&flock, &path) {
+            close_without_touching_directory(self, &path)?;
+            eyre::bail!(
+                "rocksdb directory {} was replaced. Refusing to write SCHEMA.",
+                path.display()
+            );
+        }
         drop(self);
+        if !conversion_lock_protects(&flock, &path) {
+            eyre::bail!(
+                "rocksdb directory {} was replaced. Refusing to write SCHEMA.",
+                path.display()
+            );
+        }
         remove_rocks_wal_files(&path)?;
         sync_dir(&path)?;
         #[cfg(any(test, feature = "test-utils"))]
         if let Some(hook) = before_schema {
             hook();
         }
+        if !conversion_lock_protects(&flock, &path) {
+            eyre::bail!(
+                "rocksdb directory {} was replaced. Refusing to write SCHEMA.",
+                path.display()
+            );
+        }
         write_schema_marker_file(&path, SUBMODULE_SCHEMA_ROCKS_V1)
     }
+}
 
+/// Close `store` without writing into the directory now at `path`.
+///
+/// `rocksdb_close` flushes through the open path. After that path has been
+/// replaced, the flush would publish `CURRENT` and SST files into the new
+/// directory. Move that directory aside, close into an empty one, delete the
+/// empty one, and move the saved directory back.
+fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> eyre::Result<()> {
+    let Some(parent) = path.parent() else {
+        abandon_open_database(store);
+        return Ok(());
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let parked = parent.join(format!(
+        ".{name}.close-scratch-{}-{}",
+        std::process::id(),
+        CLOSE_SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    if !path.exists() {
+        fs::create_dir_all(path)?;
+        drop(store);
+        let _ = fs::remove_dir_all(path);
+        return Ok(());
+    }
+    if let Err(err) = fs::rename(path, &parked) {
+        abandon_open_database(store);
+        return Err(err).wrap_err_with(|| {
+            format!("park {} before an abandoned rocksdb close", path.display())
+        });
+    }
+    if let Err(err) = fs::create_dir(path) {
+        let restored = fs::rename(&parked, path);
+        abandon_open_database(store);
+        restored.wrap_err_with(|| {
+            format!(
+                "restore {} after a failed scratch create; the directory is at {}",
+                path.display(),
+                parked.display()
+            )
+        })?;
+        return Err(err).wrap_err("create directory for abandoned rocksdb close");
+    }
+    drop(store);
+    let removed = fs::remove_dir_all(path);
+    fs::rename(&parked, path).wrap_err_with(|| {
+        format!(
+            "restore {} after abandoned rocksdb close; the directory is at {}",
+            path.display(),
+            parked.display()
+        )
+    })?;
+    removed.wrap_err("remove abandoned rocksdb close directory")
+}
+
+fn abandon_open_database(store: RocksSubmoduleStore) {
+    let RocksSubmoduleStore {
+        lifetime,
+        compact,
+        db,
+        resources,
+        stats,
+        write,
+        group,
+        lock_file,
+        ..
+    } = store;
+    // Join threads that call into the database, then leak the handle. Closing
+    // it would write through the path this process no longer owns.
+    drop(lifetime);
+    drop(compact);
+    drop(write);
+    drop(group);
+    std::mem::forget(db);
+    std::mem::forget(resources);
+    std::mem::forget(stats);
+    std::mem::forget(lock_file);
+}
+
+static CLOSE_SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+impl RocksSubmoduleStore {
     fn flush_families_locked(&self) -> eyre::Result<()> {
         for cf in families() {
             let handle = cf_handle(&self.db, cf)?;
@@ -2817,6 +2978,45 @@ fn shared_resources_for(
         None if tuning.share_resources => Ok(Some(process_rocks_resources()?)),
         None => Ok(None),
     }
+}
+
+/// `flock` `LOCK`, creating the file when it is missing.
+///
+/// Does not take `fcntl`. RocksDB locks with `fcntl`, and that lock does not
+/// conflict with `flock`. Closing this file releases every `fcntl` lock this
+/// process holds on `LOCK`, including RocksDB's, so the caller keeps it open
+/// until the database has closed.
+pub(super) fn acquire_conversion_lock(path: &Path) -> eyre::Result<Arc<File>> {
+    let lock_path = path.join("LOCK");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        // An existing LOCK is RocksDB's file. Truncating it is a write we do not need.
+        .truncate(false)
+        .open(&lock_path)
+        .wrap_err("open rocksdb LOCK")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        eyre::bail!(
+            "refusing to run because the rocksdb LOCK is held, so the node may be running. Stop the node and retry. {err}"
+        );
+    }
+    Ok(Arc::new(file))
+}
+
+/// `true` when `file` is still the `LOCK` inode at `path`.
+///
+/// A replaced directory has a different `LOCK` file, or none. Flocking the
+/// path again would lock that new file.
+pub(super) fn conversion_lock_protects(file: &File, path: &Path) -> bool {
+    let Ok(held) = file.metadata() else {
+        return false;
+    };
+    let Ok(current) = fs::metadata(path.join("LOCK")) else {
+        return false;
+    };
+    held.dev() == current.dev() && held.ino() == current.ino()
 }
 
 /// Exclusive non-blocking lock of `LOCK` when the file exists.

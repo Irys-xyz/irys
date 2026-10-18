@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use eyre::WrapErr as _;
@@ -767,7 +768,8 @@ pub fn convert_rocks_to_mdbx(
         stats
     } else {
         let args = exclusive_args(options);
-        prepare_mdbx_target(mdbx_dir, args.clone(), options.replace_incomplete)?;
+        // Held until the completion marker is durable. Drop releases `LOCK`.
+        let _lock = prepare_mdbx_target(mdbx_dir, args.clone(), options.replace_incomplete)?;
         let dst = map_open(MdbxSubmoduleStore::open_for_convert(mdbx_dir, args))?;
         let stats = copy_rocks_into_mdbx(&src, Some(&dst), options, &db, &map)?;
         refuse_unresolved(&stats, options)?;
@@ -2655,8 +2657,11 @@ fn write_rocks_copy(
         refuse_unresolved(&stats, options)?;
         return Ok(stats);
     }
-    prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
+    let lock = prepare_rocks_target(dir, options.replace_incomplete)?;
+    let dst = map_open(RocksSubmoduleStore::open_converting_with_lock(
+        dir,
+        Some(lock),
+    ))?;
     let stats = copy(Some(&dst))?;
     refuse_unresolved(&stats, options)?;
     seal_rocks_target(dst, options)?;
@@ -2683,8 +2688,11 @@ fn open_converting_rocks(
     dir: &Path,
     options: &ConvertOptions,
 ) -> eyre::Result<RocksSubmoduleStore> {
-    prepare_rocks_target(dir, options.replace_incomplete)?;
-    let dst = map_open(RocksSubmoduleStore::open_converting(dir))?;
+    let lock = prepare_rocks_target(dir, options.replace_incomplete)?;
+    let dst = map_open(RocksSubmoduleStore::open_converting_with_lock(
+        dir,
+        Some(lock),
+    ))?;
     if options.fail_after_batches == Some(0) {
         eyre::bail!("injected conversion interrupt after 0 batches");
     }
@@ -2732,7 +2740,8 @@ fn write_reset_mdbx(dir: &Path, options: &ConvertOptions) -> eyre::Result<Conver
         });
     }
     let args = exclusive_args(options);
-    prepare_mdbx_target(dir, args.clone(), options.replace_incomplete)?;
+    // Held until the completion marker is durable. Drop releases `LOCK`.
+    let _lock = prepare_mdbx_target(dir, args.clone(), options.replace_incomplete)?;
     let dst = map_open(MdbxSubmoduleStore::open_for_convert(dir, args))?;
     if options.fail_after_batches == Some(0) {
         eyre::bail!("injected conversion interrupt after 0 batches");
@@ -4324,6 +4333,9 @@ thread_local! {
     /// Commits on the environment that still has the target open.
     static DURING_MDBX_REPLACE_ENV: std::cell::RefCell<Option<Box<dyn FnOnce(&DatabaseEnv)>>> =
         const { std::cell::RefCell::new(None) };
+    /// Runs after the first lock check and before `remove_dir_all`.
+    static BEFORE_REPLACE_DELETE: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -4336,6 +4348,9 @@ impl Drop for MdbxReplaceHookGuard {
             cell.borrow_mut().take();
         });
         DURING_MDBX_REPLACE_ENV.with(|cell| {
+            cell.borrow_mut().take();
+        });
+        BEFORE_REPLACE_DELETE.with(|cell| {
             cell.borrow_mut().take();
         });
     }
@@ -4372,7 +4387,33 @@ fn run_mdbx_replace_hooks(path: &Path, held: &DatabaseEnv) {
     }
 }
 
-fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
+#[cfg(test)]
+fn set_before_replace_delete(hook: impl FnOnce(&Path) + 'static) -> MdbxReplaceHookGuard {
+    BEFORE_REPLACE_DELETE.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hook));
+    });
+    MdbxReplaceHookGuard
+}
+
+#[cfg(test)]
+fn run_before_replace_delete(path: &Path) {
+    if let Some(hook) = BEFORE_REPLACE_DELETE.with(|cell| cell.borrow_mut().take()) {
+        hook(path);
+    }
+}
+
+/// Flock `LOCK`, then make `CONVERTING` durable.
+///
+/// The sentinel is not visible until the flock is held. A replacer that sees
+/// `CONVERTING` then finds `LOCK` either busy or, after this process dies,
+/// free. Closing the returned file releases the flock.
+fn lock_then_mark(path: &Path) -> eyre::Result<Arc<File>> {
+    let lock = rocks::acquire_conversion_lock(path)?;
+    write_converting_sentinel(path)?;
+    Ok(lock)
+}
+
+fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<Arc<File>> {
     let path = lexical_target(path)?;
     let path = path.as_path();
     if path.exists() && !path.is_dir() {
@@ -4380,8 +4421,7 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
     }
     if !path.exists() || dir_is_empty(path)? {
         fs::create_dir_all(path)?;
-        write_converting_sentinel(path)?;
-        return Ok(());
+        return lock_then_mark(path);
     }
     refuse_forbidden(path)?;
     if path.join("mdbx.dat").is_file() {
@@ -4391,11 +4431,20 @@ fn prepare_rocks_target(path: &Path, replace: bool) -> eyre::Result<()> {
         );
     }
     refuse_existing_rocks_schema(path)?;
-    replace_marked_incomplete(path, replace, true)?;
-    Ok(())
+    match replace_marked_incomplete(path, replace, true)? {
+        ReplaceMarked::Ready(lock) => Ok(lock),
+        ReplaceMarked::MdbxDat => eyre::bail!(
+            "target {} contains mdbx.dat. Refusing to delete an MDBX index or a consensus database.",
+            path.display()
+        ),
+    }
 }
 
-fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> eyre::Result<()> {
+fn prepare_mdbx_target(
+    path: &Path,
+    args: DatabaseArguments,
+    replace: bool,
+) -> eyre::Result<Arc<File>> {
     let path = lexical_target(path)?;
     let path = path.as_path();
     if path.exists() && !path.is_dir() {
@@ -4403,57 +4452,66 @@ fn prepare_mdbx_target(path: &Path, args: DatabaseArguments, replace: bool) -> e
     }
     if !path.exists() || dir_is_empty(path)? {
         fs::create_dir_all(path)?;
-        write_converting_sentinel(path)?;
-        return Ok(());
+        return lock_then_mark(path);
     }
     // SCHEMA beside CONVERTING is a finished index. Refuse it before any delete.
     refuse_existing_rocks_schema(path)?;
     refuse_forbidden(path)?;
     if path.join("mdbx.dat").is_file() {
-        // The sealer opens read-write and exclusive, and it keeps that env
-        // until `CONVERTING` is removed. Hold the same kind of env from this
-        // read through `remove_dir_all`, then read the schema again. A current
-        // row is not deleted. Drop the env before creating the new directory:
-        // close must not write into the directory this function is about to create.
-        let args = args.with_exclusive(Some(true));
-        let env = match DatabaseEnv::open(path, DatabaseEnvKind::RW, args) {
-            Ok(env) => env,
-            Err(err) if is_lock_error(&eyre::eyre!("{err}")) => {
-                return Err(map_lock(eyre::eyre!("{err}")));
-            }
-            Err(err) => {
-                eyre::bail!(
-                    "target {} could not be opened ({err}). Refusing to delete it.",
-                    path.display()
-                );
-            }
-        };
-        refuse_mdbx_replace_schema(path, &env)?;
-        if !migrate::converting_sentinel_present(path)? {
-            eyre::bail!(
-                "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
-                path.display()
-            );
-        }
-        if !replace {
-            eyre::bail!(
-                "target {} is an incomplete conversion. Pass --replace-incomplete to delete it and start over.",
-                path.display()
-            );
-        }
-        refuse_existing_rocks_schema(path)?;
-        refuse_forbidden(path)?;
-        #[cfg(test)]
-        run_mdbx_replace_hooks(path, &env);
-        refuse_mdbx_replace_schema(path, &env)?;
-        fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
-        drop(env);
-        fs::create_dir_all(path)?;
-        write_converting_sentinel(path)?;
-        return Ok(());
+        return replace_incomplete_mdbx(path, args, replace);
     }
-    replace_marked_incomplete(path, replace, false)?;
-    Ok(())
+    match replace_marked_incomplete(path, replace, false)? {
+        ReplaceMarked::Ready(lock) => Ok(lock),
+        // `mdbx.dat` appeared after the first stat. Open it. Do not delete first.
+        ReplaceMarked::MdbxDat => replace_incomplete_mdbx(path, args, replace),
+    }
+}
+
+/// Delete an incomplete MDBX target while its exclusive env is held.
+///
+/// The env stays open from the schema read through `remove_dir_all`. A current
+/// row is not deleted. Drop the env before creating the new directory: close
+/// must not write into the directory this function is about to create.
+fn replace_incomplete_mdbx(
+    path: &Path,
+    args: DatabaseArguments,
+    replace: bool,
+) -> eyre::Result<Arc<File>> {
+    let args = args.with_exclusive(Some(true));
+    let env = match DatabaseEnv::open(path, DatabaseEnvKind::RW, args) {
+        Ok(env) => env,
+        Err(err) if is_lock_error(&eyre::eyre!("{err}")) => {
+            return Err(map_lock(eyre::eyre!("{err}")));
+        }
+        Err(err) => {
+            eyre::bail!(
+                "target {} could not be opened ({err}). Refusing to delete it.",
+                path.display()
+            );
+        }
+    };
+    refuse_mdbx_replace_schema(path, &env)?;
+    if !migrate::converting_sentinel_present(path)? {
+        eyre::bail!(
+            "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
+            path.display()
+        );
+    }
+    if !replace {
+        eyre::bail!(
+            "target {} is an incomplete conversion. Pass --replace-incomplete to delete it and start over.",
+            path.display()
+        );
+    }
+    refuse_existing_rocks_schema(path)?;
+    refuse_forbidden(path)?;
+    #[cfg(test)]
+    run_mdbx_replace_hooks(path, &env);
+    refuse_mdbx_replace_schema(path, &env)?;
+    fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
+    drop(env);
+    fs::create_dir_all(path)?;
+    lock_then_mark(path)
 }
 
 /// Refuse a schema row that `--replace-incomplete` must not delete.
@@ -4483,7 +4541,20 @@ fn refuse_mdbx_replace_schema(path: &Path, env: &DatabaseEnv) -> eyre::Result<()
     }
 }
 
-fn replace_marked_incomplete(path: &Path, replace: bool, refuse_mdbx: bool) -> eyre::Result<()> {
+#[derive(Debug)]
+enum ReplaceMarked {
+    /// The old directory is gone. `LOCK` is flocked and `CONVERTING` is durable.
+    Ready(Arc<File>),
+    /// `mdbx.dat` is present. The caller opens that environment and does not
+    /// delete the directory first.
+    MdbxDat,
+}
+
+fn replace_marked_incomplete(
+    path: &Path,
+    replace: bool,
+    refuse_mdbx: bool,
+) -> eyre::Result<ReplaceMarked> {
     if !migrate::converting_sentinel_present(path)? {
         eyre::bail!(
             "target {} has no CONVERTING sentinel. Pass --replace-incomplete only deletes a directory this tool marked. Delete an older incomplete directory by hand.",
@@ -4499,7 +4570,7 @@ fn replace_marked_incomplete(path: &Path, replace: bool, refuse_mdbx: bool) -> e
     // Hold LOCK across the marker check and the delete. Seal writes SCHEMA
     // before it drops that lock. `remove_dir_all` unlinks LOCK, so the flock
     // does not cover the directory created below.
-    let hold = rocks::hold_rocks_lock(path)?;
+    let mut hold = rocks::hold_rocks_lock(path)?;
     refuse_existing_rocks_schema(path)?;
     refuse_forbidden(path)?;
     if refuse_mdbx && path.join("mdbx.dat").is_file() {
@@ -4508,11 +4579,31 @@ fn replace_marked_incomplete(path: &Path, replace: bool, refuse_mdbx: bool) -> e
             path.display()
         );
     }
+    #[cfg(test)]
+    run_before_replace_delete(path);
+    // `LOCK`, `CURRENT`, or `mdbx.dat` may have appeared since the first stat.
+    if path.join("mdbx.dat").is_file() {
+        if refuse_mdbx {
+            eyre::bail!(
+                "target {} contains mdbx.dat. Refusing to delete an MDBX index or a consensus database.",
+                path.display()
+            );
+        }
+        return Ok(ReplaceMarked::MdbxDat);
+    }
+    if hold.is_none() && path.join("LOCK").is_file() {
+        hold = rocks::hold_rocks_lock(path)?;
+    }
+    if path.join("CURRENT").is_file() && hold.is_none() {
+        eyre::bail!(
+            "target {} has CURRENT but no LOCK file. Refusing to delete it.",
+            path.display()
+        );
+    }
     fs::remove_dir_all(path).wrap_err("remove incomplete target")?;
     drop(hold);
     fs::create_dir_all(path)?;
-    write_converting_sentinel(path)?;
-    Ok(())
+    Ok(ReplaceMarked::Ready(lock_then_mark(path)?))
 }
 
 fn refuse_forbidden(path: &Path) -> eyre::Result<()> {
@@ -4553,6 +4644,14 @@ fn clear_converting_sentinel(path: &Path) -> eyre::Result<()> {
         return Ok(());
     }
     fs::remove_file(&file_path).wrap_err("remove CONVERTING")?;
+    // MDBX has no CURRENT. Drop the flock file after CONVERTING so a finished
+    // directory does not keep it. RocksDB keeps LOCK beside CURRENT.
+    if !path.join("CURRENT").is_file() {
+        let lock_path = path.join("LOCK");
+        if lock_path.is_file() {
+            fs::remove_file(&lock_path).wrap_err("remove conversion LOCK")?;
+        }
+    }
     File::open(path)
         .and_then(|dir| dir.sync_all())
         .wrap_err("sync target directory")?;
@@ -5650,6 +5749,111 @@ mod tests {
         Ok(())
     }
 
+    /// The directory inode was replaced after this database opened. Seal must
+    /// not write SCHEMA into the new directory or delete its log. `LOCK` on
+    /// the new directory is a different file, so a flock of that path is not
+    /// this database's lock.
+    #[test]
+    fn seal_does_not_publish_schema_into_a_replaced_directory() -> eyre::Result<()> {
+        let root = temp("convert-seal-replaced");
+        let rocks = root.path().join("rocks");
+        let moved = root.path().join("rocks-moved");
+        super::prepare_rocks_target(&rocks, false)?;
+        let opened = RocksSubmoduleStore::open_converting(&rocks)?;
+        fs::rename(&rocks, &moved)?;
+        fs::create_dir_all(&rocks)?;
+        fs::write(
+            rocks.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(rocks.join("CURRENT"), b"MANIFEST-000099\n")?;
+        fs::write(rocks.join("000099.log"), b"replacement-log")?;
+        fs::write(rocks.join("LOCK"), b"")?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        let err = opened.seal_and_stamp().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("replaced"),
+            "seal must refuse the new directory, not fail earlier: {text}"
+        );
+        assert!(
+            !rocks.join("SCHEMA").is_file(),
+            "replaced directory must not gain SCHEMA"
+        );
+        assert_eq!(fs::read(rocks.join("000099.log"))?, b"replacement-log");
+        assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000099\n");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(!moved.join("SCHEMA").is_file());
+        Ok(())
+    }
+
+    /// `CONVERTING` is written only after `LOCK` is flocked. A replace that
+    /// sees the sentinel must fail while that flock is held, and must succeed
+    /// after the holder drops it.
+    #[test]
+    fn held_conversion_lock_blocks_replace_before_the_database_opens() -> eyre::Result<()> {
+        let root = temp("convert-lock-before-open");
+        let rocks = root.path().join("rocks");
+        let held = super::prepare_rocks_target(&rocks, false)?;
+        assert!(rocks.join("LOCK").is_file());
+        assert!(rocks.join("CONVERTING").is_file());
+        assert!(!rocks.join("CURRENT").exists());
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        let err = super::prepare_rocks_target(&rocks, true).unwrap_err();
+        assert!(format!("{err:#}").contains("may be running"), "{err:#}");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(rocks.join("CONVERTING").is_file());
+        drop(held);
+        super::prepare_rocks_target(&rocks, true)?;
+        assert!(!rocks.join("KEEP").is_file());
+        assert!(rocks.join("CONVERTING").is_file());
+        assert!(!rocks.join("SCHEMA").is_file());
+        Ok(())
+    }
+
+    /// Same order for an MDBX target: the flock is held before `mdbx.dat` exists.
+    #[test]
+    fn held_conversion_lock_blocks_mdbx_replace_before_the_env_opens() -> eyre::Result<()> {
+        let root = temp("convert-mdbx-lock-before-open");
+        let path = root.path().join("mdbx");
+        let held = super::prepare_mdbx_target(&path, testing_args()?, false)?;
+        assert!(path.join("LOCK").is_file());
+        assert!(path.join("CONVERTING").is_file());
+        assert!(!path.join("mdbx.dat").exists());
+        fs::write(path.join("KEEP"), b"keep")?;
+        let err = super::prepare_mdbx_target(&path, testing_args()?, true).unwrap_err();
+        assert!(format!("{err:#}").contains("may be running"), "{err:#}");
+        assert_eq!(fs::read(path.join("KEEP"))?, b"keep");
+        drop(held);
+        super::prepare_mdbx_target(&path, testing_args()?, true)?;
+        assert!(!path.join("KEEP").is_file());
+        assert!(path.join("CONVERTING").is_file());
+        assert!(!path.join("mdbx.dat").exists());
+        Ok(())
+    }
+
+    /// `CURRENT` with no `LOCK` file is not a dropped conversion. Delete would
+    /// remove a database that this process cannot prove is idle.
+    #[test]
+    fn replace_incomplete_refuses_current_without_a_lock_file() -> eyre::Result<()> {
+        let root = temp("convert-current-without-lock");
+        let rocks = root.path().join("rocks");
+        fs::create_dir_all(&rocks)?;
+        fs::write(
+            rocks.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(rocks.join("CURRENT"), b"MANIFEST-000001\n")?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        let err = super::prepare_rocks_target(&rocks, true).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("CURRENT") && text.contains("LOCK"), "{text}");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000001\n");
+        assert!(rocks.join("CONVERTING").is_file());
+        Ok(())
+    }
+
     /// A replace that runs after the database closes and before SCHEMA exists
     /// must not delete the directory being sealed.
     #[test]
@@ -5664,7 +5868,7 @@ mod tests {
         let flag = std::sync::Arc::clone(&seen);
         opened.set_before_schema_hook(move || {
             let text = match super::prepare_rocks_target(&path, true) {
-                Ok(()) => "ok".to_owned(),
+                Ok(_) => "ok".to_owned(),
                 Err(err) => format!("{err:#}"),
             };
             *flag.lock().expect("seal window") = Some((
@@ -5773,6 +5977,69 @@ mod tests {
         fs::write(path.join("CONVERTING"), super::SUBMODULE_CONVERT_INCOMPLETE)?;
         fs::write(path.join("KEEP"), b"keep")?;
         Ok(path)
+    }
+
+    /// `mdbx.dat` can appear after the first stat and before `remove_dir_all`.
+    /// The delete must not run. The exclusive open sees the completed schema.
+    #[test]
+    fn replace_refuses_when_mdbx_dat_appears_before_the_delete() -> eyre::Result<()> {
+        let root = temp("convert-mdbx-appears");
+        let path = root.path().join("mdbx");
+        fs::create_dir_all(&path)?;
+        fs::write(path.join("CONVERTING"), super::SUBMODULE_CONVERT_INCOMPLETE)?;
+        fs::write(path.join("KEEP"), b"keep")?;
+        let _guard = super::set_before_replace_delete(|dir| {
+            let store = MdbxSubmoduleStore::open_for_convert(
+                dir,
+                testing_args().expect("args").with_exclusive(Some(true)),
+            )
+            .expect("plant mdbx");
+            store
+                .put_schema_bytes(super::SUBMODULE_SCHEMA.as_bytes())
+                .expect("completed schema");
+        });
+        let err = super::prepare_mdbx_target(&path, testing_args()?, true).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("completed"), "{text}");
+        assert_eq!(fs::read(path.join("KEEP"))?, b"keep");
+        assert!(path.join("mdbx.dat").is_file());
+        assert!(path.join("CONVERTING").is_file());
+        let store = MdbxSubmoduleStore::open(&path, testing_args()?)?;
+        assert_eq!(
+            store.schema_bytes()?.as_deref(),
+            Some(super::SUBMODULE_SCHEMA.as_bytes())
+        );
+        Ok(())
+    }
+
+    /// Clearing the sentinel drops the flock file on an MDBX directory.
+    /// A RocksDB directory has `CURRENT` and keeps `LOCK`.
+    #[test]
+    fn clear_converting_sentinel_drops_an_mdbx_lock_and_keeps_a_rocks_lock() -> eyre::Result<()> {
+        let root = temp("convert-clear-lock");
+        let mdbx = root.path().join("mdbx");
+        fs::create_dir_all(&mdbx)?;
+        fs::write(mdbx.join("CONVERTING"), super::SUBMODULE_CONVERT_INCOMPLETE)?;
+        fs::write(mdbx.join("LOCK"), b"")?;
+        fs::write(mdbx.join("SCHEMA"), super::SUBMODULE_SCHEMA)?;
+        super::clear_converting_sentinel(&mdbx)?;
+        assert!(!mdbx.join("CONVERTING").exists());
+        assert!(!mdbx.join("LOCK").exists());
+        assert!(mdbx.join("SCHEMA").is_file());
+
+        let rocks = root.path().join("rocks");
+        fs::create_dir_all(&rocks)?;
+        fs::write(
+            rocks.join("CONVERTING"),
+            super::SUBMODULE_CONVERT_INCOMPLETE,
+        )?;
+        fs::write(rocks.join("LOCK"), b"held")?;
+        fs::write(rocks.join("CURRENT"), b"MANIFEST-000001\n")?;
+        super::clear_converting_sentinel(&rocks)?;
+        assert!(!rocks.join("CONVERTING").exists());
+        assert_eq!(fs::read(rocks.join("LOCK"))?, b"held");
+        assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000001\n");
+        Ok(())
     }
 
     /// `--replace-incomplete` deletes an unfinished MDBX target and starts again.
