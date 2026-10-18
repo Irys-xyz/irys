@@ -1671,7 +1671,7 @@ fn chunks_file_too_big(path: &Path, full_len: u64) -> eyre::Report {
 /// Logical size only. A test can force `EFBIG` without creating a large file.
 fn set_chunks_logical_len(file: &File, full_len: u64) -> std::io::Result<()> {
     #[cfg(test)]
-    if CHUNKS_LEN_EFBIG.with(|flag| flag.get()) {
+    if CHUNKS_LEN_EFBIG.with(std::cell::Cell::get) {
         return Err(std::io::Error::from_raw_os_error(libc::EFBIG));
     }
     file.set_len(full_len)
@@ -17478,7 +17478,7 @@ mod tests {
             "{message}"
         );
         assert_eq!(
-            PackingParams::from_toml(&sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
+            PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
             Some(hash)
         );
         assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Entropy));
@@ -17551,7 +17551,7 @@ mod tests {
             );
         }
         assert_eq!(
-            PackingParams::from_toml(&sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
+            PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
             Some(hash),
             "the interrupted unassign published the packing file"
         );
