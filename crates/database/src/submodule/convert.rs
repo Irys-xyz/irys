@@ -4342,6 +4342,10 @@ thread_local! {
     /// Runs once the delete is decided and before `remove_dir_all`.
     static AT_REPLACE_DELETE: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         const { std::cell::RefCell::new(None) };
+    /// Runs after `CONVERTING` is durable. The flock is already held when
+    /// [`lock_then_mark`] writes the sentinel second.
+    static AFTER_CONVERTING_WRITTEN: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -4363,6 +4367,9 @@ impl Drop for MdbxReplaceHookGuard {
             cell.borrow_mut().take();
         });
         AT_REPLACE_DELETE.with(|cell| {
+            cell.borrow_mut().take();
+        });
+        AFTER_CONVERTING_WRITTEN.with(|cell| {
             cell.borrow_mut().take();
         });
     }
@@ -4440,6 +4447,21 @@ fn set_at_replace_delete(hook: impl FnOnce(&Path) + 'static) -> MdbxReplaceHookG
 #[cfg(test)]
 fn run_at_replace_delete(path: &Path) {
     if let Some(hook) = AT_REPLACE_DELETE.with(|cell| cell.borrow_mut().take()) {
+        hook(path);
+    }
+}
+
+#[cfg(test)]
+fn set_after_converting_written(hook: impl FnOnce(&Path) + 'static) -> MdbxReplaceHookGuard {
+    AFTER_CONVERTING_WRITTEN.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hook));
+    });
+    MdbxReplaceHookGuard
+}
+
+#[cfg(test)]
+fn run_after_converting_written(path: &Path) {
+    if let Some(hook) = AFTER_CONVERTING_WRITTEN.with(|cell| cell.borrow_mut().take()) {
         hook(path);
     }
 }
@@ -4730,6 +4752,8 @@ fn write_converting_sentinel(path: &Path) -> eyre::Result<()> {
     File::open(path)
         .and_then(|dir| dir.sync_all())
         .wrap_err("sync target directory")?;
+    #[cfg(test)]
+    run_after_converting_written(path);
     Ok(())
 }
 
@@ -6317,6 +6341,61 @@ mod tests {
         });
         assert!(!left, "completed close must not leave a scratch sibling");
         Ok(())
+    }
+
+    /// `CONVERTING` is written only after `LOCK` is flocked. A replace that
+    /// runs in that write must see the flock. Looking after both calls return
+    /// stays green if the sentinel is written first.
+    fn assert_replace_during_sentinel_write(
+        label: &str,
+        prepare: impl Fn(&Path, bool) -> eyre::Result<std::sync::Arc<std::fs::File>> + 'static,
+    ) -> eyre::Result<()> {
+        let root = temp(label);
+        let path = root.path().join("index");
+        fs::create_dir_all(&path)?;
+        let prepare = std::sync::Arc::new(prepare);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let flag = std::sync::Arc::clone(&seen);
+        let inner = std::sync::Arc::clone(&prepare);
+        let _hook = super::set_after_converting_written(move |dir| {
+            let _ = fs::write(dir.join("KEEP"), b"keep");
+            let text = match inner(dir, true) {
+                Ok(_) => "ok".to_owned(),
+                Err(err) => format!("{err:#}"),
+            };
+            let kept = dir.join("KEEP").is_file();
+            *flag.lock().expect("sentinel window") = Some((text, kept));
+        });
+        let held = prepare(&path, false);
+        let (text, kept) = seen.lock().expect("sentinel window").clone().expect("hook");
+        assert!(
+            text.contains("rocksdb LOCK"),
+            "replace must see the flock, not a directory that has no LOCK yet: {text}"
+        );
+        assert!(kept, "replace deleted the directory before the flock");
+        assert_eq!(fs::read(path.join("KEEP"))?, b"keep");
+        let held = held?;
+        assert!(path.join("CONVERTING").is_file());
+        assert!(path.join("LOCK").is_file());
+        drop(held);
+        drop(_hook);
+        Ok(())
+    }
+
+    #[test]
+    fn replace_during_sentinel_write_sees_the_rocks_lock() -> eyre::Result<()> {
+        assert_replace_during_sentinel_write("convert-sentinel-after-lock", |path, replace| {
+            super::prepare_rocks_target(path, replace)
+        })
+    }
+
+    #[test]
+    fn replace_during_sentinel_write_sees_the_mdbx_lock() -> eyre::Result<()> {
+        let args = testing_args()?;
+        assert_replace_during_sentinel_write(
+            "convert-mdbx-sentinel-after-lock",
+            move |path, replace| super::prepare_mdbx_target(path, args.clone(), replace),
+        )
     }
 
     /// `CONVERTING` is written only after `LOCK` is flocked. A replace that
