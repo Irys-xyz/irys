@@ -7474,19 +7474,17 @@ impl StorageModule {
                     chunk_crc::CrcVerdict::Skip => {}
                     chunk_crc::CrcVerdict::Match => {
                         // The body was copied before this checksum was
-                        // checked. A durable point can commit a new pair in
-                        // that gap. Serve these bytes only while the stored
-                        // checksum is still the one they matched. The lock
-                        // is held through the insert, then dropped: the next
-                        // offset may confirm or reload, and both take this
-                        // lock. A different checksum is loaded again after
-                        // the lock drops.
+                        // checked. A later commit can keep the checksum and
+                        // replace the path. Serve these bytes only while
+                        // both still match. The lock is held through the
+                        // insert, then dropped: the next offset may confirm
+                        // or reload, and both take this lock.
                         let sync = self.lock_sync();
-                        let stored = submodule
-                            .db
-                            .view(|tx| tx.get_offset_meta(offset))?
-                            .and_then(|row| row.crc);
-                        if stored == crc {
+                        let row = submodule.db.view(|tx| tx.get_offset_meta(offset))?;
+                        let stored = row.as_ref().and_then(|row| row.crc);
+                        let path_matches = row.as_ref().and_then(|row| row.proof.as_deref())
+                            == Some(data_path.0.as_slice());
+                        if stored == crc && path_matches {
                             out.insert(
                                 offset,
                                 PackedChunk {
@@ -17402,6 +17400,108 @@ mod tests {
         eyre::ensure!(
             again.data_path.0 == served.data_path.0 && again.bytes.0 == served.bytes.0,
             "a later serve does not match the overlapped serve"
+        );
+        Ok(())
+    }
+
+    /// Two transactions share chunk 0's unpacked bytes and differ in chunk 1.
+    /// The packed checksum stays. The data path does not. A serve that copied
+    /// the first body must return the path committed with that checksum.
+    #[test]
+    fn serve_after_body_read_reloads_when_the_path_changes_and_the_crc_stays() -> eyre::Result<()> {
+        let (tmp, storage) = pair_module("serve_same_crc", SubmoduleIndexEngine::Rocksdb)?;
+        let _tmp = tmp;
+        let storage = Arc::new(storage);
+        storage.pack_with_zeros();
+        let offset = PartitionChunkOffset::from(0);
+        let (first, root1) = index_pattern(&storage, &[0x11, 0x22], 0)?;
+        storage.write_data_chunk(&first[0])?;
+        storage.force_sync_pending_chunks()?;
+        let path1 = data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("first path missing"))?;
+        let crc1 = storage
+            .offset_meta_for_test(offset)?
+            .and_then(|row| row.crc);
+        let packed = packed_prefix(&storage, offset)?;
+        let stable = storage
+            .generate_full_chunk(offset)?
+            .ok_or_else(|| eyre::eyre!("settled serve omitted the offset"))?;
+        eyre::ensure!(
+            stable.data_root == root1 && stable.data_path.0 == path1 && stable.bytes.0 == packed,
+            "a serve with no later commit did not return the copied pair"
+        );
+
+        storage.pause_next_serve_after_body_read();
+        let reading = Arc::clone(&storage);
+        let (tx_serve, rx_serve) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| -> eyre::Result<()> {
+            let _release = SyncPauseRelease(&storage);
+            scope.spawn(move || {
+                let _ = tx_serve.send(reading.generate_full_chunk(offset));
+            });
+            eyre::ensure!(
+                storage.wait_for_sync_pause(Duration::from_secs(5)),
+                "serve did not pause after the body read"
+            );
+            let hash = storage
+                .partition_hash()
+                .ok_or_else(|| eyre::eyre!("partition hash missing"))?;
+            let chunk_size = storage.config.consensus.chunk_size as usize;
+            // The same pad the first pack read. The unpacked bytes match, so
+            // the packed checksum stays and only the data path changes.
+            eyre::ensure!(
+                storage.write_entropy_chunk(offset, vec![0; chunk_size], hash),
+                "entropy overwrite was refused"
+            );
+            storage.force_sync_pending_chunks()?;
+            let (second, root2) = index_pattern(&storage, &[0x11, 0x33], 1)?;
+            storage.write_data_chunk(&second[0])?;
+            storage.force_sync_pending_chunks()?;
+            let path2 =
+                data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("second path missing"))?;
+            let crc2 = storage
+                .offset_meta_for_test(offset)?
+                .and_then(|row| row.crc);
+            eyre::ensure!(
+                crc1.is_some() && crc1 == crc2,
+                "the shared payload did not keep the checksum: {crc1:?} then {crc2:?}"
+            );
+            eyre::ensure!(
+                path1 != path2,
+                "the second transaction reused the data path"
+            );
+            eyre::ensure!(
+                packed_prefix(&storage, offset)? == packed,
+                "the shared payload did not pack to the same bytes"
+            );
+            drop(_release);
+            let served = rx_serve
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| eyre::eyre!("serve did not finish"))??
+                .ok_or_else(|| {
+                    eyre::eyre!("serve omitted a body whose checksum is still current")
+                })?;
+            eyre::ensure!(
+                served.data_path.0 == path2,
+                "served the data path from the previous transaction"
+            );
+            eyre::ensure!(
+                served.data_root == root2,
+                "served proof is not the committed data root"
+            );
+            eyre::ensure!(
+                served.bytes.0 == packed,
+                "serve dropped bytes whose checksum was still current"
+            );
+            Ok(())
+        })?;
+        let again = storage
+            .generate_full_chunk(offset)?
+            .ok_or_else(|| eyre::eyre!("later serve omitted the offset"))?;
+        eyre::ensure!(
+            again.data_path.0
+                == data_path_at(&storage, 0)?.ok_or_else(|| eyre::eyre!("later path missing"))?
+                && again.bytes.0 == packed,
+            "a later serve is not the committed pair"
         );
         Ok(())
     }
