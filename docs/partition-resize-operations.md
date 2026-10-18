@@ -39,6 +39,12 @@ The ID pool preserves nominal capacity, not already-packed capacity. For example
 
 After disk space is released, append fresh directory paths to `.irys_submodules.toml` and restart through the existing storage provisioning workflow. Preserve existing path ordering and directories. Obtain the required additional pledges through the usual process; the resize does not create free pledges. Newly assigned IDs receive fresh packing. Six fully packed new partitions occupy 22.806528 decimal TB before filesystem and database overhead.
 
+## Capacity reporting
+
+`GET /v1/storage/capacity` reports the active `geometry` (partition chunks, recall chunks, sampling origin), chunk bytes, target ingress, epoch reserve, and total partition-ID supply. Network allocation is captured with the canonical tip and epoch snapshot.
+
+Each ledger reports reservations, cumulative allocated slots and headroom, required/assigned replicas for nonexpired slots, and fully assigned slots. The nested `local` counts and top-level `local` total describe only this node: packed chunks include observed entropy and data, while packed writable chunks count entropy on ledger-assigned modules accepting data writes. Packed capacity-pool entropy is not reported as writable ledger capacity. Local counters are observational, include pending writes, and may advance during a request; they are not a network-wide durability or throughput guarantee. Assignments that disagree with the captured epoch are excluded. Targets and epoch reserves are `null` before activation.
+
 ## Scope
 
 Transactions spanning partition/slot boundaries are not supported by this change. Partial ingress proofs, multi-slot proof aggregation, and related reward changes remain future work. Resize tests use synthetic reservation counters or transactions contained within individual Submit and Publish slots. SSD and scattered sampling support are outside this fork.
