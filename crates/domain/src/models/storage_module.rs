@@ -466,6 +466,8 @@ enum SyncFailurePoint {
     AfterResetClear,
     /// Interval file is `Uninitialized`. The reset marker is still set.
     AfterResetIntervals,
+    /// `store_assignment` has not written. The reset, if it ran, is done.
+    AssignmentStore,
 }
 
 /// Test barrier. `AfterPresenceCopy` runs inside a durable point that holds
@@ -2402,6 +2404,8 @@ impl StorageModule {
         next: Option<PartitionAssignment>,
         update_height: u64,
     ) -> eyre::Result<()> {
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AssignmentStore)?;
         let old_hash = assignment.as_ref().map(|current| current.partition_hash);
         let new_hash = next.map(|current| current.partition_hash);
         let mut updated = Vec::new();
@@ -3177,6 +3181,17 @@ impl StorageModule {
     /// stores the new assignment before it releases the assignment lock.
     /// After `reset` alone, the previous assignment is still visible.
     pub fn reset(&self) -> eyre::Result<Interval<PartitionChunkOffset>> {
+        self.wipe_for_reset(true)
+    }
+
+    /// Wipe the module. `drop_marker` is false when the caller still has to
+    /// store an assignment: the marker stays until that store succeeds, so a
+    /// failed store leaves the wipe unfinished and a later matching assignment
+    /// can pack it.
+    fn wipe_for_reset(
+        &self,
+        drop_marker: bool,
+    ) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let _sync_guard = self.lock_sync();
         #[cfg(any(test, feature = "test-utils"))]
         if self.reset_fail_next.swap(false, Ordering::SeqCst) {
@@ -3254,11 +3269,25 @@ impl StorageModule {
         #[cfg(test)]
         self.inject_sync_failure(SyncFailurePoint::AfterResetIntervals)?;
 
+        if drop_marker {
+            self.clear_reset_marker_in_sync()?;
+        }
+        Ok(storage_interval)
+    }
+
+    /// Drop the reset marker. The caller holds `sync_in_progress`.
+    fn clear_reset_marker_in_sync(&self) -> eyre::Result<()> {
         for (_, submodule) in self.submodules.iter() {
             submodule.db.clear_reset_in_progress()?;
         }
         self.reset_incomplete.store(false, Ordering::SeqCst);
-        Ok(storage_interval)
+        Ok(())
+    }
+
+    /// Drop the reset marker after the assignment store has succeeded.
+    fn drop_reset_marker(&self) -> eyre::Result<()> {
+        let _sync_guard = self.lock_sync();
+        self.clear_reset_marker_in_sync()
     }
 
     /// Clear the in-memory reset flag when no durable marker exists.
@@ -3295,15 +3324,17 @@ impl StorageModule {
     /// pending insert, so reset cannot clear `pending` and then lose it.
     ///
     /// `next` of `None` clears the assignment. A failed reset leaves the
-    /// previous assignment in place.
+    /// previous assignment in place. A wipe that commits and then fails to
+    /// store `next` leaves the marker set, so the span can still be packed.
     pub fn reset_with_assignment(
         &self,
         next: Option<PartitionAssignment>,
         update_height: u64,
     ) -> eyre::Result<Interval<PartitionChunkOffset>> {
         let mut assignment = self.partition_assignment.write().unwrap();
-        let interval = self.reset()?;
+        let interval = self.wipe_for_reset(false)?;
         self.store_assignment(&mut assignment, next, update_height)?;
+        self.drop_reset_marker()?;
         Ok(interval)
     }
 
@@ -3348,8 +3379,9 @@ impl StorageModule {
             ledger_id: None,
             slot_index: None,
         };
-        let interval = self.reset()?;
+        let interval = self.wipe_for_reset(false)?;
         self.store_assignment(&mut assignment, Some(capacity), notice_height)?;
+        self.drop_reset_marker()?;
         Ok(Some(interval))
     }
 
@@ -15319,6 +15351,125 @@ mod tests {
         assert!(storage.is_data_chunk_durable_at(parked));
         assert!(storage.offset_meta_for_test(parked)?.is_some());
         assert!(!storage.has_pending_writes());
+        Ok(())
+    }
+
+    /// The wipe committed and the assignment file could not be parsed.
+    /// The marker stays, memory keeps the old ledger, and a later store
+    /// still installs the new assignment and drops the marker.
+    #[test]
+    fn failed_assignment_store_keeps_the_reset_marker() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("reset_store_fail")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x31);
+        let mut current = submit_assignment(0);
+        current.partition_hash = hash;
+        current.miner_address = config.node_config.miner_address();
+        current.ledger_id = Some(DataLedger::Publish.into());
+        // Absolute. `store_assignment` writes `packing_params.toml` at
+        // `submodule.path`, and a relative name would miss this temp dir.
+        let sub = tmp.path().join("chunks");
+        let storage = StorageModule::new(&one_span(3, sub.clone(), Some(current)), &config)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![0x11; 32], ChunkType::Data));
+        storage.force_sync_pending_chunks()?;
+        let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+        let saved = fs::read(&params_path)?;
+        fs::write(&params_path, b"not-toml")?;
+
+        let next = PartitionAssignment {
+            partition_hash: hash,
+            miner_address: current.miner_address,
+            ledger_id: None,
+            slot_index: None,
+        };
+        let err = storage
+            .reset_with_assignment(Some(next), 4)
+            .expect_err("a bad packing-params file fails the store");
+        assert!(err.to_string().contains("packing params"), "{err}");
+        assert!(
+            storage.reset_incomplete(),
+            "a failed store must leave the wipe unfinished"
+        );
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        assert!(
+            submodule.db.reset_in_progress()?,
+            "a failed store must keep the reset marker"
+        );
+        assert_eq!(
+            storage.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "memory keeps the assignment the store did not replace"
+        );
+        assert_eq!(
+            storage.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "the wipe already committed"
+        );
+        assert_eq!(fs::read(&params_path)?, b"not-toml");
+
+        fs::write(&params_path, saved)?;
+        storage.reset_with_assignment(Some(next), 5)?;
+        assert!(!storage.reset_incomplete());
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        assert!(!submodule.db.reset_in_progress()?);
+        assert_eq!(storage.partition_assignment().unwrap().ledger_id, None);
+        assert_eq!(storage.partition_assignment().unwrap().slot_index, None);
+        let stored = PackingParams::from_toml(&params_path)?;
+        assert_eq!(stored.ledger, None);
+        assert_eq!(stored.slot, None);
+        assert_eq!(stored.last_updated_height, Some(5));
+        Ok(())
+    }
+
+    /// Expiry reads the file, wipes, then stores capacity. A store error
+    /// after that wipe keeps the marker. The retry still moves to capacity.
+    #[test]
+    fn failed_expiry_store_keeps_the_reset_marker() -> eyre::Result<()> {
+        let tmp = TempDirBuilder::new()
+            .prefix("expiry_store_fail")
+            .with_tracing()
+            .build();
+        let config = testing_config(tmp.path(), 32, 4);
+        let hash = H256::repeat_byte(0x32);
+        let mut current = submit_assignment(0);
+        current.partition_hash = hash;
+        current.miner_address = config.node_config.miner_address();
+        current.ledger_id = Some(DataLedger::Publish.into());
+        let sub = tmp.path().join("chunks");
+        let storage = StorageModule::new(&one_span(3, sub.clone(), Some(current)), &config)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![0x22; 32], ChunkType::Data));
+        storage.force_sync_pending_chunks()?;
+        storage.fail_next_sync_at(SyncFailurePoint::AssignmentStore);
+
+        let err = storage
+            .reset_expired_to_capacity(hash, 9)
+            .expect_err("the capacity store is the injected failure");
+        assert!(err.to_string().contains("AssignmentStore"), "{err}");
+        assert!(storage.reset_incomplete());
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        assert!(submodule.db.reset_in_progress()?);
+        let assignment = storage.partition_assignment().unwrap();
+        assert_eq!(assignment.partition_hash, hash);
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(
+            storage.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized)
+        );
+
+        let finished = storage
+            .reset_expired_to_capacity(hash, 9)?
+            .expect("the same expiry still resets once the store can finish");
+        assert_eq!(finished, partition_chunk_offset_ii!(0, 3));
+        assert!(!storage.reset_incomplete());
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        assert!(!submodule.db.reset_in_progress()?);
+        assert_eq!(storage.partition_assignment().unwrap().ledger_id, None);
+        assert_eq!(storage.partition_assignment().unwrap().slot_index, None);
         Ok(())
     }
 

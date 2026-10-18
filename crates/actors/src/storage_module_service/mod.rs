@@ -1275,6 +1275,184 @@ mod assignment_reset_tests {
         assert_full_partition_span(&request);
     }
 
+    /// Replace `packing_params.toml` with bytes `from_toml` rejects.
+    /// `validate_packing_params` skips a parse error. `reset` does not read
+    /// the file. `store_assignment` does, after the wipe.
+    fn corrupt_packing_params(path: &std::path::Path) -> Vec<u8> {
+        let file = path.join(irys_domain::PACKING_PARAMS_FILE_NAME);
+        let saved = std::fs::read(&file).expect("packing params");
+        std::fs::write(&file, b"not-toml").expect("corrupt packing params");
+        saved
+    }
+
+    fn restore_packing_params(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::write(path.join(irys_domain::PACKING_PARAMS_FILE_NAME), bytes)
+            .expect("restore packing params");
+    }
+
+    /// Ledger to capacity. The wipe commits and the assignment file does not.
+    /// A later message that names the old ledger packs that wiped span once.
+    #[tokio::test]
+    async fn old_ledger_after_failed_assignment_store_packs_the_wipe() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_synced_data(&harness.module, 0x51);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let saved = corrupt_packing_params(&path);
+
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert!(harness.inner.pending_assignment.is_some());
+        assert!(
+            harness.module.reset_incomplete(),
+            "a failed store must leave the wipe unfinished"
+        );
+        assert!(
+            reset_marker(&harness.module),
+            "a failed store must keep the reset marker"
+        );
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().slot_index,
+            Some(0)
+        );
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert!(harness.receivers.packing.try_recv().is_err());
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "a stored retry is applied by the run loop, not by this tick"
+        );
+        assert!(harness.module.reset_incomplete());
+
+        restore_packing_params(&path, &saved);
+        let publish = publish_update(&path, hash, miner);
+        apply_update(&mut harness, Arc::clone(&publish), 5).await;
+        assert!(harness.inner.pending_assignment.is_none());
+        assert!(!harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        let assignment = harness.module.partition_assignment().unwrap();
+        assert_eq!(assignment.ledger_id, Some(DataLedger::Publish.into()));
+        assert_eq!(assignment.slot_index, Some(0));
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the old ledger packs the wiped span");
+        assert_full_partition_span(&request);
+        drop(request);
+        apply_update(&mut harness, publish, 5).await;
+        harness.inner.tick();
+        assert!(
+            harness.receivers.packing.try_recv().is_err(),
+            "the span is packed once"
+        );
+    }
+
+    /// The same capacity message, retried after the file is readable, still
+    /// installs capacity and packs the wipe once.
+    #[tokio::test]
+    async fn retried_assignment_after_failed_store_packs_once() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_synced_data(&harness.module, 0x52);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let saved = corrupt_packing_params(&path);
+        let update = capacity_update(&path, hash, miner);
+        apply_update(&mut harness, Arc::clone(&update), 4).await;
+        assert!(harness.module.reset_incomplete());
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert!(harness.receivers.packing.try_recv().is_err());
+
+        restore_packing_params(&path, &saved);
+        apply_update(&mut harness, update, 4).await;
+        assert!(harness.inner.pending_assignment.is_none());
+        assert!(!harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            None
+        );
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("the retried capacity assignment packs the wipe");
+        assert_full_partition_span(&request);
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// The capacity retry was dropped. The tick finishes the marker and packs
+    /// one span. It does not pack while that retry is still stored.
+    #[tokio::test]
+    async fn dropped_retry_after_failed_store_packs_on_tick() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_synced_data(&harness.module, 0x53);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let _saved = corrupt_packing_params(&path);
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert!(harness.inner.pending_assignment.is_some());
+        harness.inner.tick();
+        assert!(harness.receivers.packing.try_recv().is_err());
+        assert!(harness.module.reset_incomplete());
+
+        harness.inner.pending_assignment = None;
+        harness.inner.tick();
+        assert!(!harness.module.reset_incomplete());
+        assert!(!reset_marker(&harness.module));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into()),
+            "the tick does not install the dropped capacity assignment"
+        );
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        let request = harness
+            .receivers
+            .packing
+            .try_recv()
+            .expect("a dropped retry packs the wiped span");
+        assert_full_partition_span(&request);
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
+    /// The old ledger confirms the wipe while the packing channel is full.
+    /// One span is kept, not one request per chunk, and a later tick sends it.
+    #[tokio::test]
+    async fn full_channel_defers_one_span_after_failed_store() {
+        use irys_domain::storage_module::ChunkType;
+
+        let mut harness = harness(Some(DataLedger::Publish.into()));
+        write_synced_data(&harness.module, 0x54);
+        let (hash, miner) = assigned_hash_and_miner(&harness.module);
+        let path = harness.path.clone();
+        let saved = corrupt_packing_params(&path);
+        apply_update(&mut harness, capacity_update(&path, hash, miner), 4).await;
+        assert!(reset_marker(&harness.module));
+        restore_packing_params(&path, &saved);
+        fill_packing_channel(&harness);
+        apply_update(&mut harness, publish_update(&path, hash, miner), 5).await;
+        assert_eq!(chunk_type(&harness.module), Some(ChunkType::Uninitialized));
+        assert_eq!(
+            harness.module.partition_assignment().unwrap().ledger_id,
+            Some(DataLedger::Publish.into())
+        );
+        assert!(!harness.module.reset_incomplete());
+        assert_one_deferred_full_span(&harness);
+        deferred_span_is_sent_on_tick(&mut harness);
+        assert!(harness.receivers.packing.try_recv().is_err());
+    }
+
     /// The marker is durable and the finish fails before the clear. The
     /// matching update stays pending, the marker stays, and the bytes stay
     /// until a later attempt completes the wipe.
