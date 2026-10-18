@@ -3206,6 +3206,26 @@ impl StorageModule {
         Ok(storage_interval)
     }
 
+    /// Clear the in-memory reset flag when no durable marker exists.
+    ///
+    /// Returns `Ok(true)` when the flag is cleared and nothing was wiped.
+    /// Open recovery does not wipe in that case. Returns `Ok(false)` when a
+    /// submodule still has the marker: the caller must finish the clear.
+    /// A read error leaves the flag set.
+    ///
+    /// Holds `sync_in_progress`, the same lock as [`Self::reset`], so this
+    /// cannot observe a marker that `reset` is still writing.
+    pub fn clear_reset_incomplete_without_marker(&self) -> eyre::Result<bool> {
+        let _sync_guard = self.lock_sync();
+        for (_, submodule) in self.submodules.iter() {
+            if submodule.db.reset_in_progress()? {
+                return Ok(false);
+            }
+        }
+        self.reset_incomplete.store(false, Ordering::SeqCst);
+        Ok(true)
+    }
+
     /// Reset the index and install `next` before a registration can see the
     /// cleared module under the old assignment.
     ///
