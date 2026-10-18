@@ -573,8 +573,10 @@ pub struct StorageSyncConfig {
     /// Pending chunk count that lets a non-force flush write one submodule.
     ///
     /// This count does not set the `fdatasync` gap. That gap is
-    /// [`Self::min_durable_interval_ms`]. The value also sizes the pending-byte
-    /// ceiling and the packing sync stride. `0` is rejected.
+    /// [`Self::min_durable_interval_ms`]. Reaching the count also releases
+    /// every short packed run. A busy disk no longer waits out the reorder
+    /// grace for a neighbor. The value also sizes the pending-byte ceiling
+    /// and the packing sync stride. `0` is rejected.
     pub num_writes_before_sync: u64,
     /// Ceiling, in bytes, on chunk bodies one storage module may hold in memory
     /// awaiting flush before background body migration pauses writing to it.
@@ -713,10 +715,10 @@ pub struct StorageSyncConfig {
     /// everything else (measured on devnet HDDs: page cache full within
     /// minutes; serving p50 5–8 ms buffered vs 0.8 ms direct, recall p50
     /// ~12% lower direct). `testing()` keeps it off. An open that fails with
-    /// `EINVAL` or `EOPNOTSUPP` (tmpfs returns `EINVAL`) logs one warning and
-    /// keeps the buffered descriptor. Any other errno fails module open. Set
-    /// this flag false to skip the direct descriptor. Serving, the entropy
-    /// sweep, and packing validation stay on the buffered descriptor either way.
+    /// `EINVAL` or `EOPNOTSUPP` logs one warning and keeps the buffered
+    /// descriptor. Any other errno fails module open. Set this flag false
+    /// to skip the direct descriptor. Serving, the entropy sweep, and packing
+    /// validation stay on the buffered descriptor either way.
     ///
     /// A direct read of a range that still has dirty buffered pages returns
     /// the new bytes. Linux writes that range back before the direct read

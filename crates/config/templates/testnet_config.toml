@@ -34,6 +34,9 @@ bind_port = 30303
 
 
 [storage]
+# Does not set the fdatasync gap. That gap is min_durable_interval_ms.
+# 1 releases every short packed run at once. A busy disk does not wait
+# to join a neighbor. The code default is 100.
 num_writes_before_sync = 1
 # Seconds between completion rewrites of intervals.json. Write-ahead
 # Interrupted marks are still immediate. 0 rewrites on every sync.
