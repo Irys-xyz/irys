@@ -26,7 +26,11 @@ and does not modify the directory. Start the node so the in-place
 migration finishes, then convert. There is no separate v1 copy.
 
 An omitted `database.submodule_index` stays `mdbx`. That first open is
-also when these storage defaults take effect. Mining recall reads
+also when these storage defaults take effect. The same open reserves a
+short or holey `chunks.dat` to the full partition (`fallocate` mode 0)
+before it migrates the index. Both sit on the submodule disk. A 4.0.8
+file is sparse, so the reserve runs. `EOPNOTSUPP` leaves the file sparse.
+Any other `fallocate` error fails the open. Mining recall reads
 `chunks.dat` with `O_DIRECT` (`storage.recall_direct_io`, default true).
 A direct read of a range that still has dirty buffered pages returns the
 new bytes. Linux writes that range back before the direct read (XFS and
