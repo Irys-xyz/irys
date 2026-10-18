@@ -6167,9 +6167,7 @@ impl StorageModule {
                 Some((gap_sub, gap_off)) if gap_sub == sub_start => u32::try_from(gap_off)
                     .ok()
                     .map(PartitionChunkOffset)
-                    .filter(|offset| {
-                        offset.0 >= interval.start().0 && offset.0 <= interval.end().0
-                    })
+                    .filter(|offset| offset.0 >= interval.start().0 && offset.0 <= interval.end().0)
                     .unwrap_or(interval.start()),
                 _ => interval.start(),
             };
@@ -6179,13 +6177,14 @@ impl StorageModule {
                 self.crc_scan_from
                     .store(u64::from(scan_start.0), Ordering::SeqCst);
             }
-            match submodule.db.view(|tx| tx.offset_crc_missing(scan_start, interval.end())) {
+            match submodule
+                .db
+                .view(|tx| tx.offset_crc_missing(scan_start, interval.end()))
+            {
                 Ok(true) => {
-                    if let Some(gap) = Self::first_missing_checksum(
-                        &submodule.db,
-                        scan_start,
-                        interval.end(),
-                    ) {
+                    if let Some(gap) =
+                        Self::first_missing_checksum(&submodule.db, scan_start, interval.end())
+                    {
                         self.store_crc_gap(sub_start, u64::from(gap.0));
                     }
                     self.crc_scan_done.store(true, Ordering::SeqCst);
@@ -6263,9 +6262,7 @@ impl StorageModule {
             return true;
         };
         u64::from(submodule_start.0) == gap_sub
-            && rows
-                .iter()
-                .any(|row| u64::from(row.offset.0) >= gap_off)
+            && rows.iter().any(|row| u64::from(row.offset.0) >= gap_off)
     }
 
     /// First offset in `[start, end]` with no checksum.
