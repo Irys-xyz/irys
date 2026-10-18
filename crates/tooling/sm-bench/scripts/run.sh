@@ -33,10 +33,12 @@
 # scored miss has it and the new index stays. A usage error also exits 2, and
 # it does not write header.json. An old header.json from an earlier run does
 # not count: it is moved aside before the bench and put back when this run
-# does not write a new one. Bench exit 1 (a startup refusal, or an interrupt
-# with no scored failure) and every other status, including a panic, make this
-# script exit with that status so the ladder puts the previous index back. A
-# guard failure exits 1 before the bench starts.
+# does not write a new one. If that move fails, the old file is still in
+# place, so this script exits 1 before the bench starts. Bench exit 1 (a
+# startup refusal, or an interrupt with no scored failure) and every other
+# status, including a panic, make this script exit with that status so the
+# ladder puts the previous index back. A guard failure exits 1 before the
+# bench starts.
 
 set -euo pipefail
 
@@ -211,10 +213,11 @@ cleanup() {
         rm -f "$out/run.pid" "$out/sample.pid"
     fi
     # A scored miss writes a new header.json. A usage error does not, so the
-    # file moved aside before the bench goes back.
+    # file moved aside before the bench goes back. rm -f does not remove a
+    # directory. That failure must not replace the status this run chose.
     if [ -n "${header_prior:-}" ] && [ -e "$header_prior" ]; then
         if [ -n "${out:-}" ] && [ -e "$out/header.json" ]; then
-            rm -f "$header_prior"
+            rm -f "$header_prior" || true
         else
             mv "$header_prior" "$out/header.json" || true
         fi
@@ -232,9 +235,14 @@ sp=$!
 printf '%s\n' "$sp" >"$out/sample.pid"
 set +e
 # header.json from an earlier run must not make this exit 2 look scored.
+# A failed move leaves that file in place. Do not start the bench.
 if [ -f "$out/header.json" ]; then
     header_prior=$out/header.json.prior
-    mv "$out/header.json" "$header_prior"
+    if ! mv "$out/header.json" "$header_prior"; then
+        echo "cannot move $out/header.json aside" >&2
+        header_prior=
+        exit 1
+    fi
 fi
 "$bench" \
     --dir "$loadtest" \

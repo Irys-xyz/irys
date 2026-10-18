@@ -2609,6 +2609,118 @@ test_run_keeps_exit_2_when_an_old_header_is_not_rewritten() {
     rm -rf "$root"
 }
 
+# header.json.prior is a second name for header.json. mv fails, the old
+# file stays, and exit 2 must not count as a scored miss. The bench must
+# not start.
+test_run_exits_1_when_the_header_aside_is_the_same_file() {
+    local name=run-header-aside-same-file root err dev mnt rc
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    mkdir -p "$root/out/t"
+    printf 'OLD-SCORE\n' >"$root/out/t/header.json"
+    ln "$root/out/t/header.json" "$root/out/t/header.json.prior"
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 2\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        bad "$name" "run.sh treated the old header as a scored miss: $(cat "$err")"
+    elif [ "$rc" -ne 1 ]; then
+        bad "$name" "run.sh exited $rc: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran after the aside failed: $(cat "$err")"
+    elif ! cmp -s <(printf 'OLD-SCORE\n') "$root/out/t/header.json"; then
+        bad "$name" "header.json: $(cat "$root/out/t/header.json" 2>/dev/null)"
+    elif ! grep -q "cannot move" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# The aside path is a directory mounted read-only. mv cannot put the old
+# header there. Exit 2 must not count as a scored miss, and the bench must
+# not start. The trap's rm of that directory must not choose the status.
+test_run_exits_1_when_the_header_aside_directory_is_not_writable() {
+    local name=run-header-aside-ro root err dev mnt rc
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    mkdir -p "$root/out/t/header.json.prior"
+    printf 'OLD-SCORE\n' >"$root/out/t/header.json"
+    printf '#!/bin/sh\nprintf ran >"%s/bench-ran"\nexit 2\n' "$root" >"$root/bench"
+    chmod +x "$root/bench"
+    cat >"$root/wrap" <<EOF
+#!/bin/bash
+mount --bind "$root/out/t/header.json.prior" "$root/out/t/header.json.prior" || exit 96
+mount -o remount,bind,ro "$root/out/t/header.json.prior" || exit 95
+exec "$here/run.sh" "\$@"
+EOF
+    chmod +x "$root/wrap"
+    with_fake_sys "$root/sys" "$root/wrap" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        bad "$name" "run.sh treated the old header as a scored miss: $(cat "$err")"
+    elif [ "$rc" -ne 1 ]; then
+        bad "$name" "run.sh exited $rc: $(cat "$err")"
+    elif [ -e "$root/bench-ran" ]; then
+        bad "$name" "bench ran after the aside failed: $(cat "$err")"
+    elif ! cmp -s <(printf 'OLD-SCORE\n') "$root/out/t/header.json"; then
+        bad "$name" "header.json: $(cat "$root/out/t/header.json" 2>/dev/null)"
+    elif [ -e "$root/out/t/header.json.prior/header.json" ]; then
+        bad "$name" "mv wrote into the read-only aside"
+    elif ! grep -q "cannot move" "$err"; then
+        bad "$name" "stderr: $(cat "$err")"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
+# A scored miss writes a new header. header.json.prior is a directory, so
+# the trap cannot remove it. That rm must not turn the scored exit into 1.
+test_run_exits_0_when_exit_2_replaces_a_header_and_the_aside_is_a_directory() {
+    local name=run-exit-2-aside-directory root err dev mnt rc
+    root=$(tmpdir)
+    err=$root/err
+    loadtest_disk "$root" dev mnt
+    mkdir -p "$root/out/t/header.json.prior"
+    printf 'OLD-SCORE\n' >"$root/out/t/header.json"
+    cat >"$root/bench" <<EOF
+#!/bin/sh
+printf 'NEW-SCORE\n' > "$root/out/t/header.json"
+printf ran > "$root/bench-ran"
+exit 2
+EOF
+    chmod +x "$root/bench"
+    with_fake_sys "$root/sys" "$here/run.sh" \
+        --name t --device "$dev" --mount "$mnt" \
+        --loadtest "$root/safe/loadtest" \
+        --out-root "$root/out" --bench "$root/bench" --min-free-gib 0 \
+        >"$err" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        bad "$name" "run.sh exited $rc: $(cat "$err")"
+    elif [ ! -e "$root/bench-ran" ]; then
+        bad "$name" "bench did not run: $(cat "$err")"
+    elif ! cmp -s <(printf 'NEW-SCORE\n') "$root/out/t/header.json"; then
+        bad "$name" "header.json: $(cat "$root/out/t/header.json" 2>/dev/null)"
+    else
+        ok "$name"
+    fi
+    rm -rf "$root"
+}
+
 # A scored miss rewrites header.json. An older file in that path does not
 # replace the new one, and the run still counts as success.
 test_run_exits_0_when_exit_2_replaces_an_old_header() {
