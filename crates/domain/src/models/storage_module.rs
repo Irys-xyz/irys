@@ -901,10 +901,19 @@ pub struct StorageModule {
     /// A complete module leaves this set: a later checksum write does not
     /// open a gap, so it must not walk the offset span again.
     crc_scan_done: AtomicBool,
+    /// Submodule start of the first missing checksum. `u64::MAX` is none.
+    /// The next settled scan starts at [`Self::crc_gap_offset`] so it does
+    /// not decode the checksummed prefix again.
+    crc_gap_submodule: AtomicU64,
+    /// Offset of that checksum hole. `u64::MAX` is none.
+    crc_gap_offset: AtomicU64,
     /// Calls to `offset_crc_missing` from the settled scan. One submodule
     /// span is one call. Test code that reads a span does not count.
     #[cfg(test)]
     crc_span_scans: AtomicU64,
+    /// Start offset of the last counted span scan. `u64::MAX` is none.
+    #[cfg(test)]
+    crc_scan_from: AtomicU64,
     /// Crash tests drop the module without the final fsync or interval rewrite.
     #[cfg(test)]
     abandon_on_drop: AtomicBool,
@@ -2289,8 +2298,12 @@ impl StorageModule {
             crc_repairs: Mutex::new(BTreeSet::new()),
             crc_suspects: Mutex::new(BTreeSet::new()),
             crc_scan_done: AtomicBool::new(false),
+            crc_gap_submodule: AtomicU64::new(u64::MAX),
+            crc_gap_offset: AtomicU64::new(u64::MAX),
             #[cfg(test)]
             crc_span_scans: AtomicU64::new(0),
+            #[cfg(test)]
+            crc_scan_from: AtomicU64::new(u64::MAX),
             #[cfg(test)]
             abandon_on_drop: AtomicBool::new(false),
             #[cfg(test)]
@@ -4266,15 +4279,20 @@ impl StorageModule {
                 continue;
             }
             // A written checksum can close a gap only while some checksum
-            // submodule is still incomplete. Clear the latch then, so this
-            // point scans. Once every such submodule is complete, a write
-            // stores `crc: Some` and does not open a gap, so the latch stays
-            // set and this point does not walk the span.
+            // submodule is still incomplete, and only at or after the
+            // recorded hole in that submodule. A write before the hole
+            // stores `crc: Some` and does not open a hole in the prefix, so
+            // the latch stays set. No recorded hole: any checksum write may
+            // settle the module. Once every such submodule is complete, a
+            // write does not open a gap, so the latch stays set.
             // `clear_chunk_crc_complete` arms the next scan.
             let scan_still_open = self.submodules.iter().any(|(_, submodule)| {
                 submodule.db.stores_offset_crc() && !submodule.crc_complete.load(Ordering::SeqCst)
             });
-            if !rows.is_empty() && scan_still_open {
+            if !rows.is_empty()
+                && scan_still_open
+                && self.checksum_write_can_close_crc_gap(start, &rows)
+            {
                 self.crc_scan_done.store(false, Ordering::SeqCst);
             }
             let missed = submodule
@@ -6087,6 +6105,7 @@ impl StorageModule {
     /// touch the Metadata family, so this deletes the flag itself.
     pub fn clear_chunk_crc_complete(&self) -> eyre::Result<()> {
         self.crc_scan_done.store(false, Ordering::SeqCst);
+        self.clear_crc_gap();
         for (_, submodule) in self.submodules.iter() {
             submodule.db.set_chunk_crc_complete(false)?;
             submodule.crc_complete.store(false, Ordering::SeqCst);
@@ -6101,6 +6120,10 @@ impl StorageModule {
     /// unknown. Reset, a finished crashed reset, and partition recovery clear
     /// the flag and allow another scan. A scan error does not fail the durable
     /// point and does not stick the flag.
+    ///
+    /// A recorded hole resumes at that offset. The search that records a
+    /// later hole starts each probe after the prefix already known to be
+    /// present, so that prefix is decoded once.
     fn maybe_mark_crc_complete(&self) {
         if self.crc_scan_done.load(Ordering::SeqCst) {
             return;
@@ -6127,23 +6150,48 @@ impl StorageModule {
                 return;
             }
         }
+        let resume = self.crc_gap_if_current();
         for (interval, submodule) in self.submodules.iter() {
             if !submodule.db.stores_offset_crc() {
                 continue;
             }
+            let sub_start = u64::from(interval.start().0);
+            if resume.is_some_and(|(gap_sub, _)| sub_start < gap_sub) {
+                continue;
+            }
+            let scan_start = match resume {
+                Some((gap_sub, gap_off)) if gap_sub == sub_start => u32::try_from(gap_off)
+                    .ok()
+                    .map(PartitionChunkOffset)
+                    .filter(|offset| {
+                        offset.0 >= interval.start().0 && offset.0 <= interval.end().0
+                    })
+                    .unwrap_or(interval.start()),
+                _ => interval.start(),
+            };
             #[cfg(test)]
-            self.crc_span_scans.fetch_add(1, Ordering::SeqCst);
-            match submodule.db.view(|tx| {
-                tx.offset_crc_missing(
-                    PartitionChunkOffset(*interval.start()),
-                    PartitionChunkOffset(*interval.end()),
-                )
-            }) {
+            {
+                self.crc_span_scans.fetch_add(1, Ordering::SeqCst);
+                self.crc_scan_from
+                    .store(u64::from(scan_start.0), Ordering::SeqCst);
+            }
+            match submodule.db.view(|tx| tx.offset_crc_missing(scan_start, interval.end())) {
                 Ok(true) => {
+                    if let Some(gap) = Self::first_missing_checksum(
+                        &submodule.db,
+                        scan_start,
+                        interval.end(),
+                    ) {
+                        self.store_crc_gap(sub_start, u64::from(gap.0));
+                    }
                     self.crc_scan_done.store(true, Ordering::SeqCst);
                     return;
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    if resume.is_some_and(|(gap_sub, _)| gap_sub == sub_start) {
+                        self.clear_crc_gap();
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(
                         module_id = self.id,
@@ -6168,7 +6216,87 @@ impl StorageModule {
             }
             submodule.crc_complete.store(true, Ordering::SeqCst);
         }
+        self.clear_crc_gap();
         self.crc_scan_done.store(true, Ordering::SeqCst);
+    }
+
+    fn clear_crc_gap(&self) {
+        self.crc_gap_submodule.store(u64::MAX, Ordering::SeqCst);
+        self.crc_gap_offset.store(u64::MAX, Ordering::SeqCst);
+    }
+
+    fn store_crc_gap(&self, submodule_start: u64, offset: u64) {
+        self.crc_gap_submodule
+            .store(submodule_start, Ordering::SeqCst);
+        self.crc_gap_offset.store(offset, Ordering::SeqCst);
+    }
+
+    /// Recorded hole, when that submodule still covers the offset.
+    fn crc_gap_if_current(&self) -> Option<(u64, u64)> {
+        let submodule_start = self.crc_gap_submodule.load(Ordering::SeqCst);
+        let offset = self.crc_gap_offset.load(Ordering::SeqCst);
+        if submodule_start == u64::MAX || offset == u64::MAX {
+            return None;
+        }
+        let covers = self.submodules.iter().any(|(interval, submodule)| {
+            submodule.db.stores_offset_crc()
+                && u64::from(interval.start().0) == submodule_start
+                && offset >= u64::from(interval.start().0)
+                && offset <= u64::from(interval.end().0)
+        });
+        covers.then_some((submodule_start, offset))
+    }
+
+    /// A checksum write closes the recorded hole only at or after it, in
+    /// the same submodule. No recorded hole: any checksum write may settle
+    /// the module.
+    fn checksum_write_can_close_crc_gap(
+        &self,
+        submodule_start: PartitionChunkOffset,
+        rows: &[PackedOffsetRow],
+    ) -> bool {
+        let Some((gap_sub, gap_off)) = self.crc_gap_if_current() else {
+            return true;
+        };
+        u64::from(submodule_start.0) == gap_sub
+            && rows
+                .iter()
+                .any(|row| u64::from(row.offset.0) >= gap_off)
+    }
+
+    /// First offset in `[start, end]` with no checksum.
+    ///
+    /// The span scan already walked to the hole. This records where the
+    /// next scan starts. A present prefix is not decoded again: the next
+    /// probe begins at the first offset the previous probe did not cover.
+    fn first_missing_checksum(
+        index: &SubmoduleIndex,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> Option<PartitionChunkOffset> {
+        let missing = |from: PartitionChunkOffset, to: PartitionChunkOffset| -> Option<bool> {
+            index.view(|tx| tx.offset_crc_missing(from, to)).ok()
+        };
+        if missing(start, start)? {
+            return Some(start);
+        }
+        let mut lo = u64::from(start.0).saturating_add(1);
+        let mut hi = u64::from(end.0);
+        if lo > hi {
+            return None;
+        }
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let from = PartitionChunkOffset(u32::try_from(lo).ok()?);
+            let to = PartitionChunkOffset(u32::try_from(mid).ok()?);
+            if missing(from, to)? {
+                hi = mid;
+            } else {
+                lo = mid.saturating_add(1);
+            }
+        }
+        let found = PartitionChunkOffset(u32::try_from(lo).ok()?);
+        missing(found, found)?.then_some(found)
     }
 
     #[cfg(test)]
@@ -6180,6 +6308,13 @@ impl StorageModule {
     #[cfg(test)]
     fn crc_span_scan_count(&self) -> u64 {
         self.crc_span_scans.load(Ordering::SeqCst)
+    }
+
+    /// Start offset of the last counted span scan.
+    #[cfg(test)]
+    fn crc_scan_start_for_test(&self) -> Option<u32> {
+        let raw = self.crc_scan_from.load(Ordering::SeqCst);
+        u32::try_from(raw).ok()
     }
 
     #[cfg(test)]
@@ -15050,6 +15185,89 @@ mod tests {
         assert_indexed_entropy(&reopened, data_root)?;
         drop(reopened);
         drop(tmp);
+        Ok(())
+    }
+
+    /// A settled Rocks module with one checksum hole scans from that hole.
+    /// A later write before the hole does not walk the prefix. Filling the
+    /// hole still sets `crc_complete`. An empty durable point does not scan.
+    #[test]
+    fn checksum_gap_scan_resumes_at_the_first_hole() -> eyre::Result<()> {
+        let (_tmp, _config, module) =
+            open_presence_module("crc_gap_resume", SubmoduleIndexEngine::Rocksdb)?;
+        for offset in 0..8_u32 {
+            assert!(module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                vec![0x21_u8; 32],
+                ChunkType::Entropy,
+            ));
+            module.sync_pending_chunks()?;
+        }
+        assert!(
+            module.chunk_crc_complete_for_test(),
+            "the fill scan set crc_complete"
+        );
+        module.set_offset_crc_for_test(PartitionChunkOffset::from(5), None)?;
+        module.clear_chunk_crc_complete()?;
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(6),
+            vec![0x31_u8; 32],
+            ChunkType::Entropy,
+        ));
+        module.sync_pending_chunks()?;
+        assert!(
+            !module.chunk_crc_complete_for_test(),
+            "offset 5 still has no checksum"
+        );
+
+        let before_resume = module.crc_span_scan_count();
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(7),
+            vec![0x32_u8; 32],
+            ChunkType::Entropy,
+        ));
+        module.sync_pending_chunks()?;
+        assert_eq!(
+            module.crc_span_scan_count(),
+            before_resume + 1,
+            "the open gap must be scanned once"
+        );
+        assert_eq!(
+            module.crc_scan_start_for_test(),
+            Some(5),
+            "the scan restarted at the submodule start"
+        );
+
+        let before_early = module.crc_span_scan_count();
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(2),
+            vec![0x33_u8; 32],
+            ChunkType::Entropy,
+        ));
+        module.sync_pending_chunks()?;
+        assert_eq!(
+            module.crc_span_scan_count(),
+            before_early,
+            "a write before the gap must not scan"
+        );
+
+        assert!(module.write_chunk(
+            PartitionChunkOffset::from(5),
+            vec![0x34_u8; 32],
+            ChunkType::Entropy,
+        ));
+        module.sync_pending_chunks()?;
+        assert!(
+            module.chunk_crc_complete_for_test(),
+            "filling the only gap sets crc_complete"
+        );
+        let after_fill = module.crc_span_scan_count();
+        module.force_sync_pending_chunks()?;
+        assert_eq!(
+            module.crc_span_scan_count(),
+            after_fill,
+            "an empty durable point must not scan"
+        );
         Ok(())
     }
 
