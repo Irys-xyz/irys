@@ -3246,6 +3246,8 @@ fn v1_data_path_reads() -> usize {
 #[cfg(test)]
 thread_local! {
     static V1_UNCOMPARED_HASH_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static V1_UNCOMPARED_HASH_GROUP: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -3261,6 +3263,30 @@ fn v1_uncompared_hash_views() -> usize {
 fn note_v1_uncompared_hash_view() {
     #[cfg(test)]
     V1_UNCOMPARED_HASH_VIEWS.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+struct V1UncomparedHashGroupGuard;
+
+#[cfg(test)]
+impl Drop for V1UncomparedHashGroupGuard {
+    fn drop(&mut self) {
+        V1_UNCOMPARED_HASH_GROUP.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+fn set_v1_uncompared_hash_group(group: usize) -> V1UncomparedHashGroupGuard {
+    V1_UNCOMPARED_HASH_GROUP.with(|cell| cell.set(Some(group.max(1))));
+    V1UncomparedHashGroupGuard
+}
+
+fn uncompared_hash_group() -> usize {
+    #[cfg(test)]
+    if let Some(group) = V1_UNCOMPARED_HASH_GROUP.with(std::cell::Cell::get) {
+        return group.max(1);
+    }
+    usize::MAX
 }
 
 #[cfg(test)]
@@ -3733,18 +3759,23 @@ fn v1_uncompared_hash_rows(
     if keys.is_empty() {
         return Ok(Vec::new());
     }
-    note_verify_view();
-    note_v1_uncompared_hash_view();
-    let rows = env.view_eyre(|tx| {
-        keys.iter()
-            .map(|key| match tx.get::<ChunkPathHashesByOffset>(*key) {
-                Ok(row) => Ok(row),
-                Err(err) if table_missing(&err) => Ok(None),
-                Err(err) => Err(err.into()),
-            })
-            .collect::<eyre::Result<Vec<_>>>()
-    })?;
-    Ok(keys.iter().copied().zip(rows).collect())
+    let mut out = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(uncompared_hash_group()) {
+        let rows = env.view_eyre(|tx| {
+            note_verify_view();
+            note_v1_uncompared_hash_view();
+            chunk
+                .iter()
+                .map(|key| match tx.get::<ChunkPathHashesByOffset>(*key) {
+                    Ok(row) => Ok(row),
+                    Err(err) if table_missing(&err) => Ok(None),
+                    Err(err) => Err(err.into()),
+                })
+                .collect::<eyre::Result<Vec<_>>>()
+        })?;
+        out.extend(chunk.iter().copied().zip(rows));
+    }
+    Ok(out)
 }
 
 fn verify_mdbx_v1_against_rocks(
@@ -4526,9 +4557,9 @@ mod tests {
         ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
         convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_data_path_reads,
         reset_v1_range_copy_batches, reset_v1_uncompared_hash_views, reset_verify_placement_caches,
-        reset_verify_views, set_merge_batch, set_v1_placement_batch, v1_data_path_reads,
-        v1_placement_views, v1_range_copy_batches, v1_uncompared_hash_views, verify_mdbx_and_rocks,
-        verify_placement_caches, verify_rocks_records, verify_views,
+        reset_verify_views, set_merge_batch, set_v1_placement_batch, set_v1_uncompared_hash_group,
+        v1_data_path_reads, v1_placement_views, v1_range_copy_batches, v1_uncompared_hash_views,
+        verify_mdbx_and_rocks, verify_placement_caches, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -6668,6 +6699,47 @@ mod tests {
             3,
             "path compare is two views plus one hash batch"
         );
+        Ok(())
+    }
+
+    /// A view per uncompared offset counts once per view.
+    #[test]
+    fn verify_v1_counts_each_uncompared_hash_view() -> eyre::Result<()> {
+        const N: u64 = 4;
+        let holes = [1_u64, 2];
+        let root = temp("convert-v1-uncompared-per-key");
+        let consensus = write_v1_one_tx_with_holes(root.path(), N, &holes)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![
+                    PackedOffsetRow {
+                        offset: PartitionChunkOffset(holes[0] as u32),
+                        crc: Some(0x11),
+                        proof: None,
+                    },
+                    PackedOffsetRow {
+                        offset: PartitionChunkOffset(holes[1] as u32),
+                        crc: Some(0x22),
+                        proof: None,
+                    },
+                ])?;
+                Ok(())
+            })?;
+        }
+        let _group = set_v1_uncompared_hash_group(1);
+        reset_v1_uncompared_hash_views();
+        reset_verify_views();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(report.mismatch_chunk_crc >= 2, "{report}");
+        assert_eq!(v1_uncompared_hash_views(), 2, "{report}");
+        assert_eq!(verify_views(), 4, "{report}");
         Ok(())
     }
 
