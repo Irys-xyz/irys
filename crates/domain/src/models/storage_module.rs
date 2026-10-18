@@ -6112,8 +6112,7 @@ impl StorageModule {
     ///
     /// Touching matches merge. The stored map is scanned once. Each pending
     /// offset is a binary search. Pending is a bounded batch. Rebuilding a
-    /// tree is O(n log n) in the fragment count, and the data-sync tick calls
-    /// this for every module.
+    /// tree is O(n log n) in the fragment count.
     pub fn get_intervals(&self, chunk_type: ChunkType) -> Vec<Interval<PartitionChunkOffset>> {
         let intervals = self.intervals.read().unwrap();
         let mut spans = self.intervals_matching(&intervals, chunk_type);
