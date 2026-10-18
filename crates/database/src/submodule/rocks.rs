@@ -1281,7 +1281,13 @@ impl RocksSubmoduleStore {
                 }
             },
         };
-        if !conversion_lock_protects(&flock, &path) {
+        // Queued flush and compaction must finish in this directory before a
+        // later check can refuse the seal. Both refuse arms abandon the handle.
+        // They do not flush, and they do not cancel background work: cancel
+        // flushes when the WAL is off. A flush already running when the
+        // directory is renamed still finishes. Waiting after that rename
+        // writes the SST files into the replacement.
+        if !drain_while_lock_protects(&self, &flock, &path)? {
             close_without_touching_directory(self, &path)?;
             eyre::bail!(
                 "rocksdb directory {} was replaced. Refusing to write SCHEMA.",
@@ -1298,7 +1304,9 @@ impl RocksSubmoduleStore {
             self.flush_families_locked()?;
             self.compact_split_families_locked();
         }
-        if !conversion_lock_protects(&flock, &path) {
+        // Compaction from the flush above. Skip the wait when the directory
+        // was already replaced: waiting would finish that publish.
+        if !drain_while_lock_protects(&self, &flock, &path)? {
             close_without_touching_directory(self, &path)?;
             eyre::bail!(
                 "rocksdb directory {} was replaced. Refusing to write SCHEMA.",
@@ -1326,6 +1334,46 @@ impl RocksSubmoduleStore {
         }
         write_schema_marker_file(&path, SUBMODULE_SCHEMA_ROCKS_V1)
     }
+}
+
+/// Wait for flush and compaction that are already queued.
+///
+/// Does not start a flush. A new flush writes SST files through `dbname_`.
+fn drain_background_work(store: &RocksSubmoduleStore) -> eyre::Result<()> {
+    #[cfg(test)]
+    BACKGROUND_DRAINS.with(|cell| cell.set(cell.get().saturating_add(1)));
+    let mut opts = rocksdb::WaitForCompactOptions::default();
+    // Leave `flush` false. A new flush writes SST files through dbname_.
+    opts.set_flush(false);
+    store
+        .db
+        .wait_for_compact(&opts)
+        .wrap_err("drain rocksdb background flush and compaction")
+}
+
+/// `true` when the wait finished and `flock` still names `path`.
+///
+/// `false` when the directory was already replaced, or the wait failed after
+/// that replacement. The caller abandons without flushing and without cancel.
+fn drain_while_lock_protects(
+    store: &RocksSubmoduleStore,
+    flock: &File,
+    path: &Path,
+) -> eyre::Result<bool> {
+    if !conversion_lock_protects(flock, path) {
+        return Ok(false);
+    }
+    if let Err(err) = drain_background_work(store) {
+        // `Err` makes the caller drop `store`, and that drop flushes. A
+        // replaced directory takes the abandon path instead.
+        if !conversion_lock_protects(flock, path) {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    #[cfg(test)]
+    run_after_protected_drain();
+    Ok(conversion_lock_protects(flock, path))
 }
 
 /// Put the directory at `path` back without closing `store`.
@@ -1562,6 +1610,46 @@ pub(super) enum CloseScratchStop {
 thread_local! {
     static CLOSE_SCRATCH_STOP: std::cell::Cell<Option<CloseScratchStop>> =
         const { std::cell::Cell::new(None) };
+    static AFTER_PROTECTED_DRAIN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+    static BACKGROUND_DRAINS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+struct AfterProtectedDrainGuard;
+
+#[cfg(test)]
+impl Drop for AfterProtectedDrainGuard {
+    fn drop(&mut self) {
+        AFTER_PROTECTED_DRAIN.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+/// Runs after a protected drain check and before the lock is read again.
+/// The directory is still the one the handle opened, unless the hook renames it.
+#[cfg(test)]
+fn set_after_protected_drain(hook: impl FnMut() + 'static) -> AfterProtectedDrainGuard {
+    AFTER_PROTECTED_DRAIN.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
+    AfterProtectedDrainGuard
+}
+
+#[cfg(test)]
+fn run_after_protected_drain() {
+    AFTER_PROTECTED_DRAIN.with(|cell| {
+        if let Some(hook) = cell.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn reset_background_drains() {
+    BACKGROUND_DRAINS.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn background_drains() -> u64 {
+    BACKGROUND_DRAINS.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -9822,5 +9910,275 @@ mod tests {
         copy_tree(&moved, &copy)?;
         assert_eq!(placement_row_count(&copy)?, 1);
         Ok(())
+    }
+
+    fn plant_replacement(rocks: &Path) -> eyre::Result<()> {
+        fs::create_dir(rocks)?;
+        fs::write(rocks.join("CURRENT"), b"MANIFEST-000099\n")?;
+        fs::write(rocks.join("000099.log"), b"replacement-log")?;
+        fs::write(rocks.join("LOCK"), b"")?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        Ok(())
+    }
+
+    fn schedule_memtable_flush(store: &RocksSubmoduleStore) -> eyre::Result<()> {
+        let mut opts = rocksdb::FlushOptions::default();
+        // The write-buffer path schedules this and returns. It does not wait.
+        opts.set_wait(false);
+        for cf in families() {
+            let handle = cf_handle(&store.db, cf)?;
+            store
+                .db
+                .flush_cf_opt(&handle, &opts)
+                .map_err(|err| eyre::eyre!("schedule flush: {err}"))?;
+        }
+        Ok(())
+    }
+
+    fn replacement_names() -> Vec<String> {
+        vec![
+            "000099.log".to_owned(),
+            "CURRENT".to_owned(),
+            "KEEP".to_owned(),
+            "LOCK".to_owned(),
+        ]
+    }
+
+    /// A queued flush that publishes shows up inside this window.
+    fn assert_replacement_stays_planted(rocks: &Path) -> eyre::Result<()> {
+        let started = Instant::now();
+        loop {
+            assert_eq!(
+                dir_names(rocks)?,
+                replacement_names(),
+                "replacement gained flush files"
+            );
+            assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000099\n");
+            if started.elapsed() >= Duration::from_millis(800) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    struct QueuedFlush {
+        root: irys_testing_utils::utils::tempfile::TempDir,
+        rocks: PathBuf,
+        store: RocksSubmoduleStore,
+    }
+
+    /// One durable row, one memtable row, and a non-blocking flush of that row.
+    /// The flush is queued while the open directory is still the original.
+    fn open_with_queued_flush(prefix: &str) -> eyre::Result<QueuedFlush> {
+        let root = temp_dir(prefix);
+        let rocks = root.path().join("rocks");
+        fs::create_dir(&rocks)?;
+        let store = RocksSubmoduleStore::open_converting(&rocks)?;
+        put_offset(&store, 0, 1)?;
+        flush_every_family(&store)?;
+        put_offset(&store, 2, 2)?;
+        schedule_memtable_flush(&store)?;
+        Ok(QueuedFlush { root, rocks, store })
+    }
+
+    /// The empty-directory arm. The flush is queued while the lock protects
+    /// the directory. The swap runs after that wait. The replacement must stay
+    /// the planted files, and both rows must open from the moved directory.
+    #[test]
+    fn queued_flush_drained_before_swap_does_not_publish_into_the_replacement() -> eyre::Result<()>
+    {
+        reset_background_drains();
+        let prepared = open_with_queued_flush("queued-flush-swap")?;
+        let rocks = prepared.rocks.clone();
+        let moved = prepared.root.path().join("rocks-moved");
+        let rocks_hook = rocks.clone();
+        let moved_hook = moved.clone();
+        let _hook = set_after_protected_drain(move || {
+            fs::rename(&rocks_hook, &moved_hook).expect("rename open directory");
+            plant_replacement(&rocks_hook).expect("plant replacement");
+        });
+        let err = prepared.store.seal_and_stamp().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("replaced"), "{text}");
+        assert_replacement_stays_planted(&rocks)?;
+        assert!(!rocks.join("SCHEMA").is_file());
+        assert!(
+            !prepared
+                .root
+                .path()
+                .join(".rocks.close-scratch-marker")
+                .exists()
+        );
+        let copy = prepared.root.path().join("rocks-copy");
+        copy_tree(&moved, &copy)?;
+        assert_eq!(
+            placement_row_count(&copy)?,
+            2,
+            "queued flush did not finish in the original directory"
+        );
+        assert_eq!(
+            background_drains(),
+            1,
+            "refused close drained more than the protected wait"
+        );
+        Ok(())
+    }
+
+    /// The scratch-marker arm. Same queued flush, then the marker path is a
+    /// directory so the marker rename fails. Abandon must not publish.
+    #[test]
+    fn queued_flush_drained_before_marker_failure_does_not_publish() -> eyre::Result<()> {
+        reset_background_drains();
+        let prepared = open_with_queued_flush("queued-flush-marker")?;
+        let rocks = prepared.rocks.clone();
+        let moved = prepared.root.path().join("rocks-moved");
+        let rocks_hook = rocks.clone();
+        let moved_hook = moved.clone();
+        let marker = prepared.root.path().join(".rocks.close-scratch-marker");
+        let _hook = set_after_protected_drain(move || {
+            fs::rename(&rocks_hook, &moved_hook).expect("rename open directory");
+            plant_replacement(&rocks_hook).expect("plant replacement");
+            fs::create_dir(&marker).expect("marker path is a directory");
+        });
+        let err = prepared.store.seal_and_stamp().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("close scratch marker"),
+            "marker failure must surface: {text}"
+        );
+        assert_replacement_stays_planted(&rocks)?;
+        assert!(!rocks.join("SCHEMA").is_file());
+        let copy = prepared.root.path().join("rocks-copy");
+        copy_tree(&moved, &copy)?;
+        assert_eq!(
+            placement_row_count(&copy)?,
+            2,
+            "queued flush did not finish in the original directory"
+        );
+        assert_eq!(
+            background_drains(),
+            1,
+            "marker failure drained more than the protected wait"
+        );
+        Ok(())
+    }
+
+    /// A flush scheduled after the directory is already swapped cannot be
+    /// waited on: that wait publishes. This seal must not drain.
+    #[test]
+    fn flush_queued_after_the_swap_is_not_drained() -> eyre::Result<()> {
+        reset_background_drains();
+        let prepared = open_with_queued_flush("queued-flush-after-swap")?;
+        let moved = prepared.root.path().join("rocks-moved");
+        fs::rename(&prepared.rocks, &moved)?;
+        plant_replacement(&prepared.rocks)?;
+        schedule_memtable_flush(&prepared.store)?;
+        let err = prepared.store.seal_and_stamp().unwrap_err();
+        assert!(format!("{err:#}").contains("replaced"), "{err:?}");
+        assert_eq!(
+            background_drains(),
+            0,
+            "draining after the swap publishes the queued flush"
+        );
+        Ok(())
+    }
+
+    /// The order the refuse path must still allow: the directory stays, the
+    /// queued flush is part of the sealed index, and SCHEMA is written.
+    #[test]
+    fn queued_flush_still_seals_when_the_directory_stays() -> eyre::Result<()> {
+        reset_background_drains();
+        let prepared = open_with_queued_flush("queued-flush-seal")?;
+        prepared.store.seal_and_stamp()?;
+        assert_eq!(
+            background_drains(),
+            2,
+            "a protected seal drains before the flush and after it"
+        );
+        assert_eq!(
+            fs::read_to_string(prepared.rocks.join(SCHEMA_FILE))?,
+            SUBMODULE_SCHEMA_ROCKS_V1
+        );
+        assert!(
+            !prepared
+                .root
+                .path()
+                .join(".rocks.close-scratch-marker")
+                .exists()
+        );
+        let copy = prepared.root.path().join("rocks-copy");
+        copy_tree(&prepared.rocks, &copy)?;
+        assert_eq!(placement_row_count(&copy)?, 2);
+        Ok(())
+    }
+
+    /// Several L0 flushes with auto compaction left on. Wait until the manifest
+    /// stops changing, then swap. A later change is a publish from the refused
+    /// close, not a compaction that finished in the original directory.
+    #[test]
+    fn probe_l0_compaction_does_not_publish_into_the_replacement() -> eyre::Result<()> {
+        let root = temp_dir("probe-l0-compact");
+        let rocks = root.path().join("rocks");
+        fs::create_dir(&rocks)?;
+        let store = RocksSubmoduleStore::open_converting(&rocks)?;
+        for offset in 0..8 {
+            put_offset(&store, offset, offset as u8)?;
+            flush_every_family(&store)?;
+        }
+        let settled = wait_until_manifest_settles(&rocks)?;
+        let names = dir_names(&rocks)?;
+        let moved = root.path().join("rocks-moved");
+        fs::rename(&rocks, &moved)?;
+        plant_replacement(&rocks)?;
+        assert_eq!(
+            manifest_bytes(&moved)?,
+            settled,
+            "manifest changed before seal"
+        );
+        let err = store.seal_and_stamp().unwrap_err();
+        assert!(format!("{err:#}").contains("replaced"), "{err:?}");
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(800) {
+            assert_eq!(
+                manifest_bytes(&moved)?,
+                settled,
+                "compaction edited the moved manifest after seal; replacement={:?} moved={:?}",
+                dir_names(&rocks)?,
+                dir_names(&moved)?
+            );
+            assert_eq!(
+                dir_names(&moved)?,
+                names,
+                "moved directory gained or lost files"
+            );
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000099\n");
+        assert_eq!(
+            dir_names(&rocks)?,
+            replacement_names(),
+            "replacement gained files"
+        );
+        Ok(())
+    }
+
+    fn wait_until_manifest_settles(path: &Path) -> eyre::Result<Vec<u8>> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut previous = manifest_bytes(path)?;
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            let now = manifest_bytes(path)?;
+            if now != previous {
+                previous = now;
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            let again = manifest_bytes(path)?;
+            if again == now {
+                return Ok(again);
+            }
+            previous = again;
+        }
+        eyre::bail!("manifest still moving before the swap")
     }
 }
