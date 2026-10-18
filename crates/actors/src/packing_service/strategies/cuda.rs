@@ -96,14 +96,21 @@ impl super::PackingStrategy for CudaPackingStrategy {
             let chain_id = self.packing_config.chain_id;
             let entropy_iterations = storage_module.config.consensus.entropy_packing_iterations;
             let runtime_handle = self.runtime_handle.clone();
+            // Size in `usize`. A `u32` product wraps once the batch is 16384
+            // chunks of 256KiB, and the CUDA capacity check then fails forever.
+            let batch_bytes = super::cuda_entropy_batch_bytes(num_chunks, chunk_size).ok_or_else(
+                || {
+                    format!(
+                        "CUDA packing buffer size overflows for SM {storage_module_id}: {num_chunks} chunks of {chunk_size} bytes"
+                    )
+                },
+            )?;
 
             // Pack batch on GPU
             let handle = runtime_handle.clone().spawn(async move {
                 let packed = runtime_handle
                     .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
-                        let mut out: Vec<u8> = Vec::with_capacity(
-                            (num_chunks * chunk_size as u32).try_into().unwrap(),
-                        );
+                        let mut out: Vec<u8> = Vec::with_capacity(batch_bytes);
                         capacity_pack_range_cuda_c(
                             num_chunks,
                             mining_address,
@@ -153,11 +160,14 @@ impl super::PackingStrategy for CudaPackingStrategy {
                         }
                         crate::packing_service::EntropyOffset::Pack => {}
                     }
+                    let byte_range = super::cuda_chunk_byte_range(i, chunk_size).ok_or_else(|| {
+                        format!(
+                            "CUDA packing chunk {i} byte range overflows for SM {storage_module_id}"
+                        )
+                    })?;
                     let wrote = storage_module_clone.write_entropy_chunk(
                         offset,
-                        out[(i * chunk_size as u32) as usize
-                            ..((i + 1) * chunk_size as u32) as usize]
-                            .to_vec(),
+                        out[byte_range].to_vec(),
                         partition_hash,
                     );
                     if !wrote {
