@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1643 — expert analysis — reject price quotes over the max data tx size</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel-2: #1d212c;
+    --border: #2a2f3d;
+    --text: #e6e8ef;
+    --text-dim: #9aa2b4;
+    --accent: #7aa2f7;
+    --good: #4fd6a8;
+    --warn: #f5a742;
+    --bad: #f07178;
+    --code-bg: #10131a;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  header.page {
+    padding: 1.6rem 1.5rem 1.2rem;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #151822, #0f1117);
+  }
+  header.page h1 {
+    margin: 0 0 0.3rem;
+    font-size: 1.4rem;
+    font-weight: 650;
+  }
+  header.page .meta {
+    color: var(--text-dim);
+    font-size: 0.88rem;
+  }
+  header.page .meta code {
+    background: var(--code-bg);
+    padding: 0.08rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.82rem;
+  }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(15,17,23,0.96);
+    backdrop-filter: blur(4px);
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 1.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    font-size: 0.85rem;
+  }
+  nav.toc a {
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  nav.toc a:hover { text-decoration: underline; }
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 1.6rem 1.5rem 4rem;
+  }
+  section {
+    margin-bottom: 2.4rem;
+    scroll-margin-top: 3.2rem;
+  }
+  section h2 {
+    font-size: 1.1rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin-bottom: 0.9rem;
+    color: #fff;
+  }
+  section h2 .tag {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    font-weight: 500;
+    margin-left: 0.5rem;
+  }
+  p { margin: 0.6rem 0; }
+  code, pre, a.cite {
+    font-family: var(--mono);
+  }
+  a.cite {
+    color: var(--accent);
+    background: var(--code-bg);
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    text-decoration: none;
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  a.cite:hover { text-decoration: underline; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+    font-size: 0.83rem;
+    line-height: 1.5;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.87rem;
+    margin: 0.8rem 0 1rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.5rem 0.65rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--panel-2);
+    font-weight: 600;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
+  .unaccounted { color: var(--bad); font-weight: 700; }
+  .reestablished { color: var(--good); font-weight: 600; }
+  ol.focus-list, ul.clean {
+    padding-left: 1.2rem;
+  }
+  ol.focus-list li, ul.clean li {
+    margin-bottom: 1rem;
+  }
+  .callout {
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    margin: 0.8rem 0;
+    border: 1px solid var(--border);
+    font-size: 0.92rem;
+  }
+  .callout.info { background: rgba(122,162,247,0.08); border-color: rgba(122,162,247,0.35); }
+  .callout.warn { background: rgba(245,167,66,0.08); border-color: rgba(245,167,66,0.4); }
+  .callout.bad { background: rgba(240,113,120,0.08); border-color: rgba(240,113,120,0.4); }
+  .callout .label {
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    display: block;
+    margin-bottom: 0.3rem;
+  }
+  .callout.info .label { color: var(--accent); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.bad .label { color: var(--bad); }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+    margin: 1rem 0;
+    font-size: 0.85rem;
+  }
+  .flow .box {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 0.9rem;
+    min-width: 170px;
+    flex: 1 1 170px;
+  }
+  .flow .box .t { font-weight: 700; margin-bottom: 0.3rem; color: #fff; }
+  .flow .box .d { color: var(--text-dim); font-size: 0.8rem; }
+  .flow .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.5rem;
+    color: var(--text-dim);
+    font-size: 1.3rem;
+    min-width: 2rem;
+  }
+  .flow .box.bad { border-color: var(--bad); }
+  .flow .box.good { border-color: var(--good); }
+  footer.page {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    border-top: 1px solid var(--border);
+    padding: 1.2rem 1.5rem;
+    text-align: center;
+  }
+  @media (max-width: 600px) {
+    nav.toc { gap: 0.3rem 0.7rem; font-size: 0.8rem; }
+    .flow { flex-direction: column; }
+    .flow .arrow { transform: rotate(90deg); padding: 0.2rem 0; }
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>PR #1643 — fix(api): reject price quotes over the max data tx size</h1>
+  <div class="meta">
+    Expert mode · CI pass (opened) · repo root for paths: checkout root ·
+    commit <code>c2c5417c933e980ecd89fc2b2ea266dc7d7ba012</code> ·
+    citations resolve against <code>Irys-xyz/irys@c2c5417c9</code>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#intent">Intent &amp; approach</a>
+  <a href="#delta">Delta semantics</a>
+  <a href="#cross-file">Cross-file impact</a>
+  <a href="#review-focus">Review-focus map</a>
+  <a href="#open-questions">Open questions</a>
+</nav>
+
+<main>
+
+<section id="intent">
+  <h2>Intent &amp; approach</h2>
+  <p>
+    <code>GET /v1/price/{ledger}/{size}</code> computed <code>bytes_to_store</code> by rounding the path-supplied
+    <code>size</code> up to a whole number of chunks via an unchecked
+    <code>div_ceil(chunk_size) * chunk_size</code>. For <code>size</code> near <code>u64::MAX</code> the multiply
+    overflows; because the node's release profile sets <code>overflow-checks = true</code>
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/Cargo.toml#L400">Cargo.toml:400</a>),
+    that overflow panics, and the node's custom panic hook
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/chain/src/main.rs#L72">crates/chain/src/main.rs:72</a>)
+    turns any panic into a process abort. An unauthenticated, single HTTP request was enough to crash-loop mainnet
+    nodes (stated in the PR description, dated 2026-10-18).
+  </p>
+  <p>
+    The fix rejects the request with <code>400</code> before the multiply ever runs, whenever the requested
+    chunk count exceeds <code>consensus.mempool.max_data_tx_chunks</code>
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L60">crates/api-server/src/routes/price.rs:60</a>).
+    This is the same cap already enforced at mempool ingress and consensus prevalidation via
+    <code>data_tx_structural_defect</code>
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/actors/src/data_tx_validation.rs#L63">crates/actors/src/data_tx_validation.rs:63</a>),
+    so the approach is semantic, not just mechanical: a quote is never returned for a size that could never become
+    an accepted transaction, and bounding the chunk count before the multiply incidentally also bounds the multiply
+    itself.
+  </p>
+  <p>
+    <strong>Road not taken:</strong> the overflow could have been fixed purely mechanically — swap the unchecked
+    multiply for <code>checked_mul</code> or <code>saturating_mul</code> and return a generic error (or a clamped
+    value) on overflow. That would have stopped the crash without encoding "this size can never be accepted" as a
+    400. The chosen approach instead reuses the mempool/consensus cap as the rejection boundary, which is more
+    informative to callers (a real error message naming the max transaction size) but, as discussed in
+    <a href="#review-focus">Review-focus map</a>, introduces a third, independently-written site that encodes the
+    same cap-comparison rule.
+  </p>
+  <p>
+    The commit message and PR description both state this is a cherry-pick of mainnet hotfix #1640 onto
+    <code>release/4.x</code>, applied "cleanly" — i.e. no conflict resolution was needed, so the diff is expected to
+    be the hotfix verbatim.
+  </p>
+</section>
+
+<section id="delta">
+  <h2>Delta semantics</h2>
+  <p>
+    <strong>API contract — error response:</strong> before this change, any <code>size</code> whose chunk count
+    exceeded <code>max_data_tx_chunks</code> either (a) succeeded and returned a quote for a tx that mempool
+    ingress/consensus would later reject anyway, or (b) for sizes close to <code>u64::MAX</code>, aborted the
+    process. After this change, such sizes uniformly get a <code>400</code> with a message naming the byte-size
+    cap, before any EMA lookup, block-tree read, or fee calculation runs
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L61-L70">crates/api-server/src/routes/price.rs:61-70</a>).
+    The check sits above the <code>match data_ledger</code>
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L73">crates/api-server/src/routes/price.rs:73</a>),
+    so it applies uniformly to <code>Publish</code>, <code>Submit</code>, <code>OneYear</code> and
+    <code>ThirtyDay</code> alike, even though <code>Submit</code> is rejected for an unrelated reason a few lines
+    later.
+  </p>
+  <p>
+    <strong>Compatibility:</strong> purely additive from a valid-client point of view — every size that previously
+    returned <code>200</code> with a correct quote still does (the test asserts the exact-max-size boundary stays
+    <code>200</code>:
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/chain-tests/src/api/pricing_endpoint.rs#L55-L57">crates/chain-tests/src/api/pricing_endpoint.rs:55-57</a>).
+    Only requests that were already doomed to be rejected downstream (or that crashed the node) observe a behavior
+    change, and they now get a normal HTTP error instead of a crash or a misleading quote.
+  </p>
+
+  <h3>Removed-behavior audit</h3>
+  <table>
+    <thead>
+      <tr><th>Deleted/replaced code</th><th>Old enforcement site</th><th>New enforcement / outcome</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <code>let bytes_to_store = std::cmp::max(chunk_size, bytes_to_store);<br>
+          let bytes_to_store = bytes_to_store.div_ceil(chunk_size) * chunk_size;</code>
+        </td>
+        <td>Old <code>price.rs</code> body — "requested size rounds up to at least one chunk"</td>
+        <td class="reestablished">Re-established identically: <code>let chunks = std::cmp::max(chunk_size, bytes_to_store).div_ceil(chunk_size);</code> at
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L55">price.rs:55</a>,
+          with the final <code>bytes_to_store = chunks * chunk_size</code> at
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L71">price.rs:71</a>.
+          Same rounding semantics, just computed as chunk-count-first so the new cap check can run before the
+          multiply.</td>
+      </tr>
+      <tr>
+        <td>Implicit old behavior: the endpoint would attempt to multiply an unbounded chunk count by
+          <code>chunk_size</code> for any <code>u64</code> input</td>
+        <td>None — there was no upper bound on <code>bytes_to_store</code> at this layer prior to this PR</td>
+        <td class="reestablished">This is a <em>new</em> invariant, not a re-established one: chunk count is now
+          bounded by <code>max_data_tx_chunks</code> before the multiply, at
+          <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L61">price.rs:61</a>.
+          The PR description and commit message both state this intentionally mirrors the mempool/consensus cap, so
+          this is stated intent, not an accidental tightening.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    No invariant is deleted and left <span class="unaccounted">unaccounted for</span> — the rounding behavior
+    survives intact, and the new bound is the entire point of the PR. The interesting question (see
+    <a href="#review-focus">Review-focus map</a>) is not what was dropped, but that the new bound is a
+    <em>third</em> hand-written copy of a rule the codebase already centralizes elsewhere for exactly this
+    drift-prevention reason.
+  </p>
+</section>
+
+<section id="cross-file">
+  <h2>Cross-file impact</h2>
+  <p>
+    <code>get_price</code> has no in-process Rust callers beyond its own route registration — it is wired up once,
+    at <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/lib.rs#L141">crates/api-server/src/lib.rs:141</a>
+    (<code>.route("/price/{ledger}/{size}", web::get().to(price::get_price))</code>). So there is no internal
+    caller whose preconditions or return-shape handling needs updating; the only consumers of the changed contract
+    are external HTTP clients and the test helper <code>price_endpoint_request</code>, which the PR exercises
+    directly rather than needing to change
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/chain-tests/src/api/pricing_endpoint.rs#L56-L69">crates/chain-tests/src/api/pricing_endpoint.rs:56-69</a>).
+  </p>
+  <p>
+    The more relevant "cross-file" relationship is semantic rather than call-graph: the new check at
+    <code>price.rs:61</code> duplicates the comparison already centralized in
+    <code>data_tx_structural_defect</code> at
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/actors/src/data_tx_validation.rs#L63">crates/actors/src/data_tx_validation.rs:63</a>,
+    which that module's own doc comment says exists specifically "to keep the two gates from drifting"
+    (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/actors/src/data_tx_validation.rs#L1-L7">crates/actors/src/data_tx_validation.rs:1-7</a>).
+    That helper takes a <code>DataTransactionHeader</code>, not a bare size, so it isn't directly callable from the
+    quote endpoint without refactoring — the duplication is a reasonable consequence of the type mismatch, not
+    obviously a mistake, but it is now a third site carrying the same arithmetic rule. See
+    <a href="#review-focus">Review-focus map</a>.
+  </p>
+  <div class="flow">
+    <div class="box">
+      <div class="t">mempool ingress</div>
+      <div class="d"><code>data_tx_structural_defect</code><br>tx_selector/mod.rs:542</div>
+    </div>
+    <div class="arrow">≈</div>
+    <div class="box">
+      <div class="t">consensus prevalidation</div>
+      <div class="d"><code>data_tx_structural_defect</code><br>block_validation.rs:1993</div>
+    </div>
+    <div class="arrow">≈</div>
+    <div class="box good">
+      <div class="t">price quote (this PR)</div>
+      <div class="d">hand-written <code>chunks &gt; max_chunks</code><br>price.rs:61</div>
+    </div>
+  </div>
+  <p style="color:var(--text-dim); font-size:0.85rem;">
+    Three sites now encode "chunk count must not exceed <code>max_data_tx_chunks</code>"; two share one function,
+    the third is independent.
+  </p>
+</section>
+
+<section id="review-focus">
+  <h2>Review-focus map <span class="tag">attention pointers, not verified findings</span></h2>
+  <ol class="focus-list">
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L65">crates/api-server/src/routes/price.rs:65</a>
+      — the rejection message computes <code>max_chunks * chunk_size</code> to report the byte cap. This multiply
+      is unguarded, same shape as the bug this PR fixes, just operating on config values instead of
+      request input. Config validation only enforces
+      <code>max_data_tx_chunks &gt; 0</code>
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/types/src/config/mod.rs#L163-L166">crates/types/src/config/mod.rs:163-166</a>) — there
+      is no check that <code>max_data_tx_chunks * chunk_size</code> stays within <code>u64</code>. With today's
+      mainnet value (20,971,520 chunks × a 256 KiB-class <code>chunk_size</code>) this is nowhere near overflowing,
+      but a future config change that raises <code>max_data_tx_chunks</code> or <code>chunk_size</code> without
+      re-deriving this bound would reintroduce the exact crash-loop class this PR exists to close — this time
+      gated by config rather than by an attacker-supplied path parameter, so it would only surface once that
+      config ships. Worth a dedicated code-review pass if <code>max_data_tx_chunks</code> or <code>chunk_size</code>
+      are ever planned to change.
+    </li>
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L60-L61">crates/api-server/src/routes/price.rs:60-61</a>
+      — the cap check is a hand-written comparison rather than a call into
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/actors/src/data_tx_validation.rs#L40-L70">crates/actors/src/data_tx_validation.rs:40-70</a>,
+      the function that exists specifically so mempool ingress and consensus prevalidation can't drift apart on
+      this rule. If that shared function's comparison ever changes (e.g. a stated-intent change to
+      off-by-one semantics, or an added condition folded into "oversized"), this third site in
+      <code>price.rs</code> won't pick it up automatically: a future edit to the mempool/consensus rule, state ->
+      quote endpoint now disagrees with what mempool/consensus will actually accept, either quoting a price for a
+      transaction that will be rejected on submission, or rejecting a quote request for a size that would
+      actually be accepted.
+    </li>
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/chain-tests/src/api/pricing_endpoint.rs#L184-L213">crates/chain-tests/src/api/pricing_endpoint.rs:184-213</a>
+      — the new test covers the exact-max/max+1/<code>u64::MAX</code> boundary and a post-rejection liveness check,
+      but exercises only <code>DataLedger::Publish</code>. The fix applies before the ledger match
+      (<a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/api-server/src/routes/price.rs#L61">price.rs:61</a>),
+      so <code>Submit</code>/<code>OneYear</code>/<code>ThirtyDay</code> get the same bound for free by
+      construction — low risk — but the test suite doesn't assert that for those ledgers directly, so a future
+      refactor that moves the check inside the match arm would not be caught by this test.
+    </li>
+  </ol>
+  <div class="callout info">
+    <span class="label">Suggested follow-up</span>
+    None of the above is a confirmed bug — item 1 depends on a hypothetical future config value, item 2 is a
+    maintainability/drift concern rather than a present incorrectness, and item 3 is a coverage gap. If the
+    maintainers want certainty before merging, a dedicated code-review pass (<code>/code-review</code>) could
+    verify there's genuinely no path today to a <code>max_data_tx_chunks * chunk_size</code> overflow given the
+    live mainnet and testnet config values, and confirm the three enforcement sites agree bit-for-bit on the
+    current cap.
+  </div>
+</section>
+
+<section id="open-questions">
+  <h2>Open questions</h2>
+  <ul class="clean">
+    <li>
+      Was factoring the cap check into a shared helper (callable from both <code>data_tx_validation.rs</code> and
+      <code>price.rs</code>) considered and rejected for this hotfix, or deferred because the hotfix needed to ship
+      fast and a shared-helper refactor was out of scope for a mainnet crash-loop fix? The PR description frames
+      this purely as "same cap... already enforce," which reads as intentional parity rather than a planned
+      follow-up to deduplicate.
+    </li>
+    <li>
+      Is there a tracked follow-up to add a config-time check that <code>max_data_tx_chunks * chunk_size</code>
+      (and the <code>max_chunks * chunk_size</code> computed in the new error message) can't overflow
+      <code>u64</code>, analogous to the existing <code>&gt; 0</code> checks in
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/c2c5417c933e980ecd89fc2b2ea266dc7d7ba012/crates/types/src/config/mod.rs#L162-L166">crates/types/src/config/mod.rs:162-166</a>?
+    </li>
+    <li>
+      The PR says this was cherry-picked "cleanly" from mainnet hotfix #1640. Does <code>release/4.x</code> carry
+      any other in-flight changes to <code>crates/api-server/src/routes/price.rs</code> that could reintroduce a
+      divergence between the mainnet-deployed fix and this branch once both are released?
+    </li>
+  </ul>
+</section>
+
+</main>
+
+<footer class="page">
+  Generated by the explain-diff skill, expert mode, CI pass against pull request #1643 of Irys-xyz/irys.
+</footer>
+
+</body>
+</html>
