@@ -4630,8 +4630,7 @@ mod tests {
         reset_verify_placement_caches, reset_verify_views, set_merge_batch, set_v1_path_view_group,
         set_v1_placement_batch, set_v1_uncompared_hash_group, v1_copy_path_views,
         v1_data_path_reads, v1_placement_views, v1_range_copy_batches, v1_uncompared_hash_views,
-        verify_mdbx_and_rocks,
-        verify_placement_caches, verify_rocks_records, verify_views,
+        verify_mdbx_and_rocks, verify_placement_caches, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
@@ -6701,7 +6700,8 @@ mod tests {
         assert!(
             run.copy_views > run.reads,
             "group 1 copy views {} are not above first-pass point reads {}",
-            run.copy_views, run.reads
+            run.copy_views,
+            run.reads
         );
         assert_eq!(run.copy_views, 4, "one view per path");
         assert_v1_paths_stored(&run.rocks, N, 80)?;

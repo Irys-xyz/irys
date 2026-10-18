@@ -190,7 +190,10 @@ fn write_state(path: &Path, done: u64) -> eyre::Result<()> {
     drop(file);
     fs::rename(tmp, path)?;
     // The file sync does not make the rename durable. Sync the directory too.
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         let dir = File::open(parent).wrap_err("open prepop counter directory")?;
         dir.sync_all().wrap_err("sync prepop counter directory")?;
     }
