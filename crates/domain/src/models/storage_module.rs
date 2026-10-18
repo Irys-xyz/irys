@@ -1789,6 +1789,10 @@ thread_local! {
     /// Test open returns `EFBIG` from the logical-size check and does not
     /// call `set_len`. Production still calls `set_len`.
     static CHUNKS_LEN_EFBIG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test open fails after the reset marker is durable and before
+    /// `crc_complete` is cleared. Production writes both, marker first.
+    static FAIL_AFTER_OPEN_RESET_MARKER: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn note_submodule_open(step: &'static str) {
@@ -2136,6 +2140,10 @@ impl StorageModule {
         // intact module. `finish_pending_resets` clears the flag again.
         for index in &reset_dbs {
             index.set_reset_in_progress()?;
+            #[cfg(test)]
+            if FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.replace(false)) {
+                eyre::bail!("injected failure after the open reset marker");
+            }
             index.set_chunk_crc_complete(false)?;
         }
 
@@ -17426,6 +17434,98 @@ mod tests {
                 "{engine:?}: a finished unassign kept the tx row"
             );
         }
+        Ok(())
+    }
+
+    /// Arms a failure after the open reset marker and clears it on drop.
+    struct OpenResetMarkerFail;
+
+    impl OpenResetMarkerFail {
+        fn arm() -> Self {
+            FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.set(true));
+            Self
+        }
+    }
+
+    impl Drop for OpenResetMarkerFail {
+        fn drop(&mut self) {
+            FAIL_AFTER_OPEN_RESET_MARKER.with(|flag| flag.set(false));
+        }
+    }
+
+    /// A crash after the unassign marker, and before `crc_complete` is
+    /// cleared, must leave the flag set. The next open finishes the wipe.
+    /// An unassign that is not interrupted still wipes and clears the flag.
+    #[test]
+    fn crash_after_open_reset_marker_keeps_crc_complete() -> eyre::Result<()> {
+        let hash = H256::repeat_byte(0x63);
+        let (_tmp, config, sub) =
+            seed_assigned_entropy("open_marker_crc", SubmoduleIndexEngine::Rocksdb, hash)?;
+        {
+            let _fail = OpenResetMarkerFail::arm();
+            let err = StorageModule::new(&module_info(&sub, None), &config)
+                .expect_err("the open stops after the marker");
+            assert!(
+                err.to_string()
+                    .contains("injected failure after the open reset marker"),
+                "{err}"
+            );
+        }
+        assert_eq!(
+            PackingParams::from_toml(&sub.join(PACKING_PARAMS_FILE_NAME))?.partition_hash,
+            Some(hash),
+            "the interrupted unassign published the packing file"
+        );
+        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Entropy));
+        {
+            let index = open_submodule_index(&sub, &config.node_config.database)?;
+            let marker = index.reset_in_progress()?;
+            let crc = index.chunk_crc_complete()?;
+            assert!(
+                marker && crc,
+                "a crash after the marker must keep crc_complete set; marker={marker} crc={crc}"
+            );
+            let rows = index.view(|tx| {
+                tx.tx_intervals_in_range(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(0),
+                )
+            })?;
+            assert!(
+                !rows.is_empty(),
+                "the interrupted unassign cleared the index"
+            );
+        }
+
+        let recovered = StorageModule::new(
+            &module_info(&sub, Some(submit_slot(&config, hash, 0))),
+            &config,
+        )?;
+        assert_eq!(
+            recovered.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized),
+            "the next open must finish a wipe whose marker is durable"
+        );
+        let (_, submodule) = recovered.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(!submodule.db.reset_in_progress()?);
+        assert!(!submodule.db.chunk_crc_complete()?);
+        assert_eq!(live_tx_rows(&recovered)?, 0);
+        drop(recovered);
+
+        let (_kept, config, sub) =
+            seed_assigned_entropy("open_marker_done", SubmoduleIndexEngine::Rocksdb, hash)?;
+        let unassigned = StorageModule::new(&module_info(&sub, None), &config)?;
+        assert_eq!(
+            unassigned.get_chunk_type(&PartitionChunkOffset::from(0)),
+            Some(ChunkType::Uninitialized),
+            "an uninterrupted unassign must still wipe"
+        );
+        let (_, submodule) = unassigned.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        assert!(!submodule.db.reset_in_progress()?);
+        assert!(
+            !submodule.db.chunk_crc_complete()?,
+            "a finished unassign must clear crc_complete"
+        );
         Ok(())
     }
 
