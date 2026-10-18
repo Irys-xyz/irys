@@ -181,6 +181,37 @@ async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
+async fn heavy_pricing_endpoint_rejects_size_over_max_tx_size() -> eyre::Result<()> {
+    // setup
+    let ctx = IrysNodeTest::default_async().start().await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+    let chunk_size = ctx.node_ctx.config.consensus.chunk_size;
+    let max_bytes = ctx.node_ctx.config.consensus.mempool.max_data_tx_chunks * chunk_size;
+
+    // assert - exactly the max tx size is priced
+    let response = price_endpoint_request(&address, DataLedger::Publish, max_bytes).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    // assert - one byte over (an extra chunk) is rejected
+    let response = price_endpoint_request(&address, DataLedger::Publish, max_bytes + 1).await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // assert - u64::MAX is rejected instead of overflowing the chunk round-up
+    let response = price_endpoint_request(&address, DataLedger::Publish, u64::MAX).await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // assert - the node survived and still answers
+    let response = price_endpoint_request(&address, DataLedger::Publish, chunk_size).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    ctx.stop().await;
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
 async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // setup
     let ctx = IrysNodeTest::default_async().start().await;
