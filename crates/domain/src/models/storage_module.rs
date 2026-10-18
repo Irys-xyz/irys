@@ -893,6 +893,9 @@ pub struct StorageModule {
     /// One span is one cut and one insert.
     #[cfg(test)]
     rollback_interval_edits: AtomicU64,
+    /// Set when rollback's assignment `try_write` returns [`std::sync::TryLockError::WouldBlock`].
+    #[cfg(test)]
+    rollback_assignment_blocked: AtomicBool,
     /// The next lane `pwrite` panics once, before the kernel write.
     #[cfg(test)]
     pwrite_panic_once: AtomicBool,
@@ -2140,6 +2143,8 @@ impl StorageModule {
             abandon_on_drop: AtomicBool::new(false),
             #[cfg(test)]
             rollback_interval_edits: AtomicU64::new(0),
+            #[cfg(test)]
+            rollback_assignment_blocked: AtomicBool::new(false),
             #[cfg(test)]
             pwrite_panic_once: AtomicBool::new(false),
         })
@@ -6184,6 +6189,33 @@ impl StorageModule {
             .is_some_and(|ahead| ahead.chunk_type == chunk_type && ahead.bytes.as_slice() == bytes)
     }
 
+    /// Take the assignment write lock for rollback.
+    ///
+    /// A registration inside its commit already holds the read lock. The first
+    /// `try_write` records that block, then this waits so the clear cannot
+    /// start until that commit returns.
+    fn lock_assignment_for_rollback(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, Option<irys_types::partition::PartitionAssignment>> {
+        #[cfg(test)]
+        match self.partition_assignment.try_write() {
+            Ok(guard) => {
+                self.rollback_assignment_blocked
+                    .store(false, Ordering::SeqCst);
+                return guard;
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.rollback_assignment_blocked
+                    .store(true, Ordering::SeqCst);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                self.rollback_assignment_blocked
+                    .store(false, Ordering::SeqCst);
+            }
+        }
+        self.partition_assignment.write().unwrap()
+    }
+
     /// Clear an orphaned partition range and publish `Uninitialized`.
     ///
     /// The interval rewrite is last. It waits on the disk lane, and the lane
@@ -6208,7 +6240,7 @@ impl StorageModule {
         data_roots: &[H256],
     ) -> eyre::Result<()> {
         {
-            let _assignment = self.partition_assignment.write().unwrap();
+            let _assignment = self.lock_assignment_for_rollback();
             let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
             let _sync = self.lock_sync();
             self.drop_pending_writes_in_range(start, end);
@@ -10746,10 +10778,21 @@ mod tests {
                         );
                         let _ = roll_tx.send(result);
                     });
-                    let finished = roll_rx.recv_timeout(Duration::from_millis(400));
+                    let deadline = std::time::Instant::now() + Duration::from_millis(400);
+                    let mut blocked = false;
+                    while std::time::Instant::now() < deadline {
+                        if storage.rollback_assignment_blocked.load(Ordering::SeqCst) {
+                            blocked = true;
+                            break;
+                        }
+                        if roll_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                     eyre::ensure!(
-                        finished.is_err(),
-                        "rollback cleared the index while the registration still held the assignment lock"
+                        blocked,
+                        "rollback did not block on the assignment lock while the registration held it"
                     );
                     storage.release_registration_pause();
                     result_rx
