@@ -190,6 +190,12 @@ pub(super) fn ensure_mdbx_schema(
     Ok(stats)
 }
 
+#[cfg(test)]
+thread_local! {
+    static DURING_MIGRATION: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn run_migration(
     env: &DatabaseEnv,
     path: &Path,
@@ -199,6 +205,12 @@ fn run_migration(
 ) -> eyre::Result<MigrationStats> {
     if options.fail_after_commits == Some(0) {
         eyre::bail!("injected migration interrupt after 0 commits");
+    }
+    // The env for this run is already open. A test uses that window to try a
+    // second open before any migration commit.
+    #[cfg(test)]
+    if let Some(hook) = DURING_MIGRATION.with(|cell| cell.borrow_mut().take()) {
+        hook(path);
     }
     log_started(path, &progress);
     let ctx = MigrateCtx {
@@ -358,6 +370,11 @@ fn apply_copy(ctx: &MigrateCtx<'_>, batch: CopyBatch, progress: &mut Progress) -
     let mut open = progress.open;
     let mut closed = Vec::new();
     let write = ctx.env.tx_mut()?;
+    // A peer can finish and publish the schema between the read of this batch
+    // and this commit. The batch was read from the old rows. Writing it back
+    // would replace the current schema with a progress marker after the v1
+    // path table is already gone.
+    refuse_finished_schema(&write)?;
     for row in batch.rows {
         absorb(
             &mut open,
@@ -491,6 +508,7 @@ fn apply_drop(
         eyre::bail!("submodule index migration delete cursor did not advance");
     }
     let write = ctx.env.tx_mut()?;
+    refuse_finished_schema(&write)?;
     for key in &batch.keys {
         write.delete::<ChunkDataPathByPathHash>(*key, None)?;
     }
@@ -508,6 +526,14 @@ fn apply_drop(
     write.put::<Metadata>(MetadataKey::DBSchemaVersion, encode_progress(progress))?;
     write.commit()?;
     Ok(false)
+}
+
+fn refuse_finished_schema<T: DbTx>(tx: &T) -> eyre::Result<()> {
+    let row = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
+    if row.as_deref() == Some(SUBMODULE_SCHEMA.as_bytes()) {
+        eyre::bail!("submodule index migration refuses to replace the current schema row");
+    }
+    Ok(())
 }
 
 fn incomplete_mdbx_conversion(path: &Path) -> eyre::Report {
@@ -571,6 +597,22 @@ pub(super) fn missing_table(err: &DatabaseError) -> bool {
 
 fn count_u64(count: usize) -> u64 {
     u64::try_from(count).unwrap_or(u64::MAX)
+}
+
+/// `true` when open must copy schema v1 rows or resume a progress marker.
+///
+/// An empty directory, a current schema row, a foreign row, and an incomplete
+/// conversion are not migrations. Those stay on the caller's open args.
+pub(super) fn migration_required(env: &DatabaseEnv) -> eyre::Result<bool> {
+    let read = env.tx()?;
+    let row = read.get::<Metadata>(MetadataKey::DBSchemaVersion)?;
+    let path_hash_rows = count_u64(read.entries::<ChunkPathHashesByOffset>()?);
+    let legacy_rows = legacy_row_count(&read)?;
+    Ok(match classify(&row) {
+        SchemaRow::Progress(_) => true,
+        SchemaRow::Absent => path_hash_rows > 0 || legacy_rows > 0,
+        SchemaRow::Current | SchemaRow::Foreign | SchemaRow::ConvertIncomplete => false,
+    })
 }
 
 fn log_open(path: &Path, stats: &MigrationStats) {
@@ -1490,6 +1532,229 @@ mod tests {
         assert_eq!(intervals(&env)?, vec![(0, 4, h(1))]);
         assert_eq!(legacy_of(&env)?, 0);
         Ok(())
+    }
+
+    /// A copy batch read before the drop phase must not put a progress marker
+    /// on top of the current schema row. The next open still serves the rows.
+    #[test]
+    fn stale_copy_commit_after_finish_keeps_the_schema() -> eyre::Result<()> {
+        let dir = temp("sm-stale-copy");
+        let args = testing_args()?;
+        write_contiguous(dir.path(), 4)?;
+        let preview = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
+        let batch = {
+            let read = preview.tx()?;
+            super::read_copy_batch(&read, 0, 2, 8 * 1024 * 1024)?
+        };
+        assert_eq!(batch.rows.len(), 2);
+        assert!(!batch.exhausted);
+        drop(preview);
+
+        let (env, stats) = open_submodule_index(
+            dir.path(),
+            args.clone(),
+            SubmoduleMigrationOptions::default(),
+        )?;
+        assert!(stats.migrated);
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::V1);
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes())
+        );
+        assert_eq!(legacy_of(&env)?, 0);
+        let tx = env.tx()?;
+        assert_eq!(
+            get_data_path_by_offset(&tx, PartitionChunkOffset(0))?,
+            Some(vec![0])
+        );
+        drop(tx);
+        drop(env);
+
+        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
+        let ctx = super::MigrateCtx {
+            env: &env,
+            path: dir.path(),
+            batch_rows: 2,
+            batch_value_bytes: 8 * 1024 * 1024,
+            base_ms: 0,
+            started: std::time::Instant::now(),
+        };
+        let mut progress = super::Progress::new();
+        let err = super::apply_copy(&ctx, batch, &mut progress).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("current schema"),
+            "stale copy commit must be refused, got {text}"
+        );
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes())
+        );
+        drop(env);
+
+        let (env, stats) =
+            open_submodule_index(dir.path(), args, SubmoduleMigrationOptions::default())?;
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::V2);
+        assert!(!stats.migrated);
+        let tx = env.tx()?;
+        assert_eq!(
+            get_data_path_by_offset(&tx, PartitionChunkOffset(3))?,
+            Some(vec![3])
+        );
+        assert_eq!(
+            get_tx_path_by_offset(&tx, PartitionChunkOffset(0))?,
+            Some(b"tx".to_vec())
+        );
+        Ok(())
+    }
+
+    /// A drop batch must not replace the current schema row either.
+    #[test]
+    fn stale_drop_commit_after_finish_keeps_the_schema() -> eyre::Result<()> {
+        let dir = temp("sm-stale-drop");
+        let args = testing_args()?;
+        write_contiguous(dir.path(), 4)?;
+        let (env, stats) = open_submodule_index(
+            dir.path(),
+            args.clone(),
+            SubmoduleMigrationOptions::default(),
+        )?;
+        assert!(stats.migrated);
+        assert_eq!(legacy_of(&env)?, 0);
+        drop(env);
+
+        let env = open_or_create_db(dir.path(), SubmoduleTables::ALL, args.clone())?;
+        let ctx = super::MigrateCtx {
+            env: &env,
+            path: dir.path(),
+            batch_rows: 2,
+            batch_value_bytes: 8 * 1024 * 1024,
+            base_ms: 0,
+            started: std::time::Instant::now(),
+        };
+        let mut progress = super::Progress {
+            phase: super::Phase::Drop,
+            ..super::Progress::new()
+        };
+        let batch = super::DropBatch {
+            keys: vec![h(10)],
+            next_key: Some(h(11)),
+            exhausted: false,
+        };
+        let err = super::apply_drop(&ctx, batch, &mut progress).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("current schema"),
+            "stale drop commit must be refused, got {text}"
+        );
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes())
+        );
+        drop(env);
+
+        let (env, stats) =
+            open_submodule_index(dir.path(), args, SubmoduleMigrationOptions::default())?;
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::V2);
+        assert!(!stats.migrated);
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes())
+        );
+        Ok(())
+    }
+
+    /// The migration env is exclusive for the run. A reader cannot open it
+    /// then. After the run returns, the caller's args are in force again and
+    /// a reader can open.
+    #[test]
+    fn migration_exclusive_blocks_a_reader_until_the_run_returns() -> eyre::Result<()> {
+        if std::env::var_os("IRYS_MIGRATION_EXCLUSIVE_CHILD").is_some() {
+            return reader_during_migration();
+        }
+        let dir = temp("sm-v1-exclusive");
+        let args = testing_args()?;
+        write_contiguous(dir.path(), 4)?;
+        let path = dir.path().to_path_buf();
+        let probe = path.clone();
+        super::DURING_MIGRATION.with(|cell| {
+            *cell.borrow_mut() = Some(Box::new(move |open_path: &Path| {
+                assert_eq!(open_path, probe.as_path());
+                let status = spawn_reader(&probe).expect("reader");
+                let text = status.text();
+                assert_ne!(
+                    status.code,
+                    Some(0),
+                    "a reader opened the index during migration: {text}"
+                );
+                let lower = text.to_ascii_lowercase();
+                assert!(
+                    lower.contains("busy") || lower.contains("exclusive") || lower.contains("lock"),
+                    "reader error was not a held database: {text}"
+                );
+            }));
+        });
+        let (env, stats) =
+            open_submodule_index(&path, args.clone(), SubmoduleMigrationOptions::default())?;
+        assert!(stats.migrated);
+        assert_eq!(
+            schema_of(&env)?.as_deref(),
+            Some(SUBMODULE_SCHEMA.as_bytes())
+        );
+        let status = spawn_reader(&path)?;
+        let text = status.text();
+        assert_eq!(
+            status.code,
+            Some(0),
+            "a reader must open after migration returns: {text}"
+        );
+        drop(env);
+        let (env, stats) = open_submodule_index(&path, args, SubmoduleMigrationOptions::default())?;
+        assert_eq!(stats.detected, DetectedSubmoduleSchema::V2);
+        assert!(!stats.migrated);
+        drop(env);
+        Ok(())
+    }
+
+    struct ReaderOutput {
+        code: Option<i32>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    }
+
+    impl ReaderOutput {
+        fn text(&self) -> String {
+            format!(
+                "code {:?} stdout {} stderr {}",
+                self.code,
+                String::from_utf8_lossy(&self.stdout),
+                String::from_utf8_lossy(&self.stderr)
+            )
+        }
+    }
+
+    fn spawn_reader(path: &Path) -> eyre::Result<ReaderOutput> {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .arg("migration_exclusive_blocks_a_reader_until_the_run_returns")
+            .env("IRYS_MIGRATION_EXCLUSIVE_CHILD", "1")
+            .env("IRYS_MIGRATION_DIR", path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()?;
+        Ok(ReaderOutput {
+            code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    fn reader_during_migration() -> eyre::Result<()> {
+        let path = std::path::PathBuf::from(std::env::var("IRYS_MIGRATION_DIR")?);
+        let args = testing_args()?.with_exclusive(Some(false));
+        reth_db::DatabaseEnv::open(&path, reth_db::DatabaseEnvKind::RO, args)
+            .map(|_| ())
+            .map_err(|err| eyre::eyre!("reader open failed: {err}"))
     }
 
     #[test]

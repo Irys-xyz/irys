@@ -55,14 +55,31 @@ pub fn create_or_open_submodule_db<P: AsRef<Path>>(
 /// [`SubmoduleMigrationOptions::fail_after_commits`] stops a migration after
 /// that many committed transactions. Production passes
 /// [`SubmoduleMigrationOptions::default`].
+///
+/// A v1 migration is opened with `MDBX_EXCLUSIVE` and that env is dropped
+/// before this returns. The returned env uses `args` unchanged, so a current
+/// index stays cooperative and another process can read it. A second migration
+/// of the same directory gets `MDBX_BUSY` for the whole run.
 pub fn open_submodule_index<P: AsRef<Path>>(
     path: P,
     args: DatabaseArguments,
     options: SubmoduleMigrationOptions,
 ) -> eyre::Result<(DatabaseEnv, MigrationStats)> {
     let path = path.as_ref();
+    let env = open_or_create_db(path, SubmoduleTables::ALL, args.clone())?;
+    if !migrate::migration_required(&env)? {
+        let stats = migrate::ensure_mdbx_schema(&env, path, &options)?;
+        return Ok((env, stats));
+    }
+    drop(env);
+    let exclusive = open_or_create_db(
+        path,
+        SubmoduleTables::ALL,
+        args.clone().with_exclusive(Some(true)),
+    )?;
+    let stats = migrate::ensure_mdbx_schema(&exclusive, path, &options)?;
+    drop(exclusive);
     let env = open_or_create_db(path, SubmoduleTables::ALL, args)?;
-    let stats = migrate::ensure_mdbx_schema(&env, path, &options)?;
     Ok((env, stats))
 }
 
