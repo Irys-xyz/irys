@@ -92,15 +92,16 @@ impl ChunkIngressMessage {
 
     /// Returns true when the message carries a oneshot reply channel the caller
     /// is awaiting. Reply-bearing variants fast-fail on saturation so callers
-    /// can retry. Fire-and-forget variants park the recv loop on saturation
-    /// instead — the upstream emit sites
+    /// can retry. Fire-and-forget control-plane messages park the recv loop
+    /// instead. Their emit sites
     /// (`mempool_service::data_txs::postprocess_data_ingress` for
     /// `ProcessPendingChunks`, `mempool_service::lifecycle::handle_block_confirmed`
     /// for `TryGenerateProofsForConfirmedRoots` /
-    /// `ProcessPendingIngressProofs`, `block_tree_service::on_block_prevalidated`
-    /// for `ProcessPendingIngressProofs`, and the data_sync_service
-    /// SM-write fallback for `IngestChunk(_, None)`) emit each message once,
-    /// without retry, so dropping any of them silently strands work.
+    /// `ProcessPendingIngressProofs`, and `block_tree_service::on_block_prevalidated`
+    /// for `ProcessPendingIngressProofs`) send each message once, without
+    /// retry, so dropping one strands that work. Data sync and gossip send
+    /// `IngestChunk` with a reply. Saturation returns `Overloaded`: data sync
+    /// requeues the offset, and gossip reports rate limiting to the peer.
     pub fn has_reply_channel(&self) -> bool {
         match self {
             Self::IngestChunk(_, reply, _) => reply.is_some(),
