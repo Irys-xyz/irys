@@ -1310,8 +1310,8 @@ fn prepare_v2_placement<S: SubmoduleStore>(
         };
         Ok((stored, binding, infos))
     })?;
-    let stored = stored
-        .ok_or_else(|| eyre::eyre!("partition offset {} has no stored tx path", start.0))?;
+    let stored =
+        stored.ok_or_else(|| eyre::eyre!("partition offset {} has no stored tx path", start.0))?;
     let bound_root = binding.as_ref().map(|binding| binding.data_root);
     split_stored_interval(
         db,
@@ -3245,38 +3245,22 @@ fn v1_data_path_reads() -> usize {
 
 #[cfg(test)]
 thread_local! {
-    static V1_HASH_POINT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static V1_HASH_POINT_COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static V1_UNCOMPARED_HASH_VIEWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-fn reset_v1_hash_point_reads() {
-    V1_HASH_POINT_READS.with(|cell| cell.set(0));
-}
-
-/// Counts `v1_hashes_at` only inside the extra-row scan. Placement-start
-/// checks also call that helper and are not the copied-offset point reads.
-#[cfg(test)]
-struct CountV1HashPointReads;
-
-#[cfg(test)]
-impl CountV1HashPointReads {
-    fn enter() -> Self {
-        V1_HASH_POINT_COUNTING.with(|cell| cell.set(true));
-        Self
-    }
+fn reset_v1_uncompared_hash_views() {
+    V1_UNCOMPARED_HASH_VIEWS.with(|cell| cell.set(0));
 }
 
 #[cfg(test)]
-impl Drop for CountV1HashPointReads {
-    fn drop(&mut self) {
-        V1_HASH_POINT_COUNTING.with(|cell| cell.set(false));
-    }
+fn v1_uncompared_hash_views() -> usize {
+    V1_UNCOMPARED_HASH_VIEWS.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
-fn v1_hash_point_reads() -> usize {
-    V1_HASH_POINT_READS.with(std::cell::Cell::get)
+fn note_v1_uncompared_hash_view() {
+    #[cfg(test)]
+    V1_UNCOMPARED_HASH_VIEWS.with(|cell| cell.set(cell.get().saturating_add(1)));
 }
 
 #[cfg(test)]
@@ -3749,6 +3733,7 @@ fn v1_uncompared_hash_rows(
         return Ok(Vec::new());
     }
     note_verify_view();
+    note_v1_uncompared_hash_view();
     let rows = env.view_eyre(|tx| {
         keys.iter()
             .map(|key| match tx.get::<ChunkPathHashesByOffset>(*key) {
@@ -4091,8 +4076,6 @@ fn note_extra_rocks_offset_rows(
     accepted: &AcceptedOffsets,
     report: &mut EngineEquivalenceReport,
 ) -> eyre::Result<()> {
-    #[cfg(test)]
-    let _count_point_reads = CountV1HashPointReads::enter();
     let mut after = None;
     loop {
         let keys = v3.read_offset_row_keys(after, VERIFY_KEYS)?;
@@ -4454,9 +4437,9 @@ mod tests {
     use super::{
         ConvertOptions, ConvertStats, accepted_offset_ranges, convert_mdbx_to_rocks,
         convert_rocks_to_mdbx, reset_accepted_offset_ranges, reset_v1_data_path_reads,
-        reset_v1_hash_point_reads, reset_v1_range_copy_batches, reset_verify_placement_caches,
+        reset_v1_range_copy_batches, reset_v1_uncompared_hash_views, reset_verify_placement_caches,
         reset_verify_views, set_merge_batch, set_v1_placement_batch, v1_data_path_reads,
-        v1_hash_point_reads, v1_placement_views, v1_range_copy_batches, verify_mdbx_and_rocks,
+        v1_placement_views, v1_range_copy_batches, v1_uncompared_hash_views, verify_mdbx_and_rocks,
         verify_placement_caches, verify_rocks_records, verify_views,
     };
     use crate::db::IrysDatabaseExt as _;
@@ -6117,6 +6100,12 @@ mod tests {
     /// One v1 tx over `n` chunks. `hole` keeps the tx-path hash and stores no
     /// data path, so the placement still covers that offset.
     fn write_v1_one_tx_with_hole(root: &Path, n: u64, hole: u64) -> eyre::Result<PathBuf> {
+        write_v1_one_tx_with_holes(root, n, &[hole])
+    }
+
+    /// Same run as [`write_v1_one_tx_with_hole`], with every offset in `holes`
+    /// storing a tx-path hash and no data path.
+    fn write_v1_one_tx_with_holes(root: &Path, n: u64, holes: &[u64]) -> eyre::Result<PathBuf> {
         use crate::submodule::tables::v1_fixture::master;
         use crate::tx_path_derive::{TxPathBlockCache, derive_tx_path_at_offset_cached};
         use reth_db::Database as _;
@@ -6139,7 +6128,7 @@ mod tests {
                 let proof = derived.proof.proof;
                 let path_hash = tx_path_hash(&proof);
                 let key = PartitionChunkOffset(offset as u32);
-                let data_path_hash = if offset == hole {
+                let data_path_hash = if holes.contains(&offset) {
                     None
                 } else {
                     let data = v1_path_bytes(offset);
@@ -6366,16 +6355,75 @@ mod tests {
         options.slot_index = 0;
         options.chunks_per_partition = N;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
-        reset_v1_hash_point_reads();
+        reset_v1_uncompared_hash_views();
         reset_verify_views();
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!report.has_mismatch(), "{report}");
         assert_eq!(
-            v1_hash_point_reads(),
+            v1_uncompared_hash_views(),
             0,
             "accepted hash rows are already compared"
         );
         assert_eq!(verify_views(), 2);
+        Ok(())
+    }
+
+    /// Two checksum rows inside a v1 path hole are one hash-table read, not
+    /// one read per offset. A verify before those rows exist does not read them.
+    #[test]
+    fn verify_v1_reads_uncompared_offsets_in_one_view() -> eyre::Result<()> {
+        const N: u64 = 4;
+        let holes = [1_u64, 2];
+        let root = temp("convert-v1-uncompared-views");
+        let consensus = write_v1_one_tx_with_holes(root.path(), N, &holes)?;
+        let mdbx = root.path().join("db");
+        let rocks = root.path().join("rocks");
+        let mut options = options_for(&consensus)?;
+        options.slot_index = 0;
+        options.chunks_per_partition = N;
+        let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
+        assert_eq!(stats.data_paths, N - holes.len() as u64, "{stats:?}");
+
+        reset_v1_uncompared_hash_views();
+        reset_verify_views();
+        let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(!clean.has_mismatch(), "{clean}");
+        assert_eq!(v1_uncompared_hash_views(), 0, "{clean}");
+        assert_eq!(verify_views(), 2, "{clean}");
+
+        {
+            let opened = RocksSubmoduleStore::open(&rocks)?;
+            opened.update(|tx| {
+                tx.write_packed_offset_rows(vec![
+                    PackedOffsetRow {
+                        offset: PartitionChunkOffset(holes[0] as u32),
+                        crc: Some(0x11),
+                        proof: None,
+                    },
+                    PackedOffsetRow {
+                        offset: PartitionChunkOffset(holes[1] as u32),
+                        crc: Some(0x22),
+                        proof: None,
+                    },
+                ])?;
+                Ok(())
+            })?;
+        }
+        reset_v1_uncompared_hash_views();
+        reset_verify_views();
+        let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
+        assert!(report.mismatch_chunk_crc >= 2, "{report}");
+        assert_eq!(
+            v1_uncompared_hash_views(),
+            1,
+            "two uncompared offsets are one hash read, counter stayed {}",
+            v1_uncompared_hash_views()
+        );
+        assert_eq!(
+            verify_views(),
+            3,
+            "path compare is two views plus one hash batch"
+        );
         Ok(())
     }
 
@@ -6393,10 +6441,10 @@ mod tests {
         options.chunks_per_partition = N;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         reset_accepted_offset_ranges();
-        reset_v1_hash_point_reads();
+        reset_v1_uncompared_hash_views();
         let dense = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!dense.has_mismatch(), "{dense}");
-        assert_eq!(v1_hash_point_reads(), 0);
+        assert_eq!(v1_uncompared_hash_views(), 0);
         assert_eq!(
             accepted_offset_ranges(),
             1,
@@ -6413,10 +6461,10 @@ mod tests {
         options.chunks_per_partition = N;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         reset_accepted_offset_ranges();
-        reset_v1_hash_point_reads();
+        reset_v1_uncompared_hash_views();
         let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!clean.has_mismatch(), "{clean}");
-        assert_eq!(v1_hash_point_reads(), 0);
+        assert_eq!(v1_uncompared_hash_views(), 0);
         assert_eq!(
             accepted_offset_ranges(),
             2,
@@ -6454,10 +6502,10 @@ mod tests {
         options.slot_index = 0;
         options.chunks_per_partition = N;
         convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
-        reset_v1_hash_point_reads();
+        reset_v1_uncompared_hash_views();
         let report = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!report.has_mismatch(), "{report}");
-        assert_eq!(v1_hash_point_reads(), 0, "{report}");
+        assert_eq!(v1_uncompared_hash_views(), 0, "{report}");
         assert_eq!(
             v1_placement_views(),
             1,
@@ -6465,10 +6513,10 @@ mod tests {
         );
 
         let _batch = set_v1_placement_batch(1);
-        reset_v1_hash_point_reads();
+        reset_v1_uncompared_hash_views();
         let again = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!again.has_mismatch(), "{again}");
-        assert_eq!(v1_hash_point_reads(), 0, "{again}");
+        assert_eq!(v1_uncompared_hash_views(), 0, "{again}");
         assert_eq!(
             v1_placement_views(),
             usize::try_from(N).unwrap_or(usize::MAX),
@@ -7065,10 +7113,10 @@ mod tests {
         options.chunks_per_partition = N;
         let stats = convert_mdbx_to_rocks(&mdbx, &rocks, &options)?;
         assert_eq!(stats.data_paths, N - 1, "{stats}");
-        reset_v1_hash_point_reads();
+        reset_v1_uncompared_hash_views();
         let clean = verify_mdbx_and_rocks(&mdbx, &rocks, &options)?;
         assert!(!clean.has_mismatch(), "{clean}");
-        assert_eq!(v1_hash_point_reads(), 0, "{clean}");
+        assert_eq!(v1_uncompared_hash_views(), 0, "{clean}");
         assert_eq!(clean.index_audit_findings, 0, "{clean}");
 
         {
