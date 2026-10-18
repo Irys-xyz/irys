@@ -1328,12 +1328,12 @@ impl RocksSubmoduleStore {
     }
 }
 
-/// Close `store` without writing into the directory now at `path`.
+/// Put the directory at `path` back without closing `store`.
 ///
-/// `rocksdb_close` flushes through the open path. After that path has been
-/// replaced, the flush would publish `CURRENT` and SST files into the new
-/// directory. Move that directory aside, close into an empty one, delete the
-/// empty one, and move the saved directory back.
+/// `rocksdb_close` flushes through the still-open manifest fd. That fd is the
+/// directory moved aside, while the new SST files are created in the empty
+/// directory at `path`. Deleting the empty directory then drops those SST
+/// files and leaves the moved manifest naming them. Leak the handle instead.
 ///
 /// A sibling marker names the parked directory before the rename. `remove_dir_all`
 /// of `path` does not remove that marker. Open and replace refuse while it exists.
@@ -1402,7 +1402,10 @@ fn close_without_touching_directory(store: RocksSubmoduleStore, path: &Path) -> 
         abandon_open_database(store);
         eyre::bail!("stopped refused close");
     }
-    drop(store);
+    // Do not drop `store` here. Drop runs `rocksdb_close`, which records the
+    // shutdown flush in the parked manifest and writes the SST files into this
+    // empty directory. The delete below would remove those files.
+    abandon_open_database(store);
     #[cfg(test)]
     if close_scratch_stopped(CloseScratchStop::Close) {
         eyre::bail!("stopped refused close");
@@ -9627,5 +9630,134 @@ mod tests {
         let (_, file) =
             newest.ok_or_else(|| eyre::eyre!("no OPTIONS file in {}", path.display()))?;
         fs::read_to_string(file).wrap_err("read OPTIONS")
+    }
+
+    fn dir_names(path: &Path) -> eyre::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(path).wrap_err("read db dir")? {
+            names.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    fn manifest_bytes(path: &Path) -> eyre::Result<Vec<u8>> {
+        let current = fs::read_to_string(path.join("CURRENT")).wrap_err("read CURRENT")?;
+        let name = current.trim();
+        fs::read(path.join(name)).wrap_err_with(|| format!("read {name}"))
+    }
+
+    fn copy_tree(from: &Path, to: &Path) -> eyre::Result<()> {
+        fs::create_dir_all(to)?;
+        for entry in fs::read_dir(from).wrap_err("read tree")? {
+            let entry = entry?;
+            let dest = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &dest)?;
+            } else {
+                fs::copy(entry.path(), &dest)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn placement_row_count(path: &Path) -> eyre::Result<usize> {
+        let db = open_db_read_only(path)?;
+        let handle = db
+            .cf_handle("PlacementIntervals")
+            .ok_or_else(|| eyre::eyre!("PlacementIntervals missing"))?;
+        let rows = db
+            .iterator_cf(handle, IteratorMode::Start)
+            .collect::<Result<Vec<_>, rocksdb::Error>>()
+            .map_err(|err| eyre::eyre!("scan placement intervals: {err}"))?;
+        Ok(rows.len())
+    }
+
+    /// Shutdown flush records the memtable in the moved directory's manifest
+    /// and writes the SST into the empty directory, which is then deleted.
+    /// The moved manifest must still open, and only the flushed row is durable.
+    #[test]
+    fn refused_close_keeps_flushed_rows_in_the_moved_directory() -> eyre::Result<()> {
+        let root = temp_dir("refused-close-moved");
+        let rocks = root.path().join("rocks");
+        fs::create_dir(&rocks)?;
+        let store = RocksSubmoduleStore::open_converting(&rocks)?;
+        // A background compaction writes the new SST by path and the manifest
+        // edit through the open fd. That is a separate race. This test is the
+        // shutdown flush of the refused close.
+        store.disable_auto_compaction()?;
+        put_offset(&store, 0, 1)?;
+        flush_every_family(&store)?;
+        let manifest = manifest_bytes(&rocks)?;
+        let names = dir_names(&rocks)?;
+        put_offset(&store, 2, 2)?;
+        let moved = root.path().join("rocks-moved");
+        fs::rename(&rocks, &moved)?;
+        fs::create_dir(&rocks)?;
+        fs::write(rocks.join("CURRENT"), b"MANIFEST-000099\n")?;
+        fs::write(rocks.join("000099.log"), b"replacement-log")?;
+        fs::write(rocks.join("LOCK"), b"")?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        let err = store.seal_and_stamp().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("replaced"), "{text}");
+        assert_eq!(
+            manifest_bytes(&moved)?,
+            manifest,
+            "refused close recorded a flush in the moved manifest"
+        );
+        assert_eq!(dir_names(&moved)?, names, "moved directory gained or lost files");
+        assert_eq!(fs::read(rocks.join("CURRENT"))?, b"MANIFEST-000099\n");
+        assert_eq!(fs::read(rocks.join("000099.log"))?, b"replacement-log");
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(!rocks.join("SCHEMA").is_file());
+        assert_eq!(
+            dir_names(&rocks)?,
+            vec![
+                "000099.log".to_owned(),
+                "CURRENT".to_owned(),
+                "KEEP".to_owned(),
+                "LOCK".to_owned(),
+            ]
+        );
+        assert!(!root.path().join(".rocks.close-scratch-marker").exists());
+        let copy = root.path().join("rocks-copy");
+        copy_tree(&moved, &copy)?;
+        assert_eq!(placement_row_count(&copy)?, 1);
+        Ok(())
+    }
+
+    /// Removing `LOCK` on the directory this database still owns refuses the
+    /// seal, restores that directory, and keeps the flushed manifest.
+    #[test]
+    fn refused_close_of_the_same_directory_keeps_flushed_rows() -> eyre::Result<()> {
+        let root = temp_dir("refused-close-same");
+        let rocks = root.path().join("rocks");
+        fs::create_dir(&rocks)?;
+        let store = RocksSubmoduleStore::open_converting(&rocks)?;
+        store.disable_auto_compaction()?;
+        put_offset(&store, 0, 1)?;
+        flush_every_family(&store)?;
+        put_offset(&store, 2, 2)?;
+        fs::write(rocks.join("KEEP"), b"keep")?;
+        fs::remove_file(rocks.join("LOCK"))?;
+        let manifest = manifest_bytes(&rocks)?;
+        let names = dir_names(&rocks)?;
+        let err = store.seal_and_stamp().unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("replaced"), "{text}");
+        assert_eq!(
+            manifest_bytes(&rocks)?,
+            manifest,
+            "refused close recorded a flush in the restored manifest"
+        );
+        assert_eq!(dir_names(&rocks)?, names);
+        assert_eq!(fs::read(rocks.join("KEEP"))?, b"keep");
+        assert!(!rocks.join("SCHEMA").is_file());
+        assert!(!root.path().join(".rocks.close-scratch-marker").exists());
+        let copy = root.path().join("rocks-copy");
+        copy_tree(&rocks, &copy)?;
+        assert_eq!(placement_row_count(&copy)?, 1);
+        Ok(())
     }
 }
