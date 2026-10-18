@@ -386,6 +386,10 @@ pub fn process_ledger_transactions(
             .iter()
             .map(|module| module.lock_index_recovery_shared())
             .collect();
+        // The test pause is after the lock returns and before the hash read.
+        // A wait that ends while this flag is clear has not reached the gate.
+        #[cfg(test)]
+        recovery_lock_pause::pause_after_shared_lock();
         let still_canonical = matches!(
             block_index.get_item(block.height),
             Some(item) if item.block_hash == block.block_hash
@@ -940,6 +944,83 @@ impl ChunkMigrationService {
     }
 }
 
+/// Test gate between the shared recovery lock and the block-hash read.
+///
+/// Inert unless a test arms it. The flag is set only after
+/// `lock_index_recovery_shared` returns.
+#[cfg(test)]
+mod recovery_lock_pause {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    struct State {
+        reached: AtomicBool,
+        release: AtomicBool,
+    }
+
+    static ARMED: Mutex<Option<Arc<State>>> = Mutex::new(None);
+
+    pub(super) struct Guard(Arc<State>);
+
+    impl Guard {
+        pub(super) fn arm() -> Self {
+            let state = Arc::new(State {
+                reached: AtomicBool::new(false),
+                release: AtomicBool::new(false),
+            });
+            loop {
+                let mut armed = ARMED.lock().expect("recovery pause");
+                if armed.is_none() {
+                    *armed = Some(Arc::clone(&state));
+                    return Self(state);
+                }
+                drop(armed);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// `true` once the indexer holds the shared lock and has not read the hash.
+        pub(super) fn wait_until_reached(&self, bound: Duration) -> bool {
+            let deadline = Instant::now() + bound;
+            while Instant::now() < deadline {
+                if self.0.reached.load(Ordering::SeqCst) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            self.0.reached.load(Ordering::SeqCst)
+        }
+
+        pub(super) fn release(&self) {
+            self.0.release.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.release();
+            let mut armed = ARMED.lock().expect("recovery pause");
+            if armed
+                .as_ref()
+                .is_some_and(|state| Arc::ptr_eq(state, &self.0))
+            {
+                *armed = None;
+            }
+        }
+    }
+
+    pub(super) fn pause_after_shared_lock() {
+        let Some(state) = ARMED.lock().expect("recovery pause").clone() else {
+            return;
+        };
+        state.reached.store(true, Ordering::SeqCst);
+        while !state.release.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::body_worker::{
@@ -1271,40 +1352,29 @@ mod tests {
         Ok(())
     }
 
-    fn poll_index(
-        done_rx: &std::sync::mpsc::Receiver<Result<(), MigrationError>>,
-    ) -> Option<Result<(), MigrationError>> {
-        let deadline = std::time::Instant::now() + Duration::from_millis(200);
-        while std::time::Instant::now() < deadline {
-            match done_rx.try_recv() {
-                Ok(result) => return Some(result),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    panic!("index thread dropped the result");
-                }
-            }
-        }
-        None
+    /// The indexer has the shared recovery lock and has not read the hash.
+    /// 200ms is the failure bound: a thread that has not taken the lock yet
+    /// must not count as waiting.
+    fn wait_for_recovery_lock(pause: &super::recovery_lock_pause::Guard) {
+        assert!(
+            pause.wait_until_reached(Duration::from_millis(200)),
+            "indexing must take the recovery lock before it reads the block hash"
+        );
     }
 
-    /// Recovery holds the gate, then this height's hash changes, then the gate
-    /// opens. A registration that started during the hold must not commit.
+    /// Recovery's pause sits after the shared lock and before the hash read.
+    /// Replacing the hash there must keep the registration from committing.
     #[test]
     fn registration_started_under_recovery_does_not_commit_a_replaced_block() -> eyre::Result<()> {
         let f = fixture(3, Some(u64::MAX))?;
         f.persist_block()?;
-        let gate = f.sm.lock_index_recovery_exclusive();
+        let pause = super::recovery_lock_pause::Guard::arm();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let _ = done_tx.send(index_fixture_block(&f));
             });
-            assert!(
-                poll_index(&done_rx).is_none(),
-                "indexing must wait while recovery holds the gate"
-            );
+            wait_for_recovery_lock(&pause);
             let submit = &f.block.data_ledgers[DataLedger::Submit];
             f.block_index.push_item(
                 &BlockIndexItem {
@@ -1318,39 +1388,36 @@ mod tests {
                 },
                 f.block.height,
             )?;
-            drop(gate);
+            pause.release();
             let result = done_rx
                 .recv_timeout(Duration::from_secs(5))
-                .expect("index finishes after the gate opens");
+                .expect("index finishes after the recovery pause releases");
             result?;
             assert!(
                 f.rows()?.is_empty(),
-                "a block replaced during recovery must not commit"
+                "a block replaced before the hash read must not commit"
             );
             Ok(())
         })
     }
 
-    /// The same hold still lets the registration commit when the hash is
-    /// unchanged after the gate opens.
+    /// The same pause still lets the registration commit when the hash is
+    /// unchanged before the read.
     #[test]
     fn registration_after_recovery_commits_when_the_block_remains() -> eyre::Result<()> {
         let f = fixture(3, Some(u64::MAX))?;
         f.persist_block()?;
-        let gate = f.sm.lock_index_recovery_exclusive();
+        let pause = super::recovery_lock_pause::Guard::arm();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 let _ = done_tx.send(index_fixture_block(&f));
             });
-            assert!(
-                poll_index(&done_rx).is_none(),
-                "indexing must wait while recovery holds the gate"
-            );
-            drop(gate);
+            wait_for_recovery_lock(&pause);
+            pause.release();
             let result = done_rx
                 .recv_timeout(Duration::from_secs(5))
-                .expect("index finishes after the gate opens");
+                .expect("index finishes after the recovery pause releases");
             result?;
             assert_eq!(f.rows()?.len(), 1);
             Ok(())
