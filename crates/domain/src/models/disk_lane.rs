@@ -6085,20 +6085,29 @@ mod tests {
         assert_slot_shape(&module, 1, super::WritePriority::Ingress, true);
         assert!(!module.memory_entropy_can_fold());
         assert!(!module.only_pending_blocked_disk_slots());
-        let remain = module
-            .read_grace_remaining()
-            .expect("the young disk span is a read wait");
-        assert!(!remain.is_zero(), "the young span is already due");
         let _guard = FailSweepOnDrop {
             module: &module,
             armed: true,
         };
+        // Sample immediately before the drain. The floor is the grace still
+        // left, not a later clock. A span that is already almost due fails
+        // here instead of after a short wait.
+        let remain = module
+            .read_grace_remaining()
+            .expect("the young disk span is a read wait");
+        assert!(
+            remain >= Duration::from_millis(20),
+            "the young span is already almost due: {remain:?}"
+        );
         let started = Instant::now();
         module.drive_entropy_queue_for_test();
         let elapsed = started.elapsed();
+        // The sample is a few instructions before the drain reads the grace
+        // again. The wait can be that much shorter than `remain`.
+        let slack = Duration::from_millis(5);
         assert!(
-            elapsed >= Duration::from_millis(20),
-            "drain took {elapsed:?}, before the grace"
+            elapsed.saturating_add(slack) >= remain,
+            "drain took {elapsed:?}, before the remaining grace {remain:?}"
         );
         assert!(
             elapsed < Duration::from_secs(2),
