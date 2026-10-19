@@ -1526,11 +1526,13 @@ where
         self.blocks_cache.contains_block(block_hash).await
     }
 
-    /// True when this node already holds the block: in the in-flight cache,
-    /// recently processed, or in the block tree.
+    /// True when this node already holds the block: in the in-flight cache
+    /// (including a parked orphan), recently processed, or in the block tree.
     ///
     /// The seen cache is the broadcast-exclusion set, so a hash can be
-    /// recorded before the body lands. A skip on "seen" must also check this.
+    /// recorded before the body lands. A seen-skip must not use this alone:
+    /// a parked cache entry is held but is not making progress. See
+    /// [`Self::is_block_parked`].
     pub async fn is_block_known_locally(&self, block_hash: &BlockHash) -> bool {
         if self.blocks_cache.contains_block(block_hash).await {
             return true;
@@ -1547,6 +1549,29 @@ where
 
     pub async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {
         self.blocks_cache.is_block_processing(block_hash).await
+    }
+
+    /// In the pool cache, not processing, and not held in the tree or the
+    /// recently-processed cache.
+    ///
+    /// Side-effect free: does not stamp the reprocess cooldown. A seen-skip
+    /// must let this case through so `dedup_and_maybe_emit_reprocess` can
+    /// re-emit `AttemptReprocessingBlock` once that cooldown has elapsed.
+    pub(crate) async fn is_block_parked(&self, block_hash: &BlockHash) -> bool {
+        if !self.blocks_cache.contains_block(block_hash).await {
+            return false;
+        }
+        if self.blocks_cache.is_block_processing(block_hash).await {
+            return false;
+        }
+        if self
+            .blocks_cache
+            .contains_recently_processed(block_hash)
+            .await
+        {
+            return false;
+        }
+        !self.block_status_provider.is_block_in_the_tree(block_hash)
     }
 
     /// Mark the block as requested - for orphan block processing

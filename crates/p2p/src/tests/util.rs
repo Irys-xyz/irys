@@ -1051,6 +1051,20 @@ pub(crate) fn data_handler_stub(
     db: DatabaseProvider,
     sync_state: ChainSyncState,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
+    data_handler_stub_with_sync(config, peer_list_guard, db, sync_state).0
+}
+
+/// Same stub as [`data_handler_stub`], plus the chain-sync receiver the pool
+/// sends on. Tests that must observe `AttemptReprocessingBlock` use this.
+pub(crate) fn data_handler_stub_with_sync(
+    config: &Config,
+    peer_list_guard: &PeerList,
+    db: DatabaseProvider,
+    sync_state: ChainSyncState,
+) -> (
+    Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>>,
+    UnboundedReceiver<SyncChainServiceMessage>,
+) {
     let genesis_block = irys_testing_utils::new_mock_signed_header();
     let block_index = BlockIndex::new_for_testing(db.clone());
     let block_index_read_guard_stub = BlockIndexReadGuard::new(block_index);
@@ -1060,7 +1074,7 @@ pub(crate) fn data_handler_stub(
     let (service_senders, service_receivers) =
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
-    let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
+    let (sync_tx, sync_rx) = mpsc::unbounded_channel();
     let mempool_config = MempoolConfig::testing();
     let state = create_state(&mempool_config, &[]);
     let mempool_state = AtomicMempoolState::new(state);
@@ -1109,7 +1123,7 @@ pub(crate) fn data_handler_stub(
 
     info!("Created GossipDataHandler stub");
     let consensus_config_hash = config.consensus.keccak256_hash();
-    Arc::new(GossipDataHandler {
+    let handler = Arc::new(GossipDataHandler {
         mempool: mempool_stub,
         chunk_ingress,
         block_pool: block_pool_stub,
@@ -1138,7 +1152,8 @@ pub(crate) fn data_handler_stub(
         started_at: std::time::Instant::now(),
         consensus_config_hash,
         runtime_handle: tokio::runtime::Handle::current(),
-    })
+    });
+    (handler, sync_rx)
 }
 
 pub(crate) fn data_handler_with_stubbed_pool(
