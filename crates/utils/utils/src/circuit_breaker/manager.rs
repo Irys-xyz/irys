@@ -47,6 +47,36 @@ where
         }
     }
 
+    /// Whether a filter may select this key.
+    ///
+    /// Filters use this. It does not change state, consume a half-open trial,
+    /// or refresh last access. A caller that is about to send must use
+    /// [`Self::is_available`], which grants the trial.
+    #[must_use]
+    pub fn would_allow(&self, key: &K) -> bool {
+        match self.breakers.get(key) {
+            Some(breaker) => breaker.would_allow(),
+            // No breaker is the closed state. A filter must not create one.
+            None => true,
+        }
+    }
+
+    /// Grant one recovery probe, ignoring the open cooldown.
+    ///
+    /// A closed breaker returns true and does not consume a trial. An open
+    /// breaker moves to half-open and consumes one trial even when the cooldown
+    /// has not elapsed. Grants stay bounded by `recovery_attempts` per window.
+    /// The source-peer body pull uses this. Every other send uses
+    /// [`Self::is_available`].
+    #[must_use]
+    pub fn begin_probe(&self, key: &K) -> bool {
+        match self.breakers.get(key) {
+            Some(breaker) => breaker.begin_probe(),
+            // Closed, and not yet tracked. Do not consume a trial or create one.
+            None => true,
+        }
+    }
+
     pub fn record_success(&self, key: &K) {
         if let Some(breaker) = self.breakers.get(key) {
             breaker.record_success();
@@ -353,6 +383,67 @@ mod tests {
         // New key should trigger cleanup and succeed
         let key3 = TestKey("test3".to_string());
         assert!(manager.is_available(&key3));
+        assert_eq!(manager.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn would_allow_does_not_create_a_breaker_or_consume_trials() {
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
+
+        let _guard = TestTimeGuard::new(1_000_000_000);
+        let config = TestConfigBuilder::default()
+            .cooldown_duration(Duration::from_millis(100))
+            .recovery_attempts(2)
+            .build();
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
+        let key = TestKey("peer".to_string());
+
+        assert!(manager.would_allow(&key));
+        assert_eq!(manager.len(), 0);
+
+        for _ in 0..3 {
+            manager.record_failure(&key);
+        }
+        assert!(!manager.would_allow(&key));
+        let len = manager.len();
+
+        advance_test_time(Duration::from_millis(150));
+        assert!(manager.would_allow(&key));
+        assert_eq!(manager.len(), len);
+        assert_eq!(manager.metrics().half_open_count, 0);
+        assert_eq!(manager.metrics().open_count, 1);
+
+        assert!(manager.is_available(&key));
+        assert!(manager.is_available(&key));
+        assert!(!manager.is_available(&key));
+    }
+
+    #[test]
+    #[serial]
+    fn begin_probe_before_cooldown_grants_at_most_recovery_attempts() {
+        use super::super::test_utils::TestTimeGuard;
+
+        let _guard = TestTimeGuard::new(1_000_000_000);
+        let config = TestConfigBuilder::default()
+            .cooldown_duration(Duration::from_secs(10))
+            .recovery_attempts(3)
+            .build();
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
+        let key = TestKey("peer".to_string());
+
+        for _ in 0..3 {
+            manager.record_failure(&key);
+        }
+        assert!(!manager.would_allow(&key));
+
+        assert!(manager.begin_probe(&key));
+        assert!(manager.begin_probe(&key));
+        assert!(manager.begin_probe(&key));
+        assert!(!manager.begin_probe(&key));
+
+        let other = TestKey("other".to_string());
+        assert!(manager.begin_probe(&other));
         assert_eq!(manager.len(), 1);
     }
 
