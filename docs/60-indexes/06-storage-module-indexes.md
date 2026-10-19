@@ -30,10 +30,14 @@ also when these storage defaults take effect. Before the index
 migration, open sets the logical size of `chunks.dat` and does not
 allocate blocks. ext4 returns `EFBIG` when the file is larger than
 16 TiB - 4 KiB. A mainnet partition is 18.01 TiB, so that file does
-not fit. A testnet partition is 12.37 TiB and is under that cap. Open
+not fit. The built-in testnet consensus (`consensus = "Testnet"`)
+opens that same 18.01 TiB file. 12.37 TiB is only the Custom scaffold
+in `testnet_config.toml` (`num_chunks_in_partition = 51872000`). A
+live testnet node does not load that scaffold. Open
 refuses, and the index is not migrated. `EFBIG` is not a free-space
 error. Format the drive with XFS, or use another filesystem whose
-maximum file size is at least 18.01 TiB. When the file fits, the open
+maximum file size is at least 18.01 TiB. That limit applies to mainnet
+and to the built-in testnet. When the file fits, the open
 migrates the index, then reserves a short or holey `chunks.dat` to the
 full partition (`fallocate` mode 0). A v1 index keeps its rows until
 the v2 copy commits and the old table is dropped. Dropped pages stay in `mdbx.dat`

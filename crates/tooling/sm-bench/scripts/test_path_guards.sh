@@ -3443,6 +3443,42 @@ ${line}"
     ok "$name"
 }
 
+# The built-in testnet consensus opens the mainnet partition file.
+# 12.37 TiB is only the Custom scaffold in testnet_config.toml.
+test_runbook_builtin_testnet_partition_is_the_mainnet_file() {
+    local name=runbook-testnet-partition-size runbook
+    runbook=$here/../../../../docs/60-indexes/06-storage-module-indexes.md
+    if [ ! -f "$runbook" ]; then
+        bad "$name" "missing $runbook"
+        return
+    fi
+    if grep -F 'A testnet partition is 12.37 TiB and is under that cap.' "$runbook" >/dev/null; then
+        bad "$name" "runbook says the built-in testnet partition fits ext4"
+        return
+    fi
+    if ! grep -F 'opens that same 18.01 TiB file' "$runbook" >/dev/null; then
+        bad "$name" "runbook does not say the built-in testnet file is 18.01 TiB"
+        return
+    fi
+    if ! grep -F 'consensus = "Testnet"' "$runbook" >/dev/null; then
+        bad "$name" "runbook does not name the built-in testnet consensus"
+        return
+    fi
+    if ! grep -F 'testnet_config.toml' "$runbook" >/dev/null; then
+        bad "$name" "runbook does not name the Custom scaffold file"
+        return
+    fi
+    if ! grep -F 'num_chunks_in_partition = 51872000' "$runbook" >/dev/null; then
+        bad "$name" "runbook does not name the scaffold chunk count"
+        return
+    fi
+    if ! grep -F 'That limit applies to mainnet' "$runbook" >/dev/null; then
+        bad "$name" "runbook does not keep the 18.01 TiB limit for both networks"
+        return
+    fi
+    ok "$name"
+}
+
 main() {
     local fn
     if [ "$#" -gt 0 ]; then
