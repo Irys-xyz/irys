@@ -678,7 +678,9 @@ fn push_fail(failures: &mut FailureLog, err: &eyre::Report) {
         return;
     }
     let text = err.to_string();
-    let end = text.len().min(240);
+    // A multibyte character can straddle the cap. Slicing at a raw byte
+    // panics the worker, and the join then drops that worker's failure count.
+    let end = text.floor_char_boundary(text.len().min(240));
     failures.samples.push(text[..end].to_owned());
 }
 
@@ -2269,6 +2271,35 @@ mod tests {
         assert_eq!(printed.len(), 5, "{printed:?}");
         assert!(printed.iter().any(|line| line.contains("boom-4")));
         assert!(!lines.iter().any(|line| line.contains("boom-7")));
+    }
+
+    /// A multibyte character that straddles the 240-byte cap must not panic
+    /// the worker. The stored sample stops on a char boundary. The failure
+    /// count still increments. An ASCII message of exactly 240 bytes is kept.
+    #[test]
+    fn push_fail_truncates_on_a_char_boundary() {
+        let split = format!("{}é", "a".repeat(239));
+        assert_eq!(split.len(), 241, "the char must cover byte 240");
+        let mut failures = super::FailureLog::default();
+        super::push_fail(&mut failures, &eyre::eyre!("{split}"));
+        assert_eq!(failures.count, 1);
+        assert_eq!(failures.samples.len(), 1);
+        let sample = &failures.samples[0];
+        assert!(sample.len() <= 240, "{}", sample.len());
+        assert!(sample.is_char_boundary(sample.len()));
+        assert_eq!(sample, &"a".repeat(239));
+        assert!(!sample.contains('é'));
+
+        let ascii = "b".repeat(240);
+        let mut failures = super::FailureLog::default();
+        super::push_fail(&mut failures, &eyre::eyre!("{ascii}"));
+        assert_eq!(failures.count, 1);
+        assert_eq!(failures.samples, vec![ascii]);
+
+        let mut failures = super::FailureLog::default();
+        super::push_fail(&mut failures, &eyre::eyre!("short"));
+        assert_eq!(failures.count, 1);
+        assert_eq!(failures.samples, vec!["short".to_owned()]);
     }
 
     #[test]
