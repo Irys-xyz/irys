@@ -116,6 +116,15 @@ pub(crate) fn entropy_target_ranges(
         .collect()
 }
 
+/// Chunks between packing syncs.
+///
+/// Strategies use this as a modulus. The config value is a `u64`, and half
+/// of it rounded up can exceed `u32::MAX`. A wider cadence does not fit in
+/// that modulus.
+fn short_writes_before_sync(num_writes_before_sync: u64) -> u32 {
+    u32::try_from(num_writes_before_sync.div_ceil(2)).unwrap_or(u32::MAX)
+}
+
 /// Wake the disk lane, then wait until the module has room for more pending
 /// chunks. Packing computes entropy faster than a disk writes it, and with the
 /// lane running a sync only wakes the lane, so without this wait the pending
@@ -391,14 +400,8 @@ impl PackingService {
                 continue;
             }
 
-            let short_writes_before_sync: u32 = (self
-                .config
-                .node_config
-                .storage
-                .num_writes_before_sync
-                .div_ceil(2))
-            .try_into()
-            .expect("Should be able to convert min_writes_before_sync to u32");
+            let short_writes_before_sync =
+                short_writes_before_sync(self.config.node_config.storage.num_writes_before_sync);
 
             for target in targets {
                 // Try remote packing first if configured
@@ -640,6 +643,17 @@ mod tests {
         partition::{PartitionAssignment, PartitionHash},
     };
     use tokio::sync::Semaphore;
+
+    #[test]
+    fn short_writes_before_sync_saturates_past_u32() {
+        assert_eq!(short_writes_before_sync(1), 1);
+        assert_eq!(short_writes_before_sync(100), 50);
+        assert_eq!(short_writes_before_sync(101), 51);
+        // 2 * u32::MAX still fits. One more does not.
+        assert_eq!(short_writes_before_sync(8_589_934_590), u32::MAX);
+        assert_eq!(short_writes_before_sync(8_589_934_591), u32::MAX);
+        assert_eq!(short_writes_before_sync(u64::MAX), u32::MAX);
+    }
 
     #[test_log::test(tokio::test)]
     async fn panicked_pack_worker_requeues_the_range() -> eyre::Result<()> {
