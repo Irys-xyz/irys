@@ -16,6 +16,7 @@ use irys_vdf::state::VdfController;
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -402,25 +403,46 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         )
         .await
         {
-            Ok(true) => {
+            Ok(status) => {
+                // No non-syncing answer: every trusted peer that replied is
+                // itself syncing. Try again next interval. Do not pause the VDF.
+                let Some((best_trusted_height, best_peer_address)) =
+                    status.best_trusted_height.zip(status.best_peer_address)
+                else {
+                    info!(
+                        local_height = status.local_height,
+                        "Periodic sync check: every trusted peer that answered is syncing; not starting a sync"
+                    );
+                    return;
+                };
                 // This check is detached, so it can still be running after the
                 // service loop exited; starting a sync then would outlive it.
-                if self.is_shutting_down.load(Ordering::Acquire) {
+                if status.behind && self.is_shutting_down.load(Ordering::Acquire) {
                     debug!("Periodic sync check: service is shutting down, not starting a sync");
                     return;
                 }
-                let online_trusted_peer_count = self.peer_list.online_trusted_peers().len();
-                if should_start_periodic_sync(true, online_trusted_peer_count) {
-                    info!("Periodic sync check: We're behind the network, starting sync");
-                    self.spawn_chain_sync_task(None, false);
-                } else {
-                    error!(
-                        "Periodic sync check: local index is behind trusted peers but none is online; not starting a sync"
+                let has_usable_peer = has_active_not_syncing_trusted_peer(
+                    &self.peer_list,
+                    &status.not_syncing_peer_ids,
+                );
+                if should_start_periodic_sync(status.behind, has_usable_peer) {
+                    info!(
+                        local_height = status.local_height,
+                        best_trusted_height,
+                        peer = %best_peer_address,
+                        "Periodic sync check: We're behind the network, starting sync"
                     );
+                    self.spawn_chain_sync_task(None, false);
+                } else if status.behind {
+                    error!(
+                        local_height = status.local_height,
+                        best_trusted_height,
+                        peer = %best_peer_address,
+                        "Periodic sync check: local index is behind trusted peers but no trusted peer that answered as not syncing is active; not starting a sync"
+                    );
+                } else {
+                    debug!("Periodic sync check: We're up to date with the network");
                 }
-            }
-            Ok(false) => {
-                debug!("Periodic sync check: We're up to date with the network");
             }
             Err(e) => {
                 error!(
@@ -1898,23 +1920,53 @@ async fn get_block_index(
     ))
 }
 
-/// Whether the periodic behind-check should start a chain sync.
+/// Local index compared with trusted peers that answered `/info`.
 ///
-/// The behind-check can be true while every trusted peer is offline, because
-/// it queries the configured set. `sync_chain` reads only online trusted
-/// peers. A sync with none online pauses the VDF and turns broadcast off, then
-/// skips.
-fn should_start_periodic_sync(behind: bool, online_trusted_peer_count: usize) -> bool {
-    behind && online_trusted_peer_count > 0
+/// A trusted peer whose answer has `is_syncing` set does not contribute a
+/// height. `sync_chain` refuses that peer, and spawning against it pauses the
+/// VDF before the refusal.
+#[derive(Debug)]
+struct TrustedPeerIndexStatus {
+    behind: bool,
+    local_height: u64,
+    /// Highest index height among trusted peers that answered with `!is_syncing`.
+    /// `None` when every answering trusted peer is syncing.
+    best_trusted_height: Option<u64>,
+    /// Gossip address of the peer that reported `best_trusted_height`.
+    best_peer_address: Option<SocketAddr>,
+    /// Trusted peers that answered with `!is_syncing`.
+    not_syncing_peer_ids: Vec<IrysPeerId>,
 }
 
-/// Check if the local index is behind trusted peers. Returns true if behind, false if up to date.
+/// Whether the periodic behind-check should start a chain sync.
+///
+/// `sync_chain` only makes progress with an active trusted peer that is not
+/// syncing. Spawning without one pauses the VDF and sets `is_syncing`, then
+/// skips or waits.
+fn should_start_periodic_sync(behind: bool, has_active_not_syncing_trusted_peer: bool) -> bool {
+    behind && has_active_not_syncing_trusted_peer
+}
+
+/// `is_active` is online and reputable. `sync_chain` waits on that set, then
+/// drops peers that are still syncing.
+fn has_active_not_syncing_trusted_peer(peer_list: &PeerList, peer_ids: &[IrysPeerId]) -> bool {
+    peer_ids.iter().any(|peer_id| {
+        peer_list
+            .get_peer(peer_id)
+            .is_some_and(|peer| peer.is_active())
+    })
+}
+
+/// Compare the local index with the configured trusted set.
+///
+/// Queries run in parallel. Untrusted peers are not asked. Only answers with
+/// `!is_syncing` set the best height.
 async fn is_local_index_is_behind_trusted_peers(
     config: &Config,
     peer_list: &PeerList,
     gossip_client: &GossipClient,
     block_index: &BlockIndexReadGuard,
-) -> ChainSyncResult<bool> {
+) -> ChainSyncResult<TrustedPeerIndexStatus> {
     let migration_depth = u64::from(config.consensus.block_migration_depth);
 
     // The configured trusted set, not the online subset. A trusted peer that
@@ -1927,42 +1979,69 @@ async fn is_local_index_is_behind_trusted_peers(
         ));
     }
 
-    let futures = trusted_peers.iter().map(|(_, peer)| {
+    let futures = trusted_peers.iter().map(|(peer_id, peer)| {
         debug!("Sync task: Trusted peer: {:?}", peer);
         let gossip_client = gossip_client.clone();
+        let peer_id = *peer_id;
+        let gossip_address = peer.address.gossip;
+        let address = peer.address;
         async move {
-            match gossip_client.get_info(peer.address).await {
-                Ok(info) => Some(info.block_index_height),
+            match gossip_client.get_info(address).await {
+                Ok(info) => Some((
+                    peer_id,
+                    gossip_address,
+                    info.block_index_height,
+                    info.is_syncing,
+                )),
                 Err(err) => {
-                    warn!(
-                        "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
-                        peer.address.gossip, err
-                    );
+                    // Queries run together, so a miss does not select another peer.
+                    warn!("Sync task: Trusted peer {gossip_address} did not answer: {err}");
                     None
                 }
             }
         }
     });
 
-    let mut highest_trusted_peer_height = None;
-    for index_tip in futures::future::join_all(futures)
+    let mut any_answer = false;
+    let mut best_trusted_height = None;
+    let mut best_peer_address = None;
+    let mut not_syncing_peer_ids = Vec::new();
+    for (peer_id, gossip_address, height, is_syncing) in futures::future::join_all(futures)
         .await
         .into_iter()
         .flatten()
     {
-        highest_trusted_peer_height = Some(
-            highest_trusted_peer_height.map_or(index_tip, |height: u64| height.max(index_tip)),
-        );
+        any_answer = true;
+        // The peer's index can be ahead of blocks it is willing to serve.
+        if is_syncing {
+            continue;
+        }
+        not_syncing_peer_ids.push(peer_id);
+        if best_trusted_height.is_none_or(|current| height > current) {
+            best_trusted_height = Some(height);
+            best_peer_address = Some(gossip_address);
+        }
     }
 
-    if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
-        Ok((block_index.read().latest_height() + (migration_depth * 2))
-            < highest_trusted_peer_height)
-    } else {
-        Err(ChainSyncError::Network(
+    if !any_answer {
+        return Err(ChainSyncError::Network(
             "Wasn't able to fetch node info from any of the trusted peers".to_string(),
-        ))
+        ));
     }
+
+    let local_height = block_index.read().latest_height();
+    let behind = matches!(
+        best_trusted_height,
+        Some(height) if local_height + (migration_depth * 2) < height
+    );
+
+    Ok(TrustedPeerIndexStatus {
+        behind,
+        local_height,
+        best_trusted_height,
+        best_peer_address,
+        not_syncing_peer_ids,
+    })
 }
 
 /// This function estimates the canonical height by querying trusted peers for their block index height.
@@ -3173,7 +3252,7 @@ mod tests {
             let dir = TempDirBuilder::new().with_tracing().build();
             let index = empty_index(dir.path());
 
-            let behind = is_local_index_is_behind_trusted_peers(
+            let status = is_local_index_is_behind_trusted_peers(
                 &config,
                 &peer_list,
                 &gossip_client(),
@@ -3181,7 +3260,11 @@ mod tests {
             )
             .await;
 
-            assert!(behind.expect("an offline trusted peer must still be asked"));
+            assert!(
+                status
+                    .expect("an offline trusted peer must still be asked")
+                    .behind
+            );
             assert!(
                 !peer_list.get_peer(&peer_id).expect("peer exists").is_online,
                 "the behind-check must not mark the peer online"
@@ -3216,7 +3299,7 @@ mod tests {
             let dir = TempDirBuilder::new().with_tracing().build();
             let index = empty_index(dir.path());
 
-            let behind = is_local_index_is_behind_trusted_peers(
+            let status = is_local_index_is_behind_trusted_peers(
                 &config,
                 &peer_list,
                 &gossip_client(),
@@ -3225,7 +3308,9 @@ mod tests {
             .await;
 
             assert!(
-                !behind.expect("the offline trusted peer answers with a low tip"),
+                !status
+                    .expect("the offline trusted peer answers with a low tip")
+                    .behind,
                 "an untrusted tip must not make the local index look behind"
             );
             assert_eq!(
@@ -3290,27 +3375,221 @@ mod tests {
             );
         }
 
-        /// `sync_chain` only uses online trusted peers. A behind result with
-        /// none online must not start a sync: the spawn pauses the VDF and
-        /// turns broadcast off, then skips.
-        #[test]
-        fn behind_with_no_online_trusted_peer_does_not_start_a_sync() {
+        fn decides_to_start(status: &TrustedPeerIndexStatus, peer_list: &PeerList) -> bool {
+            should_start_periodic_sync(
+                status.behind,
+                has_active_not_syncing_trusted_peer(peer_list, &status.not_syncing_peer_ids),
+            )
+        }
+
+        /// One trusted peer. The query runs before the server is dropped.
+        async fn single_trusted_peer_status(
+            byte: u8,
+            is_online: bool,
+            score: u16,
+            height: u64,
+            is_syncing: bool,
+        ) -> (TrustedPeerIndexStatus, PeerList, SocketAddr, IrysPeerId) {
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(move || {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: height,
+                    is_syncing,
+                    ..NodeInfo::default()
+                })
+            });
+            let addr = server.spawn();
+            let peer = peer_list_item(byte, addr, is_online, score);
+            let peer_id = peer.peer_id;
+            let (config, peer_list) = peer_list_with_trusted(
+                vec![peer],
+                vec![PeerAddress {
+                    gossip: addr,
+                    api: addr,
+                    execution: Default::default(),
+                }],
+            );
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+            let status = is_local_index_is_behind_trusted_peers(
+                &config,
+                &peer_list,
+                &gossip_client(),
+                &index,
+            )
+            .await
+            .expect("the trusted peer answered");
+            (status, peer_list, addr, peer_id)
+        }
+
+        /// A trusted peer that is still syncing cannot serve `sync_chain`.
+        /// Its height must not make the local index look behind, or the
+        /// periodic check spawns a sync that pauses the VDF and then waits.
+        #[tokio::test]
+        async fn syncing_trusted_peer_ahead_does_not_count_as_behind() {
+            let (status, peer_list, _, peer_id) =
+                single_trusted_peer_status(0x35, true, PeerScore::MAX, 100, true).await;
+
             assert!(
-                !should_start_periodic_sync(true, 0),
-                "no online trusted peer means the sync cannot make progress"
+                !status.behind,
+                "a syncing trusted peer must not count as ahead"
+            );
+            assert_eq!(status.best_trusted_height, None);
+            assert_eq!(status.best_peer_address, None);
+            assert!(
+                !status.not_syncing_peer_ids.contains(&peer_id),
+                "a syncing answer must not be a usable peer"
             );
             assert!(
-                !should_start_periodic_sync(false, 0),
+                peer_list
+                    .get_peer(&peer_id)
+                    .expect("peer exists")
+                    .is_active(),
+                "the peer is online and reputable; only is_syncing excludes it"
+            );
+            assert!(
+                !decides_to_start(&status, &peer_list),
+                "a syncing trusted peer must not start a sync"
+            );
+        }
+
+        /// One trusted peer fails `/info`. Another answers, is not syncing, and
+        /// is ahead. The miss must not hide the peer that can serve the sync.
+        #[tokio::test]
+        async fn trusted_peer_error_and_ahead_not_syncing_peer_is_behind_and_starts() {
+            let error_server = FakeGossipServer::new();
+            error_server.set_on_info_request(|| {
+                GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
+            });
+            let error_addr = error_server.spawn();
+
+            let ahead_server = FakeGossipServer::new();
+            ahead_server.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: 100,
+                    is_syncing: false,
+                    ..NodeInfo::default()
+                })
+            });
+            let ahead_addr = ahead_server.spawn();
+
+            let error_peer = peer_list_item(0x36, error_addr, true, PeerScore::MAX);
+            let ahead_peer = peer_list_item(0x37, ahead_addr, true, PeerScore::MAX);
+            let error_peer_id = error_peer.peer_id;
+            let ahead_peer_id = ahead_peer.peer_id;
+            let (config, peer_list) = peer_list_with_trusted(
+                vec![error_peer, ahead_peer],
+                vec![
+                    PeerAddress {
+                        gossip: error_addr,
+                        api: error_addr,
+                        execution: Default::default(),
+                    },
+                    PeerAddress {
+                        gossip: ahead_addr,
+                        api: ahead_addr,
+                        execution: Default::default(),
+                    },
+                ],
+            );
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+
+            let status = is_local_index_is_behind_trusted_peers(
+                &config,
+                &peer_list,
+                &gossip_client(),
+                &index,
+            )
+            .await
+            .expect("one trusted peer answered");
+
+            assert!(status.behind);
+            assert_eq!(status.local_height, 0);
+            assert_eq!(status.best_trusted_height, Some(100));
+            assert_eq!(status.best_peer_address, Some(ahead_addr));
+            assert_eq!(status.not_syncing_peer_ids, vec![ahead_peer_id]);
+            assert!(
+                !status.not_syncing_peer_ids.contains(&error_peer_id),
+                "a peer that did not answer is not usable"
+            );
+            assert!(
+                peer_list
+                    .get_peer(&ahead_peer_id)
+                    .expect("peer exists")
+                    .is_active()
+            );
+            assert!(
+                decides_to_start(&status, &peer_list),
+                "an active trusted peer that is ahead and not syncing starts a sync"
+            );
+        }
+
+        /// Ahead and not syncing, but offline. The height counts. The peer is
+        /// not active, so the check must not spawn.
+        #[tokio::test]
+        async fn trusted_peer_ahead_not_syncing_but_offline_does_not_start_a_sync() {
+            let (status, peer_list, addr, peer_id) =
+                single_trusted_peer_status(0x38, false, PeerScore::MAX, 100, false).await;
+
+            assert!(status.behind);
+            assert_eq!(status.best_trusted_height, Some(100));
+            assert_eq!(status.best_peer_address, Some(addr));
+            assert_eq!(status.not_syncing_peer_ids, vec![peer_id]);
+            assert!(
+                !peer_list
+                    .get_peer(&peer_id)
+                    .expect("peer exists")
+                    .is_active()
+            );
+            assert!(
+                !decides_to_start(&status, &peer_list),
+                "an offline trusted peer must not start a sync"
+            );
+        }
+
+        /// Ahead, not syncing, and online, but below the reputation threshold.
+        /// `online` is not enough: `sync_chain` waits for `is_active`.
+        #[tokio::test]
+        async fn trusted_peer_ahead_not_syncing_but_below_reputation_does_not_start_a_sync() {
+            let (status, peer_list, addr, peer_id) =
+                single_trusted_peer_status(0x39, true, PeerScore::ACTIVE_THRESHOLD - 1, 100, false)
+                    .await;
+
+            let peer = peer_list.get_peer(&peer_id).expect("peer exists");
+            assert!(peer.is_online);
+            assert!(!peer.is_active());
+            assert!(status.behind);
+            assert_eq!(status.best_trusted_height, Some(100));
+            assert_eq!(status.best_peer_address, Some(addr));
+            assert_eq!(status.not_syncing_peer_ids, vec![peer_id]);
+            assert!(
+                !decides_to_start(&status, &peer_list),
+                "a trusted peer below the reputation threshold must not start a sync"
+            );
+        }
+
+        /// `sync_chain` needs an active trusted peer that is not syncing.
+        /// Spawning without one pauses the VDF and turns broadcast off, then
+        /// skips or waits.
+        #[test]
+        fn behind_with_no_active_not_syncing_trusted_peer_does_not_start_a_sync() {
+            assert!(
+                !should_start_periodic_sync(true, false),
+                "no active trusted peer that is done syncing means the sync cannot make progress"
+            );
+            assert!(
+                !should_start_periodic_sync(false, false),
                 "an up-to-date index does not start a sync"
             );
         }
 
         #[test]
-        fn behind_with_an_online_trusted_peer_starts_a_sync() {
-            assert!(should_start_periodic_sync(true, 1));
+        fn behind_with_an_active_not_syncing_trusted_peer_starts_a_sync() {
+            assert!(should_start_periodic_sync(true, true));
             assert!(
-                !should_start_periodic_sync(false, 1),
-                "an online trusted peer does not start a sync when the index is up to date"
+                !should_start_periodic_sync(false, true),
+                "an active trusted peer does not start a sync when the index is up to date"
             );
         }
     }
