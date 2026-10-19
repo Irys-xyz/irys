@@ -2080,8 +2080,8 @@ mod tests {
             nwbs, 1,
             "testing config: the floor must be what applies here"
         );
-        let expected = (2 * nwbs).max(256) * f.config.consensus.chunk_size
-            * f.sm.submodule_count() as u64;
+        let expected =
+            (2 * nwbs).max(256) * f.config.consensus.chunk_size * f.sm.submodule_count() as u64;
         assert_eq!(f.sm.pending_memory_ceiling_bytes(), expected);
         assert_eq!(
             expected,
