@@ -20836,7 +20836,7 @@ mod tests {
         storage.pause_next_completion_clone();
         let flush_mod = Arc::clone(&storage);
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let first_flush = std::thread::spawn(move || {
             let _ = tx.send(flush_mod.flush_interval_completions_locked(true));
         });
         assert!(
@@ -20854,8 +20854,14 @@ mod tests {
         assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
         assert_eq!(storage.crc_cut_epoch.load(Ordering::SeqCst), 0);
         storage.release_interval_image_pause();
-        rx.recv_timeout(Duration::from_secs(10))
-            .map_err(|err| eyre!("completion flush did not finish: {err}"))??;
+        let flushed = rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|err| eyre!("completion flush did not finish: {err}"));
+        // The worker sends before its closure drops its clone.
+        first_flush
+            .join()
+            .map_err(|_| eyre!("completion flush thread panicked"))?;
+        flushed??;
         assert_eq!(
             file_label(&storage, 0)?,
             Some(ChunkType::Data),
@@ -20872,7 +20878,7 @@ mod tests {
         storage.pause_next_completion_clone();
         let flush_mod = Arc::clone(&storage);
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let second_flush = std::thread::spawn(move || {
             let _ = tx.send(flush_mod.flush_interval_completions_locked(true));
         });
         assert!(
@@ -20881,8 +20887,14 @@ mod tests {
         );
         storage.note_crc_mismatch(offset, ChunkType::Data, "test")?;
         storage.release_interval_image_pause();
-        rx.recv_timeout(Duration::from_secs(10))
-            .map_err(|err| eyre!("second completion flush did not finish: {err}"))??;
+        let flushed = rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|err| eyre!("second completion flush did not finish: {err}"));
+        // The worker sends before its closure drops its clone.
+        second_flush
+            .join()
+            .map_err(|_| eyre!("completion flush thread panicked"))?;
+        flushed??;
         assert_eq!(
             file_label(&storage, 0)?,
             Some(ChunkType::Uninitialized),
@@ -20893,6 +20905,9 @@ mod tests {
             storage.take_crc_repair_ranges(),
             vec![partition_chunk_offset_ii!(0, 0)]
         );
+        // Both joins finished above. Take the module back only after the clones drop.
+        let storage =
+            Arc::try_unwrap(storage).map_err(|_| eyre!("a flush worker still holds the module"))?;
         drop(storage);
         drop(tmp);
         Ok(())
