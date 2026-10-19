@@ -459,6 +459,9 @@ enum SyncFailurePoint {
     /// Authoritative interval replace has not committed. The ahead mask must
     /// still describe the previous file.
     BeforeIntervalImageCommit,
+    /// Rollback has committed the `Uninitialized` interval image. The proof
+    /// index clear has not started.
+    AfterRollbackIntervalImage,
     /// Reset marker write has not started. Pending is still the caller's.
     ResetMarkerWrite,
     /// Reset marker is durable. The index clear has not run.
@@ -869,6 +872,12 @@ pub struct StorageModule {
     /// [`Self::interval_image_epoch`]: that bump makes
     /// [`Self::persist_write_ahead`] skip its `Interrupted` mark.
     crc_cut_epoch: AtomicU64,
+    /// Bumped inside the rollback mutation, under the intervals write lock,
+    /// together with the live-map flip, before the file replace. A completion
+    /// that cloned the map before the bump does not commit that image and
+    /// does not clear `dirty`. This is not [`Self::interval_image_epoch`] and
+    /// not [`Self::crc_cut_epoch`].
+    publish_generation: AtomicU64,
     /// Bumped when an entropy `pwrite` lands. A disk read that captured an
     /// older value must not pack those bytes or cache them.
     entropy_write_epoch: AtomicU64,
@@ -2290,6 +2299,7 @@ impl StorageModule {
             interval_image_epoch: AtomicU64::new(0),
             interval_publish: Mutex::new(()),
             crc_cut_epoch: AtomicU64::new(0),
+            publish_generation: AtomicU64::new(0),
             entropy_write_epoch: AtomicU64::new(0),
             #[cfg(test)]
             suppress_interval_flush: AtomicBool::new(false),
@@ -4363,6 +4373,10 @@ impl StorageModule {
         self.crc_cut_epoch.load(Ordering::SeqCst)
     }
 
+    fn load_publish_generation(&self) -> u64 {
+        self.publish_generation.load(Ordering::SeqCst)
+    }
+
     /// `false` when `reset` published a newer map after this snapshot was taken.
     /// The caller must not replace the file or restore that snapshot's mask.
     fn interval_snapshot_current(&self, snapshot_epoch: u64) -> bool {
@@ -4383,9 +4397,25 @@ impl StorageModule {
         current
     }
 
-    fn interval_image_acceptable(&self, snapshot_epoch: u64, snapshot_crc_epoch: u64) -> bool {
+    /// `false` when rollback published a newer map after this snapshot was copied.
+    /// The caller must not commit the pre-rollback image or clear `dirty`.
+    fn publish_snapshot_current(&self, snapshot_publish: u64) -> bool {
+        let current = snapshot_publish == self.load_publish_generation();
+        if !current {
+            debug!("skipping interval rewrite snapshotted before rollback");
+        }
+        current
+    }
+
+    fn interval_image_acceptable(
+        &self,
+        snapshot_epoch: u64,
+        snapshot_crc_epoch: u64,
+        snapshot_publish: u64,
+    ) -> bool {
         self.interval_snapshot_current(snapshot_epoch)
             && self.crc_cut_snapshot_current(snapshot_crc_epoch)
+            && self.publish_snapshot_current(snapshot_publish)
     }
 
     /// Time until a dirty completion may be rewritten. `None` when batching
@@ -4439,12 +4469,16 @@ impl StorageModule {
         if !self.intervals_batched() {
             return self.write_intervals_files(Some(touched), None);
         }
-        // Read both epochs before the map. A later reset fails this snapshot
-        // instead of letting it put the old mask back. A checksum cut fails
-        // it the same way, without using `interval_image_epoch`: that bump
-        // would take the success return below and skip this `Interrupted` mark.
+        // Read both epochs and the publish generation before the map. A later
+        // reset fails this snapshot instead of letting it put the old mask
+        // back. A checksum cut fails it the same way, without using
+        // `interval_image_epoch`: that bump would take the success return
+        // below and skip this `Interrupted` mark. The publish generation is
+        // not part of that early return for the same reason. The replace
+        // further down does consult it.
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_crc_epoch = self.load_crc_cut_epoch();
+        let snapshot_publish = self.load_publish_generation();
         // The file already says Interrupted for a covered batch. Return before
         // cloning the interval map: that clone is the whole fragment list, and
         // this runs on the durable-point path. The lock is not held across the
@@ -4490,13 +4524,14 @@ impl StorageModule {
             Some(touched),
             snapshot_epoch,
             snapshot_crc_epoch,
+            snapshot_publish,
             false,
         )?;
         let mut disk = self.lock_interval_disk();
         // The replace already dropped the publish lock. A cut that landed
         // after it rewrote the file; installing this mask would claim those
         // spans are already `Interrupted`.
-        if self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
+        if self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish) {
             disk.mask = mask;
         }
         Ok(())
@@ -4552,6 +4587,7 @@ impl StorageModule {
         let period = self.intervals_persist_period();
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_crc_epoch = self.load_crc_cut_epoch();
+        let snapshot_publish = self.load_publish_generation();
         // Due-ness does not need the interval map. A lane pass with nothing
         // due must not clone that map: after a crash it is the fragment list.
         let due_starts = {
@@ -4585,6 +4621,7 @@ impl StorageModule {
             Some(&touched),
             snapshot_epoch,
             snapshot_crc_epoch,
+            snapshot_publish,
             false,
         )
     }
@@ -4633,6 +4670,7 @@ impl StorageModule {
         }
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_crc_epoch = self.load_crc_cut_epoch();
+        let snapshot_publish = self.load_publish_generation();
         let mut memory = recover_read(&self.intervals).clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
@@ -4652,7 +4690,12 @@ impl StorageModule {
                 drop(disk);
                 // The file already has this image. Remember the nondurable
                 // spans so the next batch inside them does not rewrite.
-                self.install_authoritative_mask(&nondurable, snapshot_epoch, snapshot_crc_epoch);
+                self.install_authoritative_mask(
+                    &nondurable,
+                    snapshot_epoch,
+                    snapshot_crc_epoch,
+                    snapshot_publish,
+                );
                 return Ok(());
             }
         }
@@ -4661,12 +4704,18 @@ impl StorageModule {
             None,
             snapshot_epoch,
             snapshot_crc_epoch,
+            snapshot_publish,
             force_replace,
         )?;
         // The mask means the file already says `Interrupted`. Install it
         // only after the replace commits. A failed replace leaves the old
         // mask, so the next write-ahead still rewrites those spans.
-        self.install_authoritative_mask(&nondurable, snapshot_epoch, snapshot_crc_epoch);
+        self.install_authoritative_mask(
+            &nondurable,
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            snapshot_publish,
+        );
         Ok(())
     }
 
@@ -4675,9 +4724,10 @@ impl StorageModule {
         nondurable: &BTreeSet<PartitionChunkOffset>,
         snapshot_epoch: u64,
         snapshot_crc_epoch: u64,
+        snapshot_publish: u64,
     ) {
         let mut disk = self.lock_interval_disk();
-        if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
+        if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish) {
             return;
         }
         disk.mask = Self::mask_for_offsets(nondurable);
@@ -4699,6 +4749,7 @@ impl StorageModule {
     ) -> eyre::Result<()> {
         let snapshot_epoch = self.load_interval_image_epoch();
         let snapshot_crc_epoch = self.load_crc_cut_epoch();
+        let snapshot_publish = self.load_publish_generation();
         let mut memory = recover_read(&self.intervals).clone();
         let mut nondurable = self.snapshot_nondurable_offsets();
         if let Some(durable_now) = durable_now {
@@ -4707,7 +4758,14 @@ impl StorageModule {
             }
         }
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
-        self.write_interval_image(&memory, only, snapshot_epoch, snapshot_crc_epoch, false)
+        self.write_interval_image(
+            &memory,
+            only,
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            snapshot_publish,
+            false,
+        )
     }
 
     /// `pending.chunks` and `pending.written_ahead`. Caller released
@@ -4750,9 +4808,11 @@ impl StorageModule {
     ///
     /// `snapshot_epoch` is the value read before `image` was copied. `reset`
     /// bumps that epoch after it publishes `Uninitialized`. `snapshot_crc_epoch`
-    /// is the checksum-cut epoch read at the same time. A replace whose epoch
+    /// is the checksum-cut epoch read at the same time. `snapshot_publish` is
+    /// the publish generation read before the copy. Rollback bumps that
+    /// generation with the live-map flip. A replace whose epoch
     /// no longer matches does not write the file and does not change `written`
-    /// or the dirty set.
+    /// or the dirty set. `Ok` here is not proof that this image was stored.
     ///
     /// The publish lock covers the replace. A checksum cut holds it across
     /// its own bump and replace, so this snapshot cannot commit afterwards.
@@ -4762,6 +4822,7 @@ impl StorageModule {
         only: Option<&BTreeSet<PartitionChunkOffset>>,
         snapshot_epoch: u64,
         snapshot_crc_epoch: u64,
+        snapshot_publish: u64,
         force_replace: bool,
     ) -> eyre::Result<()> {
         let _publish = self.lock_interval_publish();
@@ -4770,6 +4831,7 @@ impl StorageModule {
             only,
             snapshot_epoch,
             snapshot_crc_epoch,
+            snapshot_publish,
             force_replace,
         )
     }
@@ -4780,10 +4842,12 @@ impl StorageModule {
         only: Option<&BTreeSet<PartitionChunkOffset>>,
         snapshot_epoch: u64,
         snapshot_crc_epoch: u64,
+        snapshot_publish: u64,
         force_replace: bool,
     ) -> eyre::Result<()> {
         for (submodule_interval, submodule) in self.submodules.iter() {
-            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
+            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish)
+            {
                 return Ok(());
             }
             let start = submodule_interval.start();
@@ -4802,7 +4866,11 @@ impl StorageModule {
                 // The epoch check and the dirty-bit clear share this lock.
                 // `reset` bumps the epoch under the same lock, so a stale
                 // snapshot cannot drop a dirty bit published after the bump.
-                if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
+                if !self.interval_image_acceptable(
+                    snapshot_epoch,
+                    snapshot_crc_epoch,
+                    snapshot_publish,
+                ) {
                     return Ok(());
                 }
                 disk.dirty.remove(&start);
@@ -4813,7 +4881,8 @@ impl StorageModule {
             // snapshot from before that bump must not replace the new image.
             // A checksum cut bumps `crc_cut_epoch` under the publish lock
             // this caller already holds, so a pre-cut snapshot stops here.
-            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
+            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish)
+            {
                 return Ok(());
             }
             #[cfg(test)]
@@ -4825,7 +4894,8 @@ impl StorageModule {
             file.commit()?;
             drop(path);
             let mut disk = self.lock_interval_disk();
-            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch) {
+            if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish)
+            {
                 return Ok(());
             }
             Self::splice_interval_slice(&mut disk.written, *submodule_interval, &slice);
@@ -6040,6 +6110,7 @@ impl StorageModule {
     /// [`Self::persist_write_ahead`] skip its `Interrupted` mark.
     fn publish_crc_cut(&self, offset: PartitionChunkOffset) -> eyre::Result<()> {
         let snapshot_epoch = self.load_interval_image_epoch();
+        let snapshot_publish = self.load_publish_generation();
         let mut memory = recover_read(&self.intervals).clone();
         let nondurable = self.snapshot_nondurable_offsets();
         Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
@@ -6058,6 +6129,7 @@ impl StorageModule {
             Some(&touched),
             snapshot_epoch,
             crc_epoch,
+            snapshot_publish,
             false,
         ) {
             let _ = self.crc_cut_epoch.fetch_sub(1, Ordering::SeqCst);
@@ -6756,36 +6828,46 @@ impl StorageModule {
 
     /// Clear an orphaned partition range and publish `Uninitialized`.
     ///
-    /// The interval rewrite is last. It waits on the disk lane, and the lane
-    /// takes `sync_in_progress`, so this does not hold that lock across the
-    /// rewrite. The clear does hold it: an in-flight durable point keeps the
-    /// lock through its label update, and must not publish `Data` after the
-    /// index is gone.
+    /// The `Uninitialized` image is durable before the proof index is cleared.
+    /// A crash before that image leaves the previous file and the previous
+    /// proofs. A crash after it leaves `Uninitialized`. Open drops any proofs
+    /// still stored under that label. The file is not `Data` with an empty
+    /// proof index. This holds `sync_in_progress` across the replace and does
+    /// not wait on the disk lane: the lane takes that lock to flush. A failed
+    /// replace restores the live map and does not clear the index.
+    ///
+    /// The publish generation bumps in the same intervals-lock section as the
+    /// live-map flip. A completion that cloned the map before the bump does
+    /// not replace the file and does not clear `dirty`.
     ///
     /// Lock order, outer to inner: `partition_assignment` write, then
-    /// `sync_in_progress`. The write lock covers the generation bump and the
-    /// index clear, and it is released before the interval rewrite. The
-    /// assignment value stays. A registration that already holds the read
-    /// lock finishes its commit, and this clear then removes those rows. A
-    /// registration that has not entered captures the new generation. The
-    /// assignment is unchanged, so that storage commit still proceeds.
-    /// Chunk migration holds `index_recovery` across the commit and writes
-    /// only when the block is still at this height.
+    /// `sync_in_progress`, then `intervals` (released before
+    /// `interval_publish`). The assignment write lock covers the generation
+    /// bump, the file replace, and the index clear. The assignment value
+    /// stays. A registration that already holds the read lock finishes its
+    /// commit, and this clear then removes those rows. A registration that
+    /// has not entered captures the new generation. The assignment is
+    /// unchanged, so that storage commit still proceeds. Chunk migration
+    /// holds `index_recovery` across the commit and writes only when the
+    /// block is still at this height.
     pub fn rollback_unassigned_range(
         &self,
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
         data_roots: &[H256],
     ) -> eyre::Result<()> {
-        {
-            let _assignment = self.lock_assignment_for_rollback();
-            let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
-            let _sync = self.lock_sync();
-            self.drop_pending_writes_in_range(start, end);
-            self.clear_offset_index_in_range(start, end)?;
-            self.clear_data_root_infos_in_range(start, end, data_roots)?;
-            self.purge_pending_body_migrations_in_range(start, end)?;
+        let _assignment = self.lock_assignment_for_rollback();
+        let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
+        let _sync = self.lock_sync();
+        self.drop_pending_writes_in_range(start, end);
+
+        let previous_generation = self.load_publish_generation();
+        let previous_map = {
             let mut guard = self.intervals.write().unwrap();
+            let previous = guard.clone();
+            // The bump and the flip share this lock. A reader clones either
+            // the old map at the old generation or the new map at the new one.
+            self.publish_generation.fetch_add(1, Ordering::SeqCst);
             // One label covers the inclusive span. One cut splits the
             // neighbors. The insert merges with touching `Uninitialized`.
             let span = ii(start, end);
@@ -6796,8 +6878,58 @@ impl StorageModule {
             };
             intervals.cut(span);
             intervals.insert_merge_touching_if_values_equal(span, ChunkType::Uninitialized);
+            previous
+        };
+
+        // Read after the bump, after the intervals lock is released.
+        let snapshot_epoch = self.load_interval_image_epoch();
+        let snapshot_crc_epoch = self.load_crc_cut_epoch();
+        let snapshot_publish = self.load_publish_generation();
+        let mut memory = recover_read(&self.intervals).clone();
+        let nondurable = self.snapshot_nondurable_offsets();
+        Self::overlay_nondurable_as_interrupted(&mut memory, &nondurable);
+        // Not `write_intervals_to_submodules`: that waits on the lane, and a
+        // suppressed flush would skip the replace. `force_replace` still
+        // commits when the tracked image already matches.
+        if let Err(err) = self.write_interval_image(
+            &memory,
+            None,
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            snapshot_publish,
+            true,
+        ) {
+            self.restore_rollback_intervals(previous_map, previous_generation);
+            return Err(err);
         }
-        self.write_intervals_to_submodules()
+        // `Ok` is also a snapshot that did not replace the file. Do not
+        // clear proofs over the previous image.
+        if !self.interval_image_acceptable(snapshot_epoch, snapshot_crc_epoch, snapshot_publish) {
+            self.restore_rollback_intervals(previous_map, previous_generation);
+            eyre::bail!("rollback interval image was not published");
+        }
+        self.install_authoritative_mask(
+            &nondurable,
+            snapshot_epoch,
+            snapshot_crc_epoch,
+            snapshot_publish,
+        );
+        #[cfg(test)]
+        self.inject_sync_failure(SyncFailurePoint::AfterRollbackIntervalImage)?;
+        self.clear_offset_index_in_range(start, end)?;
+        self.clear_data_root_infos_in_range(start, end, data_roots)?;
+        self.purge_pending_body_migrations_in_range(start, end)?;
+        Ok(())
+    }
+
+    /// Put the pre-rollback map and publish generation back. `store` writes
+    /// the captured value. A decrement would move a generation this call did
+    /// not own.
+    fn restore_rollback_intervals(&self, previous_map: StorageIntervals, previous_generation: u64) {
+        let mut guard = self.intervals.write().unwrap();
+        *guard = previous_map;
+        self.publish_generation
+            .store(previous_generation, Ordering::SeqCst);
     }
 
     /// Drops any queued (not-yet-synced) chunk writes whose partition offset
@@ -11799,6 +11931,318 @@ mod tests {
             );
         }
         eyre::ensure!(edits == 2, "{label}: interval edits {edits}, want 2");
+        Ok(())
+    }
+
+    /// Assigned module, four chunks, the chosen index engine.
+    fn open_assigned_module(
+        prefix: &str,
+        engine: SubmoduleIndexEngine,
+        persist_secs: u64,
+    ) -> eyre::Result<(
+        irys_testing_utils::utils::tempfile::TempDir,
+        Config,
+        StorageModule,
+    )> {
+        let tmp_dir = TempDirBuilder::new().prefix(prefix).build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 4,
+                entropy_packing_iterations: 1,
+                ..ConsensusConfig::testing()
+            }),
+            storage: StorageSyncConfig {
+                num_writes_before_sync: 1,
+                entropy_sweep_max_bytes: chunk_size * 4,
+                entropy_read_grace_ms: 0,
+                entropy_read_batch_bytes: chunk_size * 4,
+                min_durable_interval_ms: 0,
+                intervals_persist_secs: persist_secs,
+                ..StorageSyncConfig::default()
+            },
+            database: index_database(engine),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage = StorageModule::new(&crc_hold_info(tmp_dir.path()), &config)?;
+        Ok((tmp_dir, config, storage))
+    }
+
+    /// File already says `Data` for a proved chunk at offset 0.
+    fn settle_proved_prefix(storage: &StorageModule) -> eyre::Result<(Vec<u8>, H256)> {
+        storage.pack_with_zeros();
+        let (unpacked, header, _) = index_partition(storage)?;
+        storage.write_data_chunk(&unpacked[0])?;
+        storage.force_sync_pending_chunks()?;
+        let offset = PartitionChunkOffset::from(0);
+        let bytes = storage.read_chunk_internal(offset)?;
+        assert_eq!(file_label(storage, 0)?, Some(ChunkType::Data));
+        assert_eq!(live_label(storage, 0), Some(ChunkType::Data));
+        assert!(data_path_at(storage, 0)?.is_some());
+        assert!(storage.generate_full_chunk(offset)?.is_some());
+        assert!(
+            !storage
+                .collect_data_root_infos(header.data_root)?
+                .0
+                .is_empty()
+        );
+        assert!(
+            storage
+                .pending_body_migrations()?
+                .iter()
+                .any(|(pending, _)| pending.0 == 0)
+        );
+        Ok((bytes, header.data_root))
+    }
+
+    fn reopen_assigned(config: &Config, tmp: &std::path::Path) -> eyre::Result<StorageModule> {
+        StorageModule::new(&crc_hold_info(tmp), config)
+    }
+
+    fn span_covers(intervals: &[Interval<PartitionChunkOffset>], offset: u32) -> bool {
+        intervals
+            .iter()
+            .any(|interval| interval.start().0 <= offset && offset <= interval.end().0)
+    }
+
+    /// The interval replace fails before it commits. The proof index, the
+    /// placement, and the file label stay as they were. Reopen does not see
+    /// `Data` with an empty proof.
+    #[rstest]
+    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
+    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
+    fn rollback_crash_before_interval_image_keeps_the_proof(
+        #[case] engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<()> {
+        let prefix = format!("rollback_image_crash_{engine:?}");
+        let (tmp, config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (bytes, data_root) = settle_proved_prefix(&storage)?;
+        let offset = PartitionChunkOffset::from(0);
+        let publish_before = storage.publish_generation.load(Ordering::SeqCst);
+        storage.fail_next_sync_at(SyncFailurePoint::BeforeIntervalImageCommit);
+        let failed = storage
+            .rollback_unassigned_range(offset, PartitionChunkOffset::from(3), &[data_root])
+            .expect_err("the interval replace was injected to fail");
+        assert!(
+            format!("{failed:#}").contains("BeforeIntervalImageCommit"),
+            "{engine:?}: {failed:#}"
+        );
+        assert!(
+            data_path_at(&storage, 0)?.is_some(),
+            "{engine:?}: the proof clear committed before the interval replace"
+        );
+        assert_eq!(
+            live_label(&storage, 0),
+            Some(ChunkType::Data),
+            "{engine:?}: a failed replace left the live map uninitialized"
+        );
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Data));
+        assert_eq!(
+            storage.publish_generation.load(Ordering::SeqCst),
+            publish_before,
+            "{engine:?}: a failed replace left the publish generation bumped"
+        );
+
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+        let storage = reopen_assigned(&config, tmp.path())?;
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Data));
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Data));
+        assert_eq!(storage.read_chunk_internal(offset)?, bytes);
+        assert!(storage.generate_full_chunk(offset)?.is_some());
+        assert!(data_path_at(&storage, 0)?.is_some());
+        assert!(!storage.collect_data_root_infos(data_root)?.0.is_empty());
+        assert!(
+            storage
+                .pending_body_migrations()?
+                .iter()
+                .any(|(pending, _)| pending.0 == 0)
+        );
+        assert!(
+            !span_covers(&storage.get_intervals(ChunkType::Uninitialized), 0),
+            "{engine:?}: reopen would pack a proved chunk"
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// The interval image is durable and the proof clear has not started.
+    /// Reopen loads `Uninitialized` and drops the proof. It does not reload
+    /// `Data` with an empty proof index.
+    #[rstest]
+    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
+    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
+    fn rollback_crash_between_image_and_proof_clear_reloads_uninitialized(
+        #[case] engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<()> {
+        let prefix = format!("rollback_between_clear_{engine:?}");
+        let (tmp, config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (_bytes, data_root) = settle_proved_prefix(&storage)?;
+        let offset = PartitionChunkOffset::from(0);
+        storage.fail_next_sync_at(SyncFailurePoint::AfterRollbackIntervalImage);
+        let failed = storage
+            .rollback_unassigned_range(offset, PartitionChunkOffset::from(3), &[data_root])
+            .expect_err("rollback must stop after the interval image and before the proof clear");
+        assert!(
+            format!("{failed:#}").contains("AfterRollbackIntervalImage"),
+            "{engine:?}: {failed:#}"
+        );
+        assert!(
+            data_path_at(&storage, 0)?.is_some(),
+            "{engine:?}: the proof clear committed before the interval image was durable"
+        );
+        assert_eq!(
+            file_label(&storage, 0)?,
+            Some(ChunkType::Uninitialized),
+            "{engine:?}: the interval image was not durable while the proof was still stored"
+        );
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Uninitialized));
+
+        storage.abandon_on_drop_for_test();
+        drop(storage);
+        let storage = reopen_assigned(&config, tmp.path())?;
+        let label = live_label(&storage, 0);
+        let proof = data_path_at(&storage, 0)?.is_some();
+        let pack = span_covers(&storage.get_intervals(ChunkType::Uninitialized), 0);
+        assert_eq!(
+            label,
+            Some(ChunkType::Uninitialized),
+            "{engine:?}: label={label:?} proof={proof} pack={pack}"
+        );
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Uninitialized));
+        assert!(!proof, "{engine:?}: open left a proof under Uninitialized");
+        assert!(
+            storage.collect_data_root_infos(data_root)?.0.is_empty(),
+            "{engine:?}: open left the placement"
+        );
+        assert!(
+            storage
+                .pending_body_migrations()?
+                .iter()
+                .all(|(pending, _)| pending.0 != 0),
+            "{engine:?}: open left the body job"
+        );
+        assert!(pack, "{engine:?}: reopen did not hand the span to packing");
+        assert!(storage.generate_full_chunk(offset)?.is_none());
+        assert!(!storage.is_data_chunk_durable_at(offset));
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A finished rollback stores `Uninitialized` and then drops the proof.
+    /// One span is still one cut and one insert. The publish generation is
+    /// the counter that moves. Reset's epoch and the checksum-cut epoch stay.
+    #[rstest]
+    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
+    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
+    fn rollback_publishes_uninitialized_then_clears_the_proof(
+        #[case] engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<()> {
+        let prefix = format!("rollback_image_ok_{engine:?}");
+        let (tmp, _config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (_bytes, data_root) = settle_proved_prefix(&storage)?;
+        let edits_before = storage.rollback_interval_edits.load(Ordering::SeqCst);
+        let image_epoch = storage.interval_image_epoch.load(Ordering::SeqCst);
+        let crc_epoch = storage.crc_cut_epoch.load(Ordering::SeqCst);
+        let publish_before = storage.publish_generation.load(Ordering::SeqCst);
+        storage.rollback_unassigned_range(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(3),
+            &[data_root],
+        )?;
+        let edits = storage.rollback_interval_edits.load(Ordering::SeqCst) - edits_before;
+        assert_eq!(edits, 2, "{engine:?}: interval edits {edits}");
+        assert_eq!(live_label(&storage, 0), Some(ChunkType::Uninitialized));
+        assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Uninitialized));
+        assert!(data_path_at(&storage, 0)?.is_none());
+        assert!(storage.collect_data_root_infos(data_root)?.0.is_empty());
+        assert!(
+            storage
+                .pending_body_migrations()?
+                .iter()
+                .all(|(pending, _)| pending.0 != 0)
+        );
+        assert!(span_covers(
+            &storage.get_intervals(ChunkType::Uninitialized),
+            0
+        ));
+        assert_eq!(
+            storage.interval_image_epoch.load(Ordering::SeqCst),
+            image_epoch,
+            "{engine:?}: rollback reused the reset epoch"
+        );
+        assert_eq!(
+            storage.crc_cut_epoch.load(Ordering::SeqCst),
+            crc_epoch,
+            "{engine:?}: rollback reused the checksum-cut epoch"
+        );
+        assert_eq!(
+            storage.publish_generation.load(Ordering::SeqCst),
+            publish_before + 1,
+            "{engine:?}: rollback did not bump the publish generation"
+        );
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
+    /// A completion that copied the map before rollback must not write that
+    /// `Data` image back over the `Uninitialized` file.
+    #[rstest]
+    #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
+    #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
+    fn stale_interval_snapshot_cannot_restore_data_after_rollback(
+        #[case] engine: SubmoduleIndexEngine,
+    ) -> eyre::Result<()> {
+        let prefix = format!("rollback_stale_image_{engine:?}");
+        let (tmp, _config, storage) = open_assigned_module(&prefix, engine, 30)?;
+        let (_bytes, data_root) = settle_proved_prefix(&storage)?;
+        let storage = Arc::new(storage);
+        storage.pause_next_interval_image();
+        let writer = Arc::clone(&storage);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| -> eyre::Result<()> {
+            struct Release<'a>(&'a StorageModule);
+            impl Drop for Release<'_> {
+                fn drop(&mut self) {
+                    self.0.release_interval_image_pause();
+                }
+            }
+            let _release = Release(&storage);
+            scope.spawn(move || {
+                let _ = done_tx.send(writer.write_intervals_to_submodules());
+            });
+            assert!(
+                storage.wait_for_interval_image_pause(Duration::from_secs(5)),
+                "{engine:?}: the interval rewrite did not pause"
+            );
+            storage.rollback_unassigned_range(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(3),
+                &[data_root],
+            )?;
+            assert_eq!(file_label(&storage, 0)?, Some(ChunkType::Uninitialized));
+            assert!(data_path_at(&storage, 0)?.is_none());
+            storage.release_interval_image_pause();
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| eyre::eyre!("{engine:?}: the paused rewrite did not finish"))??;
+            assert_eq!(
+                file_label(&storage, 0)?,
+                Some(ChunkType::Uninitialized),
+                "{engine:?}: a pre-rollback snapshot republished Data"
+            );
+            assert_eq!(live_label(&storage, 0), Some(ChunkType::Uninitialized));
+            assert!(data_path_at(&storage, 0)?.is_none());
+            Ok(())
+        })?;
+        drop(storage);
+        drop(tmp);
         Ok(())
     }
 
