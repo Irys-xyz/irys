@@ -1956,9 +1956,10 @@ impl StorageModule {
         let mut pack_binds = Vec::new();
         // Hash, ledger, and slot changes are written only after
         // `bind_packing_identity` accepts. A refused open leaves the previous
-        // file in place. A hash change sets the reset marker only after every
-        // check that can refuse. A same-hash ledger or slot change does not
-        // wipe the bytes.
+        // file in place. The reset marker is written after every check that
+        // can refuse. A hash change sets it. A ledger or slot change sets it
+        // when the module already holds a ledger. Capacity gaining a ledger
+        // keeps the stored bytes.
         let mut rebind_after_bind: Vec<(PathBuf, Option<H256>, Option<u32>, Option<usize>)> =
             Vec::new();
         let mut reset_dbs: Vec<SubmoduleIndex> = Vec::new();
@@ -2063,20 +2064,20 @@ impl StorageModule {
                         None => (None, None, None),
                     };
 
-                // A different partition must not keep the old labels or the
-                // old Rocks partition key. The marker is written after packing
-                // validation, interval repair, and coverage. A refusal before
-                // that leaves the bytes alone. Ledger or slot drift with the
-                // same hash does not wipe the bytes.
-                if params.partition_hash != want_hash {
-                    reset_dbs.push(submodule_db.clone());
-                    rebind_after_bind.push((
-                        params_path.clone(),
-                        want_hash,
-                        want_ledger,
-                        want_slot,
-                    ));
-                } else if params.ledger != want_ledger || params.slot != want_slot {
+                // A different partition clears the old labels and index rows.
+                // A ledger or slot change does the same when the module already
+                // holds a ledger: the bytes belong to the previous assignment.
+                // The marker is written after packing validation, interval
+                // repair, and coverage. A refusal before that leaves the bytes
+                // alone. Capacity gaining a ledger keeps the bytes.
+                let ledger_or_slot_changed =
+                    params.ledger != want_ledger || params.slot != want_slot;
+                let leaving_a_ledger = params.ledger.is_some() && ledger_or_slot_changed;
+                let wipe = params.partition_hash != want_hash || leaving_a_ledger;
+                if wipe || ledger_or_slot_changed {
+                    if wipe {
+                        reset_dbs.push(submodule_db.clone());
+                    }
                     rebind_after_bind.push((
                         params_path.clone(),
                         want_hash,
@@ -18017,7 +18018,8 @@ mod tests {
 
     /// Same hash, new slot. A packing refusal and a coverage refusal both
     /// return before the file is replaced. A matching open publishes the
-    /// slot and keeps the chunk, its label, and its index row.
+    /// slot and wipes the labels and index rows of the ledger it left.
+    /// The chunk file is not the proof of a wipe: the label and the row are.
     #[test]
     fn refused_open_keeps_the_same_hash_slot() -> eyre::Result<()> {
         let tmp = TempDirBuilder::new()
@@ -18086,7 +18088,7 @@ mod tests {
             &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 0))),
             &config,
         )?;
-        assert!(seeded.write_chunk(offset, bytes.clone(), ChunkType::Data));
+        assert!(seeded.write_chunk(offset, bytes, ChunkType::Data));
         seeded.force_sync_pending_chunks()?;
         assert_eq!(seeded.get_chunk_type(&offset), Some(ChunkType::Data));
         let root = H256::repeat_byte(0x44);
@@ -18108,13 +18110,16 @@ mod tests {
             &one_span(3, sub.clone(), Some(submit_slot(&config, hash, 1))),
             &config,
         )?;
-        assert_eq!(opened.read_chunk_internal(offset)?, bytes);
-        assert_eq!(opened.get_chunk_type(&offset), Some(ChunkType::Data));
-        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Data));
+        assert_eq!(
+            opened.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "a same-hash slot change must wipe the live label"
+        );
+        assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Uninitialized));
         assert_eq!(
             live_tx_rows(&opened)?,
-            1,
-            "a slot change wiped the index row"
+            0,
+            "a same-hash slot change must wipe the index row"
         );
         assert!(
             !opened
@@ -18131,6 +18136,525 @@ mod tests {
         assert_eq!(loaded.last_updated_height, Some(0));
         assert_eq!(loaded.partition_hash, Some(hash));
         assert_eq!(loaded.entropy_packing_iterations, Some(recorded));
+        Ok(())
+    }
+
+    fn assignment(
+        config: &Config,
+        hash: H256,
+        ledger: Option<u32>,
+        slot: Option<usize>,
+    ) -> PartitionAssignment {
+        PartitionAssignment {
+            ledger_id: ledger,
+            slot_index: slot,
+            miner_address: config.node_config.miner_address(),
+            partition_hash: hash,
+        }
+    }
+
+    /// One `Data` chunk and one tx row on a fresh module.
+    fn seed_labeled_data(
+        config: &Config,
+        sub: &Path,
+        assigned: PartitionAssignment,
+    ) -> eyre::Result<()> {
+        let storage = StorageModule::new(&one_span(3, sub, Some(assigned)), config)?;
+        let offset = PartitionChunkOffset::from(0);
+        assert!(storage.write_chunk(offset, vec![0xE1_u8; 32], ChunkType::Data));
+        storage.force_sync_pending_chunks()?;
+        let root = H256::repeat_byte(0x44);
+        let (_, submodule) = storage.get_submodule_for_offset(offset)?;
+        submodule.db.update(|tx| {
+            tx.add_tx_leaf_binding(
+                root,
+                &TxLeafBinding {
+                    data_root: root,
+                    prefix_hash: H256::zero(),
+                },
+            )?;
+            tx.add_tx_path_hash_to_offset_range(offset, offset, Some(root))
+        })?;
+        eyre::ensure!(live_tx_rows(&storage)? == 1, "tx row was not stored");
+        drop(storage);
+        Ok(())
+    }
+
+    fn assert_kept(storage: &StorageModule, sub: &Path, why: &str) -> eyre::Result<()> {
+        let offset = PartitionChunkOffset::from(0);
+        assert_eq!(
+            storage.read_chunk_internal(offset)?,
+            vec![0xE1_u8; 32],
+            "{why}: the chunk bytes changed"
+        );
+        assert_eq!(
+            storage.get_chunk_type(&offset),
+            Some(ChunkType::Data),
+            "{why}: the label was wiped"
+        );
+        assert_eq!(interval_label(sub, 0)?, Some(ChunkType::Data), "{why}");
+        assert_eq!(live_tx_rows(storage)?, 1, "{why}: the index row was wiped");
+        assert!(
+            !storage
+                .get_submodule_for_offset(offset)?
+                .1
+                .db
+                .reset_in_progress()?
+        );
+        Ok(())
+    }
+
+    fn assert_wiped(storage: &StorageModule, sub: &Path, why: &str) -> eyre::Result<()> {
+        let offset = PartitionChunkOffset::from(0);
+        assert_eq!(
+            storage.get_chunk_type(&offset),
+            Some(ChunkType::Uninitialized),
+            "{why}: the label stayed"
+        );
+        assert_eq!(
+            interval_label(sub, 0)?,
+            Some(ChunkType::Uninitialized),
+            "{why}"
+        );
+        assert_eq!(live_tx_rows(storage)?, 0, "{why}: the index row stayed");
+        assert!(
+            !storage
+                .get_submodule_for_offset(offset)?
+                .1
+                .db
+                .reset_in_progress()?,
+            "{why}: the marker stayed set"
+        );
+        Ok(())
+    }
+
+    fn chunk_file_prefix(sub: &Path, len: usize) -> eyre::Result<Vec<u8>> {
+        let mut file = std::fs::File::open(sub.join("chunks.dat"))?;
+        let mut buf = vec![0_u8; len];
+        std::io::Read::read_exact(&mut file, &mut buf)?;
+        Ok(buf)
+    }
+
+    fn index_root_on_slot(
+        storage: &StorageModule,
+        data_root: H256,
+        slot: usize,
+    ) -> eyre::Result<()> {
+        let chunk_size = storage.config.consensus.chunk_size;
+        let chunks = storage.config.consensus.num_chunks_in_partition;
+        let data_size = chunks * chunk_size;
+        let prefix_hash = H256::zero();
+        let header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size,
+                prefix_hash,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        let folded = DataTransactionLedger::fold_tx_root_leaf(data_root, prefix_hash);
+        let mut tx_path = folded.0.to_vec();
+        tx_path.extend_from_slice(&[0_u8; 32]);
+        let start = slot as u64 * chunks;
+        let range = LedgerChunkRange(ledger_chunk_offset_ii!(start, start + chunks - 1));
+        storage.index_transaction_data_in(
+            &header,
+            &tx_path,
+            range,
+            11,
+            Some(DataLedger::Submit),
+            Some(0),
+        )
+    }
+
+    /// Same hash, same ledger, and same slot keeps the bytes. Gaining a ledger
+    /// from capacity keeps them too. Leaving a ledger wipes: another ledger,
+    /// another slot, or capacity. A wiped expiry still accepts a repack.
+    #[test]
+    fn same_hash_ledger_drift_wipes_only_when_leaving_a_ledger() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("ledger_drift_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x71);
+            let submit = Some(u32::from(DataLedger::Submit));
+            let publish = Some(u32::from(DataLedger::Publish));
+
+            let sub = tmp.path().join("same");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+                &config,
+            )?;
+            assert_kept(&opened, &sub, "same ledger and slot")?;
+            drop(opened);
+
+            let sub = tmp.path().join("slot");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )?;
+            assert_wiped(&opened, &sub, "same hash, new slot")?;
+            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+            assert_eq!(loaded.slot, Some(1));
+            assert_eq!(loaded.ledger, submit);
+            assert_eq!(loaded.partition_hash, Some(hash));
+            drop(opened);
+
+            let sub = tmp.path().join("publish");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, publish, Some(0)))),
+                &config,
+            )?;
+            assert_wiped(&opened, &sub, "submit to publish")?;
+            drop(opened);
+
+            let sub = tmp.path().join("expiry");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, None, None))),
+                &config,
+            )?;
+            assert_wiped(&opened, &sub, "ledger to capacity")?;
+            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+            assert_eq!(loaded.ledger, None);
+            assert_eq!(loaded.partition_hash, Some(hash));
+            assert!(
+                opened.write_entropy_chunk(PartitionChunkOffset::from(0), vec![0x11_u8; 32], hash),
+                "a wiped expiry did not accept a repack"
+            );
+            opened.force_sync_pending_chunks()?;
+            assert_eq!(
+                opened.get_chunk_type(&PartitionChunkOffset::from(0)),
+                Some(ChunkType::Entropy),
+                "a wiped expiry did not store the repack"
+            );
+            drop(opened);
+
+            let sub = tmp.path().join("gain");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, None, None))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+                &config,
+            )?;
+            assert_kept(&opened, &sub, "capacity to ledger")?;
+            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+            assert_eq!(loaded.ledger, submit);
+            assert_eq!(loaded.slot, Some(0));
+            drop(opened);
+        }
+        Ok(())
+    }
+
+    /// A crash after the slot-change marker, and before the wipe finishes,
+    /// leaves the old file and the old label. The next open finishes the wipe.
+    #[test]
+    fn crash_during_slot_change_wipe_finishes_on_the_next_open() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("slot_marker_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x72);
+            let sub = tmp.path().join("sub");
+            let submit = Some(u32::from(DataLedger::Submit));
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            {
+                let index = open_submodule_index(&sub, &config.node_config.database)?;
+                if index.stores_offset_crc() {
+                    index.set_chunk_crc_complete(true)?;
+                }
+            }
+            {
+                let _fail = OpenResetMarkerFail::arm();
+                let err = StorageModule::new(
+                    &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                    &config,
+                )
+                .expect_err("the open stops after the marker");
+                assert!(
+                    err.to_string()
+                        .contains("injected failure after the open reset marker"),
+                    "{engine:?}: {err}"
+                );
+            }
+            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+            assert_eq!(loaded.slot, Some(0), "{engine:?}: the file was published");
+            assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Data));
+            {
+                let index = open_submodule_index(&sub, &config.node_config.database)?;
+                assert!(index.reset_in_progress()?, "{engine:?}: marker missing");
+                if index.stores_offset_crc() {
+                    assert!(
+                        index.chunk_crc_complete()?,
+                        "{engine:?}: crc_complete was cleared before the wipe"
+                    );
+                }
+                let rows = index.view(|tx| {
+                    tx.tx_intervals_in_range(
+                        PartitionChunkOffset::from(0),
+                        PartitionChunkOffset::from(0),
+                    )
+                })?;
+                assert!(
+                    !rows.is_empty(),
+                    "{engine:?}: the interrupted wipe cleared the row"
+                );
+            }
+
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )?;
+            assert_wiped(&opened, &sub, "the next open finishes the slot wipe")?;
+            let loaded = PackingParams::from_toml(sub.join(PACKING_PARAMS_FILE_NAME))?;
+            assert_eq!(loaded.slot, Some(1));
+            let (_, submodule) = opened.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+            if submodule.db.stores_offset_crc() {
+                assert!(!submodule.db.chunk_crc_complete()?);
+            }
+        }
+        Ok(())
+    }
+
+    /// A restart that does not change the assignment keeps the bytes and the
+    /// label. A same-hash slot change wipes them. The new root indexed on
+    /// that slot is not already stored, so its body can be written.
+    #[test]
+    fn restart_across_same_hash_slot_change_writes_the_new_root() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("slot_restart_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x73);
+            let submit = Some(u32::from(DataLedger::Submit));
+            let offset = PartitionChunkOffset::from(0);
+
+            let sub = tmp.path().join("same");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+                &config,
+            )?;
+            assert_kept(&opened, &sub, "same assignment restart")?;
+            drop(opened);
+
+            let sub = tmp.path().join("slot");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )?;
+            assert_wiped(&opened, &sub, "same-hash slot change")?;
+            assert!(
+                !opened.is_data_chunk_persisted_at(offset),
+                "{engine:?}: the old Data label still counts as stored"
+            );
+            assert!(
+                opened.data_root_and_tx_offset_at(offset)?.is_none(),
+                "{engine:?}: the old placement stayed"
+            );
+            assert!(
+                opened.write_entropy_chunk(offset, vec![0x11_u8; 32], hash),
+                "{engine:?}: the wiped span did not accept a repack"
+            );
+            opened.force_sync_pending_chunks()?;
+            assert_eq!(
+                opened.get_chunk_type(&offset),
+                Some(ChunkType::Entropy),
+                "{engine:?}: the repack did not store entropy"
+            );
+
+            let new_root = H256::repeat_byte(0xB2);
+            index_root_on_slot(&opened, new_root, 1)?;
+            let jobs = opened.pending_body_migrations()?;
+            assert_eq!(jobs.len(), 1, "{engine:?}: the new root has no body job");
+            assert_eq!(jobs[0].1.data_root, new_root);
+            assert!(
+                !opened.is_data_chunk_persisted_at(offset),
+                "{engine:?}: the new root was stored before its body"
+            );
+            let writable = opened.get_writeable_offsets(&UnpackedChunk {
+                data_root: new_root,
+                tx_offset: TxChunkOffset::from(0),
+                ..UnpackedChunk::default()
+            })?;
+            assert_eq!(
+                writable,
+                vec![offset],
+                "{engine:?}: the new root is not writable"
+            );
+
+            let body = vec![0xB2_u8; 32];
+            assert!(opened.write_chunk(offset, body.clone(), ChunkType::Data));
+            opened.force_sync_pending_chunks()?;
+            assert_eq!(opened.read_chunk_internal(offset)?, body);
+            assert_eq!(opened.get_chunk_type(&offset), Some(ChunkType::Data));
+            assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Data));
+            assert!(
+                opened.is_data_chunk_persisted_at(offset),
+                "{engine:?}: the new body is not persisted"
+            );
+            let resolved = opened
+                .data_root_and_tx_offset_at(offset)?
+                .expect("the new root is placed");
+            assert_eq!(resolved.0, new_root);
+            assert_eq!(*resolved.1, 0);
+            let durable = opened.durable_tx_offsets_for_data_root(
+                new_root,
+                &BTreeSet::from([TxChunkOffset::from(0)]),
+            )?;
+            assert_eq!(
+                durable,
+                BTreeSet::from([TxChunkOffset::from(0)]),
+                "{engine:?}: the new body is not durable"
+            );
+            drop(opened);
+        }
+        Ok(())
+    }
+
+    /// A same-hash slot change that packing refuses writes no reset marker.
+    /// The bytes and the label stay. The next open of the original slot
+    /// still keeps them.
+    #[test]
+    fn refused_slot_change_open_writes_no_reset_marker() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("slot_refuse_marker_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x74);
+            let submit = Some(u32::from(DataLedger::Submit));
+            let sub = tmp.path().join("sub");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let bytes_before = chunk_file_prefix(&sub, 32)?;
+            let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+            let mut params = PackingParams::from_toml(&params_path)?;
+            let recorded = params
+                .entropy_packing_iterations
+                .expect("open records iterations");
+            params.entropy_packing_iterations = Some(recorded + 1);
+            params.write_to_disk(&params_path)?;
+            let file_before = fs::read(&params_path)?;
+
+            let err = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )
+            .expect_err("iterations do not match");
+            assert!(
+                err.to_string().contains("packing identity"),
+                "{engine:?}: {err}"
+            );
+            assert_eq!(
+                fs::read(&params_path)?,
+                file_before,
+                "{engine:?}: a refused open published the packing file"
+            );
+            {
+                let index = open_submodule_index(&sub, &config.node_config.database)?;
+                assert!(
+                    !index.reset_in_progress()?,
+                    "{engine:?}: a refused slot change wrote the reset marker"
+                );
+            }
+            assert_eq!(interval_label(&sub, 0)?, Some(ChunkType::Data));
+            assert_eq!(chunk_file_prefix(&sub, 32)?, bytes_before);
+
+            params.entropy_packing_iterations = Some(recorded);
+            params.write_to_disk(&params_path)?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(0)))),
+                &config,
+            )?;
+            assert_kept(&opened, &sub, "the original slot after a refused open")?;
+        }
+        Ok(())
+    }
+
+    /// A crash after the slot-change marker leaves the old bytes. A later
+    /// open that packing refuses does not finish that wipe. The next
+    /// accepted open does.
+    #[test]
+    fn refused_open_does_not_finish_a_slot_change_marker() -> eyre::Result<()> {
+        for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
+            let tmp = TempDirBuilder::new()
+                .prefix(&format!("slot_marker_refuse_{engine:?}"))
+                .build();
+            let config = testing_config_tuned(tmp.path(), 32, 4, |node| {
+                node.database = index_database(engine);
+            });
+            let hash = H256::repeat_byte(0x75);
+            let submit = Some(u32::from(DataLedger::Submit));
+            let sub = tmp.path().join("sub");
+            seed_labeled_data(&config, &sub, assignment(&config, hash, submit, Some(0)))?;
+            let bytes_before = chunk_file_prefix(&sub, 32)?;
+            {
+                let _fail = OpenResetMarkerFail::arm();
+                let err = StorageModule::new(
+                    &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                    &config,
+                )
+                .expect_err("the open stops after the marker");
+                assert!(
+                    err.to_string()
+                        .contains("injected failure after the open reset marker"),
+                    "{engine:?}: {err}"
+                );
+            }
+            let params_path = sub.join(PACKING_PARAMS_FILE_NAME);
+            let mut params = PackingParams::from_toml(&params_path)?;
+            let recorded = params
+                .entropy_packing_iterations
+                .expect("open records iterations");
+            params.entropy_packing_iterations = Some(recorded + 1);
+            params.write_to_disk(&params_path)?;
+            let err = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )
+            .expect_err("a refused open must not finish the wipe");
+            assert!(
+                err.to_string().contains("packing identity"),
+                "{engine:?}: {err}"
+            );
+            assert_eq!(
+                interval_label(&sub, 0)?,
+                Some(ChunkType::Data),
+                "{engine:?}: the refused open finished the wipe"
+            );
+            assert_eq!(chunk_file_prefix(&sub, 32)?, bytes_before);
+            {
+                let index = open_submodule_index(&sub, &config.node_config.database)?;
+                assert!(
+                    index.reset_in_progress()?,
+                    "{engine:?}: the refused open cleared the crash marker"
+                );
+                let loaded = PackingParams::from_toml(&params_path)?;
+                assert_eq!(loaded.slot, Some(0));
+            }
+            params.entropy_packing_iterations = Some(recorded);
+            params.write_to_disk(&params_path)?;
+            let opened = StorageModule::new(
+                &one_span(3, &sub, Some(assignment(&config, hash, submit, Some(1)))),
+                &config,
+            )?;
+            assert_wiped(&opened, &sub, "the accepted open finishes the crash wipe")?;
+        }
         Ok(())
     }
 
