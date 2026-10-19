@@ -3092,7 +3092,7 @@ mod tests {
     /// flag is for peer selection, not for "who is trusted".
     mod behind_trusted_peers_tests {
         use super::*;
-        use crate::tests::util::FakeGossipServer;
+        use crate::tests::util::{FakeGossipServer, peer_list_item};
         use crate::types::GossipResponse;
         use irys_domain::BlockIndex;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -3102,28 +3102,8 @@ mod tests {
             PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use irys_utils::circuit_breaker::CircuitBreakerConfig;
-        use std::net::SocketAddr;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-
-        fn make_peer(byte: u8, addr: SocketAddr, is_online: bool) -> PeerListItem {
-            let mining_address = IrysAddress::repeat_byte(byte);
-            PeerListItem {
-                peer_id: IrysPeerId::from(mining_address),
-                mining_address,
-                reputation_score: PeerScore::new(100),
-                response_time: 0,
-                address: PeerAddress {
-                    gossip: addr,
-                    api: addr,
-                    execution: Default::default(),
-                },
-                last_seen: 0,
-                is_online,
-                protocol_version: Default::default(),
-                ..Default::default()
-            }
-        }
 
         fn gossip_client() -> GossipClient {
             GossipClient::with_circuit_breaker_config(
@@ -3177,7 +3157,7 @@ mod tests {
             server.set_on_info_request(|| info_at_height(100));
             let addr = server.spawn();
 
-            let peer = make_peer(0x31, addr, false);
+            let peer = peer_list_item(0x31, addr, false, PeerScore::MAX);
             let peer_id = peer.peer_id;
             let (config, peer_list) = peer_list_with_trusted(
                 vec![peer],
@@ -3220,8 +3200,8 @@ mod tests {
             });
             let untrusted_addr = untrusted_server.spawn();
 
-            let trusted = make_peer(0x32, trusted_addr, false);
-            let untrusted = make_peer(0x33, untrusted_addr, true);
+            let trusted = peer_list_item(0x32, trusted_addr, false, PeerScore::MAX);
+            let untrusted = peer_list_item(0x33, untrusted_addr, true, PeerScore::MAX);
             let (config, peer_list) = peer_list_with_trusted(
                 vec![trusted, untrusted],
                 vec![PeerAddress {
@@ -3280,7 +3260,7 @@ mod tests {
                 GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
             });
             let addr = server.spawn();
-            let peer = make_peer(0x34, addr, false);
+            let peer = peer_list_item(0x34, addr, false, PeerScore::MAX);
             let (config, peer_list) = peer_list_with_trusted(
                 vec![peer],
                 vec![PeerAddress {

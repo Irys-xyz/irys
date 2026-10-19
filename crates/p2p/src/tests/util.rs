@@ -1015,6 +1015,36 @@ fn spawn_test_chunk_ingress_consumer(
     });
 }
 
+/// Test peer. The id is `repeat_byte(byte)`. Gossip and api both use `addr`.
+///
+/// `score` stays a parameter: body-pull tests start at [`PeerScore::INITIAL`],
+/// and the behind-check tests start at [`PeerScore::MAX`]. Protocol version
+/// is V2. A body pull follows the version the peer advertises, and V2 is the
+/// current version.
+pub(crate) fn peer_list_item(
+    byte: u8,
+    addr: SocketAddr,
+    is_online: bool,
+    score: u16,
+) -> PeerListItem {
+    let mining_address = IrysAddress::repeat_byte(byte);
+    PeerListItem {
+        peer_id: IrysPeerId::from(mining_address),
+        mining_address,
+        reputation_score: PeerScore::new(score),
+        response_time: 0,
+        address: PeerAddress {
+            gossip: addr,
+            api: addr,
+            execution: Default::default(),
+        },
+        last_seen: 0,
+        is_online,
+        protocol_version: ProtocolVersion::V2,
+        ..Default::default()
+    }
+}
+
 pub(crate) fn data_handler_stub(
     config: &Config,
     peer_list_guard: &PeerList,

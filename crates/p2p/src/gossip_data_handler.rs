@@ -584,7 +584,7 @@ where
 
         if self.skip_seen_block(&block_hash).await? {
             debug!(
-                "Node {}: Block {} height {} already seen and not requested by the pool, skipping",
+                "Node {}: Block {} height {} seen, not requested, and already known locally, skipping",
                 self.gossip_client.mining_address, block_header.block_hash, block_header.height
             );
             return Ok(());
@@ -622,11 +622,11 @@ where
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
-        // Dedup against any block we've already seen. The helper also
-        // re-emits `AttemptReprocessingBlock` for parked-after-SoftInternal
-        // blocks whose per-block cooldown has elapsed, so a parked tip
-        // block has a recovery path on honest gossip re-arrivals instead
-        // of waiting for LRU eviction.
+        // Dedup against a block the pool has already seen. The helper also
+        // re-emits `AttemptReprocessingBlock` for a parked block whose
+        // cooldown has elapsed. A re-gossip of a parked block reaches this
+        // only after its seen entry expires or when the pool requested it;
+        // before that, `skip_seen_block` returns first.
         let has_block_already_been_processed = self
             .block_pool
             .dedup_and_maybe_emit_reprocess(&block_header.block_hash, block_header.height)
@@ -725,7 +725,7 @@ where
 
         if self.skip_seen_block(&block_hash).await? {
             debug!(
-                "Node {}: Block {} already seen and not requested by the pool, skipping",
+                "Node {}: Block {} seen, not requested, and already known locally, skipping",
                 self.gossip_client.mining_address, block_hash
             );
             return Ok(());
@@ -760,8 +760,7 @@ where
             return Ok(());
         }
 
-        // Same dedup-and-recover hook as the header gossip path; see the
-        // comment on the equivalent call in `handle_block_header`.
+        // Same dedup call as `handle_block_header`. See that comment.
         let has_block_already_been_processed = self
             .block_pool
             .dedup_and_maybe_emit_reprocess(&block_header.block_hash, block_header.height)
@@ -1786,7 +1785,7 @@ mod block_body_serve_cap_tests {
 #[cfg(test)]
 mod body_fetch_recovery_tests {
     use super::*;
-    use crate::tests::util::{FakeGossipServer, data_handler_stub};
+    use crate::tests::util::{FakeGossipServer, data_handler_stub, peer_list_item};
     use crate::types::GossipResponse;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
@@ -1796,7 +1795,7 @@ mod body_fetch_recovery_tests {
     use irys_types::v2::GossipDataV2;
     use irys_types::{
         BlockBody, Config, DatabaseProvider, DbSyncMode, H256, IrysAddress, IrysPeerId, NodeConfig,
-        PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
+        PeerScore,
     };
     use irys_utils::circuit_breaker::CircuitBreakerConfig;
     use std::net::SocketAddr;
@@ -1830,25 +1829,6 @@ mod body_fetch_recovery_tests {
         (dir, peer_list, handler)
     }
 
-    fn peer_at(byte: u8, addr: SocketAddr, is_online: bool) -> PeerListItem {
-        let mining_address = IrysAddress::repeat_byte(byte);
-        PeerListItem {
-            peer_id: IrysPeerId::from(mining_address),
-            mining_address,
-            address: PeerAddress {
-                gossip: addr,
-                api: addr,
-                execution: Default::default(),
-            },
-            reputation_score: PeerScore::new(PeerScore::INITIAL),
-            response_time: 0,
-            last_seen: 0,
-            is_online,
-            protocol_version: ProtocolVersion::V2,
-            ..Default::default()
-        }
-    }
-
     fn orphan_header() -> Arc<IrysBlockHeader> {
         let mut header = irys_testing_utils::new_mock_signed_header();
         header.height = 1;
@@ -1878,7 +1858,7 @@ mod body_fetch_recovery_tests {
         let server_a = FakeGossipServer::new();
         server_a.set_on_pull_data_request(|_| GossipResponse::Accepted(None));
         let addr_a = server_a.spawn();
-        let peer_a = peer_at(0x41, addr_a, true);
+        let peer_a = peer_list_item(0x41, addr_a, true, PeerScore::INITIAL);
         let peer_a_id = peer_a.peer_id;
         peer_list.add_or_update_peer(peer_a, true);
 
@@ -1905,7 +1885,7 @@ mod body_fetch_recovery_tests {
             body_for(&served)
         });
         let addr_b = server_b.spawn();
-        let peer_b = peer_at(0x42, addr_b, true);
+        let peer_b = peer_list_item(0x42, addr_b, true, PeerScore::INITIAL);
         let peer_b_id = peer_b.peer_id;
         peer_list.add_or_update_peer(peer_b, true);
 
@@ -1936,7 +1916,7 @@ mod body_fetch_recovery_tests {
             GossipResponse::Accepted(None)
         });
         let addr_c = server_c.spawn();
-        let peer_c = peer_at(0x43, addr_c, true);
+        let peer_c = peer_list_item(0x43, addr_c, true, PeerScore::INITIAL);
         let peer_c_id = peer_c.peer_id;
         peer_list.add_or_update_peer(peer_c, true);
 
@@ -1975,7 +1955,7 @@ mod body_fetch_recovery_tests {
             GossipResponse::Accepted(None)
         });
         let addr_a = server_a.spawn();
-        let peer_a = peer_at(0x61, addr_a, true);
+        let peer_a = peer_list_item(0x61, addr_a, true, PeerScore::INITIAL);
         let peer_a_id = peer_a.peer_id;
         peer_list.add_or_update_peer(peer_a, true);
 
@@ -2016,7 +1996,7 @@ mod body_fetch_recovery_tests {
             GossipResponse::Accepted(None)
         });
         let addr_b = server_b.spawn();
-        let peer_b = peer_at(0x62, addr_b, true);
+        let peer_b = peer_list_item(0x62, addr_b, true, PeerScore::INITIAL);
         let peer_b_id = peer_b.peer_id;
         peer_list.add_or_update_peer(peer_b, true);
 
@@ -2056,7 +2036,7 @@ mod body_fetch_recovery_tests {
             GossipResponse::Accepted(None)
         });
         let addr_c = server_c.spawn();
-        let peer_c = peer_at(0x63, addr_c, true);
+        let peer_c = peer_list_item(0x63, addr_c, true, PeerScore::INITIAL);
         let peer_c_id = peer_c.peer_id;
         peer_list.add_or_update_peer(peer_c, true);
 
@@ -2103,7 +2083,7 @@ mod body_fetch_recovery_tests {
             body_for(&served)
         });
         let addr = server.spawn();
-        let peer = peer_at(0x51, addr, false);
+        let peer = peer_list_item(0x51, addr, false, PeerScore::INITIAL);
         let peer_id = peer.peer_id;
         peer_list.add_or_update_peer(peer, true);
 
@@ -2184,7 +2164,7 @@ mod body_fetch_recovery_tests {
     }
 
     fn add_peer(peer_list: &PeerList, byte: u8, addr: SocketAddr, is_online: bool) -> IrysPeerId {
-        let peer = peer_at(byte, addr, is_online);
+        let peer = peer_list_item(byte, addr, is_online, PeerScore::INITIAL);
         let peer_id = peer.peer_id;
         peer_list.add_or_update_peer(peer, true);
         peer_id
