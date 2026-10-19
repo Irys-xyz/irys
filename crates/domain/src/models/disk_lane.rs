@@ -37,6 +37,10 @@ use super::{
 
 /// How long a caller waits for its entropy read before it gives up.
 const SWEEP_WAIT: Duration = Duration::from_secs(30);
+/// How long the lane waits after a packed write fails before it tries the
+/// same bytes again. The bytes stay queued. Shutdown and `force_sync` write
+/// immediately and do not use this wait.
+const WRITE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// No-lane packed flush still commits at most this many runs.
 const INFLIGHT_DISK_OPS: usize = 3;
 /// Commands one storage module may have in the kernel at once. This is the
@@ -434,6 +438,9 @@ pub(super) struct DiskGate {
     lane_thread: Mutex<Option<std::thread::ThreadId>>,
     /// External flush and interval writes wait here. The lane thread runs them.
     handoff: LaneHandoff,
+    /// Instant when a failed packed write may be tried again. `None` after a
+    /// successful commit, and when no commit has failed.
+    write_retry_at: Mutex<Option<Instant>>,
     #[cfg(test)]
     last_commit_thread: Mutex<Option<std::thread::ThreadId>>,
     #[cfg(any(test, feature = "bench"))]
@@ -485,6 +492,12 @@ pub(super) struct DiskGate {
     /// was sampled and before the deadline check.
     #[cfg(test)]
     notify_on_wait: AtomicBool,
+    /// Commits that reached the `pwrite` section. An empty batch does not count.
+    #[cfg(test)]
+    commit_calls: AtomicU64,
+    /// Remaining injected `pwrite` failures. Each taken failure is one `EIO`.
+    #[cfg(test)]
+    pwrite_fail_remaining: AtomicU64,
 }
 
 /// Test barrier around a copied entropy pad. The slot is not in the sweep
@@ -788,6 +801,7 @@ impl DiskGate {
             index_gap,
             lane_thread: Mutex::new(None),
             handoff: LaneHandoff::new(),
+            write_retry_at: Mutex::new(None),
             #[cfg(test)]
             last_commit_thread: Mutex::new(None),
             #[cfg(any(test, feature = "bench"))]
@@ -820,6 +834,10 @@ impl DiskGate {
             sweep_wait_override: Mutex::new(None),
             #[cfg(test)]
             notify_on_wait: AtomicBool::new(false),
+            #[cfg(test)]
+            commit_calls: AtomicU64::new(0),
+            #[cfg(test)]
+            pwrite_fail_remaining: AtomicU64::new(0),
         }
     }
 
@@ -882,11 +900,41 @@ impl DiskGate {
 
     #[cfg(test)]
     pub(super) fn record_commit_thread(&self) {
+        self.commit_calls.fetch_add(1, Ordering::SeqCst);
         let mut guard = self
             .last_commit_thread
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *guard = Some(std::thread::current().id());
+    }
+
+    /// Commits that reached the `pwrite` section.
+    #[cfg(test)]
+    pub(super) fn commit_calls(&self) -> u64 {
+        self.commit_calls.load(Ordering::SeqCst)
+    }
+
+    /// The next `count` lane `pwrite`s fail before the kernel write.
+    #[cfg(test)]
+    pub(super) fn fail_next_pwrites(&self, count: u64) {
+        self.pwrite_fail_remaining.store(count, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn take_pwrite_failure(&self) -> bool {
+        loop {
+            let left = self.pwrite_fail_remaining.load(Ordering::SeqCst);
+            if left == 0 {
+                return false;
+            }
+            if self
+                .pwrite_fail_remaining
+                .compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1006,6 +1054,42 @@ impl DiskGate {
             && self.recall_waiters.load(Ordering::SeqCst) == 0
             && self.write_holds.load(Ordering::SeqCst) == 0
             && self.io_exclusive.load(Ordering::SeqCst) == 0
+    }
+
+    /// Time left before a failed packed write may be tried again.
+    /// `None` when no retry is waiting, or the deadline has already passed.
+    /// Zero is not pending: the lane wait drops a zero timeout and then
+    /// waits with no timeout, so an expired deadline must look unset.
+    pub(super) fn write_retry_remaining(&self) -> Option<Duration> {
+        let at = {
+            let guard = self
+                .write_retry_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (*guard)?
+        };
+        let remain = at.saturating_duration_since(Instant::now());
+        if remain.is_zero() { None } else { Some(remain) }
+    }
+
+    /// True while [`Self::write_retry_remaining`] is still in the future.
+    pub(super) fn write_retry_pending(&self) -> bool {
+        self.write_retry_remaining().is_some()
+    }
+
+    fn arm_write_retry(&self) {
+        let at = Instant::now() + WRITE_RETRY_BACKOFF;
+        *self
+            .write_retry_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(at);
+    }
+
+    fn clear_write_retry(&self) {
+        *self
+            .write_retry_at
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// One tiny in-flight write. Tests use it so a short command stays queued.
@@ -3350,6 +3434,18 @@ impl StorageModule {
         if self.pwrite_panic_once.swap(false, Ordering::SeqCst) {
             panic!("injected chunk write panic");
         }
+        // A test failure takes the same path as `EIO`: the guard drops first,
+        // then the live label returns to `Uninitialized` and the bytes stay queued.
+        #[cfg(test)]
+        if self.disk.take_pwrite_failure() {
+            drop(guard);
+            let error = std::io::Error::other("injected pwrite failure");
+            return self.note_write_run(
+                run,
+                Instant::now(),
+                Err(Self::chunk_write_report(run.start, 0_u64, &error)),
+            );
+        }
         let (file_arc, file_offset, submodule_offset) = self.locate_io(run.start, true)?;
         let start_time = Instant::now();
         let write_result = {
@@ -3453,7 +3549,13 @@ impl StorageModule {
             // still busy, `lane_work_ready` is false and the next notify
             // (a finished command) is the wake. A positive delay is the
             // rest of the write grace or the read grace, whichever is sooner.
+            // A retry instant can pass between the ready check and this
+            // grace. The zero is dropped below, so check readiness again
+            // before sleeping with no timeout.
             let timeout = self.lane_grace_remaining().filter(|delay| !delay.is_zero());
+            if timeout.is_none() && self.lane_work_ready() {
+                return self.disk.wake.epoch();
+            }
             // Sample before the wake lock. A lane command already in the
             // kernel, or a syscall holding the file, is service time.
             let idle_reason = self.lane_sleep_reason();
@@ -3530,10 +3632,15 @@ impl StorageModule {
     /// `None` when nothing is queued. Zero when the disk is idle, a full run
     /// is ready, the durability count is reached, or an aged short run is
     /// ready. A young short run waits out `reorder_grace` while the disk
-    /// stays busy.
+    /// stays busy. A failed write returns the time left on its retry instant
+    /// instead of zero: the lane wait drops a zero timeout and would then
+    /// sleep until some other notify.
     fn write_grace_remaining(&self) -> Option<Duration> {
         let pending = self.pending_writes.read().unwrap();
         let oldest = pending.queued_at.values().copied().min()?;
+        if let Some(remain) = self.disk.write_retry_remaining() {
+            return Some(remain);
+        }
         if self.disk.chunk_disk_idle() {
             return Some(Duration::ZERO);
         }
@@ -3705,11 +3812,17 @@ impl StorageModule {
     }
 
     fn write_ready_runs(&self) {
-        if let Err(error) = self.commit_pending_runs(false, Some(INFLIGHT_WRITES), true) {
-            tracing::error!(
-                "Couldn't write packed chunks for storage_module {}: {error}",
-                self.id
-            );
+        match self.commit_pending_runs(false, Some(INFLIGHT_WRITES), true) {
+            Ok(()) => self.disk.clear_write_retry(),
+            Err(error) => {
+                tracing::error!(
+                    "Couldn't write packed chunks for storage_module {}: {error}",
+                    self.id
+                );
+                // The bytes stay queued. The next pass waits out the retry
+                // instant. Shutdown and `force_sync` do not.
+                self.disk.arm_write_retry();
+            }
         }
     }
 
@@ -3724,6 +3837,9 @@ impl StorageModule {
             if request.force {
                 match self.commit_pending_runs(true, None, false) {
                     Ok(()) => {
+                        // The bytes are on disk. Drop a retry wait left by
+                        // the failed normal pass so the next write is not held.
+                        self.disk.clear_write_retry();
                         // The caller is still waiting. A reread blocked on
                         // the rows just committed has to be durable before
                         // this request is marked done. The lane's next pass
@@ -4921,6 +5037,142 @@ mod tests {
                 let _ = handle.join();
             }
         }
+    }
+
+    /// Spin until the first commit has failed and armed a retry.
+    /// Panics when a second commit lands first: that is the tight retry.
+    fn wait_for_failed_commit(module: &super::super::StorageModule) -> Duration {
+        let started = Instant::now();
+        loop {
+            let calls = module.disk.commit_calls();
+            if calls > 1 {
+                panic!("lane retried a failed pwrite with no backoff: calls={calls}");
+            }
+            if calls == 1 && module.disk.write_retry_pending() {
+                return module
+                    .disk
+                    .write_retry_remaining()
+                    .expect("a pending retry has time left");
+            }
+            // The injected error builds a backtrace before the commit returns.
+            // The tight retry is a second commit after that return, not a
+            // commit that is still inside the first failure.
+            if started.elapsed() > Duration::from_secs(10) {
+                panic!(
+                    "failed pwrite did not arm a retry: calls={calls} durable={} idle={} ready={}",
+                    module.is_data_chunk_durable_at(PartitionChunkOffset::from(0)),
+                    module.disk.chunk_disk_idle(),
+                    module.pending_run_ready()
+                );
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A failed `pwrite` keeps the bytes queued. The lane does not commit
+    /// again until the retry instant, including after a wake. It does commit
+    /// once that instant has passed.
+    #[test]
+    fn failed_pwrite_waits_out_backoff_before_the_next_commit() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture_timed("pwrite_backoff", 4, 4, 0, 0, 0, 0)?;
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        module.disk.fail_next_pwrites(1);
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x11; 32], super::super::ChunkType::Data));
+        let remain = wait_for_failed_commit(&module);
+        module.wake_disk_lane();
+        thread::sleep(remain / 2);
+        assert_eq!(
+            module.disk.commit_calls(),
+            1,
+            "lane committed again before the backoff"
+        );
+        assert!(
+            !module.is_data_chunk_durable_at(offset),
+            "a failed pwrite became durable during the backoff"
+        );
+        let started = Instant::now();
+        loop {
+            if module.disk.commit_calls() >= 2 && module.is_data_chunk_durable_at(offset) {
+                break;
+            }
+            if started.elapsed() > Duration::from_millis(1500) {
+                panic!(
+                    "lane did not commit after the backoff: calls={} durable={}",
+                    module.disk.commit_calls(),
+                    module.is_data_chunk_durable_at(offset)
+                );
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            module.disk.write_retry_remaining().is_none(),
+            "a successful write left a retry deadline"
+        );
+        drop(lane);
+        Ok(())
+    }
+
+    /// `force_sync` writes the failed bytes at once and clears the deadline,
+    /// so the next packed write does not wait out the old backoff.
+    #[test]
+    fn force_sync_commits_a_failed_pwrite_before_the_backoff() -> eyre::Result<()> {
+        let (_tmp, module) = span_fixture_timed("pwrite_force", 4, 4, 0, 0, 0, 0)?;
+        let module = Arc::new(module);
+        let lane = StopLane::start(Arc::clone(&module))?;
+        module.disk.fail_next_pwrites(1);
+        let offset = PartitionChunkOffset::from(0);
+        assert!(module.write_chunk(offset, vec![0x11; 32], super::super::ChunkType::Data));
+        let remain = wait_for_failed_commit(&module);
+        assert!(
+            remain > Duration::from_millis(200),
+            "backoff was already almost over: {remain:?}"
+        );
+        let retry_at = Instant::now() + remain;
+        let started = Instant::now();
+        module.force_sync_pending_chunks()?;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < remain && Instant::now() < retry_at,
+            "force waited out the backoff: elapsed={elapsed:?} remain={remain:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "force took {elapsed:?}"
+        );
+        assert!(
+            module.is_data_chunk_durable_at(offset),
+            "force did not make the failed chunk durable"
+        );
+        assert_eq!(
+            module.disk.commit_calls(),
+            2,
+            "force did not commit the failed run once"
+        );
+        assert!(
+            module.disk.write_retry_remaining().is_none(),
+            "force left the retry deadline set"
+        );
+        let next = PartitionChunkOffset::from(1);
+        assert!(module.write_chunk(next, vec![0x22; 32], super::super::ChunkType::Data));
+        let started = Instant::now();
+        loop {
+            if module.disk.commit_calls() >= 3 && module.is_data_chunk_durable_at(next) {
+                break;
+            }
+            if Instant::now() >= retry_at || started.elapsed() > Duration::from_millis(500) {
+                panic!(
+                    "the next write waited on the old deadline: calls={} durable={} elapsed={:?}",
+                    module.disk.commit_calls(),
+                    module.is_data_chunk_durable_at(next),
+                    started.elapsed()
+                );
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(lane);
+        Ok(())
     }
 
     struct ReleasePause<'a>(&'a super::DiskGate);

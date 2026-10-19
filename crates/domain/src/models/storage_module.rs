@@ -2660,6 +2660,11 @@ impl StorageModule {
         if pending.is_empty() {
             return false;
         }
+        // A failed pwrite keeps these bytes queued. The lane sleeps until
+        // the retry instant instead of issuing the same write again.
+        if self.disk.write_retry_pending() {
+            return false;
+        }
         if self.disk.chunk_disk_idle() {
             return true;
         }
