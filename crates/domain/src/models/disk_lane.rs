@@ -477,6 +477,14 @@ pub(super) struct DiskGate {
     /// Holds each inflight pread after `read_exact_at` returns.
     #[cfg(test)]
     inflight_pread_hold: InflightPreadHold,
+    /// Replaces `SWEEP_WAIT` inside `drain_entropy_queue` when set.
+    #[cfg(test)]
+    sweep_wait_override: Mutex<Option<Duration>>,
+    /// When set, every sweep wait bumps the wake epoch before it checks it.
+    /// A second thread can miss that window. This lands the wake after `seen`
+    /// was sampled and before the deadline check.
+    #[cfg(test)]
+    notify_on_wait: AtomicBool,
 }
 
 /// Test barrier around a copied entropy pad. The slot is not in the sweep
@@ -808,7 +816,34 @@ impl DiskGate {
             ingest_stages: Mutex::new(Vec::new()),
             #[cfg(test)]
             inflight_pread_hold: InflightPreadHold::new(),
+            #[cfg(test)]
+            sweep_wait_override: Mutex::new(None),
+            #[cfg(test)]
+            notify_on_wait: AtomicBool::new(false),
         }
+    }
+
+    /// Test drain bound. Production uses `SWEEP_WAIT`.
+    #[cfg(test)]
+    pub(super) fn set_sweep_wait_for_test(&self, wait: Duration) {
+        *self
+            .sweep_wait_override
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(wait);
+    }
+
+    #[cfg(test)]
+    fn sweep_wait_for_test(&self) -> Option<Duration> {
+        *self
+            .sweep_wait_override
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The next sweep waits see a wake that arrived after `seen` was sampled.
+    #[cfg(test)]
+    pub(super) fn set_notify_on_wait_for_test(&self, enabled: bool) {
+        self.notify_on_wait.store(enabled, Ordering::SeqCst);
     }
 
     pub(super) fn bind_lane_thread(&self) {
@@ -1761,7 +1796,16 @@ impl StorageModule {
             if self.entropy_idle() {
                 return;
             }
-            self.disk.yield_to_recall();
+            let overall =
+                *idle_deadline.get_or_insert_with(|| Instant::now() + self.sweep_give_up());
+            // A recall that stays up never reaches the wait below. The same
+            // give-up ends this hold. A wake after the give-up still ends it:
+            // the epoch check alone would keep looping while notifies arrive.
+            let yielded = self.disk.yield_to_recall_until(overall);
+            if !yielded || Instant::now() >= overall {
+                tracing::warn!("entropy queue did not drain");
+                return;
+            }
             let folded = self.fold_memory_entropy();
             let swept = self.sweep_one();
             if folded || swept {
@@ -1784,7 +1828,6 @@ impl StorageModule {
             if self.entropy_idle() {
                 return;
             }
-            let overall = *idle_deadline.get_or_insert_with(|| Instant::now() + SWEEP_WAIT);
             // A young short span is not eligible yet. Sleep only until the
             // grace ends, then issue it. The sweep give-up is still the bound
             // when the span never becomes eligible.
@@ -1794,7 +1837,8 @@ impl StorageModule {
                 .and_then(|delay| Instant::now().checked_add(delay))
                 .map(|at| at.min(overall))
                 .unwrap_or(overall);
-            if self.wait_until_epoch_advances(seen, wake_by) && Instant::now() >= overall {
+            self.wait_until_epoch_advances(seen, wake_by);
+            if Instant::now() >= overall {
                 tracing::warn!("entropy queue did not drain");
                 return;
             }
@@ -1815,12 +1859,26 @@ impl StorageModule {
         self.sync_pending_chunks_inner(true)
     }
 
+    /// Bound used by `drain_entropy_queue`. Tests shorten it. Production
+    /// stays at `SWEEP_WAIT`.
+    fn sweep_give_up(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(wait) = self.disk.sweep_wait_for_test() {
+            return wait;
+        }
+        SWEEP_WAIT
+    }
+
     /// Sleep until `epoch` moves past `seen`, or until `deadline`.
     /// Returns true when the deadline passes first. The check and the wait
     /// share the wake lock, so a completion cannot land between them.
     fn wait_until_epoch_advances(&self, seen: u64, deadline: Instant) -> bool {
         let mut guard = self.disk.lock_wake();
         loop {
+            #[cfg(test)]
+            if self.disk.notify_on_wait.load(Ordering::SeqCst) {
+                self.disk.wake.notify_locked();
+            }
             if self.disk.wake.epoch() != seen {
                 return false;
             }
@@ -3818,7 +3876,11 @@ fn clone_error(error: &WriteDataChunkError) -> WriteDataChunkError {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, atomic::Ordering, mpsc},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -5504,6 +5566,163 @@ mod tests {
             Some((super::super::ChunkType::Data, Some(0x10))),
             "packed the pad while the replacement entropy was still pending"
         );
+        Ok(())
+    }
+
+    /// A young span is not eligible, so the drain waits. Notifies during that
+    /// wait must not push the give-up out. The span stays queued.
+    #[test]
+    fn drain_returns_by_the_give_up_while_notifies_keep_waking_it() -> eyre::Result<()> {
+        let grace = Duration::from_millis(1_500);
+        let give_up = Duration::from_millis(200);
+        let (_tmp, module) =
+            span_fixture_grace("drain_notify_give_up", 8, 8, 0, grace.as_millis() as u64, 0)?;
+        module.disk.set_sweep_wait_for_test(give_up);
+        // A wake after `seen` was sampled and before the deadline check.
+        // A sleeping notifier loses that race and the give-up still runs.
+        module.disk.set_notify_on_wait_for_test(true);
+        insert_slots(&module, &[0, 1], Instant::now());
+        let module = Arc::new(module);
+        let (tx, rx) = mpsc::channel();
+        let worker = {
+            let module = Arc::clone(&module);
+            thread::spawn(move || {
+                let started = Instant::now();
+                module.drive_entropy_queue_for_test();
+                let _ = tx.send(started.elapsed());
+            })
+        };
+        let result = rx.recv_timeout(Duration::from_millis(1_000));
+        let elapsed = match result {
+            Ok(elapsed) => elapsed,
+            Err(timeout) => {
+                module.disk.set_notify_on_wait_for_test(false);
+                let late = rx.recv_timeout(grace + Duration::from_secs(2));
+                let _ = worker.join();
+                panic!("drain did not return under notifies: {timeout} late={late:?}");
+            }
+        };
+        module.disk.set_notify_on_wait_for_test(false);
+        worker.join().expect("drain thread");
+        assert!(
+            elapsed >= give_up,
+            "drain returned in {elapsed:?}, before the give-up"
+        );
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "drain ran {elapsed:?} while notifies kept waking it"
+        );
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            2,
+            "the give-up dropped the span"
+        );
+        module.fail_queued_sweeps();
+        Ok(())
+    }
+
+    /// A notify before the give-up is not a reason to stop. The span is still
+    /// swept once the read grace ends.
+    #[test]
+    fn drain_still_sweeps_when_a_notify_arrives_before_the_give_up() -> eyre::Result<()> {
+        let grace = Duration::from_millis(150);
+        let (_tmp, module) = span_fixture_grace(
+            "drain_notify_continues",
+            8,
+            8,
+            0,
+            grace.as_millis() as u64,
+            0,
+        )?;
+        insert_slots(&module, &[0, 1], Instant::now());
+        let module = Arc::new(module);
+        let stop = Arc::new(AtomicBool::new(false));
+        let notifier = {
+            let module = Arc::clone(&module);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    module.disk.notify();
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        let started = Instant::now();
+        module.drive_entropy_queue_for_test();
+        let elapsed = started.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        notifier.join().expect("notifier");
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "drain returned in {elapsed:?}, before the span was eligible"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a notify before the give-up ended the drain: {elapsed:?}"
+        );
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            0,
+            "the notify ended the drain before the sweep"
+        );
+        assert!(
+            module.disk.entropy_preads.load(Ordering::SeqCst) >= 1,
+            "the span was dropped without a pread"
+        );
+        Ok(())
+    }
+
+    /// A recall that stays up is the same give-up. The drain must not block
+    /// in `yield_to_recall` until the recall drops.
+    #[test]
+    fn drain_returns_when_a_recall_holds_past_the_give_up() -> eyre::Result<()> {
+        let give_up = Duration::from_millis(200);
+        let (_tmp, module) = span_fixture_grace("drain_recall_give_up", 8, 8, 0, 0, 0)?;
+        module.disk.set_sweep_wait_for_test(give_up);
+        {
+            let mut queue = module.disk.queue();
+            let mut slot = sweep_slot(0);
+            slot.pending_entropy = Some(vec![0x11; 32]);
+            queue.insert_slot(slot);
+        }
+        let module = Arc::new(module);
+        let hold = module.disk.begin_recall();
+        let (tx, rx) = mpsc::channel();
+        let worker = {
+            let module = Arc::clone(&module);
+            thread::spawn(move || {
+                let started = Instant::now();
+                module.drive_entropy_queue_for_test();
+                let _ = tx.send(started.elapsed());
+            })
+        };
+        let result = rx.recv_timeout(Duration::from_millis(1_000));
+        drop(hold);
+        let elapsed = match result {
+            Ok(elapsed) => elapsed,
+            Err(timeout) => {
+                let late = rx.recv_timeout(Duration::from_secs(3));
+                let _ = worker.join();
+                panic!(
+                    "drain did not return while a recall held the disk: {timeout} late={late:?}"
+                );
+            }
+        };
+        worker.join().expect("drain thread");
+        assert!(
+            elapsed >= give_up,
+            "drain returned in {elapsed:?}, before the give-up"
+        );
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "drain waited {elapsed:?} while a recall held the disk"
+        );
+        assert_eq!(
+            module.sweep_slot_count_for_test(),
+            1,
+            "the drain packed while the recall still held the disk"
+        );
+        module.fail_queued_sweeps();
         Ok(())
     }
 
