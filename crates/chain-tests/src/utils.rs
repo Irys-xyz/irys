@@ -540,6 +540,15 @@ impl IrysNodeTest<()> {
                 cfg_for_start.gossip.bind_port, gossip_port,
                 "held gossip listener port does not match config"
             );
+            // Same defaulting as `bind_listeners`: an unset public port
+            // advertises the bound port.
+            let mut cfg_for_start = cfg_for_start;
+            if cfg_for_start.http.public_port == 0 {
+                cfg_for_start.http.public_port = http_port;
+            }
+            if cfg_for_start.gossip.public_port == 0 {
+                cfg_for_start.gossip.public_port = gossip_port;
+            }
             (cfg_for_start, http_listener, gossip_listener)
         } else {
             match IrysNode::bind_listeners(cfg_for_start.clone()) {
