@@ -2148,7 +2148,7 @@ impl StorageModule {
                         split: opened.split,
                         db: submodule_db.clone(),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
-                        index_drain: index_drain::IndexDrain::spawn(
+                        index_drain: index_drain::IndexDrain::start(
                             submodule_db.clone(),
                             Arc::clone(&index_write_generation),
                             Arc::clone(&index_commit_fail_next),

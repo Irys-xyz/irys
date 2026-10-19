@@ -8,9 +8,12 @@
 //! when `update_eyre` starts: after the chunk `pread`s, `pwrite`s, and
 //! mining recall on this drive have left the gap, and not during them.
 
+#[cfg(test)]
 use super::super::index_read_metrics::note_uncovered_data_path;
 use super::{WriteDataChunkError, disk_lane::DiskWake};
-use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
+use irys_database::submodule::SubmoduleIndex;
+#[cfg(test)]
+use irys_database::submodule::SubmoduleStore as _;
 use irys_types::{ChunkDataPath, ChunkPathHash, PartitionChunkOffset};
 use std::{
     collections::HashSet,
@@ -19,14 +22,17 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
-    thread::{self, JoinHandle},
+    thread::JoinHandle,
 };
-use tracing::{debug, error};
+#[cfg(test)]
+use tracing::debug;
+use tracing::error;
 
 /// Ops folded into one MDBX transaction when the gap opens.
 /// One transaction is one meta write for every op that queued during the
 /// chunk run, up to this cap. A larger queue commits again before the next
 /// chunk command, still inside that gap.
+#[cfg(test)]
 const MAX_BATCH_SIZE: usize = 512;
 
 /// Shared by every index drain on one storage module and by that module's
@@ -74,6 +80,7 @@ impl IndexGap {
         }
     }
 
+    #[cfg(test)]
     fn register(&self) -> Arc<DrainProgress> {
         let progress = Arc::new(DrainProgress {
             at_recv: AtomicBool::new(false),
@@ -143,6 +150,7 @@ impl Drop for ChunkBusy {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct IndexOp {
     pub(super) path_hash: ChunkPathHash,
     pub(super) data_path: ChunkDataPath,
@@ -185,6 +193,7 @@ pub(super) struct DrainTestHooks {
     pub(super) current_generation: Arc<AtomicU64>,
 }
 
+#[cfg(test)]
 pub(super) struct DrainRunner {
     rx: mpsc::Receiver<IndexOp>,
     db: SubmoduleIndex,
@@ -198,6 +207,51 @@ pub(super) struct DrainRunner {
 }
 
 impl IndexDrain {
+    /// Opens the drain a storage module keeps.
+    ///
+    /// Tests start the commit thread so `submit` has a receiver. Production
+    /// does not: packed presence rows commit on the disk lane, and this
+    /// thread would only block in `recv`. An unregistered drain leaves
+    /// `hold_for_chunk_io` and recall free to run.
+    pub(super) fn start(
+        db: SubmoduleIndex,
+        generation: Arc<AtomicU64>,
+        fail_next: Arc<AtomicBool>,
+        gap: Arc<IndexGap>,
+    ) -> eyre::Result<Self> {
+        #[cfg(test)]
+        {
+            Self::spawn(db, generation, fail_next, gap)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (db, generation, fail_next);
+            Ok(Self::idle(gap))
+        }
+    }
+
+    /// No thread and no entry in the gap's drain list.
+    ///
+    /// `drains_idle` is true for an empty list, so chunk I/O does not wait.
+    /// `shutdown` allows a missing join.
+    pub(super) fn idle(gap: Arc<IndexGap>) -> Self {
+        Self {
+            tx: Mutex::new(None),
+            join: Mutex::new(None),
+            in_flight: Arc::new(InFlight::default()),
+            progress: Arc::new(DrainProgress {
+                at_recv: AtomicBool::new(false),
+                writing: AtomicBool::new(false),
+                stopped: AtomicBool::new(false),
+                release: AtomicBool::new(false),
+                #[cfg(test)]
+                blocked_waits: AtomicU64::new(0),
+            }),
+            gap,
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn spawn(
         db: SubmoduleIndex,
         generation: Arc<AtomicU64>,
@@ -218,7 +272,7 @@ impl IndexDrain {
             #[cfg(test)]
             hooks: None,
         };
-        let join = thread::Builder::new()
+        let join = std::thread::Builder::new()
             .name("irys-index-drain".into())
             .spawn(move || runner.run())
             .map_err(|error| eyre::eyre!("failed to spawn index drain: {error}"))?;
@@ -362,11 +416,13 @@ impl Drop for IndexDrain {
     }
 }
 
+#[cfg(test)]
 struct DrainExit<'a> {
     progress: &'a DrainProgress,
     gap: &'a IndexGap,
 }
 
+#[cfg(test)]
 impl Drop for DrainExit<'_> {
     fn drop(&mut self) {
         self.progress.stopped.store(true, Ordering::SeqCst);
@@ -376,6 +432,7 @@ impl Drop for DrainExit<'_> {
     }
 }
 
+#[cfg(test)]
 impl DrainRunner {
     pub(super) fn run(self) {
         let _exit = DrainExit {
@@ -541,6 +598,7 @@ impl DrainRunner {
     }
 }
 
+#[cfg(test)]
 fn send_ack(op: IndexOp, ack: Result<(), WriteDataChunkError>) {
     if op.done.send(ack).is_err() {
         debug!("index drain waiter dropped");
@@ -769,6 +827,47 @@ mod tests {
         assert_eq!(path_hash_at(&db, 0)?, Some(first_hash));
         assert_eq!(path_hash_at(&db, 1)?, Some(second_hash));
         Ok(())
+    }
+
+    /// An idle drain is not registered. Chunk I/O and a recall pin both
+    /// return, and shutdown has no thread to join. Registering that drain
+    /// without a runner would wait here until the timeout.
+    #[test]
+    fn idle_drain_does_not_block_chunk_io() {
+        let gap = Arc::new(IndexGap::new());
+        let drain = IndexDrain::idle(Arc::clone(&gap));
+
+        let waiting = Arc::clone(&gap);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _hold = waiting.hold_for_chunk_io();
+            entered_tx.send(()).expect("hold entered");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("chunk io waited on an idle drain");
+        worker.join().expect("hold thread");
+
+        let _pin = gap.pin_recall();
+        let waiting = Arc::clone(&gap);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _hold = waiting.hold_for_chunk_io();
+            entered_tx.send(()).expect("hold entered");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("chunk io waited while a recall pin was held");
+        worker.join().expect("pinned hold thread");
+        drop(_pin);
+
+        let started = Instant::now();
+        drain.wait_idle();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "idle drain waited for an op it cannot receive"
+        );
+        drain.shutdown();
     }
 
     #[test]
