@@ -31,8 +31,8 @@ use irys_types::{
 use irys_utils::ElapsedMs as _;
 use reth::builder::Block as _;
 use reth_ethereum_primitives::Block;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{Instrument as _, debug, error, warn};
 
@@ -78,83 +78,6 @@ fn format_failure_summary(
     )
 }
 
-/// Cap on peers recorded while one body pull runs.
-/// One failed pull must not dial every duplicate header in a burst.
-/// Eight peers is enough for the peers that sent the header during the pull.
-/// A later arrival can pull after this pull ends.
-const MAX_EXTRA_BODY_PULL_SENDERS: usize = 8;
-
-/// Holds the in-flight mark for one body pull. The map value is the extra
-/// senders that arrived while the pull ran. Drop removes the entry on
-/// success, error, and cancellation, so a failed pull can be retried.
-struct BodyPullInFlight {
-    map: Arc<Mutex<HashMap<BlockHash, Vec<IrysPeerId>>>>,
-    hash: BlockHash,
-}
-
-impl BodyPullInFlight {
-    /// Insert `hash`. Returns `None` when a pull for it is already running,
-    /// so two arrivals cannot each believe they own the mark.
-    fn enter(
-        map: &Arc<Mutex<HashMap<BlockHash, Vec<IrysPeerId>>>>,
-        hash: BlockHash,
-    ) -> Option<Self> {
-        let mut guard = map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.contains_key(&hash) {
-            return None;
-        }
-        guard.insert(hash, Vec::new());
-        drop(guard);
-        Some(Self {
-            map: Arc::clone(map),
-            hash,
-        })
-    }
-
-    /// Record a sender that lost the in-flight race. The same peer id is
-    /// stored once. The list keeps arrival order.
-    fn record_sender(
-        map: &Arc<Mutex<HashMap<BlockHash, Vec<IrysPeerId>>>>,
-        hash: BlockHash,
-        peer_id: IrysPeerId,
-    ) {
-        let mut guard = map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(senders) = guard.get_mut(&hash) else {
-            return;
-        };
-        if senders.contains(&peer_id) || senders.len() >= MAX_EXTRA_BODY_PULL_SENDERS {
-            return;
-        }
-        senders.push(peer_id);
-    }
-
-    /// Take the senders recorded so far. The entry stays, empty, so a sender
-    /// that arrives during the retries is collected for the next pass.
-    fn take_senders(&self) -> Vec<IrysPeerId> {
-        let mut guard = self
-            .map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard
-            .get_mut(&self.hash)
-            .map(std::mem::take)
-            .unwrap_or_default()
-    }
-}
-
-impl Drop for BodyPullInFlight {
-    fn drop(&mut self) {
-        self.map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.hash);
-    }
-}
-
 pub(crate) fn block_body_serve_semaphore(limit: usize) -> Arc<tokio::sync::Semaphore> {
     let permits = if limit == 0 {
         warn!("max_concurrent_block_body_serves is 0, treating as unlimited");
@@ -184,10 +107,6 @@ where
     pub(crate) block_body_semaphore: Arc<tokio::sync::Semaphore>,
     pub block_index: BlockIndexReadGuard,
     pub block_tree: BlockTreeReadGuard,
-    /// Block hash to the extra senders that arrived while its body pull runs.
-    /// The guard removes the entry on every exit, including failure and
-    /// cancellation. A failed pull retries those senders in arrival order.
-    pub(crate) body_pulls_in_flight: Arc<Mutex<HashMap<BlockHash, Vec<IrysPeerId>>>>,
     pub config: Config,
     pub started_at: Instant,
     /// Precomputed hash of the consensus config to avoid recomputing on every handshake
@@ -214,7 +133,6 @@ where
             block_body_semaphore: Arc::clone(&self.block_body_semaphore),
             block_index: self.block_index.clone(),
             block_tree: self.block_tree.clone(),
-            body_pulls_in_flight: Arc::clone(&self.body_pulls_in_flight),
             config: self.config.clone(),
             started_at: self.started_at,
             consensus_config_hash: self.consensus_config_hash,
@@ -536,9 +454,7 @@ where
     }
 
     /// Seen is the broadcast-exclusion set. Skip only when the block is
-    /// already here. A running body pull is not a reason to drop the
-    /// arrival: the in-flight guard records that sender, and a posted body
-    /// is processed even while the pull runs.
+    /// already here. A hash that is seen but not stored still needs a pull.
     async fn skip_seen_block(&self, block_hash: &BlockHash) -> GossipResult<bool> {
         if self.block_pool.is_block_requested(block_hash).await {
             return Ok(false);
@@ -657,50 +573,10 @@ where
         let use_trusted_peers_only = skip_block_validation;
         let skip_validation_for_fast_track = skip_block_validation;
 
-        // One pull owns the hash. A later arrival records its sender and
-        // returns. If this pull fails, those senders are tried in arrival
-        // order, on the source-peer path. The guard clears the entry on
-        // every exit. A block the pool has requested pulls anyway, so that
-        // caller gets the result of this call.
-        let body_pull_guard = if self.block_pool.is_block_requested(&block_hash).await {
-            None
-        } else {
-            match BodyPullInFlight::enter(&self.body_pulls_in_flight, block_hash) {
-                Some(guard) => Some(guard),
-                None => {
-                    BodyPullInFlight::record_sender(
-                        &self.body_pulls_in_flight,
-                        block_hash,
-                        source_peer_id,
-                    );
-                    debug!(
-                        "Node {}: Block {} height {} body pull is already in flight, skipping",
-                        self.gossip_client.mining_address,
-                        block_header.block_hash,
-                        block_header.height
-                    );
-                    return Ok(());
-                }
-            }
-        };
-        let sealed_block = match self
+        // Duplicate pulls are accepted. The block pool's dedup stops a second process_block.
+        let sealed_block = self
             .pull_block_body(&block_header, use_trusted_peers_only, source_peer_id)
-            .await
-        {
-            Ok(block) => block,
-            Err(original_error) => {
-                let Some(guard) = body_pull_guard.as_ref() else {
-                    return Err(original_error);
-                };
-                match self
-                    .pull_body_from_recorded_senders(guard, &block_header)
-                    .await
-                {
-                    Some(block) => block,
-                    None => return Err(original_error),
-                }
-            }
-        };
+            .await?;
 
         self.block_pool
             .process_block(Arc::new(sealed_block), skip_validation_for_fast_track)
@@ -1288,26 +1164,6 @@ where
 
         self.fetch_block_body_from_network_with_retries(header, use_trusted_peers_only)
             .await
-    }
-
-    /// After the owned pull fails, dial each sender that arrived during it.
-    /// Senders that arrive during these dials are taken on the next pass.
-    async fn pull_body_from_recorded_senders(
-        &self,
-        body_pull: &BodyPullInFlight,
-        header: &Arc<IrysBlockHeader>,
-    ) -> Option<SealedBlock> {
-        loop {
-            let senders = body_pull.take_senders();
-            if senders.is_empty() {
-                return None;
-            }
-            for peer_id in senders {
-                if let Some(body) = self.try_fetch_body_from_source(header, peer_id).await {
-                    return Some(body);
-                }
-            }
-        }
     }
 
     /// Attempts to fetch the block body from the peer that originally sent us the header.
@@ -1931,12 +1787,12 @@ mod body_fetch_recovery_tests {
         );
     }
 
-    /// Wall-clock bound for `in_flight_body_pull_suppresses_a_concurrent_arrival`.
+    /// Wall-clock bound for a body pull that runs on the server runtime.
     ///
-    /// The pull runs on the server runtime. Under a full-suite load it can
-    /// sit in the queue longer than a few seconds. Coverage multiplies the
-    /// same way as the chain-test waits. The gate that blocks the first pull
-    /// must use a larger bound than the wait for that pull to start.
+    /// Under a full-suite load the pull can sit in the queue longer than a
+    /// few seconds. Coverage multiplies the same way as the chain-test waits.
+    /// A gate that blocks a pull must use a larger bound than the wait for
+    /// that pull to start.
     fn loaded_wait(base_secs: u64) -> Duration {
         let scale = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
             3
@@ -1944,130 +1800,6 @@ mod body_fetch_recovery_tests {
             1
         };
         Duration::from_secs(base_secs.saturating_mul(scale))
-    }
-
-    /// While a body pull for H is running, a later arrival must not start
-    /// another one. After the pull fails, the mark is gone and the next
-    /// arrival pulls again.
-    #[tokio::test]
-    async fn in_flight_body_pull_suppresses_a_concurrent_arrival() {
-        let (_dir, peer_list, handler) = test_handler();
-        let header = orphan_header();
-
-        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
-        let a_pulls = Arc::new(AtomicUsize::new(0));
-        let pulls = Arc::clone(&a_pulls);
-        let gate = Arc::clone(&release_rx);
-        let server_a = FakeGossipServer::new();
-        server_a.set_on_pull_data_request(move |_| {
-            let n = pulls.fetch_add(1, Ordering::SeqCst);
-            if n == 0
-                && let Some(rx) = gate.lock().expect("gate").take()
-            {
-                // Longer than the start bound below. The test releases the
-                // gate; this timeout only fires when the test itself is stuck.
-                let _ = rx.recv_timeout(loaded_wait(90));
-            }
-            GossipResponse::Accepted(None)
-        });
-        let addr_a = server_a.spawn();
-        let peer_a = peer_list_item(0x61, addr_a, true, PeerScore::INITIAL);
-        let peer_a_id = peer_a.peer_id;
-        peer_list.add_or_update_peer(peer_a, true);
-
-        let first_handler = Arc::clone(&handler);
-        let first_header = Arc::clone(&header);
-        let first = tokio::spawn(async move {
-            first_handler
-                .handle_block_header(
-                    peer_a_id,
-                    IrysAddress::repeat_byte(0x61),
-                    first_header,
-                    addr_a,
-                )
-                .await
-        });
-
-        let started = tokio::time::Instant::now();
-        loop {
-            if a_pulls.load(Ordering::SeqCst) > 0 {
-                break;
-            }
-            if first.is_finished() {
-                let ended = first.await.expect("first task");
-                panic!("first arrival finished before a pull: {ended:?}");
-            }
-            assert!(
-                started.elapsed() < loaded_wait(30),
-                "the first pull did not start"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        let b_pulls = Arc::new(AtomicUsize::new(0));
-        let pulls = Arc::clone(&b_pulls);
-        let server_b = FakeGossipServer::new();
-        server_b.set_on_pull_data_request(move |_| {
-            pulls.fetch_add(1, Ordering::SeqCst);
-            GossipResponse::Accepted(None)
-        });
-        let addr_b = server_b.spawn();
-        let peer_b = peer_list_item(0x62, addr_b, true, PeerScore::INITIAL);
-        let peer_b_id = peer_b.peer_id;
-        peer_list.add_or_update_peer(peer_b, true);
-
-        let second = tokio::time::timeout(
-            loaded_wait(15),
-            handler.handle_block_header(
-                peer_b_id,
-                IrysAddress::repeat_byte(0x62),
-                Arc::clone(&header),
-                addr_b,
-            ),
-        )
-        .await;
-        assert_eq!(
-            b_pulls.load(Ordering::SeqCst),
-            0,
-            "a second arrival must not pull while the first pull runs"
-        );
-        assert!(
-            second.is_ok(),
-            "the second arrival must return while the first pull is in flight"
-        );
-        assert!(second.unwrap().is_ok(), "the in-flight hash is skipped");
-
-        release_tx.send(()).expect("first pull is waiting");
-        let first = tokio::time::timeout(loaded_wait(30), first)
-            .await
-            .expect("first pull finishes after the gate opens")
-            .expect("first task");
-        assert!(first.is_err(), "the blocked pull fails: {first:?}");
-
-        let c_pulls = Arc::new(AtomicUsize::new(0));
-        let pulls = Arc::clone(&c_pulls);
-        let server_c = FakeGossipServer::new();
-        server_c.set_on_pull_data_request(move |_| {
-            pulls.fetch_add(1, Ordering::SeqCst);
-            GossipResponse::Accepted(None)
-        });
-        let addr_c = server_c.spawn();
-        let peer_c = peer_list_item(0x63, addr_c, true, PeerScore::INITIAL);
-        let peer_c_id = peer_c.peer_id;
-        peer_list.add_or_update_peer(peer_c, true);
-
-        let third = tokio::time::timeout(
-            loaded_wait(30),
-            handler.handle_block_header(peer_c_id, IrysAddress::repeat_byte(0x63), header, addr_c),
-        )
-        .await
-        .expect("third arrival finishes");
-        assert!(third.is_err(), "the retried pull fails: {third:?}");
-        assert!(
-            c_pulls.load(Ordering::SeqCst) >= 1,
-            "after the failed pull, the next arrival must pull again"
-        );
     }
 
     /// An authenticated header proves the sender can reach us. The body pull
@@ -2158,26 +1890,11 @@ mod body_fetch_recovery_tests {
             if n == 0
                 && let Some(rx) = gate.lock().expect("gate").take()
             {
-                let _ = rx.recv_timeout(Duration::from_secs(5));
+                let _ = rx.recv_timeout(loaded_wait(90));
             }
             GossipResponse::Accepted(None)
         });
         (server, release_tx, pulls)
-    }
-
-    fn server_counting_body_pulls(
-        response: impl Fn() -> GossipResponse<Option<GossipDataV2>> + Send + Sync + 'static,
-    ) -> (FakeGossipServer, Arc<AtomicUsize>) {
-        let pulls = Arc::new(AtomicUsize::new(0));
-        let pulls_for_cb = Arc::clone(&pulls);
-        let server = FakeGossipServer::new();
-        server.set_on_pull_data_request(move |request| {
-            if matches!(request, GossipDataRequestV2::BlockBody(_)) {
-                pulls_for_cb.fetch_add(1, Ordering::SeqCst);
-            }
-            response()
-        });
-        (server, pulls)
     }
 
     fn add_peer(peer_list: &PeerList, byte: u8, addr: SocketAddr, is_online: bool) -> IrysPeerId {
@@ -2201,155 +1918,11 @@ mod body_fetch_recovery_tests {
                 "the pull finished before the peer was dialed"
             );
             assert!(
-                started.elapsed() < Duration::from_secs(5),
+                started.elapsed() < loaded_wait(30),
                 "the body pull did not start"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }
-
-    /// B is offline, so the network fan-out does not dial B. The source-peer
-    /// path still dials B. The retry must use that path.
-    ///
-    /// The first pull fails. B's header arrived while it ran and B has the
-    /// body. The block is processed, and B was pulled.
-    #[tokio::test]
-    async fn failed_body_pull_retries_the_sender_that_arrived_during_it() {
-        let (_dir, peer_list, handler) = test_handler();
-        let header = orphan_header();
-        let block_hash = header.block_hash;
-
-        let (server_a, release_tx, a_pulls) = server_holding_first_body();
-        let addr_a = server_a.spawn();
-        let peer_a_id = add_peer(&peer_list, 0x71, addr_a, true);
-
-        let first_handler = Arc::clone(&handler);
-        let first_header = Arc::clone(&header);
-        let first = tokio::spawn(async move {
-            first_handler
-                .handle_block_header(
-                    peer_a_id,
-                    IrysAddress::repeat_byte(0x71),
-                    first_header,
-                    addr_a,
-                )
-                .await
-        });
-        wait_for_a_pull(&a_pulls, &first).await;
-
-        let served = Arc::clone(&header);
-        let (server_b, b_pulls) = server_counting_body_pulls(move || body_for(&served));
-        let addr_b = server_b.spawn();
-        let peer_b_id = add_peer(&peer_list, 0x72, addr_b, false);
-
-        let second = tokio::time::timeout(
-            Duration::from_secs(2),
-            handler.handle_block_header(
-                peer_b_id,
-                IrysAddress::repeat_byte(0x72),
-                Arc::clone(&header),
-                addr_b,
-            ),
-        )
-        .await
-        .expect("B returns while A's pull is in flight");
-        assert!(
-            second.is_ok(),
-            "B is recorded and does not error: {second:?}"
-        );
-        assert_eq!(
-            b_pulls.load(Ordering::SeqCst),
-            0,
-            "B is not pulled while A's pull is still running"
-        );
-
-        release_tx.send(()).expect("A is waiting");
-        let first = tokio::time::timeout(Duration::from_secs(5), first)
-            .await
-            .expect("A finishes after the gate opens")
-            .expect("A task");
-        assert!(
-            first.is_ok(),
-            "A's failed pull retries B and processes the block: {first:?}"
-        );
-        assert!(
-            b_pulls.load(Ordering::SeqCst) >= 1,
-            "the sender that arrived during the failed pull must be pulled"
-        );
-        assert!(handler.block_pool.contains_block(&block_hash).await);
-    }
-
-    /// Both source pulls fail. The winner returns the original error and
-    /// clears the mark, so a third arrival pulls again.
-    #[tokio::test]
-    async fn failed_retries_return_the_original_error_and_clear_the_mark() {
-        let (_dir, peer_list, handler) = test_handler();
-        let header = orphan_header();
-
-        let (server_a, release_tx, a_pulls) = server_holding_first_body();
-        let addr_a = server_a.spawn();
-        let peer_a_id = add_peer(&peer_list, 0x81, addr_a, true);
-
-        let first_handler = Arc::clone(&handler);
-        let first_header = Arc::clone(&header);
-        let first = tokio::spawn(async move {
-            first_handler
-                .handle_block_header(
-                    peer_a_id,
-                    IrysAddress::repeat_byte(0x81),
-                    first_header,
-                    addr_a,
-                )
-                .await
-        });
-        wait_for_a_pull(&a_pulls, &first).await;
-
-        let (server_b, b_pulls) = server_counting_body_pulls(|| GossipResponse::Accepted(None));
-        let addr_b = server_b.spawn();
-        let peer_b_id = add_peer(&peer_list, 0x82, addr_b, false);
-
-        let second = tokio::time::timeout(
-            Duration::from_secs(2),
-            handler.handle_block_header(
-                peer_b_id,
-                IrysAddress::repeat_byte(0x82),
-                Arc::clone(&header),
-                addr_b,
-            ),
-        )
-        .await
-        .expect("B returns while A's pull is in flight");
-        assert!(second.is_ok(), "{second:?}");
-        assert_eq!(b_pulls.load(Ordering::SeqCst), 0);
-
-        release_tx.send(()).expect("A is waiting");
-        let first = tokio::time::timeout(Duration::from_secs(5), first)
-            .await
-            .expect("A finishes after the gate opens")
-            .expect("A task");
-        assert!(
-            first.is_err(),
-            "both pulls fail, so the original error is returned: {first:?}"
-        );
-        assert!(
-            b_pulls.load(Ordering::SeqCst) >= 1,
-            "B arrived during the pull and must be tried after A fails"
-        );
-
-        let (server_c, c_pulls) = server_counting_body_pulls(|| GossipResponse::Accepted(None));
-        let addr_c = server_c.spawn();
-        let peer_c_id = add_peer(&peer_list, 0x83, addr_c, true);
-        let third = tokio::time::timeout(
-            Duration::from_secs(5),
-            handler.handle_block_header(peer_c_id, IrysAddress::repeat_byte(0x83), header, addr_c),
-        )
-        .await
-        .expect("the third arrival finishes");
-        assert!(third.is_err(), "the third pull has no body: {third:?}");
-        assert!(
-            c_pulls.load(Ordering::SeqCst) >= 1,
-            "the failed pull clears the mark, so the next arrival pulls again"
-        );
     }
 
     /// A body that arrives in a POST is processed even while a pull for that
@@ -2392,7 +1965,7 @@ mod body_fetch_recovery_tests {
         wait_for_a_pull(&a_pulls, &first).await;
 
         let posted = tokio::time::timeout(
-            Duration::from_secs(5),
+            loaded_wait(30),
             handler.handle_block_body(
                 GossipRequestV2 {
                     peer_id: IrysPeerId::from(IrysAddress::repeat_byte(0x92)),
@@ -2415,67 +1988,140 @@ mod body_fetch_recovery_tests {
         );
 
         release_tx.send(()).expect("A is waiting");
-        let first = tokio::time::timeout(Duration::from_secs(5), first)
+        let first = tokio::time::timeout(loaded_wait(30), first)
             .await
             .expect("A finishes after the gate opens")
             .expect("A task");
         let _ = first;
     }
 
-    /// The pool has asked for this hash. That call pulls even when another
-    /// pull for the same hash is already running, and the caller gets the
-    /// result of its own pull.
+    /// Two peers push the same header at the same time. Each arrival pulls
+    /// the body. The pool keeps one block, so a later arrival does not pull.
     #[tokio::test]
-    async fn requested_block_pulls_while_another_pull_is_in_flight() {
+    async fn concurrent_header_arrivals_both_pull_and_the_block_is_processed_once() {
         let (_dir, peer_list, handler) = test_handler();
         let header = orphan_header();
         let block_hash = header.block_hash;
 
-        let (server_a, release_tx, a_pulls) = server_holding_first_body();
-        let addr_a = server_a.spawn();
-        let peer_a_id = add_peer(&peer_list, 0xA1, addr_a, true);
+        let (release_a_tx, release_a_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_b_tx, release_b_rx) = std::sync::mpsc::sync_channel(1);
+        let release_a_rx = Arc::new(std::sync::Mutex::new(Some(release_a_rx)));
+        let release_b_rx = Arc::new(std::sync::Mutex::new(Some(release_b_rx)));
 
-        let first_handler = Arc::clone(&handler);
-        let first_header = Arc::clone(&header);
-        let first = tokio::spawn(async move {
-            first_handler
-                .handle_block_header(
-                    peer_a_id,
-                    IrysAddress::repeat_byte(0xA1),
-                    first_header,
-                    addr_a,
-                )
+        let a_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&a_pulls);
+        let gate = Arc::clone(&release_a_rx);
+        let served = Arc::clone(&header);
+        let server_a = FakeGossipServer::new();
+        server_a.set_on_pull_data_request(move |request| {
+            if !matches!(request, GossipDataRequestV2::BlockBody(_)) {
+                return GossipResponse::Accepted(None);
+            }
+            let n = pulls.fetch_add(1, Ordering::SeqCst);
+            if n == 0
+                && let Some(rx) = gate.lock().expect("gate").take()
+            {
+                let _ = rx.recv_timeout(loaded_wait(90));
+            }
+            body_for(&served)
+        });
+        let addr_a = server_a.spawn();
+        let peer_a_id = add_peer(&peer_list, 0xB1, addr_a, true);
+
+        let b_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&b_pulls);
+        let gate = Arc::clone(&release_b_rx);
+        let served = Arc::clone(&header);
+        let server_b = FakeGossipServer::new();
+        server_b.set_on_pull_data_request(move |request| {
+            if !matches!(request, GossipDataRequestV2::BlockBody(_)) {
+                return GossipResponse::Accepted(None);
+            }
+            let n = pulls.fetch_add(1, Ordering::SeqCst);
+            if n == 0
+                && let Some(rx) = gate.lock().expect("gate").take()
+            {
+                let _ = rx.recv_timeout(loaded_wait(90));
+            }
+            body_for(&served)
+        });
+        let addr_b = server_b.spawn();
+        let peer_b_id = add_peer(&peer_list, 0xB2, addr_b, true);
+
+        let handler_a = Arc::clone(&handler);
+        let header_a = Arc::clone(&header);
+        let arrival_a = tokio::spawn(async move {
+            handler_a
+                .handle_block_header(peer_a_id, IrysAddress::repeat_byte(0xB1), header_a, addr_a)
                 .await
         });
-        wait_for_a_pull(&a_pulls, &first).await;
-        handler.block_pool.mark_block_as_requested(block_hash).await;
+        let handler_b = Arc::clone(&handler);
+        let header_b = Arc::clone(&header);
+        let arrival_b = tokio::spawn(async move {
+            handler_b
+                .handle_block_header(peer_b_id, IrysAddress::repeat_byte(0xB2), header_b, addr_b)
+                .await
+        });
 
-        let served = Arc::clone(&header);
-        let (server_b, b_pulls) = server_counting_body_pulls(move || body_for(&served));
-        let addr_b = server_b.spawn();
-        let peer_b_id = add_peer(&peer_list, 0xA2, addr_b, true);
+        let started = tokio::time::Instant::now();
+        loop {
+            if a_pulls.load(Ordering::SeqCst) > 0 && b_pulls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            let a_dropped = arrival_a.is_finished() && a_pulls.load(Ordering::SeqCst) == 0;
+            let b_dropped = arrival_b.is_finished() && b_pulls.load(Ordering::SeqCst) == 0;
+            assert!(
+                !a_dropped && !b_dropped,
+                "an arrival returned without pulling: a={} b={}",
+                a_pulls.load(Ordering::SeqCst),
+                b_pulls.load(Ordering::SeqCst)
+            );
+            assert!(
+                started.elapsed() < loaded_wait(30),
+                "both arrivals must pull the body"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
-        let requested = tokio::time::timeout(
-            Duration::from_secs(5),
-            handler.handle_block_header(peer_b_id, IrysAddress::repeat_byte(0xA2), header, addr_b),
-        )
-        .await
-        .expect("the requested pull finishes while the other pull is in flight");
-        assert!(
-            b_pulls.load(Ordering::SeqCst) >= 1,
-            "a requested hash must pull even while another pull is in flight"
-        );
-        assert!(
-            requested.is_ok(),
-            "the caller gets its own pull result: {requested:?}"
-        );
-        assert!(handler.block_pool.contains_block(&block_hash).await);
-
-        release_tx.send(()).expect("A is waiting");
-        let first = tokio::time::timeout(Duration::from_secs(5), first)
+        release_a_tx.send(()).expect("A is waiting");
+        release_b_tx.send(()).expect("B is waiting");
+        let result_a = tokio::time::timeout(loaded_wait(30), arrival_a)
             .await
             .expect("A finishes after the gate opens")
             .expect("A task");
-        let _ = first;
+        let result_b = tokio::time::timeout(loaded_wait(30), arrival_b)
+            .await
+            .expect("B finishes after the gate opens")
+            .expect("B task");
+        assert!(
+            result_a.is_ok() || result_b.is_ok(),
+            "one arrival processes the block: {result_a:?} {result_b:?}"
+        );
+        assert!(
+            handler.block_pool.contains_block(&block_hash).await,
+            "the block is in the pool"
+        );
+
+        let c_pulls = Arc::new(AtomicUsize::new(0));
+        let pulls = Arc::clone(&c_pulls);
+        let server_c = FakeGossipServer::new();
+        server_c.set_on_pull_data_request(move |_| {
+            pulls.fetch_add(1, Ordering::SeqCst);
+            GossipResponse::Accepted(None)
+        });
+        let addr_c = server_c.spawn();
+        let peer_c_id = add_peer(&peer_list, 0xB3, addr_c, true);
+        let third = tokio::time::timeout(
+            loaded_wait(30),
+            handler.handle_block_header(peer_c_id, IrysAddress::repeat_byte(0xB3), header, addr_c),
+        )
+        .await
+        .expect("the later arrival finishes");
+        assert!(third.is_ok(), "{third:?}");
+        assert_eq!(
+            c_pulls.load(Ordering::SeqCst),
+            0,
+            "the pool already has the block, so a later arrival must not pull"
+        );
     }
 }

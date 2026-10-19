@@ -709,14 +709,17 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
             if !err.is_advisory() {
                 self.block_pool.remove_requested_block(&block_hash).await;
-                self.block_pool
-                    .remove_block_from_cache(
-                        &block_hash,
-                        BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
-                            err.clone(),
-                        )),
-                    )
-                    .await;
+                // A block another path already stored stays in the cache.
+                if !self.block_pool.is_block_known_locally(&block_hash).await {
+                    self.block_pool
+                        .remove_block_from_cache(
+                            &block_hash,
+                            BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
+                                err.clone(),
+                            )),
+                        )
+                        .await;
+                }
             }
 
             Err(ChainSyncError::Internal(format!(
@@ -3310,5 +3313,83 @@ mod tests {
                 "an online trusted peer does not start a sync when the index is up to date"
             );
         }
+    }
+
+    /// A parent request that fails must not delete a block another path
+    /// already stored. The requested bit is still cleared.
+    #[tokio::test]
+    async fn failed_parent_request_keeps_a_block_another_path_stored() {
+        use crate::tests::util::data_handler_stub;
+        use irys_domain::PeerList;
+        use irys_domain::chain_sync_state::ChainSyncState;
+        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            BlockBody, Config, DatabaseProvider, DbSyncMode, H256, NodeConfig, SealedBlock,
+        };
+        use irys_vdf::state::VdfController;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = TempDirBuilder::new().with_tracing().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = dir.path().to_path_buf();
+        let config = Config::new_with_random_peer_id(node_config);
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_irys_consensus_data_db(
+                &config.node_config.base_directory,
+                DbSyncMode::UtterlyNoSync,
+            )
+            .expect("open test db"),
+        ));
+        let peer_list = PeerList::test_mock().expect("peer list");
+        let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
+
+        let mut header = irys_testing_utils::new_mock_signed_header();
+        header.height = 1;
+        header.previous_block_hash = H256::random();
+        header.test_sign();
+        let block_hash = header.block_hash;
+        let sealed = Arc::new(
+            SealedBlock::new(
+                header,
+                BlockBody {
+                    block_hash,
+                    data_transactions: vec![],
+                    commitment_transactions: vec![],
+                },
+            )
+            .expect("sealed block"),
+        );
+        handler
+            .block_pool
+            .test_insert_block_into_cache(sealed, false)
+            .await;
+
+        let service = ChainSyncServiceInner::new(
+            handler.sync_state.clone(),
+            handler.peer_list.clone(),
+            handler.config.clone(),
+            handler.block_index.clone(),
+            Arc::clone(&handler.block_pool),
+            Arc::clone(&handler),
+            None,
+            VdfController::new(&Arc::new(AtomicBool::new(false))),
+            tokio::runtime::Handle::current(),
+        );
+
+        let err = service
+            .request_block_from_the_network(block_hash)
+            .await
+            .expect_err("a parent pull with no peers fails");
+        let _ = err;
+        assert!(
+            !handler.block_pool.is_block_requested(&block_hash).await,
+            "a failed request clears the requested bit"
+        );
+        assert!(
+            handler.block_pool.contains_block(&block_hash).await,
+            "a failed parent request must not delete a block another path stored"
+        );
     }
 }
