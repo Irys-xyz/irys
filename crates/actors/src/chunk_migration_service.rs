@@ -2314,15 +2314,21 @@ mod tests {
         let pass = worker.drain_pass().await;
         let drain = drain_started.elapsed();
         eprintln!(
-            "fragmented uninitialized span: drain_pass={drain:?} unwritable={} written={}",
-            pass.unwritable, pass.written
+            "fragmented uninitialized span: drain_pass={drain:?} unwritable={} written={} classify_index_steps={}",
+            pass.unwritable, pass.written, pass.classify_index_steps
         );
         assert_eq!(pass.written, 0);
         assert_eq!(pass.unwritable, SPAN as usize);
         assert_eq!(sm.pending_body_migrations()?[0].1.attempts, 0);
         assert!(
-            drain < Duration::from_secs(1),
-            "drain_pass took {drain:?} for {SPAN} alternating runs"
+            pass.classify_index_steps >= SPAN as usize,
+            "classify_run recorded {} index steps for {SPAN} runs",
+            pass.classify_index_steps
+        );
+        assert!(
+            pass.classify_index_steps <= SPAN as usize * 4,
+            "classify_run recorded {} index steps for {SPAN} runs",
+            pass.classify_index_steps
         );
         Ok(())
     }

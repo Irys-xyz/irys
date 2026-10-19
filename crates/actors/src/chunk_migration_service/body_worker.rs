@@ -124,6 +124,10 @@ pub(crate) struct PassStats {
     /// The per-offset arm is one call per chunk.
     #[cfg(test)]
     pub durable_reads: usize,
+    /// Run-index probes inside `classify_run`. A forward cursor is linear in
+    /// the fragment count. A scan that restarts at the first run is quadratic.
+    #[cfg(test)]
+    pub classify_index_steps: usize,
     /// Lowest block height among the jobs this pass read. `None` when it
     /// read none. A pass that stops early has not seen later keys.
     pub oldest_pending_height: Option<u64>,
@@ -145,6 +149,7 @@ impl std::ops::AddAssign for PassStats {
         {
             self.chunk_type_reads += other.chunk_type_reads;
             self.durable_reads += other.durable_reads;
+            self.classify_index_steps += other.classify_index_steps;
         }
         self.oldest_pending_height = match (self.oldest_pending_height, other.oldest_pending_height)
         {
@@ -335,6 +340,8 @@ impl BodyMigrationWorker {
                     chunk_type_reads: std::sync::atomic::AtomicUsize::new(0),
                     #[cfg(test)]
                     durable_reads: std::sync::atomic::AtomicUsize::new(0),
+                    #[cfg(test)]
+                    classify_index_steps: std::sync::atomic::AtomicUsize::new(0),
                 };
                 tasks.push(tokio::task::spawn_blocking(move || drain.run()));
             }
@@ -419,6 +426,9 @@ struct SubmoduleDrain {
     /// `is_data_chunk_durable_at` calls this task made. Test builds only.
     #[cfg(test)]
     durable_reads: std::sync::atomic::AtomicUsize,
+    /// Run-index probes this task made inside `classify_run`. Test builds only.
+    #[cfg(test)]
+    classify_index_steps: std::sync::atomic::AtomicUsize,
 }
 
 impl SubmoduleDrain {
@@ -534,8 +544,20 @@ impl SubmoduleDrain {
             stats.durable_reads = self
                 .durable_reads
                 .load(std::sync::atomic::Ordering::Relaxed);
+            stats.classify_index_steps = self
+                .classify_index_steps
+                .load(std::sync::atomic::Ordering::Relaxed);
         }
         stats
+    }
+
+    /// One probe of the run list. Test builds count these so a from-the-start
+    /// scan cannot hide behind a clock bound.
+    #[cfg(test)]
+    fn note_classify_step(&self) {
+        let _ = self
+            .classify_index_steps
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Chunk type at `offset`, counted in test builds. The jump path must not
@@ -730,8 +752,12 @@ impl SubmoduleDrain {
         run_idx: &mut usize,
     ) -> Result<Option<RunJump>, MigrationError> {
         while *run_idx < runs.len() && runs[*run_idx].1 < cursor {
+            #[cfg(test)]
+            self.note_classify_step();
             *run_idx += 1;
         }
+        #[cfg(test)]
+        self.note_classify_step();
         let Some(&(run_start, run_end, kind)) = runs.get(*run_idx) else {
             return Ok(Some(self.unwritable_jump(cursor, last)?));
         };
