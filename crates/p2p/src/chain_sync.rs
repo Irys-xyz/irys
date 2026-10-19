@@ -426,7 +426,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 }
                 let has_usable_peer = has_active_not_syncing_trusted_peer(
                     &self.peer_list,
-                    &status.not_syncing_peer_ids,
+                    &status.sync_source_peer_ids,
                 );
                 if should_start_periodic_sync(status.behind, has_usable_peer) {
                     info!(
@@ -1945,8 +1945,10 @@ struct TrustedPeerIndexStatus {
     best_syncing_height: Option<u64>,
     /// Gossip address of the peer that reported `best_syncing_height`.
     best_syncing_peer_address: Option<SocketAddr>,
-    /// Trusted peers that answered with `!is_syncing`.
-    not_syncing_peer_ids: Vec<IrysPeerId>,
+    /// Trusted peers that answered with `!is_syncing` and whose own height is
+    /// past the gap that makes `behind` true. Only these can supply the tip
+    /// that triggered the check, so only these may start a sync.
+    sync_source_peer_ids: Vec<IrysPeerId>,
 }
 
 /// Same gap as `behind`. The peer is syncing, so the check warns and does not
@@ -2033,12 +2035,15 @@ async fn is_local_index_is_behind_trusted_peers(
         }
     });
 
+    let local_height = block_index.read().latest_height();
+    let is_ahead = |height: u64| local_height + (migration_depth * 2) < height;
+
     let mut any_answer = false;
     let mut best_trusted_height = None;
     let mut best_peer_address = None;
     let mut best_syncing_height = None;
     let mut best_syncing_peer_address = None;
-    let mut not_syncing_peer_ids = Vec::new();
+    let mut sync_source_peer_ids = Vec::new();
     for (peer_id, gossip_address, height, is_syncing) in futures::future::join_all(futures)
         .await
         .into_iter()
@@ -2055,7 +2060,11 @@ async fn is_local_index_is_behind_trusted_peers(
             }
             continue;
         }
-        not_syncing_peer_ids.push(peer_id);
+        // A peer at or near our height cannot serve the missing tip. A sync
+        // started on its account pauses the VDF and makes no progress.
+        if is_ahead(height) {
+            sync_source_peer_ids.push(peer_id);
+        }
         if best_trusted_height.is_none_or(|current| height > current) {
             best_trusted_height = Some(height);
             best_peer_address = Some(gossip_address);
@@ -2068,11 +2077,7 @@ async fn is_local_index_is_behind_trusted_peers(
         ));
     }
 
-    let local_height = block_index.read().latest_height();
-    let behind = matches!(
-        best_trusted_height,
-        Some(height) if local_height + (migration_depth * 2) < height
-    );
+    let behind = best_trusted_height.is_some_and(is_ahead);
 
     Ok(TrustedPeerIndexStatus {
         behind,
@@ -2081,7 +2086,7 @@ async fn is_local_index_is_behind_trusted_peers(
         best_peer_address,
         best_syncing_height,
         best_syncing_peer_address,
-        not_syncing_peer_ids,
+        sync_source_peer_ids,
     })
 }
 
@@ -3419,7 +3424,7 @@ mod tests {
         fn decides_to_start(status: &TrustedPeerIndexStatus, peer_list: &PeerList) -> bool {
             should_start_periodic_sync(
                 status.behind,
-                has_active_not_syncing_trusted_peer(peer_list, &status.not_syncing_peer_ids),
+                has_active_not_syncing_trusted_peer(peer_list, &status.sync_source_peer_ids),
             )
         }
 
@@ -3481,7 +3486,7 @@ mod tests {
             assert_eq!(status.best_syncing_height, Some(100));
             assert_eq!(status.best_syncing_peer_address, Some(addr));
             assert!(
-                !status.not_syncing_peer_ids.contains(&peer_id),
+                !status.sync_source_peer_ids.contains(&peer_id),
                 "a syncing answer must not be a usable peer"
             );
             assert!(
@@ -3560,9 +3565,12 @@ mod tests {
             assert_eq!(status.best_peer_address, Some(ready_addr));
             assert_eq!(status.best_syncing_height, Some(100));
             assert_eq!(status.best_syncing_peer_address, Some(syncing_addr));
-            assert_eq!(status.not_syncing_peer_ids, vec![ready_peer_id]);
             assert!(
-                !status.not_syncing_peer_ids.contains(&syncing_peer_id),
+                status.sync_source_peer_ids.is_empty(),
+                "a not-syncing peer inside the gap cannot supply the tip"
+            );
+            assert!(
+                !status.sync_source_peer_ids.contains(&syncing_peer_id),
                 "a syncing answer must not be a usable peer"
             );
             assert!(
@@ -3635,9 +3643,9 @@ mod tests {
             assert_eq!(status.best_peer_address, Some(ahead_addr));
             assert_eq!(status.best_syncing_height, None);
             assert_eq!(status.best_syncing_peer_address, None);
-            assert_eq!(status.not_syncing_peer_ids, vec![ahead_peer_id]);
+            assert_eq!(status.sync_source_peer_ids, vec![ahead_peer_id]);
             assert!(
-                !status.not_syncing_peer_ids.contains(&error_peer_id),
+                !status.sync_source_peer_ids.contains(&error_peer_id),
                 "a peer that did not answer is not usable"
             );
             assert!(
@@ -3649,6 +3657,77 @@ mod tests {
             assert!(
                 decides_to_start(&status, &peer_list),
                 "an active trusted peer that is ahead and not syncing starts a sync"
+            );
+        }
+
+        /// The peer that is ahead is offline. Another trusted peer is active but
+        /// at our height. That peer cannot supply the tip, so the check must not
+        /// start a sync that would pause the VDF and make no progress.
+        #[tokio::test]
+        async fn active_trusted_peer_that_is_not_ahead_does_not_start_a_sync() {
+            let ahead_server = FakeGossipServer::new();
+            ahead_server.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: 100,
+                    is_syncing: false,
+                    ..NodeInfo::default()
+                })
+            });
+            let ahead_addr = ahead_server.spawn();
+
+            let level_server = FakeGossipServer::new();
+            level_server.set_on_info_request(|| {
+                GossipResponse::Accepted(NodeInfo {
+                    block_index_height: 5,
+                    is_syncing: false,
+                    ..NodeInfo::default()
+                })
+            });
+            let level_addr = level_server.spawn();
+
+            let ahead_peer = peer_list_item(0x3C, ahead_addr, false, PeerScore::MAX);
+            let level_peer = peer_list_item(0x3D, level_addr, true, PeerScore::MAX);
+            let ahead_peer_id = ahead_peer.peer_id;
+            let level_peer_id = level_peer.peer_id;
+            let (config, peer_list) = peer_list_with_trusted(
+                vec![ahead_peer, level_peer],
+                vec![
+                    PeerAddress {
+                        gossip: ahead_addr,
+                        api: ahead_addr,
+                        execution: Default::default(),
+                    },
+                    PeerAddress {
+                        gossip: level_addr,
+                        api: level_addr,
+                        execution: Default::default(),
+                    },
+                ],
+            );
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+
+            let status = is_local_index_is_behind_trusted_peers(
+                &config,
+                &peer_list,
+                &gossip_client(),
+                &index,
+            )
+            .await
+            .expect("both trusted peers answered");
+
+            assert!(status.behind);
+            assert_eq!(status.sync_source_peer_ids, vec![ahead_peer_id]);
+            assert!(
+                peer_list
+                    .get_peer(&level_peer_id)
+                    .expect("peer exists")
+                    .is_active(),
+                "precondition: the level peer is active"
+            );
+            assert!(
+                !decides_to_start(&status, &peer_list),
+                "only an active peer that is ahead may start a sync"
             );
         }
 
@@ -3664,7 +3743,7 @@ mod tests {
             assert_eq!(status.best_peer_address, Some(addr));
             assert_eq!(status.best_syncing_height, None);
             assert_eq!(status.best_syncing_peer_address, None);
-            assert_eq!(status.not_syncing_peer_ids, vec![peer_id]);
+            assert_eq!(status.sync_source_peer_ids, vec![peer_id]);
             assert!(
                 !peer_list
                     .get_peer(&peer_id)
@@ -3693,7 +3772,7 @@ mod tests {
             assert_eq!(status.best_peer_address, Some(addr));
             assert_eq!(status.best_syncing_height, None);
             assert_eq!(status.best_syncing_peer_address, None);
-            assert_eq!(status.not_syncing_peer_ids, vec![peer_id]);
+            assert_eq!(status.sync_source_peer_ids, vec![peer_id]);
             assert!(
                 !decides_to_start(&status, &peer_list),
                 "a trusted peer below the reputation threshold must not start a sync"
