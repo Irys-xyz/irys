@@ -2598,16 +2598,6 @@ impl RocksSubmoduleStore {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn schema_payload(&self) -> eyre::Result<Option<Vec<u8>>> {
-        let handle = cf_handle(&self.db, Cf::Metadata)?;
-        let key = encode_key(MetadataKey::DBSchemaVersion);
-        match self.db.get_cf(&handle, key).wrap_err("read schema row")? {
-            Some(bytes) => Ok(Some(bytes)),
-            None => Ok(None),
-        }
-    }
-
     /// Both directions of every RocksDB v1 family.
     ///
     /// An interval that is not awaiting info has a data-root row with the
@@ -6747,7 +6737,7 @@ mod tests {
         {
             let store = RocksSubmoduleStore::open(&path)?;
             store.update(|tx| tx.clear())?;
-            let payload = store.schema_payload()?.expect("schema row");
+            let payload = store.schema_bytes()?.expect("schema row");
             assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
             assert!(
                 store
@@ -7509,7 +7499,7 @@ mod tests {
             assert_eq!(store.cf_key_count(cf)?, 0, "{}", cf.name());
         }
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
-        let payload = store.schema_payload()?.expect("schema row");
+        let payload = store.schema_bytes()?.expect("schema row");
         assert_eq!(payload, SUBMODULE_SCHEMA_ROCKS_V1.as_bytes());
         assert!(
             store
@@ -7539,7 +7529,7 @@ mod tests {
         assert_eq!(store.cf_key_count(Cf::OffsetMeta)?, 0);
         assert_eq!(store.cf_key_count(Cf::Metadata)?, 2);
         assert_eq!(
-            store.schema_payload()?.expect("schema row"),
+            store.schema_bytes()?.expect("schema row"),
             SUBMODULE_SCHEMA_ROCKS_V1.as_bytes()
         );
         Ok(())
