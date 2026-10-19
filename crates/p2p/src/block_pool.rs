@@ -313,6 +313,15 @@ impl BlockCacheGuard {
         self.inner.write().await.blocks.contains(block_hash)
     }
 
+    async fn contains_recently_processed(&self, block_hash: &BlockHash) -> bool {
+        // `LruCache::contains` takes `&self`, so a shared lock is enough.
+        self.inner
+            .read()
+            .await
+            .recently_processed
+            .contains(block_hash)
+    }
+
     async fn orphaned_blocks_for_parent(
         &self,
         block_hash: &BlockHash,
@@ -1515,6 +1524,25 @@ where
     /// Check if parent hash exists in block cache - for orphan block processing
     pub async fn contains_block(&self, block_hash: &BlockHash) -> bool {
         self.blocks_cache.contains_block(block_hash).await
+    }
+
+    /// True when this node already holds the block: in the in-flight cache,
+    /// recently processed, or in the block tree.
+    ///
+    /// The seen cache is the broadcast-exclusion set, so a hash can be
+    /// recorded before the body lands. A skip on "seen" must also check this.
+    pub async fn is_block_known_locally(&self, block_hash: &BlockHash) -> bool {
+        if self.blocks_cache.contains_block(block_hash).await {
+            return true;
+        }
+        if self
+            .blocks_cache
+            .contains_recently_processed(block_hash)
+            .await
+        {
+            return true;
+        }
+        self.block_status_provider.is_block_in_the_tree(block_hash)
     }
 
     pub async fn is_block_processing(&self, block_hash: &BlockHash) -> bool {

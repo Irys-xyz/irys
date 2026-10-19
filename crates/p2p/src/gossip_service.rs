@@ -232,6 +232,9 @@ impl P2PService {
             ),
             block_index,
             block_tree,
+            body_pulls_in_flight: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             config: config.clone(),
             started_at,
             consensus_config_hash,
