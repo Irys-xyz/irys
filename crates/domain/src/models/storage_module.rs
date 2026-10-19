@@ -933,6 +933,12 @@ pub struct StorageModule {
     /// Set when rollback's assignment `try_write` returns [`std::sync::TryLockError::WouldBlock`].
     #[cfg(test)]
     rollback_assignment_blocked: AtomicBool,
+    /// When set, rollback and reset record a contended `sync_in_progress` try.
+    #[cfg(test)]
+    sync_lock_probe: AtomicBool,
+    /// Set when that try returns [`std::sync::TryLockError::WouldBlock`].
+    #[cfg(test)]
+    sync_lock_blocked: AtomicBool,
     /// The next lane `pwrite` panics once, before the kernel write.
     #[cfg(test)]
     pwrite_panic_once: AtomicBool,
@@ -2326,6 +2332,10 @@ impl StorageModule {
             #[cfg(test)]
             rollback_assignment_blocked: AtomicBool::new(false),
             #[cfg(test)]
+            sync_lock_probe: AtomicBool::new(false),
+            #[cfg(test)]
+            sync_lock_blocked: AtomicBool::new(false),
+            #[cfg(test)]
             pwrite_panic_once: AtomicBool::new(false),
         })
     }
@@ -3285,6 +3295,20 @@ impl StorageModule {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Record whether `sync_in_progress` is already held.
+    ///
+    /// A free lock is taken and dropped here, before the real wait. Arm the
+    /// probe only while another caller holds the lock, or from the thread
+    /// that takes it next, so this try does not hand the mutex to someone else.
+    #[cfg(test)]
+    fn note_sync_lock_probe(&self) {
+        if !self.sync_lock_probe.load(Ordering::SeqCst) {
+            return;
+        }
+        self.sync_lock_blocked
+            .store(self.sync_lock_is_held(), Ordering::SeqCst);
+    }
+
     /// `true` only when another caller holds `sync_in_progress`.
     ///
     /// A free poisoned lock is not held: `lock_sync` clears that poison.
@@ -3350,6 +3374,8 @@ impl StorageModule {
     /// failed store leaves the wipe unfinished and a later matching assignment
     /// can pack it.
     fn wipe_for_reset(&self, drop_marker: bool) -> eyre::Result<Interval<PartitionChunkOffset>> {
+        #[cfg(test)]
+        self.note_sync_lock_probe();
         let _sync_guard = self.lock_sync();
         #[cfg(any(test, feature = "test-utils"))]
         if self.reset_fail_next.swap(false, Ordering::SeqCst) {
@@ -6884,6 +6910,8 @@ impl StorageModule {
     ) -> eyre::Result<()> {
         let _assignment = self.lock_assignment_for_rollback();
         let _ = self.rollback_generation.fetch_add(1, Ordering::SeqCst);
+        #[cfg(test)]
+        self.note_sync_lock_probe();
         let _sync = self.lock_sync();
         self.drop_pending_writes_in_range(start, end);
 
@@ -11174,6 +11202,35 @@ mod tests {
         })
     }
 
+    /// The probe is armed and nobody else holds `sync_in_progress`. Reset
+    /// still clears the label, and the try does not look blocked. A later
+    /// write is accepted.
+    #[test]
+    fn reset_with_the_sync_probe_armed_still_finishes_when_the_lock_is_free() -> eyre::Result<()> {
+        let (tmp, _config, storage) = interval_batch_module("reset_probe_free", 0)?;
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(0),
+            vec![7_u8; 32],
+            ChunkType::Data,
+        ));
+        storage.sync_lock_blocked.store(false, Ordering::SeqCst);
+        storage.sync_lock_probe.store(true, Ordering::SeqCst);
+        storage.reset()?;
+        assert!(
+            !storage.sync_lock_blocked.load(Ordering::SeqCst),
+            "a free sync lock looked blocked"
+        );
+        assert!(storage.get_intervals(ChunkType::Data).is_empty());
+        assert!(storage.write_chunk(
+            PartitionChunkOffset::from(1),
+            vec![8_u8; 32],
+            ChunkType::Entropy,
+        ));
+        drop(storage);
+        drop(tmp);
+        Ok(())
+    }
+
     /// `reset` during the presence-copy gap must not leave that proof in the index.
     ///
     /// The durable point holds `sync_in_progress` at the pause. `reset` has to
@@ -11224,7 +11281,7 @@ mod tests {
                 storage.pause_next_sync_at(SyncPausePoint::AfterPresenceCopy);
 
                 let storage_ref = &storage;
-                let (sync_result, reset_result, reset_finished_while_paused, sync_still_held) =
+                let (sync_result, reset_result, reset_blocked_on_sync, sync_still_held) =
                     std::thread::scope(|scope| {
                         let _release = SyncPauseRelease(storage_ref);
                         let sync_thread =
@@ -11233,15 +11290,24 @@ mod tests {
                             storage_ref.wait_for_sync_pause(Duration::from_secs(5)),
                             "durable point did not pause after the proof copy"
                         );
+                        storage_ref.sync_lock_blocked.store(false, Ordering::SeqCst);
+                        storage_ref.sync_lock_probe.store(true, Ordering::SeqCst);
                         let (reset_tx, reset_rx) = std::sync::mpsc::channel();
                         scope.spawn(move || {
                             let result = storage_ref.reset();
                             let _ = reset_tx.send(result);
                         });
 
-                        let deadline = Instant::now() + Duration::from_millis(500);
+                        // A timeout is a failure. Not finishing inside the window
+                        // is not proof that reset reached the mutex.
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        let mut blocked = false;
                         let mut early = None;
                         while Instant::now() < deadline {
+                            if storage_ref.sync_lock_blocked.load(Ordering::SeqCst) {
+                                blocked = true;
+                                break;
+                            }
                             match reset_rx.try_recv() {
                                 Ok(result) => {
                                     early = Some(result);
@@ -11255,8 +11321,13 @@ mod tests {
                                 }
                             }
                         }
-                        let reset_finished_while_paused = early.is_some();
+                        assert!(blocked, "reset did not block on the sync lock");
+                        assert!(
+                            early.is_none(),
+                            "reset finished before it blocked on the sync lock"
+                        );
                         let sync_still_held = storage_ref.sync_in_progress.try_lock().is_err();
+                        storage_ref.sync_lock_probe.store(false, Ordering::SeqCst);
                         storage_ref.release_sync_pause();
                         let sync_result = sync_thread.join().expect("sync thread");
                         let reset_result = match early {
@@ -11265,12 +11336,7 @@ mod tests {
                                 "reset did not finish after the durable point was released",
                             ),
                         };
-                        (
-                            sync_result,
-                            reset_result,
-                            reset_finished_while_paused,
-                            sync_still_held,
-                        )
+                        (sync_result, reset_result, blocked, sync_still_held)
                     });
 
                 sync_result?;
@@ -11285,12 +11351,12 @@ mod tests {
                 let intervals = storage.get_intervals(ChunkType::Uninitialized);
                 eyre::ensure!(
                     path.is_none()
-                        && !reset_finished_while_paused
+                        && reset_blocked_on_sync
                         && sync_still_held
                         && pending_clear
                         && intervals == vec![partition_chunk_offset_ii!(0, 7)]
                         && storage.get_intervals(ChunkType::Data).is_empty(),
-                    "path={path:?} reset_finished_while_paused={reset_finished_while_paused} sync_still_held={sync_still_held} pending_clear={pending_clear} intervals={intervals:?}"
+                    "path={path:?} reset_blocked_on_sync={reset_blocked_on_sync} sync_still_held={sync_still_held} pending_clear={pending_clear} intervals={intervals:?}"
                 );
                 let (_, submodule) = storage.get_submodule_for_offset(offset)?;
                 assert!(
@@ -15887,16 +15953,40 @@ mod tests {
             "the durable point did not reach the label update"
         );
 
+        storage.sync_lock_blocked.store(false, Ordering::SeqCst);
+        storage.sync_lock_probe.store(true, Ordering::SeqCst);
         let rollback_mod = Arc::clone(&storage);
         let (roll_tx, roll_rx) = std::sync::mpsc::channel();
         let rollback_worker = std::thread::spawn(move || {
             let _ = roll_tx.send(rollback_mod.rollback_unassigned_range(offset, offset, &[]));
         });
-        let blocked = roll_rx.recv_timeout(Duration::from_millis(500));
+        // A timeout is a failure. Not finishing inside the window is not
+        // proof that rollback reached the mutex.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_block = false;
+        while Instant::now() < deadline {
+            if storage.sync_lock_blocked.load(Ordering::SeqCst) {
+                saw_block = true;
+                break;
+            }
+            match roll_rx.try_recv() {
+                Ok(finished) => {
+                    panic!("rollback finished before it blocked on the sync lock: {finished:?}")
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("rollback thread dropped the result");
+                }
+            }
+        }
+        assert!(saw_block, "rollback did not block on the sync lock");
         assert!(
-            blocked.is_err(),
-            "rollback finished while the durable point still held the sync lock"
+            storage.sync_in_progress.try_lock().is_err(),
+            "the sync lock was free when rollback blocked"
         );
+        storage.sync_lock_probe.store(false, Ordering::SeqCst);
         storage.release_sync_pause();
         roll_rx
             .recv_timeout(Duration::from_secs(10))
