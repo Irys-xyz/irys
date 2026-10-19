@@ -4511,7 +4511,7 @@ impl StorageModule {
             Self::extend_write_ahead(&mut mask, &memory, run, submodule, budget);
         }
         let projection = Self::project_interval_file(&memory, &mask)?;
-        let needs_write = self.projection_differs(&disk.written, &projection, touched);
+        let needs_write = self.projection_differs(&disk.written, projection.as_ref(), touched);
         if !needs_write {
             // The file already has these Interrupted labels. Remember them so
             // the next batch inside the span does not rewrite.
@@ -4520,7 +4520,7 @@ impl StorageModule {
         }
         drop(disk);
         self.write_interval_image(
-            &projection,
+            projection.as_ref(),
             Some(touched),
             snapshot_epoch,
             snapshot_crc_epoch,
@@ -4854,12 +4854,13 @@ impl StorageModule {
             if only.is_some_and(|starts| !starts.contains(&start)) {
                 continue;
             }
-            let Some(slice) = Self::interval_slice(image, *submodule_interval) else {
+            let Some(slice) = Self::interval_slice_cow(image, *submodule_interval) else {
                 continue;
             };
             let unchanged = !force_replace && {
                 let disk = self.lock_interval_disk();
-                Self::interval_slice(&disk.written, *submodule_interval).as_ref() == Some(&slice)
+                Self::interval_slice_cow(&disk.written, *submodule_interval).as_ref()
+                    == Some(&slice)
             };
             if unchanged {
                 let mut disk = self.lock_interval_disk();
@@ -4890,7 +4891,7 @@ impl StorageModule {
             let mut file = get_atomic_file(path.clone())?;
             // `file` is a temporary file. `commit` renames it over the
             // original after fsync, then fsyncs the directory.
-            file.write_all(serde_json::to_string(&slice)?.as_bytes())?;
+            file.write_all(serde_json::to_string(slice.as_ref())?.as_bytes())?;
             file.commit()?;
             drop(path);
             let mut disk = self.lock_interval_disk();
@@ -4898,7 +4899,7 @@ impl StorageModule {
             {
                 return Ok(());
             }
-            Self::splice_interval_slice(&mut disk.written, *submodule_interval, &slice);
+            Self::splice_interval_slice(&mut disk.written, *submodule_interval, slice.as_ref());
             disk.dirty.remove(&start);
             disk.last_completion.insert(start, Instant::now());
         }
@@ -4915,8 +4916,8 @@ impl StorageModule {
             if !touched.contains(&interval.start()) {
                 continue;
             }
-            let file_slice = Self::interval_slice(written, *interval);
-            let next_slice = Self::interval_slice(projection, *interval);
+            let file_slice = Self::interval_slice_cow(written, *interval);
+            let next_slice = Self::interval_slice_cow(projection, *interval);
             if file_slice != next_slice {
                 return true;
             }
@@ -4924,10 +4925,15 @@ impl StorageModule {
         false
     }
 
-    fn project_interval_file(
-        memory: &StorageIntervals,
+    fn project_interval_file<'a>(
+        memory: &'a StorageIntervals,
         mask: &IntervalMask,
-    ) -> eyre::Result<StorageIntervals> {
+    ) -> eyre::Result<std::borrow::Cow<'a, StorageIntervals>> {
+        // An empty mask is the live map. Borrow it. One submodule per
+        // partition would otherwise clone the fragment list to copy it.
+        if mask.iter().next().is_none() {
+            return Ok(std::borrow::Cow::Borrowed(memory));
+        }
         let mut projected = memory.clone();
         for interval in mask.iter().copied() {
             let _ = projected.cut(interval);
@@ -4935,7 +4941,7 @@ impl StorageModule {
                 .insert_merge_touching_if_values_equal(interval, ChunkType::Interrupted)
                 .map_err(|error| eyre!("failed to overlay interrupted interval: {error:?}"))?;
         }
-        Ok(projected)
+        Ok(std::borrow::Cow::Owned(projected))
     }
 
     /// Insert `run`, then walk forward. Stop at `Data` or `Entropy`, at the
@@ -5018,17 +5024,37 @@ impl StorageModule {
     /// `Uninitialized` range so the file always spans the submodule.
     /// `None` when clipped intervals overlap.
     ///
-    /// A map that already lies inside `range` is cloned. One submodule per
-    /// partition hits that path. Clipping by copying the map and rebuilding
-    /// a tree is O(n log n) in the fragment count.
+    /// A map that already lies inside `range` is that slice. One submodule
+    /// per partition hits that path. [`Self::interval_slice`] clones it.
+    /// [`Self::interval_slice_cow`] borrows it. Clipping by copying the map
+    /// and rebuilding a tree is O(n log n) in the fragment count.
+    fn interval_lies_within(
+        image: &StorageIntervals,
+        range: Interval<PartitionChunkOffset>,
+    ) -> bool {
+        match (image.iter().next(), image.iter().next_back()) {
+            (Some((first, _)), Some((last, _))) => {
+                first.start() >= range.start() && last.end() <= range.end()
+            }
+            _ => false,
+        }
+    }
+
+    fn interval_slice_cow<'a>(
+        image: &'a StorageIntervals,
+        range: Interval<PartitionChunkOffset>,
+    ) -> Option<std::borrow::Cow<'a, StorageIntervals>> {
+        if Self::interval_lies_within(image, range) {
+            return Some(std::borrow::Cow::Borrowed(image));
+        }
+        Self::interval_slice(image, range).map(std::borrow::Cow::Owned)
+    }
+
     fn interval_slice(
         image: &StorageIntervals,
         range: Interval<PartitionChunkOffset>,
     ) -> Option<StorageIntervals> {
-        if let (Some((first, _)), Some((last, _))) = (image.iter().next(), image.iter().next_back())
-            && first.start() >= range.start()
-            && last.end() <= range.end()
-        {
+        if Self::interval_lies_within(image, range) {
             return Some(image.clone());
         }
 
