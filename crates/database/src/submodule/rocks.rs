@@ -825,24 +825,51 @@ fn live_sst_bytes(db: &DB, handle: &rocksdb::ColumnFamily) -> u64 {
     read_cf_u64(db, handle, rocksdb::properties::LIVE_SST_FILES_SIZE).unwrap_or(0)
 }
 
-/// Directories this process has open, and how many handles share each one.
+/// Directories this process has open.
+///
 /// `fcntl` on `LOCK` is per process, so it does not stop a second open here.
 /// The live handle compacts and deletes SST files that the second open has
-/// already seen in the manifest. A clone of one handle shares the count.
-fn open_directories() -> &'static Mutex<HashMap<PathBuf, usize>> {
-    static HELD: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
-    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+/// already seen in the manifest. The keys are the canonical path and, when
+/// that directory already exists, its `(st_dev, st_ino)`. A symlink or a
+/// later name of that directory is the same open. A path whose last component
+/// does not exist yet has no inode, so only the path is recorded. A clone
+/// shares both counts. `mem::forget` leaves them, so an abandoned handle
+/// still blocks that inode.
+struct OpenDirectories {
+    paths: HashMap<PathBuf, usize>,
+    inodes: HashMap<(u64, u64), usize>,
 }
 
-struct OpenClaim(PathBuf);
+fn open_directories() -> &'static Mutex<OpenDirectories> {
+    static HELD: OnceLock<Mutex<OpenDirectories>> = OnceLock::new();
+    HELD.get_or_init(|| {
+        Mutex::new(OpenDirectories {
+            paths: HashMap::new(),
+            inodes: HashMap::new(),
+        })
+    })
+}
+
+struct OpenClaim {
+    path: PathBuf,
+    /// `Some((st_dev, st_ino))` when the directory existed at claim time.
+    inode: Option<(u64, u64)>,
+}
 
 impl Clone for OpenClaim {
     fn clone(&self) -> Self {
         let mut held = open_directories()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *held.entry(self.0.clone()).or_insert(0) += 1;
-        Self(self.0.clone())
+        let path = self.path.clone();
+        *held.paths.entry(path.clone()).or_insert(0) += 1;
+        if let Some(inode) = self.inode {
+            *held.inodes.entry(inode).or_insert(0) += 1;
+        }
+        Self {
+            path,
+            inode: self.inode,
+        }
     }
 }
 
@@ -851,12 +878,21 @@ impl Drop for OpenClaim {
         let mut held = open_directories()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(count) = held.get_mut(&self.0) else {
+        if let Some(count) = held.paths.get_mut(&self.path) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                held.paths.remove(&self.path);
+            }
+        }
+        let Some(inode) = self.inode else {
+            return;
+        };
+        let Some(count) = held.inodes.get_mut(&inode) else {
             return;
         };
         *count = count.saturating_sub(1);
         if *count == 0 {
-            held.remove(&self.0);
+            held.inodes.remove(&inode);
         }
     }
 }
@@ -866,14 +902,47 @@ fn claim_open_directory(path: &Path) -> eyre::Result<OpenClaim> {
     let mut held = open_directories()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if held.get(&key).copied().unwrap_or(0) > 0 {
+    // Stat under the same lock as the insert. A symlink or a renamed
+    // directory is this inode even when its canonical path differs.
+    let inode = directory_inode(&key)?;
+    let path_held = held.paths.get(&key).copied().unwrap_or(0) > 0;
+    let inode_held = inode.is_some_and(|id| held.inodes.get(&id).copied().unwrap_or(0) > 0);
+    if path_held || inode_held {
         eyre::bail!(
             "rocksdb directory {} is already open in this process. Close that handle before opening it again.",
             path.display()
         );
     }
-    held.insert(key.clone(), 1);
-    Ok(OpenClaim(key))
+    held.paths.insert(key.clone(), 1);
+    if let Some(id) = inode {
+        held.inodes.insert(id, 1);
+    }
+    Ok(OpenClaim { path: key, inode })
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLAIM_DIRECTORY_STATS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Stats of the candidate directory. One claim stats that path once.
+/// It does not stat the other directories this process has open.
+#[cfg(test)]
+fn claim_directory_stats() -> u64 {
+    CLAIM_DIRECTORY_STATS.with(std::cell::Cell::get)
+}
+
+/// `(st_dev, st_ino)` when `path` is a directory. `None` when the last
+/// component does not exist yet: the parent inode is not the new directory.
+fn directory_inode(path: &Path) -> eyre::Result<Option<(u64, u64)>> {
+    #[cfg(test)]
+    CLAIM_DIRECTORY_STATS.with(|cell| cell.set(cell.get().saturating_add(1)));
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(Some((meta.dev(), meta.ino()))),
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).wrap_err("stat rocksdb directory"),
+    }
 }
 
 fn open_directory_key(path: &Path) -> eyre::Result<PathBuf> {
@@ -6869,6 +6938,285 @@ mod tests {
         assert!(text.contains("already open in this process"), "{text}");
         assert!(!text.contains("Corruption"), "{text}");
         assert!(!text.contains("No such file"), "{text}");
+    }
+
+    fn assert_one_claim_stat(before: u64) {
+        let stats = claim_directory_stats().saturating_sub(before);
+        assert_eq!(
+            stats, 1,
+            "claim stats the candidate once, not every open directory"
+        );
+    }
+
+    /// The claim key is the canonical path at open. Moving the directory
+    /// must not let a second open reach RocksDB while the handle is live.
+    /// After every handle drops, the new name opens and the rows are readable.
+    #[test]
+    fn probe_claim_rename_and_symlink_to_the_new_name() -> eyre::Result<()> {
+        let dir = temp_dir("probe_claim_rename");
+        let rocks = dir.path().join("rocks");
+        fs::create_dir(&rocks)?;
+        let store = RocksSubmoduleStore::open(&rocks)?;
+        store.disable_auto_compaction()?;
+        for offset in 0..6 {
+            put_offset(&store, offset, offset as u8)?;
+            flush_every_family(&store)?;
+        }
+        // Same path through a symlink, before the rename. The canonical
+        // path already refuses this. The rename below is a different path.
+        let same = dir.path().join("same-link");
+        std::os::unix::fs::symlink(&rocks, &same)?;
+        assert_live_open_refused(&RocksSubmoduleStore::open_read_only(&same).unwrap_err());
+
+        let moved = dir.path().join("rocks-moved");
+        fs::rename(&rocks, &moved)?;
+        let link = dir.path().join("moved-link");
+        std::os::unix::fs::symlink(&moved, &link)?;
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested)?;
+        let via_dotdot = nested.join("..").join("rocks-moved");
+        let before = dir_names(&moved)?;
+
+        // The old spelling stays claimed even though that path is gone.
+        let old_spell = RocksSubmoduleStore::open(&rocks).unwrap_err();
+        assert_live_open_refused(&old_spell);
+        assert!(
+            !rocks.join("CURRENT").exists(),
+            "refused open of the old spelling must not create a database"
+        );
+
+        // Other directories stay openable. The measured claim must not
+        // stat each of them.
+        let mut extras = Vec::new();
+        for index in 0..4 {
+            extras.push(RocksSubmoduleStore::open(
+                dir.path().join(format!("extra-{index}")),
+            )?);
+        }
+
+        let stats_before = claim_directory_stats();
+        match RocksSubmoduleStore::open_read_only(&moved) {
+            Ok(reader) => {
+                drop(reader);
+                eyre::bail!(
+                    "renamed live directory opened. stats={} before={before:?} after={:?}",
+                    claim_directory_stats().saturating_sub(stats_before),
+                    dir_names(&moved)?
+                );
+            }
+            Err(err) => {
+                assert_one_claim_stat(stats_before);
+                assert_live_open_refused(&err);
+            }
+        }
+        assert_eq!(dir_names(&moved)?, before);
+
+        let stats_before = claim_directory_stats();
+        match RocksSubmoduleStore::open_read_only(&link) {
+            Ok(reader) => {
+                drop(reader);
+                eyre::bail!(
+                    "symlink to the renamed live directory opened. stats={} before={before:?} after={:?}",
+                    claim_directory_stats().saturating_sub(stats_before),
+                    dir_names(&moved)?
+                );
+            }
+            Err(err) => {
+                assert_one_claim_stat(stats_before);
+                assert_live_open_refused(&err);
+            }
+        }
+        assert_eq!(dir_names(&moved)?, before);
+
+        let stats_before = claim_directory_stats();
+        assert_live_open_refused(
+            &RocksSubmoduleStore::open_read_only(moved.join(".")).expect_err("dot path"),
+        );
+        assert_one_claim_stat(stats_before);
+        assert_live_open_refused(
+            &RocksSubmoduleStore::open_read_only(&via_dotdot).expect_err("dotdot path"),
+        );
+        assert_eq!(dir_names(&moved)?, before);
+
+        let sibling = dir.path().join("sibling");
+        let other = RocksSubmoduleStore::open(&sibling)?;
+        put_offset(&other, 2, 2)?;
+        assert!(path_hashes_at(&other, 2)?.is_some());
+        drop(other);
+
+        // Clone holds the path and the inode. Dropping one side must not
+        // release the renamed directory.
+        let stats_before = claim_directory_stats();
+        let cloned = store.clone();
+        assert_eq!(claim_directory_stats(), stats_before);
+        drop(store);
+        assert_live_open_refused(&RocksSubmoduleStore::open_read_only(&link).unwrap_err());
+        drop(cloned);
+        drop(extras);
+
+        let reader = RocksSubmoduleStore::open_read_only(&link)?;
+        for offset in 0..6 {
+            assert!(
+                path_hashes_at(&reader, offset)?.is_some(),
+                "offset {offset} missing after the live handle dropped"
+            );
+        }
+        drop(reader);
+
+        // The old spelling is free. A new directory there is a different inode.
+        let fresh = RocksSubmoduleStore::open(&rocks)?;
+        put_offset(&fresh, 0, 1)?;
+        assert!(path_hashes_at(&fresh, 0)?.is_some());
+        drop(fresh);
+        let again = RocksSubmoduleStore::open_read_only(&moved)?;
+        for offset in 0..6 {
+            assert!(
+                path_hashes_at(&again, offset)?.is_some(),
+                "offset {offset} missing from the renamed directory"
+            );
+        }
+        drop(again);
+        Ok(())
+    }
+
+    /// Production abandon parks the live directory and forgets the handle.
+    /// The claim key stays the path from open. A symlink whose name is not
+    /// the scratch name must not reach RocksDB, and the error drop must not
+    /// rewrite the parked manifest. A sibling directory still opens.
+    #[test]
+    fn probe_claim_parked_scratch_alias() -> eyre::Result<()> {
+        let dir = temp_dir("probe_claim_park");
+        let rocks = dir.path().join("rocks");
+        fs::create_dir(&rocks)?;
+        let store = RocksSubmoduleStore::open_converting(&rocks)?;
+        store.disable_auto_compaction()?;
+        put_offset(&store, 0, 7)?;
+        flush_every_family(&store)?;
+        let _stop = set_close_scratch_stop(CloseScratchStop::Rename);
+        let err = close_without_touching_directory(store, &rocks).unwrap_err();
+        let parked_err = format!("{err:#}");
+        assert!(parked_err.contains("stopped refused close"), "{parked_err}");
+        let names = dir_names(dir.path())?;
+        let scratch_name = names
+            .iter()
+            .find(|name| name.contains(".close-scratch-") && !name.ends_with("marker"))
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("no scratch dir in {names:?}"))?;
+        let scratch = dir.path().join(&scratch_name);
+        let link = dir.path().join("scratch-alias");
+        std::os::unix::fs::symlink(&scratch, &link)?;
+        let before = dir_names(&scratch)?;
+
+        let read_only = RocksSubmoduleStore::open_read_only(&link).unwrap_err();
+        let read_only_text = format!("{read_only:#}");
+        assert!(read_only_text.contains("no SCHEMA"), "{read_only_text}");
+        assert!(
+            !read_only_text.contains("Corruption") && !read_only_text.contains("No such file"),
+            "{read_only_text}"
+        );
+        assert_eq!(dir_names(&scratch)?, before);
+
+        // The forgotten claim blocks one inode. Another directory still opens.
+        let sibling = dir.path().join("sibling");
+        let other = RocksSubmoduleStore::open(&sibling)?;
+        put_offset(&other, 2, 2)?;
+        assert!(path_hashes_at(&other, 2)?.is_some());
+        drop(other);
+        let sibling_reader = RocksSubmoduleStore::open_read_only(&sibling)?;
+        assert!(path_hashes_at(&sibling_reader, 2)?.is_some());
+        drop(sibling_reader);
+
+        let direct = RocksSubmoduleStore::open_converting(&scratch).unwrap_err();
+        let direct_text = format!("{direct:#}");
+        assert!(direct_text.contains("close scratch"), "{direct_text}");
+        assert_eq!(dir_names(&scratch)?, before, "{direct_text}");
+
+        let via_dot = RocksSubmoduleStore::open_converting(scratch.join(".")).unwrap_err();
+        let via_dot_text = format!("{via_dot:#}");
+        assert!(
+            via_dot_text.contains("already open in this process")
+                || via_dot_text.contains("close scratch"),
+            "{via_dot_text}"
+        );
+        assert!(!via_dot_text.contains("LOCK is held"), "{via_dot_text}");
+        assert_eq!(dir_names(&scratch)?, before, "{via_dot_text}");
+
+        let stats_before = claim_directory_stats();
+        let converting = RocksSubmoduleStore::open_converting(&link);
+        let converting_text = match &converting {
+            Ok(_) => "ok".to_owned(),
+            Err(err) => format!("{err:#}"),
+        };
+        let after_converting = dir_names(&scratch)?;
+        assert_eq!(
+            after_converting, before,
+            "converting alias reached rocksdb and rewrote the parked directory: {converting_text}"
+        );
+        assert!(
+            converting_text.contains("already open in this process"),
+            "{converting_text}"
+        );
+        assert_one_claim_stat(stats_before);
+        assert!(
+            !converting_text.contains("Corruption") && !converting_text.contains("No such file"),
+            "{converting_text}"
+        );
+
+        let writable = RocksSubmoduleStore::open(&link).unwrap_err();
+        assert_live_open_refused(&writable);
+        assert_eq!(dir_names(&scratch)?, before);
+
+        // The old spelling is marker-blocked. It must not create a new database.
+        assert!(!rocks.exists());
+        let old = RocksSubmoduleStore::open(&rocks).unwrap_err();
+        let old_text = format!("{old:#}");
+        assert!(
+            old_text.contains("close scratch") || old_text.contains("already open in this process"),
+            "{old_text}"
+        );
+        assert!(!rocks.join("CURRENT").exists(), "{old_text}");
+        Ok(())
+    }
+
+    /// A path whose last component does not exist yet has no inode. The
+    /// claim is that canonical path only. The parent directory stays openable,
+    /// and a sibling database opens beside it.
+    #[test]
+    fn probe_claim_missing_final_component_does_not_claim_the_parent() -> eyre::Result<()> {
+        let dir = temp_dir("probe_claim_fresh");
+        let parent = dir.path().join("parent");
+        fs::create_dir(&parent)?;
+        {
+            let parent_db = RocksSubmoduleStore::open(&parent)?;
+            put_offset(&parent_db, 3, 3)?;
+        }
+        let parent_link = dir.path().join("parent-link");
+        std::os::unix::fs::symlink(&parent, &parent_link)?;
+        let via_link = parent_link.join("fresh");
+        let via_real = parent.join("fresh");
+        let opened = RocksSubmoduleStore::open(&via_link)?;
+        put_offset(&opened, 0, 4)?;
+        assert_live_open_refused(&RocksSubmoduleStore::open(&via_real).unwrap_err());
+
+        let parent_reader = RocksSubmoduleStore::open_read_only(&parent)?;
+        assert!(path_hashes_at(&parent_reader, 3)?.is_some());
+        drop(parent_reader);
+
+        let sibling = parent.join("sibling");
+        let other = RocksSubmoduleStore::open(&sibling)?;
+        put_offset(&other, 1, 5)?;
+        assert!(path_hashes_at(&other, 1)?.is_some());
+        drop(other);
+
+        drop(opened);
+        let reader = RocksSubmoduleStore::open_read_only(&via_real)?;
+        assert!(path_hashes_at(&reader, 0)?.is_some());
+        drop(reader);
+        drop(RocksSubmoduleStore::open(&via_link)?);
+        let parent_again = RocksSubmoduleStore::open_read_only(&parent_link)?;
+        assert!(path_hashes_at(&parent_again, 3)?.is_some());
+        drop(parent_again);
+        Ok(())
     }
 
     /// A marker that is not RocksDB v1 is refused. Open writes nothing.
