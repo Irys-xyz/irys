@@ -1897,37 +1897,42 @@ async fn is_local_index_is_behind_trusted_peers(
 ) -> ChainSyncResult<bool> {
     let migration_depth = u64::from(config.consensus.block_migration_depth);
 
-    let mut highest_trusted_peer_height = None;
-
-    let trusted_peers = peer_list.online_trusted_peers();
+    // The configured trusted set, not the online subset. A trusted peer that
+    // is only offline has not been disproven; this check is how we notice
+    // the local index has fallen behind it.
+    let trusted_peers = peer_list.all_trusted_peers();
     if trusted_peers.is_empty() {
         return Err(ChainSyncError::Network(
-            "No trusted peers available that are online".to_string(),
+            "No trusted peers available".to_string(),
         ));
     }
 
-    for (_, peer) in trusted_peers.iter() {
+    let futures = trusted_peers.iter().map(|(_, peer)| {
         debug!("Sync task: Trusted peer: {:?}", peer);
-        let node_info = match gossip_client.get_info(peer.address).await {
-            Ok(info) => info,
-            Err(err) => {
-                warn!(
-                    "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
-                    peer.address.gossip, err
-                );
-                continue;
+        let gossip_client = gossip_client.clone();
+        async move {
+            match gossip_client.get_info(peer.address).await {
+                Ok(info) => Some(info.block_index_height),
+                Err(err) => {
+                    warn!(
+                        "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
+                        peer.address.gossip, err
+                    );
+                    None
+                }
             }
-        };
-
-        let index_tip = node_info.block_index_height;
-
-        if let Some(peer_height) = highest_trusted_peer_height {
-            if index_tip > peer_height {
-                highest_trusted_peer_height = Some(index_tip);
-            }
-        } else {
-            highest_trusted_peer_height = Some(index_tip);
         }
+    });
+
+    let mut highest_trusted_peer_height = None;
+    for index_tip in futures::future::join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+    {
+        highest_trusted_peer_height = Some(
+            highest_trusted_peer_height.map_or(index_tip, |height: u64| height.max(index_tip)),
+        );
     }
 
     if let Some(highest_trusted_peer_height) = highest_trusted_peer_height {
@@ -3062,6 +3067,226 @@ mod tests {
             assert!(
                 matches!(err, ChainSyncError::Network(_)),
                 "expected ChainSyncError::Network, got: {err:?}"
+            );
+        }
+    }
+
+    /// The periodic behind-check asks the configured trusted set. The online
+    /// flag is for peer selection, not for "who is trusted".
+    mod behind_trusted_peers_tests {
+        use super::*;
+        use crate::tests::util::FakeGossipServer;
+        use crate::types::GossipResponse;
+        use irys_domain::BlockIndex;
+        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId, NodeConfig, NodeInfo,
+            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+        };
+        use irys_utils::circuit_breaker::CircuitBreakerConfig;
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn make_peer(byte: u8, addr: SocketAddr, is_online: bool) -> PeerListItem {
+            let mining_address = IrysAddress::repeat_byte(byte);
+            PeerListItem {
+                peer_id: IrysPeerId::from(mining_address),
+                mining_address,
+                reputation_score: PeerScore::new(100),
+                response_time: 0,
+                address: PeerAddress {
+                    gossip: addr,
+                    api: addr,
+                    execution: Default::default(),
+                },
+                last_seen: 0,
+                is_online,
+                protocol_version: Default::default(),
+                ..Default::default()
+            }
+        }
+
+        fn gossip_client() -> GossipClient {
+            GossipClient::with_circuit_breaker_config(
+                Duration::from_secs(5),
+                IrysAddress::repeat_byte(0xFF),
+                IrysPeerId::from([0xAA_u8; 20]),
+                CircuitBreakerConfig::testing(),
+                tokio::runtime::Handle::current(),
+                irys_types::DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            )
+        }
+
+        fn peer_list_with_trusted(
+            peers: Vec<PeerListItem>,
+            trusted: Vec<PeerAddress>,
+        ) -> (Config, PeerList) {
+            let mut node_config = NodeConfig::testing();
+            node_config.trusted_peers = trusted;
+            let config = Config::new_with_random_peer_id(node_config);
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let peer_list = PeerList::from_peers(
+                peers,
+                PeerNetworkSender::new(sender),
+                &config,
+                tokio::sync::broadcast::channel(8).0,
+            )
+            .expect("peer list");
+            (config, peer_list)
+        }
+
+        fn empty_index(dir: &std::path::Path) -> BlockIndexReadGuard {
+            let db = DatabaseProvider(Arc::new(
+                open_or_create_irys_consensus_data_db(dir, DbSyncMode::UtterlyNoSync)
+                    .expect("open test db"),
+            ));
+            BlockIndexReadGuard::new(BlockIndex::new_for_testing(db))
+        }
+
+        fn info_at_height(height: u64) -> GossipResponse<NodeInfo> {
+            GossipResponse::Accepted(NodeInfo {
+                block_index_height: height,
+                ..NodeInfo::default()
+            })
+        }
+
+        /// Testing migration depth is 6, so an empty index (height 0) is behind
+        /// when a trusted index tip is above 12.
+        #[tokio::test]
+        async fn offline_trusted_peer_is_queried_for_the_behind_check() {
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(|| info_at_height(100));
+            let addr = server.spawn();
+
+            let peer = make_peer(0x31, addr, false);
+            let peer_id = peer.peer_id;
+            let (config, peer_list) = peer_list_with_trusted(
+                vec![peer],
+                vec![PeerAddress {
+                    gossip: addr,
+                    api: addr,
+                    execution: Default::default(),
+                }],
+            );
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+
+            let behind = is_local_index_is_behind_trusted_peers(
+                &config,
+                &peer_list,
+                &gossip_client(),
+                &index,
+            )
+            .await;
+
+            assert!(behind.expect("an offline trusted peer must still be asked"));
+            assert!(
+                !peer_list.get_peer(&peer_id).expect("peer exists").is_online,
+                "the behind-check must not mark the peer online"
+            );
+        }
+
+        #[tokio::test]
+        async fn untrusted_peer_height_does_not_count() {
+            let trusted_server = FakeGossipServer::new();
+            trusted_server.set_on_info_request(|| info_at_height(1));
+            let trusted_addr = trusted_server.spawn();
+
+            let untrusted_hits = Arc::new(AtomicUsize::new(0));
+            let hits = Arc::clone(&untrusted_hits);
+            let untrusted_server = FakeGossipServer::new();
+            untrusted_server.set_on_info_request(move || {
+                hits.fetch_add(1, Ordering::SeqCst);
+                info_at_height(10_000)
+            });
+            let untrusted_addr = untrusted_server.spawn();
+
+            let trusted = make_peer(0x32, trusted_addr, false);
+            let untrusted = make_peer(0x33, untrusted_addr, true);
+            let (config, peer_list) = peer_list_with_trusted(
+                vec![trusted, untrusted],
+                vec![PeerAddress {
+                    gossip: trusted_addr,
+                    api: trusted_addr,
+                    execution: Default::default(),
+                }],
+            );
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+
+            let behind = is_local_index_is_behind_trusted_peers(
+                &config,
+                &peer_list,
+                &gossip_client(),
+                &index,
+            )
+            .await;
+
+            assert!(
+                !behind.expect("the offline trusted peer answers with a low tip"),
+                "an untrusted tip must not make the local index look behind"
+            );
+            assert_eq!(
+                untrusted_hits.load(Ordering::SeqCst),
+                0,
+                "the behind-check must not query an untrusted peer"
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_trusted_set_errors() {
+            let (config, peer_list) = peer_list_with_trusted(vec![], vec![]);
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+
+            let err = is_local_index_is_behind_trusted_peers(
+                &config,
+                &peer_list,
+                &gossip_client(),
+                &index,
+            )
+            .await
+            .expect_err("an empty trusted set is an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("No trusted peers available") && !msg.contains("that are online"),
+                "unexpected error message: {msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn trusted_peer_that_does_not_answer_errors() {
+            let server = FakeGossipServer::new();
+            server.set_on_info_request(|| {
+                GossipResponse::Rejected(crate::types::RejectionReason::GossipDisabled)
+            });
+            let addr = server.spawn();
+            let peer = make_peer(0x34, addr, false);
+            let (config, peer_list) = peer_list_with_trusted(
+                vec![peer],
+                vec![PeerAddress {
+                    gossip: addr,
+                    api: addr,
+                    execution: Default::default(),
+                }],
+            );
+            let dir = TempDirBuilder::new().with_tracing().build();
+            let index = empty_index(dir.path());
+
+            let err = is_local_index_is_behind_trusted_peers(
+                &config,
+                &peer_list,
+                &gossip_client(),
+                &index,
+            )
+            .await
+            .expect_err("no answer is an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Wasn't able to fetch node info from any of the trusted peers"),
+                "unexpected error message: {msg}"
             );
         }
     }
