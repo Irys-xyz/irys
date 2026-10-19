@@ -1022,10 +1022,7 @@ mod recovery_lock_pause {
 
 #[cfg(test)]
 mod tests {
-    use super::body_worker::{
-        BodyMigrationWorker, MAX_BODY_MIGRATION_ATTEMPTS, PENDING_WRITE_CEILING_BATCHES,
-        PENDING_WRITE_CEILING_MIN_CHUNKS, pending_write_ceiling_bytes,
-    };
+    use super::body_worker::{BodyMigrationWorker, MAX_BODY_MIGRATION_ATTEMPTS};
     use super::*;
     use irys_database::{
         IrysDatabaseArgs as _, cache_chunk, cache_data_root, insert_block_header, insert_tx_header,
@@ -2083,18 +2080,17 @@ mod tests {
             nwbs, 1,
             "testing config: the floor must be what applies here"
         );
-        let expected = (PENDING_WRITE_CEILING_BATCHES * nwbs).max(PENDING_WRITE_CEILING_MIN_CHUNKS)
-            * f.config.consensus.chunk_size
+        let expected = (2 * nwbs).max(256) * f.config.consensus.chunk_size
             * f.sm.submodule_count() as u64;
-        assert_eq!(pending_write_ceiling_bytes(&f.config, &f.sm), expected);
+        assert_eq!(f.sm.pending_memory_ceiling_bytes(), expected);
         assert_eq!(
             expected,
-            PENDING_WRITE_CEILING_MIN_CHUNKS * f.config.consensus.chunk_size,
+            256 * f.config.consensus.chunk_size,
             "with num_writes_before_sync = 1 the floor is the ceiling"
         );
 
         let g = fixture(1, Some(12_345))?;
-        assert_eq!(pending_write_ceiling_bytes(&g.config, &g.sm), 12_345);
+        assert_eq!(g.sm.pending_memory_ceiling_bytes(), 12_345);
 
         // A configured ceiling below one flush batch is raised to it: under that
         // level the threshold flush never fires and migration would crawl.
@@ -2102,7 +2098,7 @@ mod tests {
         let one_batch = h.config.node_config.storage.num_writes_before_sync
             * h.config.consensus.chunk_size
             * h.sm.submodule_count() as u64;
-        assert_eq!(pending_write_ceiling_bytes(&h.config, &h.sm), one_batch);
+        assert_eq!(h.sm.pending_memory_ceiling_bytes(), one_batch);
         Ok(())
     }
 

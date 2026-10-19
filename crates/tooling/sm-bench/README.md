@@ -379,7 +379,7 @@ These differ from a production storage module. They are deliberate so the bench 
 - The write file's physical placement versus the entropy file is an XFS fact. The bench does not place extents.
 - `write_data_chunk_queued` completes before `fsync`. Durable latency ends at `is_data_chunk_durable_at`.
 - Ingest holds a bench semaphore permit from the moment the chunk is handed off until that durable check returns. The default is 1024 permits. Production ingress does not take this semaphore. HTTP admission (`mempool.max_http_chunk_admission`, default 256) releases when `write_data_chunk_queued` returns, at index ACK. Ingress handlers default to 30 (`max_concurrent_chunk_ingress_tasks`). Gossip chunk handlers default to 50 (`max_concurrent_gossip_chunks`).
-- Migration does not take a bench semaphore. It waits while `pending_write_bytes` is above the body-worker ceiling (two flush batches, and at least 256 chunks). That is the same ceiling as `pending_write_ceiling_bytes` when `max_pending_write_bytes` is unset. Serve does not overlap its own reads.
+- Migration does not take a bench semaphore. It waits while `pending_write_bytes` is above the body-worker ceiling (two flush batches, and at least 256 chunks). That ceiling is `StorageModule::pending_memory_ceiling_bytes`. Serve does not overlap its own reads.
 - Ingest uses the low half of the write window. Migration uses the high half. Production has one append frontier.
 - The write path does not check chunk merkle proofs. Chunk bytes are `0x5A` and data paths are 64-byte synthetic values. Serve uses `read_chunks`, which also does not check proofs.
 - `--prepopulate-index` grows the MDBX file. Recall does not look up paths, so those pages are touched by commits and the freelist.

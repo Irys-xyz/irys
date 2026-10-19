@@ -3721,8 +3721,19 @@ impl StorageModule {
         !self.pending_writes.read().unwrap().written_ahead.is_empty()
     }
 
-    /// Same ceiling the body-migration worker uses. A configured value is
-    /// floored at one flush batch so a small cap cannot stall that worker.
+    /// Flush batches the derived ceiling holds per submodule: one the storage
+    /// service is flushing and one the worker is filling.
+    const PENDING_MEMORY_CEILING_BATCHES: u64 = 2;
+
+    /// Floor on that derived ceiling, in chunks per submodule. A small
+    /// `num_writes_before_sync` must not throttle the worker to a couple of
+    /// chunks per flush tick.
+    const PENDING_MEMORY_CEILING_MIN_CHUNKS: u64 = 256;
+
+    /// Bytes one module may hold in `pending_writes` before body migration
+    /// stops writing to it. Packing and the durable-point headroom use the
+    /// same value. A configured cap is floored at one flush batch so a small
+    /// cap cannot stall that worker on the idle flush.
     pub fn pending_memory_ceiling_bytes(&self) -> u64 {
         let storage = &self.config.node_config.storage;
         let submodules = self.submodule_count() as u64;
@@ -3733,15 +3744,11 @@ impl StorageModule {
             .saturating_mul(submodules);
         match storage.max_pending_write_bytes {
             Some(configured) => configured.max(one_batch),
-            None => {
-                const BATCHES: u64 = 2;
-                const MIN_CHUNKS: u64 = 256;
-                BATCHES
-                    .saturating_mul(storage.num_writes_before_sync)
-                    .max(MIN_CHUNKS)
-                    .saturating_mul(chunk)
-                    .saturating_mul(submodules)
-            }
+            None => Self::PENDING_MEMORY_CEILING_BATCHES
+                .saturating_mul(storage.num_writes_before_sync)
+                .max(Self::PENDING_MEMORY_CEILING_MIN_CHUNKS)
+                .saturating_mul(chunk)
+                .saturating_mul(submodules),
         }
     }
 

@@ -43,44 +43,10 @@ pub(crate) const BODY_WRITES_PER_PASS: usize = 512;
 /// that is not durable, so the next pass does not walk that prefix.
 pub(crate) const BODY_ROWS_PER_PASS: usize = 64;
 
-/// Default pending-write ceiling, in flush batches per submodule: one batch
-/// the storage service is flushing plus one the worker is filling. Overridden
-/// by `storage.max_pending_write_bytes`.
-pub(crate) const PENDING_WRITE_CEILING_BATCHES: u64 = 2;
-
-/// Floor on the derived ceiling, in chunks per submodule (64 MiB at 256 KiB).
-/// A small `num_writes_before_sync` (tests use 1) must not throttle the worker
-/// to a couple of chunks per flush tick.
-pub(crate) const PENDING_WRITE_CEILING_MIN_CHUNKS: u64 = 256;
-
 /// Re-check interval after a pass was cut short by the ceiling: the storage
 /// service flushes on a 1s tick, so wait for that rather than a full
 /// [`BODY_MIGRATION_TICK`].
 pub(crate) const BODY_MIGRATION_THROTTLED_TICK: Duration = Duration::from_millis(250);
-
-/// Bytes a storage module may hold in `pending_writes` before the worker stops
-/// writing to it for the rest of the pass. The per-pass budget bounds the
-/// *rate* of enqueueing; this bounds the *level*, so a storage-service flush
-/// tick that falls behind can never let memory grow without limit.
-pub(crate) fn pending_write_ceiling_bytes(config: &Config, sm: &StorageModule) -> u64 {
-    let storage = &config.node_config.storage;
-    let submodules = sm.submodule_count() as u64;
-    // One flush batch per submodule. Below this level the storage service's
-    // threshold flush never fires and only its 5s idle force-flush drains
-    // writes, so a configured ceiling is never allowed under it.
-    let one_batch = storage
-        .num_writes_before_sync
-        .saturating_mul(config.consensus.chunk_size)
-        .saturating_mul(submodules);
-    match storage.max_pending_write_bytes {
-        Some(configured) => configured.max(one_batch),
-        None => PENDING_WRITE_CEILING_BATCHES
-            .saturating_mul(storage.num_writes_before_sync)
-            .max(PENDING_WRITE_CEILING_MIN_CHUNKS)
-            .saturating_mul(config.consensus.chunk_size)
-            .saturating_mul(submodules),
-    }
-}
 
 pub(crate) struct BodyMigrationWorker {
     storage_modules_guard: StorageModulesReadGuard,
@@ -290,7 +256,7 @@ impl BodyMigrationWorker {
                 );
                 continue;
             }
-            let ceiling = pending_write_ceiling_bytes(&self.config, &sm);
+            let ceiling = sm.pending_memory_ceiling_bytes();
             if let Some(configured) = self.config.node_config.storage.max_pending_write_bytes
                 && configured < ceiling
                 && self.ceiling_floor_warned.lock().unwrap().insert(sm.id)
