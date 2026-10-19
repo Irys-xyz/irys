@@ -176,6 +176,7 @@ fn metas_in_tx(
         // The checksum lives on this offset. A shared proof is cached by hash,
         // so a cache hit still reads this offset when the engine stores one.
         // MDBX has no checksum and keeps the single proof get.
+        // MDBX-SUBMODULE-INDEX: delete the else. MDBX has no checksum on the offset.
         let stored = if tx.stores_offset_crc() {
             tx.get_offset_meta(offset)?
         } else {
@@ -186,6 +187,7 @@ fn metas_in_tx(
             cached.clone()
         } else {
             index_read_metrics::note("data_path");
+            // MDBX-SUBMODULE-INDEX: delete the else. It is the MDBX proof read. RocksDB reads the proof from the offset row.
             let loaded = if tx.stores_offset_crc() {
                 stored.and_then(|row| row.proof).map(Base64::from)
             } else {
@@ -277,6 +279,7 @@ fn paths_in_tx(
     for (offset, hashes) in rows {
         // RocksDB v1 exposes the data root in `tx_path_hash` and stores no tx path.
         let tx_path = match hashes.tx_path_hash {
+            // MDBX-SUBMODULE-INDEX: delete this arm. Only MDBX stores tx-path bytes. RocksDB v1 derives them.
             Some(hash) if tx.stores_tx_paths() => cached_bytes(&mut tx_paths, hash, || {
                 index_read_metrics::note("tx_path");
                 tx.get_full_tx_path(hash)
@@ -1343,17 +1346,20 @@ fn rocks_index_present(rocks_dir: &Path) -> bool {
     rocks_dir.join("SCHEMA").is_file() || rocks_dir.join("CURRENT").is_file()
 }
 
+// MDBX-SUBMODULE-INDEX: delete the Mdbx arm. Open rocks/ only.
 fn open_submodule_index(
     module_dir: &Path,
     database: &DatabaseConfig,
 ) -> eyre::Result<SubmoduleIndex> {
     let path = match database.submodule_index {
+        // MDBX-SUBMODULE-INDEX: delete this arm.
         SubmoduleIndexEngine::Mdbx => module_dir.join("db"),
         SubmoduleIndexEngine::Rocksdb => module_dir.join("rocks"),
     };
     debug!("submodule_db_path: {:?}", path);
 
     let opened = match database.submodule_index {
+        // MDBX-SUBMODULE-INDEX: delete this arm. It opens db/ and migrates schema v1 in place.
         SubmoduleIndexEngine::Mdbx => {
             let rocks_dir = module_dir.join("rocks");
             let mdbx_dat = path.join("mdbx.dat");
@@ -1387,6 +1393,7 @@ fn open_submodule_index(
             let mdbx_dir = module_dir.join("db");
             let mdbx_dat = mdbx_dir.join("mdbx.dat");
             // An empty Rocks index would hide the live MDBX rows.
+            // MDBX-SUBMODULE-INDEX: delete this refusal once db/ is no longer a live index and the rollback window is closed.
             if mdbx_dat.is_file() && !rocks_index_present(&path) {
                 Err(eyre!(
                     "refusing to open {}: {} exists and the MDBX index was not copied. Stop the node and run `submodule-index-convert mdbx-to-rocks` (see --help for --consensus-db and the partition geometry) from {} to {}, then verify. Set database.submodule_index to rocksdb only after verify passes. Keep db/ until rollback is proven.",
@@ -1405,6 +1412,7 @@ fn open_submodule_index(
                         module = %module_dir.display(),
                         db = %mdbx_dir.display(),
                         rocks = %path.display(),
+                        // MDBX-SUBMODULE-INDEX: delete this log with the kept db/ once rollback is retired.
                         "db/ is kept beside rocks/ and is not read"
                     );
                 }
@@ -1432,6 +1440,7 @@ struct OpenedChunkFile {
 /// Which submodule index `open_split` opens. Production `new` uses config.
 #[cfg(feature = "bench")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// MDBX-SUBMODULE-INDEX: delete the Mdbx variant. The bench opens rocks/ only.
 pub enum BenchIndex {
     /// `{dir}/db`.
     Mdbx,
@@ -1487,6 +1496,7 @@ pub fn refuse_foreign_index(path: &Path, rocks: bool) -> eyre::Result<()> {
 }
 
 #[cfg(feature = "bench")]
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench open.
 fn open_mdbx_index(path: &Path, config: &Config) -> eyre::Result<SubmoduleIndex> {
     SubmoduleIndex::open_mdbx(
         path,
@@ -2250,6 +2260,7 @@ impl StorageModule {
         #[cfg(not(feature = "bench"))]
         let use_config_engine = true;
         if use_config_engine
+            // MDBX-SUBMODULE-INDEX: delete this engine check and always enable group commit. MDBX is left off because its SAFE_NOSYNC path aborts inside libmdbx.
             && config.node_config.database.submodule_index == SubmoduleIndexEngine::Rocksdb
         {
             for (_, submodule) in submodule_map.iter() {
@@ -2374,6 +2385,7 @@ impl StorageModule {
             refuse_foreign_index(&path, rocks)?;
             debug!("submodule index path: {:?}", path);
             return match index {
+                // MDBX-SUBMODULE-INDEX: delete this MDBX bench open.
                 BenchIndex::Mdbx => open_mdbx_index(&path, config),
                 BenchIndex::Rocks(tuning) => SubmoduleIndex::open_rocks_with(&path, tuning)
                     .map_err(|error| {
@@ -3181,6 +3193,7 @@ impl StorageModule {
         let Ok((_, submodule)) = self.get_submodule_for_offset(offset) else {
             return false;
         };
+        // MDBX-SUBMODULE-INDEX: delete this arm. MDBX treats the interval label as presence because it stores no checksum row.
         if !submodule.db.stores_offset_crc() {
             return true;
         }
@@ -4295,6 +4308,7 @@ impl StorageModule {
         let mut uncovered = replaced;
         for (start, rows) in by_start {
             let (_, submodule) = self.get_submodule_for_offset(start)?;
+            // MDBX-SUBMODULE-INDEX: delete this arm. MDBX stores proofs only and drops an entropy path.
             if !submodule.db.stores_offset_crc() {
                 // MDBX stores proofs only. An entropy row has no proof.
                 // Leaving the previous data path would serve those bytes
@@ -5221,6 +5235,7 @@ impl StorageModule {
                     let stats = submodule.db.drop_presence_in_ranges(&dropped)?;
                     Self::note_reconciled(submodule, &stats, &dropped);
                 }
+            // MDBX-SUBMODULE-INDEX: delete this else arm. MDBX drops every non-Data presence row. RocksDB v1 keeps an entropy checksum.
             } else {
                 let stats = submodule.db.drop_presence_in_ranges(&spans)?;
                 Self::note_reconciled(submodule, &stats, &spans);
@@ -5748,6 +5763,7 @@ impl StorageModule {
             return Ok(BTreeMap::new());
         };
         let (_, submodule) = self.get_submodule_for_offset(first)?;
+        // MDBX-SUBMODULE-INDEX: delete this arm. MDBX has no checksum to reject.
         if !submodule.db.stores_offset_crc() {
             return Ok(BTreeMap::new());
         }
@@ -5849,6 +5865,7 @@ impl StorageModule {
         }
         let bytes = self.pread_settled_chunk(offset)?;
         let (_, submodule) = self.get_submodule_for_offset(offset)?;
+        // MDBX-SUBMODULE-INDEX: delete the else. MDBX has no checksum, so the value is None.
         let crc = if submodule.db.stores_offset_crc() {
             submodule
                 .db
@@ -5863,6 +5880,7 @@ impl StorageModule {
         if self.crc_bytes_are_unsettled(offset) {
             return Ok(CrcConfirm::Unsettled);
         }
+        // MDBX-SUBMODULE-INDEX: delete this arm. MDBX does not confirm a checksum.
         if !submodule.db.stores_offset_crc() {
             return Ok(CrcConfirm::NotConfirmed(bytes));
         }
@@ -6083,6 +6101,7 @@ impl StorageModule {
             return Ok(chunk_crc::CrcVerdict::Skip);
         }
         let (_, submodule) = self.get_submodule_for_offset(offset)?;
+        // MDBX-SUBMODULE-INDEX: delete this arm. MDBX returns Skip because it stores no checksum.
         if !submodule.db.stores_offset_crc() {
             return Ok(chunk_crc::CrcVerdict::Skip);
         }
@@ -6257,6 +6276,7 @@ impl StorageModule {
         if self.crc_scan_done.load(Ordering::SeqCst) {
             return;
         }
+        // MDBX-SUBMODULE-INDEX: delete this return. It skips the checksum scan when every submodule index is MDBX.
         if !self
             .submodules
             .iter()
@@ -6281,6 +6301,7 @@ impl StorageModule {
         }
         let resume = self.crc_gap_if_current();
         for (interval, submodule) in self.submodules.iter() {
+            // MDBX-SUBMODULE-INDEX: delete this continue. An MDBX index stores no checksum.
             if !submodule.db.stores_offset_crc() {
                 continue;
             }
@@ -6331,6 +6352,7 @@ impl StorageModule {
             }
         }
         for (_, submodule) in self.submodules.iter() {
+            // MDBX-SUBMODULE-INDEX: delete this continue. An MDBX index stores no checksum.
             if !submodule.db.stores_offset_crc() {
                 continue;
             }
@@ -6447,6 +6469,7 @@ impl StorageModule {
     fn chunk_crc_complete_for_test(&self) -> bool {
         let mut any = false;
         for (_, submodule) in self.submodules.iter() {
+            // MDBX-SUBMODULE-INDEX: delete this continue. An MDBX index stores no checksum.
             if !submodule.db.stores_offset_crc() {
                 continue;
             }
@@ -9770,6 +9793,7 @@ mod tests {
 
     #[cfg(feature = "bench")]
     #[test]
+    // MDBX-SUBMODULE-INDEX: retarget this bench test at BenchIndex::Rocks. It opens MDBX.
     fn split_write_region_is_reserved_and_recall_is_unchanged() -> eyre::Result<()> {
         use std::os::unix::fs::MetadataExt as _;
         let tmp = TempDirBuilder::new().prefix("split_reserve").build();
@@ -9807,6 +9831,7 @@ mod tests {
             "sub",
             None,
         );
+        // MDBX-SUBMODULE-INDEX: delete this MDBX bench open.
         let storage = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)?;
         drop(storage);
 
@@ -9831,6 +9856,7 @@ mod tests {
     /// Recall bytes differ from the write file. A checksum confirm must read
     /// the write file: that is the image the checksum was computed from.
     #[cfg(feature = "bench")]
+    // MDBX-SUBMODULE-INDEX: retarget this helper at BenchIndex::Rocks, or delete it with the MDBX bench open.
     fn open_labeled_split(
         prefix: &str,
     ) -> eyre::Result<(
@@ -9869,6 +9895,7 @@ mod tests {
         let split = Arc::new(SplitBacking::open(recall, write, 0, chunks)?);
         let config = testing_config(tmp.path(), chunk, chunks);
         let info = one_span(3, "sub", Some(submit_assignment(0)));
+        // MDBX-SUBMODULE-INDEX: delete this MDBX bench open.
         let storage = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)?;
         Ok((tmp, storage, recall_path, write_path))
     }
@@ -10068,6 +10095,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX open path.
     fn submodule_index_engine_mdbx_fresh_does_not_create_rocks() -> eyre::Result<()> {
         let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_mdbx")?;
 
@@ -10187,6 +10215,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX open path.
     fn submodule_index_engine_mdbx_refuses_uncopied_rocks() -> eyre::Result<()> {
         let tmp_dir = TempDirBuilder::new()
             .prefix("submodule_index_engine_refuse_rocks")
@@ -10219,6 +10248,7 @@ mod tests {
 
     /// `db/` with no schema row. Node open of this directory stamps the schema,
     /// so a later byte compare shows whether open ran.
+    // MDBX-SUBMODULE-INDEX: delete this helper with the MDBX open tests.
     fn write_unstamped_mdbx(module_dir: &Path) -> eyre::Result<PathBuf> {
         use irys_database::open_or_create_db;
         use irys_database::submodule::tables::SubmoduleTables;
@@ -10230,6 +10260,7 @@ mod tests {
         Ok(db_dir)
     }
 
+    // MDBX-SUBMODULE-INDEX: delete this helper with the MDBX open tests.
     fn mdbx_schema_row(db_dir: &Path) -> eyre::Result<Option<Vec<u8>>> {
         use irys_database::metadata::MetadataKey;
         use irys_database::open_or_create_db;
@@ -10273,6 +10304,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX open path.
     fn submodule_index_engine_mdbx_refuses_when_both_indexes_exist() -> eyre::Result<()> {
         let (_tmp_dir, module_dir) = fresh_module_dir("submodule_index_engine_both")?;
         let db_dir = write_unstamped_mdbx(&module_dir)?;
@@ -10384,6 +10416,7 @@ mod tests {
         }
 
         let (_rocks_tmp, rocks) = open("rocks_group_commit", SubmoduleIndexEngine::Rocksdb)?;
+        // MDBX-SUBMODULE-INDEX: delete the MDBX half of this test. The RocksDB group-commit assertion stays.
         let (_mdbx_tmp, mdbx) = open("mdbx_group_commit", SubmoduleIndexEngine::Mdbx)?;
         let (_, rocks_sub) = rocks.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         assert!(rocks_sub.db.group_commit_enabled());
@@ -10676,6 +10709,7 @@ mod tests {
         prefix: &str,
         mut f: impl FnMut(&Config, StorageModule) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let (tmp, config, storage) =
                 open_presence_module(&format!("{prefix}_{engine:?}"), engine)?;
@@ -10813,6 +10847,7 @@ mod tests {
 
     /// Uninitialized `[3, 5]` drops pending and splits the tx interval.
     /// Entropy `[6, 7]` keeps the tx remnant. The data-root extent is `[1, 2]`.
+    // MDBX-SUBMODULE-INDEX: delete the stored_paths arms in this helper. They check the tx path only MDBX keeps.
     fn assert_entropy_hole_kept(module: &StorageModule, seeded: &SeededIndex) -> eyre::Result<()> {
         let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
         let stored_paths = submodule.db.stores_tx_paths();
@@ -11239,6 +11274,7 @@ mod tests {
     #[test]
     fn reset_during_presence_copy_leaves_no_data_path() -> eyre::Result<()> {
         let mut errors = Vec::new();
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let prefix = format!("reset_during_presence_copy_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
@@ -11456,6 +11492,7 @@ mod tests {
     #[test]
     fn entropy_write_during_interrupted_data_pwrite_drops_the_proof() -> eyre::Result<()> {
         let mut errors = Vec::new();
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let prefix = format!("entropy_during_data_pwrite_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
@@ -11531,6 +11568,7 @@ mod tests {
     #[test]
     fn replaced_data_bytes_without_a_proof_do_not_publish_data() -> eyre::Result<()> {
         let mut errors = Vec::new();
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let prefix = format!("replaced_data_snapshot_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
@@ -11611,6 +11649,7 @@ mod tests {
     #[test]
     fn registration_commit_follows_the_assignment() -> eyre::Result<()> {
         let mut errors = Vec::new();
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let prefix = format!("registration_assignment_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
@@ -11739,6 +11778,7 @@ mod tests {
     #[test]
     fn registration_after_rollback_does_not_restore_rows() -> eyre::Result<()> {
         let mut errors = Vec::new();
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let prefix = format!("registration_rollback_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
@@ -11833,6 +11873,7 @@ mod tests {
     #[test]
     fn rollback_waits_for_the_registration_commit_then_clears() -> eyre::Result<()> {
         let mut errors = Vec::new();
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let prefix = format!("registration_rollback_held_{engine:?}");
             let outcome = (|| -> eyre::Result<()> {
@@ -12104,6 +12145,7 @@ mod tests {
     /// placement, and the file label stay as they were. Reopen does not see
     /// `Data` with an empty proof.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn rollback_crash_before_interval_image_keeps_the_proof(
@@ -12166,6 +12208,7 @@ mod tests {
     /// Reopen loads `Uninitialized` and drops the proof. It does not reload
     /// `Data` with an empty proof index.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn rollback_crash_between_image_and_proof_clear_reloads_uninitialized(
@@ -12230,6 +12273,7 @@ mod tests {
     /// One span is still one cut and one insert. The publish generation is
     /// the counter that moves. Reset's epoch and the checksum-cut epoch stay.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn rollback_publishes_uninitialized_then_clears_the_proof(
@@ -12286,6 +12330,7 @@ mod tests {
     /// A completion that copied the map before rollback must not write that
     /// `Data` image back over the `Uninitialized` file.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn stale_interval_snapshot_cannot_restore_data_after_rollback(
@@ -12346,6 +12391,7 @@ mod tests {
     /// the number of `cut` and `insert` calls. A loop that cuts once per
     /// offset counts more than two.
     #[test]
+    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB. The interval edit is not MDBX-specific.
     fn rollback_marks_a_span_in_one_interval_edit() -> eyre::Result<()> {
         let (tmp, storage, _) = open_publish_module("rollback_span", SubmoduleIndexEngine::Mdbx)?;
         let _tmp = tmp;
@@ -12733,6 +12779,7 @@ mod tests {
         .expect_err("rocks must refuse an mdbx directory");
         assert!(rocks_err.to_string().contains("MDBX"), "{rocks_err}");
 
+        // MDBX-SUBMODULE-INDEX: delete this MDBX bench open.
         let mdbx_err = StorageModule::open_split(&info, &config, split, BenchIndex::Mdbx)
             .expect_err("mdbx must refuse a rocks directory");
         assert!(mdbx_err.to_string().contains("RocksDB"), "{mdbx_err}");
@@ -15778,6 +15825,7 @@ mod tests {
     /// run did not write. The run itself stays `Interrupted` until the
     /// completion period, so reopen still treats that offset as unpacked.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn crash_reload_of_write_ahead_keeps_indexed_entropy(
@@ -15823,6 +15871,7 @@ mod tests {
     /// A crash after the write-ahead and before fdatasync still reloads the
     /// run as `Uninitialized`. Entropy after the run keeps its label and rows.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn crash_during_the_run_keeps_the_write_fence(
@@ -17153,6 +17202,7 @@ mod tests {
         min_durable_interval_ms: u64,
         mut f: impl FnMut(&StorageModule) -> eyre::Result<()>,
     ) -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let (tmp, storage) = open_recall_io_module(
                 &format!("{prefix}_{engine:?}"),
@@ -18470,6 +18520,7 @@ mod tests {
     /// later unassign whose packing matches still wipes.
     #[test]
     fn refused_unassign_open_does_not_leave_a_reset_marker() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let hash = H256::repeat_byte(0x61);
             let prefix = format!("refuse_unassign_{engine:?}");
@@ -18976,6 +19027,7 @@ mod tests {
     /// another slot, or capacity. A wiped expiry still accepts a repack.
     #[test]
     fn same_hash_ledger_drift_wipes_only_when_leaving_a_ledger() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("ledger_drift_{engine:?}"))
@@ -19059,6 +19111,7 @@ mod tests {
     /// leaves the old file and the old label. The next open finishes the wipe.
     #[test]
     fn crash_during_slot_change_wipe_finishes_on_the_next_open() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_marker_{engine:?}"))
@@ -19133,6 +19186,7 @@ mod tests {
     /// that slot is not already stored, so its body can be written.
     #[test]
     fn restart_across_same_hash_slot_change_writes_the_new_root() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_restart_{engine:?}"))
@@ -19233,6 +19287,7 @@ mod tests {
     /// still keeps them.
     #[test]
     fn refused_slot_change_open_writes_no_reset_marker() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_refuse_marker_{engine:?}"))
@@ -19294,6 +19349,7 @@ mod tests {
     /// accepted open does.
     #[test]
     fn refused_open_does_not_finish_a_slot_change_marker() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let tmp = TempDirBuilder::new()
                 .prefix(&format!("slot_marker_refuse_{engine:?}"))
@@ -19691,6 +19747,7 @@ mod tests {
     /// The old labels must not survive either open. Both index engines.
     #[test]
     fn unassign_then_rebind_drops_old_labels() -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: drop Mdbx from this list and keep the RocksDB run.
         for engine in [SubmoduleIndexEngine::Mdbx, SubmoduleIndexEngine::Rocksdb] {
             let prefix = format!("unassign_rebind_{engine:?}");
             let tmp = TempDirBuilder::new().prefix(&prefix).build();
@@ -19784,6 +19841,7 @@ mod tests {
     /// An idle completion flush must not clone the interval map. The caller
     /// holds the write lock, so a clone blocks until that lock drops.
     #[test]
+    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn idle_interval_flush_does_not_lock_the_map() -> eyre::Result<()> {
         let (_tmp, _config, storage) =
             open_presence_module_with("idle_flush", SubmoduleIndexEngine::Mdbx, 30)?;
@@ -20355,6 +20413,7 @@ mod tests {
     /// is durable only through pwrite is not paired with it either. After the
     /// new body commits, the serve is that body's path and bytes.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn entropy_overwrite_is_not_served_under_the_previous_path(
@@ -20461,6 +20520,7 @@ mod tests {
     /// with the new body. The live label is `Entropy` so the write is legal,
     /// and the previous path is still stored because no entropy commit ran.
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test. It checks the tx path MDBX commits with the bytes.
     fn mdbx_serve_after_pwrite_uses_the_path_committed_with_the_bytes() -> eyre::Result<()> {
         let (tmp, storage) = pair_module("mdbx_pwrite_path", SubmoduleIndexEngine::Mdbx)?;
         let _tmp = tmp;

@@ -1068,6 +1068,7 @@ mod tests {
     /// carrying a single `num_chunks`-chunk Submit tx. The node DB starts with
     /// no cached bodies; `seed_cache` adds them. `max_pending_write_bytes` is
     /// the module's pending-write ceiling (`None` = derived default).
+    // MDBX-SUBMODULE-INDEX: this helper opens only MDBX. Retarget it at RocksDB, or delete the tests that call fixture.
     fn fixture(num_chunks: u64, max_pending_write_bytes: Option<u64>) -> eyre::Result<Fixture> {
         fixture_with(
             num_chunks,
@@ -1691,6 +1692,7 @@ mod tests {
         // A per-offset walk is one durability read per tail chunk. The head
         // and one lookahead read stay under this. The tail does not.
         const SCAN_BOUND: usize = 8;
+        // MDBX-SUBMODULE-INDEX: retarget this test at RocksDB. The scan bound is not MDBX-specific.
         let f = fixture_with(
             TX_CHUNKS,
             Some(u64::MAX),
@@ -1807,6 +1809,7 @@ mod tests {
     async fn pending_data_inside_a_run_does_not_scan_the_suffix() -> eyre::Result<()> {
         const TX_CHUNKS: u64 = 256;
         const HOLE: u32 = 4;
+        // MDBX-SUBMODULE-INDEX: retarget this test at RocksDB. The scan bound is not MDBX-specific.
         let f = fixture_with(
             TX_CHUNKS,
             Some(u64::MAX),

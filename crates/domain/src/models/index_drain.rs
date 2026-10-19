@@ -573,6 +573,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    // MDBX-SUBMODULE-INDEX: these tests open only MDBX. Retarget them at RocksDB. The drain itself serves both engines and stays.
     fn open_submodule_db(path: &std::path::Path) -> eyre::Result<SubmoduleIndex> {
         SubmoduleIndex::open_mdbx(path, DatabaseArguments::irys_testing()?)
     }

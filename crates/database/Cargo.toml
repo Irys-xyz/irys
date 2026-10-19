@@ -39,15 +39,18 @@ rocksdb = { version = "0.24.0", optional = true }
 libc = { version = "0.2", optional = true }
 
 [[bin]]
+# MDBX-SUBMODULE-INDEX: delete the MDBX engine path of this bench. The RocksDB timings can stay.
 name = "submodule-index-bench"
 path = "src/bin/submodule_index_bench.rs"
 required-features = ["rocksdb"]
 
 [[bin]]
+# MDBX-SUBMODULE-INDEX: remove this bin with the v1 to v2 MDBX migration.
 name = "submodule-index-migrate"
 path = "src/bin/submodule_index_migrate.rs"
 
 [[bin]]
+# MDBX-SUBMODULE-INDEX: remove this bin once the rollback window is closed.
 name = "submodule-index-convert"
 path = "src/bin/submodule_index_convert.rs"
 required-features = ["rocksdb"]

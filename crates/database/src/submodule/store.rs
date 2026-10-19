@@ -50,6 +50,7 @@ use super::{
 use crate::db::IrysDatabaseExt as _;
 
 /// Consistent read of one submodule index.
+// MDBX-SUBMODULE-INDEX: collapse this trait onto RocksSubmoduleStore when MDBX is gone. Do not delete behavior RocksDB v1 implements. The default methods below are the MDBX behavior.
 pub trait SubmoduleRead {
     fn get_data_path_by_offset(
         &self,
@@ -87,6 +88,7 @@ pub trait SubmoduleRead {
     fn get_full_tx_path(&self, path_hash: TxPathHash) -> eyre::Result<Option<TxPath>>;
 
     /// `false` on RocksDB v1. That layout does not store tx-path bytes.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX stores tx-path bytes. RocksDB v1 returns false and derives them.
     fn stores_tx_paths(&self) -> bool {
         true
     }
@@ -220,6 +222,7 @@ pub trait SubmoduleRead {
     ///
     /// RocksDB v1 seeks `ChunkOffsetsByContentHash`. The result is sorted.
     /// An absent hash is an empty vec. MDBX returns an error.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX has no content-hash index and returns an error. RocksDB v1 seeks ChunkOffsetsByContentHash.
     fn offsets_for_content_hash(
         &self,
         _content_hash: H256,
@@ -230,6 +233,7 @@ pub trait SubmoduleRead {
     /// RocksDB v1 stores a packed-chunk checksum in the offset row.
     ///
     /// The default is false. MDBX does not.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX stores no checksum. RocksDB v1 returns true.
     fn stores_offset_crc(&self) -> bool {
         false
     }
@@ -238,6 +242,7 @@ pub trait SubmoduleRead {
     ///
     /// The default is the MDBX proof with no checksum. A checksum-only
     /// row returns `proof: None`.
+    // MDBX-SUBMODULE-INDEX: delete this default. It is the MDBX proof with no checksum. RocksDB v1 reads the offset row.
     fn get_offset_meta(&self, offset: PartitionChunkOffset) -> eyre::Result<Option<OffsetMeta>> {
         Ok(self
             .get_data_path_by_offset(offset)?
@@ -251,6 +256,7 @@ pub trait SubmoduleRead {
     ///
     /// The default is empty. MDBX does not scan this family to
     /// answer a checksum read.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX does not scan checksum rows. RocksDB v1 returns them.
     fn offset_metas_in_range(
         &self,
         _start: PartitionChunkOffset,
@@ -263,6 +269,7 @@ pub trait SubmoduleRead {
     ///
     /// The default is `true`. An engine that does not store checksums never
     /// reports a complete span.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX reports every span incomplete. RocksDB v1 scans stored checksums.
     fn offset_crc_missing(
         &self,
         _start: PartitionChunkOffset,
@@ -273,6 +280,7 @@ pub trait SubmoduleRead {
 }
 
 /// Exclusive write batch. Reads inside the batch see its own writes.
+// MDBX-SUBMODULE-INDEX: collapse this trait onto RocksSubmoduleStore with SubmoduleRead. The default methods below are the MDBX behavior.
 pub trait SubmoduleWrite: SubmoduleRead {
     fn add_full_data_path(
         &mut self,
@@ -349,6 +357,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
     /// MDBX appends `info` the same way as [`Self::add_data_root_info`].
     /// RocksDB v1 updates that one interval and its data-root row. The interval
     /// must already exist and must name `data_root`.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX appends the info. RocksDB v1 updates the one interval.
     fn add_data_root_info_at(
         &mut self,
         _start: PartitionChunkOffset,
@@ -360,6 +369,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
 
     /// RocksDB v1 stores a data-root row on its interval. A later info trim
     /// must not delete those rows while the interval remains.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX returns false. RocksDB v1 stores the data-root row on the interval.
     fn intervals_own_data_root_rows(&self) -> bool {
         false
     }
@@ -421,6 +431,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
     ///
     /// MDBX ignores this. RocksDB v1 copies it onto each new placement.
     /// A writer that does not call it leaves those fields unset.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX ignores ledger, height, and tx index. RocksDB v1 copies them onto the placement.
     fn note_placement_origin(
         &mut self,
         _ledger: u32,
@@ -435,6 +446,7 @@ pub trait SubmoduleWrite: SubmoduleRead {
     /// A proof that no interval covers is returned and not stored. Its
     /// checksum is not stored either. MDBX ignores `crc` and writes the
     /// proof through [`Self::write_data_path_updates`].
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX ignores crc and writes the proof. RocksDB v1 stores the checksum.
     fn write_packed_offset_rows(
         &mut self,
         rows: Vec<PackedOffsetRow>,
@@ -472,6 +484,7 @@ impl PresenceReconcile {
 ///
 /// `view` and `update` borrow the engine only for the closure. The closure's
 /// `Err` aborts the batch. `update` commits on `Ok`.
+// MDBX-SUBMODULE-INDEX: collapse this trait onto RocksSubmoduleStore. It exists so MDBX and RocksDB share one open path.
 pub trait SubmoduleStore: Send + Sync {
     fn view<R>(&self, f: impl FnOnce(&mut dyn SubmoduleRead) -> eyre::Result<R>)
     -> eyre::Result<R>;
@@ -523,16 +536,19 @@ pub trait SubmoduleStore: Send + Sync {
     fn clear_reset_in_progress(&self) -> eyre::Result<()>;
 
     /// RocksDB v1 stores a packed-chunk checksum in the offset row.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX stores no checksum. RocksDB v1 returns true.
     fn stores_offset_crc(&self) -> bool {
         false
     }
 
     /// Metadata flag. Set only after every offset in a packed module has a checksum.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX stays false. RocksDB v1 reads the metadata flag.
     fn chunk_crc_complete(&self) -> eyre::Result<bool> {
         Ok(false)
     }
 
     /// Set or clear the checksum-complete flag. `clear` does not remove it.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX ignores the flag. RocksDB v1 writes it.
     fn set_chunk_crc_complete(&self, _complete: bool) -> eyre::Result<()> {
         Ok(())
     }
@@ -541,6 +557,7 @@ pub trait SubmoduleStore: Send + Sync {
     ///
     /// The default drops every presence row. MDBX has no
     /// checksum row to keep.
+    // MDBX-SUBMODULE-INDEX: delete this default. MDBX has no checksum row to keep, so it drops every presence row. RocksDB v1 keeps the checksum.
     fn retain_entropy_crc_rows(
         &self,
         ranges: &[(PartitionChunkOffset, PartitionChunkOffset)],
@@ -551,6 +568,7 @@ pub trait SubmoduleStore: Send + Sync {
 
 /// MDBX submodule index. One environment, the tables in [`super::tables`].
 #[derive(Clone)]
+// MDBX-SUBMODULE-INDEX: delete this type and its impls. It is the MDBX submodule index.
 pub struct MdbxSubmoduleStore {
     /// Dropped first so the delay thread joins before `env` closes.
     lifetime: Arc<EngineLifetime>,
@@ -755,6 +773,7 @@ impl MdbxSubmoduleStore {
     /// `MDBX_SAFE_NOSYNC` is env-wide, so every later commit on this environment
     /// skips fsync. `update` syncs itself. A crash rolls back to the last sync
     /// and does not corrupt the file.
+    // MDBX-SUBMODULE-INDEX: delete with MdbxSubmoduleStore. This arms MDBX_SAFE_NOSYNC for the submodule index. RocksDB group commit is a different method.
     pub(super) fn enable_group_commit(&self, txs_per_sync: u32) -> eyre::Result<()> {
         match self.group.prepare(txs_per_sync)? {
             EnableStep::On => Ok(()),
@@ -815,6 +834,7 @@ impl MdbxSubmoduleStore {
             })
     }
 
+    // MDBX-SUBMODULE-INDEX: delete with MdbxSubmoduleStore. This sets MDBX_SAFE_NOSYNC on the submodule environment.
     fn arm_group(&self) -> eyre::Result<()> {
         let _guard = self
             .nosync_enable
@@ -892,6 +912,7 @@ fn sync_env(env: &DatabaseEnv) -> eyre::Result<()> {
     Ok(())
 }
 
+// MDBX-SUBMODULE-INDEX: delete with MdbxSubmoduleStore. This sets MDBX_SAFE_NOSYNC on the submodule index only.
 fn set_safe_nosync(env: &DatabaseEnv) -> eyre::Result<()> {
     with_env(env, |ptr| {
         let rc = unsafe { ffi::mdbx_env_set_flags(ptr, ffi::MDBX_SAFE_NOSYNC, true) };
@@ -1362,13 +1383,16 @@ pub(super) fn drop_uninitialized_coverage_on(
 /// Which engine holds a submodule index. The node opens MDBX.
 /// A RocksDB variant is compiled with the `rocksdb` feature.
 #[derive(Clone, Debug)]
+// MDBX-SUBMODULE-INDEX: make RocksSubmoduleStore the only type and delete this enum.
 pub enum SubmoduleIndex {
+    // MDBX-SUBMODULE-INDEX: delete this variant and every Self::Mdbx match arm. Callers use RocksSubmoduleStore.
     Mdbx(MdbxSubmoduleStore),
     #[cfg(feature = "rocksdb")]
     Rocks(RocksSubmoduleStore),
 }
 
 /// Both engines, or only MDBX when the `rocksdb` feature is off.
+// MDBX-SUBMODULE-INDEX: delete this macro with the SubmoduleIndex enum.
 macro_rules! dispatch_index {
     ($self:expr, |$store:ident| $body:expr) => {{
         match $self {
@@ -1380,6 +1404,7 @@ macro_rules! dispatch_index {
 }
 
 impl SubmoduleIndex {
+    // MDBX-SUBMODULE-INDEX: delete this constructor with the MDBX engine.
     pub fn open_mdbx(path: impl AsRef<Path>, args: DatabaseArguments) -> eyre::Result<Self> {
         Ok(Self::Mdbx(MdbxSubmoduleStore::open(path, args)?))
     }
@@ -1408,6 +1433,7 @@ impl SubmoduleIndex {
     /// MDBX and a RocksDB schema-v2 directory do. RocksDB v1 derives them.
     pub fn stores_tx_paths(&self) -> bool {
         match self {
+            // MDBX-SUBMODULE-INDEX: delete this arm. MDBX stores tx paths. RocksDB v1 does not.
             Self::Mdbx(_) => true,
             #[cfg(feature = "rocksdb")]
             Self::Rocks(store) => store.stores_tx_paths(),
@@ -1425,6 +1451,7 @@ impl SubmoduleIndex {
         packing: &crate::submodule::PackingRecord,
     ) -> eyre::Result<()> {
         match self {
+            // MDBX-SUBMODULE-INDEX: delete this arm. MDBX ignores the packing record. RocksDB v1 binds it.
             Self::Mdbx(_) => {
                 let _ = (partition, packing);
                 Ok(())
@@ -1605,6 +1632,7 @@ impl SubmoduleIndex {
     /// bound. A later call updates a running thread.
     pub fn set_wal_backstop(&self, delay: Duration) {
         match self {
+            // MDBX-SUBMODULE-INDEX: delete this arm. MDBX ignores the WAL backstop.
             // The parameter is read only by the RocksDB engine.
             Self::Mdbx(_) => {
                 let _ = delay;
@@ -1716,6 +1744,7 @@ impl SubmoduleIndex {
     }
 
     #[cfg(test)]
+    // MDBX-SUBMODULE-INDEX: delete this test hook with MDBX_SAFE_NOSYNC.
     fn mdbx_safe_nosync(&self) -> eyre::Result<bool> {
         match self {
             Self::Mdbx(store) => store.safe_nosync(),
@@ -1859,6 +1888,7 @@ mod tests {
     }
 
     fn expect_data_hash(store: &SubmoduleIndex, stored: H256, bytes: &[u8]) -> H256 {
+        // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
         if store.stores_tx_paths() {
             stored
         } else {
@@ -1875,6 +1905,7 @@ mod tests {
         each_engine("content_hash_lookup", |store| {
             let hash = H256::repeat_byte(4);
             let absent = store.view(|tx| tx.offsets_for_content_hash(hash));
+            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
             if store.stores_tx_paths() {
                 let err = absent.unwrap_err();
                 assert!(err.to_string().contains("not supported"), "{err}");
@@ -1903,6 +1934,7 @@ mod tests {
         })
     }
 
+    // MDBX-SUBMODULE-INDEX: delete the MDBX open in this helper. Keep the RocksDB call.
     fn each_engine(
         prefix: &str,
         f: impl Fn(&SubmoduleIndex) -> eyre::Result<()>,
@@ -1964,6 +1996,7 @@ mod tests {
     #[test]
     fn merged_identical_tx_paths_keep_each_tx_start() -> eyre::Result<()> {
         each_engine("submodule_merged_identical", |store| {
+            // MDBX-SUBMODULE-INDEX: delete this test. The body runs only when the index stores tx paths, which is MDBX.
             if !store.stores_tx_paths() {
                 return Ok(());
             }
@@ -2128,6 +2161,7 @@ mod tests {
                     },
                 )?;
                 let at_30 = tx.placement_at(PartitionChunkOffset::from(30))?;
+                // MDBX-SUBMODULE-INDEX: make this the only path. RocksDB v1 does not store tx paths.
                 if !store.stores_tx_paths() {
                     let at_30 = at_30.expect("RocksDB v1 keeps the placement without a tx path");
                     assert_eq!(at_30.data_root, root_a);
@@ -2174,6 +2208,7 @@ mod tests {
             let got = store
                 .view(|tx| tx.get_path_hashes_by_offset(offset))?
                 .expect("committed row");
+            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
             if store.stores_tx_paths() {
                 assert_eq!(got, hashes);
             } else {
@@ -2410,6 +2445,7 @@ mod tests {
                     None,
                 )
             })?;
+            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
             if store.stores_tx_paths() {
                 assert_eq!(
                     store.view(|tx| tx.get_full_tx_path(shared))?,
@@ -2463,6 +2499,7 @@ mod tests {
             })?;
             assert!(store.view(|tx| tx.get_full_tx_path(old))?.is_none());
             assert!(store.view(|tx| tx.get_tx_leaf_binding(old))?.is_none());
+            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
             if store.stores_tx_paths() {
                 assert_eq!(
                     store.view(|tx| tx.get_full_tx_path(new))?,
@@ -2492,6 +2529,7 @@ mod tests {
                 start_offset: RelativeChunkOffset(1),
                 data_size: 32,
             };
+            // MDBX-SUBMODULE-INDEX: make this the only path. RocksDB v1 does not store tx paths.
             if !store.stores_tx_paths() {
                 let err = store
                     .update(|tx| tx.add_data_root_info(root, &info))
@@ -3314,6 +3352,7 @@ mod tests {
             let kept = store
                 .view(|tx| tx.get_path_hashes_by_offset(PartitionChunkOffset::from(6)))?
                 .expect("row written after clear");
+            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
             if store.stores_tx_paths() {
                 assert_eq!(kept, hashes);
             } else {
@@ -3388,6 +3427,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with MDBX group commit. RocksDB does not sync on the registration count.
     fn group_commit_syncs_every_n_registrations() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
             .prefix("submodule_store_group_n")
@@ -3536,6 +3576,7 @@ mod tests {
                 (PartitionChunkOffset::from(3), PartitionChunkOffset::from(3)),
                 (max, max),
             ])?;
+            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
             if store.stores_tx_paths() {
                 assert_eq!(stats.path_hash_rows, 2);
             } else {
@@ -3558,6 +3599,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![1]
             );
+            // MDBX-SUBMODULE-INDEX: delete this arm. It checks tx-path bytes only MDBX stores.
             if store.stores_tx_paths() {
                 assert_eq!(
                     store.view(|tx| tx.get_tx_path_by_offset(PartitionChunkOffset::from(3)))?,
@@ -4018,6 +4060,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with MDBX_SAFE_NOSYNC.
     fn mdbx_group_commit_sets_safe_nosync() -> eyre::Result<()> {
         let dir = TempDirBuilder::new()
             .prefix("submodule_store_safe_nosync")

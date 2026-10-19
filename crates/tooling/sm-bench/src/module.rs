@@ -308,6 +308,7 @@ mod tests {
             durable_headroom_permille: 1000,
             recall_direct_io: direct,
             recall_offset_chunks,
+            // MDBX-SUBMODULE-INDEX: retarget this open at BenchIndex::Rocks. The check is not MDBX-specific.
             index: BenchIndex::Mdbx,
             index_group_commit: 0,
         })
@@ -439,6 +440,7 @@ mod tests {
             durable_headroom_permille: 1000,
             recall_direct_io: false,
             recall_offset_chunks: 0,
+            // MDBX-SUBMODULE-INDEX: retarget this open at BenchIndex::Rocks. The check is not MDBX-specific.
             index: BenchIndex::Mdbx,
             index_group_commit: 0,
         }

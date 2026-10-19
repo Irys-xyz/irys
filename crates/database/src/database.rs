@@ -447,6 +447,7 @@ pub fn consensus_db_args(
     Ok(args)
 }
 
+// MDBX-SUBMODULE-INDEX: delete this function with the MDBX submodule engine. Consensus keeps consensus_db_args.
 /// Builds [`DatabaseArguments`] for a **storage submodule** database from a
 /// [`irys_types::DatabaseConfig`]. Production reserves 2 TiB; `geometry_max_size`
 /// (set by test configs) overrides that with a small cap.

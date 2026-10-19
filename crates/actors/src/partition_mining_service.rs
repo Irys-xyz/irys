@@ -80,6 +80,7 @@ pub struct PartitionMiningServiceInner {
 /// What the derive job must compare against the rebuilt path.
 enum DerivePlacement {
     /// MDBX stores no placement identity on the derive path.
+    // MDBX-SUBMODULE-INDEX: delete this variant. MDBX stores no placement identity on the derive path. RocksDB v1 checks the stored row.
     Skip,
     /// RocksDB v1 row for this offset.
     Check(irys_database::tx_path_derive::PlacementCheck),
@@ -610,6 +611,7 @@ impl PartitionMiningServiceInner {
             return None;
         }
         let tx_path = if let Some(stored) = stored_tx_path {
+            // MDBX-SUBMODULE-INDEX: delete this arm. Only MDBX returns a stored data-chunk tx path. RocksDB v1 derives it.
             TxPathSource::Stored(Some(stored))
         } else {
             let job = self.spawn_tx_path_derive(offset, &data_path)?;
@@ -701,6 +703,7 @@ impl PartitionMiningServiceInner {
     /// MDBX skips the placement check. RocksDB v1 requires the stored row.
     fn placement_for_derive(&self, offset: PartitionChunkOffset) -> Option<DerivePlacement> {
         let (_, submodule) = self.storage_module.get_submodule_for_offset(offset).ok()?;
+        // MDBX-SUBMODULE-INDEX: delete this arm. MDBX stores the tx path and skips the placement check.
         if submodule.db.stores_tx_paths() {
             return Some(DerivePlacement::Skip);
         }
@@ -1837,6 +1840,7 @@ mod tests {
 
     /// `tx_data` replaces the four full chunks when `indexed` is set. The
     /// partition stays [`DATA_CHUNKS`] long, so a short tail still has a slot.
+    // MDBX-SUBMODULE-INDEX: this helper opens only MDBX. Retarget it at RocksDB, or delete the tests that call open_data_miner.
     fn open_data_miner_with_tx_data(
         difficulty: U256,
         indexed: bool,

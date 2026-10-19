@@ -240,6 +240,7 @@ impl GroupCommit {
     ///
     /// MDBX syncs when this returns `true`. RocksDB ignores the bool: the
     /// next synced write or the backstop covers the record.
+    // MDBX-SUBMODULE-INDEX: the true result is the MDBX sync trigger in MdbxSubmoduleStore::update_registration. RocksDB ignores the bool. Delete that caller with the MDBX store.
     pub(super) fn note_visible(&self) -> bool {
         let mut state = self.lock();
         state.generation = state.generation.wrapping_add(1);

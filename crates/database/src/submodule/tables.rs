@@ -15,6 +15,7 @@ use std::fmt;
 ///
 /// A schema v1 directory has no row. Open migrates it and writes this value
 /// only when the new rows are complete. Any other row is refused.
+// MDBX-SUBMODULE-INDEX: delete this MDBX schema v2 marker with the MDBX engine. RocksDB v1 uses SUBMODULE_SCHEMA_ROCKS_V1.
 pub const SUBMODULE_SCHEMA: &str = "irys-submodule-index 2\n";
 
 /// Schema file and metadata row for a RocksDB v1 index.
@@ -46,9 +47,11 @@ pub fn unrecognised_rocks_layout(marker: &str) -> String {
 /// Open refuses this value. The converter replaces it with
 /// [`SUBMODULE_SCHEMA`] only after every row is durable. A crash leaves
 /// this row, so the directory is incomplete and must be deleted and redone.
+// MDBX-SUBMODULE-INDEX: remove with rocks-to-mdbx. Open refuses a directory that still has this row.
 pub const SUBMODULE_CONVERT_INCOMPLETE: &str = "irys-submodule-index convert-incomplete\n";
 
 // Per-submodule database tables
+// MDBX-SUBMODULE-INDEX: delete this MDBX table set with the MDBX engine. OffsetMeta, PackedOffsetRow, and Placement below are shared with RocksDB v1 and stay.
 tables! {
     SubmoduleTables;
     /// Maps a partition offset to that chunk's data-path hash.
@@ -240,6 +243,7 @@ impl Ord for DataRootInfo {
 /// Schema v1 table kept so migration can read hash-keyed data paths.
 ///
 /// Not part of [`SubmoduleTables`]. A new database does not create it.
+// MDBX-SUBMODULE-INDEX: remove with the v1 to v2 migration. This is the schema v1 data-path table.
 pub mod v1 {
     use irys_types::{ChunkDataPath, ChunkPathHash};
     use paste::paste;
@@ -266,6 +270,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX table set.
     fn test_offset_range_queries() -> eyre::Result<()> {
         use irys_testing_utils::utils::TempDirBuilder;
         use reth_db::cursor::*;
@@ -328,6 +333,7 @@ mod tests {
 /// the way master and the release binaries do: same names, same encodings,
 /// no schema row.
 #[cfg(test)]
+// MDBX-SUBMODULE-INDEX: remove with the v1 to v2 migration. Test writers use this to build a release-4.0.8 db/.
 pub mod v1_fixture {
     pub mod master {
         use crate::metadata::MetadataKey;

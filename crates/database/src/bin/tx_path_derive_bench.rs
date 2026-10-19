@@ -102,6 +102,7 @@ const BUCKETS: [&str; 6] = ["1", "2-10", "11-100", "101-1000", "1001-10000", ">1
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Engine {
     Auto,
+    // MDBX-SUBMODULE-INDEX: delete this variant. The derive bench stays for RocksDB.
     Mdbx,
     Rocks,
 }
@@ -111,6 +112,7 @@ enum Mode {
     All,
     Real,
     Synthetic,
+    // MDBX-SUBMODULE-INDEX: delete this variant with baseline-stored. That mode times a tx path only MDBX stores.
     Baseline,
 }
 
@@ -130,6 +132,7 @@ struct Args {
     cold: bool,
     index_span: Option<(u32, u32)>,
     migrate_copy: bool,
+    // MDBX-SUBMODULE-INDEX: delete this flag with the v1 to v2 MDBX migration. The derive bench itself stays for RocksDB.
     migrate_index: bool,
     prepare: Option<PathBuf>,
 }
@@ -268,6 +271,7 @@ fn wants_synthetic(mode: Mode) -> bool {
 
 fn wants_baseline(mode: Mode, has_index: bool) -> eyre::Result<bool> {
     match mode {
+        // MDBX-SUBMODULE-INDEX: delete these Baseline arms with baseline-stored.
         Mode::Baseline if !has_index => {
             eyre::bail!("baseline-stored needs --index")
         }
@@ -448,6 +452,7 @@ fn run_synthetic(db_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
     Ok((attempted, succeeded))
 }
 
+// MDBX-SUBMODULE-INDEX: delete this mode. It times a stored tx path, which only MDBX keeps.
 fn run_baseline(index_path: &Path, args: &Args) -> eyre::Result<(usize, usize)> {
     let engine = detect_engine(index_path, args.engine)?;
     println!("index engine: {}", engine_name(engine));
@@ -941,6 +946,7 @@ fn read_schema(db: &DatabaseEnv) -> eyre::Result<Option<u32>> {
         .map_err(|err| eyre!("schema decode failed: {err}"))
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path. RocksDB open does not use it.
 fn submodule_args() -> eyre::Result<DatabaseArguments> {
     Ok(DatabaseArguments::irys_default(DbSyncMode::Durable)?
         .with_log_level(None)
@@ -948,12 +954,14 @@ fn submodule_args() -> eyre::Result<DatabaseArguments> {
         .with_geometry_max_size(Some(2 * irys_types::TERABYTE)))
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn open_mdbx_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
     DatabaseEnv::open(path, DatabaseEnvKind::RO, submodule_args()?)
         .map_err(|err| eyre!("read-only submodule open {}: {err}", path.display()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+// MDBX-SUBMODULE-INDEX: delete this enum with the MDBX bench path.
 enum MdbxSchema {
     V2,
     V1,
@@ -962,6 +970,7 @@ enum MdbxSchema {
     Foreign,
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn probe_mdbx(path: &Path) -> eyre::Result<MdbxSchema> {
     let env = open_mdbx_ro(path)?;
     let row = env
@@ -971,6 +980,7 @@ fn probe_mdbx(path: &Path) -> eyre::Result<MdbxSchema> {
     Ok(classify_mdbx(row))
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn classify_mdbx(row: Option<Vec<u8>>) -> MdbxSchema {
     match row {
         Some(bytes) if bytes.as_slice() == SUBMODULE_SCHEMA.as_bytes() => MdbxSchema::V2,
@@ -998,11 +1008,13 @@ fn open_index_cold(path: &Path, engine: Engine) -> eyre::Result<SubmoduleIndex> 
 fn open_index(path: &Path, engine: Engine, migrate: bool) -> eyre::Result<SubmoduleIndex> {
     match engine {
         Engine::Auto => eyre::bail!("engine was not resolved"),
+        // MDBX-SUBMODULE-INDEX: delete this arm.
         Engine::Mdbx => open_mdbx_index(path, migrate),
         Engine::Rocks => open_rocks_index(path),
     }
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn open_mdbx_index(path: &Path, migrate: bool) -> eyre::Result<SubmoduleIndex> {
     match probe_mdbx(path)? {
         MdbxSchema::V2 => {}
@@ -1024,6 +1036,7 @@ fn open_mdbx_index(path: &Path, migrate: bool) -> eyre::Result<SubmoduleIndex> {
     SubmoduleIndex::open_mdbx(path, submodule_args()?)
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn v1_index_message(path: &Path) -> String {
     format!(
         "submodule index {} has no v2 schema row. Release 4.0.8 stores one tx-path hash per offset and has no interval table. Baseline times the v2 interval read. Do not migrate a live directory.\n\
@@ -1070,6 +1083,7 @@ fn harvest_offsets(
 ) -> eyre::Result<Vec<u32>> {
     let want = args.samples.saturating_mul(4).clamp(1, 20_000);
     let candidates = match engine {
+        // MDBX-SUBMODULE-INDEX: delete this arm.
         Engine::Mdbx => spread_offsets(mdbx_intervals, want, args.index_span),
         Engine::Rocks => {
             let span = args.index_span.unwrap_or((0, DEFAULT_SPAN_END));
@@ -1091,6 +1105,7 @@ fn harvest_offsets(
     Ok(usable)
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn mdbx_intervals(path: &Path) -> eyre::Result<Vec<(u32, u32)>> {
     let env = open_mdbx_ro(path)?;
     env.view(|tx| -> eyre::Result<Vec<(u32, u32)>> {
@@ -1107,6 +1122,7 @@ fn mdbx_intervals(path: &Path) -> eyre::Result<Vec<(u32, u32)>> {
     .map_err(|err| eyre!("interval scan failed: {err}"))?
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn spread_offsets(intervals: &[(u32, u32)], want: usize, span: Option<(u32, u32)>) -> Vec<u32> {
     let clipped = clip_intervals(intervals, span);
     if clipped.is_empty() || want == 0 {
@@ -1136,6 +1152,7 @@ fn spread_offsets(intervals: &[(u32, u32)], want: usize, span: Option<(u32, u32)
     out
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX bench path.
 fn clip_intervals(intervals: &[(u32, u32)], span: Option<(u32, u32)>) -> Vec<(u32, u32)> {
     let mut clipped = Vec::new();
     for &(start, end) in intervals {
@@ -1198,6 +1215,7 @@ fn detect_engine(path: &Path, requested: Engine) -> eyre::Result<Engine> {
     let mdbx = path.join("mdbx.dat").is_file();
     let rocks = path.join("SCHEMA").is_file();
     match (mdbx, rocks) {
+        // MDBX-SUBMODULE-INDEX: delete this arm. Auto-detect of mdbx.dat goes away with the MDBX index.
         (true, false) => Ok(Engine::Mdbx),
         (false, true) => Ok(Engine::Rocks),
         (true, true) => {
@@ -1216,6 +1234,7 @@ fn detect_engine(path: &Path, requested: Engine) -> eyre::Result<Engine> {
 fn engine_name(engine: Engine) -> &'static str {
     match engine {
         Engine::Auto => "auto",
+        // MDBX-SUBMODULE-INDEX: delete this arm.
         Engine::Mdbx => "mdbx",
         Engine::Rocks => "rocks",
     }
@@ -1342,6 +1361,7 @@ fn resolve_operator_path(path: &Path) -> eyre::Result<PathBuf> {
     Ok(resolved)
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with --migrate-index. It guards the v1 to v2 MDBX migration.
 fn require_copy_dir(path: &Path, kind: &str) -> eyre::Result<()> {
     if !name_has_copy(path) {
         eyre::bail!(
@@ -1360,6 +1380,7 @@ fn require_copy_dir(path: &Path, kind: &str) -> eyre::Result<()> {
     Ok(())
 }
 
+// MDBX-SUBMODULE-INDEX: delete this fixture writer with the MDBX baseline. It stores tx paths in an MDBX index.
 fn prepare_fixture(dir: &Path) -> eyre::Result<()> {
     require_copy_dir(dir, "fixture directory")?;
     let consensus = dir.join("consensus");
@@ -1474,6 +1495,7 @@ fn set_fixture_ledger(
     slot.total_chunks = total;
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX baseline. It writes stored tx paths.
 fn store_paths(
     index: &SubmoduleIndex,
     headers: &[DataTransactionHeader],
@@ -1827,6 +1849,7 @@ fn apply_flag(
             mark_once(seen, "--migrate-copy")?;
             args.migrate_copy = true;
         }
+        // MDBX-SUBMODULE-INDEX: delete this flag with the v1 to v2 MDBX migration.
         "--migrate-index" => {
             mark_once(seen, "--migrate-index")?;
             args.migrate_index = true;
@@ -1855,6 +1878,7 @@ fn parse_int<T: std::str::FromStr>(text: &str, flag: &str) -> eyre::Result<T> {
 fn parse_engine(text: &str) -> eyre::Result<Engine> {
     match text {
         "auto" => Ok(Engine::Auto),
+        // MDBX-SUBMODULE-INDEX: delete this arm.
         "mdbx" => Ok(Engine::Mdbx),
         "rocks" => Ok(Engine::Rocks),
         other => eyre::bail!("unknown engine {other}"),
@@ -1866,6 +1890,7 @@ fn parse_mode(text: &str) -> eyre::Result<Mode> {
         "all" => Ok(Mode::All),
         "derive-real" => Ok(Mode::Real),
         "derive-synthetic" => Ok(Mode::Synthetic),
+        // MDBX-SUBMODULE-INDEX: delete this arm with baseline-stored.
         "baseline-stored" => Ok(Mode::Baseline),
         other => eyre::bail!("unknown mode {other}"),
     }

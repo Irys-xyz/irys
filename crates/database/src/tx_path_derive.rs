@@ -1335,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test. It stores a tx path in an MDBX submodule index. RocksDB v1 derives the path and does not store it.
     fn stored_tx_path_matches_merklize_bytes() {
         // These two writes are what migration commits for the tx path. The
         // data-path rows are what the body worker adds before mining's read
@@ -1476,6 +1477,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test. It stores a tx path in an MDBX submodule index. The derive against the consensus database stays.
     fn derived_equals_stored_equals_merklize() {
         let headers = [tx_at(1, 32), tx_at(2, 64), tx_at(3, 32)];
         let (root, proofs) = DataTransactionLedger::merklize_tx_root(&headers);

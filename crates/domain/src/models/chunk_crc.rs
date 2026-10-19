@@ -635,6 +635,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with the MDBX engine. It asserts that MDBX stores no checksum.
     fn mdbx_does_not_store_or_check_a_checksum() -> eyre::Result<()> {
         let (tmp, config, module) =
             open_module("crc_mdbx", SubmoduleIndexEngine::Mdbx, fast_storage())?;

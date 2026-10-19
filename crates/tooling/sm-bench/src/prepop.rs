@@ -248,6 +248,7 @@ mod tests {
         file.sync_all().unwrap();
     }
 
+    // MDBX-SUBMODULE-INDEX: this helper opens only MDBX. Retarget it at BenchIndex::Rocks.
     fn open_at(dir: &Path, chunks: u32) -> crate::module::OpenedModule {
         open_index(dir, chunks, BenchIndex::Mdbx)
     }

@@ -1,3 +1,4 @@
+// MDBX-SUBMODULE-INDEX: remove this binary once the rollback window is closed. The verify-rocks command compares two RocksDB v1 directories and can be split out if that compare is still wanted.
 //! Offline copy between an MDBX submodule index and RocksDB v1.
 //!
 //! Stop the node first. See `--help`.
@@ -247,8 +248,11 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
         return Ok(None);
     }
     let command = match command.as_str() {
+        // MDBX-SUBMODULE-INDEX: delete this command.
         "mdbx-to-rocks" => Command::MdbxToRocks,
+        // MDBX-SUBMODULE-INDEX: delete this command once the rollback window is closed.
         "rocks-to-mdbx" => Command::RocksToMdbx,
+        // MDBX-SUBMODULE-INDEX: delete this command. It compares an MDBX index with RocksDB v1. Keep verify-rocks if a Rocks-only compare is still wanted.
         "verify" => Command::Verify,
         "verify-rocks" => Command::VerifyRocks,
         _ => {
@@ -287,6 +291,7 @@ fn parse_args() -> eyre::Result<Option<ToolArgs>> {
                 allow_unresolved = true;
                 index += 1;
             }
+            // MDBX-SUBMODULE-INDEX: delete this flag with verify of a rocks-to-mdbx copy.
             "--rollback" => {
                 rollback = true;
                 index += 1;

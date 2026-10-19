@@ -1,3 +1,4 @@
+// MDBX-SUBMODULE-INDEX: delete this MDBX table API with MdbxSubmoduleStore. Move engine-agnostic helpers (placement extent, span overlap) out before deleting the file. The consensus database is a different MDBX environment and stays.
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -60,6 +61,7 @@ pub fn create_or_open_submodule_db<P: AsRef<Path>>(
 /// before this returns. The returned env uses `args` unchanged, so a current
 /// index stays cooperative and another process can read it. A second migration
 /// of the same directory gets `MDBX_BUSY` for the whole run.
+// MDBX-SUBMODULE-INDEX: delete this open with the MDBX engine. It migrates a schema v1 directory in place before it returns.
 pub fn open_submodule_index<P: AsRef<Path>>(
     path: P,
     args: DatabaseArguments,

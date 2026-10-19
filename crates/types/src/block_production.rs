@@ -69,6 +69,7 @@ pub struct SolutionContext {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TxPathSource {
     /// The index stored the path. `None` is a capacity chunk.
+    // MDBX-SUBMODULE-INDEX: Stored(Some) is the MDBX data-chunk path; delete that use. Stored(None) stays: capacity chunks on RocksDB still use it.
     Stored(Option<TxPath>),
     /// One derive shared by every rebuild of this solution.
     Derive(TxPathJob),

@@ -1,3 +1,4 @@
+// MDBX-SUBMODULE-INDEX: remove this file with the submodule-index-migrate CLI. It upgrades an MDBX schema v1 submodule index to schema v2 in place.
 //! Upgrade a schema v1 submodule MDBX directory in place.
 //!
 //! v1 stores a tx hash on every offset row and the data path under that
@@ -536,6 +537,7 @@ fn refuse_finished_schema<T: DbTx>(tx: &T) -> eyre::Result<()> {
     Ok(())
 }
 
+// MDBX-SUBMODULE-INDEX: delete with rocks-to-mdbx. Open refuses an MDBX directory left unfinished by that conversion.
 fn incomplete_mdbx_conversion(path: &Path) -> eyre::Report {
     eyre::eyre!(
         "submodule index {} is an incomplete MDBX conversion and has no completion marker. Delete this directory and rerun `submodule-index-convert rocks-to-mdbx` with --replace-incomplete. Do not start the node on it. The RocksDB source is unchanged. If a completed rocks/ index has rows written after the switch, that command is also the rollback.",

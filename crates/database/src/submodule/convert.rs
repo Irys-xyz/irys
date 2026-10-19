@@ -1,3 +1,4 @@
+// MDBX-SUBMODULE-INDEX: delete the MDBX conversion and the MDBX verify in this file once every node is on RocksDB v1 and the rollback window is closed. verify_rocks_records compares two RocksDB v1 directories and is not an MDBX path.
 //! Offline copy between an MDBX submodule index and RocksDB v1.
 //!
 //! The source is never modified. The completion marker (`rocks/SCHEMA`, or the
@@ -277,6 +278,7 @@ pub struct ConvertOptions {
     /// `verify` of a `rocks-to-mdbx` copy. MDBX stores no checksums, so a
     /// RocksDB checksum the node wrote after the forward conversion is
     /// counted in `dropped_checksums` instead of as a mismatch.
+    // MDBX-SUBMODULE-INDEX: delete this flag with --rollback. It accepts a rocks-to-mdbx copy that dropped checksums.
     pub rollback: bool,
     /// Keep going when a placement is past the consensus frontier.
     /// An empty consensus block index still fails the run.
@@ -518,6 +520,7 @@ impl RowSource for RocksSubmoduleStore {
 /// It is not migrated. Each stored tx path must match the path derived from
 /// the consensus database. A mismatch aborts and names the partition offset.
 /// The RocksDB `SCHEMA` file is written only after the rows are durable.
+// MDBX-SUBMODULE-INDEX: delete this function with the mdbx-to-rocks command.
 pub fn convert_mdbx_to_rocks(
     mdbx_dir: &Path,
     rocks_dir: &Path,
@@ -734,6 +737,7 @@ fn count_family_mismatches(
 /// aborts the run and names the partition offset. The MDBX schema row stays
 /// [`SUBMODULE_CONVERT_INCOMPLETE`] until every row is durable, then becomes
 /// [`SUBMODULE_SCHEMA`].
+// MDBX-SUBMODULE-INDEX: delete this function with the rocks-to-mdbx command once the rollback window is closed.
 pub fn convert_rocks_to_mdbx(
     rocks_dir: &Path,
     mdbx_dir: &Path,
@@ -790,6 +794,7 @@ pub fn convert_rocks_to_mdbx(
 /// [`EngineEquivalenceReport::has_mismatch`] is set.
 ///
 /// Does not migrate and does not write. A v1 MDBX directory is read as v1.
+// MDBX-SUBMODULE-INDEX: delete this function with verify of an MDBX source. verify_rocks_records is the Rocks-only compare.
 pub fn verify_mdbx_and_rocks(
     mdbx_dir: &Path,
     rocks_dir: &Path,
@@ -2564,6 +2569,7 @@ enum OpenedMdbx {
     Empty(DatabaseEnv),
 }
 
+// MDBX-SUBMODULE-INDEX: delete this helper with the MDBX source reader.
 fn open_mdbx_source(path: &Path, args: DatabaseArguments) -> eyre::Result<OpenedMdbx> {
     if !path.join("mdbx.dat").is_file() {
         eyre::bail!(

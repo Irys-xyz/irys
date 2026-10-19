@@ -637,6 +637,7 @@ mod tests {
     use rstest::rstest;
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn get_by_data_tx_offset_test() -> eyre::Result<()> {
         let (tmp_dir, config, storage_module) =
             opened_publish("get_by_data_tx_offset_test", SubmoduleIndexEngine::Mdbx)?;
@@ -661,6 +662,7 @@ mod tests {
 
     /// A node with no storage module still serves a cached body by data root.
     #[test]
+    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn get_by_data_root_serves_from_chunk_cache_without_sm() -> eyre::Result<()> {
         let (tmp_dir, config) =
             opened_config("get_by_data_root_cache_test", SubmoduleIndexEngine::Mdbx);
@@ -696,6 +698,7 @@ mod tests {
     /// Two adjacent placements. `data_tx_offset == chunk_count` of the first tx
     /// is the first byte of the next tx. That offset must not be served.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn out_of_range_data_tx_offset_does_not_serve_the_next_placement(
@@ -740,6 +743,7 @@ mod tests {
     /// `data_size` is not a multiple of `chunk_size`. The short final chunk is
     /// in range. The next offset is the following placement.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn partial_final_chunk_is_in_range_and_the_next_offset_is_not(
@@ -783,6 +787,7 @@ mod tests {
     /// `chunk_count` names the second placement's first chunk and must not
     /// be returned as if it were that offset.
     #[rstest]
+    // MDBX-SUBMODULE-INDEX: delete this MDBX case and keep the RocksDB case.
     #[case::mdbx(SubmoduleIndexEngine::Mdbx)]
     #[case::rocksdb(SubmoduleIndexEngine::Rocksdb)]
     fn same_data_root_second_placement_does_not_extend_chunk_count(
@@ -826,6 +831,7 @@ mod tests {
     /// The cache key is `(data_root, tx_offset)`, so this does not alias into
     /// another tx; the bound is the data size on `CachedDataRoots`.
     #[test]
+    // MDBX-SUBMODULE-INDEX: this test opens only MDBX. Retarget it at RocksDB.
     fn cache_does_not_serve_offset_past_data_size() -> eyre::Result<()> {
         let (tmp_dir, config) = opened_config("data_root_cache_bounds", SubmoduleIndexEngine::Mdbx);
         let chunk_size = config.consensus.chunk_size as usize;

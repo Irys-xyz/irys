@@ -57,6 +57,7 @@ impl From<DbSyncMode> for reth_db::mdbx::SyncMode {
 /// Per-chunk submodule index engine. The default stays MDBX.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+// MDBX-SUBMODULE-INDEX: make RocksDB the only submodule index engine, then remove this enum and the submodule_index key. The consensus database stays MDBX. DatabaseConfig denies unknown fields, so delete the key only after configs no longer contain it.
 pub enum SubmoduleIndexEngine {
     #[default]
     Mdbx,
@@ -122,6 +123,7 @@ pub struct DatabaseConfig {
     /// Engine for each storage submodule's per-chunk index.
     /// `mdbx` opens `db/`. `rocksdb` opens a sibling `rocks/` directory.
     #[serde(default)]
+    // MDBX-SUBMODULE-INDEX: remove this field once every config is on RocksDB and the key has been retired. An omitted key selects MDBX.
     pub submodule_index: SubmoduleIndexEngine,
 
     /// Block cache shared by every RocksDB submodule index. Ignored for MDBX.
@@ -181,6 +183,7 @@ impl Default for DatabaseConfig {
         Self {
             sync_mode: default_db_sync_mode(),
             cache_sync_mode: default_cache_db_sync_mode(),
+            // MDBX-SUBMODULE-INDEX: delete this assignment with the field. The default is MDBX until then.
             geometry_max_size: None,
             submodule_index: SubmoduleIndexEngine::Mdbx,
             rocksdb_block_cache_bytes: default_rocksdb_block_cache_bytes(),
@@ -1840,6 +1843,7 @@ impl NodeConfig {
                 cache_sync_mode: DbSyncMode::UtterlyNoSync,
                 // Small MDBX geometry so many concurrent test node databases don't
                 // exhaust virtual address space (see TEST_DB_GEOMETRY_MAX_SIZE).
+                // MDBX-SUBMODULE-INDEX: point test configs at RocksDB when that is the only engine. This line selects MDBX.
                 geometry_max_size: Some(crate::TEST_DB_GEOMETRY_MAX_SIZE),
                 submodule_index: SubmoduleIndexEngine::Mdbx,
                 ..DatabaseConfig::default()
@@ -2271,6 +2275,7 @@ mod run_mode_tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete the submodule_index assertion in this test when the field is removed. The other assertions stay.
     fn database_config_defaults() {
         let config = DatabaseConfig::default();
         assert_eq!(config.sync_mode, DbSyncMode::Durable);
@@ -2326,6 +2331,7 @@ mod run_mode_tests {
     /// A config with no `submodule_index` stays on MDBX. `rocksdb` selects the
     /// sibling engine. Any other string is rejected.
     #[test]
+    // MDBX-SUBMODULE-INDEX: rewrite this test when the key is removed. It pins an omitted key to MDBX.
     fn submodule_index_engine_serde() {
         let missing_toml: DatabaseConfig = toml::from_str(
             r#"

@@ -1,5 +1,9 @@
 # Storage module indexes
 
+<!-- MDBX-SUBMODULE-INDEX: delete the MDBX sections of this page once RocksDB v1 is the only submodule index. The consensus database stays MDBX. -->
+
+The removal list is [mdbx-submodule-index-removal.md](mdbx-submodule-index-removal.md).
+
 Each submodule keeps its index in `db/` (MDBX) or `rocks/` (RocksDB).
 `database.submodule_index` selects the engine. The value is `mdbx` or
 `rocksdb`. The node opens only that directory. It refuses a layout that

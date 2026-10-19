@@ -3032,6 +3032,7 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
     }
 
     fn chunk_crc_complete(&self) -> eyre::Result<bool> {
+        // MDBX-SUBMODULE-INDEX: delete this guard. RocksDB v1 always stores checksums. The false return is the MDBX default.
         if !self.stores_offset_crc() {
             return Ok(false);
         }
@@ -3041,6 +3042,7 @@ impl super::SubmoduleStore for RocksSubmoduleStore {
     }
 
     fn set_chunk_crc_complete(&self, complete: bool) -> eyre::Result<()> {
+        // MDBX-SUBMODULE-INDEX: delete this guard. RocksDB v1 always stores checksums. The empty return is the MDBX default.
         if !self.stores_offset_crc() {
             return Ok(());
         }

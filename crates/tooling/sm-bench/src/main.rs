@@ -104,6 +104,7 @@ struct Args {
     prepopulate_index: u64,
     /// Submodule index engine. `mdbx` is the production engine.
     #[arg(long, value_enum, default_value_t = IndexEngine::Mdbx)]
+    // MDBX-SUBMODULE-INDEX: change this default to Rocks when MDBX is gone, then remove the flag.
     index_engine: IndexEngine,
     /// RocksDB preset. Same names as `RocksTuning::presets`. Default `baseline`
     /// when `--index-engine rocks`.
@@ -237,6 +238,7 @@ impl std::fmt::Display for IngestIndex {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+// MDBX-SUBMODULE-INDEX: delete the Mdbx variant and make Rocks the only bench engine.
 enum IndexEngine {
     Mdbx,
     Rocks,
@@ -259,6 +261,7 @@ fn resolve_index(
     small_file_compact_threshold: Option<u64>,
 ) -> eyre::Result<BenchIndex> {
     match engine {
+        // MDBX-SUBMODULE-INDEX: delete this arm.
         IndexEngine::Mdbx => {
             if preset.is_some() || block_cache.is_some() || small_file_compact_threshold.is_some() {
                 return Err(eyre!(
@@ -440,6 +443,7 @@ fn run() -> eyre::Result<i32> {
     let index_dir = dir.join(opened.index.dir_name());
     let (rocks_preset, rocks_tuning, rocks_block_cache_bytes, rocks_shared_resources) =
         match opened.index {
+            // MDBX-SUBMODULE-INDEX: delete this arm.
             BenchIndex::Mdbx => (None, None, None, None),
             BenchIndex::Rocks(tuning) => (
                 Some(tuning.name),
@@ -1304,6 +1308,7 @@ mod tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test when the bench default is Rocks.
     fn index_engine_defaults_to_mdbx() {
         let args = parsed(&[]);
         assert_eq!(args.index_engine, IndexEngine::Mdbx);

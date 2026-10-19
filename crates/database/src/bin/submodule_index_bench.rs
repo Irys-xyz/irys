@@ -1,3 +1,4 @@
+// MDBX-SUBMODULE-INDEX: delete the MDBX engine path in this bench. The RocksDB timings can stay.
 //! Write one synthetic submodule index on MDBX and on RocksDB.
 //!
 //! Prints wall time and directory bytes. The path must contain an
@@ -43,9 +44,11 @@ const LARGE_RAW_BYTES: u64 = 8 << 30;
 /// Filled run past a typical HDD cache. 4096-byte paths, about 4 GiB raw.
 const MID_CHUNKS: u32 = 1_000_000;
 /// Transactions per grouped commit. `--mid` uses this for MDBX. `--group-commit` uses it for both.
+// MDBX-SUBMODULE-INDEX: delete this constant and MID_MDBX_PATH_BATCH with the MDBX bench path.
 const MID_MDBX_TXS_PER_COMMIT: u32 = 8;
 /// Data-path rows per grouped commit. `--mid` uses this for MDBX. `--group-commit` uses it for both.
 /// Rocks without the flag stays at `--batch`.
+// MDBX-SUBMODULE-INDEX: delete this constant with the MDBX bench path.
 const MID_MDBX_PATH_BATCH: u32 = 2048;
 /// First samples reported apart from the rest, in arrival order.
 const HEAD_SAMPLES: usize = 32;
@@ -148,6 +151,7 @@ struct TxPlace {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Engines {
     Both,
+    // MDBX-SUBMODULE-INDEX: delete this variant. Keep Rocks.
     Mdbx,
     Rocks,
 }
@@ -161,6 +165,7 @@ impl Engines {
         }
     }
 
+    // MDBX-SUBMODULE-INDEX: delete this method with the MDBX bench path.
     fn includes_mdbx(self) -> bool {
         matches!(self, Self::Both | Self::Mdbx)
     }
@@ -283,6 +288,7 @@ fn main() -> eyre::Result<()> {
         println!("mode=filled");
     }
 
+    // MDBX-SUBMODULE-INDEX: delete this block. It times the MDBX engine.
     if args.engines.includes_mdbx() {
         let mdbx_dir = args.dir.join("mdbx");
         fs::create_dir_all(&mdbx_dir)?;
@@ -989,6 +995,7 @@ fn read_phase(
             );
             // MDBX stores the hash the writer passed. RocksDB v1 has no
             // path-hash row, so the reported hash is sha256 of the bytes.
+            // MDBX-SUBMODULE-INDEX: delete this arm. Only MDBX stores the writer hash.
             let expected = if store.stores_tx_paths() {
                 expected
             } else {
@@ -1153,6 +1160,7 @@ fn read_phase(
     let kept = kept.ok_or_else(|| eyre::eyre!("offset 0 missing after rmw"))?;
     // MDBX keeps the stored tx-path hash. RocksDB v1 reports the
     // placement data root. Offset 0 is the start of the first transaction.
+    // MDBX-SUBMODULE-INDEX: delete this arm. Only MDBX stores the tx-path hash.
     let expected_tx = if store.stores_tx_paths() {
         hash_at(0)
     } else {
@@ -1185,6 +1193,7 @@ const ROCKS_RMW_ROOT_SKIP: &str = "RocksDB v1 fills each placement's data-root r
 
 /// MDBX appends one new data-root info. RocksDB v1 does not write.
 fn rmw_root_sample(store: &SubmoduleIndex, args: &Args, i: u32) -> eyre::Result<RmwRoot> {
+    // MDBX-SUBMODULE-INDEX: make this the only path. The append below is the MDBX write.
     if !store.stores_tx_paths() {
         return Ok(RmwRoot::Skipped(ROCKS_RMW_ROOT_SKIP));
     }
@@ -2618,6 +2627,7 @@ fn parse_arg_list(args: impl IntoIterator<Item = String>) -> eyre::Result<Args> 
             workload.name()
         );
     }
+    // MDBX-SUBMODULE-INDEX: delete this refusal with the MDBX bench path. Checksums run on RocksDB only.
     if (with_crc || entropy_fill) && engines.includes_mdbx() {
         eyre::bail!("--with-crc and --entropy-fill run on rocks only");
     }

@@ -1,3 +1,4 @@
+// MDBX-SUBMODULE-INDEX: remove this file with the migrate CLI. It compares a pristine MDBX schema v1 index with the migrated schema v2 index.
 //! Compare a pristine schema v1 submodule index with a migrated v2 index.
 //!
 //! v1 answers use the pre-interval readers: the data path is stored under its

@@ -1,3 +1,4 @@
+// MDBX-SUBMODULE-INDEX: remove this binary with the v1 to v2 MDBX migration.
 //! Migrate a copy of a schema v1 submodule `db/` and print the counts.
 //!
 //! The directory name must contain `copy`. This tool never opens a live `db/`.

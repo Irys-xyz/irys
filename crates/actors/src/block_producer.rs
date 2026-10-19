@@ -2300,6 +2300,7 @@ mod tx_path_poa_tests {
     }
 
     #[test]
+    // MDBX-SUBMODULE-INDEX: delete this test with Stored(Some). Capacity still uses Stored(None), which carries no bytes.
     fn stored_path_is_copied_into_the_poa() {
         let bytes = vec![9, 8, 7];
         let solution = SolutionContext {
