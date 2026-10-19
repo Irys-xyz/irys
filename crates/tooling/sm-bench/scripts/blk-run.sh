@@ -78,9 +78,14 @@ bt=$here/blk-trace.bt
 snap=$here/extent-snap.sh
 
 # The snapshot's own process group, so TERM reaches filefrag and not only the shell.
+# `quiet` drops stdout. The farewell snapshot uses it. Stderr stays visible.
 start_snap() {
     set -m
-    "$snap" "$mnt" "$canon" "$out" &
+    if [ "${1:-}" = quiet ]; then
+        "$snap" "$mnt" "$canon" "$out" >/dev/null &
+    else
+        "$snap" "$mnt" "$canon" "$out" &
+    fi
     snap_pid=$!
     set +m
 }
@@ -153,9 +158,16 @@ cleanup() {
         wait "$bpid" 2>/dev/null || true
         bpid=
     fi
+    # A second TERM must stop the farewell snapshot. Ignoring it for the
+    # whole cleanup would leave filefrag running. This handler only stops
+    # that process group, so cleanup does not start again.
+    trap 'stop_snap' INT TERM
     if [ -n "${mnt:-}" ]; then
-        "$snap" "$mnt" "$canon" "$out" >/dev/null || true
+        start_snap quiet
+        wait "$snap_pid" || true
+        snap_pid=
     fi
+    trap '' INT TERM
     if [ -n "$spid" ]; then
         kill -TERM "$spid" 2>/dev/null || true
         wait "$spid" 2>/dev/null || true

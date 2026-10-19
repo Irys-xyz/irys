@@ -2506,6 +2506,97 @@ EOF
     rm -rf "$root"
 }
 
+# Cleanup ignores TERM on the shell, then waits for the farewell snapshot.
+# A second TERM to the blk-run pid must still stop that snapshot and its child.
+test_blk_run_second_term_stops_the_farewell_snapshot() {
+    local name=blk-run-term-farewell root err dev outer blk snap child tries
+    root=$(tmpdir)
+    err=$root/err
+    dev=$(block_dev) || {
+        bad "$name" "no loop0 or dm-0 block device"
+        rm -rf "$root"
+        return
+    }
+    prepare_blk_run_fakes "$root" "$dev"
+    hold_bpftrace "$root"
+    cat >"$root/extent-snap.sh" <<EOF
+#!/bin/bash
+n=\$(cat "$root/snap.count" 2>/dev/null || echo 0)
+n=\$((n + 1))
+printf '%s\n' "\$n" > "$root/snap.count"
+printf '%s\n' "\$\$" > "$root/snap.pid"
+if [ "\$n" -ge 2 ]; then
+    sleep 60 &
+    printf '%s\n' "\$!" > "$root/child.pid"
+    wait
+fi
+exit 0
+EOF
+    chmod +x "$root/extent-snap.sh"
+    PATH="$root/bin:$PATH" with_binds "$root/sys" "$root/extent-snap.sh" "$here/extent-snap.sh" \
+        "$here/blk-run.sh" "$dev" "$root/safe/loadtest" "$root/trace" >"$err" 2>&1 &
+    outer=$!
+    if ! wait_file "$root/snap.pid" || ! wait_file "$root/bpf.pid"; then
+        bad "$name" "startup snapshot did not start: $(cat "$err" 2>/dev/null)"
+        kill "$outer" 2>/dev/null || true
+        wait "$outer" 2>/dev/null || true
+        rm -rf "$root"
+        return
+    fi
+    blk=$(ps -o ppid= -p "$(cat "$root/bpf.pid")" | tr -d '[:space:]')
+    tries=0
+    while alive "$(cat "$root/snap.pid")"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 30 ]; then
+            bad "$name" "startup snapshot did not exit"
+            kill -9 "$blk" "$outer" 2>/dev/null || true
+            wait "$outer" 2>/dev/null || true
+            rm -rf "$root"
+            return
+        fi
+        sleep 0.1
+    done
+    if ! alive "$blk"; then
+        bad "$name" "blk-run exited before the farewell snapshot: $(cat "$err")"
+        wait "$outer" 2>/dev/null || true
+        rm -rf "$root"
+        return
+    fi
+    kill -TERM "$blk" 2>/dev/null || true
+    if ! wait_file "$root/child.pid"; then
+        bad "$name" "farewell snapshot did not start a child: count=$(cat "$root/snap.count" 2>/dev/null) $(cat "$err")"
+        kill -9 "$blk" "$outer" 2>/dev/null || true
+        wait "$outer" 2>/dev/null || true
+        rm -rf "$root"
+        return
+    fi
+    snap=$(cat "$root/snap.pid")
+    child=$(cat "$root/child.pid")
+    kill -TERM "$blk" 2>/dev/null || true
+    tries=0
+    while alive "$blk" || alive "$snap" || alive "$child"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 30 ]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if alive "$child"; then
+        bad "$name" "farewell child $child still running 3s after the second TERM"
+    elif alive "$snap"; then
+        bad "$name" "farewell snapshot $snap still running after the second TERM"
+    elif alive "$blk"; then
+        bad "$name" "blk-run $blk still running after the second TERM"
+    elif [ "$(cat "$root/snap.count")" -lt 2 ]; then
+        bad "$name" "farewell snapshot did not run: count=$(cat "$root/snap.count")"
+    else
+        ok "$name"
+    fi
+    kill -9 "$blk" "$snap" "$child" "$(cat "$root/bpf.pid" 2>/dev/null)" "$outer" 2>/dev/null || true
+    wait "$outer" 2>/dev/null || true
+    rm -rf "$root"
+}
+
 test_run_exits_1_when_the_bench_exits_1() {
     local name=run-bench-exit-1 root err dev mnt rc
     root=$(tmpdir)
