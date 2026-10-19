@@ -12,6 +12,7 @@ use eyre::{WrapErr as _, bail, ensure};
 use irys_chain::IrysNodeCtx;
 use irys_types::irys::IrysSigner;
 use irys_types::{BlockHash, IrysPeerId, NodeConfig};
+use irys_utils::listener::create_listener;
 use tracing::info;
 
 use crate::utils::{IrysNodeTest, TimeMode, coverage_adjusted_timeout};
@@ -39,22 +40,29 @@ fn adopt_wait() -> Duration {
     adjusted(3)
 }
 
-/// Listeners held until the peer node binds. The harness binds its own
-/// sockets and does not take a caller listener. `SO_REUSEADDR` does not
-/// allow both listeners on the same port, so these are dropped on the line
-/// before `start`. Holding them until then keeps the ports reserved across
-/// the genesis restart.
+/// Sockets for a pinned http port and a pinned gossip port.
+///
+/// Genesis stores the peer address before the peer boots, and a restart has
+/// to bind that same address. The harness assigns a port only inside
+/// `bind_listeners`, and its address-in-use path binds a different port, so
+/// the peer port is pinned. These sockets are moved into `start`. Releasing
+/// them and binding again leaves a window another process can take.
 struct ReservedPorts {
     http: TcpListener,
     gossip: TcpListener,
 }
 
 impl ReservedPorts {
-    fn bind() -> eyre::Result<Self> {
-        let http = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .wrap_err("setup: failed to reserve a local http port")?;
-        let gossip = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .wrap_err("setup: failed to reserve a local gossip port")?;
+    fn bind_free() -> eyre::Result<Self> {
+        Self::try_bind(0, 0).wrap_err("setup: failed to reserve local http and gossip ports")
+    }
+
+    /// `create_listener` sets `SO_REUSEADDR`, same as the node. A plain
+    /// `TcpListener::bind` can fail to reclaim a port that still has a
+    /// connection in `TIME_WAIT`.
+    fn try_bind(http_port: u16, gossip_port: u16) -> eyre::Result<Self> {
+        let http = create_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, http_port)))?;
+        let gossip = create_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, gossip_port)))?;
         Ok(Self { http, gossip })
     }
 
@@ -73,6 +81,50 @@ impl ReservedPorts {
             .wrap_err("setup: failed to read the reserved gossip port")?
             .port())
     }
+
+    fn into_listeners(self) -> (TcpListener, TcpListener) {
+        (self.http, self.gossip)
+    }
+}
+
+/// Take `http_port` and `gossip_port` as soon as the owner releases them.
+/// Shutdown still holds the sockets for part of `stop`, so this retries
+/// until both binds succeed. The returned listeners keep the ports.
+async fn reserve_exact(http_port: u16, gossip_port: u16) -> eyre::Result<ReservedPorts> {
+    ensure!(
+        http_port != 0 && gossip_port != 0,
+        "setup: cannot reserve unbound ports (http {http_port}, gossip {gossip_port})"
+    );
+    // Above the node's shutdown bound, so a slow stop is not reported as a
+    // port that stayed taken. The loop returns when the bind succeeds.
+    let deadline = Instant::now() + adjusted(90);
+    tokio::task::spawn_blocking(move || {
+        loop {
+            match ReservedPorts::try_bind(http_port, gossip_port) {
+                Ok(reserved) => return Ok(reserved),
+                Err(err) if Instant::now() >= deadline => {
+                    return Err(err).wrap_err(format!(
+                        "setup: http {http_port} and gossip {gossip_port} stayed in use"
+                    ));
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    })
+    .await
+    .wrap_err("setup: port reservation task stopped")?
+}
+
+/// Stop `node` and hold the http and gossip ports it was using.
+/// The hold starts while `stop` runs, because `stop` releases the listeners
+/// before it returns.
+async fn stop_and_hold_ports(
+    node: IrysNodeTest<IrysNodeCtx>,
+) -> eyre::Result<(IrysNodeTest<()>, ReservedPorts)> {
+    let http_port = node.cfg.http.bind_port;
+    let gossip_port = node.cfg.gossip.bind_port;
+    let (stopped, reserved) = tokio::join!(node.stop(), reserve_exact(http_port, gossip_port));
+    Ok((stopped, reserved?))
 }
 
 fn tip(node: &IrysNodeTest<IrysNodeCtx>) -> eyre::Result<(u64, BlockHash)> {
@@ -368,7 +420,7 @@ async fn start_trusted_miners()
         .await;
 
     let mut peer_config = genesis.testing_peer_with_signer(&peer_signer);
-    let reserved = ReservedPorts::bind()?;
+    let reserved = ReservedPorts::bind_free()?;
     let http_port = reserved.http_port()?;
     let gossip_port = reserved.gossip_port()?;
     peer_config.http.bind_port = http_port;
@@ -380,7 +432,7 @@ async fn start_trusted_miners()
 
     // Trust is fixed at peer-list startup. Restart genesis with the peer
     // address before the peer boots, so the peer never dials a dead genesis.
-    let mut genesis = genesis.stop().await;
+    let (mut genesis, genesis_ports) = stop_and_hold_ports(genesis).await?;
     genesis.cfg.trusted_peers = vec![peer_addr];
     // Hydration on the pull client records success and closes the breaker.
     // The restart test opens that breaker and then mines. This interval
@@ -388,7 +440,11 @@ async fn start_trusted_miners()
     // The peer config was copied before this assignment and keeps the
     // default interval.
     genesis.cfg.sync.periodic_sync_check_interval_secs = PULL_BREAKER_QUIET_SECS;
-    let genesis = genesis.start_and_wait_for_packing("GENESIS", 20).await;
+    let (genesis_http, genesis_gossip) = genesis_ports.into_listeners();
+    let genesis = genesis
+        .with_listeners(genesis_http, genesis_gossip)
+        .start_and_wait_for_packing("GENESIS", 20)
+        .await;
     ensure!(
         genesis.get_gossip_addr() == trusted_genesis.gossip,
         "setup: genesis gossip address changed on restart (was {}, now {})",
@@ -402,9 +458,11 @@ async fn start_trusted_miners()
         genesis.get_peer_addr()
     );
 
-    // Drop on this line. `start` binds the same ports.
-    drop(reserved);
-    let peer = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
+    let (peer_http, peer_gossip) = reserved.into_listeners();
+    let peer = IrysNodeTest::new(peer_config)
+        .with_listeners(peer_http, peer_gossip)
+        .start_with_name("PEER")
+        .await;
     let peer_id = peer.node_ctx.config.peer_id();
     let genesis_peer_id = genesis.node_ctx.config.peer_id();
     wait_until_peer_online(&genesis, peer_id, adjusted(30)).await?;
@@ -422,14 +480,18 @@ async fn slow_heavy_restarted_peer_block_converges_before_migration() -> eyre::R
     let gossip_addr = peer.get_gossip_addr();
     let api_addr = peer.get_peer_addr();
 
-    let peer = peer.stop().await;
+    let (peer, peer_ports) = stop_and_hold_ports(peer).await?;
     // `stop` is the proof the process is down. The online flag moves only
     // when the sync-check hydration probes this pull client. That pass stays
     // quiet for the rest of the test, so it cannot record success and close
     // the breaker opened after startup sync. The flag can stay true while
     // the process is down. It is not the signal this test waits on.
 
-    let peer = peer.start_with_name("PEER").await;
+    let (peer_http, peer_gossip) = peer_ports.into_listeners();
+    let peer = peer
+        .with_listeners(peer_http, peer_gossip)
+        .start_with_name("PEER")
+        .await;
     ensure!(
         peer.node_ctx.config.peer_id() == peer_id,
         "setup: peer id changed on restart"
