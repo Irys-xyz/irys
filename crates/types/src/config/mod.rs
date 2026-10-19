@@ -1417,7 +1417,54 @@ mod tests {
         let cfg = NodeConfig::testing();
         let enc = toml::to_string_pretty(&cfg).unwrap();
         let dec: NodeConfig = toml::from_str(&enc).unwrap();
-        assert_eq!(cfg, dec);
+        let mut expected = cfg;
+        // Unread keys are accepted and not written back.
+        expected.storage.entropy_sweep_interval_millis = 1000;
+        expected.storage.drop_recall_page_cache = false;
+        // A config file cannot change the two read sizes.
+        expected.storage.entropy_read_batch_bytes = node::DEFAULT_ENTROPY_SWEEP_MAX_BYTES;
+        expected.storage.entropy_readahead_bytes = node::DEFAULT_ENTROPY_SWEEP_MAX_BYTES;
+        assert_eq!(expected, dec);
+    }
+
+    /// Older configs may still name these keys. The two unread keys parse and
+    /// are not written back. A node file cannot change the two read sizes:
+    /// both stay at the sweep cap. Code can still assign those fields.
+    #[test]
+    fn ignored_storage_keys_parse_and_read_sizes_stay_at_the_sweep_cap() {
+        let raw = r#"
+            entropy_sweep_interval_millis = 5
+            drop_recall_page_cache = true
+            entropy_read_batch_bytes = 1
+            entropy_readahead_bytes = 1
+        "#;
+        let cfg: StorageSyncConfig = toml::from_str(raw).expect("older keys must still parse");
+        assert_eq!(cfg.entropy_sweep_interval_millis, 5);
+        assert!(cfg.drop_recall_page_cache);
+        assert_eq!(
+            cfg.entropy_read_batch_bytes,
+            node::DEFAULT_ENTROPY_SWEEP_MAX_BYTES,
+            "entropy_read_batch_bytes is still an operator knob"
+        );
+        assert_eq!(
+            cfg.entropy_readahead_bytes,
+            node::DEFAULT_ENTROPY_SWEEP_MAX_BYTES,
+            "entropy_readahead_bytes is still an operator knob"
+        );
+        let written = toml::to_string(&cfg).unwrap();
+        assert!(
+            !written.contains("entropy_sweep_interval_millis"),
+            "{written}"
+        );
+        assert!(!written.contains("drop_recall_page_cache"), "{written}");
+        assert!(!written.contains("entropy_read_batch_bytes"), "{written}");
+        assert!(!written.contains("entropy_readahead_bytes"), "{written}");
+
+        let mut overridden = StorageSyncConfig::default();
+        overridden.entropy_read_batch_bytes = 256 * 1024;
+        overridden.entropy_readahead_bytes = 0;
+        assert_eq!(overridden.entropy_read_batch_bytes, 256 * 1024);
+        assert_eq!(overridden.entropy_readahead_bytes, 0);
     }
 
     /// Minimal-but-complete `NodeConfig` TOML fixture missing only the

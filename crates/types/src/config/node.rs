@@ -588,9 +588,10 @@ pub struct StorageSyncConfig {
     /// floored at 256 chunks so a small `num_writes_before_sync` cannot stall
     /// the worker on the storage service's idle flush.
     pub max_pending_write_bytes: Option<u64>,
-    /// Parsed so existing configs keep this key. A queued entropy sweep runs
-    /// when the disk is free. The disk lane does not wait out this interval.
-    #[serde(default = "default_entropy_sweep_interval_millis")]
+    /// Parsed so an older config that set this key still loads. A queued
+    /// entropy sweep runs when the disk is free. The disk lane does not read
+    /// this value, and it is not written back.
+    #[serde(default = "default_entropy_sweep_interval_millis", skip_serializing)]
     pub entropy_sweep_interval_millis: u64,
     /// Max bytes of one entropy pread. A hold is at least one chunk.
     /// A coalesced packed `pwrite` uses its own cap. A non-coalesced pwrite
@@ -613,16 +614,28 @@ pub struct StorageSyncConfig {
     /// Bytes a span must cover before it is read without
     /// [`Self::entropy_read_grace_ms`].
     ///
-    /// [`Self::entropy_sweep_max_bytes`] still limits the pread. `0` treats
-    /// every span as large enough to issue at once.
-    #[serde(default = "default_entropy_read_batch_bytes")]
+    /// [`Self::entropy_sweep_max_bytes`] still limits the pread. A config
+    /// file that sets this key still loads, and the loaded value is the
+    /// sweep cap. Tests and the bench assign the field in code. `0` on that
+    /// path treats every span as large enough to issue at once.
+    #[serde(
+        default = "default_entropy_read_batch_bytes",
+        skip_serializing,
+        deserialize_with = "freeze_entropy_bytes_at_sweep_cap"
+    )]
     pub entropy_read_batch_bytes: u64,
     /// Extra bytes a short ingress span may read past its last queued chunk.
     ///
     /// The whole pread still stops at [`Self::entropy_sweep_max_bytes`], at
     /// the transaction's last chunk in this module, and at the submodule.
-    /// The extra entropy is cached. `0` does not read ahead.
-    #[serde(default = "default_entropy_readahead_bytes")]
+    /// A config file that sets this key still loads, and the loaded value is
+    /// the sweep cap. Tests and the bench assign the field in code. `0` on
+    /// that path does not read ahead.
+    #[serde(
+        default = "default_entropy_readahead_bytes",
+        skip_serializing,
+        deserialize_with = "freeze_entropy_bytes_at_sweep_cap"
+    )]
     pub entropy_readahead_bytes: u64,
     /// Cap, in bytes, on the per-module entropy read-ahead cache.
     ///
@@ -702,8 +715,8 @@ pub struct StorageSyncConfig {
     #[serde(default = "default_durable_headroom_permille")]
     pub durable_headroom_permille: u64,
     /// Accepted so an older config that set this key still loads.
-    /// The value is ignored. Recall pages stay cached.
-    #[serde(default)]
+    /// The value is ignored and is not written back. Recall pages stay cached.
+    #[serde(default, skip_serializing)]
     pub drop_recall_page_cache: bool,
     /// When true, mining recall reads `chunks.dat` through a second read-only
     /// descriptor opened with `O_DIRECT`.
@@ -850,6 +863,19 @@ fn default_entropy_read_batch_bytes() -> u64 {
 
 fn default_entropy_readahead_bytes() -> u64 {
     DEFAULT_ENTROPY_READAHEAD_BYTES
+}
+
+/// Accept a configured read size and keep the sweep cap.
+///
+/// One pread cannot pass [`DEFAULT_ENTROPY_SWEEP_MAX_BYTES`]. A smaller
+/// value is not a node-config knob. Tests and the bench assign the field
+/// in code, which does not go through this function.
+fn freeze_entropy_bytes_at_sweep_cap<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _configured = u64::deserialize(deserializer)?;
+    Ok(DEFAULT_ENTROPY_SWEEP_MAX_BYTES)
 }
 
 fn default_entropy_readahead_cache_bytes() -> u64 {
