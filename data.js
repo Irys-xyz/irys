@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792410134275,
+  "lastUpdate": 1792452353557,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -17539,6 +17539,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ed9c9426cf795e7330ccfb2dde0fadc1aab17459",
+          "message": "fix(p2p): recover peers behind an open circuit breaker so a restart cannot fork the chain (#1645)\n\n* fix(utils): stop a half-open circuit breaker from refusing a peer forever\n\nA half-open breaker leaves that state only on a recorded success or\nfailure. A trial taken without a recorded outcome (a filter check, a\nbackpressure reply, a cancelled request) was never given back. After\n`recovery_attempts` such trials the breaker refused the peer for the\nlife of the process.\n\n- An exhausted trial window opens again once `cooldown_duration` has\n  passed since the last grant. One CAS on the grant stamp picks the\n  single caller that resets the window.\n- A recorded half-open failure keeps the window exhausted, so the next\n  grant waits for the cooldown.\n- Add `would_allow`: a check for filters that changes no state and\n  takes no trial.\n- Add `begin_probe`: a trial that ignores the open cooldown, still\n  capped at `recovery_attempts` per window.\n\n* fix(p2p): let a peer behind an open circuit breaker recover\n\n- The health check no longer consults the breaker. Its GET is the\n  probe that closes the breaker. The inactive-peer loop and the hydrate\n  pass already limit its rate.\n- A `GossipDisabled` health reply records breaker success: the peer is\n  reachable while it syncs. The peer stays offline until it serves\n  gossip again.\n- Pull-candidate selection uses `would_allow`, so the filter takes no\n  half-open trial. A pull, including the transaction pulls of a V1\n  block body, takes one trial in total.\n- Pull outcomes: an accepted pull marks the peer online. A\n  backpressure, handshake or gossip-disabled reply closes the breaker\n  without a score change. Any other rejection records a failure.\n- The body pull from the peer that pushed the header uses\n  `begin_probe`. An authenticated push shows the peer can reach us;\n  this pull shows we can reach it. Network fan-out and broadcast still\n  respect the cooldown.\n\n* fix(p2p): retry a gossiped block whose body pull failed\n\nThe seen cache records a block hash before its body is pulled. If the\npull failed, every later copy of that block was skipped as already\nseen until the cache entry expired, which is after migration.\n\nSkip a seen block only when the block pool or block tree already holds\nit, or when a body pull for it is still running. A guard keeps one\nbody pull per hash and clears its mark on every exit. The seen entry\nstays, because it is the broadcast-exclusion set.\n\n* fix(p2p): ask every trusted peer in the periodic behind-check\n\nThe check asked only trusted peers marked online. With every trusted\npeer marked offline, the check failed each time and could not see that\nthe node had fallen behind.\n\nQuery the configured trusted set in parallel, without regard to the\nonline flag. Untrusted peers are still never asked.\n\n* fix: agents.md\n\n* test(chain-tests): a restarted or syncing peer's block must not fork the chain\n\nTwo nodes trust each other. The block-pull circuit breaker for the\npeer is opened with failed health dials. The peer then mines inside\nthe cooldown.\n\n- Restart: the peer stops and restarts on the same data dir and peer\n  id, finishes startup sync, then mines.\n- Gossip disabled: the peer turns broadcast off (the startup-sync\n  health shape), then turns it back on and mines.\n\nBoth tests require the two nodes to reach the same tip before either\nside moves `block_migration_depth` blocks past the shared ancestor.\nWithout the breaker and body-pull fixes, the node rejects the peer's\nblock with \"No peers available\" and the tips diverge.\n\n* fix(p2p): keep a gossip-disabled peer online\n\nA `GossipDisabled` health reply means the peer will not gossip to the\nrest of the network, for example during startup sync. The peer still\naccepts pushes and serves pulls. Treating it as unhealthy marked the\npeer offline and cut its score on every 10 s probe, which removed it\nfrom pull and sync selection long after it recovered.\n\nReturn `AnsweredNotServing`: the breaker closes, the peer stays\nonline, and its score is unchanged, so it ranks below peers that do\ngossip.\n\n* fix(p2p): start a periodic sync only when a trusted peer is online\n\nThe behind-check asks every configured trusted peer, so it can report\n\"behind\" while all of them are flagged offline. The sync it starts\nreads only online trusted peers: it paused the VDF, turned broadcast\noff, waited for active peers, then skipped, every 30 s.\n\nStart the sync only when at least one trusted peer is online.\nOtherwise log an error and leave mining running.\n\n* fix(p2p): retry a failed body pull from senders that arrived during it\n\nOne body pull owns a block hash. A later arrival of the same header\nwas dropped and its sender told \"accepted\", so if the owning pull\nfailed, nobody retried and the block was missing until a child asked\nfor it.\n\n- A later arrival records its sender (deduplicated, at most 8). If the\n  owning pull fails, each recorded sender is dialed in arrival order on\n  the source-peer path, including senders that arrive during those\n  retries.\n- A body that arrives in a POST is processed even while a pull runs.\n- A block the pool requested pulls even while another pull runs, so\n  the requester gets a real result.\n\nGossip dedup cuts duplicate traffic but must not cost a block: a\nduplicate pull is cheaper than a fork.\n\n* fix(p2p): take one breaker trial per push and count soft replies as reachable\n\nEach rate-limit retry inside a push took another half-open trial, and\na rate-limited, handshake-required or gossip-disabled reply recorded\nnothing. One push to a recovering peer could use the whole trial\nwindow, so the source-peer body pull was refused for a full cooldown.\n\nAdmit the peer once per push, before the retry loop. Treat those soft\nreplies as reachable and record breaker success, as the pull path\ndoes. Score, online flag and seen-cache are unchanged.\n\n* chore(p2p): correct seen-skip logs and comment; share a test peer builder\n\n- The seen-skip log lines now say what the rule is: seen, not\n  requested, and already known locally.\n- The reprocess comment in the header path states when a re-gossiped\n  parked block reaches the reprocess hook.\n- Move the peer builder added by the new body-pull and behind-check\n  tests into the shared p2p test utils.\n\n* test(chain-tests): assert pull-breaker state in the peer recovery tests\n\n- The restart test opens the block-pull breaker after the peer's\n  startup sync and asserts it is open right before the peer mines, so\n  the test depends on the source-peer body pull alone.\n- The gossip-disabled test asserts the breaker stays closed after\n  `GossipDisabled` replies and that the peer's block is adopted.\n- Read breaker state from the client's metrics instead of matching\n  debug text. Keep port reservations until the peer binds, scale the\n  adoption wait for coverage runs, and check adoption separately from\n  the fork assertion.\n- Give the in-flight body-pull unit test a load-scaled wait.\n\n* fix(p2p): drop the one-pull-per-hash guard; keep another pull's cached block\n\nThe guard let one body pull own a block hash. Later arrivals recorded\ntheir sender and returned Ok, which sync-path callers read as handled,\nso they stopped trying other peers. Its sender cap, retry loop and\ncancel path each had a way to lose a block. It only saved duplicate\nbody downloads.\n\n- Every header arrival that the seen-skip and the block pool's dedup\n  do not stop runs its own body pull. Duplicate pulls are accepted;\n  dedup stops a second process_block.\n- A failed parent request still clears its requested bit, but removes\n  the cache entry only when no other path holds the block.\n\n* fix(p2p): start a periodic sync only with a usable trusted peer\n\nA peer in startup sync now stays online, but sync_chain refuses peers\nwhose /info reports is_syncing and waits only on active peers. The\nperiodic check could still spawn a sync with no usable peer: the\nspawn paused the VDF and set is_syncing before the refusal, so mining\nstopped for part of every interval with no progress.\n\n- The behind-check takes the best height only from trusted peers that\n  answered as not syncing.\n- The sync starts only if one of those peers is active. Otherwise the\n  check logs the local height, the best trusted height and that peer.\n- If every trusted peer that answered is syncing, the check does not\n  start a sync and does not pause the VDF.\n\n* fix(p2p): share one breaker between the gossip clients; answered health is reachable\n\nThe node built two gossip clients, each with its own circuit breaker.\nThe inactive-peer health loop recorded outcomes on one; pulls,\nbroadcast and hydrate used the other. A recovered peer was marked\nonline while pushes to it stayed refused until hydrate or the\ncooldown.\n\n- Build one breaker manager at node startup and pass it to both\n  clients. The existing constructors keep a private manager.\n- RateLimited and HandshakeRequired health replies record breaker\n  success, as GossipDisabled does: the peer answered.\n- Remove the three paths that marked a peer offline on a\n  GossipDisabled pull or whitelist reply.\n- Correct the AnsweredNotServing, hydrate and inactive-peer docs and\n  log text.\n- Lock that pull-candidate selection does not take a recovery trial.\n\n* fix(p2p): rank peers that do not gossip after peers that do, for pulls\n\nA peer whose health reply is GossipDisabled stays online with its\nscore unchanged, but it should rank below peers that gossip. Pull\nselection shuffled every candidate equally, so during a rolling\nrestart the one serving peer could miss every sample of 5.\n\n- Keep an in-memory not_gossiping set on the peer list: marked on a\n  GossipDisabled health reply, cleared on Healthy, on an accepted\n  pull, and when the peer is removed. It is not persisted.\n- Pull selection shuffles, then puts gossiping peers first and keeps\n  not_gossiping peers as fill, before the breaker filter and the cap.\n\n* fix(p2p): let a parked block's re-gossip and sync pull reach reprocess\n\nThe seen-skip treated any block in the pool cache as already held,\nincluding a parked orphan whose parent was missing. For the 300 s\nseen TTL every re-gossip and every sync pull of that block returned\nOk before the reprocess path, so its parent was not requested again\nand sync logged success while the node mined on.\n\nA parked block (in the cache, not processing, not recently processed,\nnot in the tree) now falls through to the signature check and\ndedup_and_maybe_emit_reprocess, whose per-block cooldown bounds the\nretry. Blocks that are processing, recently processed or in the tree\nare still skipped.\n\n* fix(p2p): warn when the node is behind a trusted peer that is syncing\n\nHeights from trusted peers that report is_syncing do not count as\n\"behind\", because sync cannot use them, so the check stayed quiet\nwhile the node mined on a stale tip.\n\nRecord the best height among syncing trusted peers too, and warn with\nthe local height, that height and the peer when the gap passes the\nsync threshold. The decision to start a sync is unchanged: no sync and\nno VDF pause without an active trusted peer that is not syncing.\n\n* fix(utils): keep the open cooldown for ordinary half-open admission\n\n- begin_probe may move a breaker to half-open during the open\n  cooldown. is_available then handed the remaining trials to ordinary\n  pushes and pulls, which could use them up and lock the source probe\n  out for a further cooldown. In half-open, is_available and\n  would_allow now wait out the open cooldown; only begin_probe skips\n  it.\n- The grant that fills the trial window stores its stamp before it\n  publishes the full count, so a concurrent reset that sees a full\n  window also sees the new stamp and cannot open a second window.\n- At capacity, would_allow refuses an untracked key, as is_available\n  does, so the pull filter does not select a peer admission will\n  refuse.\n\n* test(chain-tests): hold the recovery tests' ports until the node binds\n\nThe peer recovery tests pin the peer's ports because genesis stores\nthe peer address before the peer boots. They released the reserved\nsockets before start and before each restart, so another process\ncould take a port, and a pinned port skips the harness's bind retry.\n\nAdd an optional `with_listeners` hook to the test harness so `start`\nuses sockets the test already holds. The tests reserve the ports up\nfront and re-take them while `stop` releases them.\n\n* fix(p2p): start a periodic sync only from a trusted peer that is ahead\n\nThe sync-start check accepted any active, non-syncing trusted peer,\neven one at our own height. If the peer that reported the higher tip\nwas inactive, the node paused the VDF and started a sync that could\nnot reach that tip, and repeated it every interval.\n\nCount a trusted peer as a sync source only when it is not syncing and\nits own index height is past the gap that makes the node \"behind\".\nThe sync starts only if one of those peers is active.\n\n* test(chain-tests): default public ports when the harness uses held listeners\n\n`bind_listeners` sets an unset public port to the bound port. The\nheld-listener path in `start` skipped that, so a caller that left a\npublic port at 0 would advertise port 0. Apply the same defaulting.\n\n* fix(p2p): check and claim a block for processing under one lock\n\nprocess_block checked is_processing under one cache lock and inserted\nthe block under another. Two concurrent arrivals of the same block\ncould both pass the check and both run prevalidation, including the\nVDF checkpoint checks. The block tree accepts a block once, so this\ncost CPU, not correctness.\n\nDo the check and the insert under one write lock. The losing call\ngets the same AlreadyProcessed advisory it gets when it arrives a\nmoment later. A parked block is not processing, so a later arrival\ncan still retry it.",
+          "timestamp": "2026-10-20T00:07:34+01:00",
+          "tree_id": "b120ed0ac01331504178ce971ac7547b0782e975",
+          "url": "https://github.com/Irys-xyz/irys/commit/ed9c9426cf795e7330ccfb2dde0fadc1aab17459"
+        },
+        "date": 1792452350684,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011953,
+            "range": "± 0.000051",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120085,
+            "range": "± 0.000354",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.205756,
+            "range": "± 0.016567",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.949391,
+            "range": "± 0.06966",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074777,
+            "range": "± 0.000711",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 750.398379,
+            "range": "± 3.408681",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 981.947348,
+            "range": "± 34.469912",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117642,
+            "range": "± 0.000574",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1179.718152,
+            "range": "± 8.826312",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1550.887905,
+            "range": "± 9.460531",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033871,
+            "range": "± 0.001539",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.710593,
+            "range": "± 1.779849",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.57828,
+            "range": "± 1.569927",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
