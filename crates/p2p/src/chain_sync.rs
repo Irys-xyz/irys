@@ -409,8 +409,15 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     debug!("Periodic sync check: service is shutting down, not starting a sync");
                     return;
                 }
-                info!("Periodic sync check: We're behind the network, starting sync");
-                self.spawn_chain_sync_task(None, false);
+                let online_trusted_peer_count = self.peer_list.online_trusted_peers().len();
+                if should_start_periodic_sync(true, online_trusted_peer_count) {
+                    info!("Periodic sync check: We're behind the network, starting sync");
+                    self.spawn_chain_sync_task(None, false);
+                } else {
+                    error!(
+                        "Periodic sync check: local index is behind trusted peers but none is online; not starting a sync"
+                    );
+                }
             }
             Ok(false) => {
                 debug!("Periodic sync check: We're up to date with the network");
@@ -1888,6 +1895,16 @@ async fn get_block_index(
     ))
 }
 
+/// Whether the periodic behind-check should start a chain sync.
+///
+/// The behind-check can be true while every trusted peer is offline, because
+/// it queries the configured set. `sync_chain` reads only online trusted
+/// peers. A sync with none online pauses the VDF and turns broadcast off, then
+/// skips.
+fn should_start_periodic_sync(behind: bool, online_trusted_peer_count: usize) -> bool {
+    behind && online_trusted_peer_count > 0
+}
+
 /// Check if the local index is behind trusted peers. Returns true if behind, false if up to date.
 async fn is_local_index_is_behind_trusted_peers(
     config: &Config,
@@ -3287,6 +3304,30 @@ mod tests {
             assert!(
                 msg.contains("Wasn't able to fetch node info from any of the trusted peers"),
                 "unexpected error message: {msg}"
+            );
+        }
+
+        /// `sync_chain` only uses online trusted peers. A behind result with
+        /// none online must not start a sync: the spawn pauses the VDF and
+        /// turns broadcast off, then skips.
+        #[test]
+        fn behind_with_no_online_trusted_peer_does_not_start_a_sync() {
+            assert!(
+                !should_start_periodic_sync(true, 0),
+                "no online trusted peer means the sync cannot make progress"
+            );
+            assert!(
+                !should_start_periodic_sync(false, 0),
+                "an up-to-date index does not start a sync"
+            );
+        }
+
+        #[test]
+        fn behind_with_an_online_trusted_peer_starts_a_sync() {
+            assert!(should_start_periodic_sync(true, 1));
+            assert!(
+                !should_start_periodic_sync(false, 1),
+                "an online trusted peer does not start a sync when the index is up to date"
             );
         }
     }
