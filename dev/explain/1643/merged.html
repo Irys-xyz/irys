@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR #1643 — reject price quotes over the max data tx size</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e3e6ec;
+    --muted: #9aa3b2;
+    --accent: #5fb3f9;
+    --warn-bg: #3a2a12;
+    --warn-border: #a9711f;
+    --info-bg: #10263a;
+    --info-border: #1f5a8a;
+    --code-bg: #0b0d12;
+    --green: #5fd98a;
+    --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 24px 20px 80px; }
+  header.page-header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+    margin-bottom: 20px;
+  }
+  header.page-header h1 { font-size: 1.5rem; margin: 0 0 8px; }
+  header.page-header .meta { color: var(--muted); font-size: 0.9rem; }
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 28px;
+  }
+  nav.toc h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0 0 8px; }
+  nav.toc ul { margin: 0; padding-left: 20px; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section { margin-bottom: 36px; }
+  section h2 {
+    font-size: 1.15rem;
+    border-left: 4px solid var(--accent);
+    padding-left: 10px;
+    margin-bottom: 14px;
+  }
+  code, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.92em; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  a.cite {
+    color: var(--accent);
+    text-decoration: none;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 0.9em;
+    border-bottom: 1px dotted var(--accent);
+  }
+  a.cite:hover { border-bottom-style: solid; }
+  ul.changemap, ul.watch { padding-left: 0; list-style: none; }
+  ul.changemap li, ul.watch li {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+  }
+  .theme-name { font-weight: 600; color: var(--text); }
+  .files { color: var(--muted); }
+  .callout {
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 14px 0;
+    border: 1px solid;
+  }
+  .callout.info { background: var(--info-bg); border-color: var(--info-border); }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+  .callout strong { display: block; margin-bottom: 4px; }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+    margin: 16px 0;
+  }
+  .flow .box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    min-width: 160px;
+    flex: 1 1 160px;
+  }
+  .flow .box h4 { margin: 0 0 6px; font-size: 0.85rem; color: var(--accent); }
+  .flow .box .data { font-family: monospace; font-size: 0.85rem; color: var(--muted); }
+  .flow .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 8px;
+    color: var(--muted);
+    font-size: 1.4rem;
+    flex: 0 0 auto;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .badge.before { background: #3a1f1f; color: var(--red); }
+  .badge.after { background: #1f3a26; color: var(--green); }
+  p.lead { font-size: 1.02rem; }
+  footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); padding-top: 14px; margin-top: 40px; }
+  @media (max-width: 600px) {
+    .flow { flex-direction: column; }
+    .flow .arrow { transform: rotate(90deg); padding: 4px 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page-header">
+  <h1>Price endpoint now rejects data sizes no transaction could ever carry</h1>
+  <div class="meta">
+    PR #1643 · <span class="mono">fix(api): reject price quotes over the max data tx size</span><br>
+    Repo root for citations: checkout at commit
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399">9df1c80e7</a>
+    · Mode: <strong>summary</strong> · Generated 2026-10-19
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ul>
+    <li><a href="#what-why">What it does / Why</a></li>
+    <li><a href="#change-map">Change map</a></li>
+    <li><a href="#behavior-changes">Behavior changes</a></li>
+    <li><a href="#watch-out">Watch out for</a></li>
+  </ul>
+</nav>
+
+<section id="what-why">
+  <h2>What it does &amp; why</h2>
+  <p class="lead">
+    <code>GET /v1/price/{ledger}/{size}</code> rounds the requested size up to a whole number
+    of chunks before computing a fee quote. That round-up used an unchecked
+    <code>div_ceil(chunk_size) * chunk_size</code> — for a <code>size</code> near
+    <code>u64::MAX</code> the multiply overflows. The PR adds a bounds check: if the
+    requested size's chunk count exceeds
+    <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399/crates/api-server/src/routes/price.rs#L60">crates/api-server/src/routes/price.rs:60</a>
+    <code>consensus.mempool.max_data_tx_chunks</code> (the same cap mempool ingress and
+    consensus prevalidation already enforce on real transactions, from #1533), the route
+    now returns <code>400</code> before the multiply ever runs.
+  </p>
+  <div class="callout warn">
+    <strong>Why — stated intent (PR description &amp; commit message)</strong>
+    The build profile mainnet runs (<code>debug-release</code>, and <code>[profile.release]</code>
+    with <code>overflow-checks = true</code>) panics on integer overflow, and the panic hook
+    aborts the whole node. An unauthenticated client exploited this by requesting a price
+    quote for a size near <code>u64::MAX</code>, crash-looping mainnet nodes on 2026-10-18.
+    This is a hotfix port of #1640 (already merged to mainnet) onto <code>release/4.x</code>.
+  </div>
+</section>
+
+<section id="change-map">
+  <h2>Change map</h2>
+  <ul class="changemap">
+    <li>
+      <span class="theme-name">Bound the chunk count before multiplying</span>
+      (<span class="files"><code>crates/api-server/src/routes/price.rs</code></span>) —
+      compute <code>chunks = max(chunk_size, bytes_to_store).div_ceil(chunk_size)</code>,
+      reject with <code>400</code> if <code>chunks &gt; max_data_tx_chunks</code>, and only
+      then compute <code>bytes_to_store = chunks * chunk_size</code>. The overflow-prone
+      multiply now only ever runs on an already-bounded <code>chunks</code> value. See
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399/crates/api-server/src/routes/price.rs#L53-L71">crates/api-server/src/routes/price.rs:53-71</a>.
+    </li>
+    <li>
+      <span class="theme-name">Regression test for the crash and the new boundary</span>
+      (<span class="files"><code>crates/chain-tests/src/api/pricing_endpoint.rs</code></span>) —
+      new test <code>heavy_pricing_endpoint_rejects_size_over_max_tx_size</code> asserts
+      exactly-max-size succeeds (200), one byte over fails (400),
+      <code>u64::MAX</code> fails (400) instead of crashing the process, and the node still
+      answers a normal request afterward. See
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399/crates/chain-tests/src/api/pricing_endpoint.rs#L183-L215">crates/chain-tests/src/api/pricing_endpoint.rs:183-215</a>.
+    </li>
+  </ul>
+
+  <div class="flow">
+    <div class="box">
+      <h4>Client request</h4>
+      <div class="data">GET /v1/price/0/18446744073709551615</div>
+    </div>
+    <div class="arrow">&#8594;</div>
+    <div class="box">
+      <h4>chunks = div_ceil</h4>
+      <div class="data">chunks ≈ 7.2 × 10¹⁵</div>
+    </div>
+    <div class="arrow">&#8594;</div>
+    <div class="box">
+      <h4>Bounds check (new)</h4>
+      <div class="data">chunks &gt; max_data_tx_chunks (20,971,520)?</div>
+    </div>
+    <div class="arrow">&#8594;</div>
+    <div class="box">
+      <h4>Response</h4>
+      <div class="data">400 Bad Request<br>(before: overflow panic → node abort)</div>
+    </div>
+  </div>
+</section>
+
+<section id="behavior-changes">
+  <h2>Behavior changes</h2>
+  <ul>
+    <li>
+      <strong>Requests with chunk count &gt; <code>max_data_tx_chunks</code>:</strong>
+      previously the multiply <code>chunks * chunk_size</code> ran unconditionally and
+      could overflow <code>u64</code> for sizes near <code>u64::MAX</code>, which — under
+      the overflow-checked build profile mainnet runs — panicked and aborted the node
+      <span class="badge before">before: crash</span> &#8594; now the route returns
+      <code>400 Bad Request</code> with a message naming the byte limit, and the node
+      keeps serving other requests
+      <span class="badge after">after: 400</span>.
+    </li>
+    <li>
+      <strong>Requests with chunk count ≤ <code>max_data_tx_chunks</code> (including
+      exactly at the max):</strong> unchanged — still rounds up to the next whole chunk
+      and returns a <code>200</code> price quote, per the test's exactly-at-max-size
+      assertion at
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399/crates/chain-tests/src/api/pricing_endpoint.rs#L193-L195">crates/chain-tests/src/api/pricing_endpoint.rs:193-195</a>.
+    </li>
+    <li>
+      <strong>Error message shape:</strong> new 400 responses for oversized requests now
+      carry the text <code>"Data size exceeds the maximum transaction size of {n} bytes"</code>,
+      a response shape that did not exist on this route before (previously no request could
+      reach this particular rejection path).
+    </li>
+  </ul>
+</section>
+
+<section id="watch-out">
+  <h2>Watch out for</h2>
+  <ul class="watch">
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399/crates/api-server/src/routes/price.rs#L65">crates/api-server/src/routes/price.rs:65</a>
+      — the error message computes <code>max_chunks * chunk_size</code> to report the byte
+      limit; this is the same multiply shape that overflowed in the bug being fixed, just
+      with <code>max_chunks</code> (a fixed, small, config-bounded value — 5 TiB / chunk_size
+      on mainnet) instead of the unbounded user-supplied <code>chunks</code>. It cannot
+      overflow with today's config values, but it is a non-overflow-checked multiply sitting
+      one line below a fix for an overflow bug, so a future config change to
+      <code>max_data_tx_chunks</code> or <code>chunk_size</code> is worth a mental note here.
+    </li>
+    <li>
+      <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399/crates/api-server/src/routes/price.rs#L61">crates/api-server/src/routes/price.rs:61</a>
+      — the new check is placed after the <code>DataLedger::try_from</code> conversion but
+      before the per-ledger match (Publish / Submit / term ledgers); a reviewer should
+      confirm the <code>Submit</code> / term-ledger branches don't have their own,
+      independent path to the same overflow (this diff only touches the single shared
+      check before the match, so if another code path recomputed chunk counts separately
+      it would not be covered — worth a dedicated code-review pass to confirm there is no
+      such second path).
+    </li>
+  </ul>
+</section>
+
+<footer>
+  PR #1643 · Irys-xyz/irys · citations resolve against commit
+  <a class="cite" href="https://github.com/Irys-xyz/irys/blob/9df1c80e778a0eab1816d965ba631afb1277e399">9df1c80e7</a>
+  (merge commit, CI mode).
+</footer>
+
+</div>
+</body>
+</html>
