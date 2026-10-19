@@ -650,11 +650,6 @@ fn get_block_offsets_in_ledger(
         start_chunk_offset
     };
 
-    // debug!(
-    //     "get_block_range - {} {}",
-    //     start_chunk_offset, end_chunk_offset
-    // );
-
     LedgerChunkRange(ii(
         LedgerChunkOffset::from(start_chunk_offset),
         LedgerChunkOffset::from(end_chunk_offset),
