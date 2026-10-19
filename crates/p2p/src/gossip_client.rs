@@ -4237,9 +4237,17 @@ mod tests {
             assert!(!client.circuit_breaker.is_available(&peer_id));
         }
 
-        /// Two recovery trials. `begin_probe` spends the first, so the push
-        /// has one left. The cooldown is longer than the rate-limit backoff,
-        /// so a retry cannot refill the window.
+        /// Longer than the rate-limit backoff, so a push that takes the last
+        /// half-open trial cannot refill that window before the test checks.
+        const PUSH_TRIAL_COOLDOWN: Duration = Duration::from_secs(3);
+
+        /// Ordinary admission waits out the open cooldown. `begin_probe` does not.
+        async fn wait_out_open_cooldown() {
+            tokio::time::sleep(PUSH_TRIAL_COOLDOWN + Duration::from_millis(500)).await;
+        }
+
+        /// Two recovery trials. `begin_probe` spends the first after the open
+        /// cooldown, so the push has one left.
         fn client_with_one_push_trial_left() -> GossipClient {
             use irys_utils::circuit_breaker::{FailureThreshold, RecoveryAttempts};
             use std::num::NonZeroU32;
@@ -4247,7 +4255,7 @@ mod tests {
             let mut config = CircuitBreakerConfig::p2p_defaults();
             config.failure_threshold = FailureThreshold::new(NonZeroU32::new(1).expect("1"));
             config.recovery_attempts = RecoveryAttempts::new(NonZeroU32::new(2).expect("2"));
-            config.cooldown_duration = Duration::from_secs(60);
+            config.cooldown_duration = PUSH_TRIAL_COOLDOWN;
             GossipClient::with_circuit_breaker_config(
                 Duration::from_secs(2),
                 IrysAddress::from([3_u8; 20]),
@@ -4444,6 +4452,7 @@ mod tests {
             let (peer_list, peer_id, _, initial_score) = peer_aimed_at(4, server.addr);
             let cache = GossipCache::new();
             client.circuit_breaker.record_failure(&peer_id);
+            wait_out_open_cooldown().await;
             assert!(
                 client.circuit_breaker.begin_probe(&peer_id),
                 "precondition: half-open, one trial spent, one left"
@@ -4480,6 +4489,7 @@ mod tests {
             let (peer_list, peer_id, peer, initial_score) = peer_aimed_at(5, server.addr);
             let cache = GossipCache::new();
             client.circuit_breaker.record_failure(&peer_id);
+            wait_out_open_cooldown().await;
             assert!(client.circuit_breaker.begin_probe(&peer_id));
             assert!(client.circuit_breaker.would_allow(&peer_id));
 

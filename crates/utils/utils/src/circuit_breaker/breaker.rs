@@ -4,6 +4,21 @@ use super::config::CircuitBreakerConfig;
 use super::state::CircuitState;
 use super::{get_current_time_nanos, has_timeout_elapsed};
 
+#[cfg(test)]
+static FILLING_GRANT_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn fire_filling_grant_hook() {
+    let hook = {
+        let mut guard = FILLING_GRANT_HOOK.lock().expect("filling grant hook");
+        guard.take()
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct CircuitBreaker {
     state: AtomicU8,
@@ -130,14 +145,28 @@ impl CircuitBreaker {
         loop {
             let current = self.half_open_trial_count.load(Ordering::Acquire);
             if current < max {
+                let filling = current + 1 == max;
+                if filling {
+                    // Stamp before publishing `max`. Reset Acquire-loads the count,
+                    // then the stamp, so a full count sees this stamp.
+                    self.stamp_trial_grant();
+                    #[cfg(test)]
+                    fire_filling_grant_hook();
+                }
                 match self.half_open_trial_count.compare_exchange(
                     current,
                     current + 1,
-                    Ordering::AcqRel,
+                    if filling {
+                        Ordering::Release
+                    } else {
+                        Ordering::AcqRel
+                    },
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        self.stamp_trial_grant();
+                        if !filling {
+                            self.stamp_trial_grant();
+                        }
                         return true;
                     }
                     Err(_) => continue,
@@ -175,7 +204,11 @@ impl CircuitBreaker {
                     && self.try_enter_half_open()
                     && self.grant_half_open_trial()
             }
-            CircuitState::HalfOpen => self.grant_half_open_trial(),
+            // The open cooldown still applies. Only `begin_probe` may spend a
+            // trial before it elapses. A push or a normal pull must not.
+            CircuitState::HalfOpen => {
+                self.should_attempt_recovery() && self.grant_half_open_trial()
+            }
         }
     }
 
@@ -185,7 +218,12 @@ impl CircuitBreaker {
         match self.state() {
             CircuitState::Closed => true,
             CircuitState::Open => self.should_attempt_recovery(),
+            // Same gate as `is_available`: cooldown, then a trial left or a
+            // window that can reset. A filter must not select a refused peer.
             CircuitState::HalfOpen => {
+                if !self.should_attempt_recovery() {
+                    return false;
+                }
                 let trials = self.half_open_trial_count.load(Ordering::Acquire);
                 trials < self.config.recovery_attempts.get() || self.trial_window_expired()
             }
@@ -399,6 +437,64 @@ mod tests {
         assert!(breaker.is_stale());
     }
 
+    /// A push uses `is_available`. That must not spend the trials `begin_probe`
+    /// opened while the open cooldown still has time left. The filter uses
+    /// `would_allow` and must refuse the same peer.
+    #[test]
+    #[serial]
+    fn half_open_ordinary_admission_keeps_the_open_cooldown() {
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
+
+        let _guard = TestTimeGuard::new(1_000_000_000);
+        let recovery_attempts = 3_u32;
+        let config = test_config_with_recovery_attempts(recovery_attempts);
+        let breaker = CircuitBreaker::new(&config);
+
+        for _ in 0..3 {
+            breaker.record_failure();
+        }
+        assert_eq!(breaker.state(), CircuitState::Open);
+        assert!(!breaker.is_available());
+
+        assert!(breaker.begin_probe());
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
+        assert_eq!(breaker.trial_count(), 1);
+
+        assert!(
+            !breaker.is_available(),
+            "a push must not take a half-open trial before the open cooldown"
+        );
+        assert_eq!(
+            breaker.trial_count(),
+            1,
+            "a refused push must not consume a trial"
+        );
+        assert!(
+            !breaker.would_allow(),
+            "a filter must not select a peer that admission will refuse"
+        );
+        assert_eq!(breaker.trial_count(), 1);
+
+        let mut probes = 1_u32;
+        while breaker.begin_probe() {
+            probes += 1;
+        }
+        assert_eq!(
+            probes, recovery_attempts,
+            "begin_probe still grants until recovery_attempts during the cooldown"
+        );
+        assert_eq!(breaker.trial_count(), recovery_attempts);
+        assert!(!breaker.is_available());
+
+        advance_test_time(Duration::from_millis(150));
+
+        assert!(breaker.would_allow());
+        assert!(
+            breaker.is_available(),
+            "after the cooldown ordinary admission grants a trial"
+        );
+    }
+
     #[test]
     #[serial]
     fn begin_probe_ignores_open_cooldown_and_caps_trials() {
@@ -488,6 +584,95 @@ mod tests {
         breaker.record_success();
         assert_eq!(breaker.trial_count(), 0);
         assert_eq!(breaker.state(), CircuitState::Closed);
+    }
+
+    /// The grant that fills the window stores a fresh stamp, then this hook
+    /// pauses before that grant publishes `recovery_attempts`. Threads that
+    /// run in that gap must not open a second window.
+    #[test]
+    #[serial]
+    fn filling_the_window_does_not_open_a_second_window() {
+        use super::super::test_utils::{TestTimeGuard, advance_test_time};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        struct ReleaseOnDrop {
+            release: Mutex<Option<mpsc::Sender<()>>>,
+        }
+
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                if let Some(release) = self.release.lock().expect("release").take() {
+                    let _ = release.send(());
+                }
+                if let Ok(mut guard) = super::FILLING_GRANT_HOOK.lock() {
+                    guard.take();
+                }
+            }
+        }
+
+        let _guard = TestTimeGuard::new(1_000_000_000);
+        let recovery_attempts = 3_u32;
+        let config = test_config_with_recovery_attempts(recovery_attempts);
+        let breaker = Arc::new(CircuitBreaker::new(&config));
+
+        for _ in 0..3 {
+            breaker.record_failure();
+        }
+        assert!(breaker.begin_probe());
+        assert!(breaker.begin_probe());
+        assert_eq!(breaker.trial_count(), recovery_attempts - 1);
+
+        advance_test_time(Duration::from_millis(150));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _release = ReleaseOnDrop {
+            release: Mutex::new(Some(release_tx)),
+        };
+        {
+            let mut guard = super::FILLING_GRANT_HOOK.lock().expect("install hook");
+            *guard = Some(Box::new(move || {
+                started_tx.send(()).expect("pause signal");
+                release_rx.recv().expect("resume");
+            }));
+        }
+
+        let filler = {
+            let breaker = Arc::clone(&breaker);
+            thread::spawn(move || breaker.begin_probe())
+        };
+        started_rx.recv().expect("filler reached the publish gap");
+
+        let grants = Arc::new(AtomicU32::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let breaker = Arc::clone(&breaker);
+            let grants = Arc::clone(&grants);
+            handles.push(thread::spawn(move || {
+                for _ in 0..8 {
+                    if breaker.begin_probe() {
+                        grants.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("contending grant");
+        }
+
+        if let Some(release) = _release.release.lock().expect("release").take() {
+            release.send(()).expect("resume filler");
+        }
+        let filler_granted = filler.join().expect("filler");
+        let total = grants.load(Ordering::SeqCst) + u32::from(filler_granted);
+        assert!(
+            total <= 1,
+            "the last slot of one window is a single grant, got {total}"
+        );
+        assert!(total >= 1, "the last slot must still be granted");
     }
 
     /// One expired window, many threads. At most `recovery_attempts` grants.

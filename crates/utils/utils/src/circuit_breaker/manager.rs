@@ -56,8 +56,9 @@ where
     pub fn would_allow(&self, key: &K) -> bool {
         match self.breakers.get(key) {
             Some(breaker) => breaker.would_allow(),
-            // No breaker is the closed state. A filter must not create one.
-            None => true,
+            // No insert. A missing key is selectable only when admission
+            // could create a breaker. At capacity it fail-closes.
+            None => self.active_count.load(Ordering::Relaxed) < self.capacity,
         }
     }
 
@@ -384,6 +385,37 @@ mod tests {
         let key3 = TestKey("test3".to_string());
         assert!(manager.is_available(&key3));
         assert_eq!(manager.len(), 1);
+    }
+
+    #[test]
+    fn would_allow_refuses_an_untracked_key_at_capacity() {
+        let config = TestConfigBuilder::default().capacity(2).build();
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
+
+        let first = TestKey("tracked-1".to_string());
+        let second = TestKey("tracked-2".to_string());
+        assert!(manager.is_available(&first));
+        assert!(manager.is_available(&second));
+        assert_eq!(manager.len(), 2);
+
+        let missing = TestKey("untracked".to_string());
+        assert!(
+            !manager.would_allow(&missing),
+            "a full map must not select a key that admission cannot track"
+        );
+        assert_eq!(manager.len(), 2);
+        assert!(!manager.breakers.contains_key(&missing));
+
+        let room =
+            CircuitBreakerManager::<TestKey>::new(TestConfigBuilder::default().capacity(2).build());
+        let open_slot = TestKey("open-slot".to_string());
+        assert!(room.is_available(&TestKey("one".to_string())));
+        assert!(
+            room.would_allow(&open_slot),
+            "a free slot must still let a filter select an untracked key"
+        );
+        assert_eq!(room.len(), 1);
+        assert!(!room.breakers.contains_key(&open_slot));
     }
 
     #[test]
