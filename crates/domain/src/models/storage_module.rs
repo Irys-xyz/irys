@@ -15853,7 +15853,7 @@ mod tests {
         storage.pause_next_sync_at(SyncPausePoint::AfterPwrite);
         let sync_mod = Arc::clone(&storage);
         let (sync_tx, sync_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let sync_worker = std::thread::spawn(move || {
             let _ = sync_tx.send(sync_mod.sync_pending_chunks());
         });
         assert!(
@@ -15863,7 +15863,7 @@ mod tests {
 
         let rollback_mod = Arc::clone(&storage);
         let (roll_tx, roll_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let rollback_worker = std::thread::spawn(move || {
             let _ = roll_tx.send(rollback_mod.rollback_unassigned_range(offset, offset, &[]));
         });
         let blocked = roll_rx.recv_timeout(Duration::from_millis(500));
@@ -15895,6 +15895,14 @@ mod tests {
         );
         assert!(!storage.is_data_root_index_ready_at(offset));
 
+        // A worker sends its result before its closure drops its clone, so join
+        // both before taking the module back.
+        sync_worker
+            .join()
+            .map_err(|_| eyre!("durable point thread panicked"))?;
+        rollback_worker
+            .join()
+            .map_err(|_| eyre!("rollback thread panicked"))?;
         let storage =
             Arc::try_unwrap(storage).map_err(|_| eyre!("a worker still holds the module"))?;
         storage.abandon_on_drop_for_test();
@@ -20413,7 +20421,7 @@ mod tests {
         } else {
             let flush_mod = Arc::clone(&storage);
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
+            let flush_worker = std::thread::spawn(move || {
                 let _ = tx.send(flush_mod.flush_interval_completions_locked(true));
             });
             assert!(
@@ -20425,6 +20433,10 @@ mod tests {
             let flushed = rx.recv_timeout(Duration::from_secs(10));
             noted?;
             flushed.map_err(|err| eyre!("completion flush did not finish: {err}"))??;
+            // The worker sends before its closure drops its clone.
+            flush_worker
+                .join()
+                .map_err(|_| eyre!("completion flush thread panicked"))?;
         }
         assert_eq!(
             file_label(&storage, 0)?,
