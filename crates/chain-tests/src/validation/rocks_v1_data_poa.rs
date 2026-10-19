@@ -2,9 +2,8 @@
 //! `poa_is_valid` must accept it. These tests run a node whose submodule
 //! index is RocksDB and wait until a canonical block carries that PoA.
 //!
-//! Every tx here is a multiple of `chunk_size`. A tx whose size is not
-//! chunk-aligned fails PoA for a separate reason, and these tests do not
-//! cover that case.
+//! Every tx here is a multiple of `chunk_size`. These tests do not cover a
+//! short final chunk. PoA accepts that chunk and binds its prefix only.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
