@@ -56,8 +56,15 @@ struct CdrEvictionState {
 /// One transaction's chunk span on a ledger, in ledger offsets.
 struct TxLedgerSpan {
     ledger: DataLedger,
-    start: u64,
+    /// First chunk of this transaction on `ledger`.
+    start: LedgerChunkOffset,
+    /// Chunk length. `start + chunk_count` may not fit in a ledger offset.
     chunk_count: u64,
+}
+
+/// `start + count`. `None` when the sum does not fit in a ledger offset.
+fn checked_ledger_offset(start: LedgerChunkOffset, count: u64) -> Option<LedgerChunkOffset> {
+    (*start).checked_add(count).map(LedgerChunkOffset::from)
 }
 
 /// Maximum evictions per invocation to prevent blocking the service.
@@ -714,7 +721,7 @@ impl InnerCacheTask {
                 if raw >= span.chunk_count {
                     continue;
                 }
-                let Some(ledger_offset) = span.start.checked_add(raw) else {
+                let Some(ledger_offset) = checked_ledger_offset(span.start, raw) else {
                     continue;
                 };
                 for sm in storage_modules {
@@ -729,18 +736,21 @@ impl InnerCacheTask {
                     if ledger_id != u32::from(span.ledger) {
                         continue;
                     }
-                    if !sm.contains_offset(LedgerChunkOffset::from(ledger_offset)) {
+                    // `contains_offset` and the helper multiply `slot * num_chunks`
+                    // in `u64`. Debug builds panic on overflow. Release builds wrap.
+                    // A product that does not fit is not this slot.
+                    if (slot_index as u64)
+                        .checked_mul(sm.config.consensus.num_chunks_in_partition)
+                        .is_none()
+                    {
                         continue;
                     }
-                    let Some(start) = (slot_index as u64)
-                        .checked_mul(sm.config.consensus.num_chunks_in_partition)
+                    if !sm.contains_offset(ledger_offset) {
+                        continue;
+                    }
+                    let Ok(partition_raw) =
+                        sm.make_offset_partition_relative_guarded(ledger_offset)
                     else {
-                        continue;
-                    };
-                    let Some(partition_raw) = ledger_offset.checked_sub(start) else {
-                        continue;
-                    };
-                    let Ok(partition_raw) = u32::try_from(partition_raw) else {
                         continue;
                     };
                     let partition_offset = PartitionChunkOffset::from(partition_raw);
@@ -872,7 +882,7 @@ impl InnerCacheTask {
                         chunk_count: count,
                     }));
                 }
-                let Some(next) = cursor.checked_add(count) else {
+                let Some(next) = checked_ledger_offset(cursor, count) else {
                     return Ok(None);
                 };
                 cursor = next;
@@ -889,20 +899,20 @@ impl InnerCacheTask {
         &self,
         block: &IrysBlockHeader,
         ledger: DataLedger,
-    ) -> eyre::Result<Option<u64>> {
+    ) -> eyre::Result<Option<LedgerChunkOffset>> {
         if block.height == 0 {
-            return Ok(Some(0));
+            return Ok(Some(LedgerChunkOffset::from(0_u64)));
         }
         let Some(prev) = self.onchain_header_at_height(block.height - 1)? else {
             return Ok(None);
         };
-        Ok(Some(
+        Ok(Some(LedgerChunkOffset::from(
             prev.data_ledgers
                 .iter()
                 .find(|entry| entry.ledger_id == u32::from(ledger))
                 .map(|entry| entry.total_chunks)
                 .unwrap_or(0),
-        ))
+        )))
     }
 
     /// Canonical header at `height`: the in-memory on-chain tree, else the
@@ -2724,6 +2734,247 @@ mod tests {
         Ok(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
             sm,
         ]))))
+    }
+
+    /// One assigned span. `persisted_own` writes this root as `Data` at partition 0.
+    ///
+    /// The fixture partition is 10 chunks. Returns `(kept, index span views, interval visits)`
+    /// for the single candidate.
+    fn span_keep(case: SpanKeepCase) -> eyre::Result<(bool, u64, u64)> {
+        use irys_database::insert_tx_header;
+        use irys_database::tables::{IrysBlockHeaders, MigratedBlockHashes};
+        use irys_types::{H256, IrysBlockHeader, U256};
+
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let chunk_size = config.consensus.chunk_size;
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let cached = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                data_root: H256::random(),
+                data_size: case.tx_chunks * chunk_size,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let data_root = cached.data_root;
+        let mut tx_ids = Vec::with_capacity(case.prior_chunks.len() + 1);
+        db.update(|wtx| {
+            for chunks in case.prior_chunks {
+                let prior = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        id: H256::random(),
+                        data_root: H256::random(),
+                        data_size: chunks * chunk_size,
+                        ledger_id: DataLedger::Submit as u32,
+                        ..Default::default()
+                    },
+                    metadata: DataTransactionMetadata::new(),
+                });
+                insert_tx_header(wtx, &prior)?;
+                tx_ids.push(prior.id);
+            }
+            database::cache_data_root(wtx, &cached, None)?;
+            insert_tx_header(wtx, &cached)?;
+            irys_database::set_data_tx_included_height(wtx, &cached.id, 1)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {e:?}"))?;
+            eyre::Ok(())
+        })??;
+        tx_ids.push(cached.id);
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.data_ledgers[DataLedger::Submit].total_chunks = case.prev_total_chunks;
+        genesis.test_sign();
+        let mut included = IrysBlockHeader::new_mock_header();
+        included.height = 1;
+        included.previous_block_hash = genesis.block_hash;
+        included.cumulative_diff = U256::from(2_u64);
+        let submit = &mut included.data_ledgers[DataLedger::Submit];
+        submit.total_chunks = case.prev_total_chunks;
+        submit.tx_ids = H256List(tx_ids);
+        included.test_sign();
+        db.update(|wtx| {
+            wtx.put::<IrysBlockHeaders>(genesis.block_hash, genesis.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(0, genesis.block_hash)?;
+            wtx.put::<IrysBlockHeaders>(included.block_hash, included.clone().into())?;
+            wtx.put::<MigratedBlockHashes>(1, included.block_hash)?;
+            eyre::Ok(())
+        })??;
+
+        let sm_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let storage_modules_guard = if case.persisted_own {
+            storage_modules_guard_with_durable(
+                sm_dir.path().to_path_buf(),
+                data_root,
+                chunk_size,
+                &[0],
+            )?
+        } else {
+            assigned_module_without_placement(sm_dir.path().to_path_buf(), case.slot_index)?
+        };
+        let sm = storage_modules_guard.read()[0].clone();
+        eyre::ensure!(
+            sm.config.consensus.num_chunks_in_partition == 10,
+            "span_keep assumes a 10-chunk partition"
+        );
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = InnerCacheTask {
+            db,
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+            storage_modules_guard,
+            #[cfg(test)]
+            prune_recheck_pause: Arc::new(PruneRecheckPause::new()),
+        };
+        let start = task
+            .ledger_chunk_start(&included, DataLedger::Submit)?
+            .expect("previous block names the ledger start");
+        assert_eq!(*start, case.prev_total_chunks);
+        let candidate = TxChunkOffset::from(case.candidate);
+        let views_before = sm.index_view_count();
+        let visits_before = sm.interval_visit_count();
+        let keep = task.assigned_unpersisted_offsets(
+            data_root,
+            &BTreeSet::from([candidate]),
+            &task.storage_modules_guard.read(),
+            10,
+        )?;
+        let views = sm.index_view_count().saturating_sub(views_before);
+        let visits = sm.interval_visit_count().saturating_sub(visits_before);
+        Ok((keep.contains(&candidate), views, visits))
+    }
+
+    /// A fitting assigned chunk is kept. An offset that does not fit is skipped.
+    ///
+    /// One candidate is one point read: a span index view or an interval walk
+    /// would count above zero.
+    #[tokio::test]
+    async fn ledger_span_keeps_a_fitting_offset_and_skips_one_that_does_not_fit() -> eyre::Result<()>
+    {
+        let (kept, views, visits) = span_keep(SpanKeepCase {
+            prev_total_chunks: 0,
+            prior_chunks: &[],
+            tx_chunks: 1,
+            candidate: 0,
+            slot_index: 0,
+            persisted_own: false,
+        })?;
+        assert!(kept, "an assigned unpersisted chunk stays in the cache");
+        assert_eq!(views, 0, "one candidate must not open a span index view");
+        assert_eq!(visits, 0, "one candidate must not walk the interval map");
+
+        let (kept, views, visits) = span_keep(SpanKeepCase {
+            prev_total_chunks: 10,
+            prior_chunks: &[],
+            tx_chunks: 1,
+            candidate: 0,
+            slot_index: 1,
+            persisted_own: false,
+        })?;
+        assert!(
+            kept,
+            "a chunk at the start of slot 1 is still kept while it is unpersisted"
+        );
+        assert_eq!(views, 0, "one candidate must not open a span index view");
+        assert_eq!(visits, 0, "one candidate must not walk the interval map");
+
+        let (kept, _, _) = span_keep(SpanKeepCase {
+            prev_total_chunks: 0,
+            prior_chunks: &[],
+            tx_chunks: 1,
+            candidate: 0,
+            slot_index: 0,
+            persisted_own: true,
+        })?;
+        assert!(
+            !kept,
+            "persisted Data for this chunk still releases the cache"
+        );
+
+        let (kept, _, _) = span_keep(SpanKeepCase {
+            prev_total_chunks: 0,
+            prior_chunks: &[],
+            tx_chunks: 1,
+            candidate: 5,
+            slot_index: 0,
+            persisted_own: false,
+        })?;
+        assert!(
+            !kept,
+            "a candidate past the transaction is not part of the span"
+        );
+
+        // Tx offset 1 sits one past u64::MAX. Wrapping that sum lands on slot 0.
+        let (kept, _, _) = span_keep(SpanKeepCase {
+            prev_total_chunks: u64::MAX,
+            prior_chunks: &[],
+            tx_chunks: 2,
+            candidate: 1,
+            slot_index: 0,
+            persisted_own: false,
+        })?;
+        assert!(!kept, "a ledger offset that does not fit is skipped");
+
+        // The prior transaction's 2 chunks push the cursor past u64::MAX.
+        // Wrapping would place this transaction at ledger offset 0.
+        let (kept, _, _) = span_keep(SpanKeepCase {
+            prev_total_chunks: u64::MAX - 1,
+            prior_chunks: &[2],
+            tx_chunks: 1,
+            candidate: 0,
+            slot_index: 0,
+            persisted_own: false,
+        })?;
+        assert!(
+            !kept,
+            "a cursor that does not fit does not invent a span at offset 0"
+        );
+
+        // 10 chunks per partition. This slot product wraps to ledger offset 4.
+        let slot = usize::try_from(u64::MAX / 10 + 1).expect("slot index fits usize");
+        let (kept, views, visits) = span_keep(SpanKeepCase {
+            prev_total_chunks: 4,
+            prior_chunks: &[],
+            tx_chunks: 1,
+            candidate: 0,
+            slot_index: slot,
+            persisted_own: false,
+        })?;
+        assert!(!kept, "a slot product that does not fit is skipped");
+        assert_eq!(views, 0, "an unfit slot must not open an index view");
+        assert_eq!(visits, 0, "an unfit slot must not walk the interval map");
+        Ok(())
+    }
+
+    struct SpanKeepCase {
+        prev_total_chunks: u64,
+        prior_chunks: &'static [u64],
+        tx_chunks: u64,
+        candidate: u32,
+        slot_index: usize,
+        persisted_own: bool,
     }
 
     /// The slot that holds the cached body moved onto a partition whose file
