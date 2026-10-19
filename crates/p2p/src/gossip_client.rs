@@ -1130,6 +1130,9 @@ impl GossipClient {
             GossipResponse::Accepted(is_gossip_enabled) => {
                 if is_gossip_enabled {
                     self.circuit_breaker.record_success(peer_id);
+                    // Serving again. Both the inactive-peer loop and hydrate
+                    // reach this probe, so the rank bit is cleared here.
+                    peer_list.clear_not_gossiping(peer_id);
                     Ok(PeerHealth::Healthy)
                 } else {
                     self.circuit_breaker.record_failure(peer_id);
@@ -1162,6 +1165,9 @@ impl GossipClient {
                     // Callers mark it online and its score is left unchanged.
                     RejectionReason::GossipDisabled => {
                         self.circuit_breaker.record_success(peer_id);
+                        // Reachable, online, lower pull rank. The inactive-peer
+                        // loop and hydrate both call this probe.
+                        peer_list.mark_not_gossiping(peer_id);
                         Ok(PeerHealth::AnsweredNotServing)
                     }
                     RejectionReason::InvalidData
@@ -1742,7 +1748,11 @@ impl GossipClient {
         circuit_breaker: &CircuitBreakerManager<IrysPeerId>,
     ) {
         match result {
-            Ok(GossipResponse::Accepted(_)) => {}
+            Ok(GossipResponse::Accepted(_)) => {
+                // The peer served this pull, so the next sample ranks it
+                // with peers that gossip.
+                peer_list.clear_not_gossiping(peer_id);
+            }
             // The peer answered, so the half-open trial is a success.
             // Not a delivery: no score change and no online mark. The
             // push path records the same success.
@@ -2294,10 +2304,13 @@ impl GossipClient {
 
     /// Build the candidate peer set for a network pull.
     ///
-    /// Returns up to 5 shuffled peers (filtered to exclude peers whose
-    /// circuit-breaker is open), plus the count of peers excluded by the filter
-    /// (pre-truncate). Filter runs after shuffle so selection stays unbiased,
-    /// and before truncate so the surviving CB-closed set fills the 5 slots.
+    /// Returns up to 5 peers (filtered to exclude peers whose circuit-breaker
+    /// is open), plus the count of peers excluded by the filter (pre-truncate).
+    /// Shuffle first, then stable-partition so peers that gossip come before
+    /// peers in `not_gossiping`. The shuffle order inside each group stays.
+    /// `not_gossiping` peers remain eligible and fill slots that serving peers
+    /// did not take. The breaker filter runs after the partition and before
+    /// truncate, so a closed breaker does not consume one of the 5 slots.
     /// Trusted-only callers get the full trusted set; general callers get every
     /// active+online peer sorted by reputation — capping the pool *before* the
     /// CB filter would let a cluster of high-score CB-open peers starve the
@@ -2314,6 +2327,22 @@ impl GossipClient {
             peer_list.top_active_peers(None, None)
         };
         peers.shuffle(&mut rand::thread_rng());
+        // Stable partition. `not_gossiping` peers stay eligible, but a peer
+        // that still gossips fills a slot first. The shuffled order inside
+        // each group stays, so a rolling restart cannot shuffle the serving
+        // peer out of every sample.
+        let not_gossiping = peer_list.not_gossiping();
+        let mut demoted = Vec::new();
+        let mut gossiping = Vec::with_capacity(peers.len());
+        for peer in peers.drain(..) {
+            if not_gossiping.contains(&peer.0) {
+                demoted.push(peer);
+            } else {
+                gossiping.push(peer);
+            }
+        }
+        gossiping.append(&mut demoted);
+        peers = gossiping;
         let before = peers.len();
         peers.retain(|(peer_id, _)| self.circuit_breaker.would_allow(peer_id));
         let cb_filtered = before - peers.len();
@@ -3667,6 +3696,29 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn accepted_pull_clears_not_gossiping() {
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let fixture = TestFixture::new();
+            let (peer_id, _, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(peer, true);
+            peer_list.mark_not_gossiping(&peer_id);
+            assert!(peer_list.is_not_gossiping(&peer_id));
+
+            GossipClient::handle_data_retrieval_score(
+                &peer_list,
+                &Ok(GossipResponse::Accepted(())),
+                &peer_id,
+                Duration::from_millis(100),
+                &fixture.client.circuit_breaker,
+            );
+
+            assert!(
+                !peer_list.is_not_gossiping(&peer_id),
+                "an accepted pull clears not_gossiping"
+            );
+        }
+
+        #[tokio::test]
         async fn test_handle_data_retrieval_score_sluggish_response() {
             const EXPECTED_DECREASE_OF_ONE: u16 = 1;
             let test_cases = vec![
@@ -4649,6 +4701,124 @@ mod tests {
             assert_eq!(granted.open_count, 0);
         }
 
+        const SELECTION_TRIALS: usize = 64;
+
+        /// Six online peers, five of them `not_gossiping`. A shuffle that
+        /// keeps five can drop the one serving peer. Ranking must not.
+        #[tokio::test]
+        async fn serving_peer_is_selected_ahead_of_not_gossiping_peers() {
+            let fixture = TestFixture::new();
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let mut peer_ids = Vec::with_capacity(6);
+            for id in 1..=6_u8 {
+                let (peer_id, peer) = make_test_peer(id);
+                peer_list.add_or_update_peer(peer, true);
+                peer_ids.push(peer_id);
+            }
+            let serving = peer_ids[0];
+            for peer_id in peer_ids.iter().skip(1) {
+                peer_list.mark_not_gossiping(peer_id);
+            }
+
+            for _ in 0..SELECTION_TRIALS {
+                let (candidates, filtered) =
+                    fixture.client.select_candidates_for_pull(&peer_list, false);
+                assert_eq!(filtered, 0);
+                assert_eq!(candidates.len(), 5, "not_gossiping peers still fill slots");
+                assert!(
+                    candidates.iter().any(|(id, _)| *id == serving),
+                    "the serving peer must be in every sample of 5"
+                );
+                let first_demoted = candidates
+                    .iter()
+                    .position(|(id, _)| peer_list.is_not_gossiping(id));
+                if let Some(demoted_at) = first_demoted {
+                    assert!(
+                        candidates[..demoted_at]
+                            .iter()
+                            .all(|(id, _)| !peer_list.is_not_gossiping(id)),
+                        "peers that gossip come before not_gossiping peers"
+                    );
+                }
+            }
+        }
+
+        /// GossipDisabled marks the peer. A later Healthy reply clears it,
+        /// so the peer is ranked with peers that gossip.
+        #[tokio::test]
+        async fn healthy_reply_clears_not_gossiping_and_restores_pull_rank() {
+            let fixture = TestFixture::new();
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let mut peer_ids = Vec::with_capacity(6);
+            for id in 1..=6_u8 {
+                let (peer_id, peer) = make_test_peer(id);
+                peer_list.add_or_update_peer(peer, true);
+                peer_ids.push(peer_id);
+            }
+            let serving = peer_ids[0];
+            let recovered = peer_ids[1];
+            for peer_id in peer_ids.iter().skip(2) {
+                peer_list.mark_not_gossiping(peer_id);
+            }
+
+            let disabled = serde_json::to_string(&GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ))
+            .expect("serialize GossipDisabled");
+            let disabled_server =
+                MockHttpServer::new_with_response(200, &disabled, "application/json");
+            let health = fixture
+                .client
+                .check_health(
+                    &recovered,
+                    create_peer_address("127.0.0.1", disabled_server.port()),
+                    ProtocolVersion::V1,
+                    &peer_list,
+                )
+                .await
+                .expect("GossipDisabled is a reply");
+            assert_eq!(health, PeerHealth::AnsweredNotServing);
+            assert!(
+                peer_list.is_not_gossiping(&recovered),
+                "a GossipDisabled health reply marks the peer not_gossiping"
+            );
+
+            let healthy_body =
+                serde_json::to_string(&GossipResponse::Accepted(true)).expect("serialize Healthy");
+            let healthy_server =
+                MockHttpServer::new_with_response(200, &healthy_body, "application/json");
+            let health = fixture
+                .client
+                .check_health(
+                    &recovered,
+                    create_peer_address("127.0.0.1", healthy_server.port()),
+                    ProtocolVersion::V1,
+                    &peer_list,
+                )
+                .await
+                .expect("Healthy is a reply");
+            assert_eq!(health, PeerHealth::Healthy);
+            assert!(
+                !peer_list.is_not_gossiping(&recovered),
+                "Healthy clears not_gossiping"
+            );
+
+            for _ in 0..SELECTION_TRIALS {
+                let (candidates, filtered) =
+                    fixture.client.select_candidates_for_pull(&peer_list, false);
+                assert_eq!(filtered, 0);
+                assert_eq!(candidates.len(), 5);
+                assert!(
+                    candidates.iter().any(|(id, _)| *id == serving),
+                    "the peer that already gossips stays selected"
+                );
+                assert!(
+                    candidates.iter().any(|(id, _)| *id == recovered),
+                    "a peer that answered Healthy is no longer deprioritised"
+                );
+            }
+        }
+
         #[test]
         fn pull_kind_label_covers_all_variants() {
             use irys_types::v2::GossipDataRequestV2;
@@ -5015,6 +5185,10 @@ mod tests {
                     "{reason:?} is an answer and must close the breaker"
                 );
                 assert_eq!(client.circuit_breaker.metrics().open_count, 0);
+                assert!(
+                    !peer_list.is_not_gossiping(&peer_id),
+                    "{reason:?} is not GossipDisabled and must not mark not_gossiping"
+                );
             }
         }
 

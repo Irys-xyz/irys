@@ -56,6 +56,10 @@ pub struct PeerListDataInner {
     /// Old `peer_id` rows left behind by V1→V2 migration or a duplicate load.
     /// `PeerNetworkService::flush` is the sole DB writer and drains this set.
     pending_db_removals: HashSet<IrysPeerId>,
+    /// Latest health probe answered `GossipDisabled`. Not stored on the peer
+    /// row. A new list starts empty. A `Healthy` probe or an accepted pull
+    /// removes the id. Pull selection ranks these peers after peers that gossip.
+    not_gossiping: HashSet<IrysPeerId>,
     trusted_peers_api_to_gossip_addresses: HashMap<SocketAddr, SocketAddr>,
     /// Outbound handshake has no mining address, so observations wait here
     /// until `add_or_update_peer` can insert a real `PeerListItem`.
@@ -471,6 +475,34 @@ impl PeerList {
         peers
     }
 
+    /// The peer's latest health probe answered `GossipDisabled`.
+    /// The peer stays online and eligible for pulls, at a lower rank.
+    pub fn mark_not_gossiping(&self, peer_id: &IrysPeerId) {
+        self.0
+            .write()
+            .expect("PeerListDataInner lock poisoned")
+            .not_gossiping
+            .insert(*peer_id);
+    }
+
+    /// The peer is serving again: a `Healthy` probe, or an accepted pull.
+    pub fn clear_not_gossiping(&self, peer_id: &IrysPeerId) {
+        self.0
+            .write()
+            .expect("PeerListDataInner lock poisoned")
+            .not_gossiping
+            .remove(peer_id);
+    }
+
+    pub fn is_not_gossiping(&self, peer_id: &IrysPeerId) -> bool {
+        self.read().not_gossiping.contains(peer_id)
+    }
+
+    /// Peers whose latest health probe answered `GossipDisabled`.
+    pub fn not_gossiping(&self) -> HashSet<IrysPeerId> {
+        self.read().not_gossiping.clone()
+    }
+
     pub fn all_peers_sorted_by_score(&self) -> Vec<(IrysPeerId, PeerListItem)> {
         let guard = self.read();
 
@@ -725,6 +757,7 @@ impl PeerListDataInner {
             gossip_addr_to_peer_id_map: HashMap::new(),
             api_addr_to_peer_id_map: HashMap::new(),
             pending_db_removals: HashSet::new(),
+            not_gossiping: HashSet::new(),
             pending_handshake: LruCache::new(
                 std::num::NonZeroUsize::new(PENDING_HANDSHAKE_CAPACITY)
                     .expect("PENDING_HANDSHAKE_CAPACITY > 0"),
@@ -1090,6 +1123,7 @@ impl PeerListDataInner {
                 self.api_addr_to_peer_id_map.remove(&peer.address.api);
                 self.miner_addr_to_peer_id_map.remove(&mining_addr);
                 self.peer_id_to_miner_addr_map.remove(peer_id);
+                self.not_gossiping.remove(peer_id);
                 debug!("Removed unstaked peer {:?} from all caches", peer_id);
                 self.emit_peer_event(PeerEvent::PeerRemoved { mining_addr, peer });
             }
@@ -1111,6 +1145,7 @@ impl PeerListDataInner {
         self.api_addr_to_peer_id_map.remove(&peer.address.api);
         self.miner_addr_to_peer_id_map.remove(&mining_addr);
         self.peer_id_to_miner_addr_map.remove(&peer_id);
+        self.not_gossiping.remove(&peer_id);
         debug!(
             "Evicted peer {:?} (api {:?}) from all caches",
             peer_id, api_address
@@ -1333,6 +1368,7 @@ impl PeerListDataInner {
             self.miner_addr_to_peer_id_map.remove(&peer.mining_address);
         }
         self.peer_id_to_miner_addr_map.remove(&peer_id);
+        self.not_gossiping.remove(&peer_id);
         self.pending_handshake.pop(&peer.address.api);
     }
 
@@ -1620,6 +1656,7 @@ mod tests {
                 std::num::NonZeroUsize::new(UNSTAKED_PEER_PURGATORY_CAPACITY).unwrap(),
             ),
             pending_db_removals: HashSet::new(),
+            not_gossiping: HashSet::new(),
             pending_handshake: LruCache::new(
                 std::num::NonZeroUsize::new(PENDING_HANDSHAKE_CAPACITY)
                     .expect("PENDING_HANDSHAKE_CAPACITY > 0"),
@@ -2623,6 +2660,32 @@ mod tests {
         let stored = peer_list.peer_by_id(&peer_id).unwrap();
         assert_eq!(stored.software_version_string(), "4.0.6+irys-rs.6cbc03b");
         assert_eq!(stored.consensus_config_hash, Some(H256::from([9; 32])));
+    }
+
+    #[test]
+    fn not_gossiping_starts_empty_and_is_not_persisted() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (_addr, peer_id, peer) = create_test_peer(1);
+        assert!(
+            !peer_list.is_not_gossiping(&peer_id),
+            "a fresh peer list starts empty"
+        );
+
+        peer_list.add_or_update_peer(peer, true);
+        peer_list.mark_not_gossiping(&peer_id);
+        assert!(peer_list.is_not_gossiping(&peer_id));
+
+        let stored: Vec<_> = peer_list.persistable_peers().into_values().collect();
+        let reloaded = list_from_loaded_peers(stored);
+        assert!(
+            reloaded.peer_by_id(&peer_id).is_some(),
+            "the peer row reloads"
+        );
+        assert!(
+            !reloaded.is_not_gossiping(&peer_id),
+            "not_gossiping is memory only and does not reload with the peer row"
+        );
     }
 
     fn list_from_loaded_peers(peers: Vec<PeerListItem>) -> PeerList {
