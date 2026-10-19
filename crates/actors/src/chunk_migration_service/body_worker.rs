@@ -1138,29 +1138,35 @@ impl SubmoduleDrain {
         if run.is_empty() {
             return Ok(false);
         }
+        // Move the bodies. `deposit_data_chunks` copies the bytes into the
+        // sweep slot. A second clone here is a full chunk per body.
         let bodies = std::mem::take(run);
-        let chunks: Vec<_> = bodies.iter().map(|body| body.chunk.clone()).collect();
+        let mut offsets = Vec::with_capacity(bodies.len());
+        let mut chunks = Vec::with_capacity(bodies.len());
+        for body in bodies {
+            offsets.push(body.offset);
+            chunks.push(body.chunk);
+        }
         let items = match write_chunks_to_module(&self.sm, &chunks) {
             Ok(items) => items,
             Err(MigrationError::WritesPaused) => return Ok(true),
             Err(error) => {
-                progress.failed += bodies.len();
+                progress.failed += chunks.len();
                 progress.last_error = Some(error);
                 return Ok(false);
             }
         };
         let chunk_size = self.config.consensus.chunk_size;
-        for (body, item) in bodies.into_iter().zip(items) {
+        for ((offset, chunk), item) in offsets.into_iter().zip(chunks).zip(items) {
             let missing_root = matches!(&item, BatchEnqueueItem::DataRootNotFound);
             let queued = match &item {
-                BatchEnqueueItem::Queued(offsets) => {
-                    offsets.contains(&body.offset)
-                        || self.sm.is_data_write_pending_at(body.offset)
-                        || self.data_chunk_is_durable(body.offset)
+                BatchEnqueueItem::Queued(queued_offsets) => {
+                    queued_offsets.contains(&offset)
+                        || self.sm.is_data_write_pending_at(offset)
+                        || self.data_chunk_is_durable(offset)
                 }
                 BatchEnqueueItem::NotQueued => {
-                    self.sm.is_data_write_pending_at(body.offset)
-                        || self.data_chunk_is_durable(body.offset)
+                    self.sm.is_data_write_pending_at(offset) || self.data_chunk_is_durable(offset)
                 }
                 BatchEnqueueItem::DataRootNotFound => false,
             };
@@ -1172,7 +1178,7 @@ impl SubmoduleDrain {
                 progress.failed += 1;
                 progress.last_error = Some(MigrationError::ChunkDataWrite);
             } else if matches!(&item, BatchEnqueueItem::NotQueued)
-                && self.sm.has_in_flight_index_for(&body.chunk)
+                && self.sm.has_in_flight_index_for(&chunk)
             {
                 // Another placement of this chunk is reserved, so this one
                 // was not queued. Retry it. Counting a stall here retires the
